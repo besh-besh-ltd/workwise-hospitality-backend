@@ -453,6 +453,179 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
 };
 
 /**
+ * WH-67: Notify the RFQ/Tender creator that a new vendor has registered and
+ * been automatically added to their RFQ(s). Sends ONE email per creator listing
+ * all affected RFQs. Intentionally omits vendor details (name, email, company).
+ *
+ * @param {Object} params
+ * @param {string} params.creator_email
+ * @param {string} params.creator_name
+ * @param {Array}  params.rfqs - Array of { rfq_id, rfq_no, is_tender, title, product_names }
+ */
+export const sendVendorAutoAddedToRfqNotification = async ({
+  creator_email, creator_name, rfqs
+}) => {
+  try {
+    if (!creator_email || !rfqs || rfqs.length === 0) return false;
+
+    const registrationTime = new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short'
+    });
+
+    const rfqListHTML = rfqs.map(rfq => {
+      const label = rfq.is_tender === 1 ? 'Tender' : 'RFQ';
+      const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq.rfq_id}`;
+      const products = (rfq.product_names || []).join(', ') || '—';
+      return `
+        <tr>
+          <td style="padding:10px 12px; border-bottom:1px solid #f1f5f9;">
+            <a href="${viewUrl}" style="color:#2e5ba8; font-weight:600; text-decoration:none;">${label} #${rfq.rfq_no}</a>
+            ${rfq.title ? `<div style="font-size:12px; color:#64748b; margin-top:2px;">${rfq.title}</div>` : ''}
+          </td>
+          <td style="padding:10px 12px; border-bottom:1px solid #f1f5f9; font-size:13px; color:#475569;">${products}</td>
+        </tr>`;
+    }).join('');
+
+    const subject = rfqs.length === 1
+      ? `New Vendor Registered — ${rfqs[0].is_tender === 1 ? 'Tender' : 'RFQ'} #${rfqs[0].rfq_no}`
+      : `New Vendor Registered — Added to ${rfqs.length} RFQs`;
+
+    const headerContent = `<h2>Hello ${creator_name || 'there'},</h2>`;
+
+    const containerContent = `
+      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+        <p>
+          A new vendor has registered and been automatically added to
+          ${rfqs.length === 1
+            ? `your <strong>${rfqs[0].is_tender === 1 ? 'Tender' : 'RFQ'} #${rfqs[0].rfq_no}</strong>.`
+            : `<strong>${rfqs.length}</strong> of your open RFQs.`}
+        </p>
+
+        <table style="width:100%; border-collapse:collapse; margin:16px 0; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden;">
+          <thead>
+            <tr style="background:#f8fafc;">
+              <th style="padding:10px 12px; text-align:left; font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:0.05em;">RFQ</th>
+              <th style="padding:10px 12px; text-align:left; font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:0.05em;">Products</th>
+            </tr>
+          </thead>
+          <tbody>${rfqListHTML}</tbody>
+        </table>
+
+        <ul style="list-style:none; padding-left:0;">
+          <li style="padding:4px 0;"><strong>Registration Date & Time:</strong> ${registrationTime}</li>
+        </ul>
+
+        <p style="margin-top:20px; color:#6B7280; font-size:14px;">
+          No action is required on your part. The vendor can now submit quotes for these RFQs.
+        </p>
+
+        <p style="text-align:center; margin-top:30px;">
+          <strong>— Phileein Hospitality Team</strong>
+        </p>
+      </div>`;
+
+    const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+    sendMail({
+      from: `Phileein Hospitality ${config.masterEmail}`,
+      to: creator_email,
+      subject,
+      html: htmlContent
+    });
+
+    console.log(`[WH-67] Sent creator notification for ${rfqs.length} RFQ(s) to ${creator_email}`);
+    return true;
+  } catch (err) {
+    console.error('[WH-67] Error sending creator notification email:', err);
+    return false;
+  }
+};
+
+/**
+ * WH-67: Send ONE consolidated email to a vendor listing all RFQs they were
+ * auto-added to after registration, with token links for each.
+ *
+ * @param {Object} params
+ * @param {string} params.vendor_name
+ * @param {string} params.vendor_email
+ * @param {Array}  params.rfqs - Array of { rfq_id, rfq_no, is_tender, title, bid_end_date, token, buyerName, products }
+ */
+export const sendVendorBulkRfqJoinNotification = async ({
+  vendor_name, vendor_email, rfqs
+}) => {
+  try {
+    if (!vendor_email || !rfqs || rfqs.length === 0) return false;
+
+    const rfqListHTML = rfqs.map(rfq => {
+      const label = rfq.is_tender === 1 ? 'Tender' : 'RFQ';
+      const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq.rfq_id}&token=${rfq.token}`;
+      const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq.rfq_id}&token=${rfq.token}`;
+      const bidEnd = rfq.bid_end_date
+        ? new Date(rfq.bid_end_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+        : null;
+      const productsHTML = (rfq.products || []).slice(0, 3).map(p => `<span>${p}</span>`).join(', ');
+      const moreCount = (rfq.products || []).length > 3 ? ` +${rfq.products.length - 3} more` : '';
+
+      return `
+        <div style="border:1px solid #e2e8f0; border-radius:10px; padding:16px; margin-bottom:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+            <div>
+              <div style="font-weight:700; color:#0f172a;">${label} #${rfq.rfq_no}</div>
+              ${rfq.title ? `<div style="font-size:13px; color:#64748b; margin-top:2px;">${rfq.title}</div>` : ''}
+              ${rfq.buyerName ? `<div style="font-size:12px; color:#94a3b8; margin-top:2px;">From: ${rfq.buyerName}</div>` : ''}
+            </div>
+          </div>
+          ${productsHTML ? `<div style="font-size:12px; color:#475569; margin-top:8px;">Products: ${productsHTML}${moreCount}</div>` : ''}
+          ${bidEnd ? `<div style="font-size:12px; color:#94a3b8; margin-top:4px;">Quote deadline: ${bidEnd}</div>` : ''}
+          <div style="margin-top:12px;">
+            <a href="${sendQuoteUrl}" style="background-color:#059669; color:white; padding:8px 16px; border-radius:6px; text-decoration:none; display:inline-block; font-weight:600; font-size:13px; margin-right:8px;">Submit Quote</a>
+            <a href="${viewUrl}" style="background-color:#6B7280; color:white; padding:8px 16px; border-radius:6px; text-decoration:none; display:inline-block; font-weight:600; font-size:13px;">View Details</a>
+          </div>
+        </div>`;
+    }).join('');
+
+    const headerContent = `<h2>Hello ${vendor_name || 'Vendor'},</h2>`;
+
+    const containerContent = `
+      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+        <p>
+          Great news! You've been added to <strong>${rfqs.length}</strong> open RFQ${rfqs.length > 1 ? 's' : ''}
+          based on your registered categories. Start submitting your quotes now.
+        </p>
+
+        ${rfqListHTML}
+
+        <p style="margin-top:20px;">
+          Submit your quotes promptly to make the most of these opportunities.
+        </p>
+
+        <p style="text-align:center; margin-top:30px;">
+          <strong>— Phileein Hospitality Team</strong>
+        </p>
+      </div>`;
+
+    const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+    const subject = rfqs.length === 1
+      ? `New RFQ Opportunity #${rfqs[0].rfq_no} — You've Been Added`
+      : `${rfqs.length} New RFQ Opportunities — You've Been Added`;
+
+    sendMail({
+      from: `Phileein Hospitality ${config.masterEmail}`,
+      to: vendor_email,
+      subject,
+      html: htmlContent
+    });
+
+    console.log(`[WH-67] Sent bulk RFQ join notification (${rfqs.length} RFQs) to ${vendor_email}`);
+    return true;
+  } catch (err) {
+    console.error('[WH-67] Error sending vendor bulk RFQ notification:', err);
+    return false;
+  }
+};
+
+/**
  * Send a HEADS-UP email to all members of the business unit when an RFQ/Tender
  * is closed by the creator. Conveys urgency: all actions on this RFQ are now
  * permanently restricted (no scoring, no negotiation, no PO edits, no approvals).

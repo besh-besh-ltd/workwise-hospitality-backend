@@ -168,7 +168,7 @@ UsersRoutes.post(
 );
 UsersRoutes.get(
   '/get-profile',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   UsersController.get_profile
 );
 UsersRoutes.get(
@@ -220,7 +220,7 @@ UsersRoutes.get(
 // we upload the file.
 UsersRoutes.post(
   '/upload-file',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   schema_posts.upload_user_document,
   UsersController.upload_documents
 );

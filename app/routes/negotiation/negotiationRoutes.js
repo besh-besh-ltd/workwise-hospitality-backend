@@ -4,6 +4,7 @@ import { can } from '../../middleware/auth.js';
 import negotiationController from '../../controllers/negotiation/negotiationController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
 import passport from '../../middleware/passport.js';
+import noLogin from '../../middleware/noLogin.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -19,32 +20,24 @@ NegotiationRoutes.post(
   negotiationController.createRound
 );
 
-// Get all rounds for an RFQ
+// Get all rounds for an RFQ (supports vendor token-based access from email)
 NegotiationRoutes.get(
   '/rounds/:rfq_id',
-  passportSignIn,
-  acl([2, 8, 3]), // Procurement and Top Management and Vendor
-  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
-  hospitalityMiddleware.checkHospitality(false),
+  noLogin.vendorTokenOrJwt,
   negotiationController.getRounds
 );
 
-// Get active round for a product
+// Get active round for a product (supports vendor token-based access from email)
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active',
-  passportSignIn,
-  acl([2, 8, 3]), // Procurement and Top Management and Vendor
-  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
-  hospitalityMiddleware.checkHospitality(false),
+  noLogin.vendorTokenOrJwt,
   negotiationController.getActiveRound
 );
 
-// Get all active rounds for an RFQ
+// Get all active rounds for an RFQ (supports vendor token-based access from email)
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active-all',
-  passportSignIn,
-  acl([2, 8, 3]), // Procurement and Top Management and Vendor
-  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
+  noLogin.vendorTokenOrJwt,
   negotiationController.getActiveRounds
 );
 
@@ -96,17 +89,17 @@ NegotiationRoutes.post(
   negotiationController.submitVendorQuote
 );
 
-// Get vendor's negotiation status for a specific product
+// Get vendor's negotiation status for a specific product (supports vendor token-based access)
 NegotiationRoutes.get(
   '/rounds/:rfq_id/product/:rfq_product_id/vendor-status',
-  passportSignIn,
+  noLogin.vendorTokenOrJwt,
   negotiationController.getVendorNegotiationStatus
 );
 
-// Get all vendor's negotiation statuses for an RFQ
+// Get all vendor's negotiation statuses for an RFQ (supports vendor token-based access)
 NegotiationRoutes.get(
   '/rounds/:rfq_id/vendor-status',
-  passportSignIn,
+  noLogin.vendorTokenOrJwt,
   negotiationController.getAllVendorNegotiationStatus
 );
 

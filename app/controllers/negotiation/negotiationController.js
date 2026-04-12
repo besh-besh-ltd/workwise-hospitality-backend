@@ -502,6 +502,7 @@ const NegotiationController = {
   getRounds: async (req, res) => {
     try {
       const rfq_id = parseInt(req.params.rfq_id);
+      const rfq_product_id = req.query.rfq_product_id ? parseInt(req.query.rfq_product_id) : null;
 
       if (!rfq_id) {
         return res.status(400).json({
@@ -510,7 +511,7 @@ const NegotiationController = {
         });
       }
 
-      const rounds = await negotiationModel.getRoundsByRfqId(rfq_id);
+      const rounds = await negotiationModel.getRoundsByRfqId(rfq_id, rfq_product_id);
 
       return res.status(200).json({
         status: 1,

@@ -2067,56 +2067,6 @@ update_user_detail: async (req, res, next) => {
   },
   get_profile: async (req, res, next) => {
     try {
-
-      // if req.is_verified is true then there must be token in the query
-      if (!req.is_verified && !req.query.token) {
-        return res
-          .status(401)
-          .json({
-            status: 0,
-            message: 'Access denied. Please provide a valid token.'
-          });
-      }
-
-      // if user try to uplaod file without login
-      // then we take token in the query and take the vendor
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        // Check if the token exists
-        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-
-        if (!tokenData || tokenData.length === 0) {
-          // Token is not valid
-          return res
-            .status(400)
-            .json({
-              status: 0,
-              message: 'Invalid or expired token!'
-            })
-            .end();
-        }
-
-        // Retrieve user data associated with the token
-        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-        if (!userData || userData.length === 0) {
-          // User data is not valid
-          return res
-            .status(404)
-            .json({
-              status: 0,
-              message: 'User not found!'
-            })
-            .end();
-        }
-        // Remove password from user data
-        const { password, ...userWithoutPassword } = userData[0];
-        // Assign the user data to req.user
-        req.user = userWithoutPassword;
-      }
-
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
@@ -2573,60 +2523,8 @@ update_user_detail: async (req, res, next) => {
     }
   },
   upload_documents: async (req, res, next) => {
-    
     try {
-      let user_id;
-
-      // if req.is_verified is true then there must be token in the query
-      if (!req.is_verified && !req.query.token) {
-        return res
-          .status(401)
-          .json({
-            status: 0,
-            message: 'Access denied. Please provide a valid token.'
-          });
-      }
-
-      // if user try to uplaod file without login
-      // then we take token in the query and take the vendor
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        // Check if the token exists
-        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-
-        if (!tokenData || tokenData.length === 0) {
-          // Token is not valid
-          return res
-            .status(400)
-            .json({
-              status: 0,
-              message: 'Invalid or expired token!'
-            })
-            .end();
-        }
-
-        // Retrieve user data associated with the token
-        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-        if (!userData || userData.length === 0) {
-          // User data is not valid
-          return res
-            .status(404)
-            .json({
-              status: 0,
-              message: 'User not found!'
-            })
-            .end();
-        }
-        // Remove password from user data
-        const { password, ...userWithoutPassword } = userData[0];
-        // Assign the user data to req.user
-        req.user = userWithoutPassword;
-      }
-
-      user_id = req.user.id;
+      const user_id = req.user.id;
 
       let { doc_type } = req.body;
       if (!doc_type) {
