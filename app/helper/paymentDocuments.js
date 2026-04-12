@@ -1,6 +1,8 @@
 import fs from 'fs';
 import puppeteer from 'puppeteer';
 import Config from '../config/app.config.js';
+import { logger } from '../util/logger.js';
+import { logError } from './common.js';
 
 const INVOICE_DIR = Config.upload?.invoice_file || 'app/uploads/invoice_file';
 const COMPANY_ADDRESS = '1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate, off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063';
@@ -158,7 +160,7 @@ async function generatePdf(html, fileName) {
     return { filePath: outputPath, fileName };
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
-    console.error('paymentDocuments generatePdf error:', err);
+    logError('paymentDocuments generatePdf error', err);
     return null;
   }
 }

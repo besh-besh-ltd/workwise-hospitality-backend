@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs';
 import Config from '../config/app.config.js';
 import adminModel from '../models/adminModel.js';
 import userModel from '../models/userModel.js';
+import { logger } from '../util/logger.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -39,7 +40,7 @@ passport.use(
         return done(null, { id: 0 });
       }
     } catch (error) {
-      console.error('passport error');
+      logger.error('passport error');
       done(error, false);
     }
   })
@@ -69,7 +70,7 @@ passport.use(
         if (Object.keys(user_dtls).length > 0) {
           let isMatch = '';
           if (user_dtls.password == null) {
-            console.log('Case 1');
+            logger.debug('Case 1');
             return done(null, {
               id: 0,
               err_msg:
@@ -108,7 +109,7 @@ passport.use(
           return done(null, { id: 0 });
         }
       } catch (error) {
-        console.error('passport error');
+        logger.error('passport error');
         done(error, false);
       }
     }
@@ -149,7 +150,7 @@ passport.use(
           return done(null, false, { message: 'Unauthorized' });
         }
       } catch (error) {
-        console.error('passport error');
+        logger.error('passport error');
         done(error, false);
       }
     }
@@ -197,7 +198,7 @@ passport.use(
           return done(null, false, { message: 'Unauthorized' });
         }
       } catch (error) {
-        console.error('passport error');
+        logger.error('passport error');
         done(error, false);
       }
     }

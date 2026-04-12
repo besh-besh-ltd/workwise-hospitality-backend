@@ -1,6 +1,8 @@
 import userModel from '../models/userModel.js';
 import notificationModel from '../models/notificationModel.js';
 import webpush from 'web-push';
+import { logger } from '../util/logger.js';
+import { logError } from '../helper/common.js';
 const publicVapidKey =
   'BMlcHp3X2DtYmsKkev81HR4CJeOqxTyLEZC0JU3Fnxi7qaKqM7-qOWvgPCb4Q9FmFW6-hyc9AG4w4BtrHTkwO2c';
 
@@ -44,7 +46,7 @@ const sendNotification = async (
 
     webpush
       .sendNotification(subscription, JSON.stringify(payload))
-      .catch(console.log);
+      .catch(err => logError('webpush sendNotification failed', err));
     /* if (createNotification) {
       //Check if device tokens available
       if (receiverUserIds.length) {

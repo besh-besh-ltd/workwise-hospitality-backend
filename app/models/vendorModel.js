@@ -1,7 +1,8 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
-import { sendMail } from '../helper/common.js';
+import { sendMail, logError } from '../helper/common.js';
+import { logger } from '../util/logger.js';
 import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
 
 const vendorModel = {
@@ -502,7 +503,7 @@ getLocationsByCompanyId: async (company_id, user_type = 2) => {
     return result;
 
   } catch (error) {
-    console.error("Error fetching vendor locations:", error);
+    logError("Error fetching vendor locations", error);
     throw error;
   }
 },
@@ -1308,7 +1309,7 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
       )
         .then(async function (data) {
           const spoc = data[0];
-          console.log("SPOC created:", spoc);
+          logger.debug({ spoc }, "SPOC created");
           resolve(data);
 
         // -------------------------------------------------------
@@ -1320,22 +1321,22 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
 
           const lookupId = userId || createdBy;
 
-          console.log("Looking up creator with ID:", lookupId);
+          logger.debug({ lookupId }, "Looking up creator with ID");
           try {
             const creator = await db.oneOrNone(
               `SELECT email, name, organization_name FROM tbl_users WHERE id = $1`, 
               [lookupId]
             );
             if (creator){ 
-              console.log("Creator found:", creator);
+              logger.debug({ creator }, "Creator found");
               creatorEmail = creator.email;
               creatorOrganizationName = creator.organization_name || creator.name;
               vendorName = creator.name || creator.organization_name;
 
-              console.log("Creator email:", creatorEmail);
+              logger.debug({ creatorEmail }, "Creator email");
             }
           } catch (err) {
-            console.error("Creator lookup failed:", err);
+            logError("Creator lookup failed", err);
           }
 
         // -------------------------------------------------------

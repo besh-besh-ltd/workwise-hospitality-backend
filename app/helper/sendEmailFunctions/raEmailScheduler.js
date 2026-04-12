@@ -1,6 +1,8 @@
 import { createSchedule } from '../createSchedule.js';
 import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
+import { logger } from '../../util/logger.js';
+import { logError } from '../common.js';
 
 function parseDate(dateString, timezone = 'UTC') {
     if (!dateString) return null;
@@ -8,7 +10,7 @@ function parseDate(dateString, timezone = 'UTC') {
         const date = new Date(dateString);
         return isNaN(date.getTime()) ? null : date;
     } catch (error) {
-        console.error('Error parsing date:', error);
+        logError('Error parsing date:', error);
         return null;
     }
 }
@@ -25,7 +27,7 @@ function formatDate(date) {
 }
 
 /**
- * Accepts "YYYY‑MM-DDTHH:mm" or "YYYY‑MM-DD HH:mm"
+ * Accepts "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD HH:mm"
  * Returns a JS Date in **UTC** that represents the same clock time in IST (+05:30).
  */
 function parseISTDate(datetimeStr = '') {
@@ -61,7 +63,7 @@ function parseISTDate(datetimeStr = '') {
 
     const istFormatted = `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
 
-    console.log('Parsed IST date:', istFormatted);
+    logger.debug('Parsed IST date:', istFormatted);
     return istFormatted;
 }
 
@@ -179,7 +181,7 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
         for (const vendor of Object.values(productVendormap)) {
             // Validate vendor structure
             if (!vendor?.vendorDetails?.user_id) {
-                console.warn('⚠️ Skipping vendor with missing user_id:', vendor);
+                logger.warn('Skipping vendor with missing user_id:', vendor);
                 continue;
             }
 
@@ -204,7 +206,7 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
             };
 
             vendorPayloadList.push(vendorObject);
-            console.log("✅ Vendor Object processed:", vendorObject.vendorDetails.vendor_name);
+            logger.info(`Vendor Object processed: ${vendorObject.vendorDetails.vendor_name}`);
         }
 
         // Schedule emails for each vendor
@@ -216,13 +218,13 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
                     ra_end_date
                 );
             } catch (error) {
-                console.error(`❌ Failed to schedule emails for vendor ${vendorPayload.vendorDetails.vendor_name}:`, error.message);
+                logError(`Failed to schedule emails for vendor ${vendorPayload.vendorDetails.vendor_name}`, error);
             }
         }
 
         return vendorPayloadList;
     } catch (error) {
-        console.error("❌ Error in raSchedulerForVendor:", error.message);
+        logError("Error in raSchedulerForVendor", error);
         throw error;
     }
 };
@@ -264,7 +266,7 @@ export async function scheduleEmailsForAuctionEventBridge(
         const startDate = createDateFromIST(startDateIST);
         const endDate = createDateFromIST(endDateIST);
         
-        console.log("Start Date IST:", startDateIST, "End Date IST:", endDateIST);
+        logger.debug(`Start Date IST: ${startDateIST}, End Date IST: ${endDateIST}`);
 
         // Validate dates
         if (endDate <= startDate) {
@@ -274,7 +276,7 @@ export async function scheduleEmailsForAuctionEventBridge(
             throw new Error('Auction start date must be in the future');
         }
 
-        console.log(`📧 Scheduling emails for vendor: ${vendor_name} (${vendor_email})`);
+        logger.info(`Scheduling emails for vendor: ${vendor_name} (${vendor_email})`);
 
         // === 1. One-Day-Before Email ===
         let oneDayBeforeIST = addHoursToISTDate(startDateIST, -24);
@@ -290,10 +292,10 @@ export async function scheduleEmailsForAuctionEventBridge(
             const MM = String(oneDayBeforeDate.getMonth() + 1).padStart(2, '0');
             const dd = String(oneDayBeforeDate.getDate()).padStart(2, '0');
             oneDayBeforeIST = `${yyyy}-${MM}-${dd}T17:00:00`;
-            console.log(`Adjusted one-day-before to Friday 5 PM: ${oneDayBeforeIST}`);
+            logger.debug(`Adjusted one-day-before to Friday 5 PM: ${oneDayBeforeIST}`);
         }
 
-        console.log("One day before schedule time check ------>", oneDayBeforeIST);
+        logger.debug(`One day before schedule time check: ${oneDayBeforeIST}`);
 
         if (createDateFromIST(oneDayBeforeIST) > now) {
             await createSchedule({
@@ -314,13 +316,13 @@ export async function scheduleEmailsForAuctionEventBridge(
                     buyer_company_name
                 }
             });
-            console.log(`✅ Scheduled one-day-before email for ${vendor_name}`);
+            logger.info(`Scheduled one-day-before email for ${vendor_name}`);
         } else {
-            console.log(`⏭️ Skipped one-day-before email for ${vendor_name} - date already passed`);
+            logger.debug(`Skipped one-day-before email for ${vendor_name} - date already passed`);
         }
 
         // === 2. Auction Start Email ===
-        console.log("Auction start schedule:", startDateIST);
+        logger.debug(`Auction start schedule: ${startDateIST}`);
         
         if (createDateFromIST(startDateIST) >= now) {
             await createSchedule({
@@ -341,15 +343,15 @@ export async function scheduleEmailsForAuctionEventBridge(
                     buyer_company_name
                 },
             });
-            console.log(`✅ Scheduled auction-start email for vendor ${vendor_name}`);
+            logger.info(`Scheduled auction-start email for vendor ${vendor_name}`);
         } else {
-            console.log(`⏭️ Skipped auction-start emails - date already passed`);
+            logger.debug(`Skipped auction-start emails - date already passed`);
         }
 
         // === 3. Mid Auction Reminder Email ===
         const midAuctionTimeIST = getMidPointISTDate(startDateIST, endDateIST);
         
-        console.log("Mid auction schedule time check:", midAuctionTimeIST);
+        logger.debug(`Mid auction schedule time check: ${midAuctionTimeIST}`);
 
         if (createDateFromIST(midAuctionTimeIST) >= now) {
             await createSchedule({
@@ -370,11 +372,11 @@ export async function scheduleEmailsForAuctionEventBridge(
                     buyer_company_name
                 },
             });
-            console.log(`✅ Scheduled mid-auction reminder for vendor ${vendor_name}`);
+            logger.info(`Scheduled mid-auction reminder for vendor ${vendor_name}`);
         }
 
         // === 4. Auction End Email ===
-        console.log("Auction end schedule:", endDateIST);
+        logger.debug(`Auction end schedule: ${endDateIST}`);
 
         await createSchedule({
             rfqId: rfq_id,
@@ -394,9 +396,9 @@ export async function scheduleEmailsForAuctionEventBridge(
                 buyer_company_name
             },
         });
-        console.log(`✅ Scheduled auction-end email for vendor ${vendor_name}`);
+        logger.info(`Scheduled auction-end email for vendor ${vendor_name}`);
 
-        console.log(`✅ Successfully scheduled all applicable emails for RFQ ${rfq_id}, Vendor: ${vendor_name}`);
+        logger.info(`Successfully scheduled all applicable emails for RFQ ${rfq_id}, Vendor: ${vendor_name}`);
 
         return {
             success: true,
@@ -410,7 +412,7 @@ export async function scheduleEmailsForAuctionEventBridge(
         };
 
     } catch (error) {
-        console.error(`❌ Failed to schedule emails for vendor ${vendor_name}: ${error.message}`);
+        logError(`Failed to schedule emails for vendor ${vendor_name}`, error);
         throw error;
     }
 }

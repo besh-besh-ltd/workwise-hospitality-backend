@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
 import db from "../../config/dbConn.js";
-import { sendMail } from "../../helper/common.js";
+import { sendMail, logError } from "../../helper/common.js";
+import { logger } from '../../util/logger.js';
 import { generateEmailTemplate } from "../../helper/notificationEmailLayout.js";
 import userModel from "../../models/userModel.js";
 import vendorModel from "../../models/vendorModel.js";
@@ -77,7 +78,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
 export const sendPONotificationToVendor = async (purchaseOrder, user) => {
     try {
-        console.log("PO TEST -> PURCHASE ORDER EMAIL TRIGGERED!")
+        logger.info("PO TEST -> PURCHASE ORDER EMAIL TRIGGERED!")
         let company = await userModel.getCompanyDetail(user.id);
         if(company) company = company[0];
 
@@ -151,8 +152,8 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
             // ]
         };
         
-        console.log("PO TEST -> VENDOR:", vendor);
-        console.log("PO TEST -> MAIL RECIPIENTS:", mailRecipients);
+        logger.debug({ vendor }, "PO TEST -> VENDOR");
+        logger.debug({ mailRecipients }, "PO TEST -> MAIL RECIPIENTS");
 
         // if (spocList && spocList.length > 0) {
         //     mailRecipients.to = spocList.map(spoc => spoc.email);
@@ -163,9 +164,9 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         sendMail(mailRecipients);
 
-        console.log("PO TEST -> EMAIL HAS BEEN SENT!")
+        logger.info("PO TEST -> EMAIL HAS BEEN SENT!")
     } catch (error) {
-        console.error(error);
+        logError('sendPONotificationToVendor error', error);
         throw error;
     }
 }

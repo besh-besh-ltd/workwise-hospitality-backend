@@ -12,6 +12,7 @@
  */
 
 import { createApprovalInstance } from '../../models/generalModel.js';
+import { logger } from '../../util/logger.js';
 
 /**
  * Cancel active approvals for an RFQ and reissue.
@@ -86,10 +87,9 @@ export async function cancelAndReissueApproval(rfq, userId, editSessionId, t) {
     newInstanceId = newInstance?.id || null;
   } catch (err) {
     // Don't block the edit if approval re-creation fails — log and continue.
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[reapprovalService] Could not reissue approval for RFQ ${rfq.id}:`,
-      err.message || err
+    logger.warn(
+      { rfqId: rfq.id, err: err.message || err },
+      `[reapprovalService] Could not reissue approval for RFQ ${rfq.id}`
     );
   }
 

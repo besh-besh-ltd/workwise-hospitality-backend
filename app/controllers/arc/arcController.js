@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
 import { getLifecycleHistory, getApprovalInstancesByEntity, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
@@ -375,7 +376,7 @@ const ArcController = {
               try {
                 await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `ARC rejected: ${remarks || 'No remarks'}`, 'NEGOTIATION');
               } catch (resetError) {
-                console.error('Error resetting quote finalization on ARC rejection:', resetError);
+                logError('Error resetting quote finalization on ARC rejection', resetError);
               }
             }
           }
@@ -457,7 +458,7 @@ const ArcController = {
 
             await cancelApprovalInstance(pendingInstance.id, user_id, `Sent back to ${target_stage}: ${remarks || 'No remarks'}`);
           } catch (cancelError) {
-            console.error('Error cancelling approval instance:', cancelError);
+            logError('Error cancelling approval instance', cancelError);
             // Continue even if cancellation fails
           }
         }
@@ -472,7 +473,7 @@ const ArcController = {
           try {
             await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `Sent back to ${target_stage}`, target_stage);
           } catch (resetError) {
-            console.error('Error resetting quote finalization:', resetError);
+            logError('Error resetting quote finalization', resetError);
           }
         }
         

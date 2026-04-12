@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import couponModel from '../../models/couponModel.js';
@@ -414,7 +415,7 @@ const validateDbBody = {
   },
 
   user_id_exists: async (req, res, next) => {
-    console.log("req recived");
+    logger.debug("req received");
     try {
       let errors = {};
       let err = 0;
@@ -908,7 +909,7 @@ negotiateModule: async (req, res, next) => {
       });
     }
 
-    console.log("✅ All vendors exist");
+    logger.debug("All vendors exist");
 
     // Store validated data in req for the next controller
     req.validatedData = { productId, vendorIds };
@@ -917,7 +918,7 @@ negotiateModule: async (req, res, next) => {
     return next();
 
   } catch (error) {
-    console.error("❌ Error in negotiateModule:", error.message);
+    logError("Error in negotiateModule", error);
     return res.status(500).json({
       status: 0,
       message: "Internal server error"

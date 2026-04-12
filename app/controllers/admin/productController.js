@@ -12,6 +12,7 @@ import {
   addDefaultNotifications,
   getFileNameFromUrl
 } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
@@ -611,7 +612,7 @@ const productController = {
 
       // ---------------- variations ----------------
       for await (const { attribute, selectedValues } of values.variations) {
-        console.log(attribute, selectedValues);
+        logger.debug('createProduct variation:', { attribute, selectedValues });
         let attributeObj = {
           product_id: productId,
           attribute_id: attribute
@@ -632,7 +633,7 @@ const productController = {
         }
       }
 
-      console.log('=====>>>>>>>>>>>>>>>>', values.variationOptions);
+      logger.debug('createProduct variationOptions:', values.variationOptions);
 
       // ---------------- variation_options ----------------
       for await (const optValues of values.variationOptions) {
@@ -1558,7 +1559,7 @@ const productController = {
       //      //      // console.log(sheet);
       const jsonData = xlsx.utils.sheet_to_json(sheet);
 
-      console.log(jsonData);
+      logger.debug('bulkProductUploadPreview jsonData:', jsonData);
       return false;
 
       // let NewProduct = false;
@@ -1621,7 +1622,7 @@ const productController = {
           let catNameExists = await productModel.topParentparentNameExists(
             value['Category']
           );
-          console.log(catNameExists);
+          logger.debug('bulkProductUploadPreview catNameExists:', catNameExists);
           let category_id = '';
           if (catNameExists.length > 0) {
             category_id = catNameExists[0].id;
@@ -1929,7 +1930,7 @@ const productController = {
             });
           });
       } catch (err) {
-        console.log('err: ', err);
+        logError('exportProducts write error', err);
         res.send({
           status: 'error',
           message: 'Something went wrong'
@@ -2141,7 +2142,7 @@ const productController = {
         approved_at: currentTime
       };
 
-      console.log(productObj)
+      logger.debug('approveProduct productObj:', productObj)
       
       // Add approved_at field when approving
       if (status === '1') {
@@ -2445,7 +2446,7 @@ const productController = {
               [result.id, vendors.map(v => v.vendor_id)]
             );
           } catch (mapErr) {
-            console.error('[ADD_VARIANT] Auto vendor-variant mapping failed:', mapErr);
+            logError('[ADD_VARIANT] Auto vendor-variant mapping failed', mapErr);
           }
         })();
 
@@ -2701,7 +2702,7 @@ const productController = {
       }
 
 
-      console.log("MAPPING RES: ", mappingResult, "\nVENDOR APPROVE ID: ", vendorApproveId);
+      logger.debug('mapVariantWithVendor mapping result:', { mappingResult, vendorApproveId });
 
       if (vendorApproveId.length > 0 && mappingResult) {
         let productApproveArray = [];
@@ -2856,7 +2857,7 @@ const productController = {
       };
       
       // Log the final payload just before sending
-      console.log("searchVariantsSafe: Sending response payload:", JSON.stringify(responsePayload));
+      logger.debug('searchVariantsSafe: Sending response payload:', JSON.stringify(responsePayload));
       
       // Send the explicitly constructed payload
       res.status(200).json(responsePayload).end();
@@ -3082,7 +3083,7 @@ const productController = {
         });
         
       } catch (updateError) {
-        console.error("Error updating mapping:", updateError);
+        logError('Error updating mapping', updateError);
         return res.status(500).json({
           status: 3,
           message: 'Error updating mapping approval status',
@@ -3090,8 +3091,7 @@ const productController = {
         });
       }
     } catch (error) {
-      console.error("Exception in approveMapping:", error);
-      logError(error);
+      logError('Exception in approveMapping', error);
       return res.status(500).json({
         status: 3,
         message: Config?.errorText?.value || 'Something went wrong while updating approval',
@@ -3128,8 +3128,7 @@ const productController = {
         message: 'Mapping deleted successfully'
       });
     } catch (error) {
-      console.error("Exception in deleteVariantVendorMapping:", error);
-      logError(error);
+      logError('Exception in deleteVariantVendorMapping', error);
       return res.status(500).json({
         status: 3,
         message: Config?.errorText?.value || 'Something went wrong while deleting mapping',

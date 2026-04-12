@@ -1,5 +1,6 @@
 
-import axios from 'axios'; // Import axios for making HTTP requests
+import httpClient from '../util/httpClient.js';
+import { logger } from '../util/logger.js';
 import { logError } from './common.js';
 
 const aisensy_api = process.env.AISENSY_API
@@ -53,13 +54,13 @@ const whatsappNotificationAISensy = {
     };
 
     // Make the POST request to the messaging API
-    await axios
+    await httpClient
       .post(aisensy_api, data, { headers: headers })
       .then((response) => {
-        console.log('RFQ creation notification sent:');
+        logger.info('RFQ creation notification sent');
       })
       .catch((error) => {
-        console.error('Failed to send RFQ creation notification:');
+        logError('Failed to send RFQ creation notification', error);
       });
   },
 
@@ -91,16 +92,13 @@ const whatsappNotificationAISensy = {
       'Content-Type': 'application/json'
     };
     // Make the POST request to the messaging API
-    await axios
+    await httpClient
       .post(aisensy_api, data, { headers: headers })
       .then((response) => {
-        console.log('RFQ received notification sent to vendor:', response.data);
+        logger.info('RFQ received notification sent to vendor');
       })
       .catch((error) => {
-        console.error(
-          'Failed to send RFQ received notification to vendor:',
-          error.response ? error.response.data : error.message
-        );
+        logError('Failed to send RFQ received notification to vendor', error);
       });
   },
 
@@ -130,16 +128,13 @@ const whatsappNotificationAISensy = {
       'Content-Type': 'application/json'
     };
 
-    await axios
+    await httpClient
       .post(aisensy_api, data, { headers: headers })
       .then((response) => {
-        console.log('WhatsApp Message Sent:', response.data);
+        logger.info('WhatsApp Message Sent');
       })
       .catch((error) => {
-        console.error(
-          'Failed to send WhatsApp message:',
-          error.response ? error.response.data : error.message
-        );
+        logError('Failed to send WhatsApp message', error);
       });
   },
 
@@ -164,16 +159,13 @@ const whatsappNotificationAISensy = {
       'Content-Type': 'application/json'
     };
 
-    await axios
+    await httpClient
       .post(aisensy_api, data, { headers: headers })
       .then((response) => {
-        console.log('WhatsApp Message Sent:', response.data);
+        logger.info('WhatsApp Message Sent');
       })
       .catch((error) => {
-        console.error(
-          'Failed to send WhatsApp message:',
-          error.response ? error.response.data : error.message
-        );
+        logError('Failed to send WhatsApp message', error);
       });
   },
 
@@ -249,19 +241,16 @@ const whatsappNotificationAISensy = {
       'Content-Type': 'application/json'
     };
 
-    console.log(data);
+    logger.debug({ data }, 'Sending quote reminder notification to vendor');
 
     // 4) Make the POST request
-    await axios
+    await httpClient
       .post(aisensy_api, data, { headers: headers })
       .then((response) => {
-        console.log('New Quote Notification Sent:', response.data);
+        logger.info('New Quote Notification Sent');
       })
       .catch((error) => {
-        console.error(
-          'Failed to send new quote notification:',
-          error.response ? error.response.data : error.message
-        );
+        logError('Failed to send new quote notification', error);
       });
   },
 
@@ -297,7 +286,7 @@ const whatsappNotificationAISensy = {
   //     };
 
   //     // 4) Make the POST request
-  //     await axios
+  //     await httpClient
   //       .post(aisensy_api, data, { headers: headers })
   //       .then((response) => {
   //         console.log('New Quote Notification Sent:', response.data);
@@ -371,7 +360,7 @@ const whatsappNotificationAISensy = {
   //   console.log(data)
 
   //   // 4) Make the POST request
-  //   await axios.post(flux_chat_api, data, { headers: headers })
+  //   await httpClient.post(flux_chat_api, data, { headers: headers })
   //   .then(response => {
   //       console.log('vendor added on workwise by buyer :', response.data);
   //     })

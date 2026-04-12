@@ -2,6 +2,7 @@ import {
   getApprovalInstanceById,
   recordLifecycleEvent,
 } from '../../models/generalModel.js';
+import { logError } from '../../helper/common.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
@@ -131,7 +132,7 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
                   }, poUser, t);
                 }
               } catch (poError) {
-                console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
+                logError(`Error creating PO for vendor ${selectedQuote.vendor_id}`, poError);
               }
             }
           }
@@ -155,6 +156,6 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       }
     }
   } catch (negQuoteError) {
-    console.error('Error in NEGOTIATION_QUOTE post-approval (PO creation):', negQuoteError);
+    logError('Error in NEGOTIATION_QUOTE post-approval (PO creation)', negQuoteError);
   }
 };

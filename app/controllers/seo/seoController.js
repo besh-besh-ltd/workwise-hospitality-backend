@@ -2,6 +2,7 @@ import Config from '../../config/app.config.js';
 import {
   logError
 } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import seoModel from '../../models/seoModel.js';
 import fs from 'fs';
 import path from 'path';
@@ -13,10 +14,10 @@ import { buildPOTemplateData } from '../../helper/poTemplateDataBuilder.js';
 
 const { toWords } = numberToWords;
 import { Readable } from 'stream';
-import axios from 'axios';
+import httpClient from '../../util/httpClient.js';
 
 async function getBase64FromUrl(url) {
-  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  const response = await httpClient.get(url, { responseType: 'arraybuffer' });
   const buffer = Buffer.from(response.data);
   const mimeType = response.headers['content-type'].toLowerCase();
   const base64 = buffer.toString('base64');
@@ -130,9 +131,9 @@ const seoController = {
     if (po_id) {
       try {
         data = await buildPOTemplateData(po_id, txContext);
-        console.log(`Built PO template data for PO ${po_id}`);
+        logger.info(`Built PO template data for PO ${po_id}`);
       } catch (buildError) {
-        console.error(`Error building PO template data for PO ${po_id}:`, buildError);
+        logError(`Error building PO template data for PO ${po_id}`, buildError);
         // Fall back to provided poData if build fails
         data = { ...poData };
       }
@@ -284,7 +285,7 @@ const seoController = {
       absolutePath: fullPath
     };
   } catch (err) {
-    console.error('createPoPDF error:', err);
+    logError('createPoPDF error', err);
     return { ok: false, error: err.message || 'Failed to create PDF' };
   }
 }
@@ -327,7 +328,7 @@ const seoController = {
     stream.push(null); // Signal end of stream
 
   } catch (error) {
-    console.error('Error generating sitemap:', error);
+    logError('Error generating sitemap', error);
     if (!res.headersSent) {
       res.status(400).json({ status: 3, message: 'Error generating sitemap' }).end();
     }
@@ -355,7 +356,7 @@ vendorSitemapIndex: async (req, res, next) => {
 
     res.send(xml);
   } catch (error) {
-    console.error("Error generating sitemap index:", error);
+    logError('Error generating sitemap index', error);
     if (!res.headersSent) {
       res.status(500).json({ status: 3, message: "Error generating sitemap index" });
     }
@@ -393,7 +394,7 @@ categorySitemap : async (req, res, next) => {
     stream.push(null);
 
   } catch (error) {
-    console.error('Error generating category sitemap:', error);
+    logError('Error generating category sitemap', error);
     if (!res.headersSent) {
       res.status(500).json({ status: 3, message: 'Error generating category sitemap' });
     }
@@ -403,7 +404,7 @@ categorySitemapIndex: async (req, res, next) => {
   try {
     const { totalUrls } = await seoModel.getCategorySitemapTotal();
 
-    console.log("Total Category URLs:", totalUrls);
+    logger.info({ totalUrls }, 'Total Category URLs');
     const limit = 50000;
     const totalPages = Math.ceil(totalUrls / limit);
     const baseUrl = process.env.FRONTEND_URL || "https://letsworkwise.com";
@@ -423,7 +424,7 @@ categorySitemapIndex: async (req, res, next) => {
 
     res.send(xml);
   } catch (error) {
-    console.error("Error generating category sitemap index:", error);
+    logError('Error generating category sitemap index', error);
     if (!res.headersSent) {
       res.status(500).json({
         status: 3,

@@ -1,5 +1,7 @@
 import rbacModel from "../../models/rbacModel.js";
 import { DEPARTMENT_SCOPED_RESOURCES } from "../../util/constants.js";
+import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 
 const rbacController = {
 
@@ -136,7 +138,7 @@ const rbacController = {
       });
 
     } catch (err) {
-      console.error("createRoleWithPermissions error:", err);
+      logError("createRoleWithPermissions error", err);
       return res.status(500).json({
         status: false,
         message: "Failed to create role"
@@ -198,7 +200,7 @@ const rbacController = {
     });
 
   } catch (err) {
-    console.error("updateRoleWithPermissions error:", err);
+    logError("updateRoleWithPermissions error", err);
     return res.status(500).json({
       status: false,
       message: "Failed to update role"
@@ -338,7 +340,7 @@ const rbacController = {
       });
 
     } catch (err) {
-      console.error("getAllPermissionsGrouped error:", err);
+      logError("getAllPermissionsGrouped error", err);
       return res.status(500).json({
         status: false,
         message: "Failed to fetch permissions"
@@ -400,7 +402,7 @@ const rbacController = {
         });
 
     } catch (err) {
-        console.error("getMyPermissionsGrouped error:", err);
+        logError("getMyPermissionsGrouped error", err);
         return res.status(500).json({
         status: false,
         message: "Failed to fetch permissions"
@@ -501,7 +503,7 @@ const rbacController = {
       });
 
     } catch (err) {
-      console.error("getMyPermissionsForHotels error:", err);
+      logError("getMyPermissionsForHotels error", err);
       return res.status(500).json({
         status: false,
         message: "Failed to fetch permissions"

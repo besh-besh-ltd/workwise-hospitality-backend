@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import negotiationModel from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
@@ -133,7 +134,7 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
     }
   } catch (negQuoteError) {
     // Log but don't fail the transaction
-    console.error('Error handling NEGOTIATION post-approval:', negQuoteError);
+    logError('Error handling NEGOTIATION post-approval', negQuoteError);
   }
 };
 
@@ -1225,7 +1226,7 @@ const NegotiationController = {
                 }
               } catch (arcError) {
                 // Log but don't fail finalization if ARC policy not found
-                console.error('ARC approval creation failed during auto-approval:', arcError.message);
+                logError('ARC approval creation failed during auto-approval', arcError);
               }
             }
           }
@@ -1592,7 +1593,7 @@ const NegotiationController = {
                       }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
                     }
                   } catch (poError) {
-                    console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
+                    logError(`Error creating PO for vendor ${selectedQuote.vendor_id}`, poError);
                   }
                 }
               }
@@ -1676,7 +1677,7 @@ const NegotiationController = {
         try {
           await resetQuoteFinalizationForSendback(metadata.rfq_id, rfq_product_id, user_id, `Quote approval rejected: ${remarks}`, 'NEGOTIATION');
         } catch (resetError) {
-          console.error('Error resetting quote finalization on quote rejection:', resetError);
+          logError('Error resetting quote finalization on quote rejection', resetError);
         }
       }
 

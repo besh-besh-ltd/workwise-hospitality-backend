@@ -2,6 +2,7 @@ import { Writable } from 'node:stream';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
+import { trace, context } from '@opentelemetry/api';
 
 const isDev = ['development', 'uat'].includes(process.env.NODE_ENV);
 
@@ -39,7 +40,14 @@ class OTelStream extends Writable {
   _write(chunk, _encoding, callback) {
     try {
       const record = JSON.parse(chunk.toString());
-      const { level, time, msg, pid, hostname, ...attributes } = record;
+      const { level, time, msg, pid, hostname, err: serializedErr, ...attributes } = record;
+
+      // Flatten pino-serialized error into OTel semantic conventions
+      if (serializedErr && typeof serializedErr === 'object') {
+        attributes['exception.type'] = serializedErr.type || 'Error';
+        attributes['exception.message'] = serializedErr.message || '';
+        attributes['exception.stacktrace'] = serializedErr.stack || '';
+      }
 
       this._otelLogger.emit({
         severityNumber: pinoLevelToOTel[level] ?? SeverityNumber.INFO,
@@ -68,6 +76,14 @@ const getPath = (req) => {
 const logger = pino({
   level: process.env.LOG_LEVEL || (isDev ? 'debug' : 'info'),
   timestamp: pino.stdTimeFunctions.isoTime,
+  mixin() {
+    const span = trace.getSpan(context.active());
+    if (span) {
+      const ctx = span.spanContext();
+      return { trace_id: ctx.traceId, span_id: ctx.spanId };
+    }
+    return {};
+  },
 }, pino.multistream([
   { level: 0, stream: process.stdout },
   { level: 0, stream: new OTelStream() },

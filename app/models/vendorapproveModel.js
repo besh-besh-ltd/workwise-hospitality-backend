@@ -2,6 +2,7 @@ import pgp from 'pg-promise';
 
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
+import { logger } from '../util/logger.js';
 
 const vendorapproveModel = {
   getVendorApproveList: async (limit, offset, organization, verified) => {
@@ -58,7 +59,7 @@ const vendorapproveModel = {
   getAllVendorApproveList: async (limit, offset, verified, name) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
-      console.log('verified==>>', verified);
+      logger.debug({ verified }, 'getAllVendorApproveList verified param');
       if (verified == 't') {
         dynamicQuery += `AND status = 1 `;
       } else if (verified == 'f') {

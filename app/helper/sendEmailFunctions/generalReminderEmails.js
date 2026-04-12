@@ -1,7 +1,8 @@
 import config from "../../config/app.config.js";
 import userModel from "../../models/userModel.js";
-import { sendMail } from "../common.js";
+import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { logger } from '../../util/logger.js';
 
 export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0) => {
   return new Promise(async (resolve, reject) => {
@@ -108,7 +109,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
       let recipients = {
         from: config.webmasterMail,
-        subject: `GRN Reminder: PO #${po_number} – ${subjectSuffix}`,
+        subject: `GRN Reminder: PO #${po_number} - ${subjectSuffix}`,
         html: htmlContent,
       };
 
@@ -134,7 +135,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
       sendMail(recipients);
       return resolve(true);
     } catch (err) {
-      console.error("Error sending GRN reminder:", err);
+      logError("Error sending GRN reminder:", err);
       return reject(err);
     }
   });
@@ -223,7 +224,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
       sendMail(recipients);
       return resolve(true);
     } catch (err) {
-      console.error("Error sending invoice email:", err);
+      logError("Error sending invoice email:", err);
       return reject(err);
     }
   });
@@ -311,7 +312,7 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
       sendMail(recipients);
       return resolve(true);
     } catch (err) {
-      console.error("Error sending invoice email:", err);
+      logError("Error sending invoice email:", err);
       return reject(err);
     }
   });
@@ -428,7 +429,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
       sendMail(recipients);
       return resolve(true);
     } catch (err) {
-      console.error("Error sending dispatched email:", err);
+      logError("Error sending dispatched email:", err);
       return reject(err);
     }
   });
@@ -550,7 +551,7 @@ export const sendGRNRepresentativeEmail = async (purchase_order, siteRepEmail, t
       sendMail(recipients);
       return resolve(true);
     } catch (err) {
-      console.error("Error sending dispatched email:", err);
+      logError("Error sending dispatched email:", err);
       return reject(err);
     }
   });
