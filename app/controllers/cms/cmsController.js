@@ -16,7 +16,7 @@ import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import bcrypt from 'bcryptjs';
-import axios from 'axios';
+import httpClient from '../../util/httpClient.js';
 import FormData from 'form-data';
 import fs from 'fs';
 import { v4 } from 'uuid';
@@ -129,7 +129,7 @@ const CmsController = {
           .end();
       }
 
-      const recaptchaResponse = await axios.post(
+      const recaptchaResponse = await httpClient.post(
         RECAPTCHA_VERIFY_URL,
         null,
         {

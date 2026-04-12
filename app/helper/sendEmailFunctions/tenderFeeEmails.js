@@ -1,8 +1,9 @@
 import fs from "fs";
 import config from "../../config/app.config.js";
-import { sendMail } from "../common.js";
+import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from "../paymentDocuments.js";
+import { logger } from '../../util/logger.js';
 
 /**
  * Send tender fee payment confirmation email with invoice to vendor
@@ -20,7 +21,7 @@ export const sendTenderFeePaymentConfirmation = async ({
 }) => {
   try {
     if (!vendorDetails?.email) {
-      console.log('No vendor email for tender fee payment confirmation');
+      logger.debug('No vendor email for tender fee payment confirmation');
       return false;
     }
 
@@ -174,15 +175,15 @@ export const sendTenderFeePaymentConfirmation = async ({
       }
       if (attachments.length) mailOpts.attachments = attachments;
     } catch (docErr) {
-      console.error('Tender fee doc generation failed:', docErr);
+      logError('Tender fee doc generation failed:', docErr);
     }
 
     await sendMail(mailOpts);
 
-    console.log(`Sent tender fee payment confirmation to ${vendorDetails.email} for RFQ ${rfqDetails?.rfq_no}`);
+    logger.info(`Sent tender fee payment confirmation to ${vendorDetails.email} for RFQ ${rfqDetails?.rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending tender fee payment confirmation email:", err);
+    logError("Error sending tender fee payment confirmation email:", err);
     return false;
   }
 };

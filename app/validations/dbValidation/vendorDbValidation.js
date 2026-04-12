@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 // import productModel from '../../models/productModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
@@ -174,9 +175,9 @@ const validateDbBody = {
       let err = 0;
       let vendorId = req.params.id;
       let { name } = req.body;
-      console.log('Name==>', name);
+      logger.debug({ name }, 'vendor_approve_update_exists name');
       const vendorIDExists = await vendorModel.vendorNameExist(name);
-      console.log('vendorIDExists update==>', vendorIDExists);
+      logger.debug({ vendorIDExists }, 'vendorIDExists update');
       // console.log('vendorIDExists update Idd  ==>', vendorIDExists[0].id);
       // return false;
       if (vendorIDExists.length > 0 && vendorIDExists[0]?.id != vendorId) {

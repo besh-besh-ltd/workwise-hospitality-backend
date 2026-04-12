@@ -7,6 +7,8 @@ import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createS
 import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
 import rfqModel from '../models/rfqModel.js';
 import userModel from '../models/userModel.js';
+import { logger } from '../util/logger.js';
+import { logError } from './common.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -138,7 +140,7 @@ export const rescheduleAllMilestoneReminders = async () => {
 
 export const scheduleGRNReminders = async (purchase_order, reminder_users = [], grn_rep_data, testMode = false) => {
   const { id: poId, delivery_period, po_approved_on } = purchase_order || {};
-  console.log("SCHEDULING GRN REMINDERS")
+  logger.info('Scheduling GRN reminders')
 
   if (!poId || !delivery_period || !po_approved_on) {
     return false;
@@ -191,7 +193,7 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
       }
     }
 
-    console.log("ALL THE TIMERS HAVE BEEN SET:", remindAt);
+    logger.info({ remindAt }, 'All the timers have been set');
 
     // node-cron expression for specific date/time
     const cronExpression = `${remindAt.getMinutes()} ${remindAt.getHours()} ${remindAt.getDate()} ${
@@ -221,7 +223,7 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
         // Schedule the next reminder if any
         scheduleReminderAtIndex(index + 1);
       } catch (err) {
-        console.error("Error in GRN reminder job: ", err);
+        logError('Error in GRN reminder job', err);
       } finally {
         job.stop();
         generalRemindersCronRegistry.delete(jobKey);
@@ -271,7 +273,7 @@ const publishRfq = async (rfq, txContext = null) => {
     txContext: txContext
   });
 
-  console.log(`[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id})`);
+  logger.info({ rfq_no, rfqId: id, is_tender }, `[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no}`);
 
   // Send publish notification emails
   try {
@@ -287,13 +289,13 @@ const publishRfq = async (rfq, txContext = null) => {
       [id]
     );
 
-    console.log(`[RFQ Publisher] Email section - rfqDetails found: ${!!rfqDetails}, is_tender: ${rfqDetails?.is_tender}, created_by: ${rfqDetails?.created_by}`);
+    logger.debug({ rfqDetailsFound: !!rfqDetails, is_tender: rfqDetails?.is_tender, created_by: rfqDetails?.created_by }, '[RFQ Publisher] Email section - fetched rfqDetails');
 
     if (rfqDetails) {
       // 1. Notify approval workflow users + RFQ creator
       const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
       const approvalUsers = await getApprovalWorkflowUsers(entityType, id, dbConn);
-      console.log(`[RFQ Publisher] Approval users for ${entityType} #${id}: ${approvalUsers.length} users`, approvalUsers.map(u => ({ user_id: u.user_id, email: u.email })));
+      logger.debug({ entityType, rfqId: id, count: approvalUsers.length, users: approvalUsers.map(u => ({ user_id: u.user_id, email: u.email })) }, `[RFQ Publisher] Approval users fetched`);
 
       const creatorAlreadyIncluded = approvalUsers.some(u => u.user_id === rfqDetails.created_by);
       let publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
@@ -301,13 +303,13 @@ const publishRfq = async (rfq, txContext = null) => {
       if (!creatorAlreadyIncluded && rfqDetails.created_by) {
         const creatorDetails = await userModel.user_profile_detail(rfqDetails.created_by);
         const creator = creatorDetails?.[0];
-        console.log(`[RFQ Publisher] Creator not in approval users. Creator lookup: ${creator?.email}`);
+        logger.debug({ creatorEmail: creator?.email }, '[RFQ Publisher] Creator not in approval users');
         if (creator?.email && creator.email.includes('@')) {
           publishUsers.push({ name: creator.name, email: creator.email });
         }
       }
 
-      console.log(`[RFQ Publisher] Final publishUsers (${publishUsers.length}):`, publishUsers.map(u => u.email));
+      logger.debug({ count: publishUsers.length, emails: publishUsers.map(u => u.email) }, '[RFQ Publisher] Final publishUsers');
 
       if (publishUsers.length > 0) {
         await sendRfqPublishedNotification({
@@ -315,7 +317,7 @@ const publishRfq = async (rfq, txContext = null) => {
           users: publishUsers
         });
       } else {
-        console.warn(`[RFQ Publisher] No publish users found for ${entityType} #${rfq_no} (ID: ${id}) - skipping published email`);
+        logger.warn({ entityType, rfq_no, rfqId: id }, '[RFQ Publisher] No publish users found - skipping published email');
       }
 
       // 2. Notify vendors
@@ -349,7 +351,7 @@ const publishRfq = async (rfq, txContext = null) => {
             products: vendor.products
           });
         } catch (tokenErr) {
-          console.error(`Error generating token for vendor ${vendorId}:`, tokenErr);
+          logError(`Error generating token for vendor ${vendorId}`, tokenErr);
         }
       }
 
@@ -368,7 +370,7 @@ const publishRfq = async (rfq, txContext = null) => {
       }
     }
   } catch (emailError) {
-    console.error('[RFQ Publisher] Error sending publish notification emails:', emailError);
+    logError('[RFQ Publisher] Error sending publish notification emails', emailError);
   }
 };
 
@@ -391,17 +393,17 @@ export const publishRfqById = async (rfqId, rfq_no) => {
     `, [rfqId]);
 
     if (!rfq) {
-      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not found`);
+      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ not found');
       return { skipped: true, reason: 'not_found' };
     }
 
     if (rfq.is_published === 1) {
-      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) already published`);
+      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ already published');
       return { skipped: true, reason: 'already_published' };
     }
 
     if (rfq.status === 5) {
-      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) publish request was withdrawn`);
+      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ publish request was withdrawn');
       return { skipped: true, reason: 'withdrawn' };
     }
 
@@ -411,7 +413,7 @@ export const publishRfqById = async (rfqId, rfq_no) => {
     // If still pending approval (status = 3), auto-approve it since publish date has arrived
     if (rfq.status === 3) {
       wasAutoApproved = true;
-      console.log(`[RFQ Publisher] Auto-approving RFQ ${rfq_no} (ID: ${rfqId}) - publish date arrived, no approver action taken`);
+      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Auto-approving RFQ - publish date arrived, no approver action taken');
 
       // Mark all pending approval instances as auto-approved
       await t.none(`
@@ -473,7 +475,7 @@ export const publishRfqById = async (rfqId, rfq_no) => {
         txContext: t
       });
 
-      console.log(`[RFQ Publisher] Auto-approval completed for RFQ ${rfq_no} (ID: ${rfqId})`);
+      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Auto-approval completed');
 
       // Refresh rfq object with new status
       rfq.status = 4;
@@ -481,7 +483,7 @@ export const publishRfqById = async (rfqId, rfq_no) => {
 
     // Now validate status is ready to publish
     if (rfq.status !== 4 && rfq.status !== 1) {
-      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state (status: ${rfq.status})`);
+      logger.info({ rfq_no, rfqId, status: rfq.status }, '[RFQ Publisher] Skipping - RFQ not in publishable state');
       return { skipped: true, reason: 'invalid_status' };
     }
 
@@ -505,7 +507,7 @@ export const scheduleRfqPublish = async (rfq, txContext = null) => {
 
   // If no publish date set, publish immediately
   if (!tender_publish_date) {
-    console.log(`[RFQ Publisher] Publishing immediately (no publish date): ${rfq_no}`);
+    logger.info({ rfq_no }, '[RFQ Publisher] Publishing immediately (no publish date)');
     await publishRfq(rfq, txContext);
     return;
   }
@@ -515,7 +517,7 @@ export const scheduleRfqPublish = async (rfq, txContext = null) => {
 
   // If publish date is in the past or now, publish immediately
   if (publishAt <= now) {
-    console.log(`[RFQ Publisher] Publish date passed, publishing now: ${rfq_no}`);
+    logger.info({ rfq_no }, '[RFQ Publisher] Publish date passed, publishing now');
     await publishRfq(rfq, txContext);
     return;
   }
@@ -528,7 +530,7 @@ export const scheduleRfqPublish = async (rfq, txContext = null) => {
     .replace('Z', '')           // Remove trailing Z if present
     .replace(' ', 'T');         // Replace space with T for DB format
 
-  console.log(`[RFQ Publisher] Scheduling publish for ${rfq_no} at ${scheduledTimeIST} IST`);
+  logger.info({ rfq_no, scheduledTimeIST }, '[RFQ Publisher] Scheduling publish');
 
   // Schedule via EventBridge
   await createScheduleForRfqPublish({
@@ -541,7 +543,7 @@ export const scheduleRfqPublish = async (rfq, txContext = null) => {
     }
   });
 
-  console.log(`✅ EventBridge schedule created for RFQ: ${rfq_no} (ID: ${id})`);
+  logger.info({ rfq_no, rfqId: id }, '[RFQ Publisher] EventBridge schedule created');
 };
 
 /**
@@ -555,12 +557,12 @@ export const removeRfqPublishJob = async (rfqId) => {
   try {
     const result = await deleteRfqPublishSchedule(rfqId);
     if (result.ok) {
-      console.log(`✅ Removed EventBridge schedule for RFQ: ${rfqId}`);
+      logger.info({ rfqId }, '[RFQ Publisher] Removed EventBridge schedule');
     } else {
-      console.log(`ℹ️ No schedule found for RFQ: ${rfqId} (may have already executed)`);
+      logger.info({ rfqId }, '[RFQ Publisher] No schedule found (may have already executed)');
     }
   } catch (error) {
-    console.error(`❌ Failed to remove schedule for RFQ ${rfqId}:`, error.message);
+    logError(`[RFQ Publisher] Failed to remove schedule for RFQ ${rfqId}`, error);
   }
 };
 
@@ -572,5 +574,5 @@ export const removeRfqPublishJob = async (rfqId) => {
  * Can be removed after migration is verified working in production.
  */
 export const rescheduleAllRfqPublishJobs = async () => {
-  console.log('[RFQ Publisher] Using EventBridge - no rescheduling needed on startup');
+  logger.info('[RFQ Publisher] Using EventBridge - no rescheduling needed on startup');
 };

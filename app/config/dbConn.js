@@ -17,8 +17,8 @@ const initOptions = {
       // A connection-related error;
       // Connections are reported back with the password hashed,
       // for safe errors logging, without exposing passwords.
-      console.log('CN:', e.cn);
-      console.log('EVENT:', error.message || error);
+      logger.error({ cn: e.cn }, 'Database connection error');
+      logger.error({ event: error.message || error }, 'Database error event');
     }
   }
 };

@@ -6,6 +6,8 @@ import {
   CreateScheduleGroupCommand
 } from "@aws-sdk/client-scheduler";
 import { randomUUID } from "crypto";
+import { logger } from '../util/logger.js';
+import { logError } from './common.js';
 
 const client = new SchedulerClient({ region: "ap-south-1" });
 
@@ -25,14 +27,14 @@ const ensureScheduleGroupExists = async (groupName) => {
   try {
     const command = new CreateScheduleGroupCommand({ Name: groupName });
     await client.send(command);
-    console.log(`✅ Created schedule group: ${groupName}`);
+    logger.info({ groupName }, 'Created schedule group');
     verifiedGroups.add(groupName);
   } catch (err) {
     if (err.name === "ConflictException") {
       // Group already exists, that's fine
       verifiedGroups.add(groupName);
     } else {
-      console.error(`❌ Failed to create schedule group ${groupName}:`, err.message);
+      logError(`Failed to create schedule group ${groupName}`, err);
       throw err;
     }
   }
@@ -45,9 +47,9 @@ const ensureScheduleGroupExists = async (groupName) => {
  * Delete an existing EventBridge Scheduler schedule.
  *
  * @param {Object}   opts
- * @param {string}   opts.rfqId        – RFQ id that was embedded in the schedule name
- * @param {string}   opts.type         – schedule prefix (e.g. "auctionStartVendor")
- * @param {string=}  opts.vendor_id    – user / vendor id, default empty string
+ * @param {string}   opts.rfqId        - RFQ id that was embedded in the schedule name
+ * @param {string}   opts.type         - schedule prefix (e.g. "auctionStartVendor")
+ * @param {string=}  opts.vendor_id    - user / vendor id, default empty string
  */
 
 export const createSchedule = async ({
@@ -64,7 +66,7 @@ export const createSchedule = async ({
     throw new Error("Invalid scheduledTimeIST format. Expected format: YYYY-MM-DDTHH:mm:ss");
   }
 
-  console.log("Creating schedule with IST time:---------->", scheduledTimeIST);
+  logger.info({ scheduledTimeIST }, 'Creating schedule with IST time');
 
   // keep the value as IST and let Scheduler do the TZ conversion
   const isoWithoutMs = scheduledTimeIST.replace(/\.\d{3}$/, "");
@@ -77,7 +79,7 @@ export const createSchedule = async ({
     ScheduleExpression: `at(${isoWithoutMs})`,
     ScheduleExpressionTimezone: "Asia/Kolkata",
     FlexibleTimeWindow: { Mode: "OFF" },
-    ActionAfterCompletion: "DELETE", // auto‑remove after execution
+    ActionAfterCompletion: "DELETE", // auto-remove after execution
     ClientToken: randomUUID(),       // idempotency
     Target: {
       Arn: process.env.LAMBDA_ARN,
@@ -96,20 +98,20 @@ export const createSchedule = async ({
     // ---------- 2. attempt to create ----------
     const command = new CreateScheduleCommand(baseParams);
     const res = await client.send(command);
-    console.log("✅ Schedule created:", scheduleName);
+    logger.info({ scheduleName }, 'Schedule created');
     return { created: true, arn: res.ScheduleArn };
   } catch (err) {
-    // ---------- 3. handle “already exists” ----------
+    // ---------- 3. handle "already exists" ----------
     if (err.name === "ConflictException") {
-      // clash == the schedule name exists → update it in‑place
+      // clash == the schedule name exists → update it in-place
       const updateCmd = new UpdateScheduleCommand(baseParams);
       const res = await client.send(updateCmd);
-      console.log("🔄 Schedule updated:", scheduleName);
+      logger.info({ scheduleName }, 'Schedule updated');
       return { created: false, updated: true, arn: res.ScheduleArn };
     }
 
-    console.error("❌ Schedule operation failed:", err);
-    throw err; // rethrow anything we didn’t expect
+    logError('Schedule operation failed', err);
+    throw err; // rethrow anything we didn't expect
   }
 };
 
@@ -140,7 +142,7 @@ export const createScheduleForRfqPublish = async ({ rfqId, scheduledTimeIST, pay
   // Ensure the schedule group exists (creates if not)
   await ensureScheduleGroupExists(RFQ_PUBLISH_GROUP);
 
-  console.log(`[RFQ Publish] Creating schedule: ${scheduleName} at ${scheduledTimeIST} IST (Group: ${RFQ_PUBLISH_GROUP})`);
+  logger.info({ scheduleName, scheduledTimeIST, group: RFQ_PUBLISH_GROUP }, '[RFQ Publish] Creating schedule');
 
   const baseParams = {
     GroupName: RFQ_PUBLISH_GROUP,
@@ -168,16 +170,16 @@ export const createScheduleForRfqPublish = async ({ rfqId, scheduledTimeIST, pay
   try {
     const command = new CreateScheduleCommand(baseParams);
     const res = await client.send(command);
-    console.log(`✅ [RFQ Publish] Schedule created: ${scheduleName}`);
+    logger.info({ scheduleName }, '[RFQ Publish] Schedule created');
     return { created: true, arn: res.ScheduleArn };
   } catch (err) {
     if (err.name === "ConflictException") {
       const updateCmd = new UpdateScheduleCommand(baseParams);
       const res = await client.send(updateCmd);
-      console.log(`🔄 [RFQ Publish] Schedule updated: ${scheduleName}`);
+      logger.info({ scheduleName }, '[RFQ Publish] Schedule updated');
       return { created: false, updated: true, arn: res.ScheduleArn };
     }
-    console.error(`❌ [RFQ Publish] Schedule operation failed:`, err);
+    logError('[RFQ Publish] Schedule operation failed', err);
     throw err;
   }
 };
@@ -196,14 +198,14 @@ export const deleteRfqPublishSchedule = async (rfqId) => {
 
   try {
     await client.send(new DeleteScheduleCommand(params));
-    console.log(`✅ [RFQ Publish] Schedule deleted: ${scheduleName}`);
+    logger.info({ scheduleName }, '[RFQ Publish] Schedule deleted');
     return { ok: true, scheduleName };
   } catch (err) {
     if (err.name === "ResourceNotFoundException") {
-      console.warn(`⚠️ [RFQ Publish] Schedule not found (already executed?): ${scheduleName}`);
+      logger.warn({ scheduleName }, '[RFQ Publish] Schedule not found (already executed?)');
       return { ok: false, reason: "not_found", scheduleName };
     }
-    console.error(`❌ [RFQ Publish] Schedule deletion failed:`, err);
+    logError('[RFQ Publish] Schedule deletion failed', err);
     throw err;
   }
 };
@@ -219,15 +221,15 @@ export const deleteSchedule = async (rfq_id , type , vendor_id = "") => {
   try {
     const cmd = new DeleteScheduleCommand(params);
     await client.send(cmd);
-    console.log("✅ Schedule deleted:", scheduleName);
+    logger.info({ scheduleName }, 'Schedule deleted');
     return { ok: true, scheduleName };
   } catch (err) {
-    // Swallow “not found” so repeated deletes don’t crash your service
+    // Swallow "not found" so repeated deletes don't crash your service
     if (err.name === "ResourceNotFoundException") {
-      console.warn("⚠️  Schedule not found (already deleted?):", scheduleName);
+      logger.warn({ scheduleName }, 'Schedule not found (already deleted?)');
       return { ok: false, reason: "not_found", scheduleName };
     }
-    console.error("❌ Schedule deletion failed:", err);
-    throw err; // re‑throw for unexpected errors
+    logError('Schedule deletion failed', err);
+    throw err; // re-throw for unexpected errors
   }
 };

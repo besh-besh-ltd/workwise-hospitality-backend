@@ -1,6 +1,7 @@
 import projectModel from "../../models/projectModel.js";
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import rfqModel from "../../models/rfqModel.js";
 import db from "../../config/dbConn.js";
 import userModel from "../../models/userModel.js";
@@ -51,7 +52,7 @@ const projectController = {
   },
   getProjectById: async (req, res, next) => {
     try {
-      console.log('req.params mukul');
+      logger.debug('getProjectById called');
 
       let project_id = req.params.project_id;
       const user_id = req.user.id;
@@ -121,7 +122,7 @@ const projectController = {
           message: 'Project not found'
         });
       }
-      console.log('checking the project details', projectDetails[0].rfq);
+      logger.debug({ rfq: projectDetails[0].rfq }, 'checking the project details');
       res
         .status(200)
         .json({
@@ -501,7 +502,7 @@ const projectController = {
           file_type
         });
     } catch (err) {
-      console.error('Error saving files:', err);
+      logError('Error saving files', err);
       res.status(500).json({ status: 3, message: 'Server error' });
     }
   },

@@ -1,6 +1,7 @@
 import pgp from 'pg-promise';
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
+import { logger } from '../util/logger.js';
 
 const subscriptionModel = {
   getSubscriptionList: async (user_type = 2) => {
@@ -295,7 +296,7 @@ const subscriptionModel = {
         [ele[1], subscriptionId],
         (err) => {
           if (err) {
-            console.log(`Error query---------->`);
+            logger.error('Error updating subscription query');
             reject(err);
           } else {
             // console.log(`Comapny with id ${user_id} updated.`);

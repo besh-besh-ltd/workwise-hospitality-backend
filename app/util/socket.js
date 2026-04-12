@@ -1,4 +1,5 @@
 import { Server } from 'socket.io';
+import { logger } from './logger.js';
 
 export const SocketConfig = (SERVER) => {
   const io = new Server(SERVER, { cors: ['https://letsworkwise.com'] });
@@ -14,14 +15,14 @@ export const SocketConfig = (SERVER) => {
     });
 
     socket.on('disconnect', () => {
-      console.log('Client disconnected', socket.id);
+      logger.debug({ socketId: socket.id }, 'Client disconnected');
       delete users[socket.id];
       io.emit('userList', users); // Broadcast updated user list
     });
 
     // Handle signaling data
     socket.on('signal', (data) => {
-      console.log('Signal received:', data);
+      logger.debug({ data }, 'Signal received');
       io.to(data.to).emit('signal', data);
     });
 
@@ -33,7 +34,7 @@ export const SocketConfig = (SERVER) => {
           socketId: socket.id
         });
 
-      console.log(online_users);
+      logger.debug({ online_users }, 'Online users updated');
       io.emit('getOnlineUsers', online_users);
     });
 

@@ -13,6 +13,7 @@ import origin from './origin.js';
 import { errors } from 'celebrate';
 import error from './error.js';
 import otelMiddleware from '../middleware/otelMiddleware.js';
+import bodyCapture from '../middleware/bodyCapture.js';
 import { httpLogger } from './logger.js';
 
 const util = (app) => {
@@ -35,10 +36,9 @@ const util = (app) => {
   );
 
   app.use(express.json({ limit: '100mb' }));
-  // swagger APIs list
-  //app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-  // handling routes
-  // app.use('/api/web/v1', v1Router);
+
+  // Capture request/response bodies for SigNoz traces
+  app.use(bodyCapture);
 
   app.use('/api/v1', v1Router);
 

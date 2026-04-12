@@ -1,10 +1,11 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import seoController from "../controllers/seo/seoController.js";
-import { consoleLogData, generateSignature } from "../helper/common.js";
+import { consoleLogData, generateSignature, logError } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
+import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
 import fs from 'fs';
 
@@ -392,7 +393,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           approvalResult.approval_required = true;
         }
       } catch (approvalError) {
-        console.log("APPROVAL ERROR:", approvalError);
+        logError("APPROVAL ERROR", approvalError);
         // No policy found - throw error, do not auto-approve
         throw new Error('No approval policy found for Purchase Order. Please configure an approval policy for PO entity type in the hospitality scope.');
       }
@@ -1051,7 +1052,7 @@ export const getPODetailsById = async (po_id, user_id) => {
 
     return { ...result, poPdfUrl: result?.po_pdf_url };
   } catch (error) {
-    console.error('Error in getPODetails:', error);
+    logError('Error in getPODetails', error);
     throw error;
   }
 };
@@ -1845,7 +1846,7 @@ export const regeneratePODocument = async (po_id, txContext = null) => {
     `, [po_id]);
 
     if (!poData) {
-      console.error(`Cannot regenerate PO document: PO ${po_id} not found`);
+      logger.error(`Cannot regenerate PO document: PO ${po_id} not found`);
       return null;
     }
 
@@ -1868,13 +1869,13 @@ export const regeneratePODocument = async (po_id, txContext = null) => {
         WHERE id = $2
       `, [s3Url.url || pdfResult.file, po_id]);
 
-      console.log(`Regenerated PO document for PO ${po_id}`);
+      logger.info(`Regenerated PO document for PO ${po_id}`);
       return s3Url.url || pdfResult.file;
     }
 
     return null;
   } catch (error) {
-    console.error(`Error regenerating PO document for PO ${po_id}:`, error);
+    logError(`Error regenerating PO document for PO ${po_id}`, error);
     return null;
   }
 };

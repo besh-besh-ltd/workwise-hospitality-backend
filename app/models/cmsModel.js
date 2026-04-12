@@ -1,6 +1,8 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
+import { logger } from '../util/logger.js';
+import { logError } from '../helper/common.js';
 
 const cmsModel = {
   homeBanner: async (page_id) => {
@@ -1709,7 +1711,7 @@ const cmsModel = {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`Education with id ${id} updated.`);
+                  logger.debug(`Education with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1723,7 +1725,7 @@ const cmsModel = {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`New education with id ${id} added.`);
+                  logger.debug(`New education with id ${id} added.`);
                   resolve();
                 }
               }
@@ -1756,7 +1758,7 @@ const cmsModel = {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`item with id ${id} updated.`);
+                  logger.debug(`item with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1767,7 +1769,7 @@ const cmsModel = {
               if (err) {
                 reject(err);
               } else {
-                console.log(`New item with id ${id} added.`);
+                logger.debug(`New item with id ${id} added.`);
                 resolve();
               }
             });
@@ -1799,7 +1801,7 @@ const cmsModel = {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`item with id ${id} updated.`);
+                  logger.debug(`item with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1810,7 +1812,7 @@ const cmsModel = {
               if (err) {
                 reject(err);
               } else {
-                console.log(`New item with id ${id} added.`);
+                logger.debug(`New item with id ${id} added.`);
                 resolve();
               }
             });
@@ -2514,10 +2516,10 @@ LIMIT $1 OFFSET $2;
     const query = `SELECT * FROM tbl_location_states WHERE state_name = $1 AND country_id = $2`;
     try {
       const data = await db.oneOrNone(query, [state_name, country_id]); // Returns state or null
-      console.log(' ohhh attitute ', data);
+      logger.debug({ data }, 'findByStateNameAndCountry result');
       return data;
     } catch (error) {
-      console.error('Database query failed:', error);
+      logError('Database query failed', error);
       return null; // Ensure it doesn't throw an error
     }
   },
@@ -2610,13 +2612,13 @@ LIMIT $1 OFFSET $2;
         })
         .then(resolve)
         .catch((err) => {
-          console.error('Database Error:', err);
+          logError('Database Error', err);
           reject(new Error('Failed to insert location: ' + err.message));
         });
     });
   },
   addProductDescription: async (productDescriptionObj) => {
-    console.log('getting error here ', productDescriptionObj);
+    logger.debug({ productDescriptionObj }, 'addProductDescription called');
     return new Promise((resolve, reject) => {
       try {
         let query = `insert into tbl_product_cms (product_id, description) values ($1, $2) RETURNING id
@@ -2793,7 +2795,7 @@ LIMIT $1 OFFSET $2;
         const result = await db.manyOrNone(finalQuery);
         resolve(result);
       } catch (error) {
-        console.error('Error saving product tech specs:', error);
+        logError('Error saving product tech specs', error);
         reject(new Error('Failed to save product tech specs'));
       }
     });

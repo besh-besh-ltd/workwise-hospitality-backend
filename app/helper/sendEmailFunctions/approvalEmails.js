@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
-import { sendMail } from "../common.js";
+import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { logger } from '../../util/logger.js';
 
 // Entity type → frontend link path mapping
 const ENTITY_LINK_MAP = {
@@ -40,7 +41,7 @@ export const sendRfqCreationNotification = async ({
 }) => {
   try {
     if (!users || users.length === 0) {
-      console.log('No users to notify for RFQ creation');
+      logger.debug('No users to notify for RFQ creation');
       return false;
     }
 
@@ -103,10 +104,10 @@ export const sendRfqCreationNotification = async ({
       });
     }
 
-    console.log(`Sent ${entityLabel} creation notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
+    logger.info(`Sent ${entityLabel} creation notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending RFQ creation notification emails:", err);
+    logError("Error sending RFQ creation notification emails:", err);
     return false;
   }
 };
@@ -135,7 +136,7 @@ export const sendApprovalStepNotification = async ({
 }) => {
   try {
     if (!approvers || approvers.length === 0) {
-      console.log('No approvers to notify for approval step');
+      logger.debug('No approvers to notify for approval step');
       return false;
     }
 
@@ -206,10 +207,10 @@ export const sendApprovalStepNotification = async ({
       });
     }
 
-    console.log(`Sent approval step notifications to ${approvers.length} approvers for ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`);
+    logger.info(`Sent approval step notifications to ${approvers.length} approvers for ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`);
     return true;
   } catch (err) {
-    console.error("Error sending approval step notification emails:", err);
+    logError("Error sending approval step notification emails:", err);
     return false;
   }
 };
@@ -275,10 +276,10 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
       });
     }
 
-    console.log(`Sent ready-to-publish notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
+    logger.info(`Sent ready-to-publish notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending ready-to-publish notification emails:", err);
+    logError("Error sending ready-to-publish notification emails:", err);
     return false;
   }
 };
@@ -292,7 +293,7 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
 export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
   try {
     if (!users || users.length === 0) {
-      console.log('[Published Email] No users provided, skipping');
+      logger.debug('[Published Email] No users provided, skipping');
       return false;
     }
 
@@ -305,7 +306,7 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
       : null;
 
     const subject = `${entityLabel} #${rfq_no} — Now Published`;
-    console.log(`[Published Email] Sending to ${users.length} users for ${entityLabel} #${rfq_no}. Recipients:`, users.map(u => u.email));
+    logger.info(`[Published Email] Sending to ${users.length} users for ${entityLabel} #${rfq_no}. Recipients: ${users.map(u => u.email).join(', ')}`);
 
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
@@ -348,13 +349,13 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
         subject,
         html: htmlContent
       });
-      console.log(`[Published Email] sendMail result for ${user.email}: ${result}`);
+      logger.debug(`[Published Email] sendMail result for ${user.email}: ${result}`);
     }
 
-    console.log(`[Published Email] Completed sending to ${users.length} users for ${entityLabel} #${rfq_no}`);
+    logger.info(`[Published Email] Completed sending to ${users.length} users for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("[Published Email] Error sending published notification emails:", err);
+    logError("[Published Email] Error sending published notification emails:", err);
     return false;
   }
 };
@@ -444,10 +445,10 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
       });
     }
 
-    console.log(`Sent vendor notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
+    logger.info(`Sent vendor notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending vendor RFQ notification emails:", err);
+    logError("Error sending vendor RFQ notification emails:", err);
     return false;
   }
 };
@@ -642,7 +643,7 @@ export const sendRfqClosedHeadsUpNotification = async ({
 }) => {
   try {
     if (!users || users.length === 0) {
-      console.log('[RFQ Closed Heads-Up] No BU members to notify');
+      logger.debug('[RFQ Closed Heads-Up] No BU members to notify');
       return false;
     }
 
@@ -712,10 +713,10 @@ export const sendRfqClosedHeadsUpNotification = async ({
       });
     }
 
-    console.log(`[RFQ Closed Heads-Up] Sent to ${users.length} BU members for ${entityLabel} #${rfq_no}`);
+    logger.info(`[RFQ Closed Heads-Up] Sent to ${users.length} BU members for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error('[RFQ Closed Heads-Up] Error:', err);
+    logError('[RFQ Closed Heads-Up] Error:', err);
     return false;
   }
 };
@@ -794,10 +795,10 @@ export const sendApprovalCancelledNotification = async ({
       });
     }
 
-    console.log(`[Approval Cancelled] Notified ${approvers.length} approver(s) for ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`);
+    logger.info(`[Approval Cancelled] Notified ${approvers.length} approver(s) for ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`);
     return true;
   } catch (err) {
-    console.error('[Approval Cancelled] Error:', err);
+    logError('[Approval Cancelled] Error:', err);
     return false;
   }
 };

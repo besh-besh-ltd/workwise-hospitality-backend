@@ -7,6 +7,7 @@ import mediaModel from '../../models/mediaModel.js';
 
 import Config from '../../config/app.config.js';
 import { logError, sendMail, generatePassword } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import vendorModel from '../../models/vendorModel.js';
 

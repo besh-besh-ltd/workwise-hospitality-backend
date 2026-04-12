@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -252,7 +253,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('mediaValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'

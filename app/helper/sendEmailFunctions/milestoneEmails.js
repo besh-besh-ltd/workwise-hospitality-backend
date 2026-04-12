@@ -1,10 +1,11 @@
 import config from "../../config/app.config.js";
 import userModel from "../../models/userModel.js";
-import { sendMail } from "../common.js";
+import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { logger } from '../../util/logger.js';
 
 export const sendReminderMail = async (milestone, userList) => {
-  console.log("SENDING MILESTONE MAIL");
+  logger.info("SENDING MILESTONE MAIL");
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -75,7 +76,7 @@ export const sendReminderMail = async (milestone, userList) => {
       return resolve(true);
 
     } catch (err) {
-      console.error('Error sending milestone reminder:', err);
+      logError('Error sending milestone reminder:', err);
       return reject(err);
     }
   });

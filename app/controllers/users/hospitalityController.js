@@ -5,6 +5,7 @@ import Moment from 'moment';
 import Razorpay from 'razorpay';
 import Config from '../../config/app.config.js';
 import { logError, sendMail, convertSixDigit } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { sendVendorBulkRfqJoinNotification, sendVendorAutoAddedToRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
@@ -1093,7 +1094,7 @@ const HospitalityController = {
       const mappings = await hospitalityModel.getUserMappings(userId);
       return res.status(200).json({ status: 1, data: mappings });
     } catch (error) {
-      console.error('Error fetching user mappings:', error);
+      logError('Error fetching user mappings', error);
       return res.status(500).json({ status: 3, message: 'Failed to fetch user mappings' });
     }
   },
@@ -1995,7 +1996,7 @@ const HospitalityController = {
       }
     } catch (error) {
       logError('Payment verification error:', error);
-      console.error('Full error details:', error);
+      logger.error({ err: error }, 'Full error details');
       return res.status(400).json({
         status: 3,
         message: error.message || 'Payment verification failed',
@@ -2258,14 +2259,13 @@ const HospitalityController = {
 
         const htmlContent = generateEmailTemplate(headerContent, containerContent);
 
-        console.log(`\n========== [BU CREDENTIALS EMAIL] ==========`);
-        console.log(`To: ${user.email}`);
-        console.log(`User: ${user.name}`);
-        console.log(`Hotel: ${hotel.name}`);
-        console.log(`Default Password: ${isDefaultPassword ? 'YES' : 'NO (changed)'}`);
-        console.log(`\n--- FULL HTML ---\n`);
-        console.log(htmlContent);
-        console.log(`\n========== [END EMAIL] ==========\n`);
+        logger.debug({
+          to: user.email,
+          user: user.name,
+          hotel: hotel.name,
+          defaultPassword: isDefaultPassword ? 'YES' : 'NO (changed)',
+          htmlContent
+        }, '[BU CREDENTIALS EMAIL]');
 
         sendMail({
           from: Config.webmasterMail,

@@ -1,5 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
+import { logger } from '../util/logger.js';
 
 const userModel = {
 
@@ -122,7 +123,7 @@ user_book_demo: async (mobile) => {
           reject(error);
         }
       }).catch(err => {
-        console.error("Transaction error:", err);
+        logger.error({ err }, 'Transaction error');
         reject(new Error(err));
       });
     });
@@ -163,7 +164,7 @@ user_book_demo: async (mobile) => {
             AND c.id = tu.company_id;
       `;
 
-      console.log("UPDATE COMPANY QUERY => ", updateCompanyQuery);
+      logger.debug("UPDATE COMPANY QUERY => %s", updateCompanyQuery);
 
       // 2. USER UPDATE
       const userUpdates = [];
@@ -196,7 +197,7 @@ user_book_demo: async (mobile) => {
         `;
       }
 
-      console.log("USER QUERY => ", userQuery)
+      logger.debug("USER QUERY => %s", userQuery)
 
       // 3. EXECUTE QUERIES
       const queries = [t.any(updateCompanyQuery, companyValues)];
@@ -204,7 +205,7 @@ user_book_demo: async (mobile) => {
         queries.push(t.any(userQuery, userValues));
       }
 
-      console.log("Batch Result", await t.batch(queries));
+      logger.debug("Batch Result %o", await t.batch(queries));
 
       return {
         success: true,
@@ -213,11 +214,7 @@ user_book_demo: async (mobile) => {
 
     } catch (error) {
       // Enhanced error logging
-      console.error("Update error details:", {
-        error: error.message,
-        companyObj,
-        userObj
-      });
+      logger.error({ err: error, companyObj, userObj }, 'Update error details');
       throw error; // Re-throw for transaction rollback
     }
   });
@@ -249,7 +246,7 @@ user_book_demo: async (mobile) => {
       resolve({ success: true });
     })
     .catch(err => {
-      console.error('Error inserting into tbl_company_buyer_account_limit:', err);
+      logger.error({ err }, 'Error inserting into tbl_company_buyer_account_limit');
       reject(new Error(err));
     });
   });
@@ -789,10 +786,10 @@ user_book_demo: async (mobile) => {
         [ele[1], user_id],
         (err) => {
           if (err) {
-            console.log(`Error query---------->`);
+            logger.error({ err }, 'Error query in companyProfileUpdate');
             reject(err);
           } else {
-            console.log(`Comapny with id ${user_id} updated.`);
+            logger.debug(`Company with id ${user_id} updated.`);
             resolve();
           }
         }
@@ -806,10 +803,10 @@ user_book_demo: async (mobile) => {
         [ele[1], user_id],
         (err) => {
           if (err) {
-            console.log(`Error query---------->`);
+            logger.error({ err }, 'Error query in companyProfileVendorUpdate');
             reject(err);
           } else {
-            console.log(`Comapny with id ${user_id} updated.`);
+            logger.debug(`Company with id ${user_id} updated.`);
             resolve();
           }
         }
@@ -823,10 +820,10 @@ user_book_demo: async (mobile) => {
         [ele[1], user_id],
         (err) => {
           if (err) {
-            console.log(`Error query---------->`);
+            logger.error({ err }, 'Error query in userDetailUpdate');
             reject(err);
           } else {
-            console.log(`Comapny with id ${user_id} updated.`);
+            logger.debug(`User with id ${user_id} updated.`);
             resolve();
           }
         }
@@ -935,13 +932,13 @@ user_book_demo: async (mobile) => {
               resolve(data);
             })
             .catch(function (err) {
-              console.log(err)
+              logger.error({ err }, 'userinfo inner query failed');
               let error = new Error(err);
               reject(error);
             });
         })
         .catch(function (err) {
-          console.log(err)
+          logger.error({ err }, 'userinfo outer query failed');
           let error = new Error(err);
           reject(error);
         });
@@ -1665,7 +1662,7 @@ user_book_demo: async (mobile) => {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`Education with id ${id} updated.`);
+                  logger.debug(`Education with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1679,7 +1676,7 @@ user_book_demo: async (mobile) => {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`New education with id ${id} added.`);
+                  logger.debug(`New education with id ${id} added.`);
                   resolve();
                 }
               }
@@ -1712,7 +1709,7 @@ user_book_demo: async (mobile) => {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`item with id ${id} updated.`);
+                  logger.debug(`Work exp item with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1723,7 +1720,7 @@ user_book_demo: async (mobile) => {
               if (err) {
                 reject(err);
               } else {
-                console.log(`New item with id ${id} added.`);
+                logger.debug(`New work exp item with id ${id} added.`);
                 resolve();
               }
             });
@@ -1755,7 +1752,7 @@ user_book_demo: async (mobile) => {
                 if (err) {
                   reject(err);
                 } else {
-                  console.log(`item with id ${id} updated.`);
+                  logger.debug(`English test item with id ${id} updated.`);
                   resolve();
                 }
               }
@@ -1766,7 +1763,7 @@ user_book_demo: async (mobile) => {
               if (err) {
                 reject(err);
               } else {
-                console.log(`New item with id ${id} added.`);
+                logger.debug(`New English test item with id ${id} added.`);
                 resolve();
               }
             });
@@ -2755,7 +2752,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     files,
     doc_type_id
   ) => {
-    console.log('files model-->', files);
+    logger.debug({ files }, 'upload_application_documents files');
     // return false;
     return new Promise(function (resolve, reject) {
       let items = [];
@@ -3043,7 +3040,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     return new Promise(function (resolve, reject) {
       var exist_query1 = `SELECT * FROM Users WHERE email = '${usrobj.email}'`;
       db.query(exist_query1, function (error, row_counts, fields) {
-        console.log('row_counts', row_counts);
+        logger.debug({ row_counts }, 'add_student row_counts');
         var query = '';
         if (row_counts[0]?.id) {
           resolve(row_counts[0]?.id);
@@ -3269,7 +3266,7 @@ getVendorReviews: async (vendor_id) => {
     const results = await db.any(query, [vendor_id]); // ✅ pg-promise style
     return results;
   } catch (error) {
-    console.error("Error fetching vendor reviews:", error);
+    logger.error({ err: error }, 'Error fetching vendor reviews');
     throw error;
   }
 },
@@ -3301,7 +3298,7 @@ publishProfileReviews: async (reviewObj) => {
     return result || [];
   } catch (error) {
     await db.query("ROLLBACK");
-    console.error("Error publishing vendor reviews:", error);
+    logger.error({ err: error }, 'Error publishing vendor reviews');
     throw error;
   }
 },
@@ -3310,7 +3307,7 @@ publishProfileReviews: async (reviewObj) => {
 
  uploadFiless: async (files, user_id, doc_type) => {
     let dataArray = [];
-    console.log('files-->', files);
+    logger.debug({ files }, 'uploadFiless files');
     // return false;
     if (doc_type == 'brochure' || doc_type == 'ptr') {
       dataArray = {
@@ -3342,7 +3339,7 @@ publishProfileReviews: async (reviewObj) => {
       'file_type',
       'doc_type'
     ];
-    console.log('keys-->', keys);
+    logger.debug({ keys }, 'uploadFiless keys');
     //return false;
 
     let ptrFileExist = new Promise(function (resolve, reject) {
@@ -3350,7 +3347,7 @@ publishProfileReviews: async (reviewObj) => {
         `select * from tbl_files where user_id = ${user_id} AND doc_type='ptr'`
       )
         .then(function (data) {
-          console.log('ptrFileExist resolve-->', data);
+          logger.debug({ data }, 'ptrFileExist resolve');
           if (data.length < 1) {
             const insertQuery =
               pgp.helpers.insert(dataArray, keys, 'tbl_files') + ' RETURNING *';
@@ -3865,7 +3862,7 @@ publishProfileReviews: async (reviewObj) => {
   },
   user_exist: async (email,mobile) => {
     return new Promise(function (resolve, reject) {
-      console.log(email);
+      logger.debug({ email }, 'user_exist check');
       db.any(
         `SELECT *
         FROM tbl_users
@@ -4176,7 +4173,7 @@ getBuyerAccountLimits: async (company_id) => {
         resolve(data); 
       })
       .catch((err) => {
-        console.error('Error fetching buyer account limits:', err);
+        logger.error({ err }, 'Error fetching buyer account limits');
         reject(new Error(err));
       });
   });
@@ -4225,7 +4222,7 @@ getBuyerAccountLimits: async (company_id) => {
         const result = await db.one(query, values);
         resolve(result);
       } catch (error) {
-        console.error('Error saving vendor document:', error);
+        logger.error({ err: error }, 'Error saving vendor document');
         reject(error);
       }
     });

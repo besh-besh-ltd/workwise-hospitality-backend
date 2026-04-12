@@ -2,6 +2,8 @@ import {
   submitApprovalAction as submitApprovalActionModel,
   getApprovalInstanceById,
 } from '../models/generalModel.js';
+import { logger } from '../util/logger.js';
+import { logError } from '../helper/common.js';
 
 /**
  * Approval Action Service
@@ -106,7 +108,7 @@ export async function executeApprovalAction(args) {
     } catch (postErr) {
       // Post-actions must never fail the approval itself — log and swallow,
       // matching the behaviour of the existing inline try/catch blocks.
-      console.error(`Post-approval handler failed for instance ${args.approval_instance_id}:`, postErr);
+      logError(`Post-approval handler failed for instance ${args.approval_instance_id}`, postErr);
     }
   }
 
