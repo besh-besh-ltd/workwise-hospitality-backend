@@ -237,6 +237,19 @@ export const approvePO = async (req, res) => {
 
         // NEW APPROVAL WORKFLOW
         if (po.approval_instance_id) {
+          // NOTE: this dedicated endpoint uses the raw submitApprovalAction
+          // model function (NOT executeApprovalAction) because the post-action
+          // handlers must run AFTER regeneratePODocument so that the PDF
+          // emailed by handlePOPostApproval includes the latest approver. The
+          // dispatcher in approvalActionService cannot inject the PDF
+          // regeneration step between submitApprovalAction and the post-action,
+          // so we keep the explicit ordering here.
+          //
+          // Other approval surfaces (RFQ Lifecycle Journey, generic action
+          // endpoint) go through executeApprovalAction and the dispatcher,
+          // which correctly handles the PO status transition — they just
+          // don't regenerate the PDF, which is acceptable because the
+          // dedicated endpoint is the canonical PO approval surface.
           const actionResult = await submitApprovalAction({
             approval_instance_id: po.approval_instance_id,
             approver_user_id: userId,
@@ -256,7 +269,7 @@ export const approvePO = async (req, res) => {
 
           // Handle post-approval actions
           if (actionResult.instance_status === 'APPROVED') {
-            await handlePOPostApproval(po.approval_instance_id, userId, t);
+            await handlePOPostApproval(po.approval_instance_id, userId, { txContext: t });
           } else if (actionResult.instance_status === 'REJECTED') {
             // Update PO status to rejected
             await t.none(`
@@ -413,8 +426,14 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
 /**
  * Post-approval handler for PO - called when approval instance is fully approved
  * Uses the new approval workflow (tbl_approval_instances)
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [options]
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  */
-export const handlePOPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+export const handlePOPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
@@ -491,6 +510,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
 
       // Get vendor details
       const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+      const vendorCompanyData = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
       const vendorDetails = vendorData?.[0] || {};
 
       // Get company details
@@ -547,7 +567,8 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
           id: vendorDetails.id,
           organization_name: vendorDetails.organization_name,
           name: vendorDetails.name,
-          email: vendorDetails.email
+          email: vendorDetails.email,
+          company_name: vendorCompanyData[0]?.company_name || ''
         },
         productNames,
         approvalHistory,
@@ -567,6 +588,54 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
     console.log(`PO ${po_id} approved via new approval workflow`);
   } catch (error) {
     console.error('Error handling PO post-approval:', error);
+  }
+};
+
+/**
+ * Instance-based wrapper around handlePORejection for use by the centralized
+ * approval action service. The original handlePORejection takes a pre-loaded
+ * PO object and a transaction context (because it's called from inside the
+ * dedicated approvePO endpoint's transaction). This wrapper loads the PO row
+ * from the approval instance, updates the PO status to 'rejected', and then
+ * delegates the finalization-history cleanup to handlePORejection.
+ *
+ * Called by approvalActionService.executeApprovalAction whenever a PO
+ * approval instance is rejected through any surface (generic action endpoint,
+ * lifecycle journey, etc.).
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [ctx]
+ * @param {Object} [ctx.instance] - pre-loaded approval instance, optional
+ */
+export const handlePORejectionByInstance = async (approval_instance_id, approver_user_id, ctx = {}) => {
+  try {
+    const instance = ctx.instance || await getApprovalInstanceById(approval_instance_id, 'PO');
+    if (!instance || instance.entity_type !== 'PO' || instance.status !== 'REJECTED') {
+      return;
+    }
+
+    const po_id = instance.entity_id;
+
+    await db.tx(async (t) => {
+      const purchaseOrder = await t.oneOrNone(`
+        SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
+        FROM tbl_rfq_purchase_order WHERE id = $1
+      `, [po_id]);
+
+      if (!purchaseOrder) {
+        console.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
+        return;
+      }
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
+      `, [po_id]);
+
+      await handlePORejection(purchaseOrder, approver_user_id, t);
+    });
+  } catch (error) {
+    console.error('Error handling PO rejection by instance:', error);
   }
 };
 
@@ -593,6 +662,7 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
 
     // Get vendor details
     const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    const vendorCompanyData = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
     const vendorDetails = vendorData?.[0] || {};
 
     // Get company details (non-hospitality)
@@ -666,7 +736,8 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
         id: vendorDetails.id,
         organization_name: vendorDetails.organization_name,
         name: vendorDetails.name,
-        email: vendorDetails.email
+        email: vendorDetails.email,
+        company_name: vendorCompanyData[0]?.company_name || '',
       },
       productNames,
       approvalHistory: formattedHistory,

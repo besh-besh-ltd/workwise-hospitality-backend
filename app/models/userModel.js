@@ -27,7 +27,7 @@ user_book_demo: async (mobile) => {
  * @returns company id, only if data successfully saved in tbl_company and tbl_user
  */
 
-  company_registration: async (user_data, company_data) => {
+  company_registration: async (user_data, company_data, location_data = null) => {
     return new Promise((resolve, reject) => {
       db.tx(async t => {
         try {
@@ -77,6 +77,39 @@ user_book_demo: async (mobile) => {
           `;
 
           const userResult = await t.one(insertUserQuery, userValues);
+
+          if (location_data) {
+            const locationFields = [
+              "company_id",
+              "address",
+              "country_id",
+              "state_id",
+              "city_id",
+              "postal_code",
+              "created_by",
+              "updated_by"
+            ];
+
+            const locationValues = [
+              company_id,
+              location_data?.address ?? null,
+              location_data?.country_id ?? null,
+              location_data?.state_id ?? null,
+              location_data?.city_id ?? null,
+              location_data?.postal_code ?? null,
+              location_data?.created_by ?? userResult.id,
+              location_data?.updated_by ?? userResult.id
+            ];
+            const locationPlaceholders = locationFields.map((_, i) => `$${i + 1}`).join(', ');
+
+            await t.none(
+              `
+                INSERT INTO tbl_company_location (${locationFields.join(', ')})
+                VALUES (${locationPlaceholders})
+              `,
+              locationValues
+            );
+          }
 
           resolve({
             success: true,

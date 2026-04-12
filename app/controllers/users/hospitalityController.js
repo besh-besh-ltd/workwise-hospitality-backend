@@ -13,7 +13,7 @@ import productModel from '../../models/productModel.js';
 import projectModel from '../../models/projectModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
-import db from '../../config/dbConn.js';
+import db, { pgp } from '../../config/dbConn.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -22,6 +22,258 @@ const formatErrorResponse = (res, error) => {
     status: 3,
     message
   });
+};
+
+// ============================================================
+// WH-74: Auto-map product variants when vendor subscribes to categories.
+// Mirrors the admin flow in vendorController.js:1605-1636.
+// The underlying bulkInsertVariantVendorMappings uses a LEFT JOIN to skip
+// existing mappings, so calling this on renewal is safe (no-op for existing
+// categories, maps only genuinely new ones).
+// Always called inside try/catch — failure must not break the payment flow.
+// ============================================================
+const _autoMapProductsForCategories = async (vendorId, categoryIds) => {
+  if (!categoryIds || !categoryIds.length) return;
+
+  const variants = await rfqModel.getProductsByCategories(
+    categoryIds.map(id => ({ id }))
+  );
+  if (!variants || !variants.length) return;
+
+  const mappings = variants.map(v => ({
+    variant_id: v.variant_id,
+    vendor_id: vendorId,
+    approved_by: [],
+    make_list: []
+  }));
+  await productModel.bulkInsertVariantVendorMappings(mappings, vendorId);
+
+  const variantIds = [...new Set(
+    variants.map(v => parseInt(v.variant_id)).filter(Boolean)
+  )];
+  if (variantIds.length) {
+    await productModel.autoApproveVariantMappings(vendorId, variantIds);
+  }
+};
+
+// ============================================================
+// WH-74: Remove product variant mappings when vendor unsubscribes from
+// categories. Finds all variants under the given category IDs and deletes
+// the vendor's mappings for them.
+// ============================================================
+const _unmapProductsForCategories = async (vendorId, categoryIds) => {
+  if (!categoryIds || !categoryIds.length) return;
+
+  const variants = await rfqModel.getProductsByCategories(
+    categoryIds.map(id => ({ id }))
+  );
+  if (!variants || !variants.length) return;
+
+  const variantIds = [...new Set(
+    variants.map(v => parseInt(v.variant_id)).filter(Boolean)
+  )];
+  if (variantIds.length) {
+    await productModel.removeVariantMappingsForVendor(vendorId, variantIds);
+  }
+};
+
+// ============================================================
+// WH-74: Shared subscription confirmation email builder
+// Used by verifyPayment (registration / renewal / paid modification)
+// AND by the modifySubscription free path (modification_free).
+// Always wrapped in try/catch by callers — never throws.
+// ============================================================
+const _sendSubscriptionConfirmationEmail = async ({
+  kind, // 'registration' | 'renewal' | 'modification' | 'modification_free'
+  userId,
+  totalAmount = 0,
+  razorpayOrderId = null,
+  razorpayPaymentId = null,
+  expiryDateFormatted,
+  addedCategories = [],
+  addedSubcategories = [],
+  addedHotels = [],
+  removedCategories = [],
+  removedSubcategories = [],
+  removedHotels = []
+}) => {
+  const userDetails = await userModel.userinfo(userId);
+  const user = Array.isArray(userDetails) ? userDetails[0] : userDetails;
+  if (!user || !user.email) return;
+
+  const companyDetail = await userModel.getCompanyDetail(userId);
+  const company = companyDetail && companyDetail.length > 0 ? companyDetail[0] : {};
+  const recipientName = company?.organization_name || company?.name || user?.name;
+
+  const isPaid = kind !== 'modification_free';
+  const subjectMap = {
+    registration: 'Phileein Hospitality - Vendor Registration Confirmation',
+    renewal: 'Phileein Hospitality - Subscription Renewal Confirmation',
+    modification: 'Phileein Hospitality - Subscription Modification Confirmation',
+    modification_free: 'Phileein Hospitality - Subscription Updated'
+  };
+  const introMap = {
+    registration: 'Congratulations! Your Vendor registration has been successfully completed and your payment has been processed.',
+    renewal: 'Your subscription has been successfully renewed and your payment has been processed.',
+    modification: 'Your subscription changes have been processed successfully and the additional payment has been received.',
+    modification_free: 'Your subscription has been updated. No payment was required for this change.'
+  };
+  const sectionTitleMap = {
+    registration: 'Registration Details',
+    renewal: 'Renewal Details',
+    modification: 'Modification Details',
+    modification_free: 'Update Summary'
+  };
+  const description = {
+    registration: 'Hospitality Vendor Registration',
+    renewal: 'Hospitality Vendor Subscription Renewal',
+    modification: 'Hospitality Vendor Subscription Modification',
+    modification_free: 'Hospitality Vendor Subscription Update'
+  }[kind];
+
+  // Generate PDFs only when money actually moved.
+  let invoiceResult = null;
+  let paymentReceivedPdf = null;
+  if (isPaid) {
+    try {
+      invoiceResult = await generateTaxInvoicePdf({
+        recipientName,
+        amount: totalAmount,
+        paymentId: razorpayPaymentId,
+        orderId: razorpayOrderId,
+        description
+      });
+    } catch (invoiceErr) {
+      logError('Invoice generation failed:', invoiceErr);
+    }
+    try {
+      paymentReceivedPdf = await generatePaymentReceivedPdf({
+        recipientName,
+        amount: totalAmount,
+        paymentId: razorpayPaymentId,
+        orderId: razorpayOrderId,
+        description
+      });
+    } catch (docErr) {
+      logError('Payment received doc generation failed:', docErr);
+    }
+  }
+
+  const renderList = (label, names, marker = '•') => {
+    if (!names?.length) return '';
+    return `
+      <div style="margin: 16px 0;">
+        <h3 style="color: #158993; margin: 0 0 8px; font-size: 15px;">${label}</h3>
+        <ul style="list-style-type: none; padding-left: 0; margin: 0;">
+          ${names.map(n => `<li style="padding: 4px 0;">${marker} ${n}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+  };
+
+  const isModification = kind === 'modification' || kind === 'modification_free';
+
+  const detailsBlock = isPaid
+    ? `
+      <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <h3 style="color: #158993; margin-top: 0;">${sectionTitleMap[kind]}</h3>
+        <p style="margin: 10px 0;"><strong>Company Name:</strong> ${company.organization_name || company.name || 'N/A'}</p>
+        <p style="margin: 10px 0;"><strong>Email:</strong> ${user.email}</p>
+        <p style="margin: 10px 0;"><strong>Payment Amount:</strong> ₹${Number(totalAmount).toLocaleString('en-IN')}</p>
+        <p style="margin: 10px 0;"><strong>Payment ID:</strong> ${razorpayPaymentId || '—'}</p>
+        <p style="margin: 10px 0;"><strong>Order ID:</strong> ${razorpayOrderId || '—'}</p>
+      </div>
+    `
+    : `
+      <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <h3 style="color: #158993; margin-top: 0;">${sectionTitleMap[kind]}</h3>
+        <p style="margin: 10px 0;"><strong>Company Name:</strong> ${company.organization_name || company.name || 'N/A'}</p>
+        <p style="margin: 10px 0;"><strong>Email:</strong> ${user.email}</p>
+        <p style="margin: 10px 0;">No payment was required for this change.</p>
+      </div>
+    `;
+
+  // For modifications we render added vs removed groups separately so the
+  // vendor sees exactly what changed; for registration/renewal we render the
+  // full active set as a single list.
+  const itemsBlock = isModification
+    ? `
+        ${renderList('Added Categories', addedCategories, '+')}
+        ${renderList('Added Sub-categories', addedSubcategories, '+')}
+        ${renderList('Added Business Units', addedHotels, '+')}
+        ${renderList('Removed Categories', removedCategories, '−')}
+        ${renderList('Removed Sub-categories', removedSubcategories, '−')}
+        ${renderList('Removed Business Units', removedHotels, '−')}
+      `
+    : `
+        ${renderList('Selected Categories', addedCategories)}
+        ${renderList('Selected Sub-categories', addedSubcategories)}
+        ${renderList('Selected Hotels', addedHotels)}
+      `;
+
+  const closingMap = {
+    registration: 'Your account has been approved and you can now start using the Phileein Hospitality platform.',
+    renewal: 'Your subscription is now active. You can continue using the Phileein Hospitality platform.',
+    modification: 'Your updated subscription is now active. The new items are valid through the same end date as your current subscription.',
+    modification_free: 'Your subscription has been updated. The change is reflected immediately.'
+  };
+
+  const emailHeader = `<h2>Dear ${user.name},</h2>`;
+  const emailContent = `
+    <p style="font-size: 16px; line-height: 1.6; color: #333;">
+      ${introMap[kind]}
+    </p>
+
+    ${detailsBlock}
+    ${itemsBlock}
+
+    ${expiryDateFormatted ? `
+    <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
+      <p style="margin: 0; font-weight: 600; color: #2e7d32;">
+        <strong>Subscription Expiry Date:</strong> ${expiryDateFormatted}
+      </p>
+    </div>
+    ` : ''}
+
+    <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
+      ${closingMap[kind]}
+    </p>
+
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/subscription"
+         style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+        Manage Subscription
+      </a>
+    </div>
+  `;
+
+  const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
+
+  const emailOptions = {
+    from: Config.webmasterMail,
+    to: user.email,
+    subject: subjectMap[kind],
+    html: dynamicHTML
+  };
+
+  const attachments = [];
+  if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
+    attachments.push({
+      filename: invoiceResult.fileName,
+      path: invoiceResult.filePath,
+      contentType: 'application/pdf'
+    });
+  }
+  if (paymentReceivedPdf && paymentReceivedPdf.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+    attachments.push({
+      filename: paymentReceivedPdf.fileName,
+      path: paymentReceivedPdf.filePath,
+      contentType: 'application/pdf'
+    });
+  }
+  if (attachments.length) emailOptions.attachments = attachments;
+
+  await sendMail(emailOptions);
 };
 
 const HospitalityController = {
@@ -2311,9 +2563,88 @@ const HospitalityController = {
         [razorpay_payment_id, razorpay_signature, razorpay_order_id]
       );
 
-      // Create subscription rows from payment metadata (rows are only created after payment succeeds)
       const metadata = typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata;
+
+      // ---------- WH-74: Subscription modification branch ----------
+      // If this payment is a modification (vendor added/removed items mid-cycle),
+      // apply the diff atomically and send a modification confirmation email.
+      if (metadata && metadata.type === 'modification') {
+        let applied = null;
+        await db.tx(async t => {
+          applied = await _applyModificationFromMetadata(
+            { ...payment, id: payment.id, vendor_id: userId },
+            t
+          );
+        });
+
+        const expiryDateFormatted = applied?.sharedEnd
+          ? Moment(applied.sharedEnd).format('MMMM DD, YYYY')
+          : null;
+
+        // Send modification confirmation email (with invoice + payment PDFs).
+        try {
+          await _sendSubscriptionConfirmationEmail({
+            kind: 'modification',
+            userId,
+            totalAmount: parseFloat(payment.amount) || 0,
+            razorpayOrderId: razorpay_order_id,
+            razorpayPaymentId: razorpay_payment_id,
+            expiryDateFormatted,
+            addedCategories: applied?.addedCategoryNames || [],
+            addedSubcategories: applied?.addedSubcategoryNames || [],
+            addedHotels: applied?.addedHotelNames || [],
+            removedCategories: applied?.removedCategoryNames || [],
+            removedSubcategories: applied?.removedSubcategoryNames || [],
+            removedHotels: applied?.removedHotelNames || []
+          });
+        } catch (emailErr) {
+          logError('Modification confirmation email failed:', emailErr);
+        }
+
+        return res.status(200).json({
+          status: 1,
+          message: 'Subscription modification applied successfully!',
+          data: {
+            is_modification: true,
+            amount: parseFloat(payment.amount) || 0,
+            expiry_date: expiryDateFormatted,
+            added_categories: applied?.addedCategoryNames || [],
+            added_subcategories: applied?.addedSubcategoryNames || [],
+            added_hotels: applied?.addedHotelNames || [],
+            removed_categories: applied?.removedCategoryNames || [],
+            removed_subcategories: applied?.removedSubcategoryNames || [],
+            removed_hotels: applied?.removedHotelNames || [],
+            order_id: razorpay_order_id,
+            payment_id: razorpay_payment_id
+          }
+        });
+      }
+
+      // ---------- Existing registration / renewal / extension branch ----------
+      // Before creating new subscription rows, cancel any existing active rows
+      // for this vendor that belong to the previous period. This prevents
+      // duplicate rows (old + new) from showing up in the frontend.
       if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
+        const isExtension = metadata.kind === 'extension';
+        const isRenewalPayment = payment.receipt && payment.receipt.startsWith('RNW');
+
+        if (isExtension || isRenewalPayment) {
+          // Cancel all current active subscription rows that have a DIFFERENT
+          // end_date than the new rows (i.e. they belong to the old period).
+          const newEndDate = metadata.fy_end_date || metadata.subscription_items[0]?.end_date;
+          if (newEndDate) {
+            await db.none(
+              `UPDATE tbl_vendor_hotel_category_subscription
+                  SET status = 'expired',
+                      cancelled_at = NOW()
+                WHERE vendor_id = $1
+                  AND status = 'active'
+                  AND end_date::text != $2`,
+              [userId, newEndDate]
+            );
+          }
+        }
+
         const subscriptionRows = metadata.subscription_items.map(row => ({
           ...row,
           vendor_id: userId,
@@ -2321,6 +2652,16 @@ const HospitalityController = {
           status: 'active'
         }));
         await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+      }
+
+      // Auto-map product variants for subscribed categories
+      try {
+        const allCatIds = (metadata?.subscription_items || [])
+          .filter(r => r.item_type === 'category' || r.item_type === 'subcategory')
+          .map(r => r.item_id);
+        await _autoMapProductsForCategories(userId, allCatIds);
+      } catch (mapErr) {
+        logError('Product mapping after payment failed (non-fatal):', mapErr);
       }
 
       // Approve vendor if not already approved
@@ -2358,129 +2699,20 @@ const HospitalityController = {
       );
       const isRenewal = paymentCount && parseInt(paymentCount.cnt) > 1;
 
-      // Send confirmation email
+      // Send confirmation email (registration / renewal — modification path
+      // is sent further below after _applyModificationFromMetadata).
       try {
-        const userDetails = await userModel.userinfo(userId);
-        const user = Array.isArray(userDetails) ? userDetails[0] : userDetails;
-        if (user && user.email) {
-          const companyDetail = await userModel.getCompanyDetail(userId);
-          const company = companyDetail && companyDetail.length > 0 ? companyDetail[0] : {};
-
-          // Generate invoice
-          let invoiceResult = null;
-          try {
-            invoiceResult = await generateTaxInvoicePdf({
-              recipientName: company?.organization_name || company?.name || user?.name,
-              amount: totalAmount,
-              paymentId: razorpay_payment_id,
-              orderId: razorpay_order_id,
-              description: isRenewal ? 'Hospitality Vendor Subscription Renewal' : 'Hospitality Vendor Registration'
-            });
-          } catch (invoiceErr) {
-            logError('Invoice generation failed:', invoiceErr);
-          }
-
-          const emailSubject = isRenewal
-            ? 'Phileein Hospitality - Subscription Renewal Confirmation'
-            : 'Phileein Hospitality - Vendor Registration Confirmation';
-
-          const emailHeader = `<h2>Dear ${user.name},</h2>`;
-          const emailContent = `
-            <p style="font-size: 16px; line-height: 1.6; color: #333;">
-              ${isRenewal
-                ? 'Your subscription has been successfully renewed and your payment has been processed.'
-                : 'Congratulations! Your Vendor registration has been successfully completed and your payment has been processed.'}
-            </p>
-
-            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-              <h3 style="color: #158993; margin-top: 0;">${isRenewal ? 'Renewal Details' : 'Registration Details'}</h3>
-              <p style="margin: 10px 0;"><strong>Company Name:</strong> ${company.organization_name || company.name || 'N/A'}</p>
-              <p style="margin: 10px 0;"><strong>Email:</strong> ${user.email}</p>
-              <p style="margin: 10px 0;"><strong>Payment Amount:</strong> ₹${totalAmount.toLocaleString('en-IN')}</p>
-              <p style="margin: 10px 0;"><strong>Payment ID:</strong> ${razorpay_payment_id}</p>
-              <p style="margin: 10px 0;"><strong>Order ID:</strong> ${razorpay_order_id}</p>
-            </div>
-
-            ${categories.length > 0 ? `
-            <div style="margin: 20px 0;">
-              <h3 style="color: #158993;">Selected Categories</h3>
-              <ul style="list-style-type: none; padding-left: 0;">
-                ${categories.map(cat => `<li style="padding: 5px 0;">• ${cat}</li>`).join('')}
-              </ul>
-            </div>
-            ` : ''}
-
-            ${hotels.length > 0 ? `
-            <div style="margin: 20px 0;">
-              <h3 style="color: #158993;">Selected Hotels</h3>
-              <ul style="list-style-type: none; padding-left: 0;">
-                ${hotels.map(hotel => `<li style="padding: 5px 0;">• ${hotel}</li>`).join('')}
-              </ul>
-            </div>
-            ` : ''}
-
-            <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
-              <p style="margin: 0; font-weight: 600; color: #2e7d32;">
-                <strong>Subscription Expiry Date:</strong> ${expiryDateFormatted}
-              </p>
-            </div>
-
-            <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
-              ${isRenewal
-                ? 'Your subscription is now active. You can continue using the Phileein Hospitality platform.'
-                : 'Your account has been approved and you can now start using the Phileein Hospitality platform.'}
-            </p>
-
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor"
-                 style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
-                Go to Dashboard
-              </a>
-            </div>
-          `;
-
-          const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
-
-          const emailOptions = {
-            from: Config.webmasterMail,
-            to: user.email,
-            subject: emailSubject,
-            html: dynamicHTML
-          };
-
-          // Attach invoice if generated
-          const attachments = [];
-          if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
-            attachments.push({
-              filename: invoiceResult.fileName,
-              path: invoiceResult.filePath,
-              contentType: 'application/pdf'
-            });
-          }
-
-          // Generate payment received PDF
-          try {
-            const paymentReceivedPdf = await generatePaymentReceivedPdf({
-              recipientName: company?.organization_name || company?.name || user?.name,
-              amount: totalAmount,
-              paymentId: razorpay_payment_id,
-              orderId: razorpay_order_id,
-              description: isRenewal ? 'Hospitality Vendor Subscription Renewal' : 'Hospitality Vendor Registration'
-            });
-            if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
-              attachments.push({
-                filename: paymentReceivedPdf.fileName,
-                path: paymentReceivedPdf.filePath,
-                contentType: 'application/pdf'
-              });
-            }
-          } catch (docErr) {
-            logError('Payment received doc generation failed:', docErr);
-          }
-
-          if (attachments.length) emailOptions.attachments = attachments;
-          await sendMail(emailOptions);
-        }
+        await _sendSubscriptionConfirmationEmail({
+          kind: isRenewal ? 'renewal' : 'registration',
+          userId,
+          totalAmount,
+          razorpayOrderId: razorpay_order_id,
+          razorpayPaymentId: razorpay_payment_id,
+          expiryDateFormatted,
+          addedCategories: categories,
+          addedSubcategories: [],
+          addedHotels: hotels
+        });
       } catch (emailError) {
         logError('Verify payment email error:', emailError);
       }
@@ -2502,8 +2734,1107 @@ const HospitalityController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  // ============================================================
+  // WH-74: Vendor self-service subscription management
+  // ============================================================
+
+  /**
+   * GET /api/v1/hospitality/vendor/subscription-summary
+   * Returns a rich payload for the new Subscription page: status + active
+   * items (cats with sub-cats nested under parents + hotels) + payment
+   * history + available_actions.
+   */
+  getVendorSubscriptionSummary: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+
+      // Transition any stale expired rows before we read state
+      await hospitalityModel.markExpiredSubscriptions(vendorId);
+
+      const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
+      const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
+      const history = await hospitalityModel.getVendorPaymentHistory(vendorId, { limit: 50 });
+
+      const isVendorApproved = req.user?.status === 1 || req.user?.status === '1';
+      const isValidSub = (s) =>
+        s.payment_status === 'paid' ||
+        s.payment_status === 'success' ||
+        (s.status === 'active' && !s.payment_id && isVendorApproved);
+
+      const now = Moment().startOf('day');
+      const activeSubs = allSubs.filter(s =>
+        Moment(s.end_date).isSameOrAfter(now, 'day') && isValidSub(s) && s.status === 'active'
+      );
+      const expiredSubs = allSubs.filter(s =>
+        Moment(s.end_date).isBefore(now, 'day') && isValidSub(s)
+      );
+      const pendingSubs = allSubs.filter(s =>
+        s.payment_status === 'created' || s.payment_status === 'pending' || s.status === 'pending'
+      );
+
+      let statusKey = 'none';
+      if (hasActiveSub && activeSubs.length > 0) statusKey = 'active';
+      else if (expiredSubs.length > 0) statusKey = 'expired';
+      else if (pendingSubs.length > 0) statusKey = 'pending';
+
+      const relevantSubs = statusKey === 'active' ? activeSubs : expiredSubs;
+
+      // Group sub-cats under their parent category for the nested display.
+      const categoryMap = new Map();
+      relevantSubs
+        .filter(s => s.item_type === 'category')
+        .forEach(s => {
+          categoryMap.set(s.item_id, {
+            subscription_id: s.subscription_id,
+            id: s.item_id,
+            name: s.item_name,
+            fee_amount: parseFloat(s.fee_amount) || 0,
+            start_date: s.start_date,
+            end_date: s.end_date,
+            sub_categories: []
+          });
+        });
+
+      // Pull parent_id for each subcategory so we can group correctly
+      const subRows = relevantSubs.filter(s => s.item_type === 'subcategory');
+      if (subRows.length > 0) {
+        const subIds = subRows.map(s => s.item_id);
+        const subMeta = await db.any(
+          `SELECT id, title, parent_id FROM tbl_category WHERE id = ANY($1::int[])`,
+          [subIds]
+        );
+        const parentById = new Map(subMeta.map(r => [r.id, r.parent_id]));
+        subRows.forEach(s => {
+          const parentId = parentById.get(s.item_id);
+          const parent = parentId ? categoryMap.get(parentId) : null;
+          const subItem = {
+            subscription_id: s.subscription_id,
+            id: s.item_id,
+            name: s.item_name,
+            parent_id: parentId || null,
+            start_date: s.start_date,
+            end_date: s.end_date
+          };
+          if (parent) {
+            parent.sub_categories.push(subItem);
+          }
+        });
+      }
+
+      const categories = Array.from(categoryMap.values());
+      const hotels = relevantSubs
+        .filter(s => s.item_type === 'hotel')
+        .map(s => ({
+          subscription_id: s.subscription_id,
+          id: s.item_id,
+          name: s.item_name,
+          city: s.hotel_city || null,
+          company_name: s.hotel_company_name || null,
+          start_date: s.start_date,
+          end_date: s.end_date
+        }));
+
+      // Compute the "active since" anchor from the earliest start_date across
+      // all currently-relevant rows (across potentially several payments).
+      const earliestStart = relevantSubs.reduce((min, s) => {
+        if (!s.start_date) return min;
+        if (!min || Moment(s.start_date).isBefore(Moment(min))) return s.start_date;
+        return min;
+      }, null);
+      const endDate = relevantSubs.length > 0 ? relevantSubs[0].end_date : null;
+      const daysRemaining = endDate ? Math.max(Moment(endDate).diff(Moment(), 'days'), 0) : 0;
+      // Current active cost = sum of fee_amount from active subscription rows only.
+      // This reflects what the vendor is currently paying, not historical totals.
+      // Category rows carry the real fee; hotel/subcategory rows have fee_amount=0.
+      const activeCost = relevantSubs
+        .filter(s => s.status === 'active')
+        .reduce((sum, s) => sum + (parseFloat(s.fee_amount) || 0), 0);
+
+      const canModify = statusKey === 'active';
+      const canRenew = statusKey === 'expired' || (statusKey === 'active' && daysRemaining <= 30);
+      let blockedReason = null;
+      if (statusKey === 'pending') {
+        blockedReason = 'Your initial registration payment is pending. Complete it to manage your subscription.';
+      } else if (statusKey === 'none') {
+        blockedReason = 'No subscription found. Please contact support to set up your subscription.';
+      }
+
+      // Compute an "FY label" so the hero card can print a friendly period.
+      let fyLabel = null;
+      if (endDate) {
+        const endMoment = Moment(endDate);
+        const fyStartYear = endMoment.month() >= 3 ? endMoment.year() : endMoment.year() - 1;
+        fyLabel = `FY ${fyStartYear}-${String(fyStartYear + 1).slice(-2)}`;
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          status: statusKey,
+          subscription: relevantSubs.length > 0 ? {
+            start_date: earliestStart,
+            end_date: endDate,
+            days_remaining: daysRemaining,
+            fy_label: fyLabel,
+            categories,
+            hotels,
+            active_cost: activeCost,
+            total_categories: categories.length,
+            total_subcategories: categories.reduce((c, cat) => c + cat.sub_categories.length, 0),
+            total_hotels: hotels.length
+          } : null,
+          payment_history: history,
+          available_actions: {
+            can_modify: canModify,
+            can_renew: canRenew,
+            blocked_reason: blockedReason
+          }
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * POST /api/v1/hospitality/vendor/subscription/preview
+   * Pure read: takes a desired target state and returns the diff + cost.
+   * Called by the Edit drawer's live cost preview (debounced client-side).
+   */
+  previewSubscriptionModification: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+      const preview = await _computeModificationPreview(vendorId, req.body);
+      if (preview.error) {
+        return res.status(400).json({ status: 0, message: preview.error });
+      }
+      return res.status(200).json({ status: 1, data: preview.data });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * POST /api/v1/hospitality/vendor/subscription/modify
+   * Applies the desired target state. Free path commits in a single tx and
+   * sends a "Subscription Updated" email. Paid path creates a Razorpay order
+   * whose metadata carries the diff; verifyPayment commits it on signature
+   * validation.
+   */
+  modifySubscription: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+
+      const companyDetails = await userModel.getCompanyDetail(vendorId);
+      const isHospitalityVendor =
+        companyDetails && companyDetails[0] &&
+        (companyDetails[0].is_hospitality === 1 || companyDetails[0].is_hospitality === '1');
+      if (!isHospitalityVendor) {
+        return res.status(400).json({ status: 2, message: 'Hospitality subscription not applicable' });
+      }
+
+      const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
+      if (!hasActiveSub) {
+        return res.status(400).json({
+          status: 0,
+          message: 'You need an active subscription to modify it. Please renew first.'
+        });
+      }
+
+      const hasPending = await hospitalityModel.hasPendingModification(vendorId);
+      if (hasPending) {
+        return res.status(400).json({
+          status: 0,
+          message: 'A previous subscription modification is still pending. Please complete or wait for it to expire.'
+        });
+      }
+
+      const preview = await _computeModificationPreview(vendorId, req.body);
+      if (preview.error) {
+        return res.status(400).json({ status: 0, message: preview.error });
+      }
+      const { diff, pricing, shared_end_date } = preview.data;
+
+      const hasRemovals =
+        diff.removed_categories.length > 0 ||
+        diff.removed_hotels.length > 0;
+      if (hasRemovals && req.body.confirm_removals !== true) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Removals require confirmation. Re-send with confirm_removals: true.'
+        });
+      }
+
+      const netCost = pricing.net_cost;
+      const addedCategoryNames = diff.added_categories.map(c => c.name);
+      const addedSubcategoryNames = diff.added_subcategories.map(c => c.name);
+      const addedHotelNames = diff.added_hotels.map(h => h.name);
+      const removedCategoryNames = diff.removed_categories.map(c => c.name);
+      const removedSubcategoryNames = [
+        ...diff.removed_subcategories.map(c => c.name),
+        ...diff.cascaded_subcategories.map(c => c.name)
+      ];
+      const removedHotelNames = diff.removed_hotels.map(h => h.name);
+
+      const expiryDateFormatted = shared_end_date
+        ? Moment(shared_end_date).format('MMMM DD, YYYY')
+        : null;
+
+      // ---------- FREE PATH (no charge) ----------
+      if (netCost === 0) {
+        const todayStr = Moment().format('YYYY-MM-DD');
+
+        // Create a $0 payment record so the modification appears in payment history
+        let freePaymentId = null;
+        try {
+          freePaymentId = await hospitalityModel.createVendorPayment({
+            vendor_id: vendorId,
+            razorpay_order_id: null,
+            razorpay_payment_id: null,
+            razorpay_signature: null,
+            amount: 0,
+            currency: 'INR',
+            payment_status: 'success',
+            metadata: {
+              type: 'modification',
+              shared_end_date,
+              added_category_names: addedCategoryNames,
+              added_subcategory_names: addedSubcategoryNames,
+              added_hotel_names: addedHotelNames,
+              removed_category_names: removedCategoryNames,
+              removed_subcategory_names: removedSubcategoryNames,
+              removed_hotel_names: removedHotelNames
+            }
+          });
+        } catch (payErr) {
+          logError('Free modification payment record creation failed (non-fatal):', payErr);
+        }
+
+        await db.tx(async t => {
+          // Soft-cancel explicit removals
+          const cancelIds = [
+            ...diff.removed_categories.map(c => c.subscription_id),
+            ...diff.removed_subcategories.map(c => c.subscription_id),
+            ...diff.removed_hotels.map(h => h.subscription_id)
+          ].filter(Boolean);
+          if (cancelIds.length > 0) {
+            await hospitalityModel.cancelSubscriptionItems(vendorId, cancelIds, { tx: t });
+          }
+
+          // Cascade-cancel sub-categories whose parent was removed (separate
+          // call because we don't have their subscription_ids in `diff`).
+          const parentIdsRemoved = diff.removed_categories.map(c => c.id);
+          if (parentIdsRemoved.length > 0) {
+            await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
+              vendorId, parentIdsRemoved, { tx: t }
+            );
+          }
+
+          // Insert new rows (upsert via ON CONFLICT in the model). Added cats
+          // keep their fee as "included in swap" — we store the nominal fee
+          // so the history shows non-zero line items.
+          const addRows = [];
+          for (const cat of diff.added_categories) {
+            addRows.push({
+              vendor_id: vendorId,
+              item_type: 'category',
+              item_id: cat.id,
+              fee_amount: 0, // free path — no money moved
+              start_date: todayStr,
+              end_date: shared_end_date,
+              status: 'active',
+              payment_id: null
+            });
+          }
+          for (const sc of diff.added_subcategories) {
+            addRows.push({
+              vendor_id: vendorId,
+              item_type: 'subcategory',
+              item_id: sc.id,
+              fee_amount: 0,
+              start_date: todayStr,
+              end_date: shared_end_date,
+              status: 'active',
+              payment_id: null
+            });
+          }
+          for (const h of diff.added_hotels) {
+            addRows.push({
+              vendor_id: vendorId,
+              item_type: 'hotel',
+              item_id: h.id,
+              fee_amount: 0,
+              start_date: todayStr,
+              end_date: shared_end_date,
+              status: 'active',
+              payment_id: null
+            });
+          }
+          if (addRows.length > 0) {
+            const columnSet = new pgp.helpers.ColumnSet(
+              ['vendor_id', 'item_type', 'item_id', 'fee_amount',
+               'start_date', 'end_date', 'status', 'payment_id'],
+              { table: 'tbl_vendor_hotel_category_subscription' }
+            );
+            const query =
+              pgp.helpers.insert(addRows, columnSet) +
+              ` ON CONFLICT (vendor_id, item_type, item_id, end_date)
+                DO UPDATE SET
+                  fee_amount = EXCLUDED.fee_amount,
+                  start_date = EXCLUDED.start_date,
+                  status = 'active',
+                  payment_id = EXCLUDED.payment_id,
+                  cancelled_at = NULL,
+                  cancelled_by = NULL`;
+            await t.none(query);
+          }
+        });
+
+        // Auto-map product variants for newly added categories (free path)
+        const addedCatIdsForMapping = diff.added_categories
+          .map(c => c.id)
+          .concat(diff.added_subcategories.map(s => s.id));
+        if (addedCatIdsForMapping.length > 0) {
+          try {
+            await _autoMapProductsForCategories(vendorId, addedCatIdsForMapping);
+          } catch (mapErr) {
+            logError('Product mapping after free modification failed (non-fatal):', mapErr);
+          }
+        }
+
+        // Unmap product variants for removed categories (free path)
+        const removedCatIdsForUnmap = diff.removed_categories
+          .map(c => c.id)
+          .concat(diff.removed_subcategories.map(s => s.id))
+          .concat(diff.cascaded_subcategories.map(s => s.id));
+        if (removedCatIdsForUnmap.length > 0) {
+          try {
+            await _unmapProductsForCategories(vendorId, removedCatIdsForUnmap);
+          } catch (mapErr) {
+            logError('Product unmapping after free modification failed (non-fatal):', mapErr);
+          }
+        }
+
+        // Fire-and-forget email (never fails the response)
+        try {
+          await _sendSubscriptionConfirmationEmail({
+            kind: 'modification_free',
+            userId: vendorId,
+            totalAmount: 0,
+            expiryDateFormatted,
+            addedCategories: addedCategoryNames,
+            addedSubcategories: addedSubcategoryNames,
+            addedHotels: addedHotelNames,
+            removedCategories: removedCategoryNames,
+            removedSubcategories: removedSubcategoryNames,
+            removedHotels: removedHotelNames
+          });
+        } catch (emailErr) {
+          logError('Free modification email failed:', emailErr);
+        }
+
+        return res.status(200).json({
+          status: 1,
+          data: {
+            requires_payment: false,
+            applied: true,
+            summary: {
+              added_categories: diff.added_categories,
+              added_subcategories: diff.added_subcategories,
+              added_hotels: diff.added_hotels,
+              removed_categories: diff.removed_categories,
+              removed_subcategories: diff.removed_subcategories,
+              removed_hotels: diff.removed_hotels,
+              cascaded_subcategories: diff.cascaded_subcategories
+            },
+            shared_end_date,
+            expiry_date: expiryDateFormatted
+          }
+        });
+      }
+
+      // ---------- PAID PATH (Razorpay order) ----------
+      // Build the list of new subscription rows that will be persisted only
+      // after the payment is verified. We compute per-row fee_amount so the
+      // invoice line items are faithful to the pricing formula.
+      const addSubscriptionItems = [];
+      const newTotalHotelsCount =
+        preview.data.current.hotels.length
+        + diff.added_hotels.length
+        - diff.removed_hotels.length;
+
+      for (const cat of diff.added_categories) {
+        const effectiveFee = (cat.fee_amount || 0) * (newTotalHotelsCount || 1);
+        addSubscriptionItems.push({
+          item_type: 'category',
+          item_id: cat.id,
+          item_name: cat.name,
+          fee_amount: effectiveFee
+        });
+      }
+      for (const sc of diff.added_subcategories) {
+        addSubscriptionItems.push({
+          item_type: 'subcategory',
+          item_id: sc.id,
+          item_name: sc.name,
+          fee_amount: 0
+        });
+      }
+      for (const h of diff.added_hotels) {
+        // Per hotel: all surviving categories must cover it. We already
+        // baked that into `pricing.cost_added_hotels`; at the row level we
+        // store 0 so the hotel line shows as included.
+        addSubscriptionItems.push({
+          item_type: 'hotel',
+          item_id: h.id,
+          item_name: h.name,
+          fee_amount: 0
+        });
+      }
+      // When hotels are added, the "cost for added hotels" covers surviving
+      // categories × added hotel count. We fold this into the FIRST added
+      // hotel row so the total reconciles to net_cost. If no hotels were
+      // added but the swap-credited categories still contribute, this is
+      // already in cost_added_cats on the category rows above.
+      if (diff.added_hotels.length > 0 && pricing.cost_added_hotels > 0) {
+        addSubscriptionItems.find(r => r.item_type === 'hotel').fee_amount =
+          pricing.cost_added_hotels;
+      }
+
+      const cancelSubscriptionIds = [
+        ...diff.removed_categories.map(c => c.subscription_id),
+        ...diff.removed_subcategories.map(c => c.subscription_id),
+        ...diff.removed_hotels.map(h => h.subscription_id)
+      ].filter(Boolean);
+
+      const digit = convertSixDigit(vendorId);
+      const razorpay = new Razorpay({
+        key_id: Config.razorpay.razorpay_key,
+        key_secret: Config.razorpay.razorpay_secret
+      });
+      const razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(netCost * 100),
+        currency: 'INR',
+        receipt: `MOD${digit}`,
+        payment_capture: 1
+      });
+
+      await hospitalityModel.createVendorPayment({
+        vendor_id: vendorId,
+        razorpay_order_id: razorpayOrder.id,
+        razorpay_payment_id: null,
+        razorpay_signature: null,
+        amount: netCost,
+        currency: 'INR',
+        payment_status: 'created',
+        metadata: {
+          type: 'modification',
+          shared_end_date,
+          add_subscription_items: addSubscriptionItems,
+          cancel_subscription_ids: cancelSubscriptionIds,
+          cascade_parent_category_ids: diff.removed_categories.map(c => c.id),
+          added_category_names: addedCategoryNames,
+          added_subcategory_names: addedSubcategoryNames,
+          added_hotel_names: addedHotelNames,
+          removed_category_names: removedCategoryNames,
+          removed_subcategory_names: removedSubcategoryNames,
+          removed_hotel_names: removedHotelNames
+        }
+      });
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          requires_payment: true,
+          order_id: razorpayOrder.id,
+          amount: netCost,
+          currency: 'INR',
+          shared_end_date,
+          expiry_date: expiryDateFormatted,
+          diff
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * GET /api/v1/hospitality/vendor/subscription/payment-history
+   * Paginated list of the vendor's past paid subscriptions (registration,
+   * renewals, modifications) with per-payment item breakdowns.
+   */
+  getVendorPaymentHistoryPaginated: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+      const limit = Math.min(parseInt(req.query.limit || '50', 10), 100);
+      const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+      const rows = await hospitalityModel.getVendorPaymentHistory(vendorId, { limit, offset });
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * POST /api/v1/hospitality/vendor/subscription/extend
+   * Extends the current active subscription by 1 more financial year.
+   * New end_date = current end_date + 1 year (next March 31).
+   * Charges the same category × hotels pricing for the extension period.
+   */
+  extendSubscription: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+
+      const companyDetails = await userModel.getCompanyDetail(vendorId);
+      const isHospitalityVendor =
+        companyDetails && companyDetails[0] &&
+        (companyDetails[0].is_hospitality === 1 || companyDetails[0].is_hospitality === '1');
+      if (!isHospitalityVendor) {
+        return res.status(400).json({ status: 2, message: 'Hospitality subscription not applicable' });
+      }
+
+      const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
+      if (!hasActiveSub) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No active subscription to extend. Please renew instead.'
+        });
+      }
+
+      const current = await hospitalityModel.getActiveSubscriptionItemsForVendor(vendorId);
+      if (!current.shared_end_date || !current.categories.length) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Unable to determine current subscription details.'
+        });
+      }
+
+      // New end_date: current end_date + 1 year
+      const currentEnd = Moment(current.shared_end_date);
+      const newEnd = currentEnd.clone().add(1, 'year');
+      // Snap to March 31 of the resulting year
+      const newEndYear = newEnd.month() >= 3 ? newEnd.year() + 1 : newEnd.year();
+      const newEndDate = Moment(`${newEndYear}-03-31`, 'YYYY-MM-DD');
+      const newEndDateStr = newEndDate.format('YYYY-MM-DD');
+      const newStartDateStr = currentEnd.clone().add(1, 'day').format('YYYY-MM-DD');
+
+      // Calculate pricing: same categories × same hotels
+      const numHotels = current.hotels.length || 1;
+      let totalAmount = 0;
+      const subscriptionRows = [];
+
+      const catIds = current.categories.map(c => c.id);
+      const dbCategories = await productModel.getCategoriesByIds(catIds);
+
+      for (const row of dbCategories) {
+        const baseFee = row.fee_amount || 500;
+        const effectiveFee = baseFee * numHotels;
+        totalAmount += effectiveFee;
+        subscriptionRows.push({
+          item_type: 'category',
+          item_id: row.id,
+          item_name: row.title || row.name,
+          fee_amount: effectiveFee
+        });
+      }
+
+      // Sub-categories (free)
+      for (const sc of current.subcategories) {
+        subscriptionRows.push({
+          item_type: 'subcategory',
+          item_id: sc.id,
+          item_name: sc.name,
+          fee_amount: 0
+        });
+      }
+
+      // Hotels (fee stored as 0)
+      for (const h of current.hotels) {
+        subscriptionRows.push({
+          item_type: 'hotel',
+          item_id: h.id,
+          item_name: h.name,
+          fee_amount: 0
+        });
+      }
+
+      if (totalAmount <= 0) {
+        return res.status(400).json({ status: 0, message: 'Unable to calculate extension cost.' });
+      }
+
+      const digit = convertSixDigit(vendorId);
+      const razorpay = new Razorpay({
+        key_id: Config.razorpay.razorpay_key,
+        key_secret: Config.razorpay.razorpay_secret
+      });
+      const razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(totalAmount * 100),
+        currency: 'INR',
+        receipt: `EXT${digit}`,
+        payment_capture: 1
+      });
+
+      // Store as renewal-type metadata so verifyPayment's existing path handles it
+      await hospitalityModel.createVendorPayment({
+        vendor_id: vendorId,
+        razorpay_order_id: razorpayOrder.id,
+        razorpay_payment_id: null,
+        razorpay_signature: null,
+        amount: totalAmount,
+        currency: 'INR',
+        payment_status: 'created',
+        metadata: {
+          kind: 'extension',
+          subscription_items: subscriptionRows.map(r => ({
+            vendor_id: vendorId,
+            item_type: r.item_type,
+            item_id: r.item_id,
+            fee_amount: r.fee_amount,
+            start_date: newStartDateStr,
+            end_date: newEndDateStr,
+            status: 'active'
+          })),
+          fy_end_date: newEndDateStr
+        }
+      });
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          order_id: razorpayOrder.id,
+          amount: totalAmount,
+          currency: 'INR',
+          current_end_date: current.shared_end_date,
+          new_end_date: newEndDateStr,
+          categories: catIds,
+          hotels: current.hotels.map(h => h.id)
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * GET /api/v1/hospitality/vendor/subscription/download/:paymentId
+   * On-demand PDF generation for a past payment. Query param `type` controls
+   * which document: "invoice" (Tax Invoice) or "receipt" (Payment Received).
+   * Streams the PDF directly as a download.
+   */
+  downloadPaymentDocument: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+      const paymentId = parseInt(req.params.paymentId, 10);
+      const docType = req.query.type || 'invoice'; // 'invoice' | 'receipt'
+
+      if (!paymentId || isNaN(paymentId)) {
+        return res.status(400).json({ status: 0, message: 'Invalid payment ID' });
+      }
+
+      // Verify the payment belongs to the requesting vendor
+      const payment = await db.oneOrNone(
+        `SELECT * FROM tbl_vendor_payments
+         WHERE id = $1 AND vendor_id = $2 AND payment_status IN ('paid', 'success')`,
+        [paymentId, vendorId]
+      );
+
+      if (!payment) {
+        return res.status(404).json({ status: 0, message: 'Payment not found' });
+      }
+
+      const companyDetail = await userModel.getCompanyDetail(vendorId);
+      const company = companyDetail && companyDetail.length > 0 ? companyDetail[0] : {};
+      const recipientName = company?.organization_name || company?.name || 'Vendor';
+
+      let parsedMeta = null;
+      try {
+        parsedMeta = typeof payment.metadata === 'string'
+          ? JSON.parse(payment.metadata) : payment.metadata;
+      } catch (_) {}
+
+      const isModification = parsedMeta?.type === 'modification';
+      const isExtension = parsedMeta?.kind === 'extension';
+      const isRenewal = payment.receipt?.startsWith('RNW');
+      const description = isModification
+        ? 'Hospitality Vendor Subscription Modification'
+        : isExtension
+        ? 'Hospitality Vendor Subscription Extension'
+        : isRenewal
+        ? 'Hospitality Vendor Subscription Renewal'
+        : 'Hospitality Vendor Registration';
+
+      let result;
+      if (docType === 'receipt') {
+        result = await generatePaymentReceivedPdf({
+          recipientName,
+          amount: parseFloat(payment.amount) || 0,
+          paymentId: payment.razorpay_payment_id,
+          orderId: payment.razorpay_order_id,
+          description
+        });
+      } else {
+        result = await generateTaxInvoicePdf({
+          recipientName,
+          amount: parseFloat(payment.amount) || 0,
+          paymentId: payment.razorpay_payment_id,
+          orderId: payment.razorpay_order_id,
+          receipt: payment.receipt,
+          description
+        });
+      }
+
+      if (!result || !result.filePath || !fs.existsSync(result.filePath)) {
+        return res.status(500).json({ status: 0, message: 'Failed to generate document' });
+      }
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`);
+      const stream = fs.createReadStream(result.filePath);
+      stream.pipe(res);
+      stream.on('end', () => {
+        // Clean up temp file after sending
+        try { fs.unlinkSync(result.filePath); } catch (_) {}
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
   }
 
+};
+
+// ============================================================
+// WH-74: Preview computation (shared between preview + modify endpoints)
+// Re-runs server-side on modify so clients can't inject a stale net_cost.
+// ============================================================
+const _computeModificationPreview = async (vendorId, body) => {
+  const targetCategoryIds = Array.isArray(body?.target_categories)
+    ? [...new Set(body.target_categories.map(Number).filter(n => !isNaN(n)))]
+    : [];
+  const targetSubcategoryIds = Array.isArray(body?.target_subcategories)
+    ? [...new Set(body.target_subcategories.map(Number).filter(n => !isNaN(n)))]
+    : [];
+  const targetHotelIds = Array.isArray(body?.target_hotels)
+    ? [...new Set(body.target_hotels.map(Number).filter(n => !isNaN(n)))]
+    : [];
+
+  if (targetCategoryIds.length === 0) {
+    return { error: 'At least one category is required.' };
+  }
+  if (targetHotelIds.length === 0) {
+    return { error: 'At least one business unit (hotel) is required.' };
+  }
+
+  const current = await hospitalityModel.getActiveSubscriptionItemsForVendor(vendorId);
+  if (!current.shared_end_date) {
+    return { error: 'No active subscription found to modify.' };
+  }
+
+  // Validate sub-cat parents must be present in target cats
+  if (targetSubcategoryIds.length > 0) {
+    const subMeta = await db.any(
+      `SELECT id, title, parent_id, fee_amount
+       FROM tbl_category
+       WHERE id = ANY($1::int[]) AND is_deleted = 0 AND parent_id IS NOT NULL`,
+      [targetSubcategoryIds]
+    );
+    if (subMeta.length !== targetSubcategoryIds.length) {
+      return { error: 'One or more selected sub-categories are no longer available.' };
+    }
+    const orphan = subMeta.find(sc => !targetCategoryIds.includes(sc.parent_id));
+    if (orphan) {
+      return {
+        error: `Sub-category "${orphan.title}" requires its parent category to be in the subscription.`
+      };
+    }
+  }
+
+  // Fetch full metadata for target categories (names + fees)
+  const catMeta = await db.any(
+    `SELECT id, title AS name, COALESCE(fee_amount, 500) AS fee_amount
+     FROM tbl_category
+     WHERE id = ANY($1::int[]) AND is_deleted = 0 AND (parent_id IS NULL OR parent_id = 0)`,
+    [targetCategoryIds]
+  );
+  if (catMeta.length !== targetCategoryIds.length) {
+    return { error: 'One or more selected categories are no longer available.' };
+  }
+
+  // Fetch full metadata for target hotels
+  const hotelMeta = await db.any(
+    `SELECT id, name, city, hospitality_company_id
+     FROM tbl_hospitality_company_hotels
+     WHERE id = ANY($1::int[]) AND is_deleted = 0`,
+    [targetHotelIds]
+  );
+  if (hotelMeta.length !== targetHotelIds.length) {
+    return { error: 'One or more selected business units are no longer available.' };
+  }
+
+  // Sub-category metadata (names for diff labels)
+  let subMetaFull = [];
+  if (targetSubcategoryIds.length > 0) {
+    subMetaFull = await db.any(
+      `SELECT id, title AS name, parent_id
+       FROM tbl_category
+       WHERE id = ANY($1::int[])`,
+      [targetSubcategoryIds]
+    );
+  }
+
+  const currentCatIds = current.categories.map(c => c.id);
+  const currentSubIds = current.subcategories.map(c => c.id);
+  const currentHotelIds = current.hotels.map(h => h.id);
+
+  const addedCategoryIds = targetCategoryIds.filter(id => !currentCatIds.includes(id));
+  const removedCategoryIds = currentCatIds.filter(id => !targetCategoryIds.includes(id));
+  const addedSubIds = targetSubcategoryIds.filter(id => !currentSubIds.includes(id));
+  const removedSubIds = currentSubIds.filter(id => !targetSubcategoryIds.includes(id));
+  const addedHotelIds = targetHotelIds.filter(id => !currentHotelIds.includes(id));
+  const removedHotelIds = currentHotelIds.filter(id => !targetHotelIds.includes(id));
+
+  const addedCats = addedCategoryIds.map(id => {
+    const row = catMeta.find(c => c.id === id);
+    return { id, name: row.name, fee_amount: parseFloat(row.fee_amount) || 0 };
+  });
+  const removedCats = removedCategoryIds.map(id => {
+    const cur = current.categories.find(c => c.id === id);
+    return {
+      id,
+      name: cur?.name,
+      fee_amount: cur?.fee_amount || 0,
+      subscription_id: cur?.subscription_id
+    };
+  });
+  const survivingCats = current.categories.filter(c => !removedCategoryIds.includes(c.id));
+
+  const addedSubs = addedSubIds.map(id => {
+    const row = subMetaFull.find(c => c.id === id) || {};
+    return { id, name: row.name, parent_id: row.parent_id };
+  });
+  const removedSubs = removedSubIds.map(id => {
+    const cur = current.subcategories.find(c => c.id === id);
+    return { id, name: cur?.name, subscription_id: cur?.subscription_id };
+  });
+
+  // Cascade: any current sub-cat whose parent was removed gets cascaded
+  // regardless of whether the user explicitly listed it in target_subcategories.
+  const cascadedSubs = current.subcategories
+    .filter(sc => removedCategoryIds.includes(sc.parent_id))
+    .filter(sc => !removedSubIds.includes(sc.id))
+    .map(sc => ({
+      id: sc.id,
+      name: sc.name,
+      subscription_id: sc.subscription_id,
+      parent_id: sc.parent_id
+    }));
+
+  const addedHotels = addedHotelIds.map(id => {
+    const row = hotelMeta.find(h => h.id === id);
+    return { id, name: row.name, city: row.city };
+  });
+  const removedHotels = removedHotelIds.map(id => {
+    const cur = current.hotels.find(h => h.id === id);
+    return {
+      id,
+      name: cur?.name,
+      subscription_id: cur?.subscription_id
+    };
+  });
+
+  // Pricing formula (from plan)
+  const newTotalHotelsCount =
+    currentHotelIds.length + addedHotelIds.length - removedHotelIds.length;
+
+  const sumFee = (list) => list.reduce((s, x) => s + (x.fee_amount || 0), 0);
+  const cost_added_cats = sumFee(addedCats) * newTotalHotelsCount;
+  const cost_added_hotels = sumFee(survivingCats) * addedHotelIds.length;
+  const additions_cost = cost_added_cats + cost_added_hotels;
+
+  // No swap credit — removals do not offset the cost of new additions.
+  // Vendors must pay full price for every new category/hotel regardless
+  // of what they remove, to prevent the loophole of rotating categories
+  // within a financial year without paying.
+  const swap_credit_cats = 0;
+  const swap_credit_hotels = 0;
+  const swap_credit = 0;
+
+  const net_cost = Math.max(0, additions_cost);
+
+  const warnings = [];
+  if (removedCategoryIds.length > 0 || removedHotelIds.length > 0) {
+    warnings.push('Removals do not earn refunds or credits. New categories are charged separately at full price');
+  }
+  if (cascadedSubs.length > 0) {
+    warnings.push(
+      `Removing ${removedCategoryIds.length} parent categor${removedCategoryIds.length === 1 ? 'y' : 'ies'} will also cancel ${cascadedSubs.length} linked sub-categor${cascadedSubs.length === 1 ? 'y' : 'ies'}.`
+    );
+  }
+  if (addedSubIds.length > 0 || removedSubIds.length > 0) {
+    warnings.push('Sub-category changes are always free.');
+  }
+
+  return {
+    data: {
+      current: {
+        categories: current.categories.map(c => ({ id: c.id, name: c.name, fee_amount: c.fee_amount })),
+        subcategories: current.subcategories.map(c => ({ id: c.id, name: c.name, parent_id: c.parent_id })),
+        hotels: current.hotels.map(h => ({ id: h.id, name: h.name }))
+      },
+      target: {
+        categories: targetCategoryIds,
+        subcategories: targetSubcategoryIds,
+        hotels: targetHotelIds
+      },
+      diff: {
+        added_categories: addedCats,
+        removed_categories: removedCats,
+        added_subcategories: addedSubs,
+        removed_subcategories: removedSubs,
+        cascaded_subcategories: cascadedSubs,
+        added_hotels: addedHotels,
+        removed_hotels: removedHotels
+      },
+      pricing: {
+        cost_added_cats,
+        cost_added_hotels,
+        additions_cost,
+        swap_credit_cats,
+        swap_credit_hotels,
+        swap_credit,
+        net_cost,
+        currency: 'INR',
+        existing_hotels_count: currentHotelIds.length,
+        new_total_hotels_count: newTotalHotelsCount
+      },
+      warnings,
+      shared_end_date: current.shared_end_date,
+      earliest_start_date: current.earliest_start_date
+    }
+  };
+};
+
+// ============================================================
+// WH-74: Commit a modification from payment metadata. Called from
+// verifyPayment when metadata.type === 'modification'.
+// ============================================================
+const _applyModificationFromMetadata = async (payment, t) => {
+  const metadata = typeof payment.metadata === 'string'
+    ? JSON.parse(payment.metadata)
+    : payment.metadata;
+  if (!metadata || metadata.type !== 'modification') return null;
+
+  const vendorId = payment.vendor_id;
+  const todayStr = Moment().format('YYYY-MM-DD');
+  const sharedEnd = metadata.shared_end_date;
+
+  // 1. Soft-cancel explicit removals
+  if (Array.isArray(metadata.cancel_subscription_ids) && metadata.cancel_subscription_ids.length > 0) {
+    await hospitalityModel.cancelSubscriptionItems(
+      vendorId, metadata.cancel_subscription_ids, { tx: t }
+    );
+  }
+
+  // 2. Cascade-cancel children of removed parents
+  if (Array.isArray(metadata.cascade_parent_category_ids) && metadata.cascade_parent_category_ids.length > 0) {
+    await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
+      vendorId, metadata.cascade_parent_category_ids, { tx: t }
+    );
+  }
+
+  // 3. Insert/upsert additions
+  const addItems = Array.isArray(metadata.add_subscription_items)
+    ? metadata.add_subscription_items
+    : [];
+  if (addItems.length > 0) {
+    const addRows = addItems.map(item => ({
+      vendor_id: vendorId,
+      item_type: item.item_type,
+      item_id: item.item_id,
+      fee_amount: item.fee_amount || 0,
+      start_date: todayStr,
+      end_date: sharedEnd,
+      status: 'active',
+      payment_id: payment.id
+    }));
+    const columnSet = new pgp.helpers.ColumnSet(
+      ['vendor_id', 'item_type', 'item_id', 'fee_amount',
+       'start_date', 'end_date', 'status', 'payment_id'],
+      { table: 'tbl_vendor_hotel_category_subscription' }
+    );
+    const query =
+      pgp.helpers.insert(addRows, columnSet) +
+      ` ON CONFLICT (vendor_id, item_type, item_id, end_date)
+        DO UPDATE SET
+          fee_amount = EXCLUDED.fee_amount,
+          start_date = EXCLUDED.start_date,
+          status = 'active',
+          payment_id = EXCLUDED.payment_id,
+          cancelled_at = NULL,
+          cancelled_by = NULL`;
+    await t.none(query);
+  }
+
+  // 4. Auto-map product variants for newly added categories
+  const addedCatIds = addItems
+    .filter(r => r.item_type === 'category' || r.item_type === 'subcategory')
+    .map(r => r.item_id);
+  if (addedCatIds.length > 0) {
+    try {
+      await _autoMapProductsForCategories(vendorId, addedCatIds);
+    } catch (mapErr) {
+      logError('Product mapping after modification failed (non-fatal):', mapErr);
+    }
+  }
+
+  // 5. Unmap product variants for removed categories
+  const removedCatIds = [
+    ...(Array.isArray(metadata.cancel_subscription_ids) ? [] : []),
+    ...(Array.isArray(metadata.cascade_parent_category_ids) ? metadata.cascade_parent_category_ids : [])
+  ];
+  // We need the actual category IDs that were removed — extract from the
+  // subscription items that were cancelled. The metadata stores the
+  // subscription row IDs, not the category IDs directly. But we also have
+  // the category names lists. Let's use the cancel_subscription_ids to look
+  // up what was cancelled, or more simply use the removed category names to
+  // find their IDs. The simplest: use cascade_parent_category_ids (those are
+  // the parent category IDs that were removed) plus any explicitly removed
+  // category/subcategory item_ids from the add_subscription_items inverse.
+  // Actually, the metadata doesn't store removed item_ids directly. Let's
+  // query what was just cancelled.
+  try {
+    const cancelledRows = await db.any(
+      `SELECT item_id, item_type FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND status = 'cancelled'
+         AND cancelled_at >= NOW() - INTERVAL '1 minute'
+         AND item_type IN ('category', 'subcategory')`,
+      [vendorId]
+    );
+    const cancelledCatIds = cancelledRows.map(r => r.item_id);
+    if (cancelledCatIds.length > 0) {
+      await _unmapProductsForCategories(vendorId, cancelledCatIds);
+    }
+  } catch (mapErr) {
+    logError('Product unmapping after modification failed (non-fatal):', mapErr);
+  }
+
+  return {
+    sharedEnd,
+    addedCategoryNames: metadata.added_category_names || [],
+    addedSubcategoryNames: metadata.added_subcategory_names || [],
+    addedHotelNames: metadata.added_hotel_names || [],
+    removedCategoryNames: metadata.removed_category_names || [],
+    removedSubcategoryNames: metadata.removed_subcategory_names || [],
+    removedHotelNames: metadata.removed_hotel_names || []
+  };
 };
 
 export default HospitalityController;

@@ -521,7 +521,8 @@ WHERE NOT EXISTS (
           const nextMonth = new Date(today);
           nextMonth.setMonth(today.getMonth() + 1);
 
-          const formattedDate = nextMonth.toISOString().split('T')[0];
+          // Always include time so later edits don't create artificial diffs
+          const formattedDate = nextMonth.toISOString().split('T')[0] + 'T00:00:00';
 
           const rfqValues = [
             nextRFQNumber,
@@ -844,6 +845,172 @@ WHERE NOT EXISTS (
           reject(new Error(`Error fetching RFQ details: ${err.message}`))
         );
     });
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // WH-69: Denormalised RFQ read used by the snapshot-diff update flow.
+  //
+  // Returns one object containing every field that the edit page can change,
+  // shaped exactly like the snapshot the frontend sends back. The diff helper
+  // compares the two by walking the same keys.
+  //
+  // Hotels are exposed read-only (display-only on the edit page).
+  // Returns null if the RFQ does not exist.
+  // ─────────────────────────────────────────────────────────────────────────
+  getFullRfqForEdit: async (rfq_id, db_con = db) => {
+    const rfq = await db_con.oneOrNone(
+      `SELECT
+         id, rfq_no, title, comment, response_email, contact_name, contact_number,
+         bid_end_date, location, is_published, created_by, status, rfq_type,
+         tender_publish_date, vendor_clarification_date, tender_fees, reverse_auction,
+         is_tender, ra_start_date, ra_end_date, project_id, hospitality_company_id,
+         hotel_id, department_id, process_id, technical_evaluation_by, company_name
+       FROM tbl_rfq
+       WHERE id = $1`,
+      [rfq_id]
+    );
+    if (!rfq) return null;
+
+    const [hotelRows, termRows, productRows] = await Promise.all([
+      db_con.any(
+        `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1 ORDER BY hotel_id`,
+        [rfq_id]
+      ),
+      db_con.any(
+        `SELECT terms_id FROM tbl_rfq_terms_map WHERE rfq_id = $1 ORDER BY terms_id`,
+        [rfq_id]
+      ),
+      db_con.any(
+        `SELECT
+           rp.id,
+           rp.product_variant_id,
+           rp.variant,
+           rp.comment,
+           pv.name AS product_name
+         FROM tbl_rfq_products rp
+         LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE rp.rfq_id = $1
+         ORDER BY rp.id`,
+        [rfq_id]
+      )
+    ]);
+
+    // Load specs / files / vendors for all products in three batched queries
+    let specsByKey = {};
+    let filesByProduct = {};
+    let vendorsByKey = {};
+    let techEvalByProduct = {};
+
+    if (productRows.length > 0) {
+      const productIds = productRows.map((p) => p.id);
+
+      const [specRows, fileRows, vendorRows, techRows] = await Promise.all([
+        db_con.any(
+          `SELECT rfq_id, product_variant_id, variant, title, value
+           FROM tbl_rfq_products_specs
+           WHERE rfq_id = $1`,
+          [rfq_id]
+        ),
+        db_con.any(
+          `SELECT rfq_product_id, file_type, file_url
+           FROM tbl_rfq_product_files
+           WHERE rfq_product_id = ANY($1::int[])
+           ORDER BY id`,
+          [productIds]
+        ),
+        db_con.any(
+          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id,
+                  u.name, u.email
+           FROM tbl_rfq_product_vendors rpv
+           LEFT JOIN tbl_users u ON u.id = rpv.user_id
+           WHERE rpv.rfq_id = $1
+           ORDER BY rpv.user_id`,
+          [rfq_id]
+        ),
+        db_con.any(
+          `SELECT te.tbl_rfq_product_id AS rfq_product_id,
+                  json_agg(
+                    json_build_object(
+                      'id', tec.id,
+                      'clause_text', tec.clause_text,
+                      'clause_type', tec.clause_type,
+                      'weightage', tec.weightage
+                    ) ORDER BY tec.id
+                  ) FILTER (WHERE tec.id IS NOT NULL) AS clauses
+           FROM tbl_rfq_product_tech_evaluation te
+           LEFT JOIN tbl_rfq_product_tech_evaluation_clauses tec
+             ON tec.tbl_rfq_product_tech_evaluation_id = te.id
+           WHERE te.rfq_id = $1
+           GROUP BY te.tbl_rfq_product_id`,
+          [rfq_id]
+        )
+      ]);
+
+      // Specs are keyed by product_variant_id+variant
+      for (const s of specRows) {
+        const k = `${s.product_variant_id}:${s.variant}`;
+        if (!specsByKey[k]) specsByKey[k] = {};
+        specsByKey[k][s.title] = s.value;
+      }
+
+      // Files keyed by rfq_product_id with categorised buckets
+      for (const f of fileRows) {
+        if (!filesByProduct[f.rfq_product_id]) {
+          filesByProduct[f.rfq_product_id] = {
+            qap_file: [],
+            spec_file: [],
+            datasheet_file: []
+          };
+        }
+        const bucket =
+          f.file_type === 'QAP' ? 'qap_file'
+          : f.file_type === 'SPEC' ? 'spec_file'
+          : f.file_type === 'TDS' ? 'datasheet_file'
+          : null;
+        if (bucket) filesByProduct[f.rfq_product_id][bucket].push(f.file_url);
+      }
+
+      // Vendors keyed by product_variant_id+variant
+      for (const v of vendorRows) {
+        const k = `${v.product_variant_id}:${v.variant}`;
+        if (!vendorsByKey[k]) vendorsByKey[k] = [];
+        vendorsByKey[k].push({
+          user_id: v.user_id,
+          name: v.name,
+          email: v.email
+        });
+      }
+
+      for (const t of techRows) {
+        techEvalByProduct[t.rfq_product_id] = t.clauses || [];
+      }
+    }
+
+    const products = productRows.map((p) => {
+      const key = `${p.product_variant_id}:${p.variant}`;
+      return {
+        id: p.id,
+        product_variant_id: p.product_variant_id,
+        variant: p.variant,
+        product_name: p.product_name,
+        comment: p.comment ?? '',
+        specs: specsByKey[key] || {},
+        files: filesByProduct[p.id] || {
+          qap_file: [],
+          spec_file: [],
+          datasheet_file: []
+        },
+        vendors: vendorsByKey[key] || [],
+        tech_eval_clauses: techEvalByProduct[p.id] || []
+      };
+    });
+
+    return {
+      ...rfq,
+      hotel_ids: hotelRows.map((h) => h.hotel_id),
+      terms: termRows.map((t) => t.terms_id),
+      products
+    };
   },
 
 
@@ -3430,13 +3597,35 @@ LIMIT 2;
       tech_latest AS (
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
-      -- Products with at least 1 cleared vendor
+      -- Products where tech eval is done: all eligible (responded) vendors
+      -- have been evaluated (exist in cleared_vendors, passed or failed).
       products_with_cleared AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
-        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
-          ON cv.tbl_rfq_product_tech_evaluation_id = te.id AND cv.status = 1
         WHERE te.rfq_id = ANY($1::int[])
+          AND (
+            te.is_complete = true
+            OR (
+              -- At least 1 vendor evaluated
+              EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+                WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
+              )
+              -- AND no responded vendor left unevaluated
+              AND NOT EXISTS (
+                SELECT DISTINCT vr.vendor_id
+                FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+                JOIN tbl_rfq_product_tech_evaluation_clauses c
+                  ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE c.tbl_rfq_product_tech_evaluation_id = te.id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv2
+                    WHERE cv2.tbl_rfq_product_tech_evaluation_id = te.id
+                      AND cv2.vendor_id = vr.vendor_id
+                  )
+              )
+            )
+          )
         GROUP BY te.rfq_id
       ),
       -- Active negotiation rounds
@@ -3488,9 +3677,14 @@ LIMIT 2;
           AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
         GROUP BY po.rfq_id
       ),
-      -- Whether tech eval is configured for this RFQ
+      -- Whether tech eval is configured for this RFQ (+ count of TE products)
       has_tech_eval AS (
         SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+      ),
+      tech_eval_product_count AS (
+        SELECT rfq_id, COUNT(DISTINCT tbl_rfq_product_id)::int AS te_products
+        FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+        GROUP BY rfq_id
       ),
       -- Whether any non-regret quotes have been received (= eligible vendors)
       has_eligible_vendors AS (
@@ -3504,7 +3698,7 @@ LIMIT 2;
       bid_status AS (
         SELECT id AS rfq_id,
                (bid_end_date IS NOT NULL AND bid_end_date != ''
-                  AND bid_end_date::timestamp < NOW()::timestamp) AS bid_ended
+                  AND bid_end_date::timestamp < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')) AS bid_ended
         FROM tbl_rfq WHERE id = ANY($1::int[])
       )
       SELECT
@@ -3529,9 +3723,9 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5a: Commercial Evaluation (TE flow — all products have cleared vendors)
-          WHEN pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL
-            AND pwc.products_cleared >= pc.total_products
+          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated)
+          WHEN pwc.products_cleared IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pwc.products_cleared >= tepc.te_products
             THEN 'COMMERCIAL_EVALUATION'
           -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
           WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
@@ -3548,23 +3742,28 @@ LIMIT 2;
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating — TE configured, deadline passed, AND ≥1 eligible vendor
-          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed, ≥1 eligible vendor
+          -- Also matches when latest approval is APPROVED but not all products cleared yet
+          WHEN rd.is_published = 1 AND rd.status = 1
+            AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.9 (NEW): Stuck at Technical — TE configured, deadline passed, zero eligible vendors
-          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+          -- Stage 1.9: Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          WHEN rd.is_published = 1 AND rd.status = 1
+            AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NULL
             THEN 'RFQ_STUCK_TECHNICAL'
           -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = false
             THEN 'TECHNICAL_AWAITING_QUOTES'
           -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured, bid window still open)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NULL
+            AND COALESCE(bs.bid_ended, false) = false
             THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
           WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
@@ -3581,6 +3780,7 @@ LIMIT 2;
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
       LEFT JOIN po_products_approved ppa ON ppa.rfq_id = rd.id
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
+      LEFT JOIN tech_eval_product_count tepc ON tepc.rfq_id = rd.id
       LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
       LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
@@ -3617,6 +3817,7 @@ LIMIT 2;
       TECHNICAL_AWAITING_QUOTES: { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      AWAITING_QUOTES:           { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
@@ -3843,7 +4044,7 @@ LIMIT 2;
     try {
       // 1. Get RFQ basic info + current lifecycle stage
       const rfqBasic = await db.oneOrNone(`
-        SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id FROM tbl_rfq WHERE id = $1
+        SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id, bid_end_date FROM tbl_rfq WHERE id = $1
       `, [rfqId]);
       if (!rfqBasic) return { rfq_id: rfqId, current_stage: null, phases: [] };
 
@@ -3877,6 +4078,7 @@ LIMIT 2;
         negotiationRounds,
         finalizationData,
         poData,
+        awaitingQuoteStats,
         evaluators,
       ] = await Promise.all([
         db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
@@ -3984,6 +4186,105 @@ LIMIT 2;
           WHERE po.rfq_id = $1
           ORDER BY po.created_at
         `, [rfqId]).catch(() => []),
+
+        db.one(`
+          WITH assigned_products AS (
+            SELECT DISTINCT
+              rpv.user_id,
+              rpv.product_variant_id,
+              COALESCE(rpv.variant::text, '0') AS variant_key
+            FROM tbl_rfq_product_vendors rpv
+            WHERE rpv.rfq_id = $1
+          ),
+          vendor_regrets AS (
+            SELECT DISTINCT q.created_by AS user_id
+            FROM tbl_quotes q
+            WHERE q.rfq_id = $1
+              AND q.is_regret = 1
+          ),
+          product_responses AS (
+            SELECT
+              ap.user_id,
+              ap.product_variant_id,
+              ap.variant_key,
+              BOOL_OR(
+                q.id IS NOT NULL
+                AND (
+                  COALESCE(qi.unit_price, 0) > 0
+                  OR NULLIF(BTRIM(COALESCE(qi.comment, '')), '') IS NOT NULL
+                  OR NULLIF(BTRIM(COALESCE(qi.delivery_period::text, '')), '') IS NOT NULL
+                  OR EXISTS (
+                    SELECT 1
+                    FROM tbl_quote_item_files qif
+                    WHERE qif.quote_item_id = qi.id
+                  )
+                )
+              ) AS has_any_submission,
+              BOOL_OR(
+                q.id IS NOT NULL
+                AND COALESCE(qi.unit_price, 0) > 0
+              ) AS has_commercial_submission
+            FROM assigned_products ap
+            LEFT JOIN tbl_quotes q
+              ON q.rfq_id = $1
+             AND q.created_by = ap.user_id
+             AND COALESCE(q.is_regret, 0) != 1
+            LEFT JOIN tbl_quote_items qi
+              ON qi.quote_id = q.id
+             AND qi.rfq_id = $1
+             AND qi.product_variant_id = ap.product_variant_id
+             AND COALESCE(qi.variant::text, '0') = ap.variant_key
+            GROUP BY ap.user_id, ap.product_variant_id, ap.variant_key
+          ),
+          vendor_rollup AS (
+            SELECT
+              ap.user_id,
+              COUNT(*)::int AS assigned_products,
+              COUNT(*) FILTER (WHERE pr.has_any_submission)::int AS submitted_products,
+              COUNT(*) FILTER (WHERE pr.has_commercial_submission)::int AS quoted_products,
+              BOOL_OR(vr.user_id IS NOT NULL) AS has_regret
+            FROM assigned_products ap
+            LEFT JOIN product_responses pr
+              ON pr.user_id = ap.user_id
+             AND pr.product_variant_id = ap.product_variant_id
+             AND pr.variant_key = ap.variant_key
+            LEFT JOIN vendor_regrets vr
+              ON vr.user_id = ap.user_id
+            GROUP BY ap.user_id
+          )
+          SELECT
+            COUNT(*)::int AS total_invited,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+            )::int AS participated,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+                AND quoted_products > 0
+            )::int AS sent_quotes,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+                AND quoted_products = 0
+            )::int AS technical_only,
+            COUNT(*) FILTER (WHERE has_regret)::int AS regrets,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND submitted_products < assigned_products
+            )::int AS remaining
+          FROM vendor_rollup
+        `, [rfqId]).catch(() => ({
+          total_invited: 0,
+          participated: 0,
+          sent_quotes: 0,
+          technical_only: 0,
+          regrets: 0,
+          remaining: 0,
+        })),
 
         // Evaluator names
         db.any(`
@@ -4232,6 +4533,29 @@ LIMIT 2;
         }));
       };
 
+      const buildAwaitingQuotesSnapshot = () => ({
+        total_invited: parseInt(awaitingQuoteStats?.total_invited || 0, 10),
+        participated: parseInt(awaitingQuoteStats?.participated || 0, 10),
+        sent_quotes: parseInt(awaitingQuoteStats?.sent_quotes || 0, 10),
+        technical_only: parseInt(awaitingQuoteStats?.technical_only || 0, 10),
+        regrets: parseInt(awaitingQuoteStats?.regrets || 0, 10),
+        remaining: parseInt(awaitingQuoteStats?.remaining || 0, 10),
+        bid_end_date: rfqBasic.bid_end_date || null,
+      });
+
+      const buildAwaitingQuotesSummary = (stats) => {
+        if (!stats) return null;
+        const parts = [
+          `${stats.participated} participated`,
+          `${stats.sent_quotes} quote${stats.sent_quotes === 1 ? '' : 's'}`,
+        ];
+        if (stats.regrets > 0) {
+          parts.push(`${stats.regrets} regret${stats.regrets === 1 ? '' : 's'}`);
+        }
+        parts.push(`${stats.remaining} remaining`);
+        return parts.join(' · ');
+      };
+
       // 9. Determine phase statuses
       const getPhaseStatus = (phaseKey) => {
         const phaseIndex = PHASES_ORDERED.indexOf(phaseKey);
@@ -4309,6 +4633,14 @@ LIMIT 2;
         else if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
         else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
         else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
+        else if (currentStage === 'RFQ_STUCK_TECHNICAL') subStatus = 'no_vendors_participated';
+
+        const awaitingQuotes = ['TECHNICAL_AWAITING_QUOTES', 'RFQ_STUCK_TECHNICAL'].includes(currentStage)
+          ? buildAwaitingQuotesSnapshot()
+          : null;
+        if (awaitingQuotes) {
+          summary = buildAwaitingQuotesSummary(awaitingQuotes);
+        }
 
         const latestTechInstance = techApprovalDetails.length > 0 ? techApprovalDetails[techApprovalDetails.length - 1] : null;
 
@@ -4317,6 +4649,7 @@ LIMIT 2;
           is_cancelled: latestTechInstance?.status === 'CANCELLED',
           evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
           products: techProducts,
+          awaiting_quotes: awaitingQuotes,
           approval_instances: techApprovalDetails.length > 0 ? formatApprovalInstances(techApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
         });
@@ -4341,9 +4674,18 @@ LIMIT 2;
         }
 
         let subStatus = null;
-        if (currentStage === 'COMMERCIAL_EVALUATION') subStatus = 'evaluating';
+        if (currentStage === 'AWAITING_QUOTES') subStatus = 'awaiting_quotes';
+        else if (currentStage === 'COMMERCIAL_EVALUATION') subStatus = 'evaluating';
         else if (currentStage === 'NEGOTIATION_ONGOING') subStatus = 'negotiating';
         else if (currentStage === 'QUOTATION_APPROVAL') subStatus = 'approving';
+        else if (currentStage === 'RFQ_STUCK_COMMERCIAL') subStatus = 'no_vendors_participated';
+
+        const awaitingQuotes = ['AWAITING_QUOTES', 'RFQ_STUCK_COMMERCIAL'].includes(currentStage)
+          ? buildAwaitingQuotesSnapshot()
+          : null;
+        if (awaitingQuotes) {
+          summary = buildAwaitingQuotesSummary(awaitingQuotes);
+        }
 
         const latestQuoteInstance = quoteApprovalDetails.length > 0 ? quoteApprovalDetails[quoteApprovalDetails.length - 1] : null;
 
@@ -4351,6 +4693,7 @@ LIMIT 2;
           key: 'commercial', label: 'Commercial Evaluation', status, summary, sub_status: subStatus,
           is_cancelled: latestQuoteInstance?.status === 'CANCELLED',
           products: commercialProducts,
+          awaiting_quotes: awaitingQuotes,
           approval_instances: quoteApprovalDetails.length > 0 ? formatApprovalInstances(quoteApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
         });
@@ -4464,7 +4807,79 @@ LIMIT 2;
         phases.filter(p => p.status === 'upcoming' || p.status === 'current').map(resolvePhaseActors)
       );
 
-      return { rfq_id: rfqId, current_stage: currentStage, current_phase: currentPhase, phases };
+      // Surface top-level approval action info for header buttons.
+      // Scan all phases for an approval instance where the current user can approve.
+      let userCanApprove = false;
+      let userApprovalInstanceId = null;
+      let userApprovalStepId = null;
+      let userApprovalEntityType = null;
+
+      for (const phase of phases) {
+        if (!phase.approval_instances) continue;
+        // Skip expired phases — the approval is stale (e.g. auto-published RFQ)
+        if (phase.status === 'expired') continue;
+        for (const inst of phase.approval_instances) {
+          if (inst.can_user_approve && inst.status === 'PENDING') {
+            userCanApprove = true;
+            userApprovalInstanceId = inst.id;
+            userApprovalStepId = inst.user_approval_step_id;
+            userApprovalEntityType = inst.entity_type;
+            break;
+          }
+        }
+        if (userCanApprove) break;
+      }
+
+      // Determine if the current user needs to take action (approval or evaluation).
+      let userActionRequired = false;
+      let userActionType = null;
+      let userActionLabel = null;
+      let userActionPhase = null;
+
+      // Stages where the user's action is NOT yet required even if they are
+      // an action holder: bid window still open (nothing to evaluate yet) or
+      // bid ended with zero vendor participation (nothing to act on).
+      const NON_ACTIONABLE_STAGES = new Set([
+        'AWAITING_QUOTES',
+        'TECHNICAL_AWAITING_QUOTES',
+        'RFQ_STUCK_TECHNICAL',
+        'RFQ_STUCK_COMMERCIAL',
+      ]);
+
+      if (userCanApprove) {
+        userActionRequired = true;
+        userActionType = 'approval';
+        userActionLabel = 'You have a pending approval action';
+        userActionPhase = phases.find(p => p.approval_instances?.some(i => i.id === userApprovalInstanceId))?.key || null;
+      } else if (
+        currentActionHolders?.users?.length > 0 &&
+        !NON_ACTIONABLE_STAGES.has(currentStage)
+      ) {
+        const isCurrentUserActionHolder = currentActionHolders.users.some(u => parseInt(u.id) === parseInt(userId));
+        if (isCurrentUserActionHolder) {
+          userActionRequired = true;
+          userActionType = currentActionHolders.type === 'permission' ? 'evaluation' : 'approval';
+          userActionLabel = `You are a ${currentActionHolders.label?.toLowerCase() || 'action holder'} for this ${rfqBasic.is_tender === 1 ? 'Tender' : 'RFQ'}`;
+          userActionPhase = currentPhase;
+        }
+      }
+
+      return {
+        rfq_id: rfqId,
+        current_stage: currentStage,
+        current_phase: currentPhase,
+        // Top-level approval action info — for header approve/reject buttons
+        user_can_approve: userCanApprove,
+        user_approval_instance_id: userApprovalInstanceId,
+        user_approval_step_id: userApprovalStepId,
+        user_approval_entity_type: userApprovalEntityType,
+        // Action-required indicator — for visual highlight on the current stage
+        user_action_required: userActionRequired,
+        user_action_type: userActionType,
+        user_action_label: userActionLabel,
+        user_action_phase: userActionPhase,
+        phases,
+      };
     } catch (err) {
       console.error('getLifecycleSummary error:', err);
       return { rfq_id: rfqId, current_stage: null, phases: [] };
@@ -5737,6 +6152,71 @@ LIMIT 2;
           reject(error);
         });
     });
+  },
+
+  getQuoteVisibilityLockedProductsByRfqId: async (id, rfq_product_id) => {
+    if (rfq_product_id) {
+      rfq_product_id = rfq_product_id.split(',').map(Number);
+    }
+
+    const query = `
+      SELECT
+        TRF.id,
+        TRF.rfq_id,
+        TRF.product_variant_id,
+        TRF.variant,
+        ARRAY(
+          SELECT json_build_object(
+            'rfq_no', TR.rfq_no,
+            'response_email', TR.response_email,
+            'contact_name', TR.contact_name,
+            'contact_number', TR.contact_number,
+            'project_id', TR.project_id,
+            'status', TR.status
+          )
+          FROM tbl_rfq TR
+          WHERE TR.id = $1
+        ) AS "rfq",
+        ARRAY(
+          SELECT json_build_object(
+            'product_name', COALESCE(PV.name, P.name),
+            'rfq_details', (
+              SELECT json_agg(
+                json_build_object(
+                  'title', TPS.title,
+                  'value', TPS.value
+                )
+              )
+              FROM tbl_rfq_products_specs TPS
+              WHERE TPS.product_variant_id = TRF.product_variant_id
+                AND COALESCE(TPS.variant, 0) = COALESCE(TRF.variant, 0)
+                AND TPS.rfq_id = $1
+            )
+          )
+          FROM tbl_product_variant PV
+          LEFT JOIN tbl_product P ON P.id = PV.product_id
+          WHERE PV.id = TRF.product_variant_id
+        ) AS "product_details",
+        ARRAY(
+          SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+          FROM tbl_rfq_products_specs TPS
+          WHERE TPS.product_variant_id = TRF.product_variant_id
+            AND COALESCE(TPS.variant, 0) = COALESCE(TRF.variant, 0)
+            AND TPS.rfq_id = $1
+        ) AS "product_specs",
+        '[]'::json AS "quotations",
+        '[]'::json AS "all_vendors",
+        '[]'::json AS "finalization_history",
+        NULL::json AS "last_purchase_rate",
+        NULL::json AS "last_quote_rate",
+        NULL::numeric AS "latest_target_price"
+      FROM tbl_rfq_products TRF
+      WHERE TRF.rfq_id = $1
+      ${rfq_product_id ? 'AND TRF.id = ANY($2)' : ''}
+      ORDER BY TRF.id ASC;
+    `;
+
+    return db.any(query, rfq_product_id ? [id, rfq_product_id] : [id]);
   },
 
   changeRFQStatus: async (id, user_id) => {
@@ -10943,7 +11423,60 @@ ORDER BY m.created_at;
         OR RFQ.project_id IN (
           SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
         )
+        OR EXISTS (
+          -- Business unit visibility (fallback): users mapped to the draft's scalar hotel_id
+          -- (covers older rows where RFQ.hotel_id / hospitality_company_id are populated)
+          SELECT 1 FROM tbl_hospitality_user_mappings HUM
+          WHERE HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = RFQ.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+            )
+        )
+        OR EXISTS (
+          -- Business unit visibility (primary): users mapped to ANY hotel the draft
+          -- is associated with via tbl_rfq_hotel_mappings (the source of truth for saveDraft)
+          SELECT 1
+          FROM tbl_rfq_hotel_mappings rhm
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+          JOIN tbl_hospitality_user_mappings HUM ON HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = rhm.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = hch.hospitality_company_id)
+            )
+          WHERE rhm.rfq_id = RFQ.id
+        )
       ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
+      -- Permission filter: only drafts the user has read access for.
+      -- Passes if the user has rfq/boq read on the draft's scalar company (fallback)
+      -- OR on any company derived from tbl_rfq_hotel_mappings (primary).
+      AND (
+        EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = ${user_id}
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM tbl_rfq_hotel_mappings rhm
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+          JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+            AND _urs3.company_id = hch.hospitality_company_id
+            AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+          JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+          JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+          WHERE rhm.rfq_id = RFQ.id
+            AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p3.action = 'read'
+        )
+      )
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${
@@ -10960,7 +11493,58 @@ ORDER BY m.created_at;
       const countQuery = `
         SELECT COUNT(*) AS total_count
         FROM tbl_rfq RFQ
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0 AND RFQ.status != 2
+        WHERE (
+          RFQ.created_by = ${user_id}
+          OR RFQ.project_id IN (
+            SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
+          )
+          OR EXISTS (
+            SELECT 1 FROM tbl_hospitality_user_mappings HUM
+            WHERE HUM.user_id = ${user_id}
+              AND (
+                HUM.hospitality_hotel_id = RFQ.hotel_id
+                OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                    AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+              )
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_hotel_mappings rhm
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+            JOIN tbl_hospitality_user_mappings HUM ON HUM.user_id = ${user_id}
+              AND (
+                HUM.hospitality_hotel_id = rhm.hotel_id
+                OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                    AND HUM.hospitality_company_id = hch.hospitality_company_id)
+              )
+            WHERE rhm.rfq_id = RFQ.id
+          )
+        ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
+        AND (
+          EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs2
+            JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+            JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+            WHERE _urs2.user_id = ${user_id}
+              AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p2.action = 'read'
+              AND _urs2.company_id = RFQ.hospitality_company_id
+              AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_hotel_mappings rhm
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+            JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+              AND _urs3.company_id = hch.hospitality_company_id
+              AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+            JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+            JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+            WHERE rhm.rfq_id = RFQ.id
+              AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p3.action = 'read'
+          )
+        )
         ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${
@@ -11503,7 +12087,7 @@ ORDER BY tq.timestamp DESC;
           (
             RFQ.bid_end_date IS NOT NULL
             AND RFQ.bid_end_date != ''
-            AND RFQ.bid_end_date::timestamp < NOW()::timestamp
+            AND RFQ.bid_end_date::timestamp < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
             AND EXISTS (
               SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
               WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete

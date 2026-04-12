@@ -68,6 +68,94 @@
       font-weight: bold;
       text-align: center;
     }
+    .approval-detail-table td,
+    .approval-detail-table th {
+      border: none !important;
+      padding: 3px 4px !important;
+      text-align: left;
+      vertical-align: top;
+    }
+    .approval-detail-table th {
+      font-weight: bold;
+    }
+    .tax-amount-line {
+      display: block;
+      margin-top: 2px;
+      font-size: 10px;
+      line-height: 1.3;
+    }
+    .term-number {
+      width: 22px;
+      vertical-align: top;
+      font-weight: bold;
+      white-space: nowrap;
+      text-align: right;
+      padding-right: 6px;
+    }
+    .term-content {
+      font-size: 10px;
+      line-height: 1.4;
+      word-wrap: break-word;
+    }
+    .term-content p {
+      margin: 0 0 4px 0;
+    }
+    .term-content p:last-child {
+      margin-bottom: 0;
+    }
+    .term-content ul,
+    .term-content ol {
+      margin: 4px 0;
+      padding-left: 18px;
+    }
+    .term-content li {
+      margin-bottom: 2px;
+    }
+    .term-content strong,
+    .term-content b {
+      font-weight: bold;
+    }
+    .term-content em,
+    .term-content i {
+      font-style: italic;
+    }
+    .term-content u {
+      text-decoration: underline;
+    }
+    .term-content h1,
+    .term-content h2,
+    .term-content h3,
+    .term-content h4,
+    .term-content h5,
+    .term-content h6 {
+      margin: 6px 0 4px 0;
+      font-weight: bold;
+    }
+    .term-content h1 { font-size: 13px; }
+    .term-content h2 { font-size: 12px; }
+    .term-content h3,
+    .term-content h4,
+    .term-content h5,
+    .term-content h6 { font-size: 11px; }
+    .term-content a {
+      color: #1a73e8;
+      text-decoration: underline;
+      word-break: break-all;
+    }
+    .term-content table {
+      width: auto;
+      border-collapse: collapse;
+      margin: 4px 0;
+    }
+    .term-content table td,
+    .term-content table th {
+      border: 1px solid #ccc;
+      padding: 3px 6px;
+    }
+    .term-content img {
+      max-width: 100%;
+      height: auto;
+    }
   </style>
 </head>
 
@@ -76,16 +164,15 @@
   <!-- HEADER - Middle Top: PO Title, Project Name, RFQ Title -->
   <table>
     <tr>
-      <td class="center bold" colspan="3" style="font-size: 16px; padding-bottom: 10px;">
+      <td class="center bold" colspan="3" style="font-size: 22px; font-weight: 800; padding-bottom: 10px;">
         PURCHASE ORDER
-        {{#if buyer_business_unit_name}}
-          <br/><span style="font-size: 13px;">{{buyer_business_unit_name}}</span>
+        {{#if buyer.name}}
+          <br/><span style="font-size: 12px; font-weight: normal;">
+            Company Name: {{buyer.name}}{{#if buyer.business_unit_name}}, Business Unit: {{buyer.business_unit_name}}{{/if}}
+          </span>
         {{/if}}
         {{#if project_name}}
           <br/><span style="font-size: 13px;">{{project_name}}</span>
-        {{/if}}
-        {{#if rfq_title}}
-          <br/><span style="font-size: 11px; font-weight: normal;">{{rfq_title}}</span>
         {{/if}}
       </td>
     </tr>
@@ -101,6 +188,9 @@
         <div class="bold" style="margin-bottom: 4px;">Vendor Details</div>
         <strong>{{supplier.name}}</strong><br/>
         {{supplier.address}}
+        {{#if supplier.state_name}}
+          <br/>State: {{supplier.state_name}}
+        {{/if}}
         {{#if supplier.gstin}}
           <br/>GSTIN: {{supplier.gstin}}
         {{/if}}
@@ -121,6 +211,12 @@
           <tr>
             <td class="bold" style="width: 40%;">RFQ No</td>
             <td>{{rfq_no}}</td>
+          </tr>
+          {{/if}}
+          {{#if rfq_title}}
+          <tr>
+            <td class="bold" style="width: 40%;">RFQ Title</td>
+            <td>{{rfq_title}}</td>
           </tr>
           {{/if}}
           <tr>
@@ -174,11 +270,31 @@
           {{#if hsn_code}}
             <br/><span class="small">[HSN/SAC: {{hsn_code}}]</span>
           {{/if}}
+          {{#if delivery_period_display}}
+            <br/><span class="small">Delivery Period: {{delivery_period_display}}</span>
+          {{/if}}
+          {{#if comment}}
+            <br/><span class="small">Comment: {{{nl2br comment}}}</span>
+          {{/if}}
         </td>
         <td class="center">{{unit}}</td>
         <td class="right">{{quantity}}</td>
         <td class="right">{{unit_price}}</td>
-        <td class="center">{{tax}}%</td>
+        <td class="center">
+          {{tax_rate_display}}%
+          {{#if cgst_amount}}
+            <span class="tax-amount-line">CGST ₹{{formatCurrency cgst_amount}}</span>
+            <span class="tax-amount-line">SGST ₹{{formatCurrency sgst_amount}}</span>
+          {{else}}
+            {{#if igst_amount}}
+              <span class="tax-amount-line">IGST ₹{{formatCurrency igst_amount}}</span>
+            {{else}}
+              {{#if gst_amount}}
+                <span class="tax-amount-line">₹{{formatCurrency gst_amount}}</span>
+              {{/if}}
+            {{/if}}
+          {{/if}}
+        </td>
         <td class="right">{{basic_amount}}</td>
       </tr>
       {{/each}}
@@ -209,12 +325,12 @@
             <td class="right">{{totalPackage}}</td>
           </tr>
           {{/if}}
-          {{#if gstAmount}}
+          {{#each summaryTaxRows}}
           <tr>
-            <td>GST (Taxes)</td>
-            <td class="right">{{gstAmount}}</td>
+            <td>{{label}} ({{rate_display}}%)</td>
+            <td class="right">{{amount}}</td>
           </tr>
-          {{/if}}
+          {{/each}}
           <tr class="bold">
             <td>Total PO Value :</td>
             <td class="right">{{totalPrice}}</td>
@@ -226,8 +342,8 @@
 
   <br/>
 
-  <!-- DELIVERY & PAYMENT SECTION -->
-  <div class="section-title">DELIVERY & PAYMENT</div>
+  <!-- DELIVERY & BUYER DETAILS -->
+  <div class="section-title">DELIVERY & BUYER DETAILS</div>
 
   <table>
     <tr>
@@ -238,20 +354,29 @@
         {{else}}
           {{location}}
         {{/if}}
+        {{#if buyer.contact_person}}
+          <div style="border-top: 1px solid #ccc; margin-top: 6px; padding-top: 6px;">
+            <strong>Contact Information:</strong><br/>
+            {{buyer.contact_person}}{{#if buyer.phone}} &nbsp;|&nbsp; {{buyer.phone}}{{/if}}{{#if buyer.email}} &nbsp;|&nbsp; {{buyer.email}}{{/if}}
+          </div>
+        {{/if}}
       </td>
       <td style="width: 50%;">
         <strong>Buyer Details:</strong><br/>
-        {{company_name}}<br/>
-        {{#if buyer_business_unit_name}}
-          <span class="small">Business Unit: {{buyer_business_unit_name}}</span><br/>
+        {{buyer.name}}<br/>
+        {{#if buyer.business_unit_name}}
+          <span class="small">Business Unit: {{buyer.business_unit_name}}</span><br/>
         {{/if}}
-        {{#if location}}
-          {{location}}
+        {{#if buyer.address}}
+          {{buyer.address}}
         {{else}}
           {{company.address}}
         {{/if}}
-        {{#if gstin}}
-          <br/>GSTIN: {{gstin}}
+        {{#if buyer.state_name}}
+          <br/>State: {{buyer.state_name}}
+        {{/if}}
+        {{#if buyer.gstin}}
+          <br/>GSTIN: {{buyer.gstin}}
         {{/if}}
       </td>
     </tr>
@@ -276,107 +401,154 @@
   <br/>
   {{/if}}
 
-  <!-- TERMS AND CONDITIONS - With Checkboxes -->
+  <!-- TERMS AND CONDITIONS - Numbered List -->
   <div class="section-title">TERMS AND CONDITIONS</div>
 
   <table class="small" style="margin-top: 8px;">
     {{#if deliveryterms}}
     <tr>
-      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
+      <td class="term-number">1.</td>
       <td><strong>Delivery Terms:</strong> {{deliveryterms}} days</td>
     </tr>
     {{/if}}
     {{#each rfqTerms}}
     <tr>
-      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
-      <td><strong>{{term_content}}:</strong></td>
+      <td class="term-number">{{#if ../deliveryterms}}{{add @index 2}}{{else}}{{add @index 1}}{{/if}}.</td>
+      <td><div class="term-content">{{{term_content}}}</div></td>
     </tr>
     {{/each}}
   </table>
+
+  {{#if global_comment}}
+  <br/>
+  <div class="section-title">QUOTE COMMENTS</div>
+  <table class="small" style="margin-top: 8px;">
+    <tr>
+      <td>{{{nl2br global_comment}}}</td>
+    </tr>
+  </table>
+  {{/if}}
 
   <br/>
 
   <!-- APPROVAL BOX -->
   <table class="approval-box">
     <tr>
-      <td class="approval-header" colspan="4">
+      <td class="approval-header" colspan="2">
         APPROVAL DETAILS
       </td>
     </tr>
     <tr>
-      <td style="width: 25%; vertical-align: top;">
-        <strong>Created By:</strong><br/>
+      <td style="width: 28%; vertical-align: top;"><strong>Created By</strong></td>
+      <td style="width: 72%; vertical-align: top;">
         {{#unless isAutoPublished}}
-          {{#if rfqCreatorName}}
-            <div style="margin-bottom: 2px;">
-              <span class="small" style="color: #6b7280;">Creator:</span><br/>
-              <span style="font-weight: 500;">{{rfqCreatorName}}</span>
-            </div>
-          {{/if}}
-          {{#if rfqApproverName}}
-            <div>
-              <span class="small" style="color: #6b7280;">Approver:</span><br/>
-              <span style="font-weight: 500;">{{rfqApproverName}}</span>
-            </div>
-          {{/if}}
-          {{#unless rfqCreatorName}}-{{/unless}}
+          <table class="approval-detail-table" style="width: 100%;">
+            <tr>
+              <th style="width: 18%;">Role</th>
+              <th>Name</th>
+            </tr>
+            <tr>
+              <td class="small">Creator</td>
+              <td>{{#if rfqCreatorName}}{{rfqCreatorName}}{{else}}-{{/if}}</td>
+            </tr>
+            <tr>
+              <td class="small">Approver</td>
+              <td>{{#if rfqApproverName}}{{rfqApproverName}}{{else}}-{{/if}}</td>
+            </tr>
+          </table>
+        {{else}}
+          -
         {{/unless}}
-        {{#if isAutoPublished}}-{{/if}}
       </td>
-      <td style="width: 25%; vertical-align: top;">
-        <strong>Technical Evaluation:</strong><br/>
+    </tr>
+    <tr>
+      <td style="vertical-align: top;"><strong>Technical Evaluation</strong></td>
+      <td style="vertical-align: top;">
         {{#if techEvaluations.evaluators.length}}
-          <div style="margin-bottom: 2px;">
-            <span class="small" style="color: #6b7280;">Evaluators:</span>
-            {{#each techEvaluations.evaluators}}
-              <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
-            {{/each}}
-          </div>
-          {{#if techEvaluations.approvers.length}}
-            <div style="margin-bottom: 2px;">
-              <span class="small" style="color: #6b7280;">Approvers:</span>
-              {{#each techEvaluations.approvers}}
-                <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
-              {{/each}}
-            </div>
-          {{/if}}
+          <table class="approval-detail-table" style="width: 100%;">
+            <tr>
+              <th style="width: 18%;">Role</th>
+              <th>Name</th>
+            </tr>
+            <tr>
+              <td class="small">Evaluator</td>
+              <td>
+                {{#each techEvaluations.evaluators}}
+                  {{this}}{{#unless @last}}, {{/unless}}
+                {{/each}}
+              </td>
+            </tr>
+            <tr>
+              <td class="small">Approvers</td>
+              <td>
+                {{#if techEvaluations.approvers.length}}
+                  {{#each techEvaluations.approvers}}
+                    {{this}}{{#unless @last}}, {{/unless}}
+                  {{/each}}
+                {{else}}
+                  -
+                {{/if}}
+              </td>
+            </tr>
+          </table>
         {{else}}
           -
         {{/if}}
       </td>
-      <td style="width: 25%; vertical-align: top;">
-        <strong>Commercial Evaluation:</strong><br/>
+    </tr>
+    <tr>
+      <td style="vertical-align: top;"><strong>Commercial Evaluation</strong></td>
+      <td style="vertical-align: top;">
         {{#if commercialEvaluations.evaluators.length}}
-          <div style="margin-bottom: 2px;">
-            <span class="small" style="color: #6b7280;">Evaluators:</span>
-            {{#each commercialEvaluations.evaluators}}
-              <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
-            {{/each}}
-          </div>
-          {{#if commercialEvaluations.approvers.length}}
-            <div style="margin-bottom: 2px;">
-              <span class="small" style="color: #6b7280;">Approvers:</span>
-              {{#each commercialEvaluations.approvers}}
-                <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
-              {{/each}}
-            </div>
-          {{/if}}
+          <table class="approval-detail-table" style="width: 100%;">
+            <tr>
+              <th style="width: 18%;">Role</th>
+              <th>Name</th>
+            </tr>
+            <tr>
+              <td class="small">Evaluator</td>
+              <td>
+                {{#each commercialEvaluations.evaluators}}
+                  {{this}}{{#unless @last}}, {{/unless}}
+                {{/each}}
+              </td>
+            </tr>
+            <tr>
+              <td class="small">Approvers</td>
+              <td>
+                {{#if commercialEvaluations.approvers.length}}
+                  {{#each commercialEvaluations.approvers}}
+                    {{this}}{{#unless @last}}, {{/unless}}
+                  {{/each}}
+                {{else}}
+                  -
+                {{/if}}
+              </td>
+            </tr>
+          </table>
         {{else}}
           -
         {{/if}}
       </td>
-      <td style="width: 25%; vertical-align: top;">
-        <strong>PO Approvers:</strong><br/>
+    </tr>
+    <tr>
+      <td style="vertical-align: top;"><strong>PO Approvers</strong></td>
+      <td style="vertical-align: top;">
         {{#if poApprovers}}
-          {{#each poApprovers}}
-            <div style="margin-bottom: 6px;">
-              <span style="font-weight: 500;">{{name}}</span>
-              <br/>
-              <span style="font-size: 9px; {{#eq status 'Approved'}}color: #22c55e;{{/eq}}{{#eq status 'Rejected'}}color: #ef4444;{{/eq}}{{#eq status 'Skipped'}}color: #f59e0b;{{/eq}}{{#eq status 'Invited'}}color: #6b7280;{{/eq}}">
-                {{status}}{{#if timestamp}} | {{timestamp}}{{/if}}
-              </span>
-            </div>
-          {{/each}}
+          <table class="approval-detail-table" style="width: 100%;">
+            <tr>
+              <th style="width: 38%;">Name</th>
+              <th style="width: 18%;">Status</th>
+              <th>Actioned On</th>
+            </tr>
+            {{#each poApprovers}}
+            <tr>
+              <td>{{name}}</td>
+              <td style="{{#eq status 'Approved'}}color: #22c55e;{{/eq}}{{#eq status 'Rejected'}}color: #ef4444;{{/eq}}{{#eq status 'Skipped'}}color: #f59e0b;{{/eq}}{{#eq status 'Invited'}}color: #6b7280;{{/eq}}">{{status}}</td>
+              <td>{{#if timestamp}}{{timestamp}}{{else}}-{{/if}}</td>
+            </tr>
+            {{/each}}
+          </table>
         {{else}}
           -
         {{/if}}

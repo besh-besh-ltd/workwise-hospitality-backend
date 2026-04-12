@@ -15,21 +15,41 @@ import {
 import db, { pgp } from '../../config/dbConn.js';
 import { draftPO } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
+import {
+  buildQuoteVisibilityMeta,
+  createQuoteVisibilityError,
+} from '../../helper/quoteVisibility.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
   const message = error.message || Config.errorText.value;
   return res.status(statusCode).json({
     status: 3,
-    message
+    message,
+    meta: error.quoteVisibility ? { quoteVisibility: error.quoteVisibility } : undefined,
   });
+};
+
+const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
+  const rfqData = await rfqModel.getRfqDetailsById(rfqId);
+  const quoteVisibility = buildQuoteVisibilityMeta(rfqData);
+  if (quoteVisibility.locked) {
+    throw createQuoteVisibilityError(quoteVisibility, message);
+  }
+  return { rfqData, quoteVisibility };
 };
 
 /**
  * Handle NEGOTIATION post-approval actions (add quotes to finalization)
  * Called after NEGOTIATION approval instance is fully approved
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [options]
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  */
-const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
   
   try {
@@ -324,6 +344,14 @@ const NegotiationController = {
           status: 2,
           message: 'Negotiation rounds are only available for hospitality RFQs/Tenders'
         });
+      }
+
+      const quoteVisibility = buildQuoteVisibilityMeta(rfqData);
+      if (quoteVisibility.locked) {
+        throw createQuoteVisibilityError(
+          quoteVisibility,
+          'Negotiation remains view only until the quote submission deadline has passed in IST.'
+        );
       }
 
       // Check if product exists using model
@@ -843,6 +871,19 @@ const NegotiationController = {
           message: 'Round ID is required'
         });
       }
+
+      const round = await negotiationModel.getRoundById(round_id);
+      if (!round) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Round not found'
+        });
+      }
+
+      await ensureNegotiationQuoteVisibilityUnlocked(
+        round.rfq_id,
+        'Negotiation quote details are locked until the quote submission deadline has passed in IST.'
+      );
 
       const quotes = await negotiationModel.getRoundQuotes(round_id);
 
@@ -1673,4 +1714,3 @@ const NegotiationController = {
 };
 
 export default NegotiationController;
-

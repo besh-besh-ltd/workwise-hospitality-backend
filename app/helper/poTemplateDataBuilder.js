@@ -1,4 +1,47 @@
 import db from '../config/dbConn.js';
+import { formatCompanyLocationDisplay } from './companyLocation.js';
+import { buildPOTemplatePricing, resolvePOTaxMode } from './poTemplatePricing.js';
+
+const getLatestCompanyLocation = async (conn, companyId) => {
+  if (!companyId) return null;
+
+  return conn.oneOrNone(
+    `
+      SELECT
+        TCL.id,
+        TCL.company_id,
+        TCL.address,
+        TCL.postal_code,
+        TCL.country_id,
+        LCO.country_name,
+        TCL.state_id,
+        TLS.state_name,
+        TCL.city_id,
+        TLC.city_name
+      FROM tbl_company_location TCL
+      LEFT JOIN tbl_location_country LCO ON LCO.id = TCL.country_id
+      LEFT JOIN tbl_location_states TLS ON TLS.id = TCL.state_id
+      LEFT JOIN tbl_location_cities TLC ON TLC.id = TCL.city_id
+      WHERE TCL.company_id = $1
+      ORDER BY COALESCE(TCL.created_at, TCL.updated_at) DESC, TCL.id DESC
+      LIMIT 1
+    `,
+    [companyId]
+  );
+};
+
+const buildDeliveryTermsLabel = (items = []) => {
+  const deliveryPeriods = items
+    .map((item) => Number.parseInt(item.delivery_period, 10))
+    .filter((value) => !Number.isNaN(value));
+
+  if (!deliveryPeriods.length) return null;
+
+  const minValue = Math.min(...deliveryPeriods);
+  const maxValue = Math.max(...deliveryPeriods);
+
+  return minValue === maxValue ? String(minValue) : `${minValue} - ${maxValue}`;
+};
 
 /**
  * Build complete data object for PO template rendering
@@ -9,54 +52,52 @@ import db from '../config/dbConn.js';
  */
 export const buildPOTemplateData = async (po_id, txContext = null) => {
   const conn = txContext || db;
-  // 1. Get PO with all related data
+
   const poData = await conn.oneOrNone(`
     SELECT
       PO.*,
       PO.initiated_by,
       INITIATOR.name AS prepared_by_name,
-
-      -- RFQ Details
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
       RFQ.title AS rfq_title,
+      RFQ.comment AS rfq_comment,
       RFQ.hospitality_company_id,
       RFQ.hotel_id,
-
-      -- Project
       PROJ.name AS project_name,
-
-      -- Finalized Quote
-      TQ.id AS quote_id,
-      TQ.gstin AS quote_gstin,
-
-      -- Buyer Company
+      POQ.id AS source_quote_id,
+      POQ.gstin AS quote_gstin,
+      POQ.global_comment,
       TC.company_name,
       TC.cin AS buyer_cin,
       TC.gstin AS buyer_gstin,
       TC.logo AS company_logo,
-
-      -- Hospitality Company (if applicable)
+      TC.location AS buyer_legacy_location,
       THC.name AS hospitality_company_name,
-
-      -- Hotel (if applicable)
       THCH.name AS hotel_name,
       THCH.full_address AS hotel_address,
       THCH.gst AS hotel_gstin,
-
-      -- Delivery Location
-      COALESCE(RFQ.location, TCL.address) AS delivery_location,
-      TCL.address AS buyer_address
+      RFQ.location AS rfq_delivery_location,
+      RFQ.contact_name AS buyer_contact_name,
+      RFQ.contact_number AS buyer_contact_number,
+      RFQ.response_email AS buyer_contact_email
 
     FROM tbl_rfq_purchase_order PO
     JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
     LEFT JOIN tbl_users INITIATOR ON INITIATOR.id = PO.initiated_by
     LEFT JOIN tbl_projects PROJ ON PROJ.id = RFQ.project_id
-    LEFT JOIN tbl_quotes TQ ON TQ.created_by = PO.finalized_vendor_id AND TQ.rfq_id = PO.rfq_id
+    LEFT JOIN LATERAL (
+      SELECT TQ.id, TQ.gstin, TQ.global_comment
+      FROM tbl_purchase_order_product POP_Q
+      JOIN tbl_quote_items TQI ON TQI.id = POP_Q.quote_id
+      JOIN tbl_quotes TQ ON TQ.id = TQI.quote_id
+      WHERE POP_Q.purchase_order_id = PO.id
+      ORDER BY TQ.timestamp DESC, TQ.id DESC
+      LIMIT 1
+    ) POQ ON TRUE
     LEFT JOIN tbl_company TC ON TC.id = PO.company_id
     LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
     LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
-    LEFT JOIN tbl_company_location TCL ON TCL.company_id = TC.id
     WHERE PO.id = $1
   `, [po_id]);
 
@@ -64,42 +105,36 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     throw new Error(`PO ${po_id} not found`);
   }
 
-  // 2. Get Supplier/Vendor details (including state for tax calculation)
   const supplier = await conn.oneOrNone(`
     SELECT
-      U.id, U.name, U.email, U.mobile AS phone,
+      U.id,
+      U.company_id,
+      U.name,
+      U.email,
+      U.mobile AS phone,
       TC.company_name AS organization_name,
-      TC.gstin, TC.cin,
-      TCL.address,
-      TLS.state_name AS supplier_state
+      TC.gstin,
+      TC.cin,
+      TC.location AS legacy_address
     FROM tbl_users U
     LEFT JOIN tbl_company TC ON TC.id = U.company_id
-    LEFT JOIN tbl_company_location TCL ON TCL.company_id = TC.id
-    LEFT JOIN tbl_location_states TLS ON TCL.state_id = TLS.id
     WHERE U.id = $1
-    ORDER BY TCL.created_at DESC
     LIMIT 1
   `, [poData.finalized_vendor_id]);
 
-  // Get buyer state for tax calculation
-  const buyerLocation = await conn.oneOrNone(`
-    SELECT TLS.state_name AS state FROM tbl_company_location TCL
-    JOIN tbl_location_states TLS ON TCL.state_id = TLS.id
-    WHERE TCL.company_id = $1
-    ORDER BY TCL.created_at DESC LIMIT 1
-  `, [poData.company_id]);
+  const [buyerLocation, supplierLocation] = await Promise.all([
+    getLatestCompanyLocation(conn, poData.company_id),
+    getLatestCompanyLocation(conn, supplier?.company_id)
+  ]);
 
-  // 3. Get PO Items with product details
-  // Note: tax, freight_price, package_price are stored in charges_meta JSONB column
-  // Size and Spec come from tbl_rfq_products_specs filtered by title
-  // HSN code comes from tbl_purchase_order_hsn_mapping
   const items = await conn.any(`
     SELECT
+      POP.id,
+      POP.quote_id AS quote_item_id,
       POP.quantity,
       POP.unit,
       POP.unit_price,
       POP.total_price,
-      -- Extract charges from JSONB charges_meta column
       COALESCE((POP.charges_meta->>'tax')::numeric, 0) AS tax,
       POP.charges_meta->>'tax_mode' AS tax_mode,
       COALESCE((POP.charges_meta->>'freight_price')::numeric, 0) AS freight_price,
@@ -107,47 +142,44 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       COALESCE((POP.charges_meta->>'package_price')::numeric, 0) AS package_price,
       POP.charges_meta->>'package_mode' AS package_mode,
       PV.name AS product_name,
-      -- HSN code from mapping table
       POHM.hsn_code,
-      -- Size from specs table (title = 'Size')
       RPS_SIZE.value AS size,
-      -- Specification from specs table (title = 'Spec')
-      RPS_SPEC.value AS specification
+      RPS_SPEC.value AS specification,
+      QI.comment,
+      QI.delivery_period
     FROM tbl_purchase_order_product POP
     JOIN tbl_rfq_products RP ON RP.id = POP.rfq_product_id
     JOIN tbl_product_variant PV ON PV.id = RP.product_variant_id
-    -- HSN mapping
     LEFT JOIN tbl_purchase_order_hsn_mapping POHM ON POHM.rfq_item_id = POP.rfq_product_id
-    -- Size from specs
     LEFT JOIN tbl_rfq_products_specs RPS_SIZE ON
       RPS_SIZE.product_variant_id = RP.product_variant_id
       AND RPS_SIZE.variant = RP.variant
       AND RPS_SIZE.rfq_id = RP.rfq_id
       AND RPS_SIZE.title = 'Size'
-    -- Specification from specs
     LEFT JOIN tbl_rfq_products_specs RPS_SPEC ON
       RPS_SPEC.product_variant_id = RP.product_variant_id
       AND RPS_SPEC.variant = RP.variant
       AND RPS_SPEC.rfq_id = RP.rfq_id
       AND RPS_SPEC.title = 'Spec'
+    LEFT JOIN tbl_quote_items QI ON QI.id = POP.quote_id
     WHERE POP.purchase_order_id = $1
     ORDER BY POP.id
   `, [po_id]);
 
-  // 4. Calculate pricing with tax breakdown (state-based SGST/CGST vs IGST)
-  const buyerState = buyerLocation?.state;
-  const supplierState = supplier?.supplier_state;
-  const pricing = calculatePricingBreakdown(items, buyerState, supplierState);
+  const taxMode = resolvePOTaxMode(buyerLocation, supplierLocation);
+  const pricing = buildPOTemplatePricing(items, taxMode);
+  const buyerAddress = formatCompanyLocationDisplay(buyerLocation, poData.buyer_legacy_location);
+  const supplierAddress = formatCompanyLocationDisplay(supplierLocation, supplier?.legacy_address);
 
-  // 5. Get Payment Terms from Quote
-  const paymentTermsList = await conn.any(`
-    SELECT type, value, days, comment
-    FROM tbl_quotes_payment_terms
-    WHERE quote_id = $1
-    ORDER BY id
-  `, [poData.quote_id]);
+  const paymentTermsList = poData.source_quote_id
+    ? await conn.any(`
+        SELECT type, value, days, comment
+        FROM tbl_quotes_payment_terms
+        WHERE quote_id = $1
+        ORDER BY id
+      `, [poData.source_quote_id])
+    : [];
 
-  // 6. Get RFQ Terms (via junction table tbl_rfq_terms_map)
   const rfqTerms = await conn.any(`
     SELECT RT.id, RT.term_content
     FROM tbl_rfq_terms_map RTM
@@ -156,121 +188,104 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     ORDER BY RTM.id
   `, [poData.rfq_id]);
 
-  // 7. Get Approval Data
+  // 6a. Parse the rfq.comment HTML and merge into rfqTerms.
+  //  - Starts with list (no preceding text) → flatten each <li> as its own row
+  //  - Plain text (no list)                 → one numbered row
+  //  - Text then list                       → text is the row, list nests under it
+  //  - Trailing text after a list           → next numbered row
+  if (poData.rfq_comment) {
+    const html = poData.rfq_comment.trim();
+
+    // Split into ordered segments: { type: 'text'|'list', html }
+    const segments = [];
+    const listBlockRegex = /<(ul|ol)[^>]*>[\s\S]*?<\/\1>/gi;
+    let lastIndex = 0;
+    let blockMatch;
+    while ((blockMatch = listBlockRegex.exec(html)) !== null) {
+      const before = html.substring(lastIndex, blockMatch.index).trim();
+      if (before) segments.push({ type: 'text', html: before });
+      segments.push({ type: 'list', html: blockMatch[0] });
+      lastIndex = blockMatch.index + blockMatch[0].length;
+    }
+    const trailing = html.substring(lastIndex).trim();
+    if (trailing) segments.push({ type: 'text', html: trailing });
+
+    // Walk segments and build rfqTerms entries
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+
+      if (seg.type === 'text') {
+        const next = segments[i + 1];
+        if (next && next.type === 'list') {
+          // Text + list → merge into one row; convert <ul> to <ol> for numbering
+          const numberedList = next.html
+            .replace(/<ul([^>]*)>/gi, '<ol$1>')
+            .replace(/<\/ul>/gi, '</ol>');
+          rfqTerms.push({ id: null, term_content: seg.html + numberedList });
+          i++; // skip the list segment
+        } else {
+          rfqTerms.push({ id: null, term_content: seg.html });
+        }
+      } else {
+        // List without preceding text → flatten each <li>
+        const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+        let liMatch;
+        while ((liMatch = liRegex.exec(seg.html)) !== null) {
+          const inner = liMatch[1].trim();
+          if (inner) rfqTerms.push({ id: null, term_content: inner });
+        }
+      }
+    }
+  }
+
   const approvalData = await getApprovalDataForPO(po_id, poData, conn);
 
-  // 8. Build final template data
   return {
-    // Header
     project_name: poData.project_name,
     rfq_title: poData.rfq_title,
     rfq_no: poData.rfq_no,
-
-    // Supplier
     supplier: {
       name: supplier?.organization_name || supplier?.name,
-      address: supplier?.address,
-      gstin: supplier?.gstin || poData.quote_gstin,
+      address: supplierAddress,
+      gstin: poData.quote_gstin || supplier?.gstin,
       cin: supplier?.cin,
       phone: supplier?.phone,
-      email: supplier?.email
+      email: supplier?.email,
+      state_name: supplierLocation?.state_name || null
     },
-
-    // PO Meta
     po_number: poData.po_number,
-    created_at: poData.created_at,  // Raw date - seoController.js handles formatting
-
-    // Items with calculated fields
-    items: items.map(item => ({
-      ...item,
-      basic_amount: (item.unit_price * item.quantity).toFixed(2)
-    })),
-
-    // Pricing Breakdown
+    created_at: poData.created_at,
+    items: pricing.items,
     ...pricing,
-
-    // Delivery & Location
-    delivery_location: poData.delivery_location,
-    location: poData.buyer_address,
+    tax_mode: taxMode,
+    delivery_location: poData.rfq_delivery_location || buyerAddress,
+    location: buyerAddress,
     company_name: poData.hospitality_company_name || poData.company_name,
     company: {
-      address: poData.buyer_address
+      address: buyerAddress
+    },
+    buyer: {
+      name: poData.hospitality_company_name || poData.company_name,
+      business_unit_name: poData.hotel_name,
+      address: buyerAddress,
+      gstin: poData.hotel_gstin || poData.buyer_gstin,
+      state_name: buyerLocation?.state_name || null,
+      contact_person: poData.buyer_contact_name || null,
+      phone: poData.buyer_contact_number || null,
+      email: poData.buyer_contact_email || null
     },
     buyer_business_unit_name: poData.hotel_name,
     gstin: poData.hotel_gstin || poData.buyer_gstin,
-
-    // Terms
-    deliveryterms: poData.delivery_period,
+    deliveryterms: poData.delivery_period || buildDeliveryTermsLabel(items),
     paymentTermsList,
     rfqTerms,
-
-    // Approval Section
+    global_comment: poData.global_comment || null,
     isAutoPublished: approvalData.isAutoPublished,
     rfqCreatorName: approvalData.rfqCreatorName,
     rfqApproverName: approvalData.rfqApproverName,
     techEvaluations: approvalData.techEvaluations,
     commercialEvaluations: approvalData.commercialEvaluations,
     poApprovers: approvalData.poApprovers
-  };
-};
-
-/**
- * Calculate pricing breakdown with SGST/CGST/IGST
- * Uses state comparison: Same state = CGST+SGST, Different state = IGST
- *
- * @param {Array} items - PO items
- * @param {string} buyerState - Buyer's state
- * @param {string} supplierState - Supplier's state
- * @returns {Object} - Pricing breakdown object
- */
-const calculatePricingBreakdown = (items, buyerState, supplierState) => {
-  let basicAmount = 0;
-  let totalFreight = 0;
-  let totalPackage = 0;
-  let totalTax = 0;
-
-  items.forEach(item => {
-    const itemBasic = item.unit_price * item.quantity;
-    basicAmount += itemBasic;
-
-    // Calculate freight for this item (percentage or actual)
-    let itemFreight = 0;
-    const freightValue = Number(item.freight_price) || 0;
-    if (item.freight_mode === 'percentage') {
-      itemFreight = (itemBasic * freightValue) / 100;
-    } else {
-      itemFreight = freightValue;
-    }
-    totalFreight += itemFreight;
-
-    // Calculate package for this item (percentage or actual)
-    let itemPackage = 0;
-    const packageValue = Number(item.package_price) || 0;
-    if (item.package_mode === 'percentage') {
-      itemPackage = (itemBasic * packageValue) / 100;
-    } else {
-      itemPackage = packageValue;
-    }
-    totalPackage += itemPackage;
-
-    // Calculate tax on (basic + freight + package) for this item
-    // Tax is applied AFTER freight and package are added to the base price
-    const itemSubtotal = itemBasic + itemFreight + itemPackage;
-    const taxValue = Number(item.tax) || 0;
-    if (item.tax_mode === 'percentage' || !item.tax_mode) {
-      // Default to percentage if mode not specified
-      totalTax += (itemSubtotal * taxValue) / 100;
-    } else {
-      totalTax += taxValue;
-    }
-  });
-
-  return {
-    basicAmount: basicAmount.toFixed(2),
-    totalFreight: totalFreight > 0 ? totalFreight.toFixed(2) : null,
-    totalPackage: totalPackage > 0 ? totalPackage.toFixed(2) : null,
-    gstAmount: totalTax > 0 ? totalTax.toFixed(2) : null,
-    totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
   };
 };
 
@@ -583,4 +598,3 @@ const formatTimestamp = (date) => {
 
   return `${day}/${month}/${year} - ${hours}:${minutes} ${ampm}`;
 };
-

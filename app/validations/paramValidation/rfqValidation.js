@@ -251,109 +251,61 @@ export const rfqSchemas = {
     process_id: Joi.number().integer().optional().allow(null),
     title: Joi.string().required(),
   }),
+  // WH-69: snapshot-based update. Frontend sends the full intended state of
+  // the RFQ as `snapshot`; the controller computes the diff and applies it
+  // transactionally. The previous `updatableData` shape is gone.
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
-    response_email: Joi.string().required(),
-    contact_name: Joi.string().required(),
-    status: Joi.number().allow(1, 2).optional(),
-    termsChanged: Joi.boolean().optional(),
-    selectedTerms: Joi.array().items(termsItems).allow(null).allow(''),
-    contact_number: Joi.string().trim().min(6).max(17).required(),
-    is_tender: Joi.number().required(),
-    tender_fees: Joi.number().integer().min(0).optional().allow(null),
-    tender_publish_date: Joi.string().optional().allow(null).allow(''),
-    vendor_clarification_date: Joi.string().optional().allow(null).allow('')
-      .custom((value, helpers) => {
-        if (value) {
-          const { bid_end_date } = helpers.state.ancestors[0];
-          if (bid_end_date && new Date(value) >= new Date(bid_end_date)) {
-            return helpers.message(
-              'Vendor Clarification End Date must be before the Quote Submission End Date'
-            );
-          }
-        }
-        return value;
-      }),
-    hospitality_company_id: Joi.number().integer().optional().allow(null),
-    hotel_id: Joi.number().integer().optional().allow(null),
-    hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
-    title: Joi.string().required(),
-    // technical_evaluation_by is now optional and can be null/omitted
-    technical_evaluation_by: Joi.number().integer().optional().allow(null),
-    // Optional overall RFQ/tender comment (header-level)
-    comment: Joi.string().trim().max(1000).optional().allow(null, ''),
-    bid_end_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
-      .custom((value, helpers) => {
-        if (value) {
-          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
-          if (new Date(value) < minAllowed) {
-            return helpers.message(
-              'Quote Submission End Date must be at least 2 hours from now'
-            );
-          }
-        }
-        return value;
-      }),
-    ra_start_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
-      .custom((value, helpers) => {
-        // mukul: 04/may/2025 : Check if reverse_auction is 1 and bid_end_date is present, and ra_start_date is after bid end date only
-        const { reverse_auction, bid_end_date } = helpers.state.ancestors[0];
+    snapshot: Joi.object()
+      .keys({
+        // RFQ-level scalar fields (mirrors RFQ_EDITABLE_FIELDS in
+        // app/controllers/rfq/rfqEditableFields.js — keep both in sync)
+        title: Joi.string().required(),
+        comment: Joi.string().trim().max(1000).allow('', null),
+        contact_name: Joi.string().required(),
+        contact_number: Joi.string().trim().min(6).max(17).required(),
+        response_email: Joi.string().required(),
+        location: Joi.string().allow('', null),
+        bid_end_date: Joi.string().allow('', null),
+        tender_publish_date: Joi.string().allow('', null),
+        tender_fees: Joi.number().integer().min(0).allow(null),
+        vendor_clarification_date: Joi.string().allow('', null),
+        rfq_type: Joi.string().trim().allow('', null),
+        reverse_auction: Joi.number().valid(0, 1).allow(null),
+        ra_start_date: Joi.string().allow('', null),
+        ra_end_date: Joi.string().allow('', null),
+        project_id: Joi.number().integer().allow(null),
+        is_tender: Joi.number().valid(0, 1).required(),
 
-        if (value && reverse_auction === 1 && bid_end_date) {
-          const raStart = new Date(value);
-          const bidEnd = new Date(bid_end_date);
+        // Read-only on the server, accepted but ignored — frontend may echo
+        // them back for display continuity. Hotels are immutable post-create.
+        hotel_ids: Joi.array().items(Joi.number()).optional(),
 
-          if (
-            raStart.toDateString() === bidEnd.toDateString() ||
-            raStart < bidEnd
-          ) {
-            return helpers.message(
-              'Reverse Auction Start Date must be after the Procurement End Date'
-            );
-          }
+        // Terms is just an array of term ids
+        terms: Joi.array().items(Joi.number()).default([]),
 
-          const now = new Date();
-          if (raStart < now) {
-            return helpers.message('ra_start_date cannot be in the past');
-          }
-        }
-
-        return value;
-      }),
-    ra_end_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
-      .custom((value, helpers) => {
-        const { ra_start_date } = helpers.state.ancestors[0];
-
-        // mukul: 04/may/2025 : Check if reverse_auction is 1 and ra_start_date is present, and ra_end_date is after ra_start_date only with 60min gap
-        if (value && ra_start_date) {
-          const raEnd = new Date(value);
-          const raStart = new Date(ra_start_date);
-
-          const diffInMinutes = (raEnd - raStart) / (1000 * 60); // convert ms to minutes
-
-          if (diffInMinutes < 60) {
-            return helpers.message(
-              'Reverse Auction End Date & Time must be at least 60 minutes after the Reverse Auction Start Time.'
-            );
-          }
-        }
-        return value;
-      }),
-    project_id: Joi.number().integer().allow(null).optional(),
-    rfq_type: Joi.string().trim().optional(),
-    reverse_auction: Joi.valid(0, 1).allow(''),
-    location: Joi.string().optional().allow('').allow(null),
-    updatableData: Joi.object().optional(),
-    department_id: Joi.number().integer().optional().allow(null)
+        // Products array — id=null means newly added in this edit
+        products: Joi.array().items(
+          Joi.object({
+            id: Joi.number().allow(null),
+            clientId: Joi.string().optional(),
+            product_variant_id: Joi.number().required(),
+            variant: Joi.number().default(0),
+            product_name: Joi.string().allow('', null).optional(),
+            comment: Joi.string().allow('', null),
+            specs: Joi.object().pattern(Joi.string(), Joi.any()).default({}),
+            files: Joi.object({
+              qap_file: Joi.array().items(Joi.string().allow('', null)).default([]),
+              spec_file: Joi.array().items(Joi.string().allow('', null)).default([]),
+              datasheet_file: Joi.array().items(Joi.string().allow('', null)).default([])
+            }).default({ qap_file: [], spec_file: [], datasheet_file: [] }),
+            vendors: Joi.array().items(Joi.number()).default([]),
+            tech_eval_clauses: Joi.array().default([])
+          })
+        ).default([])
+      })
+      .required()
+      .unknown(true)
   }).unknown(false),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),

@@ -756,12 +756,21 @@ const hospitalityModel = {
           WHEN vhcs.item_type = 'subcategory' THEN c.title
           WHEN vhcs.item_type = 'hotel' THEN h.name
         END AS item_name,
+        CASE
+          WHEN vhcs.item_type = 'hotel' THEN h.city
+          ELSE NULL
+        END AS hotel_city,
+        CASE
+          WHEN vhcs.item_type = 'hotel' THEN hc.name
+          ELSE NULL
+        END AS hotel_company_name,
         vp.payment_status, vp.amount AS total_paid,
         vp.razorpay_payment_id, vp.razorpay_order_id
        FROM tbl_vendor_hotel_category_subscription vhcs
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        LEFT JOIN tbl_category c ON vhcs.item_type IN ('category', 'subcategory') AND c.id = vhcs.item_id
        LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+       LEFT JOIN tbl_hospitality_companies hc ON vhcs.item_type = 'hotel' AND hc.id = h.hospitality_company_id
        WHERE vhcs.vendor_id = $1
        ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
       [vendorId]
@@ -1011,9 +1020,11 @@ const hospitalityModel = {
  * Vendors failing any of the above conditions are excluded.
  */
 getEligibleVendorsForVariant: async (variantId, hotelIds) => {
-  // Include ALL vendors mapped to the hotel, regardless of subscription expiry.
-  // Expired vendors are included in RFQs but blocked from taking actions (sending quotes)
-  // until they renew. This ensures they appear in search results and can receive RFQs.
+  // Include vendors with active OR expired subscriptions (expired vendors
+  // are included in RFQs but blocked from actions until they renew).
+  // Must have BOTH a valid hotel subscription AND a valid category
+  // subscription for the product's category. Cancelled subscriptions
+  // are excluded from both checks.
   return db.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
@@ -1021,6 +1032,22 @@ getEligibleVendorsForVariant: async (variantId, hotelIds) => {
     WHERE product_variant_id = $1
       AND status = true
       AND is_approved = true
+),
+
+product_categories AS (
+    SELECT DISTINCT pc.category_id
+    FROM tbl_product_variant pv
+    JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+    WHERE pv.id = $1
+),
+
+eligible_category_vendors AS (
+    SELECT DISTINCT s.vendor_id
+    FROM tbl_vendor_hotel_category_subscription s
+    JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+    JOIN product_categories pc ON pc.category_id = s.item_id
+    WHERE s.item_type = 'category'
+      AND s.status IN ('active', 'expired')
 ),
 
 eligible_hotel_vendors AS (
@@ -1035,6 +1062,7 @@ eligible_hotel_vendors AS (
 
 SELECT vv.vendor_id
 FROM variant_vendors vv
+JOIN eligible_category_vendors ecv ON ecv.vendor_id = vv.vendor_id
 JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
 `,
     [variantId, hotelIds]
@@ -1556,6 +1584,289 @@ getVendorHotelCategoryMappings: async (vendorId) => {
        ORDER BY u.id, hum.mapping_type DESC`,
       [companyId, hotelId]
     );
+  },
+
+  // ============================================================
+  // WH-74: Vendor self-service subscription management
+  // ============================================================
+
+  /**
+   * Returns the vendor's currently-active subscription items grouped into
+   * categories, sub-categories (nested under their parent), and hotels, plus
+   * the shared FY end_date that all rows align to.
+   *
+   * Excludes 'cancelled' rows. Only includes rows whose payment_status is
+   * paid/success OR whose payment_id is NULL on an approved vendor (admin-
+   * assigned subscriptions). Treats 'active' status with future end_date as
+   * the source of truth — does NOT include expired or pending rows.
+   */
+  getActiveSubscriptionItemsForVendor: async (vendorId) => {
+    const rows = await db.any(
+      `SELECT
+        s.id AS subscription_id,
+        s.item_type,
+        s.item_id,
+        s.fee_amount,
+        s.start_date,
+        s.end_date,
+        s.status,
+        s.payment_id,
+        CASE
+          WHEN s.item_type = 'category' THEN c.title
+          WHEN s.item_type = 'subcategory' THEN sc.title
+          WHEN s.item_type = 'hotel' THEN h.name
+        END AS item_name,
+        CASE
+          WHEN s.item_type = 'subcategory' THEN sc.parent_id
+          ELSE NULL
+        END AS sub_parent_id,
+        CASE
+          WHEN s.item_type = 'subcategory' THEN sc_parent.title
+          ELSE NULL
+        END AS sub_parent_name,
+        CASE
+          WHEN s.item_type = 'hotel' THEN h.city
+          ELSE NULL
+        END AS city,
+        CASE
+          WHEN s.item_type = 'hotel' THEN hc.name
+          ELSE NULL
+        END AS company_name
+       FROM tbl_vendor_hotel_category_subscription s
+       JOIN tbl_users u ON u.id = s.vendor_id
+       LEFT JOIN tbl_vendor_payments vp ON vp.id = s.payment_id
+       LEFT JOIN tbl_category c
+         ON c.id = s.item_id AND s.item_type = 'category'
+       LEFT JOIN tbl_category sc
+         ON sc.id = s.item_id AND s.item_type = 'subcategory'
+       LEFT JOIN tbl_category sc_parent
+         ON sc_parent.id = sc.parent_id
+       LEFT JOIN tbl_hospitality_company_hotels h
+         ON h.id = s.item_id AND s.item_type = 'hotel'
+       LEFT JOIN tbl_hospitality_companies hc
+         ON hc.id = h.hospitality_company_id
+       WHERE s.vendor_id = $1
+         AND s.status = 'active'
+         AND s.end_date >= CURRENT_DATE
+         AND (
+           vp.payment_status IN ('paid', 'success')
+           OR (s.payment_id IS NULL AND u.status = 1)
+         )
+       ORDER BY s.item_type, item_name`,
+      [vendorId]
+    );
+
+    const categories = rows
+      .filter(r => r.item_type === 'category')
+      .map(r => ({
+        subscription_id: r.subscription_id,
+        id: r.item_id,
+        name: r.item_name,
+        fee_amount: parseFloat(r.fee_amount) || 0,
+        start_date: r.start_date,
+        end_date: r.end_date
+      }));
+
+    const subcategories = rows
+      .filter(r => r.item_type === 'subcategory')
+      .map(r => ({
+        subscription_id: r.subscription_id,
+        id: r.item_id,
+        name: r.item_name,
+        parent_id: r.sub_parent_id,
+        parent_name: r.sub_parent_name,
+        start_date: r.start_date,
+        end_date: r.end_date
+      }));
+
+    const hotels = rows
+      .filter(r => r.item_type === 'hotel')
+      .map(r => ({
+        subscription_id: r.subscription_id,
+        id: r.item_id,
+        name: r.item_name,
+        city: r.city,
+        company_name: r.company_name,
+        start_date: r.start_date,
+        end_date: r.end_date
+      }));
+
+    // All active rows share one FY end_date; pick the latest start_date as
+    // the "active since" anchor for the hero card.
+    const sharedEndDate = rows.length > 0 ? rows[0].end_date : null;
+    const earliestStart = rows.reduce((min, r) => {
+      if (!min || new Date(r.start_date) < new Date(min)) return r.start_date;
+      return min;
+    }, null);
+
+    return {
+      categories,
+      subcategories,
+      hotels,
+      shared_end_date: sharedEndDate,
+      earliest_start_date: earliestStart
+    };
+  },
+
+  /**
+   * Returns the vendor's payment history (paid/success only) with each row
+   * including its associated subscription items so the frontend can display
+   * what was bought in each payment.
+   */
+  getVendorPaymentHistory: async (vendorId, { limit = 50, offset = 0 } = {}) => {
+    const payments = await db.any(
+      `SELECT
+        id,
+        razorpay_order_id,
+        razorpay_payment_id,
+        amount,
+        currency,
+        payment_status,
+        metadata,
+        receipt,
+        created_at
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1
+         AND payment_status IN ('paid', 'success')
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [vendorId, limit, offset]
+    );
+
+    if (!payments.length) return [];
+
+    const paymentIds = payments.map(p => p.id);
+    const items = await db.any(
+      `SELECT
+        s.payment_id,
+        s.item_type,
+        s.item_id,
+        s.fee_amount,
+        CASE
+          WHEN s.item_type IN ('category', 'subcategory') THEN c.title
+          WHEN s.item_type = 'hotel' THEN h.name
+        END AS item_name
+       FROM tbl_vendor_hotel_category_subscription s
+       LEFT JOIN tbl_category c
+         ON c.id = s.item_id AND s.item_type IN ('category', 'subcategory')
+       LEFT JOIN tbl_hospitality_company_hotels h
+         ON h.id = s.item_id AND s.item_type = 'hotel'
+       WHERE s.payment_id = ANY($1::int[])`,
+      [paymentIds]
+    );
+
+    const itemsByPayment = items.reduce((map, row) => {
+      const key = row.payment_id;
+      if (!map[key]) map[key] = [];
+      map[key].push({
+        type: row.item_type,
+        id: row.item_id,
+        name: row.item_name,
+        fee: parseFloat(row.fee_amount) || 0
+      });
+      return map;
+    }, {});
+
+    return payments.map(p => {
+      let parsedMeta = null;
+      try {
+        parsedMeta = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+      } catch (_) {
+        parsedMeta = null;
+      }
+      const kind = parsedMeta?.type === 'modification'
+        ? 'modification'
+        : (parsedMeta?.kind || (p.receipt && p.receipt.startsWith('RNW') ? 'renewal' : 'registration'));
+
+      // For modifications, surface the added/removed details from metadata
+      const modification_details = kind === 'modification' && parsedMeta ? {
+        added_categories: parsedMeta.added_category_names || [],
+        removed_categories: parsedMeta.removed_category_names || [],
+        added_subcategories: parsedMeta.added_subcategory_names || [],
+        removed_subcategories: parsedMeta.removed_subcategory_names || [],
+        added_hotels: parsedMeta.added_hotel_names || [],
+        removed_hotels: parsedMeta.removed_hotel_names || [],
+      } : null;
+
+      return {
+        payment_id: p.id,
+        razorpay_order_id: p.razorpay_order_id,
+        razorpay_payment_id: p.razorpay_payment_id,
+        amount: parseFloat(p.amount) || 0,
+        currency: p.currency || 'INR',
+        payment_status: p.payment_status,
+        receipt: p.receipt,
+        created_at: p.created_at,
+        type: kind,
+        items: itemsByPayment[p.id] || [],
+        modification_details,
+      };
+    });
+  },
+
+  /**
+   * Bulk soft-cancel a set of subscription rows (audit-preserving deletion).
+   * Used by the modify endpoint when a vendor removes items. Optionally
+   * runs inside an existing transaction.
+   */
+  cancelSubscriptionItems: async (vendorId, subscriptionIds, { tx } = {}) => {
+    if (!subscriptionIds?.length) return 0;
+    const conn = tx || db;
+    const result = await conn.result(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET status = 'cancelled',
+           cancelled_at = NOW(),
+           cancelled_by = $1
+       WHERE id = ANY($2::int[])
+         AND vendor_id = $1
+         AND status = 'active'`,
+      [vendorId, subscriptionIds]
+    );
+    return result.rowCount;
+  },
+
+  /**
+   * Cascade-cancel all active sub-categories whose parent_id is in the given
+   * list of removed category ids. Used when a vendor removes a parent
+   * category — the children are no longer meaningful and should disappear
+   * with the parent. Returns the cancelled subscription_ids so the caller
+   * can include them in the modification summary.
+   */
+  cancelSubcategoriesByParentCategoryIds: async (vendorId, parentCategoryIds, { tx } = {}) => {
+    if (!parentCategoryIds?.length) return [];
+    const conn = tx || db;
+    const cancelled = await conn.any(
+      `UPDATE tbl_vendor_hotel_category_subscription s
+       SET status = 'cancelled',
+           cancelled_at = NOW(),
+           cancelled_by = $1
+       FROM tbl_category sc
+       WHERE s.item_id = sc.id
+         AND s.item_type = 'subcategory'
+         AND s.vendor_id = $1
+         AND s.status = 'active'
+         AND sc.parent_id = ANY($2::int[])
+       RETURNING s.id, s.item_id`,
+      [vendorId, parentCategoryIds]
+    );
+    return cancelled;
+  },
+
+  /**
+   * Detect any in-flight modification orders so we can prevent the vendor
+   * from creating a duplicate Razorpay order while one is pending.
+   */
+  hasPendingModification: async (vendorId) => {
+    const row = await db.oneOrNone(
+      `SELECT 1
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1
+         AND payment_status IN ('created', 'pending')
+         AND metadata::jsonb->>'type' = 'modification'
+       LIMIT 1`,
+      [vendorId]
+    );
+    return !!row;
   },
 
 };
