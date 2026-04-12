@@ -7,8 +7,9 @@ import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestones
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
-import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
-import { sendApprovalNotification, sendPONotificationToVendor } from "./purchaseOrderEmails.js";
+import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../../util/constants.js";
+import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
+import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 
 export const getPOByRFQ = async (req, res) => {
@@ -457,10 +458,10 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
       return;
     }
 
-    // Update PO status to approved
+    // Update PO status to acceptance_pending (vendor must accept before proceeding)
     await t.none(`
       UPDATE tbl_rfq_purchase_order
-      SET status = 'approved', updated_at = NOW()
+      SET status = 'acceptance_pending', updated_at = NOW()
       WHERE id = $1
     `, [po_id]);
 
@@ -468,7 +469,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
     await recordLifecycleEvent({
       entity_type: 'PO',
       entity_id: po_id,
-      stage: 'PO_APPROVED',
+      stage: 'PO_ACCEPTANCE_PENDING',
       action: 'APPROVE',
       performed_by: approver_user_id,
       metadata: {
@@ -491,13 +492,10 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         WHERE r.id = $1
       `, [purchaseOrder.rfq_id]);
 
-      // Send vendor notification with RFQ creator as buyer info (not the approver)
-      const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
-      if (rfqCreator && rfqCreator[0]) {
-        sendPONotificationToVendor(purchaseOrder, rfqCreator[0]).catch(err => {
-          logError('Failed to send PO notification to vendor', err);
-        });
-      }
+      // Send acceptance request email to vendor (vendor must accept/reject)
+      sendPOAcceptanceRequestToVendor(purchaseOrder, rfqDetails).catch(err => {
+        logError('Failed to send PO acceptance request to vendor', err);
+      });
 
       // Get product names from tbl_purchase_order_product (normalized table)
       const products = await t.any(`
@@ -548,7 +546,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         created_at: action.created_at
       })) || [];
 
-      // Fire-and-forget notification
+      // Fire-and-forget notification (internal team: PO approved, sent to vendor for acceptance)
       sendPOApprovalCompletionNotification({
         rfqDetails: {
           id: rfqDetails?.id,
@@ -750,6 +748,147 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
 
   } catch (error) {
     logError('Error in sendLegacyPOApprovalNotification', error);
+  }
+};
+
+// ============= VENDOR ACCEPTANCE / REJECTION =============
+
+/**
+ * Vendor accepts a PO that is in acceptance_pending status.
+ * POST /api/v1/po/accept/:po_id
+ */
+export const acceptPO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const vendorUserId = req.user.id;
+
+    const result = await db.tx(async t => {
+      const po = await t.oneOrNone(`
+        SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+      `, [po_id, vendorUserId]);
+
+      if (!po) {
+        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+      }
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order
+        SET status = 'approved', vendor_action_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+      `, [po_id]);
+
+      await recordLifecycleEvent({
+        entity_type: 'PO',
+        entity_id: po_id,
+        stage: 'PO_ACCEPTED_BY_VENDOR',
+        action: 'ACCEPT',
+        performed_by: vendorUserId,
+        metadata: { rfq_id: po.rfq_id, po_number: po.po_number },
+        txContext: t
+      });
+
+      return po;
+    });
+
+    // Send confirmed PO email to vendor (existing email with PO PDF)
+    const rfqDetails = await db.oneOrNone(`
+      SELECT r.id, r.rfq_no, r.title, r.created_by, r.hospitality_company_id, r.hotel_id
+      FROM tbl_rfq r WHERE r.id = $1
+    `, [result.rfq_id]);
+
+    const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
+    if (rfqCreator && rfqCreator[0]) {
+      sendPONotificationToVendor(result, rfqCreator[0]).catch(err => {
+        logError('Failed to send PO confirmed notification to vendor', err);
+      });
+    }
+
+    // Send "Vendor Accepted" notification to all internal BU members
+    sendPOAcceptedNotificationToTeam(result, rfqDetails).catch(err => {
+      logError('Failed to send PO accepted notification to team', err);
+    });
+
+    return res.json({
+      status: 1,
+      message: 'Purchase order accepted successfully.',
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 0,
+      message: error.message || 'Failed to accept PO.',
+    });
+  }
+};
+
+/**
+ * Vendor rejects a PO that is in acceptance_pending status.
+ * POST /api/v1/po/reject/:po_id
+ */
+export const rejectPO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { reason = '' } = req.body;
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ status: 0, message: 'Rejection reason is required.' });
+    }
+    const vendorUserId = req.user.id;
+
+    const result = await db.tx(async t => {
+      const po = await t.oneOrNone(`
+        SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+      `, [po_id, vendorUserId]);
+
+      if (!po) {
+        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+      }
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order
+        SET status = 'rejected_by_vendor',
+            vendor_rejection_reason = $2,
+            vendor_action_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+      `, [po_id, reason]);
+
+      // Definalize vendor — move from tbl_quote_finalization to history
+      await handlePORejection(po, vendorUserId, t);
+
+      await recordLifecycleEvent({
+        entity_type: 'PO',
+        entity_id: po_id,
+        stage: 'PO_REJECTED_BY_VENDOR',
+        action: 'REJECT',
+        performed_by: vendorUserId,
+        metadata: {
+          rfq_id: po.rfq_id,
+          po_number: po.po_number,
+          rejection_reason: reason
+        },
+        txContext: t
+      });
+
+      return po;
+    });
+
+    // Send rejection notification to commercial evaluators (fire-and-forget)
+    sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
+      logError('Failed to send vendor rejection notification', err);
+    });
+
+    return res.json({
+      status: 1,
+      message: 'Purchase order rejected. The buyer has been notified.',
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 0,
+      message: error.message || 'Failed to reject PO.',
+    });
   }
 };
 

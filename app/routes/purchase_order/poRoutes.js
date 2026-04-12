@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, raiseInvoice, regeneratePO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
@@ -15,6 +15,8 @@ PORoutes.put('/:po_id', passportSignIn, updatePO)
 PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
 PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
 PORoutes.post('/approve/:po_id', passportSignIn, approvePO);
+PORoutes.post('/accept/:po_id', passportSignIn, acl([3]), acceptPO);
+PORoutes.post('/reject/:po_id', passportSignIn, acl([3]), rejectPO);
 PORoutes.post('/regenerate/:po_id', passportSignIn, regeneratePO);
 PORoutes.post('/upload-pdf/:po_id', passportSignIn, poUploadMiddleware, uploadPODocument);
 PORoutes.post('/updateGST/:po_id', passportSignIn, updateGST);

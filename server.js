@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron } from './app/helper/cronManager.js';
 import { logger } from './app/util/logger.js';
 
 
@@ -46,6 +46,7 @@ util(app);
 
 rescheduleAllMilestoneReminders();
 rescheduleAllRfqPublishJobs();
+startVendorAcceptanceReminderCron();
 
 
 // Clean error handler

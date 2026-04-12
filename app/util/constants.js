@@ -17,14 +17,16 @@ export const APPROVAL_DECISIONS = {
 }
 
 export const PO_STATUSES = {
-  DRAFT: 'draft', 
-  PENDING_APPROVAL: 'pending_approval', 
-  APPROVED: 'approved', 
-  SENT: 'sent', 
-  GRN: 'GRN', 
-  COMPLETED: 'completed', 
+  DRAFT: 'draft',
+  PENDING_APPROVAL: 'pending_approval',
+  ACCEPTANCE_PENDING: 'acceptance_pending',
+  APPROVED: 'approved',
+  SENT: 'sent',
+  GRN: 'GRN',
+  COMPLETED: 'completed',
   CANCELLED: 'cancelled',
-  REJECTED: 'rejected'
+  REJECTED: 'rejected',
+  REJECTED_BY_VENDOR: 'rejected_by_vendor'
 }
 
 export const RFQ_STATUSES = {

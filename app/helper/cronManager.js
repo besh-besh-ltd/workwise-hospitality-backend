@@ -576,3 +576,65 @@ export const removeRfqPublishJob = async (rfqId) => {
 export const rescheduleAllRfqPublishJobs = async () => {
   logger.info('[RFQ Publisher] Using EventBridge - no rescheduling needed on startup');
 };
+
+// ============= VENDOR PO ACCEPTANCE REMINDERS =============
+
+/**
+ * Sends tiered reminder emails to vendors for POs still in acceptance_pending.
+ * Schedule: Runs every day at 10:00 AM IST.
+ * Reminders: Day 1 (gentle), Day 3 (firm), Day 5 (final).
+ */
+export const startVendorAcceptanceReminderCron = () => {
+  // 10:00 AM IST → 4:30 AM UTC
+  cron.schedule('30 4 * * *', async () => {
+    logger.info('[Vendor Acceptance Reminder] Running daily check...');
+    try {
+      const pendingPOs = await db.any(`
+        SELECT po.*, r.rfq_no
+        FROM tbl_rfq_purchase_order po
+        JOIN tbl_rfq r ON r.id = po.rfq_id
+        WHERE po.status = 'acceptance_pending'
+      `);
+
+      if (pendingPOs.length === 0) {
+        logger.info('[Vendor Acceptance Reminder] No pending POs found.');
+        return;
+      }
+
+      const { sendPOAcceptanceReminderToVendor } = await import('../controllers/po/purchaseOrderEmails.js');
+
+      for (const po of pendingPOs) {
+        const daysSince = Math.floor((Date.now() - new Date(po.updated_at).getTime()) / (1000 * 60 * 60 * 24));
+        const reminderCount = po.vendor_reminder_count || 0;
+        let reminderToSend = null;
+
+        if (daysSince >= 5 && reminderCount === 2) {
+          reminderToSend = 3;
+        } else if (daysSince >= 3 && reminderCount === 1) {
+          reminderToSend = 2;
+        } else if (daysSince >= 1 && reminderCount === 0) {
+          reminderToSend = 1;
+        }
+
+        if (reminderToSend) {
+          try {
+            await sendPOAcceptanceReminderToVendor(po, { rfq_no: po.rfq_no }, reminderToSend);
+            await db.none(
+              `UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = $2 WHERE id = $1`,
+              [po.id, reminderToSend]
+            );
+            logger.info(`[Vendor Acceptance Reminder] Sent reminder #${reminderToSend} for PO ${po.po_number}`);
+          } catch (emailError) {
+            logError(`[Vendor Acceptance Reminder] Failed to send reminder for PO ${po.id}`, emailError);
+          }
+        }
+      }
+
+      logger.info(`[Vendor Acceptance Reminder] Processed ${pendingPOs.length} pending POs.`);
+    } catch (error) {
+      logError('[Vendor Acceptance Reminder] Cron job failed', error);
+    }
+  });
+
+  logger.info('[Vendor Acceptance Reminder] Cron scheduled: daily at 10:00 AM IST');
+};

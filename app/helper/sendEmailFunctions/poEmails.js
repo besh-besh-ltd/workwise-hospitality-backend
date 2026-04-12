@@ -57,12 +57,15 @@ export const sendPOApprovalCompletionNotification = async ({
       const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
           <p>
-            Great news! A <strong>Purchase Order</strong> has been fully approved and finalized.
+            A <strong>Purchase Order</strong> has been fully approved internally and sent to the vendor for acceptance.
           </p>
 
-          <div style="background-color:#F0FDF4; border-left:4px solid #10B981; padding:16px; margin:16px 0; border-radius:4px;">
-            <p style="margin:0; font-size:18px; font-weight:600; color:#166534;">
-              Vendor Finalized: ${vendorName}
+          <div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; padding:16px; margin:16px 0; border-radius:4px;">
+            <p style="margin:0; font-size:18px; font-weight:600; color:#92400E;">
+              Awaiting Vendor Acceptance: ${vendorName}
+            </p>
+            <p style="margin:8px 0 0; font-size:14px; color:#92400E;">
+              The vendor has been notified and must accept or reject this PO before it can proceed.
             </p>
           </div>
 
@@ -125,7 +128,7 @@ export const sendPOApprovalCompletionNotification = async ({
       sendMail({
         from: config.webmasterMail,
         to: user.email,
-        subject: `PO Approved — ${vendorName} finalized for RFQ #${rfq_no}`,
+        subject: `PO Approved & Sent to Vendor — Awaiting Acceptance for RFQ #${rfq_no}`,
         html: htmlContent
       });
     }
