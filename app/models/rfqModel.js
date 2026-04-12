@@ -5801,7 +5801,8 @@ LIMIT 2;
     company_id,
     TA_Vendors,
     no_freight,
-    rfq_product_id
+    rfq_product_id,
+    include_negotiation = false
   ) => {
     if(rfq_product_id) {
       rfq_product_id = rfq_product_id.split(",").map(Number);
@@ -6139,6 +6140,66 @@ LIMIT 2;
               AND TQI.variant = TRF.variant              
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
+
+        ${include_negotiation ? `
+        , (
+          SELECT json_build_object(
+            'id', NR.id, 'rfq_id', NR.rfq_id, 'rfq_product_id', NR.rfq_product_id,
+            'round_number', NR.round_number, 'target_price', NR.target_price,
+            'status', NR.status, 'end_date', NR.end_date,
+            'approved_at', NR.approved_at, 'published_at', NR.published_at,
+            'closed_at', NR.closed_at, 'created_by', NR.created_by,
+            'created_by_name', NRU.name, 'created_by_email', NRU.email,
+            'remarks', NR.remarks, 'created_at', NR.created_at
+          )
+          FROM tbl_negotiation_rounds NR
+          LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
+          WHERE NR.rfq_product_id = TRF.id
+            AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+          ORDER BY NR.round_number DESC
+          LIMIT 1
+        ) AS "active_round"
+
+        , (
+          SELECT json_agg(sub ORDER BY sub.submitted_at DESC)
+          FROM (
+            SELECT
+              NRQ.id, NRQ.negotiation_round_id,
+              NRQ.vendor_id, NRQU.name AS vendor_name,
+              NRQU.email AS vendor_email,
+              COALESCE(NRQCO.company_name, NRQU.organization_name, NRQU.name) AS organization_name,
+              NRQ.rfq_product_id,
+              NRQ.quoted_price, NRQ.previous_price,
+              NRQ.submitted_at
+            FROM tbl_negotiation_round_quotes NRQ
+            LEFT JOIN tbl_users NRQU ON NRQU.id = NRQ.vendor_id
+            LEFT JOIN tbl_company NRQCO ON NRQCO.id = NRQU.company_id
+            WHERE NRQ.negotiation_round_id = (
+              SELECT NR2.id FROM tbl_negotiation_rounds NR2
+              WHERE NR2.rfq_product_id = TRF.id
+                AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
+              ORDER BY NR2.round_number DESC LIMIT 1
+            )
+          ) sub
+        ) AS "active_round_quotes"
+
+        , (
+          SELECT json_build_object(
+            'has_pending_approval', (AI.status = 'PENDING'),
+            'approval_instance', json_build_object(
+              'id', AI.id, 'status', AI.status, 'current_step', AI.current_step,
+              'metadata', AI.metadata,
+              'created_at', AI.created_at, 'completed_at', AI.completed_at
+            )
+          )
+          FROM tbl_approval_instances AI
+          WHERE AI.entity_type = 'NEGOTIATION_QUOTE'
+            AND AI.entity_id = TRF.id
+          ORDER BY AI.created_at DESC
+          LIMIT 1
+        ) AS "quote_approval_status"
+        ` : ''}
+
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = $1
         ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
@@ -12360,12 +12421,14 @@ ORDER BY tq.timestamp DESC;
             )
           END
         ) AS finalization_partially_approved
+        , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       LEFT JOIN tbl_hospitality_company_hotels H
       ON H.id = RFQ.hotel_id
       AND H.is_deleted = 0
+      LEFT JOIN tbl_department D ON D.id = RFQ.department_id
 
       ${dynamicJoins}
       WHERE (${

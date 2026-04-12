@@ -571,10 +571,247 @@ const negotiationModel = {
   getExistingRoundQuote: async (negotiation_round_id, vendor_id, rfq_product_id, txContext = null) => {
     const dbContext = txContext || db;
     return dbContext.oneOrNone(
-      `SELECT id, submitted_at FROM tbl_negotiation_round_quotes 
+      `SELECT id, submitted_at FROM tbl_negotiation_round_quotes
        WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
       [negotiation_round_id, vendor_id, rfq_product_id]
     );
+  },
+
+  getApprovalBundleForRfq: async (rfqId, userId) => {
+    // 1. Get all rfq_product_ids for this RFQ
+    const products = await db.any(
+      `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`,
+      [rfqId]
+    );
+    const productIds = products.map(p => p.id);
+    if (productIds.length === 0) {
+      return { negotiation_instances: {}, negotiation_quote_instances: {}, rounds_history: [] };
+    }
+
+    // 2. Fetch rounds history, approval instances, steps, approvers, and actions in parallel
+    const [roundsHistory, instances, allSteps, allApprovers, allActions] = await Promise.all([
+      // Full rounds history for the RFQ
+      db.any(
+        `SELECT nr.*, u.name as created_by_name, u.email as created_by_email,
+                COALESCE(PV.name, P.name) as product_name
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_users u ON u.id = nr.created_by
+         LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+         LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+         LEFT JOIN tbl_product P ON P.id = PV.product_id
+         WHERE nr.rfq_id = $1
+         ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`,
+        [rfqId]
+      ),
+      // All approval instances for NEGOTIATION and NEGOTIATION_QUOTE entity types
+      db.any(
+        `SELECT
+           i.*,
+           p.entity_type as policy_entity_type,
+           p.hospitality_company_id as policy_company_id,
+           p.hotel_id as policy_hotel_id,
+           p.department_id as policy_department_id,
+           hc.name as company_name,
+           hh.name as hotel_name,
+           d.title as department_name,
+           initiator.name as initiated_by_name,
+           initiator.email as initiated_by_email,
+           initiator.designation as initiated_by_designation
+         FROM tbl_approval_instances i
+         JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
+         LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
+         LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
+         LEFT JOIN tbl_department d ON i.department_id = d.id
+         LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
+         WHERE i.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
+           AND i.entity_id = ANY($1::int[])
+         ORDER BY i.created_at DESC`,
+        [productIds]
+      ),
+      // All steps for those instances
+      db.any(
+        `SELECT s.*, ps.approval_type, ps.approver_source_type, ps.approver_source_id
+         FROM tbl_approval_instance_steps s
+         LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
+         WHERE s.approval_instance_id IN (
+           SELECT id FROM tbl_approval_instances
+           WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
+             AND entity_id = ANY($1::int[])
+         )
+         ORDER BY s.step_order ASC`,
+        [productIds]
+      ),
+      // All approvers for those steps
+      db.any(
+        `SELECT
+           sa.*,
+           u.name as user_name,
+           u.email as user_email,
+           u.designation as user_designation,
+           (
+             SELECT d.title
+             FROM tbl_user_department ud
+             JOIN tbl_department d ON d.id = ud.department_id
+             WHERE ud.user_id = u.id
+             ORDER BY ud.id DESC
+             LIMIT 1
+           ) AS user_department
+         FROM tbl_approval_step_approvers sa
+         JOIN tbl_users u ON sa.approver_user_id = u.id
+         WHERE sa.approval_instance_step_id IN (
+           SELECT s.id FROM tbl_approval_instance_steps s
+           WHERE s.approval_instance_id IN (
+             SELECT id FROM tbl_approval_instances
+             WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
+               AND entity_id = ANY($1::int[])
+           )
+         )`,
+        [productIds]
+      ),
+      // All actions for those instances
+      db.any(
+        `SELECT
+           a.id, a.approval_instance_id, a.approval_instance_step_id,
+           a.approver_user_id, a.action, a.comment,
+           a.created_at AT TIME ZONE 'UTC' AS created_at,
+           u.name as actor_name,
+           u.email as actor_email
+         FROM tbl_approval_actions a
+         JOIN tbl_users u ON a.approver_user_id = u.id
+         WHERE a.approval_instance_id IN (
+           SELECT id FROM tbl_approval_instances
+           WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
+             AND entity_id = ANY($1::int[])
+         )
+         ORDER BY a.created_at ASC`,
+        [productIds]
+      )
+    ]);
+
+    // 3. Index steps and approvers by instance/step
+    const stepsByInstance = {};
+    for (const step of allSteps) {
+      if (!stepsByInstance[step.approval_instance_id]) {
+        stepsByInstance[step.approval_instance_id] = [];
+      }
+      stepsByInstance[step.approval_instance_id].push(step);
+    }
+
+    const approversByStep = {};
+    for (const approver of allApprovers) {
+      if (!approversByStep[approver.approval_instance_step_id]) {
+        approversByStep[approver.approval_instance_step_id] = [];
+      }
+      approversByStep[approver.approval_instance_step_id].push(approver);
+    }
+
+    const actionsByInstance = {};
+    for (const action of allActions) {
+      if (!actionsByInstance[action.approval_instance_id]) {
+        actionsByInstance[action.approval_instance_id] = [];
+      }
+      actionsByInstance[action.approval_instance_id].push(action);
+    }
+
+    // 4. Assemble full instance details (matching getApprovalInstanceDetails contract)
+    const negotiationInstances = {};
+    const negotiationQuoteInstances = {};
+
+    for (const inst of instances) {
+      const steps = (stepsByInstance[inst.id] || []).map(step => {
+        const approvers = approversByStep[step.id] || [];
+        return { ...step, approvers };
+      });
+
+      // Compute can_user_approve
+      let canUserApprove = false;
+      let userApprovalStepId = null;
+      if (userId) {
+        for (const step of steps) {
+          if (step.step_order === inst.current_step && inst.status === 'PENDING') {
+            const userApprover = step.approvers.find(
+              ap => ap.approver_user_id === userId && ap.status === 'PENDING'
+            );
+            if (userApprover) {
+              canUserApprove = true;
+              userApprovalStepId = step.id;
+              break;
+            }
+          }
+        }
+      }
+
+      // Compute total_steps
+      const totalSteps = steps.length;
+
+      const assembled = {
+        id: inst.id,
+        entity_type: inst.entity_type,
+        entity_id: inst.entity_id,
+        status: inst.status,
+        current_step: inst.current_step,
+        total_steps: totalSteps,
+        created_at: inst.created_at,
+        completed_at: inst.completed_at,
+        metadata: inst.metadata,
+        initiated_by: {
+          user_id: inst.initiated_by,
+          name: inst.initiated_by_name,
+          email: inst.initiated_by_email,
+          designation: inst.initiated_by_designation
+        },
+        policy: {
+          id: inst.approval_policy_id,
+          hospitality_company_id: inst.policy_company_id,
+          hotel_id: inst.policy_hotel_id,
+          department_id: inst.policy_department_id
+        },
+        scope: {
+          hospitality_company_id: inst.hospitality_company_id,
+          company_name: inst.company_name,
+          hotel_id: inst.hotel_id,
+          hotel_name: inst.hotel_name,
+          department_id: inst.department_id,
+          department_name: inst.department_name
+        },
+        can_user_approve: canUserApprove,
+        user_approval_step_id: userApprovalStepId,
+        steps,
+        action_history: actionsByInstance[inst.id] || []
+      };
+
+      // Group by entity_type and entity_id
+      const targetMap = inst.entity_type === 'NEGOTIATION' ? negotiationInstances : negotiationQuoteInstances;
+      const entityId = String(inst.entity_id);
+      if (!targetMap[entityId]) {
+        targetMap[entityId] = [];
+      }
+      targetMap[entityId].push(assembled);
+    }
+
+    // 5. Attach round-level approvals to rounds_history
+    const enrichedRounds = roundsHistory.map(round => {
+      const roundApprovals = negotiationInstances[String(round.rfq_product_id)] || [];
+      return {
+        ...round,
+        approvals: roundApprovals.length > 0
+          ? roundApprovals[0].steps?.flatMap(s => s.approvers.map(a => ({
+              id: a.id,
+              approver_name: a.user_name,
+              approver_email: a.user_email,
+              status: a.status,
+              acted_at: a.acted_at,
+              comment: a.comment
+            })))
+          : []
+      };
+    });
+
+    return {
+      negotiation_instances: negotiationInstances,
+      negotiation_quote_instances: negotiationQuoteInstances,
+      rounds_history: enrichedRounds
+    };
   }
 };
 

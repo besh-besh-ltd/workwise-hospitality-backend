@@ -7952,7 +7952,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id , pageSource } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id, pageSource, include_negotiation } = req.query;
     const { id, company_id } = req.user;
 
     try {
@@ -7972,7 +7972,8 @@ const rfqController = {
           company_id,
           TA_Vendors,
           no_freight,
-          rfq_product_id
+          rfq_product_id,
+          include_negotiation === 'true'
         );
       }
       // rfQItem = processQuotations(rfQItem);
