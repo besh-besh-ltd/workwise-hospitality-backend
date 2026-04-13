@@ -6712,6 +6712,36 @@ const rfqController = {
         rfqData.po_initiators = [];
       }
 
+      // Fetch vendor PO rejections for this RFQ (used by Quote Compare to show rejection info)
+      try {
+        rfqData.vendor_rejections = await db.any(`
+          SELECT
+            rp.product_variant_id,
+            rp.variant,
+            po.finalized_vendor_id AS vendor_id,
+            u.name AS vendor_name,
+            u.organization_name AS vendor_organization,
+            po.po_number,
+            po.vendor_rejection_reason,
+            po.vendor_action_at AS rejected_at
+          FROM tbl_rfq_purchase_order po
+          JOIN tbl_users u ON u.id = po.finalized_vendor_id
+          CROSS JOIN LATERAL unnest(po.rfq_product_id) AS pid(val)
+          JOIN tbl_rfq_products rp ON rp.id = pid.val
+          WHERE po.rfq_id = $1
+            AND po.status = 'rejected_by_vendor'
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization qf
+              WHERE qf.rfq_id = po.rfq_id
+                AND qf.product_variant_id = rp.product_variant_id
+                AND qf.variant = rp.variant
+            )
+        `, [rfqData.id]);
+      } catch (err) {
+        logError('Error fetching vendor rejections for RFQ', err);
+        rfqData.vendor_rejections = [];
+      }
+
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
         rfqData.has_paid_tender_fees = rfqData.vendor_payment_status === 'success';
@@ -8944,6 +8974,27 @@ const rfqController = {
                     approvalTriggered = true;
                     negotiationQuoteApprovalPending = true;
                   } else {
+                    // If there's an old APPROVED instance whose PO was rejected by vendor,
+                    // cancel it so a fresh approval cycle can begin for re-finalization.
+                    const existingApproved = existingApprovals.find(inst => inst.status === 'APPROVED');
+                    if (existingApproved) {
+                      const linkedPO = await t.oneOrNone(`
+                        SELECT id, status FROM tbl_rfq_purchase_order
+                        WHERE rfq_id = $1 AND status = 'rejected_by_vendor'
+                          AND rfq_product_id @> ARRAY[$2]::int[]
+                        ORDER BY updated_at DESC LIMIT 1
+                      `, [rfq_id, rfqProduct.id]);
+
+                      if (linkedPO) {
+                        await t.none(`
+                          UPDATE tbl_approval_instances
+                          SET status = 'CANCELLED', completed_at = NOW()
+                          WHERE id = $1
+                        `, [existingApproved.id]);
+                        logger.info(`Cancelled old NEGOTIATION_QUOTE approval ${existingApproved.id} for re-finalization after vendor PO rejection`);
+                      }
+                    }
+
                     // Try to create NEGOTIATION_QUOTE approval instance
                     const approvalResult = await createApprovalInstance({
                       entity_type: 'NEGOTIATION_QUOTE',
@@ -14282,6 +14333,24 @@ getClauses: async (req, res) => {
       } else {
         for (const rfq of rfqs) {
           rfq.approval_required = false;
+        }
+      }
+
+      // Enrich with has_acceptance_pending flag for vendor order book sidebar
+      if (po && user_type == 3 && rfqs.length > 0) {
+        try {
+          const rfqIds = rfqs.map(r => parseInt(r.id));
+          const pendingRows = await db.any(`
+            SELECT DISTINCT rfq_id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = ANY($1) AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+          `, [rfqIds, user_id]);
+          const pendingSet = new Set(pendingRows.map(r => parseInt(r.rfq_id)));
+          for (const rfq of rfqs) {
+            rfq.has_acceptance_pending = pendingSet.has(parseInt(rfq.id));
+          }
+        } catch (err) {
+          logError('Error enriching RFQs with acceptance_pending flag', err);
+          for (const rfq of rfqs) { rfq.has_acceptance_pending = false; }
         }
       }
 

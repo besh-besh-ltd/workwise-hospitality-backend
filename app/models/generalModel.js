@@ -3131,17 +3131,25 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
 
 export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   try {
+    const newStatus = reject ? PO_STATUSES.REJECTED : PO_STATUSES.ACCEPTANCE_PENDING;
     const purchaseOrder = await t.one(
       `UPDATE tbl_rfq_purchase_order
        SET status = $2,
            updated_at = NOW()
        WHERE id = $1 RETURNING *`,
-      [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
+      [po_id, newStatus]
     );
 
-    // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
+    // Send acceptance request email to vendor (vendor must accept/reject before PO proceeds)
     if(!reject) {
-      await sendPONotificationToVendor(purchaseOrder, user);
+      const { sendPOAcceptanceRequestToVendor } = await import('../controllers/po/purchaseOrderEmails.js');
+      const rfqDetails = await t.oneOrNone(
+        `SELECT id, rfq_no, title, created_by FROM tbl_rfq WHERE id = $1`,
+        [purchaseOrder.rfq_id]
+      );
+      sendPOAcceptanceRequestToVendor(purchaseOrder, rfqDetails).catch(err => {
+        logError('Failed to send PO acceptance request to vendor (legacy)', err);
+      });
     }
 
     return true;
