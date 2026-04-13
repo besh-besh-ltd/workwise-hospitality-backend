@@ -3343,6 +3343,14 @@ LIMIT 2;
             FROM tbl_quotes tq
             WHERE tq.rfq_id = RFQ.id
           ) AS is_finalized,
+          -- is_quotes_present: used by canEditRfq to block editing after bid deadline
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_quotes _tq_exists
+              WHERE _tq_exists.rfq_id = RFQ.id
+              LIMIT 1
+            )
+          ) AS is_quotes_present,
           -- po_completed: ALL products have an approved (or beyond) PO
           (
             SELECT CASE
@@ -12127,7 +12135,7 @@ ORDER BY tq.timestamp DESC;
         dynamicJoins +=
           'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
         dynamicConditions +=
-          'GROUP BY RFQ.id, P.name, H.name HAVING COUNT(RFQ_T_E.id) > 0';
+          'GROUP BY RFQ.id, P.name, H.name, D.title HAVING COUNT(RFQ_T_E.id) > 0';
         // te_completed = true when ALL products have >= 5 cleared vendors
         dynamicSelectColumns += `,
           (
@@ -12242,13 +12250,8 @@ ORDER BY tq.timestamp DESC;
           dynamicJoins +=
             'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
         }
-        // po_completed = true only when ALL POs for this RFQ are fully approved or beyond
+        // po_completed is now always included in the main SELECT
         dynamicSelectColumns += `,
-          (
-            SELECT BOOL_AND(_po_chk.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed', 'invoice_raised'))
-            FROM tbl_rfq_purchase_order _po_chk
-            WHERE _po_chk.rfq_id = RFQ.id
-          ) AS po_completed,
           -- has_draft_po: any PO in draft status
           EXISTS (
             SELECT 1 FROM tbl_rfq_purchase_order po_draft
@@ -12303,6 +12306,17 @@ ORDER BY tq.timestamp DESC;
         RFQ.timestamp,
         RFQ.hospitality_company_id,
         RFQ.hotel_id,
+        RFQ.is_published,
+        RFQ.created_by,
+        RFQ.tender_publish_date,
+        RFQ.vendor_clarification_date,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_quotes _tq_exists
+            WHERE _tq_exists.rfq_id = RFQ.id
+            LIMIT 1
+          )
+        ) AS is_quotes_present,
         (
           SELECT
             CASE
@@ -12454,7 +12468,24 @@ ORDER BY tq.timestamp DESC;
               ) _partial
             )
           END
-        ) AS finalization_partially_approved
+        ) AS finalization_partially_approved,
+        (
+          SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+            ELSE (
+              SELECT BOOL_AND(has_approved)
+              FROM (
+                SELECT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po2
+                  WHERE _po2.rfq_id = RFQ.id
+                    AND _po2.rfq_product_id @> ARRAY[_rp3.id]
+                    AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                ) AS has_approved
+                FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
+              ) _chk
+            )
+          END
+        ) AS po_completed
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
