@@ -60,7 +60,7 @@ const negotiationModel = {
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
-        COALESCE(PV.name, P.name) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
@@ -93,7 +93,7 @@ const negotiationModel = {
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
-        COALESCE(PV.name, P.name) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
@@ -102,7 +102,6 @@ const negotiationModel = {
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
-         AND (nr.end_date IS NULL OR nr.end_date > NOW())
        ORDER BY nr.round_number DESC
        LIMIT 1`,
       [rfqId, rfqProductId]
@@ -118,7 +117,7 @@ const negotiationModel = {
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
-        COALESCE(PV.name, P.name) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
@@ -351,10 +350,10 @@ const negotiationModel = {
 
     if (!result) return null;
 
-    const now = new Date();
-    const endDate = parseAsUTC(result.end_date);
+    // Use status directly — cron sets ENDED/EXPIRED when end_date passes
+    const expired = result.status !== 'ACTIVE' && result.status !== 'PENDING_APPROVAL';
     return {
-      expired: now > endDate,
+      expired,
       endDate: result.end_date,
       status: result.status
     };
@@ -368,7 +367,7 @@ const negotiationModel = {
     // Prioritize ACTIVE rounds, then fall back to most recent by created_at
     const latestRound = await db.oneOrNone(
       `SELECT nr.*,
-        COALESCE(PV.name, P.name) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
@@ -400,10 +399,9 @@ const negotiationModel = {
       [latestRound.id, vendorId]
     );
 
-    const now = new Date();
-    const endDate = parseAsUTC(latestRound.end_date);
-    const isExpired = now > endDate;
-    const isActive = latestRound.status === 'ACTIVE' && !isExpired;
+    // Use status directly — cron sets ENDED/EXPIRED when end_date passes
+    const isActive = latestRound.status === 'ACTIVE';
+    const isExpired = latestRound.status === 'ENDED' || latestRound.status === 'EXPIRED' || latestRound.status === 'CLOSED' || latestRound.status === 'COMPLETED';
 
     return {
       hasActiveRound: isActive,
@@ -424,7 +422,7 @@ const negotiationModel = {
     // Get the latest round per product (prioritize ACTIVE, then most recent)
     const latestRounds = await db.any(
       `SELECT DISTINCT ON (nr.rfq_product_id) nr.*,
-        COALESCE(PV.name, P.name) as product_name,
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
         nrq.id as vendor_quote_id,
         nrq.quoted_price as vendor_quoted_price,
         nrq.submitted_at as vendor_submitted_at
@@ -442,13 +440,12 @@ const negotiationModel = {
     );
 
     return latestRounds.map(round => {
-      const now = new Date();
-      const endDate = parseAsUTC(round.end_date);
-      const isExpired = now > endDate;
+      // Use status directly — cron sets ENDED/EXPIRED when end_date passes
+      const isExpired = round.status === 'ENDED' || round.status === 'EXPIRED' || round.status === 'CLOSED' || round.status === 'COMPLETED';
       return {
         ...round,
         isExpired,
-        isActive: round.status === 'ACTIVE' && !isExpired,
+        isActive: round.status === 'ACTIVE',
         hasSubmittedQuote: !!round.vendor_quote_id
       };
     });
@@ -593,7 +590,7 @@ const negotiationModel = {
       // Full rounds history for the RFQ
       db.any(
         `SELECT nr.*, u.name as created_by_name, u.email as created_by_email,
-                COALESCE(PV.name, P.name) as product_name
+                COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
          FROM tbl_negotiation_rounds nr
          LEFT JOIN tbl_users u ON u.id = nr.created_by
          LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
@@ -812,6 +809,72 @@ const negotiationModel = {
       negotiation_quote_instances: negotiationQuoteInstances,
       rounds_history: enrichedRounds
     };
+  },
+
+  // ============= ROUND EXPIRATION SCHEDULING =============
+
+  /**
+   * Get rounds that need rescheduling on server startup (future end_date, still pending or active)
+   */
+  getRoundsForReschedule: async () => {
+    return db.any(`
+      SELECT nr.*, r.rfq_no, r.hotel_id,
+             rp.product_variant_id,
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+      FROM tbl_negotiation_rounds nr
+      JOIN tbl_rfq r ON r.id = nr.rfq_id
+      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+      LEFT JOIN tbl_product P ON P.id = PV.product_id
+      WHERE nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+        AND nr.end_date > NOW()
+    `);
+  },
+
+  /**
+   * Get rounds that expired during server downtime (past end_date, still pending or active)
+   */
+  getExpiredRoundsDuringDowntime: async () => {
+    return db.any(`
+      SELECT nr.*, r.rfq_no, r.hotel_id,
+             rp.product_variant_id,
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+      FROM tbl_negotiation_rounds nr
+      JOIN tbl_rfq r ON r.id = nr.rfq_id
+      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+      LEFT JOIN tbl_product P ON P.id = PV.product_id
+      WHERE nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+        AND nr.end_date <= NOW()
+    `);
+  },
+
+  /**
+   * Get the count of quotes submitted for a specific negotiation round
+   */
+  getQuoteCountForRound: async (roundId) => {
+    const result = await db.one(
+      `SELECT COUNT(*)::int AS count FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = $1`,
+      [roundId]
+    );
+    return result.count;
+  },
+
+  /**
+   * Get round by ID with RFQ and product info (for cron expiration handler)
+   */
+  getRoundWithContext: async (roundId) => {
+    return db.oneOrNone(`
+      SELECT nr.*, r.rfq_no, r.hotel_id,
+             rp.product_variant_id,
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+      FROM tbl_negotiation_rounds nr
+      JOIN tbl_rfq r ON r.id = nr.rfq_id
+      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+      LEFT JOIN tbl_product P ON P.id = PV.product_id
+      WHERE nr.id = $1
+    `, [roundId]);
   }
 };
 

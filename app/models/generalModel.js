@@ -2067,11 +2067,16 @@ export async function createApprovalInstance({
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
     // 1. Check for existing pending/approved instance for this entity
+    // For NEGOTIATION type, allow new instances even if a previous one was APPROVED,
+    // because multiple rounds can exist per product and each needs its own approval.
+    const allowReapproval = entity_type === 'NEGOTIATION';
+    const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
+
     const existingInstance = await t.oneOrNone(`
       SELECT id, status FROM tbl_approval_instances
-      WHERE entity_type = $1 AND entity_id = $2 AND status IN ('PENDING', 'APPROVED')
+      WHERE entity_type = $1 AND entity_id = $2 AND status = ANY($3::text[])
       ORDER BY created_at DESC LIMIT 1
-    `, [entity_type, entity_id]);
+    `, [entity_type, entity_id, blockingStatuses]);
 
     if (existingInstance) {
       if (existingInstance.status === 'APPROVED') {
@@ -3121,6 +3126,13 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
     WHERE ${conditions.join(' AND ')}
+      AND NOT (
+        i.entity_type IN ('RFQ', 'TENDER')
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq r
+          WHERE r.id = i.entity_id AND r.is_published = 1
+        )
+      )
     GROUP BY i.entity_type
   `;
 

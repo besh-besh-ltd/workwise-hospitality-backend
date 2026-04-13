@@ -20,6 +20,10 @@ import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
 } from '../../helper/quoteVisibility.js';
+import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } from '../../helper/cronManager.js';
+import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
+import rbacModel from '../../models/rbacModel.js';
+import userModel from '../../models/userModel.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -426,14 +430,14 @@ const NegotiationController = {
           created_by: user_id
         }, t);
 
-        // Cancel any stale approval instances from previous expired/completed rounds
-        // Safe because getActiveRound already confirmed no active round exists for this product
+        // Cancel any stale PENDING approval instances from previous expired rounds
+        // Only cancel PENDING — APPROVED/REJECTED instances are historical and should be preserved
         await t.none(
           `UPDATE tbl_approval_instances
-           SET status = 'CANCELLED'
+           SET status = 'CANCELLED', completed_at = NOW()
            WHERE entity_type = 'NEGOTIATION'
              AND entity_id = $1
-             AND status IN ('PENDING', 'APPROVED')`,
+             AND status = 'PENDING'`,
           [rfq_product_id]
         );
 
@@ -484,10 +488,35 @@ const NegotiationController = {
         return updatedRound || round;
       });
 
+      // Schedule expiration cron at exact end_date
+      scheduleNegotiationRoundExpiration(result);
+
+      // Send initiation email to the round creator (fire-and-forget)
+      const isAutoApproved = result.status === 'ACTIVE';
+      (async () => {
+        try {
+          const initiatorData = await userModel.getUserById(user_id);
+          const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
+          const roundWithContext = await negotiationModel.getRoundWithContext(result.id);
+          const productName = roundWithContext?.product_name || 'Product';
+          if (initiator) {
+            await sendNegotiationRoundCreatedNotification({
+              round: { ...result, rfq_id },
+              rfqNo: rfqData.rfq_no,
+              productName,
+              initiator,
+              autoApproved: isAutoApproved
+            });
+          }
+        } catch (emailErr) {
+          logError('Failed to send round creation email', emailErr);
+        }
+      })();
+
       return res.status(200).json({
         status: 1,
         data: result,
-        message: `Negotiation round ${round_number} created successfully. Awaiting committee approval.`
+        message: `Negotiation round ${round_number} created successfully. ${isAutoApproved ? 'Auto-approved and live.' : 'Awaiting committee approval.'}`
       });
     } catch (error) {
       logError(error);
@@ -681,6 +710,31 @@ const NegotiationController = {
             round_number: round.round_number
           }
         });
+
+        // Send round-approved-live email to initiator + CC commercial evaluators (fire-and-forget)
+        (async () => {
+          try {
+            const roundWithContext = await negotiationModel.getRoundWithContext(round_id);
+            const initiatorData = await userModel.getUserById(round.created_by);
+            const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
+            const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
+            const commercialEvaluators = hotelIds.length > 0
+              ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+              : [];
+
+            if (initiator) {
+              await sendNegotiationRoundApprovedNotification({
+                round: roundWithContext || round,
+                rfqNo: rfqData.rfq_no,
+                productName: roundWithContext?.product_name || 'Product',
+                initiator,
+                commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+              });
+            }
+          } catch (emailErr) {
+            logError('Failed to send round approval email', emailErr);
+          }
+        })();
       }
 
       return res.status(200).json({
@@ -763,6 +817,9 @@ const NegotiationController = {
         remarks: remarks
       });
 
+      // Remove scheduled expiration cron
+      removeNegotiationRoundExpiration(round_id);
+
       return res.status(200).json({
         status: 1,
         data: {
@@ -812,6 +869,9 @@ const NegotiationController = {
       await negotiationModel.updateRoundStatus(round_id, 'COMPLETED', {
         closed_at: new Date()
       });
+
+      // Remove scheduled expiration cron
+      removeNegotiationRoundExpiration(round_id);
 
       // Record lifecycle event
       const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);

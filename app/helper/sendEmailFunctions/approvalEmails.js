@@ -20,7 +20,7 @@ const ENTITY_LABELS = {
   'TENDER': 'Tender',
   'TECHNICAL': 'Technical Evaluation',
   'NEGOTIATION': 'Negotiation',
-  'NEGOTIATION_QUOTE': 'Negotiation Quote',
+  'NEGOTIATION_QUOTE': 'Vendor Finalization',
   'ARC': 'ARC',
   'PO': 'Purchase Order',
 };
