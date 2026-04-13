@@ -5309,22 +5309,7 @@ const rfqController = {
           }
         }
 
-        // 3. Quotes-received guard: if any vendor has submitted a quote
-        //    we only allow extending bid_end_date and block product mutations
-        //    on the products that received quotes.
-
-        if (hasQuotes && snapshot.bid_end_date) {
-          const newDate = new Date(snapshot.bid_end_date);
-          const oldDate = new Date(current.bid_end_date);
-          if (newDate < oldDate) {
-            throw updateHttpError(
-              400,
-              'Cannot shorten bid_end_date once vendors have started submitting quotes. You can only extend it.'
-            );
-          }
-        }
-
-        // 3b. Date-window constraints (IST):
+        // 3. Date-window constraints (IST):
         //   - bid_end_date >= now + 2h
         //   - vendor_clarification_date <= bid_end_date - 1h
         //   - vendor_clarification_date > tender_publish_date
