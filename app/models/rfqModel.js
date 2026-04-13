@@ -2944,7 +2944,7 @@ bulkSearchVendorsByCategory: async (
       ? `AND EXISTS (
           SELECT 1 FROM tbl_rfq_product_vendors rpv
           JOIN tbl_rfq r ON r.id = rpv.rfq_id
-          WHERE rpv.vendor_id = tu.id AND r.user_id = ${user_id}
+          WHERE rpv.user_id = tu.id AND r.user_id = ${user_id}
         )`
       : ''
     : '';
@@ -4082,23 +4082,23 @@ LIMIT 2;
         awaitingQuoteStats,
         evaluators,
       ] = await Promise.all([
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PO' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: RFQ approval instances query failed`); return []; }),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech approval instances query failed`); return []; }),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: quote approval instances query failed`); return []; }),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PO' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO approval instances query failed`); return []; }),
 
         // Tech eval: per-product summary
         db.any(`
           SELECT te.id AS tech_eval_id, te.tbl_rfq_product_id AS product_id,
             COALESCE(pv.name, 'Product ' || te.tbl_rfq_product_id) AS product_name,
-            te.minimum_passing_score, te.round_number AS current_round,
-            (SELECT COUNT(DISTINCT rpv.vendor_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_product_id = te.tbl_rfq_product_id) AS total_vendors
+            te.minimum_passing_score, te.current_round,
+            (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = $1 AND rpv.product_variant_id = rp.product_variant_id AND COALESCE(rpv.variant::text, '0') = COALESCE(rp.variant::text, '0')) AS total_vendors
           FROM tbl_rfq_product_tech_evaluation te
           LEFT JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
           LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
           WHERE te.rfq_id = $1
           ORDER BY te.tbl_rfq_product_id
-        `, [rfqId]).catch(() => []),
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech eval products query failed`); return []; }),
 
         // Tech eval: clause-level scores per vendor per product
         db.any(`
@@ -4106,16 +4106,17 @@ LIMIT 2;
             c.tbl_rfq_product_tech_evaluation_id AS tech_eval_id,
             c.id AS clause_id, c.clause_text, c.clause_type, c.weightage,
             vr.vendor_id, u_vendor.name AS vendor_name,
-            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS vendor_company,
             vr.vendor_response, vr.buyer_marks, vr.buyer_remark,
             vr.score_timestamp
           FROM tbl_rfq_product_tech_evaluation_clauses c
           JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
           LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = vr.vendor_id
+          LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           WHERE te.rfq_id = $1
           ORDER BY c.tbl_rfq_product_tech_evaluation_id, c.id, vr.vendor_id
-        `, [rfqId]).catch(() => []),
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech eval clause data query failed`); return []; }),
 
         // Tech eval: cleared vendors (pass/fail)
         db.any(`
@@ -4123,57 +4124,59 @@ LIMIT 2;
             cv.vendor_id, cv.status, cv.reject_message, cv.evaluation_round,
             cv.created_by AS evaluated_by_id, cv.timestamp AS evaluated_at,
             u_vendor.name AS vendor_name,
-            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS vendor_company,
             u_evaluator.name AS evaluated_by_name
           FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
           JOIN tbl_rfq_product_tech_evaluation te ON te.id = cv.tbl_rfq_product_tech_evaluation_id
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = cv.vendor_id
+          LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           LEFT JOIN tbl_users u_evaluator ON u_evaluator.id = cv.created_by
           WHERE te.rfq_id = $1
           ORDER BY cv.tbl_rfq_product_tech_evaluation_id, cv.vendor_id
-        `, [rfqId]).catch(() => []),
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech eval cleared vendors query failed`); return []; }),
 
         // Negotiation rounds with vendor quotes
         db.any(`
           SELECT nr.id, nr.rfq_product_id, nr.round_number, nr.status, nr.end_date, nr.target_price,
             COALESCE(pv.name, 'Product') AS product_name,
-            nrv.vendor_id, u_v.name AS vendor_name,
-            COALESCE(u_v.company_name, u_v.organization_name) AS vendor_company,
+            nrq.vendor_id, u_v.name AS vendor_name,
+            COALESCE(u_v_company.company_name, u_v.organization_name) AS vendor_company,
             nrq.quoted_price, nrq.submitted_at AS quote_submitted_at
           FROM tbl_negotiation_rounds nr
           LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
           LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-          LEFT JOIN tbl_negotiation_round_vendors nrv ON nrv.negotiation_round_id = nr.id
-          LEFT JOIN tbl_users u_v ON u_v.id = nrv.vendor_id
-          LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = nrv.vendor_id
+          LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
+          LEFT JOIN tbl_users u_v ON u_v.id = nrq.vendor_id
+          LEFT JOIN tbl_company u_v_company ON u_v_company.id = u_v.company_id
           WHERE nr.rfq_id = $1
-          ORDER BY nr.round_number, nrv.vendor_id
-        `, [rfqId]).catch(() => []),
+          ORDER BY nr.round_number, nrq.vendor_id
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: negotiation rounds query failed`); return []; }),
 
         // Finalization data
         db.any(`
           SELECT qf.product_variant_id, qf.vendor_id,
             COALESCE(pv.name, 'Product') AS product_name, rp.variant,
             u_vendor.name AS finalized_vendor_name,
-            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS finalized_vendor_company,
+            COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS finalized_vendor_company,
             qi.unit_price AS finalized_price, qi.total_price AS total_price,
             u_buyer.name AS finalized_by_name,
-            qf.created_at AS finalized_at
+            qf.timestamp AS finalized_at
           FROM tbl_quote_finalization qf
           LEFT JOIN tbl_rfq_products rp ON rp.id = qf.product_variant_id
           LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = qf.vendor_id
+          LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           LEFT JOIN tbl_users u_buyer ON u_buyer.id = qf.created_by
-          LEFT JOIN tbl_quote_items qi ON qi.quote_id = qf.quote_id AND qi.rfq_product_id = qf.product_variant_id
+          LEFT JOIN tbl_quote_items qi ON qi.quote_id = qf.quote_id AND qi.product_variant_id = qf.product_variant_id AND qi.variant = qf.variant
           WHERE qf.rfq_id = $1
-          ORDER BY qf.created_at
-        `, [rfqId]).catch(() => []),
+          ORDER BY qf.timestamp
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: finalization data query failed`); return []; }),
 
         // PO data (with product names)
         db.any(`
-          SELECT po.id, po.po_number, po.status, po.total_amount,
+          SELECT po.id, po.po_number, po.status, po.total_value,
             u_vendor.name AS vendor_name,
-            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS vendor_company,
             po.created_at,
             (
               SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
@@ -4183,10 +4186,11 @@ LIMIT 2;
               WHERE pop.purchase_order_id = po.id
             ) AS product_names
           FROM tbl_rfq_purchase_order po
-          LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.vendor_id
+          LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.finalized_vendor_id
+          LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           WHERE po.rfq_id = $1
           ORDER BY po.created_at
-        `, [rfqId]).catch(() => []),
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO data query failed`); return []; }),
 
         db.one(`
           WITH assigned_products AS (
@@ -4278,20 +4282,50 @@ LIMIT 2;
                 AND submitted_products < assigned_products
             )::int AS remaining
           FROM vendor_rollup
-        `, [rfqId]).catch(() => ({
-          total_invited: 0,
-          participated: 0,
-          sent_quotes: 0,
-          technical_only: 0,
-          regrets: 0,
-          remaining: 0,
-        })),
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
 
-        // Evaluator names
+        // Evaluator names: users who have both te.read and te.create permissions
+        // scoped to this RFQ's business unit (hotel) and department
         db.any(`
-          SELECT DISTINCT u.id, u.name FROM tbl_rfq_product_tech_evaluation te
-          JOIN tbl_users u ON u.id = te.created_by WHERE te.rfq_id = $1
-        `, [rfqId]).catch(() => []),
+          SELECT DISTINCT u.id, u.name
+          FROM tbl_users u
+          JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          JOIN tbl_rfq rfq ON rfq.id = $1
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rfq.hotel_id AND hch.is_deleted = 0
+          WHERE urs.company_id = hch.hospitality_company_id
+            AND p.resource = 'te'
+            AND p.action IN ('read', 'create')
+            AND (
+              urs.hotel_id = rfq.hotel_id
+              OR (
+                urs.hotel_id IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM tbl_hospitality_user_mappings hum
+                  WHERE hum.user_id = u.id
+                    AND (
+                      hum.hospitality_hotel_id = rfq.hotel_id
+                      OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                          AND hum.hospitality_company_id = hch.hospitality_company_id)
+                    )
+                )
+              )
+            )
+            AND (
+              rfq.department_id IS NULL
+              OR urs.department_id = rfq.department_id
+              OR (
+                urs.department_id IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM tbl_user_department ud
+                  WHERE ud.user_id = u.id AND ud.department_id = rfq.department_id
+                )
+              )
+            )
+          GROUP BY u.id, u.name
+          HAVING COUNT(DISTINCT p.action) = 2
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: evaluators query failed`); return []; }),
       ]);
 
       // Override phase mapping: AWAITING_QUOTES defaults to 'commercial',
@@ -4528,7 +4562,7 @@ LIMIT 2;
         return poData.map(po => ({
           id: po.id, po_number: po.po_number, status: po.status,
           vendor_name: po.vendor_name, vendor_company: po.vendor_company,
-          total_amount: po.total_amount ? parseFloat(po.total_amount) : null,
+          total_amount: po.total_value ? parseFloat(po.total_value) : null,
           product_names: po.product_names || null,
           created_at: po.created_at,
         }));
@@ -4707,7 +4741,7 @@ LIMIT 2;
         if (!hasData && status === 'completed') status = 'skipped';
 
         const purchaseOrders = buildPODetail();
-        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_amount || 0), 0) : 0;
+        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_value || 0), 0) : 0;
 
         let summary = null;
         if (purchaseOrders?.length > 0) {
