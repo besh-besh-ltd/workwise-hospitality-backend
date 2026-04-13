@@ -19,15 +19,6 @@ const initOptions = {
       // for safe errors logging, without exposing passwords.
       logger.error({ cn: e.cn }, 'Database connection error');
       logger.error({ event: error.message || error }, 'Database error event');
-
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: Config.developers, // list of receivers
-        subject: `URL || Work wise || Dev DB Error`, // Subject line
-        html: `Error: ${JSON.stringify(e.cn)} <br> ${JSON.stringify(
-          error.message
-        )} <br> ${JSON.stringify(error)}` // plain text body
-      });
     }
   }
 };

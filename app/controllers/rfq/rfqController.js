@@ -6613,49 +6613,6 @@ const rfqController = {
 
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
-    // Determine the user ID to check based on the verification status
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await db.any(
-        'SELECT * FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
-        [withoutLoginUserToken]
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await db.any(
-        'SELECT * FROM tbl_users WHERE id = $1',
-        [tokenData[0].vendor_id]
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
-
     const { user_type, id: user_id } = req.user;
     let { includeVendors = false } = req.query;
 
@@ -7212,48 +7169,6 @@ const rfqController = {
       regret_reason,
       vendorGSTIN
     } = req.body;
-
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
 
     const user = req.user;
 
@@ -12275,49 +12190,6 @@ sendFollowUpEmails: async (req, res) => {
       vendorGSTIN
     } = req.body;
 
-    // Determine the user ID to check based on the verification status
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
-
     const user = req.user;
 
     // Check if all required fields are present in each product
@@ -13497,54 +13369,6 @@ getClauses: async (req, res) => {
      const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
      const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
-
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-     
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-      
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-      
-    }
-
-
       if (response) {
         if (req.user.user_type == 3) {
           //Notice the vendor object is passed as buyer since this requet is coming from vendor and concerend prop value at frontend is same hence
@@ -13579,51 +13403,6 @@ getClauses: async (req, res) => {
   getTechComments: async (req, res) => {
     try {
       const { clause_id, sender_id, receiver_id } = req.body;
-      
-
-
-
-       const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
 
     const user_id = req.user.id;
     const user_type = req.user.user_type;
@@ -13697,38 +13476,6 @@ getClauses: async (req, res) => {
       const { rfq_product_id, user_id } = req.body;
       if (!rfq_product_id) {
         return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
-      }
-
-      // Token-based auth for non-login vendors (same pattern as getTechComments)
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        const tokenData = await rfqModel.checkIfExists(
-          'tbl_vendor_rfq_tokens_non_login',
-          `token = '${withoutLoginUserToken}'`
-        );
-
-        if (!tokenData || tokenData.length === 0) {
-          return res
-            .status(400)
-            .json({ status: 0, message: 'Invalid or expired token!' })
-            .end();
-        }
-
-        const userData = await rfqModel.checkIfExists(
-          'tbl_users',
-          `id = ${tokenData[0].vendor_id}`
-        );
-
-        if (!userData || userData.length === 0) {
-          return res
-            .status(404)
-            .json({ status: 0, message: 'User not found!' })
-            .end();
-        }
-
-        const { password, ...userWithoutPassword } = userData[0];
-        req.user = userWithoutPassword;
       }
 
       const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);

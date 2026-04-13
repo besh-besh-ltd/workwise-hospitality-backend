@@ -8,6 +8,7 @@ import { logError, sendMail, convertSixDigit } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
+import { sendVendorBulkRfqJoinNotification, sendVendorAutoAddedToRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import productModel from '../../models/productModel.js';
@@ -3503,6 +3504,170 @@ const HospitalityController = {
         // Clean up temp file after sending
         try { fs.unlinkSync(result.filePath); } catch (_) {}
       });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // ============================================================
+  // WH-67: Auto-add vendors to open RFQs after registration
+  // ============================================================
+
+  /**
+   * GET /api/v1/hospitality/vendor/matching-open-rfqs
+   * Returns open RFQs the vendor is eligible for but not yet added to.
+   */
+  getMatchingOpenRfqs: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+      const rfqs = await hospitalityModel.getMatchingOpenRfqsForVendor(vendorId);
+      return res.status(200).json({ status: 1, data: { rfqs } });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * POST /api/v1/hospitality/vendor/join-open-rfqs
+   * Adds the vendor to selected open RFQs, generates tokens, and sends emails.
+   * Body: { rfq_ids: [1, 2, 3] }
+   */
+  joinOpenRfqs: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+      const { rfq_ids } = req.body;
+
+      if (!Array.isArray(rfq_ids) || rfq_ids.length === 0) {
+        return res.status(400).json({ status: 0, message: 'rfq_ids must be a non-empty array' });
+      }
+
+      const rfqIds = [...new Set(rfq_ids.map(Number).filter(n => !isNaN(n)))];
+      if (rfqIds.length === 0) {
+        return res.status(400).json({ status: 0, message: 'No valid RFQ IDs provided' });
+      }
+
+      // Batch-fetch: vendor details + all open RFQs in one go
+      const [vendorUser, openRfqs] = await Promise.all([
+        db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [vendorId]),
+        db.any(
+          `SELECT id, rfq_no, title, is_tender, bid_end_date, created_by
+           FROM tbl_rfq
+           WHERE id = ANY($1::int[])
+             AND status = 1 AND is_published = 1
+             AND bid_end_date::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`,
+          [rfqIds]
+        )
+      ]);
+
+      if (!vendorUser) {
+        return res.status(404).json({ status: 0, message: 'Vendor not found' });
+      }
+      if (!openRfqs.length) {
+        return res.status(200).json({ status: 1, message: 'No open RFQs to join', data: { joined_count: 0, rfqs: [] } });
+      }
+
+      // Insert vendor into all RFQs in parallel
+      const insertResults = await Promise.all(
+        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id))
+      );
+
+      // Collect joined RFQs and product variant IDs
+      const joinedRfqs = [];
+      const allVariantIds = new Set();
+      const rfqProductMap = new Map(); // rfq index → inserted products
+
+      openRfqs.forEach((rfq, i) => {
+        const inserted = insertResults[i] || [];
+        if (inserted.length > 0) {
+          joinedRfqs.push({ rfq, inserted });
+          inserted.forEach(p => allVariantIds.add(p.product_variant_id));
+          rfqProductMap.set(i, inserted);
+        }
+      });
+
+      if (joinedRfqs.length === 0) {
+        return res.status(200).json({ status: 1, message: 'Already added to all RFQs', data: { joined_count: 0, rfqs: [] } });
+      }
+
+      // Batch-fetch: product names + creator details + generate tokens in parallel
+      const creatorIds = [...new Set(joinedRfqs.map(j => j.rfq.created_by))];
+      const [productNames, creators, ...tokens] = await Promise.all([
+        db.any(
+          `SELECT DISTINCT id, COALESCE(name, '') AS name FROM tbl_product_variant WHERE id = ANY($1::int[])`,
+          [[...allVariantIds]]
+        ),
+        db.any(`SELECT id, name, email FROM tbl_users WHERE id = ANY($1::int[])`, [creatorIds]),
+        ...joinedRfqs.map(j =>
+          rfqModel.insertVendorRfqToken(vendorId, j.rfq.rfq_no).catch(() => null)
+        )
+      ]);
+
+      const productNameMap = new Map(productNames.map(p => [p.id, p.name]));
+      const creatorMap = new Map(creators.map(c => [c.id, c]));
+
+      // Respond immediately — send emails fire-and-forget
+      const responseRfqs = joinedRfqs.map((j, i) => ({
+        rfq_id: j.rfq.id,
+        rfq_no: j.rfq.rfq_no,
+        title: j.rfq.title,
+        products_added: j.inserted.length
+      }));
+
+      res.status(200).json({
+        status: 1,
+        message: `Successfully joined ${joinedRfqs.length} RFQ(s)`,
+        data: { joined_count: joinedRfqs.length, rfqs: responseRfqs }
+      });
+
+      // Fire-and-forget: send consolidated emails in background
+      setImmediate(() => {
+        try {
+          // 1 email to vendor with ALL joined RFQs
+          const vendorRfqList = joinedRfqs.map((j, i) => {
+            const names = [...new Set(j.inserted.map(p => productNameMap.get(p.product_variant_id)).filter(Boolean))];
+            const creator = creatorMap.get(j.rfq.created_by);
+            return {
+              rfq_id: j.rfq.id, rfq_no: j.rfq.rfq_no, is_tender: j.rfq.is_tender,
+              title: j.rfq.title, bid_end_date: j.rfq.bid_end_date,
+              token: tokens[i], buyerName: creator?.name || 'Buyer', products: names
+            };
+          });
+
+          sendVendorBulkRfqJoinNotification({
+            vendor_name: vendorUser.name,
+            vendor_email: vendorUser.email,
+            rfqs: vendorRfqList
+          }).catch(() => {});
+
+          // 1 email per creator with all THEIR affected RFQs
+          const creatorRfqMap = new Map();
+          for (let i = 0; i < joinedRfqs.length; i++) {
+            const { rfq, inserted } = joinedRfqs[i];
+            const creator = creatorMap.get(rfq.created_by);
+            if (!creator) continue;
+            if (!creatorRfqMap.has(creator.id)) creatorRfqMap.set(creator.id, { creator, rfqs: [] });
+            const names = [...new Set(inserted.map(p => productNameMap.get(p.product_variant_id)).filter(Boolean))];
+            creatorRfqMap.get(creator.id).rfqs.push({
+              rfq_id: rfq.id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender,
+              title: rfq.title, product_names: names
+            });
+          }
+
+          for (const { creator, rfqs: creatorRfqs } of creatorRfqMap.values()) {
+            sendVendorAutoAddedToRfqNotification({
+              creator_email: creator.email,
+              creator_name: creator.name,
+              rfqs: creatorRfqs
+            }).catch(() => {});
+          }
+        } catch (err) {
+          logError('[WH-67] Background email error:', err);
+        }
+      });
+
+      return;
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

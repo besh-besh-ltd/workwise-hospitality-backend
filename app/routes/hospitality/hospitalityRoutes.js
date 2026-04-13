@@ -373,6 +373,32 @@ HospitalityRoutes.get(
   hospitalityController.downloadPaymentDocument
 );
 
+// ============================================================
+// WH-67: Auto-add vendors to open RFQs after registration payment
+// ============================================================
+
+/**
+ * @route GET /api/v1/hospitality/vendor/matching-open-rfqs
+ * @description Returns open RFQs the vendor is eligible for but not yet added to.
+ * Called after subscription payment to prompt vendor to join.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.get(
+  '/vendor/matching-open-rfqs',
+  passportSignIn,
+  hospitalityController.getMatchingOpenRfqs
+);
+
+/**
+ * @route POST /api/v1/hospitality/vendor/join-open-rfqs
+ * @description Adds vendor to selected open RFQs, generates tokens, sends emails.
+ * Body: { rfq_ids: [1, 2, 3] }
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/vendor/join-open-rfqs',
+  passportSignIn,
+  hospitalityController.joinOpenRfqs
+);
+
 export default HospitalityRoutes;
-
-
