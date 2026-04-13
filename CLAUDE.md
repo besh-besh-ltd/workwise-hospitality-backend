@@ -127,7 +127,7 @@ A multi-tenant hospitality procurement platform enabling companies and hotels to
 - Post-approval: ARC document generation for tenders
 - Negotiation lifecycle tracking
 
-**Key Tables:** `tbl_negotiation_rounds`, `tbl_negotiation_round_vendors`, `tbl_negotiation_round_quotes`
+**Key Tables:** `tbl_negotiation_rounds`, `tbl_negotiation_round_quotes`, `tbl_negotiation_round_approvals`
 
 ### 3. Purchase Order (PO) Module
 **Location:** `app/controllers/po/`, `app/models/purchaseOrderModel.js`
