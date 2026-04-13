@@ -294,11 +294,11 @@ function diffSingleProduct(cur, snap) {
     for (const u of cur_urls) if (!newSet.has(u)) diff.files.removed.push({ type: bucket, url: u });
   }
 
-  // vendors (array of user_ids)
+  // vendors (array of user_ids) — only additions; vendors are never removed
+  // via the Edit RFQ flow (they can only be added via Refresh Vendors).
   const curVendorIds = new Set((cur.vendors || []).map((v) => Number(v.user_id)));
   const newVendorIds = new Set((snap.vendors || []).map((v) => Number(v)));
   for (const id of newVendorIds) if (!curVendorIds.has(id)) diff.vendors.added.push(id);
-  for (const id of curVendorIds) if (!newVendorIds.has(id)) diff.vendors.removed.push(id);
 
   // tech eval (loose check — just stringify-compare; deeper diff is overkill for now)
   const curTech = JSON.stringify(cur.tech_eval_clauses || []);
@@ -313,7 +313,6 @@ function diffSingleProduct(cur, snap) {
     diff.files.added.length > 0 ||
     diff.files.removed.length > 0 ||
     diff.vendors.added.length > 0 ||
-    diff.vendors.removed.length > 0 ||
     diff.techEvalChanged;
 
   return diff;
@@ -689,18 +688,8 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
         old_value: null, new_value: userId, is_material: true
       });
     }
-    for (const userId of u.vendors.removed) {
-      await t.none(
-        `DELETE FROM tbl_rfq_product_vendors
-          WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3 AND user_id = $4`,
-        [rfqId, u.current.product_variant_id, u.current.variant, userId]
-      );
-      history.push({
-        entity_type: 'PRODUCT_VENDOR', entity_id: u.id, entity_label: label,
-        field_name: 'vendor', change_type: 'DELETE',
-        old_value: userId, new_value: null, is_material: true
-      });
-    }
+    // Vendor removal is intentionally disabled — vendors can only be added
+    // via the Edit RFQ flow, never removed.
 
     if (u.techEvalChanged) {
       // Tech eval clauses are saved by their own dedicated endpoints
