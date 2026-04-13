@@ -1712,6 +1712,27 @@ const NegotiationController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  getApprovalBundle: async (req, res) => {
+    try {
+      const rfqId = parseInt(req.params.rfq_id, 10);
+      const userId = req.user?.id || null;
+
+      if (!rfqId || isNaN(rfqId)) {
+        return res.status(400).json({ status: 2, message: 'Invalid RFQ ID' });
+      }
+
+      const bundle = await negotiationModel.getApprovalBundleForRfq(rfqId, userId);
+
+      return res.status(200).json({
+        status: 1,
+        data: bundle
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
   }
 };
 

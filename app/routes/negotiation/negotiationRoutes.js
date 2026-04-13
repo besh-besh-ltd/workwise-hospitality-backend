@@ -41,6 +41,15 @@ NegotiationRoutes.get(
   negotiationController.getActiveRounds
 );
 
+// Get approval bundle (instances + history) for an RFQ - used by quote-compare optimization
+NegotiationRoutes.get(
+  '/rounds/:rfq_id/approval-bundle',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.checkHospitality(false),
+  negotiationController.getApprovalBundle
+);
+
 // Approve a round
 NegotiationRoutes.post(
   '/rounds/:id/approve',
