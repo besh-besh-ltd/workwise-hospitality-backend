@@ -577,7 +577,7 @@ const NegotiationController = {
         });
       }
 
-      const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id);
+      const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true);
 
       // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
       if (!round || (req.user.user_type == 3 && round.status !== 'ACTIVE')) {
@@ -614,7 +614,7 @@ const NegotiationController = {
         });
       }
 
-      let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id);
+      let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, true);
 
       // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
       if (req.user.user_type == 3) {

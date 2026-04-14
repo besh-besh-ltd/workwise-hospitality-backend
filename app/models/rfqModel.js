@@ -6197,7 +6197,7 @@ LIMIT 2;
           FROM tbl_negotiation_rounds NR
           LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
           WHERE NR.rfq_product_id = TRF.id
-            AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+            AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
           ORDER BY NR.round_number DESC
           LIMIT 1
         ) AS "active_round"
@@ -6219,7 +6219,7 @@ LIMIT 2;
             WHERE NRQ.negotiation_round_id = (
               SELECT NR2.id FROM tbl_negotiation_rounds NR2
               WHERE NR2.rfq_product_id = TRF.id
-                AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
               ORDER BY NR2.round_number DESC LIMIT 1
             )
           ) sub

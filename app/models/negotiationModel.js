@@ -83,10 +83,14 @@ const negotiationModel = {
   /**
    * Get active round for a product
    */
-  getActiveRound: async (rfqId, rfqProductId) => {
+  getActiveRound: async (rfqId, rfqProductId, includeEnded = false) => {
     if (!rfqProductId) {
       throw new Error('rfq_product_id is required');
     }
+
+    const statusFilter = includeEnded
+      ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
+      : `('PENDING_APPROVAL', 'ACTIVE')`;
 
     return db.oneOrNone(
       `SELECT
@@ -101,7 +105,7 @@ const negotiationModel = {
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
-         AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND nr.status IN ${statusFilter}
        ORDER BY nr.round_number DESC
        LIMIT 1`,
       [rfqId, rfqProductId]
@@ -111,9 +115,13 @@ const negotiationModel = {
   /**
    * Get all active rounds for an RFQ (multiple products)
    */
-  getActiveRoundsByRfqId: async (rfqId) => {
+  getActiveRoundsByRfqId: async (rfqId, includeEnded = false) => {
+    const statusFilter = includeEnded
+      ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
+      : `('PENDING_APPROVAL', 'ACTIVE')`;
+
     return db.any(
-      `SELECT 
+      `SELECT
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
@@ -124,7 +132,7 @@ const negotiationModel = {
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
-         AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND nr.status IN ${statusFilter}
        ORDER BY nr.rfq_product_id, nr.round_number DESC`,
       [rfqId]
     );
