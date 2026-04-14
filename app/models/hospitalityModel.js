@@ -1869,6 +1869,24 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     return !!row;
   },
 
+  /**
+   * Expire any abandoned "created" or "pending" modification payment records
+   * for this vendor. Called before creating a new modification so stale
+   * abandoned Razorpay orders don't permanently block the vendor.
+   * Returns the count of expired rows.
+   */
+  expireStaleModifications: async (vendorId) => {
+    const result = await db.result(
+      `UPDATE tbl_vendor_payments
+       SET payment_status = 'expired'
+       WHERE vendor_id = $1
+         AND payment_status IN ('created', 'pending')
+         AND metadata::jsonb->>'type' = 'modification'`,
+      [vendorId]
+    );
+    return result.rowCount;
+  },
+
   // ============================================================
   // WH-67: Auto-add vendors to open RFQs after registration
   // ============================================================
