@@ -78,6 +78,52 @@ const _unmapProductsForCategories = async (vendorId, categoryIds) => {
 };
 
 // ============================================================
+// WH-74: Notify dev team when a subscription operation fails.
+// Fire-and-forget — errors in this function must never propagate.
+// ============================================================
+const _notifyDevTeamOfSubscriptionFailure = async ({
+  operation, // 'modification' | 'verify_payment'
+  vendorId,
+  vendorEmail,
+  errorMessage,
+  stackTrace,
+  requestBody
+}) => {
+  try {
+    const timestamp = Moment().format('YYYY-MM-DD HH:mm:ss');
+    const subject = `[ALERT] Subscription ${operation} failed for vendor ${vendorId}`;
+    const html = `
+      <h2 style="color: #dc2626;">Subscription Operation Failure</h2>
+      <table style="border-collapse: collapse; width: 100%; font-size: 14px;">
+        <tr><td style="padding: 8px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">Operation</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${operation}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">Vendor ID</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${vendorId}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">Vendor Email</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${vendorEmail || 'N/A'}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">Timestamp</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${timestamp}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">Error</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; color: #dc2626;">${errorMessage}</td></tr>
+      </table>
+      <h3 style="margin-top: 20px;">Stack Trace</h3>
+      <pre style="background: #f3f4f6; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px;">${stackTrace || 'N/A'}</pre>
+      <h3>Request Body</h3>
+      <pre style="background: #f3f4f6; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px;">${JSON.stringify(requestBody, null, 2)}</pre>
+    `;
+
+    await sendMail({
+      from: Config.webmasterMail,
+      to: 'kushal@letsworkwise.com, sarvesh@letsworkwise.com',
+      subject,
+      html
+    });
+  } catch (notifyErr) {
+    logError('Dev team notification email failed:', notifyErr);
+  }
+};
+
+// ============================================================
 // WH-74: Shared subscription confirmation email builder
 // Used by verifyPayment (registration / renewal / paid modification)
 // AND by the modifySubscription free path (modification_free).
@@ -2621,17 +2667,28 @@ const HospitalityController = {
       }
 
       // ---------- Existing registration / renewal / extension branch ----------
-      // Before creating new subscription rows, cancel any existing active rows
-      // for this vendor that belong to the previous period. This prevents
-      // duplicate rows (old + new) from showing up in the frontend.
       if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
         const isExtension = metadata.kind === 'extension';
         const isRenewalPayment = payment.receipt && payment.receipt.startsWith('RNW');
+        const newEndDate = metadata.fy_end_date || metadata.subscription_items[0]?.end_date;
 
-        if (isExtension || isRenewalPayment) {
-          // Cancel all current active subscription rows that have a DIFFERENT
-          // end_date than the new rows (i.e. they belong to the old period).
-          const newEndDate = metadata.fy_end_date || metadata.subscription_items[0]?.end_date;
+        if (isExtension) {
+          // Extension: stretch existing active rows to the new end_date
+          // and link to the extension payment for audit/history tracking.
+          // Don't expire or recreate — keeps start_date intact and avoids
+          // a gap in coverage between old end and new start.
+          if (newEndDate) {
+            await db.none(
+              `UPDATE tbl_vendor_hotel_category_subscription
+                  SET end_date = $2,
+                      payment_id = $3
+                WHERE vendor_id = $1
+                  AND status = 'active'`,
+              [userId, newEndDate, payment.id]
+            );
+          }
+        } else if (isRenewalPayment) {
+          // Renewal: expire old-period rows, then create fresh ones below.
           if (newEndDate) {
             await db.none(
               `UPDATE tbl_vendor_hotel_category_subscription
@@ -2645,13 +2702,17 @@ const HospitalityController = {
           }
         }
 
-        const subscriptionRows = metadata.subscription_items.map(row => ({
-          ...row,
-          vendor_id: userId,
-          payment_id: payment.id,
-          status: 'active'
-        }));
-        await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+        // For renewal / registration — create new subscription rows.
+        // Extensions only update end_date above, no new rows needed.
+        if (!isExtension) {
+          const subscriptionRows = metadata.subscription_items.map(row => ({
+            ...row,
+            vendor_id: userId,
+            payment_id: payment.id,
+            status: 'active'
+          }));
+          await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+        }
       }
 
       // Auto-map product variants for subscribed categories
@@ -2732,7 +2793,22 @@ const HospitalityController = {
       });
     } catch (error) {
       logError(error);
-      return formatErrorResponse(res, error);
+
+      // Notify dev team (fire-and-forget)
+      _notifyDevTeamOfSubscriptionFailure({
+        operation: 'verify_payment',
+        vendorId: req.user?.id,
+        vendorEmail: req.user?.email || null,
+        errorMessage: error.message || String(error),
+        stackTrace: error.stack,
+        requestBody: req.body
+      });
+
+      return res.status(error.statusCode || 500).json({
+        status: 3,
+        message: error.message || Config.errorText.value,
+        show_error_modal: true
+      });
     }
   },
 
@@ -2945,12 +3021,11 @@ const HospitalityController = {
         });
       }
 
-      const hasPending = await hospitalityModel.hasPendingModification(vendorId);
-      if (hasPending) {
-        return res.status(400).json({
-          status: 0,
-          message: 'A previous subscription modification is still pending. Please complete or wait for it to expire.'
-        });
+      // Expire any stale/abandoned modification orders so the vendor
+      // can always start a fresh modification.
+      const expiredCount = await hospitalityModel.expireStaleModifications(vendorId);
+      if (expiredCount > 0) {
+        logError(`Expired ${expiredCount} stale modification record(s) for vendor ${vendorId}`);
       }
 
       const preview = await _computeModificationPreview(vendorId, req.body);
@@ -3161,11 +3236,15 @@ const HospitalityController = {
       // Build the list of new subscription rows that will be persisted only
       // after the payment is verified. We compute per-row fee_amount so the
       // invoice line items are faithful to the pricing formula.
+      // Per-row fee_amount stores the PER-YEAR rate (not the multi-year
+      // total). The total charge (net_cost) already includes the FY
+      // multiplier and drives the Razorpay order amount.
       const addSubscriptionItems = [];
       const newTotalHotelsCount =
         preview.data.current.hotels.length
         + diff.added_hotels.length
         - diff.removed_hotels.length;
+      const fyPeriodsRemaining = pricing.fy_periods_remaining || 1;
 
       for (const cat of diff.added_categories) {
         const effectiveFee = (cat.fee_amount || 0) * (newTotalHotelsCount || 1);
@@ -3185,9 +3264,8 @@ const HospitalityController = {
         });
       }
       for (const h of diff.added_hotels) {
-        // Per hotel: all surviving categories must cover it. We already
-        // baked that into `pricing.cost_added_hotels`; at the row level we
-        // store 0 so the hotel line shows as included.
+        // Per hotel: all surviving categories must cover it. At the row
+        // level we store 0 so the hotel line shows as included.
         addSubscriptionItems.push({
           item_type: 'hotel',
           item_id: h.id,
@@ -3195,14 +3273,12 @@ const HospitalityController = {
           fee_amount: 0
         });
       }
-      // When hotels are added, the "cost for added hotels" covers surviving
-      // categories × added hotel count. We fold this into the FIRST added
-      // hotel row so the total reconciles to net_cost. If no hotels were
-      // added but the swap-credited categories still contribute, this is
-      // already in cost_added_cats on the category rows above.
+      // When hotels are added, fold the per-year hotel cost into the FIRST
+      // added hotel row. Divide out the FY multiplier since per-row fees
+      // are annual rates.
       if (diff.added_hotels.length > 0 && pricing.cost_added_hotels > 0) {
         addSubscriptionItems.find(r => r.item_type === 'hotel').fee_amount =
-          pricing.cost_added_hotels;
+          pricing.cost_added_hotels / fyPeriodsRemaining;
       }
 
       const cancelSubscriptionIds = [
@@ -3260,7 +3336,22 @@ const HospitalityController = {
       });
     } catch (error) {
       logError(error);
-      return formatErrorResponse(res, error);
+
+      // Notify dev team (fire-and-forget)
+      _notifyDevTeamOfSubscriptionFailure({
+        operation: 'modification',
+        vendorId: req.user?.id,
+        vendorEmail: req.user?.email || null,
+        errorMessage: error.message || String(error),
+        stackTrace: error.stack,
+        requestBody: req.body
+      });
+
+      return res.status(error.statusCode || 500).json({
+        status: 3,
+        message: error.message || Config.errorText.value,
+        show_error_modal: true
+      });
     }
   },
 
@@ -3654,9 +3745,18 @@ const _computeModificationPreview = async (vendorId, body) => {
   const newTotalHotelsCount =
     currentHotelIds.length + addedHotelIds.length - removedHotelIds.length;
 
+  // Compute how many FY periods the modification covers.
+  // If the subscription was extended beyond the current FY, new items
+  // must be charged for every remaining FY period.
+  const today = Moment();
+  const currentFYEnd = today.month() >= 3
+    ? Moment(`${today.year() + 1}-03-31`, 'YYYY-MM-DD')
+    : Moment(`${today.year()}-03-31`, 'YYYY-MM-DD');
+  const fyPeriodsRemaining = Math.max(1, Moment(current.shared_end_date).year() - currentFYEnd.year() + 1);
+
   const sumFee = (list) => list.reduce((s, x) => s + (x.fee_amount || 0), 0);
-  const cost_added_cats = sumFee(addedCats) * newTotalHotelsCount;
-  const cost_added_hotels = sumFee(survivingCats) * addedHotelIds.length;
+  const cost_added_cats = sumFee(addedCats) * newTotalHotelsCount * fyPeriodsRemaining;
+  const cost_added_hotels = sumFee(survivingCats) * addedHotelIds.length * fyPeriodsRemaining;
   const additions_cost = cost_added_cats + cost_added_hotels;
 
   // No swap credit — removals do not offset the cost of new additions.
@@ -3713,11 +3813,18 @@ const _computeModificationPreview = async (vendorId, body) => {
         net_cost,
         currency: 'INR',
         existing_hotels_count: currentHotelIds.length,
-        new_total_hotels_count: newTotalHotelsCount
+        new_total_hotels_count: newTotalHotelsCount,
+        fy_periods_remaining: fyPeriodsRemaining
       },
       warnings,
-      shared_end_date: current.shared_end_date,
+      // Normalize dates to plain YYYY-MM-DD strings to prevent timezone
+      // drift when round-tripping through JSON metadata. JS Date objects
+      // in IST serialize as T18:30:00Z (previous day in UTC), losing a
+      // day each time PostgreSQL casts them back to DATE.
+      shared_end_date: Moment(current.shared_end_date).format('YYYY-MM-DD'),
       earliest_start_date: current.earliest_start_date
+        ? Moment(current.earliest_start_date).format('YYYY-MM-DD')
+        : null
     }
   };
 };
@@ -3734,7 +3841,8 @@ const _applyModificationFromMetadata = async (payment, t) => {
 
   const vendorId = payment.vendor_id;
   const todayStr = Moment().format('YYYY-MM-DD');
-  const sharedEnd = metadata.shared_end_date;
+  // Normalize to YYYY-MM-DD to avoid timezone drift from JSON round-trip
+  const sharedEnd = Moment(metadata.shared_end_date).format('YYYY-MM-DD');
 
   // 1. Soft-cancel explicit removals
   if (Array.isArray(metadata.cancel_subscription_ids) && metadata.cancel_subscription_ids.length > 0) {
