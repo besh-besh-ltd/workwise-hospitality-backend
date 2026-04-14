@@ -2,16 +2,20 @@ import cron from 'node-cron';
 import db from '../config/dbConn.js';
 import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
 import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
+import { sendNegotiationExpiredNotification, sendNegotiationRoundEndedNotification } from './sendEmailFunctions/negotiationEmails.js';
 import { recordLifecycleEvent, getApprovalWorkflowUsers } from '../models/generalModel.js';
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
 import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
 import rfqModel from '../models/rfqModel.js';
 import userModel from '../models/userModel.js';
+import negotiationModel from '../models/negotiationModel.js';
+import rbacModel from '../models/rbacModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from './common.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
+const negotiationRoundCronRegistry = new Map();
 
 export const scheduleMilestoneReminder = async (milestone) => {
   const { id, due_date, reminder_users } = milestone;
@@ -444,7 +448,7 @@ export const publishRfqById = async (rfqId, rfq_no) => {
       // Mark all pending step approvers as auto-approved
       await t.none(`
         UPDATE tbl_approval_step_approvers
-        SET status = 'APPROVED', approved_at = NOW()
+        SET status = 'APPROVED', acted_at = NOW()
         WHERE approval_instance_step_id IN (
           SELECT ais.id FROM tbl_approval_instance_steps ais
           JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
@@ -637,4 +641,217 @@ export const startVendorAcceptanceReminderCron = () => {
   });
 
   logger.info('[Vendor Acceptance Reminder] Cron scheduled: daily at 10:00 AM IST');
+};
+
+
+// ============= NEGOTIATION ROUND EXPIRATION =============
+
+/**
+ * Core handler: processes a negotiation round when its end_date is reached.
+ * Re-fetches the round from DB to handle concurrent status changes.
+ */
+const handleNegotiationRoundExpiration = async (roundId) => {
+  try {
+    const round = await negotiationModel.getRoundWithContext(roundId);
+    if (!round) {
+      logger.info(`[Negotiation Expiry] Round ${roundId} not found, skipping.`);
+      return;
+    }
+
+    const hotelIds = round.hotel_id ? [round.hotel_id] : [];
+
+    if (round.status === 'PENDING_APPROVAL') {
+      // --- EXPIRE the round ---
+      logger.info(`[Negotiation Expiry] Expiring PENDING_APPROVAL round ${roundId} for RFQ #${round.rfq_no}`);
+
+      await db.tx(async (t) => {
+        // Update round status to EXPIRED
+        await t.none(
+          `UPDATE tbl_negotiation_rounds SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [roundId]
+        );
+
+        // Cancel pending approval instances
+        await t.none(
+          `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW()
+           WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
+          [round.rfq_product_id]
+        );
+
+        // Cancel pending approval steps
+        await t.none(
+          `UPDATE tbl_approval_instance_steps SET status = 'CANCELLED', completed_at = NOW()
+           WHERE approval_instance_id IN (
+             SELECT id FROM tbl_approval_instances
+             WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'CANCELLED'
+           ) AND status = 'PENDING'`,
+          [round.rfq_product_id]
+        );
+
+        // Note: tbl_approval_step_approvers only allows PENDING/APPROVED/REJECTED.
+        // Leaving approvers as PENDING is fine — the parent instance and steps
+        // are already CANCELLED, and the ApprovalTimeline component uses
+        // instanceStatus to render PENDING approvers as "Expired" when the
+        // instance is CANCELLED.
+      });
+
+      // Record lifecycle event (fire-and-forget)
+      recordLifecycleEvent({
+        entity_type: 'NEGOTIATION',
+        entity_id: round.rfq_id,
+        stage: 'NEGOTIATION',
+        action: 'NEGOTIATION_ROUND_EXPIRED',
+        performed_by: round.created_by,
+        metadata: { round_id: roundId, round_number: round.round_number, rfq_product_id: round.rfq_product_id }
+      }).catch(err => logError('[Negotiation Expiry] Failed to record lifecycle event', err));
+
+      // Send expiry email
+      try {
+        const initiatorData = await userModel.getUserById(round.created_by);
+        const initiator = initiatorData && initiatorData.length > 0
+          ? { name: initiatorData[0].name, email: initiatorData[0].email }
+          : null;
+
+        const commercialEvaluators = hotelIds.length > 0
+          ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+          : [];
+
+        if (initiator) {
+          await sendNegotiationExpiredNotification({
+            round,
+            rfqNo: round.rfq_no,
+            productName: round.product_name,
+            initiator,
+            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+          });
+        }
+      } catch (emailErr) {
+        logError('[Negotiation Expiry] Failed to send expiry email', emailErr);
+      }
+
+      logger.info(`[Negotiation Expiry] Round ${roundId} expired successfully.`);
+
+    } else if (round.status === 'ACTIVE') {
+      // --- END the round ---
+      logger.info(`[Negotiation Expiry] Ending ACTIVE round ${roundId} for RFQ #${round.rfq_no}`);
+
+      await db.none(
+        `UPDATE tbl_negotiation_rounds SET status = 'ENDED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [roundId]
+      );
+
+      const quoteCount = await negotiationModel.getQuoteCountForRound(roundId);
+
+      // Record lifecycle event (fire-and-forget)
+      recordLifecycleEvent({
+        entity_type: 'NEGOTIATION',
+        entity_id: round.rfq_id,
+        stage: 'NEGOTIATION',
+        action: 'NEGOTIATION_ROUND_ENDED',
+        performed_by: round.created_by,
+        metadata: { round_id: roundId, round_number: round.round_number, rfq_product_id: round.rfq_product_id, quote_count: quoteCount }
+      }).catch(err => logError('[Negotiation Expiry] Failed to record lifecycle event', err));
+
+      // Send ended email
+      try {
+        const commercialEvaluators = hotelIds.length > 0
+          ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+          : [];
+
+        if (commercialEvaluators.length > 0) {
+          await sendNegotiationRoundEndedNotification({
+            round,
+            rfqNo: round.rfq_no,
+            productName: round.product_name,
+            quoteCount,
+            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+          });
+        }
+      } catch (emailErr) {
+        logError('[Negotiation Expiry] Failed to send round-ended email', emailErr);
+      }
+
+      logger.info(`[Negotiation Expiry] Round ${roundId} ended successfully. ${quoteCount} quote(s) received.`);
+
+    } else {
+      // Round already closed/completed/rejected/cancelled — no-op
+      logger.info(`[Negotiation Expiry] Round ${roundId} is already in status '${round.status}', skipping.`);
+    }
+  } catch (err) {
+    logError(`[Negotiation Expiry] Error processing round ${roundId}`, err);
+  }
+};
+
+/**
+ * Schedule a one-time cron job to fire at the exact end_date of a negotiation round.
+ * @param {Object} round - Must have { id, end_date }
+ */
+export const scheduleNegotiationRoundExpiration = (round) => {
+  const { id: roundId, end_date } = round;
+
+  // Remove any existing schedule for this round
+  removeNegotiationRoundExpiration(roundId);
+
+  const endDate = new Date(typeof end_date === 'string' && !end_date.includes('+') && !end_date.includes('Z')
+    ? end_date.replace(' ', 'T') + 'Z'
+    : end_date
+  );
+
+  if (isNaN(endDate.getTime()) || endDate <= new Date()) {
+    logger.debug(`[Negotiation Expiry] Round ${roundId} end_date is in the past or invalid, skipping schedule.`);
+    return;
+  }
+
+  const cronExpression = `${endDate.getMinutes()} ${endDate.getHours()} ${endDate.getDate()} ${endDate.getMonth() + 1} *`;
+
+  const job = cron.schedule(cronExpression, async () => {
+    logger.info(`[Negotiation Expiry] Cron fired for round ${roundId}`);
+    await handleNegotiationRoundExpiration(roundId);
+    job.stop();
+    negotiationRoundCronRegistry.delete(roundId);
+  });
+
+  negotiationRoundCronRegistry.set(roundId, job);
+  logger.info(`[Negotiation Expiry] Scheduled round ${roundId} to expire at ${endDate.toISOString()}`);
+};
+
+/**
+ * Remove a scheduled expiration job for a negotiation round.
+ * Call when a round is manually closed or rejected before end_date.
+ * @param {number} roundId
+ */
+export const removeNegotiationRoundExpiration = (roundId) => {
+  const job = negotiationRoundCronRegistry.get(roundId);
+  if (job) {
+    job.stop();
+    negotiationRoundCronRegistry.delete(roundId);
+    logger.info(`[Negotiation Expiry] Removed scheduled expiration for round ${roundId}`);
+  }
+};
+
+/**
+ * On server startup: reschedule expiration jobs for all future rounds
+ * and immediately process any rounds that expired during downtime.
+ */
+export const rescheduleAllNegotiationRoundExpirations = async () => {
+  try {
+    // 1. Reschedule future rounds
+    const futureRounds = await negotiationModel.getRoundsForReschedule();
+    for (const round of futureRounds) {
+      scheduleNegotiationRoundExpiration(round);
+    }
+    logger.info(`[Negotiation Expiry] Rescheduled ${futureRounds.length} future round(s).`);
+
+    // 2. Process rounds that expired during downtime
+    const expiredRounds = await negotiationModel.getExpiredRoundsDuringDowntime();
+    for (const round of expiredRounds) {
+      logger.info(`[Negotiation Expiry] Processing round ${round.id} that expired during downtime.`);
+      await handleNegotiationRoundExpiration(round.id);
+    }
+    if (expiredRounds.length > 0) {
+      logger.info(`[Negotiation Expiry] Processed ${expiredRounds.length} round(s) that expired during downtime.`);
+    }
+  } catch (err) {
+    logError('[Negotiation Expiry] Failed to reschedule round expirations on startup', err);
+  }
 };

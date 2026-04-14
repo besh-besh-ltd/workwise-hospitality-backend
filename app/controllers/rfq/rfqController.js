@@ -8787,6 +8787,25 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
+      // Check for active negotiation round blocking finalization
+      const rfqProductForNego = await db.oneOrNone(
+        `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+        [rfq_id, product_variant_id, variant]
+      );
+      if (rfqProductForNego) {
+        const activeNegotiationRound = await db.oneOrNone(
+          `SELECT id FROM tbl_negotiation_rounds
+           WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' AND end_date > NOW()`,
+          [rfq_id, rfqProductForNego.id]
+        );
+        if (activeNegotiationRound) {
+          return res.status(400).json({
+            status: 2,
+            message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
+          });
+        }
+      }
+
       const vendor_details = await userModel.user_profile_detail(vendor_id);
       const rfQItem = await rfqModel.getRfqById(rfq_id, vendor_id);
       let winning_product = null;
