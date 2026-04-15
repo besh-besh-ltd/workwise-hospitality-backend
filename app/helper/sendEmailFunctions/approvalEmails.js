@@ -380,7 +380,7 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
       : null;
 
     for (const vendor of vendors) {
-      const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${vendor.token}`;
+      const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}`;
       const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}`;
 
       const productListHTML = (vendor.products || []).slice(0, 5).map(p =>
@@ -559,7 +559,7 @@ export const sendVendorBulkRfqJoinNotification = async ({
 
     const rfqListHTML = rfqs.map(rfq => {
       const label = rfq.is_tender === 1 ? 'Tender' : 'RFQ';
-      const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq.rfq_id}&token=${rfq.token}`;
+      const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq.rfq_id}&token=${rfq.token}`;
       const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq.rfq_id}&token=${rfq.token}`;
       const bidEnd = rfq.bid_end_date
         ? new Date(rfq.bid_end_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })

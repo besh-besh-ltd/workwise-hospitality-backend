@@ -598,7 +598,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
             </tbody>
           </table>
 
-          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfqNumber}&token=${token}
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
             Submit Your Quote Now
           </a>
@@ -786,7 +786,7 @@ const sendMailToVendorsForTargetPrice = async (
               </tbody>
             </table>
 
-            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${token}
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
@@ -1270,7 +1270,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
       
         <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
       
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${vendor.token}"
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}"
            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           Submit Your Quote Now
         </a>

@@ -4162,16 +4162,18 @@ LIMIT 2;
 
         // Finalization data
         db.any(`
-          SELECT qf.product_variant_id, qf.vendor_id,
-            COALESCE(pv.name, 'Product') AS product_name, rp.variant,
+          SELECT rp.id AS rfq_product_id, qf.product_variant_id, qf.vendor_id,
+            COALESCE(pv.name, 'Product') AS product_name, qf.variant,
             u_vendor.name AS finalized_vendor_name,
             COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS finalized_vendor_company,
             qi.unit_price AS finalized_price, qi.total_price AS total_price,
             u_buyer.name AS finalized_by_name,
             qf.timestamp AS finalized_at
           FROM tbl_quote_finalization qf
-          LEFT JOIN tbl_rfq_products rp ON rp.id = qf.product_variant_id
-          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          LEFT JOIN tbl_rfq_products rp ON rp.product_variant_id = qf.product_variant_id
+            AND COALESCE(rp.variant, 0) = COALESCE(qf.variant, 0)
+            AND rp.rfq_id = qf.rfq_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = qf.product_variant_id
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = qf.vendor_id
           LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           LEFT JOIN tbl_users u_buyer ON u_buyer.id = qf.created_by
@@ -4499,10 +4501,10 @@ LIMIT 2;
 
         // Add finalization data
         for (const f of finalizationData) {
-          const key = f.product_variant_id;
+          const key = f.rfq_product_id || f.product_variant_id;
           if (!productMap[key]) {
             productMap[key] = {
-              product_id: f.product_variant_id,
+              product_id: key,
               product_name: f.product_name + (f.variant && f.variant !== '0' ? ` (${f.variant})` : ''),
               finalization: null,
               negotiation_rounds: [],

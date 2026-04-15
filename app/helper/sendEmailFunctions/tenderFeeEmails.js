@@ -113,7 +113,7 @@ export const sendTenderFeePaymentConfirmation = async ({
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?rfq=${rfqDetails?.id}"
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?rfq=${rfqDetails?.id}"
              style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             Submit Your Quote
           </a>
