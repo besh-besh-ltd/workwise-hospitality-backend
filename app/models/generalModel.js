@@ -3400,11 +3400,13 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       removedFinalizations++;
     }
 
-    // 3. Cancel NEGOTIATION approval instances
+    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id)
     const negInstances = await t.any(`
       SELECT id, status FROM tbl_approval_instances
       WHERE entity_type = 'NEGOTIATION'
-        AND entity_id = $1
+        AND entity_id IN (
+          SELECT id FROM tbl_negotiation_rounds WHERE rfq_product_id = $1
+        )
         AND status IN ('PENDING', 'APPROVED')
     `, [rfq_product_id]);
 

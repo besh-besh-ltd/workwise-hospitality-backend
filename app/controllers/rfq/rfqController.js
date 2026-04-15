@@ -8159,7 +8159,7 @@ const rfqController = {
         // shapes depending on the entity_type. We catch every shape:
         //   • RFQ/TENDER:        entity_id = rfq_id
         //   • PO:                entity_id = po_id (FK to tbl_rfq_purchase_order)
-        //   • NEGOTIATION:       entity_id = rfq_product_id (FK to tbl_rfq_products)
+        //   • NEGOTIATION:       entity_id = round_id (FK to tbl_negotiation_rounds)
         //   • NEGOTIATION_QUOTE: entity_id = rfq_product_id
         //   • ARC:               entity_id = rfq_product_id
         //   • TECHNICAL:         entity_id = tech_evaluation round id (FK to tbl_rfq_product_tech_evaluation)
@@ -8176,7 +8176,11 @@ const rfqController = {
                   AND entity_id IN (SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1)
                 )
                 OR (
-                  entity_type IN ('NEGOTIATION','NEGOTIATION_QUOTE','ARC')
+                  entity_type = 'NEGOTIATION'
+                  AND entity_id IN (SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1)
+                )
+                OR (
+                  entity_type IN ('NEGOTIATION_QUOTE','ARC')
                   AND entity_id IN (SELECT id FROM tbl_rfq_products WHERE rfq_id = $1)
                 )
                 OR (

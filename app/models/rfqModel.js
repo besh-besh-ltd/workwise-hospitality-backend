@@ -6194,7 +6194,9 @@ LIMIT 2;
             'approved_at', NR.approved_at, 'published_at', NR.published_at,
             'closed_at', NR.closed_at, 'created_by', NR.created_by,
             'created_by_name', NRU.name, 'created_by_email', NRU.email,
-            'remarks', NR.remarks, 'created_at', NR.created_at
+            'remarks', NR.remarks, 'created_at', NR.created_at,
+            'vendor_ids', NR.vendor_ids,
+            'vendor_approvals', NR.vendor_approvals
           )
           FROM tbl_negotiation_rounds NR
           LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
@@ -6228,20 +6230,45 @@ LIMIT 2;
         ) AS "active_round_quotes"
 
         , (
-          SELECT json_build_object(
-            'has_pending_approval', (AI.status = 'PENDING'),
-            'approval_instance', json_build_object(
-              'id', AI.id, 'status', AI.status, 'current_step', AI.current_step,
-              'metadata', AI.metadata,
-              'created_at', AI.created_at, 'completed_at', AI.completed_at
-            )
-          )
-          FROM tbl_approval_instances AI
-          WHERE AI.entity_type = 'NEGOTIATION_QUOTE'
-            AND AI.entity_id = TRF.id
-          ORDER BY AI.created_at DESC
-          LIMIT 1
-        ) AS "quote_approval_status"
+          SELECT json_agg(pv_sub ORDER BY pv_sub.in_active_round ASC, pv_sub.organization_name ASC)
+          FROM (
+            SELECT
+              RPV_U.id,
+              RPV_U.name,
+              RPV_U.email,
+              RPV_U.organization_name,
+              COALESCE(RPV_C.company_name, RPV_U.organization_name) AS company_name,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM tbl_negotiation_rounds ANR
+                WHERE ANR.rfq_product_id = TRF.id
+                  AND ANR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR.vendor_ids)
+              ) THEN true ELSE false END AS in_active_round,
+              (
+                SELECT json_build_object('round_id', ANR2.id, 'round_number', ANR2.round_number, 'status', ANR2.status)
+                FROM tbl_negotiation_rounds ANR2
+                WHERE ANR2.rfq_product_id = TRF.id
+                  AND ANR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR2.vendor_ids)
+                ORDER BY ANR2.round_number DESC LIMIT 1
+              ) AS active_round_info
+            FROM tbl_rfq_product_vendors RPV
+            JOIN tbl_users RPV_U ON RPV_U.id = RPV.user_id
+            LEFT JOIN tbl_company RPV_C ON RPV_C.id = RPV_U.company_id
+            WHERE RPV.rfq_id = TRF.rfq_id
+              AND RPV.product_variant_id = TRF.product_variant_id
+              AND RPV.variant = TRF.variant
+              AND EXISTS (
+                SELECT 1 FROM tbl_quotes _pv_q
+                JOIN tbl_quote_items _pv_qi ON _pv_qi.quote_id = _pv_q.id
+                WHERE _pv_q.rfq_id = TRF.rfq_id
+                  AND _pv_q.created_by = RPV_U.id
+                  AND _pv_qi.product_variant_id = TRF.product_variant_id
+                  AND _pv_qi.variant = TRF.variant
+              )
+          ) pv_sub
+        ) AS "product_vendors"
+
         ` : ''}
 
         FROM tbl_rfq_products TRF
