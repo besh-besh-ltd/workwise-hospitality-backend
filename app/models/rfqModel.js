@@ -5846,7 +5846,8 @@ LIMIT 2;
     TA_Vendors,
     no_freight,
     rfq_product_id,
-    include_negotiation = false
+    include_negotiation = false,
+    vendor_filter_id = null
   ) => {
     if(rfq_product_id) {
       rfq_product_id = rfq_product_id.split(",").map(Number);
@@ -6202,6 +6203,7 @@ LIMIT 2;
           LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
           WHERE NR.rfq_product_id = TRF.id
             AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+            AND ($5::int IS NULL OR $5 = ANY(NR.vendor_ids))
           ORDER BY NR.round_number DESC
           LIMIT 1
         ) AS "active_round"
@@ -6224,6 +6226,7 @@ LIMIT 2;
               SELECT NR2.id FROM tbl_negotiation_rounds NR2
               WHERE NR2.rfq_product_id = TRF.id
                 AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+                AND ($5::int IS NULL OR $5 = ANY(NR2.vendor_ids))
               ORDER BY NR2.round_number DESC LIMIT 1
             )
           ) sub
@@ -6276,7 +6279,7 @@ LIMIT 2;
         ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
         ;`;
 
-      db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
+      db.query(mainQuery, [id, user_id, company_id, rfq_product_id, vendor_filter_id])
         .then(function (data) {
           resolve(data);
         })

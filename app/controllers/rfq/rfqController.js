@@ -7896,6 +7896,8 @@ const rfqController = {
         );
         rfQItem = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
       } else {
+        // Vendors (user_type 3) see only negotiation rounds they are selected for
+        const vendor_filter_id = req.user.user_type == 3 ? (req.user.vendor_id || id) : null;
         rfQItem = await rfqModel.getQuotesByRfqById2(
           rfq_id,
           id,
@@ -7903,7 +7905,8 @@ const rfqController = {
           TA_Vendors,
           no_freight,
           rfq_product_id,
-          include_negotiation === 'true'
+          include_negotiation === 'true',
+          vendor_filter_id
         );
       }
       // rfQItem = processQuotations(rfQItem);

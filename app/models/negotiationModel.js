@@ -55,10 +55,11 @@ const negotiationModel = {
   },
 
   /**
-   * Get all rounds for an RFQ (optionally filtered by product)
+   * Get all rounds for an RFQ (optionally filtered by product).
+   * When vendorId is provided, returns only rounds where that vendor is in vendor_ids.
    */
-  getRoundsByRfqId: async (rfqId, rfqProductId = null) => {
-    let query = `SELECT 
+  getRoundsByRfqId: async (rfqId, rfqProductId = null, vendorId = null) => {
+    let query = `SELECT
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
@@ -69,16 +70,21 @@ const negotiationModel = {
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1`;
-    
+
     const values = [rfqId];
-    
+
     if (rfqProductId) {
-      query += ` AND nr.rfq_product_id = $2`;
       values.push(rfqProductId);
+      query += ` AND nr.rfq_product_id = $${values.length}`;
     }
-    
+
+    if (vendorId) {
+      values.push(vendorId);
+      query += ` AND $${values.length} = ANY(nr.vendor_ids)`;
+    }
+
     query += ` ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`;
-    
+
     return db.any(query, values);
   },
 
@@ -87,10 +93,14 @@ const negotiationModel = {
    * When vendorId is provided, returns only the round assigned to that vendor.
    * When vendorId is omitted, returns the most recent active round (admin view).
    */
-  getActiveRound: async (rfqId, rfqProductId, includeEnded = false) => {
+  getActiveRound: async (rfqId, rfqProductId, includeEnded = false, vendorId = null) => {
     if (!rfqProductId) {
       throw new Error('rfq_product_id is required');
     }
+
+    const statusFilter = includeEnded
+      ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
+      : `('PENDING_APPROVAL', 'ACTIVE')`;
 
     if (vendorId) {
       return db.oneOrNone(
@@ -106,7 +116,7 @@ const negotiationModel = {
          LEFT JOIN tbl_product P ON P.id = PV.product_id
          WHERE nr.rfq_id = $1
            AND nr.rfq_product_id = $2
-           AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+           AND nr.status IN ${statusFilter}
            AND $3 = ANY(nr.vendor_ids)
          ORDER BY nr.round_number DESC
          LIMIT 1`,
@@ -1052,6 +1062,32 @@ const negotiationModel = {
        WHERE id = $1
        RETURNING *`,
       [roundId, vendorId, status, remarks || null, actedBy]
+    );
+  },
+
+  /**
+   * Bulk update all vendor approval statuses in a round.
+   * Used when the entire round is approved/rejected at the round level.
+   */
+  updateAllVendorsStatus: async (roundId, status, remarks, actedBy, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_negotiation_rounds
+       SET vendor_approvals = (
+         SELECT jsonb_agg(
+           jsonb_build_object(
+             'vendor_id', (elem->>'vendor_id')::int,
+             'status', $2::text,
+             'remarks', $3::text,
+             'acted_by', $4::int,
+             'acted_at', NOW()::text
+           )
+         )
+         FROM jsonb_array_elements(vendor_approvals) AS elem
+       ),
+       updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [roundId, status, remarks || null, actedBy]
     );
   },
 

@@ -56,7 +56,7 @@ const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
 const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
   const txContext = options?.txContext ?? null;
   const t = txContext || db;
-  
+
   try {
     // Get approval instance
     const { getApprovalInstanceById } = await import('../../models/generalModel.js');
@@ -68,6 +68,16 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
     const metadata = instance.metadata || {};
     const rfq_product_id = metadata.rfq_product_id || instance.entity_id;
     const rfq_id = metadata.rfq_id;
+    const round_id = metadata.round_id || instance.entity_id;
+
+    // Propagate APPROVED status to all vendor_approvals entries in the round
+    if (round_id) {
+      try {
+        await negotiationModel.updateAllVendorsStatus(round_id, 'APPROVED', null, approver_user_id, t);
+      } catch (vaErr) {
+        logError('Failed to update vendor_approvals on post-approval', vaErr);
+      }
+    }
 
     if (rfq_id && metadata.selected_quotes && metadata.selected_quotes.length > 0) {
       // Get RFQ data
@@ -139,6 +149,49 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
   } catch (negQuoteError) {
     // Log but don't fail the transaction
     logError('Error handling NEGOTIATION post-approval', negQuoteError);
+  }
+};
+
+/**
+ * Handle NEGOTIATION post-rejection actions.
+ * Propagates REJECTED status to all vendor_approvals in the round and cancels the round.
+ */
+const handleNegotiationRejection = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
+  const t = txContext || db;
+
+  try {
+    const { getApprovalInstanceById } = await import('../../models/generalModel.js');
+    const instance = await getApprovalInstanceById(approval_instance_id, 'NEGOTIATION', t);
+    if (!instance || instance.status !== 'REJECTED') {
+      return;
+    }
+
+    const metadata = instance.metadata || {};
+    const round_id = metadata.round_id || instance.entity_id;
+    const comment = options?.comment || null;
+
+    if (round_id) {
+      try {
+        await negotiationModel.updateAllVendorsStatus(round_id, 'REJECTED', comment, approver_user_id, t);
+      } catch (vaErr) {
+        logError('Failed to update vendor_approvals on post-rejection', vaErr);
+      }
+
+      // Cancel the round
+      try {
+        await t.none(
+          `UPDATE tbl_negotiation_rounds
+           SET status = 'CANCELLED', remarks = COALESCE($2, remarks), updated_at = NOW()
+           WHERE id = $1 AND status = 'PENDING_APPROVAL'`,
+          [round_id, comment]
+        );
+      } catch (rndErr) {
+        logError('Failed to cancel round on post-rejection', rndErr);
+      }
+    }
+  } catch (rejErr) {
+    logError('Error handling NEGOTIATION post-rejection', rejErr);
   }
 };
 
@@ -295,7 +348,7 @@ const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqD
 };
 
 // Export the helper function for use in general controller
-export { handleNegotiationPostApproval };
+export { handleNegotiationPostApproval, handleNegotiationRejection };
 
 const NegotiationController = {
   /**
@@ -561,7 +614,9 @@ const NegotiationController = {
         });
       }
 
-      const rounds = await negotiationModel.getRoundsByRfqId(rfq_id, rfq_product_id);
+      // Vendors (user_type 3) see only rounds they are selected for
+      const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
+      const rounds = await negotiationModel.getRoundsByRfqId(rfq_id, rfq_product_id, vendorId);
 
       // Enrich each round with assigned vendors
       const enrichedRounds = await Promise.all(
@@ -619,7 +674,9 @@ const NegotiationController = {
         });
       }
 
-      const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true);
+      // Vendors (user_type 3) see only rounds they are selected for
+      const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
+      const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true, vendorId);
 
       // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
       if (!round || (req.user.user_type == 3 && round.status !== 'ACTIVE')) {
@@ -727,6 +784,9 @@ const NegotiationController = {
       });
 
       const isFullyApproved = approvalResult.instance_status === 'APPROVED';
+
+      // Propagate approval to all vendor_approvals entries
+      await negotiationModel.updateAllVendorsStatus(round_id, 'APPROVED', remarks || null, user_id);
 
       if (isFullyApproved) {
         await handleNegotiationPostApproval(pendingInstance.id, user_id);
@@ -993,6 +1053,9 @@ const NegotiationController = {
           comment: remarks
         });
       }
+
+      // Propagate rejection to all vendor_approvals entries
+      await negotiationModel.updateAllVendorsStatus(round_id, 'REJECTED', remarks, user_id);
 
       // Cancel the entire round
       await negotiationModel.updateRoundStatus(round_id, 'CANCELLED', {
