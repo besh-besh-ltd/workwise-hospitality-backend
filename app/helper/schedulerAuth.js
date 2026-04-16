@@ -1,5 +1,6 @@
 // middleware/schedulerAuth.js
 import crypto from 'crypto';
+import { logger } from '../util/logger.js';
 
 const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET;
 
@@ -13,13 +14,13 @@ const scheduleId = req.headers['x-schedule-id'];
 
 // Check if signature header exists
 if (!receivedSignature) {
-console.error('❌ Missing X-Scheduler-Signature header');
+logger.error('Missing X-Scheduler-Signature header');
 return res.status(401).json({ error: 'Unauthorized: Missing signature' });
 }
 
 // Check if secret is configured
 if (!SCHEDULER_SECRET) {
-console.error('❌ SCHEDULER_SECRET not configured on backend');
+logger.error('SCHEDULER_SECRET not configured on backend');
 return res.status(500).json({ error: 'Server configuration error' });
 }
 
@@ -36,11 +37,11 @@ Buffer.from(expectedSignature, 'hex')
 );
 
 if (!isValid) {
-console.error(`❌ Invalid signature for schedule: ${scheduleId}`);
+logger.error({ scheduleId }, 'Invalid signature for schedule');
 return res.status(401).json({ error: 'Unauthorized: Invalid signature' });
 }
 
-console.log(`✅ Verified scheduler request: ${scheduleId}`);
+logger.info({ scheduleId }, 'Verified scheduler request');
 next();
 };
 

@@ -99,7 +99,7 @@ function getRfqEmailContent({
   changedDetails,
 }) {
   const baseUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}`;
-  const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${token}`;
+  const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}`;
 
   switch (emailType) {
     case RFQ_EMAIL_TYPE.NEW_PRODUCT:

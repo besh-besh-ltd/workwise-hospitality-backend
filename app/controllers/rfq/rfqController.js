@@ -1,4 +1,5 @@
 import Config from '../../config/app.config.js';
+import { logger } from '../../util/logger.js';
 import {
   logError,
   sendMail,
@@ -111,7 +112,7 @@ const getProjectMemberEmailsForRFQ = async (rfq_id) => {
 
     return memberEmails;
   } catch (error) {
-    console.error('Error getting project member emails for RFQ:', error);
+    logError('Error getting project member emails for RFQ', error);
     return [];
   }
 };
@@ -338,7 +339,7 @@ export const notifyBuyerOnPersistenceViaEmail = async (buyer_info, previous_stat
 
       sendMail(mail);
   } catch (err) {
-    console.error("Error in sendRfqUpdatedMailToVendors:", err);
+    logError('Error in sendRfqUpdatedMailToVendors', err);
     throw err;
   }
 };
@@ -398,7 +399,7 @@ const getQUOTES = async ({ id }, user_id) => {
       return {};
     }
   } catch (error) {
-    console.error('Error inserting data:', error);
+    logError('Error inserting data', error);
     throw error;
   }
 };
@@ -484,7 +485,7 @@ const sendFollowUpEmailsService = async (payload) => {
     addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
     await sendMailWithRetry(mailRecipients);
-    console.log(`Follow-up email sent to buyer ${email} for RFQ ${rfqNumber}`);
+    logger.info(`Follow-up email sent to buyer ${email} for RFQ ${rfqNumber}`);
   } catch (error) {
     throw error;
   }
@@ -597,7 +598,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
             </tbody>
           </table>
 
-          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfqNumber}&token=${token}
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
             Submit Your Quote Now
           </a>
@@ -701,7 +702,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
       }
     }
   } catch (error) {
-    console.error('Error sending email to vendor:', error);
+    logError('Error sending email to vendor', error);
     throw error;
   }
 };
@@ -714,7 +715,7 @@ const sendMailWithRetry = async (mailOptions, maxRetries = 3) => {
       return true;
     } catch (error) {
       retries++;
-      console.error(`Email send attempt ${retries} failed:`, error);
+      logError(`Email send attempt ${retries} failed`, error);
       if (retries === maxRetries) {
         throw error;
       }
@@ -785,7 +786,7 @@ const sendMailToVendorsForTargetPrice = async (
               </tbody>
             </table>
 
-            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${token}
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
@@ -827,10 +828,7 @@ const sendMailToVendorsForTargetPrice = async (
 
         // console.log(`Email sent successfully to vendor: ${vendor.name}`);
       } catch (vendorError) {
-        console.error(
-          `Error sending email to vendor ${vendor.id}:`,
-          vendorError
-        );
+        logError(`Error sending email to vendor ${vendor.id}`, vendorError);
         // Continue with next vendor even if one fails
       }
     }
@@ -840,7 +838,7 @@ const sendMailToVendorsForTargetPrice = async (
       message: 'Target price notifications sent to all vendors'
     };
   } catch (error) {
-    console.error('Error in sendMailToVendorsForTargetPrice:', error);
+    logError('Error in sendMailToVendorsForTargetPrice', error);
     throw error;
   }
 };
@@ -902,7 +900,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products ,reverse_auction , location );
       
       } catch (error) {
-        console.error(`Failed to send email to vendor ${vendorId}:`, error);
+        logError(`Failed to send email to vendor ${vendorId}`, error);
         throw error;
       }
     });
@@ -913,7 +911,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
     }
     return true;
   } catch (error) {
-    console.error('Error in sendMailtoVendors:', error);
+    logError('Error in sendMailtoVendors', error);
     throw error;
   }
 };
@@ -961,9 +959,9 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
     await sendMailWithRetry(mailRecipients);
-    console.log(`Confirmation email sent successfully to buyer ${id}`);
+    logger.info(`Confirmation email sent successfully to buyer ${id}`);
   } catch (error) {
-    console.error('Error in sendQuotationMailToBuyer:', error);
+    logError('Error in sendQuotationMailToBuyer', error);
     throw error;
   }
 };
@@ -1272,7 +1270,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
       
         <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
       
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${vendor.token}"
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}"
            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           Submit Your Quote Now
         </a>
@@ -1370,7 +1368,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
         sendNotification(vendor.user_id, '', notificationData, payload, parsedEndpoint);
       }
     } catch (error) {
-      console.warn('Failed to parse vendor endpoint for notifications');
+      logger.warn('Failed to parse vendor endpoint for notifications');
     }
   }
 };
@@ -1558,15 +1556,12 @@ const sendQuoteNotificationEmail = async (req) => {
            sendMail(mail);
          } catch (perVendorErr) {
            // Per-vendor failure shouldn't kill the whole batch.
-           console.error(
-             `[sendRfqUpdatedMailToVendors] vendor ${vendor?.vendor_id} failed:`,
-             perVendorErr?.message || perVendorErr
-           );
+           logError(`[sendRfqUpdatedMailToVendors] vendor ${vendor?.vendor_id} failed`, perVendorErr);
          }
        })
      );
    } catch (err) {
-     console.error('Error in sendRfqUpdatedMailToVendors:', err);
+     logError('Error in sendRfqUpdatedMailToVendors', err);
      throw err;
    }
  };
@@ -1664,9 +1659,9 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
 
       sendMail(mailRecipients);
 
-      console.log(`Email sent successfully to vendor: ${vendor.vendor_name}`);
+      logger.info(`Email sent successfully to vendor: ${vendor.vendor_name}`);
     } catch (vendorError) {
-      console.error(`Error sending email to vendor ${vendor.id}:`, vendorError);
+      logError(`Error sending email to vendor ${vendor.id}`, vendorError);
     }
 
     return {
@@ -1674,7 +1669,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
       message: 'Technical clause comment notification sent to vendor'
     };
   } catch (error) {
-    console.error('Error in sendAddTechCommentMail:', error);
+    logError('Error in sendAddTechCommentMail', error);
     throw error;
   }
 };
@@ -1690,7 +1685,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
     let productName;
 
     if (Array.isArray(product)) {
-      // If it's an array, take the first element’s name
+      // If it's an array, take the first element's name
       productName = product[0]?.name;
     } else if (product && typeof product === 'object') {
       // If it's a single object, use its name
@@ -1812,11 +1807,9 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
 
       sendMail(mailRecipients);
 
-      console.log(
-        `Email sent successfully to vendor: ${vendor.name} [${reject_message ? "Rejected" : "Accepted"}]`
-      );
+      logger.info(`Email sent successfully to vendor: ${vendor.name} [${reject_message ? "Rejected" : "Accepted"}]`);
     } catch (vendorError) {
-      console.error(`Error sending email to vendor ${vendor.id}:`, vendorError);
+      logError(`Error sending email to vendor ${vendor.id}`, vendorError);
     }
 
     return {
@@ -1824,7 +1817,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       message: 'Technical evaluation decision email sent to vendor',
     };
   } catch (error) {
-    console.error('Error in sendTechEvalAccepOrRejectMailToVendor:', error);
+    logError('Error in sendTechEvalAccepOrRejectMailToVendor', error);
     throw error;
   }
 };
@@ -1913,13 +1906,13 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product, text) =
 
       sendMail(mailRecipients);
 
-      console.log(`Email sent successfully to buyer: ${buyer.contactName}`);
+      logger.info(`Email sent successfully to buyer: ${buyer.contactName}`);
     } catch (vendorError) {
-      console.error(`Error sending email for vendor ${vendor_id}:`, vendorError);
+      logError(`Error sending email for vendor ${vendor_id}`, vendorError);
     }
 
   } catch (error) {
-    console.error('Error in sendAddTechCommentMailForBuyer:', error);
+    logError('Error in sendAddTechCommentMailForBuyer', error);
     throw error;
   }
 };
@@ -3400,7 +3393,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       [instance.id, userId, 'Cancelled due to RFQ re-submission with changes']
     );
 
-    console.log(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
+    logger.info(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
   }
 
   // Check if the creator is the final approver
@@ -3416,7 +3409,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
 
   if (isFinalApprover) {
     // Creator is the final approver - auto-approve immediately
-    console.log(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
+    logger.info(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
 
     // Create an approved approval instance for audit trail
     const policy = await dbContext.oneOrNone(`
@@ -3539,7 +3532,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       txContext  // Pass transaction context to createApprovalInstance
     });
   } catch (approvalError) {
-    console.warn(`[Approval] Could not create approval instance for ${entityType} ${rfqId}: ${approvalError.message}. Proceeding to publish anyway.`);
+    logger.warn(`[Approval] Could not create approval instance for ${entityType} ${rfqId}: ${approvalError.message}. Proceeding to publish anyway.`);
     result = null;
   }
 
@@ -3582,7 +3575,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     }, dbContext);
   }
 
-  console.log(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: PENDING)`);
+  logger.info(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: PENDING)`);
 
   return {
     ...(result || {}),
@@ -3612,13 +3605,13 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
     const instance = await getApprovalInstanceById(approval_instance_id, null, t);
 
     if (!instance || instance.status !== 'APPROVED') {
-      console.log(`Approval instance ${approval_instance_id} not found or not approved`);
+      logger.info(`Approval instance ${approval_instance_id} not found or not approved`);
       return null;
     }
 
     // Only handle RFQ and TENDER entity types
     if (!['RFQ', 'TENDER'].includes(instance.entity_type)) {
-      console.log(`Skipping non-RFQ entity type: ${instance.entity_type}`);
+      logger.info(`Skipping non-RFQ entity type: ${instance.entity_type}`);
       return null;
     }
 
@@ -3630,14 +3623,14 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
     `, [rfq_id]);
 
     if (!rfq) {
-      console.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
+      logger.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
       return null;
     }
 
     // If RFQ is already published (status 1) or ready to publish (status 4),
     // just record the approval event - publishing already proceeded
     if (rfq.status === 1 || rfq.status === 4) {
-      console.log(`RFQ ${rfq_id} already at status ${rfq.status} - recording late approval`);
+      logger.info(`RFQ ${rfq_id} already at status ${rfq.status} - recording late approval`);
       await recordLifecycleEvent({
         entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
         entity_id: rfq_id,
@@ -3656,7 +3649,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
 
     // For status 3 (PENDING_APPROVAL) - normal flow
     if (rfq.status !== 3) {
-      console.log(`RFQ ${rfq_id} status is ${rfq.status}, unexpected state`);
+      logger.info(`RFQ ${rfq_id} status is ${rfq.status}, unexpected state`);
       return null;
     }
 
@@ -3696,7 +3689,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
         txContext: t
       });
 
-      console.log(`RFQ ${rfq_id} approved and published immediately (publish date already passed)`);
+      logger.info(`RFQ ${rfq_id} approved and published immediately (publish date already passed)`);
 
       // Send publish notifications (direct-publish path bypasses publishRfq in cronManager)
       try {
@@ -3705,7 +3698,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
         // Notify approval workflow users + RFQ creator
         const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
         const publishUsers = await getRfqNotificationRecipients(entityType, rfq_id, rfqFull?.created_by || rfq.created_by);
-        console.log(`[RFQ PostApproval] Direct publish email - ${entityType} #${rfq.rfq_no}: ${publishUsers.length} recipients`, publishUsers.map(u => u.email));
+        logger.info({ recipients: publishUsers.map(u => u.email) }, `[RFQ PostApproval] Direct publish email - ${entityType} #${rfq.rfq_no}: ${publishUsers.length} recipients`);
         if (publishUsers.length > 0) {
           await sendRfqPublishedNotification({
             rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title },
@@ -3736,7 +3729,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
             const token = await rfqModel.insertVendorRfqToken(vendor.user_id, rfq_id);
             vendorsWithTokens.push({ user_id: vendor.user_id, name: vendor.name, email: vendor.email, token, products: vendor.products });
           } catch (tokenErr) {
-            console.error(`Error generating token for vendor ${vendorId}:`, tokenErr);
+            logError(`Error generating token for vendor ${vendorId}`, tokenErr);
           }
         }
 
@@ -3744,7 +3737,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
           sendVendorRfqNotification({ rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, buyerName, vendors: vendorsWithTokens });
         }
       } catch (emailError) {
-        console.error('Error sending direct-publish notification emails:', emailError);
+        logError('Error sending direct-publish notification emails', emailError);
       }
 
       return { rfq_id, status: 1, published: true };
@@ -3783,14 +3776,14 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
           });
         }
       } catch (emailError) {
-        console.error('Error sending ready-to-publish notification:', emailError);
+        logError('Error sending ready-to-publish notification', emailError);
       }
     }
 
-    console.log(`RFQ ${rfq_id} approved - status updated to READY_TO_PUBLISH (4)`);
+    logger.info(`RFQ ${rfq_id} approved - status updated to READY_TO_PUBLISH (4)`);
     return { rfq_id, status: 4 };
   } catch (error) {
-    console.error('Error handling RFQ post-approval:', error);
+    logError('Error handling RFQ post-approval', error);
     throw error;
   }
 };
@@ -3818,13 +3811,13 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
     const instance = await getApprovalInstanceById(approval_instance_id, null, t);
 
     if (!instance || instance.status !== 'REJECTED') {
-      console.log(`Approval instance ${approval_instance_id} not found or not rejected`);
+      logger.info(`Approval instance ${approval_instance_id} not found or not rejected`);
       return null;
     }
 
     // Only handle RFQ and TENDER entity types
     if (!['RFQ', 'TENDER'].includes(instance.entity_type)) {
-      console.log(`Skipping non-RFQ entity type: ${instance.entity_type}`);
+      logger.info(`Skipping non-RFQ entity type: ${instance.entity_type}`);
       return null;
     }
 
@@ -3836,7 +3829,7 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
     `, [rfq_id]);
 
     if (!rfq) {
-      console.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
+      logger.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
       return null;
     }
 
@@ -3863,7 +3856,7 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
 
     return { rfq_id, status: 1, rejection_reason };
   } catch (error) {
-    console.error('Error handling RFQ rejection:', error);
+    logError('Error handling RFQ rejection', error);
     throw error;
   }
 };
@@ -4124,7 +4117,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
     // Get round record to verify
     const round = await rfqModel.getTechEvalRoundById(round_id, t);
     if (!round) {
-      console.error(`Tech eval round ${round_id} not found for approval instance ${approval_instance_id}`);
+      logger.error(`Tech eval round ${round_id} not found for approval instance ${approval_instance_id}`);
       return;
     }
 
@@ -4139,7 +4132,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
     `, [tech_evaluation_id || round.tbl_rfq_product_tech_evaluation_id]);
 
     if (!techEval) {
-      console.error(`Tech evaluation not found for round ${round_id}`);
+      logger.error(`Tech evaluation not found for round ${round_id}`);
       return;
     }
 
@@ -4217,11 +4210,11 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
               company_name: metadata.company_name
             },
             vendors: vendorsWithTokens
-          }).catch(err => console.error('Failed to send vendor tech acceptance emails:', err));
+          }).catch(err => logError('Failed to send vendor tech acceptance emails', err));
         }
       }
     } catch (emailError) {
-      console.error('Error sending vendor tech acceptance notifications:', emailError);
+      logError('Error sending vendor tech acceptance notifications', emailError);
     }
 
     // Count total passed verified vendors
@@ -4234,7 +4227,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         is_complete: true,
         total_passed_verified: totalPassedVerified
       }, t);
-      console.log(`Tech evaluation ${techEval.id} is complete with ${totalPassedVerified} passed vendors`);
+      logger.info(`Tech evaluation ${techEval.id} is complete with ${totalPassedVerified} passed vendors`);
 
       // Send notifications to qualified users
       try {
@@ -4259,11 +4252,11 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
                 required_passed_vendors: requiredPassedVendors
               },
               qualifiedUsers
-            ).catch(err => console.error('Failed to send tech eval notifications:', err));
+            ).catch(err => logError('Failed to send tech eval notifications', err));
           }
         }
       } catch (notificationError) {
-        console.error('Error sending tech eval completion notifications:', notificationError);
+        logError('Error sending tech eval completion notifications', notificationError);
       }
     } else if (failedVendors.length > 0) {
       // Need to auto-replace failed vendors
@@ -4299,9 +4292,9 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         t
       );
 
-      console.log(`[TECH-EVAL-REPLACE] currentRoundScoredIds:`, currentRoundScoredIds);
-      console.log(`[TECH-EVAL-REPLACE] evaluatedVendorIds (exclude list):`, evaluatedVendorIds);
-      console.log(`[TECH-EVAL-REPLACE] Reserve vendors found:`, nextVendors?.length, nextVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name, rpvId: v.rfq_product_vendor_id })));
+      logger.debug({ currentRoundScoredIds }, '[TECH-EVAL-REPLACE] currentRoundScoredIds');
+      logger.debug({ evaluatedVendorIds }, '[TECH-EVAL-REPLACE] evaluatedVendorIds (exclude list)');
+      logger.debug({ count: nextVendors?.length, vendors: nextVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name, rpvId: v.rfq_product_vendor_id })) }, '[TECH-EVAL-REPLACE] Reserve vendors found');
 
       // Fallback: look for external vendors from quotes if not enough pending vendors
       if (!nextVendors || nextVendors.length < replacementsNeeded) {
@@ -4317,7 +4310,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
           remaining,
           t
         );
-        console.log(`[TECH-EVAL-REPLACE] Fallback external vendors found:`, externalVendors?.length, externalVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name })));
+        logger.debug({ count: externalVendors?.length, vendors: externalVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name })) }, '[TECH-EVAL-REPLACE] Fallback external vendors found');
         nextVendors = [...(nextVendors || []), ...(externalVendors || [])];
       }
 
@@ -4362,7 +4355,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
           // Create empty vendor response records for new vendor (skips if already exist)
           await rfqModel.createEmptyVendorResponses(techEval.id, newVendor.vendor_id, t);
 
-          console.log(`Replaced failed vendor ${failedVendor.vendor_id} with ${newVendor.vendor_id}`);
+          logger.info(`Replaced failed vendor ${failedVendor.vendor_id} with ${newVendor.vendor_id}`);
         }
 
         // Increment current_round for next evaluation cycle
@@ -4371,7 +4364,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
           total_passed_verified: totalPassedVerified
         }, t);
 
-        console.log(`Prepared ${nextVendors.length} replacement vendors for round ${evaluation_round + 1}`);
+        logger.info(`Prepared ${nextVendors.length} replacement vendors for round ${evaluation_round + 1}`);
       } else {
         // No more replacement vendors available — all eligible vendors
         // have been evaluated, so mark as complete even if the passed
@@ -4381,7 +4374,7 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
           blocked_insufficient_vendors: true,
           total_passed_verified: totalPassedVerified
         }, t);
-        console.log(`Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
+        logger.info(`Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
       }
     } else {
       // All vendors passed — if no failed vendors remain, all eligible
@@ -4390,13 +4383,13 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         is_complete: true,
         total_passed_verified: totalPassedVerified
       }, t);
-      console.log(`Tech evaluation ${techEval.id} complete (all vendors passed, ${totalPassedVerified} total)`);
+      logger.info(`Tech evaluation ${techEval.id} complete (all vendors passed, ${totalPassedVerified} total)`);
     }
 
-    console.log(`Post-approval complete for tech eval round ${round_id}: ${passedVendors.length} passed, ${failedVendors.length} failed`);
+    logger.info(`Post-approval complete for tech eval round ${round_id}: ${passedVendors.length} passed, ${failedVendors.length} failed`);
   } catch (techEvalError) {
     // Log but don't fail the transaction
-    console.error('Error handling TECHNICAL post-approval:', techEvalError);
+    logError('Error handling TECHNICAL post-approval', techEvalError);
   }
 };
 
@@ -4791,7 +4784,7 @@ const sendVendorEditNotifications = async (rfq_id, userId, diff) => {
   await Promise.allSettled(dispatchTasks).then((results) => {
     for (const r of results) {
       if (r.status === 'rejected') {
-        console.error('[wh69] vendor mail dispatch failed:', r.reason?.message || r.reason);
+        logger.error({ reason: r.reason?.message || r.reason }, '[wh69] vendor mail dispatch failed');
       }
     }
   });
@@ -4967,7 +4960,7 @@ const rfqController = {
           });
         } catch (emailError) {
           // Log email error but don't fail the payment verification
-          console.error('Error sending tender fee payment email:', emailError);
+          logError('Error sending tender fee payment email', emailError);
         }
       }
 
@@ -5198,7 +5191,7 @@ const rfqController = {
           });
         }
       } catch (emailError) {
-        console.error('Error sending RFQ creation emails:', emailError);
+        logError('Error sending RFQ creation emails', emailError);
       }
 
       const buyerMsgPayload = {
@@ -5414,7 +5407,7 @@ const rfqController = {
       // 10. Respond IMMEDIATELY — notifications are dispatched in the
       //     background. Originally we awaited sendVendorEditNotifications
       //     here, which on RFQs with even a handful of vendors blocked the
-      //     response for 5–7 seconds (sequential SPOC + token + email
+      //     response for 5-7 seconds (sequential SPOC + token + email
       //     queries per vendor). The notifications are best-effort and
       //     never roll back the edit, so there's no reason to make the
       //     user wait for SMTP.
@@ -5435,7 +5428,7 @@ const rfqController = {
         // flushes before the slow email work begins.
         setImmediate(() => {
           sendVendorEditNotifications(rfq_id, userId, result.diff).catch((err) => {
-            console.error('[wh69] vendor notification error:', err.message || err);
+            logError('[wh69] vendor notification error', err);
           });
         });
       }
@@ -5570,7 +5563,7 @@ const rfqController = {
         });
       });
     } catch (error) {
-      console.error('Error deleting RFQ draft:', error);
+      logError('Error deleting RFQ draft', error);
       logError('Error deleting RFQ draft:', error);
       return res.status(500).json({
         status: 3,
@@ -5595,7 +5588,7 @@ const rfqController = {
     }
     catch(error)
     {
-      console.log(error)
+      logError('getVendorQuoteStatus error', error)
     }
     },
 
@@ -5655,8 +5648,7 @@ const rfqController = {
         data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
       });
     } catch (error) {
-      console.log(error);
-      logError('Error fetching RFQ creation data:', error);
+      logError('Error fetching RFQ creation data', error);
       res.status(500).json({
         status: 3,
         message: 'An error occurred while fetching RFQ draft data'
@@ -5767,7 +5759,7 @@ const rfqController = {
             sheetId
           );
         } catch (error) {
-          console.log(error);
+          logError('getDraftById: failed to process sheet data', error);
           return res.status(500).json({
             status: 0,
             success: false,
@@ -6069,7 +6061,7 @@ const rfqController = {
         };
 
 
-        console.log("checcking the logs here -------------", globalFilters);
+        logger.debug({ globalFilters }, 'createOrUpdateRfqDraftWithProductVendors: checking global filters');
         for (const [key, rawValue] of Object.entries(globalFilters)) {
           if (rawValue === null || rawValue === "" || rawValue?.length === 0) continue;
 
@@ -6078,7 +6070,7 @@ const rfqController = {
 
           const extracted = extractor(rawValue);
 
-          console.log(`Extracted filter - ${key}:`, extracted);
+          logger.debug({ key, extracted }, 'Extracted filter');
 
           // Handle arrays → multiple inserts
           const values = Array.isArray(extracted) ? extracted : [extracted];
@@ -6264,8 +6256,7 @@ const rfqController = {
         vendor_count
       });
     } catch (error) {
-      console.log(error);
-      logError('Error while adding Product and Vendors:', error);
+      logError('Error while adding Product and Vendors', error);
       res.status(500).json({
         status: 3,
         message: 'An error occurred while processing your request'
@@ -6473,7 +6464,7 @@ const rfqController = {
 
       const councellorssCountArr = await Promise.all(
         rfq.map((ele) => {
-          console.log('ele--->', ele);
+          logger.debug({ ele }, 'processing RFQ element');
           if (Object.keys(ele.quotations).length > 0) {
             ele.quote_received = ele.quotations.length;
           } else {
@@ -6600,56 +6591,13 @@ const rfqController = {
 
       return res.status(200).json({ status: 1, data });
     } catch (err) {
-      console.error('getLifecycleSummary error:', err);
+      logError('getLifecycleSummary error', err);
       return res.status(200).json({ status: 3, message: 'Error fetching lifecycle summary' });
     }
   },
 
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
-    // Determine the user ID to check based on the verification status
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await db.any(
-        'SELECT * FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
-        [withoutLoginUserToken]
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await db.any(
-        'SELECT * FROM tbl_users WHERE id = $1',
-        [tokenData[0].vendor_id]
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
-
     const { user_type, id: user_id } = req.user;
     let { includeVendors = false } = req.query;
 
@@ -6673,7 +6621,7 @@ const rfqController = {
               `rfq_id = ${id} AND user_id = ${req.user.id} AND is_rfq_viewed = 0`
             );
           } catch (error) {
-            console.error('Error updating RFQ viewed status:', error);
+            logError('Error updating RFQ viewed status', error);
           }
         } else {
           res
@@ -6708,7 +6656,7 @@ const rfqController = {
           const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
           rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
         } catch (err) {
-          console.error('Error fetching action holders for RFQ detail:', err);
+          logError('Error fetching action holders for RFQ detail', err);
           rfqData.action_holders = null;
         }
       }
@@ -6722,7 +6670,7 @@ const rfqController = {
             hotelIds, 'te', ['read', 'create'], deptId
           );
         } catch (evaluatorError) {
-          console.error('Error fetching technical evaluators for RFQ detail:', evaluatorError);
+          logError('Error fetching technical evaluators for RFQ detail', evaluatorError);
           rfqData.technical_evaluators = [];
         }
         try {
@@ -6731,7 +6679,7 @@ const rfqController = {
             hotelIds, 'quote-compare', ['read', 'create'], null
           );
         } catch (err) {
-          console.error('Error fetching commercial evaluators for RFQ detail:', err);
+          logError('Error fetching commercial evaluators for RFQ detail', err);
           rfqData.commercial_evaluators = [];
         }
         try {
@@ -6740,13 +6688,43 @@ const rfqController = {
             hotelIds, 'awarding', ['read', 'create'], null
           );
         } catch (err) {
-          console.error('Error fetching PO initiators for RFQ detail:', err);
+          logError('Error fetching PO initiators for RFQ detail', err);
           rfqData.po_initiators = [];
         }
       } else {
         rfqData.technical_evaluators = [];
         rfqData.commercial_evaluators = [];
         rfqData.po_initiators = [];
+      }
+
+      // Fetch vendor PO rejections for this RFQ (used by Quote Compare to show rejection info)
+      try {
+        rfqData.vendor_rejections = await db.any(`
+          SELECT
+            rp.product_variant_id,
+            rp.variant,
+            po.finalized_vendor_id AS vendor_id,
+            u.name AS vendor_name,
+            u.organization_name AS vendor_organization,
+            po.po_number,
+            po.vendor_rejection_reason,
+            po.vendor_action_at AS rejected_at
+          FROM tbl_rfq_purchase_order po
+          JOIN tbl_users u ON u.id = po.finalized_vendor_id
+          CROSS JOIN LATERAL unnest(po.rfq_product_id) AS pid(val)
+          JOIN tbl_rfq_products rp ON rp.id = pid.val
+          WHERE po.rfq_id = $1
+            AND po.status = 'rejected_by_vendor'
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization qf
+              WHERE qf.rfq_id = po.rfq_id
+                AND qf.product_variant_id = rp.product_variant_id
+                AND qf.variant = rp.variant
+            )
+        `, [rfqData.id]);
+      } catch (err) {
+        logError('Error fetching vendor rejections for RFQ', err);
+        rfqData.vendor_rejections = [];
       }
 
       // Add tender payment status for vendor viewers (sourced from main query)
@@ -6797,7 +6775,7 @@ const rfqController = {
         });
       }
     } catch (error) {
-      console.error('Error fetching target price history:', error);
+      logError('Error fetching target price history', error);
       return res.status(500).json({
         status: 0,
         message: 'Internal server error',
@@ -6831,7 +6809,7 @@ const rfqController = {
 
       const councellorssCountArr = await Promise.all(
         rfq.map((ele) => {
-          console.log('ele--->', ele);
+          logger.debug({ ele }, 'processing RFQ element');
           if (Object.keys(ele.quotations).length > 0) {
             ele.quote_received = ele.quotations.length;
           } else {
@@ -6989,7 +6967,7 @@ const rfqController = {
             rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
           }
         } catch (err) {
-          console.error('Error fetching action holders:', err);
+          logError('Error fetching action holders', err);
         }
       }
 
@@ -7081,7 +7059,7 @@ const rfqController = {
             rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
           }
         } catch (err) {
-          console.error('Error fetching action holders:', err);
+          logError('Error fetching action holders', err);
         }
       }
 
@@ -7106,7 +7084,7 @@ const rfqController = {
   },
   getVendors: async (req, res, next) => {
     let { vendors, rfq_id } = req.body;
-    console.log(vendors);
+    logger.debug({ vendors }, 'getVendors request');
     try {
       const vendorsList = await rfqModel.getVendors(vendors, rfq_id);
       res
@@ -7206,48 +7184,6 @@ const rfqController = {
       regret_reason,
       vendorGSTIN
     } = req.body;
-
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
 
     const user = req.user;
 
@@ -7877,7 +7813,7 @@ const rfqController = {
               }
             } catch (negotiationError) {
               // Log but don't fail the main quote submission
-              console.error('Error saving negotiation round quote:', negotiationError);
+              logError('Error saving negotiation round quote', negotiationError);
             }
 
             await sendQuoteNotificationEmail(req);
@@ -7946,7 +7882,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id , pageSource } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id, pageSource, include_negotiation } = req.query;
     const { id, company_id } = req.user;
 
     try {
@@ -7966,7 +7902,8 @@ const rfqController = {
           company_id,
           TA_Vendors,
           no_freight,
-          rfq_product_id
+          rfq_product_id,
+          include_negotiation === 'true'
         );
       }
       // rfQItem = processQuotations(rfQItem);
@@ -7983,12 +7920,12 @@ const rfqController = {
           current_status: "QC",
           created_by: req.user.id
         });
-        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+        logger.debug({ data: insertIntoQuoteActivity }, 'Inserted value into quote activity');
       } else {
-        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+        logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
     } else {
-      console.log(`Skipped insert for pageSource: ${pageSource}`);
+      logger.debug('Skipped insert for pageSource: ${pageSource}');
     }
 
       res
@@ -8031,7 +7968,7 @@ const rfqController = {
             .end();
         })
         .catch((error) => {
-          console.error('Error inserting data:', error);
+          logError('Error inserting data', error);
         });
     } catch (error) {
       logError(error);
@@ -8104,7 +8041,7 @@ const rfqController = {
                                                           created_by: req.user.id
                                                         });
 
-      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      logger.debug({ data: insertIntoQuoteActivity }, 'Inserted value into quote activity');
       res
         .status(200)
         .json({
@@ -8300,7 +8237,7 @@ const rfqController = {
         }
       });
 
-      console.log(`[closeRFQ] RFQ ${rfq_id}: cancelled ${cancelledInstances.length} pending approval instance(s) and ${cancelledRoundCount} active negotiation round(s)`);
+      logger.debug('[closeRFQ] RFQ ${rfq_id}: cancelled ${cancelledInstances.length} pending approval instance(s) and ${cancelledRoundCount} active negotiation round(s)');
 
       // Re-fetch the RFQ row so the response shape stays the same as before
       const rfQItem = await rfqModel.getRfqDetailsById(rfq_id);
@@ -8325,7 +8262,7 @@ const rfqController = {
           [rfQItem.hotel_id, rfQItem.hospitality_company_id]
         );
       } catch (buErr) {
-        console.error(`[closeRFQ] Failed to fetch BU members for RFQ ${rfq_id}:`, buErr.message);
+        logError('[closeRFQ] Failed to fetch BU members for RFQ ${rfq_id}', buErr);
       }
 
       // Send heads-up email to all BU members (replaces the legacy vendor-targeted close email).
@@ -8370,7 +8307,7 @@ const rfqController = {
           remarks: 'RFQ closed by creator'
         });
       } catch (lifecycleErr) {
-        console.error(`Failed to record lifecycle event for closed RFQ ${rfq_id}:`, lifecycleErr.message);
+        logError('Failed to record lifecycle event for closed RFQ ${rfq_id}', lifecycleErr);
       }
 
       res
@@ -8453,7 +8390,7 @@ const rfqController = {
         const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
         await removeRfqPublishJob(rfq_id);
       } catch (scheduleErr) {
-        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+        logError('Failed to remove publish schedule for RFQ ${rfq_id}', scheduleErr);
       }
 
       // Record lifecycle event
@@ -8546,7 +8483,7 @@ const rfqController = {
         const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
         await removeRfqPublishJob(rfq_id);
       } catch (scheduleErr) {
-        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+        logError('Failed to remove publish schedule for RFQ ${rfq_id}', scheduleErr);
       }
 
       await recordLifecycleEvent({
@@ -8850,6 +8787,25 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
+      // Check for active negotiation round blocking finalization
+      const rfqProductForNego = await db.oneOrNone(
+        `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+        [rfq_id, product_variant_id, variant]
+      );
+      if (rfqProductForNego) {
+        const activeNegotiationRound = await db.oneOrNone(
+          `SELECT id FROM tbl_negotiation_rounds
+           WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' AND end_date > NOW()`,
+          [rfq_id, rfqProductForNego.id]
+        );
+        if (activeNegotiationRound) {
+          return res.status(400).json({
+            status: 2,
+            message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
+          });
+        }
+      }
+
       const vendor_details = await userModel.user_profile_detail(vendor_id);
       const rfQItem = await rfqModel.getRfqById(rfq_id, vendor_id);
       let winning_product = null;
@@ -9023,6 +8979,27 @@ const rfqController = {
                     approvalTriggered = true;
                     negotiationQuoteApprovalPending = true;
                   } else {
+                    // If there's an old APPROVED instance whose PO was rejected by vendor,
+                    // cancel it so a fresh approval cycle can begin for re-finalization.
+                    const existingApproved = existingApprovals.find(inst => inst.status === 'APPROVED');
+                    if (existingApproved) {
+                      const linkedPO = await t.oneOrNone(`
+                        SELECT id, status FROM tbl_rfq_purchase_order
+                        WHERE rfq_id = $1 AND status = 'rejected_by_vendor'
+                          AND rfq_product_id @> ARRAY[$2]::int[]
+                        ORDER BY updated_at DESC LIMIT 1
+                      `, [rfq_id, rfqProduct.id]);
+
+                      if (linkedPO) {
+                        await t.none(`
+                          UPDATE tbl_approval_instances
+                          SET status = 'CANCELLED', completed_at = NOW()
+                          WHERE id = $1
+                        `, [existingApproved.id]);
+                        logger.info(`Cancelled old NEGOTIATION_QUOTE approval ${existingApproved.id} for re-finalization after vendor PO rejection`);
+                      }
+                    }
+
                     // Try to create NEGOTIATION_QUOTE approval instance
                     const approvalResult = await createApprovalInstance({
                       entity_type: 'NEGOTIATION_QUOTE',
@@ -9085,7 +9062,7 @@ const rfqController = {
               if (approvalError.message?.includes('No approval policy found')) {
                 approvalTriggered = false;
               } else {
-                console.error('Error checking NEGOTIATION_QUOTE approval:', approvalError);
+                logError('Error checking NEGOTIATION_QUOTE approval', approvalError);
                 throw approvalError;
               }
             }
@@ -9171,7 +9148,7 @@ const rfqController = {
               
               if (existingArcApproval) {
                 // ARC approval already exists for this product
-                console.log(`ARC approval already exists for product ${rfqProductId}`);
+                logger.debug('ARC approval already exists for product ${rfqProductId}');
                 arcApprovalCreated = true;
               } else {
                 // Create ARC approval instance for this product
@@ -9219,7 +9196,7 @@ const rfqController = {
               }
             } catch (arcError) {
               // Log error but don't fail the finalization
-              console.error('Error creating ARC approval instance:', arcError);
+              logError('Error creating ARC approval instance', arcError);
               // Try to get rfq_product_id using model
               let rfqProductIdForError = null;
               try {
@@ -9262,16 +9239,16 @@ const rfqController = {
         'tbl_quote_activity',
         `rfq_id = ${rfq_id} AND current_status = 'FIN' AND created_by = ${req.user.id}`
       );
-      console.log("Existing activity check:", existingActivity);
+      logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
         const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
           rfq_id: rfq_id,
           current_status: "FIN",
           created_by: req.user.id
         });
-        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+        logger.debug({ data: insertIntoQuoteActivity }, 'Inserted value into quote activity');
       } else {
-        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+        logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
 
         // If NEGOTIATION_QUOTE approval is pending, return appropriate message
@@ -9336,7 +9313,7 @@ const rfqController = {
         ];
         await generalModel.insertMany('product_search_record', searchedData);
       } catch (error) {
-        console.log('Product search record table not available:', error.message);
+        logger.debug({ data: error.message }, 'Product search record table not available');
       }
 
       res.status(200).json({
@@ -9453,7 +9430,7 @@ const rfqController = {
       });
 
     } catch (error) {
-      console.error('Error in bulkSearchVendorsByCategory:', error);
+      logError('Error in bulkSearchVendorsByCategory', error);
       logError(error);
       return res.status(500).json({
         status: 0,
@@ -9538,7 +9515,7 @@ const rfqController = {
           });
         }
       } catch (error) {
-        console.error('Error in searchVendorController:', error);
+        logError('Error in searchVendorController', error);
         logError(error);
         // Error handling and response
         res.status(500).json({
@@ -9611,7 +9588,7 @@ const rfqController = {
                   .end();
               })
               .catch((error) => {
-                console.error('Error inserting data:', error);
+                logError('Error inserting data', error);
               });
           } else {
             Promise.all(
@@ -9630,7 +9607,7 @@ const rfqController = {
                   .end();
               })
               .catch((error) => {
-                console.error('Error inserting data:', error);
+                logError('Error inserting data', error);
               });
           }
         } catch (error) {
@@ -11492,7 +11469,7 @@ const rfqController = {
 
       return res.json(result);
     } catch (error) {
-      console.log(error);
+      logError('rfqController error', error);
       logError(error);
       return res.status(400).json({
         status: 3,
@@ -11507,7 +11484,7 @@ const rfqController = {
       let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
         processing = processing[0];
-        console.log("FOUND ALREADY PROCESSING TASK!")
+        logger.debug('FOUND ALREADY PROCESSING TASK!');
 
         const inputUtcMoment = moment.utc(processing.started_at);
         const inputIstMoment = inputUtcMoment.tz('Asia/Kolkata');
@@ -11863,7 +11840,7 @@ sendFollowUpEmails: async (req, res) => {
     });
 
   } catch (error) {
-    console.log(" SEND_FOLLOWUP_EMAILS  --------------------------------------------------   ", error)
+    logger.debug({ data: error }, ' SEND_FOLLOWUP_EMAILS  --------------------------------------------------');
     logError(error);
     return res.status(400).json({
       status: 3,
@@ -12186,7 +12163,7 @@ sendFollowUpEmails: async (req, res) => {
             sheetId
           );
         } catch (error) {
-          console.log(error);
+          logError('rfqController error', error);
           return res.status(500).json({
             status: 0,
             success: false,
@@ -12215,7 +12192,7 @@ sendFollowUpEmails: async (req, res) => {
         });
       }
     } catch (error) {
-      console.error(`[getDraftRfqSheetWise] Unhandled error:`, error);
+      logError('[getDraftRfqSheetWise] Unhandled error', error);
       logError(error);
       return res.status(500).json({
         status: 0,
@@ -12244,7 +12221,7 @@ sendFollowUpEmails: async (req, res) => {
         sheets
       });
     } catch (error) {
-      console.log(error);
+      logError('rfqController error', error);
       logError(error);
       return res.status(500).json({
         success: false,
@@ -12268,49 +12245,6 @@ sendFollowUpEmails: async (req, res) => {
       term_and_condition_files,
       vendorGSTIN
     } = req.body;
-
-    // Determine the user ID to check based on the verification status
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
 
     const user = req.user;
 
@@ -12506,7 +12440,7 @@ sendFollowUpEmails: async (req, res) => {
       const quoteItemChanges = await Promise.all(
         products
           .map((product) => {
-            console.log('UPDATING: ', product);
+            logger.debug({ data: product }, 'UPDATING:');
             if (
               product.comment == '' &&
               product.document_files?.length <= 0 &&
@@ -12523,7 +12457,7 @@ sendFollowUpEmails: async (req, res) => {
           .filter(Boolean)
       );
 
-      console.log('QUOTE ITEM CHANGES: ', quoteItemChanges);
+      logger.debug({ data: quoteItemChanges }, 'QUOTE ITEM CHANGES:');
 
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
@@ -12646,7 +12580,7 @@ sendFollowUpEmails: async (req, res) => {
         }
       } catch (negotiationError) {
         // Log but don't fail the main quote update
-        console.error('Error saving negotiation round quote during update:', negotiationError);
+        logError('Error saving negotiation round quote during update', negotiationError);
       }
 
       let status = true;
@@ -12685,7 +12619,7 @@ sendFollowUpEmails: async (req, res) => {
         }
       });
     } catch (error) {
-      console.error('Failed to update quote items:', error);
+      logError('Failed to update quote items', error);
       return res
         .status(500)
         .json({ message: 'Error updating quote items', error: error.message });
@@ -12831,7 +12765,7 @@ sendFollowUpEmails: async (req, res) => {
         const emailSubject =
           sender_type == 3
             ? `Vendor Query on Your RFQ #${rfqNumber}`
-            : `Buyer Query for #${rfqNumber} – Your Response Needed`;
+            : `Buyer Query for #${rfqNumber} - Your Response Needed`;
 
         const mailRecipients = {
           from: `${senderCompanyName} ${
@@ -13081,16 +13015,16 @@ sendFollowUpEmails: async (req, res) => {
         'tbl_quote_activity',
         `rfq_id = ${rfq_id} AND current_status = 'NEG' AND created_by = ${req.user.id}`
       );
-      console.log("Existing activity check:", existingActivity);
+      logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
         const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
           rfq_id: rfq_id,
           current_status: "NEG",
           created_by: req.user.id
         });
-        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+        logger.debug({ data: insertIntoQuoteActivity }, 'Inserted value into quote activity');
       } else {
-        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+        logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
     
 
@@ -13100,7 +13034,7 @@ sendFollowUpEmails: async (req, res) => {
         data: result
       });
     } catch (error) {
-      console.error('Error setting target price:', error);
+      logError('Error setting target price', error);
       res.status(500).json({
         status: 0,
         message: 'Internal server error'
@@ -13375,7 +13309,7 @@ processBoqAndDownload : async (req, res) => {
       res.status(200).json(result).end();
     } catch (error) {
       // console.log("controller error")
-      console.error('Error in addClause:', error);
+      logError('Error in addClause', error);
       res.status(500).json({
         success: false,
         message: 'Error in adding clauses to technical evaluation.',
@@ -13439,19 +13373,19 @@ getClauses: async (req, res) => {
         'tbl_quote_activity',
         `rfq_id = ${rfq_id} AND current_status = 'TE' AND created_by = ${req.user.id}`
       );
-      console.log("Existing activity check:", existingActivity);
+      logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
         const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
           rfq_id: rfq_id,
           current_status: "TE",
           created_by: req.user.id
         });
-        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+        logger.debug({ data: insertIntoQuoteActivity }, 'Inserted value into quote activity');
       } else {
-        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+        logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
     } else {
-      console.log(`Skipped insert for pageSource: ${pageSource}`);
+      logger.debug('Skipped insert for pageSource: ${pageSource}');
     }
 
     res.status(200).json(result).end();
@@ -13491,54 +13425,6 @@ getClauses: async (req, res) => {
      const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
      const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
-
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-     
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-      
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-      
-    }
-
-
       if (response) {
         if (req.user.user_type == 3) {
           //Notice the vendor object is passed as buyer since this requet is coming from vendor and concerend prop value at frontend is same hence
@@ -13573,51 +13459,6 @@ getClauses: async (req, res) => {
   getTechComments: async (req, res) => {
     try {
       const { clause_id, sender_id, receiver_id } = req.body;
-      
-
-
-
-       const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
-      );
-
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
-      }
-
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
-      );
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
 
     const user_id = req.user.id;
     const user_type = req.user.user_type;
@@ -13667,7 +13508,7 @@ getClauses: async (req, res) => {
         parsedResult =
           typeof genresult === 'string' ? JSON.parse(genresult) : genresult;
       } catch (parseError) {
-        console.error('Failed to parse Gemini response:', parseError);
+        logError('Failed to parse Gemini response', parseError);
         throw new Error('Invalid response format from AI service');
       }
 
@@ -13676,7 +13517,7 @@ getClauses: async (req, res) => {
         data: parsedResult
       });
     } catch (error) {
-      console.error('Error in getSummarisedDeviation API:', error.message);
+      logError('Error in getSummarisedDeviation API', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing deviation summary',
@@ -13693,42 +13534,10 @@ getClauses: async (req, res) => {
         return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
       }
 
-      // Token-based auth for non-login vendors (same pattern as getTechComments)
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        const tokenData = await rfqModel.checkIfExists(
-          'tbl_vendor_rfq_tokens_non_login',
-          `token = '${withoutLoginUserToken}'`
-        );
-
-        if (!tokenData || tokenData.length === 0) {
-          return res
-            .status(400)
-            .json({ status: 0, message: 'Invalid or expired token!' })
-            .end();
-        }
-
-        const userData = await rfqModel.checkIfExists(
-          'tbl_users',
-          `id = ${tokenData[0].vendor_id}`
-        );
-
-        if (!userData || userData.length === 0) {
-          return res
-            .status(404)
-            .json({ status: 0, message: 'User not found!' })
-            .end();
-        }
-
-        const { password, ...userWithoutPassword } = userData[0];
-        req.user = userWithoutPassword;
-      }
-
       const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);
       res.status(200).json({ status: 1, data: result });
     } catch (error) {
-      console.error('Error in getDeviationPreviews:', error.message);
+      logError('Error in getDeviationPreviews', error);
       res.status(500).json({ status: 0, message: 'Error fetching deviation previews' });
     }
   },
@@ -13800,10 +13609,7 @@ getClauses: async (req, res) => {
           }
         }
       } catch (deadlineErr) {
-        console.error(
-          'Warning: failed to enforce tech eval deadline before saving vendor response:',
-          deadlineErr.message
-        );
+        logError('Warning: failed to enforce tech eval deadline before saving vendor response', deadlineErr);
         // Do not block the request solely due to a failed deadline lookup; continue to process.
       }
 
@@ -13811,7 +13617,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
-      console.error('Error in addVendorResponse API: ', error.message);
+      logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing vendor response.',
@@ -13860,7 +13666,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
-      console.error('Error in addVendorResponse API: ', error.message);
+      logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing vendor response.',
@@ -13953,7 +13759,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
-      console.error('Error in addVendorResponse API: ', error.message);
+      logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing vendor response.',
@@ -13983,7 +13789,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
-      console.error('Error in addVendorResponse API: ', error.message);
+      logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing vendor response.',
@@ -14018,7 +13824,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
-      console.error('Error in addVendorResponse API: ', error.message);
+      logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
         message: 'Error processing vendor response.',
@@ -14152,7 +13958,7 @@ getClauses: async (req, res) => {
         try {
           await handleTechnicalPostApproval(result.approval_instance_id, userId);
         } catch (postApprovalError) {
-          console.error('Error in TECHNICAL auto-approve post-approval processing:', postApprovalError);
+          logError('Error in TECHNICAL auto-approve post-approval processing', postApprovalError);
         }
       }
 
@@ -14245,7 +14051,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(rfqData).end();
     } catch (error) {
-      console.log(error);
+      logError('rfqController error', error);
       logError(error);
       res.status(500).json({
         success: false,
@@ -14291,7 +14097,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json({ quoteList: quoteList, rfqDetails: rfqDetails });
     } catch (error) {
-      console.error('Error fetching project report:', error);
+      logError('Error fetching project report', error);
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.message || 'Error processing RFQ details',
@@ -14352,7 +14158,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json({ message: 'Report sent successfully.' });
     } catch (error) {
-      console.error('Error fetching project report:', error);
+      logError('Error fetching project report', error);
       res.status(500).json({
         success: false,
         message: 'Error processing RFQ details',
@@ -14535,13 +14341,31 @@ getClauses: async (req, res) => {
         }
       }
 
+      // Enrich with has_acceptance_pending flag for vendor order book sidebar
+      if (po && user_type == 3 && rfqs.length > 0) {
+        try {
+          const rfqIds = rfqs.map(r => parseInt(r.id));
+          const pendingRows = await db.any(`
+            SELECT DISTINCT rfq_id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = ANY($1) AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+          `, [rfqIds, user_id]);
+          const pendingSet = new Set(pendingRows.map(r => parseInt(r.rfq_id)));
+          for (const rfq of rfqs) {
+            rfq.has_acceptance_pending = pendingSet.has(parseInt(rfq.id));
+          }
+        } catch (err) {
+          logError('Error enriching RFQs with acceptance_pending flag', err);
+          for (const rfq of rfqs) { rfq.has_acceptance_pending = false; }
+        }
+      }
+
       res.status(200).json({
         status: 1,
         data: rfqs,
         total_items: rfqs.length
       });
     } catch (error) {
-      console.error('Error in getRfqs:', error);
+      logError('Error in getRfqs', error);
       res.status(500).json({
         status: 0,
         message: 'Error fetching sidebar RFQs',
@@ -14564,7 +14388,7 @@ getClauses: async (req, res) => {
       const users = await rfqModel.getTechEvalUsers(project_id, companyId, hotelId);
       res.status(200).json({ status: 1, data: users });
     } catch (error) {
-      console.error('Error in getTechEvalUsers:', error);
+      logError('Error in getTechEvalUsers', error);
       res.status(500).json({ status: 0, message: 'Error fetching tech eval users' });
     }
   },
@@ -14578,7 +14402,7 @@ getClauses: async (req, res) => {
       await rfqModel.saveExcel(rfq_id, user.id, file_path);
       return res.status(201).end();
     } catch (error) {
-      console.error('Error in saveExcel:', error);
+      logError('Error in saveExcel', error);
       return res.status(500).json({
         status: 0,
         message: 'Error saving Excel to database',
@@ -15539,7 +15363,7 @@ getClauses: async (req, res) => {
   schedulerPublishRfq: async (req, res) => {
     try {
       const { rfqId, rfq_no } = req.body;
-      console.log(`📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})`);
+      logger.debug('📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})');
 
       const { publishRfqById } = await import('../../helper/cronManager.js');
       const result = await publishRfqById(rfqId, rfq_no);
@@ -15564,7 +15388,7 @@ getClauses: async (req, res) => {
         ...result
       });
     } catch (error) {
-      console.error('❌ RFQ publish failed:', error);
+      logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });
     }
   }

@@ -7,6 +7,7 @@ import vendorapproveModel from '../../models/vendorapproveModel.js';
 
 import Config from '../../config/app.config.js';
 import { logError, sendMail, generatePassword } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);

@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
-import { sendMail } from "../common.js";
+import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { logger } from '../../util/logger.js';
 
 /**
  * Send notification emails when technical evaluation completes
@@ -11,7 +12,7 @@ import { generateEmailTemplate } from "../notificationEmailLayout.js";
 export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDetails, users) => {
   try {
     if (!users || users.length === 0) {
-      console.log('No users to notify for tech evaluation completion');
+      logger.debug('No users to notify for tech evaluation completion');
       return false;
     }
 
@@ -72,10 +73,10 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
       });
     }
 
-    console.log(`Sent tech eval completion notifications to ${users.length} users for RFQ ${rfq_no}`);
+    logger.info(`Sent tech eval completion notifications to ${users.length} users for RFQ ${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending tech evaluation completion emails:", err);
+    logError("Error sending tech evaluation completion emails:", err);
     return false;
   }
 };
@@ -137,10 +138,10 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
       });
     }
 
-    console.log(`Sent tech acceptance notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
+    logger.info(`Sent tech acceptance notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending vendor tech acceptance emails:", err);
+    logError("Error sending vendor tech acceptance emails:", err);
     return false;
   }
 };

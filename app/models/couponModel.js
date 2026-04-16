@@ -1,5 +1,6 @@
 import pgp from 'pg-promise';
 import db from '../config/dbConn.js';
+import { logger } from '../util/logger.js';
 
 const couponModel = {
   couponExists: async (coupon, user) => {
@@ -401,7 +402,7 @@ const couponModel = {
       const values = [offerId];
       let query = pgp().helpers.update(offerObj, null, 'tbl_offer') + condition;
 
-      console.log("QUERY => ", query);
+      logger.debug({ query }, 'deleteOffer query');
 
       db.one(query, values)
         .then(function (data) {

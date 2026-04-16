@@ -1,13 +1,15 @@
 import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
+import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
-import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
-import { sendApprovalNotification, sendPONotificationToVendor } from "./purchaseOrderEmails.js";
+import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../../util/constants.js";
+import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
+import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 
 export const getPOByRFQ = async (req, res) => {
@@ -96,7 +98,7 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
     );
 
     if (!dbRow) {
-      console.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
+      logger.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
       return poInfo;
     }
 
@@ -115,7 +117,7 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
       }
     };
   } catch (err) {
-    console.error('buildAuthoritativePOPayload error, using payload as-is:', err.message);
+    logError('buildAuthoritativePOPayload error, using payload as-is:', err);
     return poInfo;
   }
 };
@@ -145,7 +147,7 @@ export const draftPO = async (poInfo, user, txn) => {
 
     return result;
   } catch (error) {
-    console.error(error);
+    logError('draftPO failed', error);
     throw error;
   }
 };
@@ -263,7 +265,7 @@ export const approvePO = async (req, res) => {
             try {
               await regeneratePODocument(po_id, t);
             } catch (err) {
-              console.error('Failed to regenerate PO document:', err);
+              logError('Failed to regenerate PO document', err);
             }
           }
 
@@ -334,7 +336,7 @@ export const approvePO = async (req, res) => {
           try {
             await regeneratePODocument(po_id, t);
           } catch (err) {
-            console.error('Failed to regenerate PO document:', err);
+            logError('Failed to regenerate PO document', err);
           }
         }
 
@@ -352,7 +354,7 @@ export const approvePO = async (req, res) => {
           } else {
             // Send company-wide notification for legacy workflow
             sendLegacyPOApprovalNotification(purchaseOrder, trx).catch(err => {
-              console.error('Failed to send legacy PO approval notifications:', err);
+              logError('Failed to send legacy PO approval notifications', err);
             });
           }
         } else if (result && (!result.is_rejected && result.approval_required)) {
@@ -452,14 +454,14 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
     `, [po_id]);
 
     if (!purchaseOrder) {
-      console.error(`PO ${po_id} not found for approval instance ${approval_instance_id}`);
+      logger.error(`PO ${po_id} not found for approval instance ${approval_instance_id}`);
       return;
     }
 
-    // Update PO status to approved
+    // Update PO status to acceptance_pending (vendor must accept before proceeding)
     await t.none(`
       UPDATE tbl_rfq_purchase_order
-      SET status = 'approved', updated_at = NOW()
+      SET status = 'acceptance_pending', updated_at = NOW()
       WHERE id = $1
     `, [po_id]);
 
@@ -467,7 +469,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
     await recordLifecycleEvent({
       entity_type: 'PO',
       entity_id: po_id,
-      stage: 'PO_APPROVED',
+      stage: 'PO_ACCEPTANCE_PENDING',
       action: 'APPROVE',
       performed_by: approver_user_id,
       metadata: {
@@ -490,13 +492,10 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         WHERE r.id = $1
       `, [purchaseOrder.rfq_id]);
 
-      // Send vendor notification with RFQ creator as buyer info (not the approver)
-      const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
-      if (rfqCreator && rfqCreator[0]) {
-        sendPONotificationToVendor(purchaseOrder, rfqCreator[0]).catch(err => {
-          console.error('Failed to send PO notification to vendor:', err);
-        });
-      }
+      // Send acceptance request email to vendor (vendor must accept/reject)
+      sendPOAcceptanceRequestToVendor(purchaseOrder, rfqDetails).catch(err => {
+        logError('Failed to send PO acceptance request to vendor', err);
+      });
 
       // Get product names from tbl_purchase_order_product (normalized table)
       const products = await t.any(`
@@ -547,7 +546,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         created_at: action.created_at
       })) || [];
 
-      // Fire-and-forget notification
+      // Fire-and-forget notification (internal team: PO approved, sent to vendor for acceptance)
       sendPOApprovalCompletionNotification({
         rfqDetails: {
           id: rfqDetails?.id,
@@ -577,17 +576,17 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
           company_name: companyDetails?.company_name
         }
       }).catch(err => {
-        console.error('Failed to send PO approval completion notifications:', err);
+        logError('Failed to send PO approval completion notifications', err);
       });
 
     } catch (notificationError) {
       // Don't fail the approval if notification fails
-      console.error('Error preparing PO approval notifications:', notificationError);
+      logError('Error preparing PO approval notifications', notificationError);
     }
 
-    console.log(`PO ${po_id} approved via new approval workflow`);
+    logger.info(`PO ${po_id} approved via new approval workflow`);
   } catch (error) {
-    console.error('Error handling PO post-approval:', error);
+    logError('Error handling PO post-approval', error);
   }
 };
 
@@ -624,7 +623,7 @@ export const handlePORejectionByInstance = async (approval_instance_id, approver
       `, [po_id]);
 
       if (!purchaseOrder) {
-        console.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
+        logger.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
         return;
       }
 
@@ -635,7 +634,7 @@ export const handlePORejectionByInstance = async (approval_instance_id, approver
       await handlePORejection(purchaseOrder, approver_user_id, t);
     });
   } catch (error) {
-    console.error('Error handling PO rejection by instance:', error);
+    logError('Error handling PO rejection by instance', error);
   }
 };
 
@@ -748,7 +747,148 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
     });
 
   } catch (error) {
-    console.error('Error in sendLegacyPOApprovalNotification:', error);
+    logError('Error in sendLegacyPOApprovalNotification', error);
+  }
+};
+
+// ============= VENDOR ACCEPTANCE / REJECTION =============
+
+/**
+ * Vendor accepts a PO that is in acceptance_pending status.
+ * POST /api/v1/po/accept/:po_id
+ */
+export const acceptPO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const vendorUserId = req.user.id;
+
+    const result = await db.tx(async t => {
+      const po = await t.oneOrNone(`
+        SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+      `, [po_id, vendorUserId]);
+
+      if (!po) {
+        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+      }
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order
+        SET status = 'approved', vendor_action_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+      `, [po_id]);
+
+      await recordLifecycleEvent({
+        entity_type: 'PO',
+        entity_id: po_id,
+        stage: 'PO_ACCEPTED_BY_VENDOR',
+        action: 'ACCEPT',
+        performed_by: vendorUserId,
+        metadata: { rfq_id: po.rfq_id, po_number: po.po_number },
+        txContext: t
+      });
+
+      return po;
+    });
+
+    // Send confirmed PO email to vendor (existing email with PO PDF)
+    const rfqDetails = await db.oneOrNone(`
+      SELECT r.id, r.rfq_no, r.title, r.created_by, r.hospitality_company_id, r.hotel_id
+      FROM tbl_rfq r WHERE r.id = $1
+    `, [result.rfq_id]);
+
+    const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
+    if (rfqCreator && rfqCreator[0]) {
+      sendPONotificationToVendor(result, rfqCreator[0]).catch(err => {
+        logError('Failed to send PO confirmed notification to vendor', err);
+      });
+    }
+
+    // Send "Vendor Accepted" notification to all internal BU members
+    sendPOAcceptedNotificationToTeam(result, rfqDetails).catch(err => {
+      logError('Failed to send PO accepted notification to team', err);
+    });
+
+    return res.json({
+      status: 1,
+      message: 'Purchase order accepted successfully.',
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 0,
+      message: error.message || 'Failed to accept PO.',
+    });
+  }
+};
+
+/**
+ * Vendor rejects a PO that is in acceptance_pending status.
+ * POST /api/v1/po/reject/:po_id
+ */
+export const rejectPO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { reason = '' } = req.body;
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ status: 0, message: 'Rejection reason is required.' });
+    }
+    const vendorUserId = req.user.id;
+
+    const result = await db.tx(async t => {
+      const po = await t.oneOrNone(`
+        SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
+      `, [po_id, vendorUserId]);
+
+      if (!po) {
+        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+      }
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order
+        SET status = 'rejected_by_vendor',
+            vendor_rejection_reason = $2,
+            vendor_action_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+      `, [po_id, reason]);
+
+      // Definalize vendor — move from tbl_quote_finalization to history
+      await handlePORejection(po, vendorUserId, t);
+
+      await recordLifecycleEvent({
+        entity_type: 'PO',
+        entity_id: po_id,
+        stage: 'PO_REJECTED_BY_VENDOR',
+        action: 'REJECT',
+        performed_by: vendorUserId,
+        metadata: {
+          rfq_id: po.rfq_id,
+          po_number: po.po_number,
+          rejection_reason: reason
+        },
+        txContext: t
+      });
+
+      return po;
+    });
+
+    // Send rejection notification to commercial evaluators (fire-and-forget)
+    sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
+      logError('Failed to send vendor rejection notification', err);
+    });
+
+    return res.json({
+      status: 1,
+      message: 'Purchase order rejected. The buyer has been notified.',
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 0,
+      message: error.message || 'Failed to reject PO.',
+    });
   }
 };
 
@@ -786,7 +926,7 @@ export const updateHSNForProduct = async (req, res) => {
       data: updatedData
     });
   } catch (error) {
-    console.error(error);
+    logError('updateHSNForProduct failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -807,7 +947,7 @@ export const raiseInvoice = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('raiseInvoice failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -828,7 +968,7 @@ export const markGRN = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('markGRN failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -849,7 +989,7 @@ export const markDispatched = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('markDispatched failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -870,7 +1010,7 @@ export const addSiteRepresentative = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('addSiteRepresentative failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -888,7 +1028,7 @@ export const getMilestonesController = async (req, res) => {
     const data = await getMilestonesByPOId(req.user.company_id, po_id, user.user_type == '8');
     return res.status(200).json({ success: true, data });
   } catch (error) {
-    console.error(error);
+    logError('getMilestonesController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -902,7 +1042,7 @@ export const createMilestoneController = async (req, res) => {
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {
-    console.error(error);
+    logError('createMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -914,7 +1054,7 @@ export const updateMilestoneController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: updated });
   } catch (error) {
-    console.error(error);
+    logError('updateMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -926,7 +1066,7 @@ export const deleteMilestoneController = async (req, res) => {
     
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
-    console.error(error);
+    logError('deleteMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -940,7 +1080,7 @@ export const getTasksController = async (req, res) => {
     const [data, count] = await getTasksByPOId(req.user.company_id, po_id, page, limit);
     return res.status(200).json({ success: true, data, total: count });
   } catch (error) {
-    console.error(error);
+    logError('getTasksController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -951,7 +1091,7 @@ export const createTaskController = async (req, res) => {
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {
-    console.error(error);
+    logError('createTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -962,7 +1102,7 @@ export const updateTaskController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: updated });
   } catch (error) {
-    console.error(error);
+    logError('updateTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -973,7 +1113,7 @@ export const deleteTaskController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
-    console.error(error);
+    logError('deleteTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

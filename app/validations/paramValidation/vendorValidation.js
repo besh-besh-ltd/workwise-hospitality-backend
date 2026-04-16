@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -417,8 +418,8 @@ const schema_posts = {
         },
         fileFilter: (req, file, cb) => {
           const ext = path.extname(file.originalname).toLowerCase();
-          console.log('ext-->', ext);
-          console.log('file name-->', file.fieldname);
+          logger.debug({ ext }, 'File extension');
+          logger.debug({ fieldname: file.fieldname }, 'File name');
 
           // File type validation
           if (file.fieldname === 'tds' || file.fieldname === 'qap') {
@@ -500,13 +501,13 @@ const schema_posts = {
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
-          console.log('ext-->', ext);
-          console.log('file name-->', file.fieldname);
+          logger.debug({ ext }, 'File extension');
+          logger.debug({ fieldname: file.fieldname }, 'File name');
           if (file.fieldname == 'tds' || file.fieldname == 'qap') {
             if (ext == '.pdf') {
               cb(null, true);
             } else {
-              console.log('right block');
+              logger.debug('File validation passed');
               cb(null, false);
               return cb('Only .pdf format allowed!', null);
             }

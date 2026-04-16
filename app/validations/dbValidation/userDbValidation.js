@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import couponModel from '../../models/couponModel.js';
@@ -414,7 +415,7 @@ const validateDbBody = {
   },
 
   user_id_exists: async (req, res, next) => {
-    console.log("req recived");
+    logger.debug("req received");
     try {
       let errors = {};
       let err = 0;
@@ -794,55 +795,7 @@ const validateDbBody = {
         req.params.id ||
         req.body.id;
 
-      // if vendor is not login then we use token from query.
-      // if req.is_verified is true then there must be token in the query
-      if (!req.is_verified && !req.query.token) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Access denied. Please provide a valid token.'
-        });
-      }
-
-      // if user try to send query without login
-      // then we take token in the query and take the vendor
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-
-        if (!tokenData || tokenData.length === 0) {
-          // Token is not valid
-          return res
-            .status(400)
-            .json({
-              status: 0,
-              message: 'Invalid or expired token!'
-            })
-            .end();
-        }
-
-        // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-        if (!userData || userData.length === 0) {
-          // User data is not valid
-          return res
-            .status(404)
-            .json({
-              status: 0,
-              message: 'User not found!'
-            })
-            .end();
-        }
-        // Remove password from user data
-        const { password, ...userWithoutPassword } = userData[0];
-        // Assign the user data to req.user
-        req.user = userWithoutPassword;
-      }
-
-
+      // Token validation is now handled by vendorTokenOrJwt middleware
       const user_id = req.user.id;
       const user_type = req.user.user_type;
 
@@ -908,7 +861,7 @@ negotiateModule: async (req, res, next) => {
       });
     }
 
-    console.log("✅ All vendors exist");
+    logger.debug("All vendors exist");
 
     // Store validated data in req for the next controller
     req.validatedData = { productId, vendorIds };
@@ -917,7 +870,7 @@ negotiateModule: async (req, res, next) => {
     return next();
 
   } catch (error) {
-    console.error("❌ Error in negotiateModule:", error.message);
+    logError("Error in negotiateModule", error);
     return res.status(500).json({
       status: 0,
       message: "Internal server error"

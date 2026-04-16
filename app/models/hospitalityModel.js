@@ -1905,6 +1905,108 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     return result.rowCount;
   },
 
+  // ============================================================
+  // WH-67: Auto-add vendors to open RFQs after registration
+  // ============================================================
+
+  /**
+   * Find open (published & active) RFQs where the vendor is eligible
+   * (has product-variant mapping + category subscription + hotel subscription)
+   * but is NOT yet added to tbl_rfq_product_vendors.
+   *
+   * @param {number} vendorId - The vendor's user ID
+   * @returns {Promise<Array>} Matching RFQs with rfq_id, rfq_no, title, is_tender, bid_end_date, created_by
+   */
+  getMatchingOpenRfqsForVendor: async (vendorId) => {
+    return db.any(
+      `WITH vendor_variants AS (
+        SELECT product_variant_id
+        FROM tbl_product_variant_vendor_mapping
+        WHERE vendor_id = $1 AND status = true AND is_approved = true
+      ),
+      vendor_hotels AS (
+        SELECT item_id AS hotel_id
+        FROM tbl_vendor_hotel_category_subscription
+        WHERE vendor_id = $1 AND item_type = 'hotel' AND status IN ('active', 'expired')
+      ),
+      vendor_cats AS (
+        SELECT item_id AS category_id
+        FROM tbl_vendor_hotel_category_subscription
+        WHERE vendor_id = $1 AND item_type = 'category' AND status IN ('active', 'expired')
+      ),
+      -- Products that have an approved PO (approved/sent/GRN/completed)
+      finalized_products AS (
+        SELECT DISTINCT pop.rfq_product_id
+        FROM tbl_purchase_order_product pop
+        JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+        WHERE po.status IN ('approved', 'sent', 'GRN', 'completed')
+      )
+      SELECT DISTINCT r.id AS rfq_id, r.rfq_no, r.title, r.is_tender,
+             r.bid_end_date, r.created_by
+      FROM tbl_rfq r
+      JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
+      JOIN vendor_variants vv ON vv.product_variant_id = rp.product_variant_id
+      JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+      JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+      JOIN vendor_cats vc ON vc.category_id = pc.category_id
+      JOIN tbl_rfq_hotel_mappings rhm ON rhm.rfq_id = r.id
+      JOIN vendor_hotels vh ON vh.hotel_id = rhm.hotel_id
+      WHERE r.status = 1 AND r.is_published = 1
+        AND r.bid_end_date::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+        -- Skip products that already have an approved PO
+        AND rp.id NOT IN (SELECT rfq_product_id FROM finalized_products)
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_vendors rpv
+          WHERE rpv.rfq_id = r.id
+            AND rpv.product_variant_id = rp.product_variant_id
+            AND rpv.variant = rp.variant
+            AND rpv.user_id = $1
+        )
+      ORDER BY r.id DESC`,
+      [vendorId]
+    );
+  },
+
+  /**
+   * Add a single vendor to all eligible products in a given RFQ.
+   * Only inserts rows where the vendor has an approved product-variant mapping
+   * and is not already present.
+   *
+   * @param {number} vendorId - The vendor's user ID
+   * @param {number} rfqId - The RFQ ID
+   * @returns {Promise<Array>} Inserted rows with product_variant_id and variant
+   */
+  addVendorToRfq: async (vendorId, rfqId) => {
+    return db.any(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+       SELECT rp.rfq_id, rp.product_variant_id, $1, rp.variant
+       FROM tbl_rfq_products rp
+       WHERE rp.rfq_id = $2
+         AND EXISTS (
+           SELECT 1 FROM tbl_product_variant_vendor_mapping m
+           WHERE m.product_variant_id = rp.product_variant_id
+             AND m.vendor_id = $1 AND m.status = true AND m.is_approved = true
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_rfq_product_vendors rpv
+           WHERE rpv.rfq_id = rp.rfq_id
+             AND rpv.product_variant_id = rp.product_variant_id
+             AND rpv.variant = rp.variant
+             AND rpv.user_id = $1
+         )
+         -- Skip products that have an approved PO
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_purchase_order_product pop
+           JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+           WHERE pop.rfq_product_id = rp.id
+             AND po.status IN ('approved', 'sent', 'GRN', 'completed')
+         )
+       ON CONFLICT DO NOTHING
+       RETURNING product_variant_id, variant`,
+      [vendorId, rfqId]
+    );
+  },
+
 };
 
 export default hospitalityModel;

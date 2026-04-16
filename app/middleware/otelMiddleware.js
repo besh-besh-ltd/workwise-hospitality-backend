@@ -21,6 +21,13 @@ const otelMiddleware = (req, res, next) => {
         'http.status_code': res.statusCode,
       });
     }
+
+    // Attach authenticated user context to span
+    if (span && req.user) {
+      span.setAttribute('enduser.id', String(req.user.id));
+      if (req.user.email) span.setAttribute('enduser.email', req.user.email);
+      if (req.user.user_type) span.setAttribute('enduser.role', String(req.user.user_type));
+    }
   });
 
   next();

@@ -6,8 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import fs from 'fs';
-import { log } from 'console';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -524,7 +524,7 @@ const schema_posts = {
             let errCount = 0;
             // fs.unlink(req.files.featured[0].path, (unlinkError) => {
             //   if (unlinkError) {
-            //     console.error('Error deleting file:', unlinkError);
+            //     logError('Error deleting file', unlinkError);
             //   }
             // });
 
@@ -615,7 +615,7 @@ const schema_posts = {
             /*  if (req.files?.featured && req.files?.featured.length > 0) {
               fs.unlink(req.files.featured[0].path, (unlinkError) => {
                 if (unlinkError) {
-                  console.error('Error deleting file:', unlinkError);
+                  logError('Error deleting file', unlinkError);
                 }
               });
             }
@@ -623,7 +623,7 @@ const schema_posts = {
               req.files.gallery.forEach((file) => {
                 fs.unlink(file.path, (unlinkError) => {
                   if (unlinkError) {
-                    console.error('Error deleting file:', unlinkError);
+                    logError('Error deleting file', unlinkError);
                   }
                 });
               });
@@ -651,7 +651,7 @@ const schema_posts = {
               /*  if (req.files?.featured && req.files?.featured.length > 0) {
                 fs.unlink(req.files.featured[0].path, (unlinkError) => {
                   if (unlinkError) {
-                    console.error('Error deleting file:', unlinkError);
+                    logError('Error deleting file', unlinkError);
                   }
                 });
               }
@@ -659,7 +659,7 @@ const schema_posts = {
                 req.files.gallery.forEach((file) => {
                   fs.unlink(file.path, (unlinkError) => {
                     if (unlinkError) {
-                      console.error('Error deleting file:', unlinkError);
+                      logError('Error deleting file', unlinkError);
                     }
                   });
                 });
@@ -749,7 +749,7 @@ const schema_posts = {
             /* if (req.files?.featured && req.files?.featured.length > 0) {
               fs.unlink(req.files.featured[0].path, (unlinkError) => {
                 if (unlinkError) {
-                  console.error('Error deleting file:', unlinkError);
+                  logError('Error deleting file', unlinkError);
                 }
               });
             } */
@@ -757,7 +757,7 @@ const schema_posts = {
               req.files.gallery.forEach((file) => {
                 fs.unlink(file.path, (unlinkError) => {
                   if (unlinkError) {
-                    console.error('Error deleting file:', unlinkError);
+                    logError('Error deleting file', unlinkError);
                   }
                 });
               });
@@ -783,7 +783,7 @@ const schema_posts = {
               /*  if (req.files?.featured && req.files?.featured.length > 0) {
                 fs.unlink(req.files.featured[0].path, (unlinkError) => {
                   if (unlinkError) {
-                    console.error('Error deleting file:', unlinkError);
+                    logError('Error deleting file', unlinkError);
                   }
                 });
               }
@@ -791,7 +791,7 @@ const schema_posts = {
                 req.files.gallery.forEach((file) => {
                   fs.unlink(file.path, (unlinkError) => {
                     if (unlinkError) {
-                      console.error('Error deleting file:', unlinkError);
+                      logError('Error deleting file', unlinkError);
                     }
                   });
                 });
@@ -800,7 +800,7 @@ const schema_posts = {
                 req.files.tds.forEach((file) => {
                   fs.unlink(file.path, (unlinkError) => {
                     if (unlinkError) {
-                      console.error('Error deleting file:', unlinkError);
+                      logError('Error deleting file', unlinkError);
                     }
                   });
                 });
@@ -809,7 +809,7 @@ const schema_posts = {
                 req.files.qap.forEach((file) => {
                   fs.unlink(file.path, (unlinkError) => {
                     if (unlinkError) {
-                      console.error('Error deleting file:', unlinkError);
+                      logError('Error deleting file', unlinkError);
                     }
                   });
                 });

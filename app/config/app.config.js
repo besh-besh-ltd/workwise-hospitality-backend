@@ -321,8 +321,8 @@ const config = {
     // 'ranit.majumder@indusnet.co.in',
     // 'anumita.banerjee@indusnet.co.in'
   ],
-  webmasterMail: "Work Wise <hello@letsworkwise.com>",
-  masterEmail : "<hello@letsworkwise.com>",
+  webmasterMail: "Work Wise <no-reply@letsworkwise.com>",
+  masterEmail : "<no-reply@letsworkwise.com>",
   template_path:
     process.env.TEMPLATE_PATH ||
     "/app/helper/email_template",

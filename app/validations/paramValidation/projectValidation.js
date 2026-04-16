@@ -5,6 +5,8 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
+import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 
 
 
@@ -123,7 +125,7 @@ export const projectSchemas = {
             next();
           });
         } catch (err) {
-          console.error('File upload error:', err);
+          logError('projectValidation file upload error', err);
           res.status(500).json({ status: 3, message: 'Server error' });
         }
       },

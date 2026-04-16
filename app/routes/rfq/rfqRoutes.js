@@ -137,9 +137,8 @@ RfqRoutes.get(
 
 RfqRoutes.get(
   '/getRfqById/:id',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
-  // validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqById
 );
 
@@ -215,14 +214,14 @@ RfqRoutes.get(
 
 RfqRoutes.post(
   '/quote/create',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.createQuote
 );
 
 RfqRoutes.put(
   '/quote/update/:quoteId',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.updateQuoteItems
 );
@@ -253,10 +252,7 @@ RfqRoutes.get(
 
 RfqRoutes.get(
   '/get-quote-history',
-  passportSignIn,
-  acl([3]),
-  hospitalityMiddleware.requireActiveSubscription,
-  validateDbBody.user_id_profileexists,
+  noLogin.vendorTokenOrJwt,
   rfqController.getQuoteHistoryForvendor
 );
 
@@ -571,14 +567,13 @@ RfqRoutes.get('/get-clauses/:id',
 
 // vendor side
 RfqRoutes.post('/add-tech-comment',
-  noLogin.customer_auth,
-  // validateBody(rfqSchemas.addTechComment),
+  noLogin.vendorTokenOrJwt,
   rfqController.addTechComment
 )
 
 // vendor side
 RfqRoutes.post('/get-tech-comments',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   validateBody(rfqSchemas.getTechComments),
   rfqController.getTechComments
 )
@@ -588,7 +583,7 @@ RfqRoutes.post('/get-summarised-deviation',
 )
 
 RfqRoutes.post('/get-deviation-previews',
-  noLogin.customer_auth,
+  noLogin.vendorTokenOrJwt,
   rfqController.getDeviationPreviews
 )
 

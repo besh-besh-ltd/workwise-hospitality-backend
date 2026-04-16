@@ -2,6 +2,7 @@ import db from '../config/dbConn.js';
 import pgp from 'pg-promise';
 import Config from '../config/app.config.js';
 import { buildProductFilters, logError } from '../helper/common.js';
+import { logger } from '../util/logger.js';
 
 const productModel = {
   parentIdExists: async (id) => {
@@ -302,7 +303,7 @@ const productModel = {
         const result = await db.one(sql, [payload, userId]);
         resolve({ inserted: result.inserted, skipped: result.skipped, makes: result.makes, approvals: result.approvals });
       } catch (error) {
-        console.error('bulkInsertVariantVendorMappings failed:', error);
+        logError('bulkInsertVariantVendorMappings failed', error);
         reject(error);
       }
     });
@@ -449,7 +450,7 @@ const productModel = {
         const result = await db.query(query);
         return result;
     } catch (error) {
-        console.log(error);
+        logError('Error fetching parent categories with products', error);
         throw new Error("Error fetching parent categories with products.");
     }
 },
@@ -1079,7 +1080,7 @@ const productModel = {
         // Ensure we have all required fields with proper defaults
         // Accept 'variant_name' from frontend but use 'name' for the database
         if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
-          console.error("Missing required fields for variant creation:", variantObj);
+          logger.error({ variantObj }, 'Missing required fields for variant creation');
           return reject(new Error("Missing required fields: product_id and variant name are required"));
         }
         
@@ -1137,11 +1138,11 @@ const productModel = {
             resolve({id: data.id});
           })
           .catch(function (err) {
-            console.error("Error creating product variant:", err);
+            logError('Error creating product variant', err);
             reject(new Error(err.message || "Failed to create product variant"));
           });
       } catch (err) {
-        console.error("Exception in createProductVariant:", err);
+        logError('Exception in createProductVariant', err);
         reject(new Error(err.message || "Exception in createProductVariant"));
       }
     });
@@ -1757,7 +1758,7 @@ getRandomProductsForCarausel : async () =>{
               params.push(startDate);
               paramIndex++;
             }
-          } catch (e) { console.error("Invalid dateFrom:", e); }
+          } catch (e) { logError('Invalid dateFrom', e); }
         }
 
         if (dateTo) {
@@ -1769,7 +1770,7 @@ getRandomProductsForCarausel : async () =>{
               params.push(endDate);
               paramIndex++;
             }
-          } catch (e) { console.error("Invalid dateTo:", e); }
+          } catch (e) { logError('Invalid dateTo', e); }
         }
 
         // Handle vendor filter
@@ -1891,7 +1892,7 @@ getRandomProductsForCarausel : async () =>{
           FROM paginated_products p;
         `
 
-        console.log(dataQuery)
+        logger.debug(dataQuery)
         
         // Add limit and offset parameters for data query
         const dataParams = [...params, limit, offset];
@@ -1919,7 +1920,7 @@ getRandomProductsForCarausel : async () =>{
         });
 
       } catch (error) {
-        console.error("Error in getMasterProductsPaginated:", error);
+        logError('Error in getMasterProductsPaginated', error);
         // Return empty result on error to avoid breaking frontend
         resolve({
           data: [],
@@ -2320,7 +2321,7 @@ FROM (
       const result = await db.query(query, [cat_id, limit, offset]);
       return result;
     } catch (error) {
-      console.error("Error in productSearchByCategory:", error.message);
+      logError('Error in productSearchByCategory', error);
       throw new Error("Failed to fetch products by category");
     }
   },
@@ -2696,7 +2697,7 @@ FROM (
             resolve([]);
           });
       } catch (error) {
-        console.error("Exception in check_product:", error);
+        logError('Exception in check_product', error);
         resolve([]); // Return empty array on exception
       }
     });
@@ -2727,7 +2728,7 @@ FROM (
             resolve([]);
           });
       } catch (error) {
-        console.error("Exception in checkVariantById:", error);
+        logError('Exception in checkVariantById', error);
         resolve([]); // Return empty array on exception
       }
     });
@@ -2871,7 +2872,7 @@ WHERE tbl_product.name = $1`,
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error in approveProduct:", err);
+          logError('Error in approveProduct', err);
           let error = new Error(err);
           reject(error);
         });
@@ -3101,7 +3102,7 @@ getProductTechSpecByID: async (productId) => {
         // Ensure we have all required fields with proper defaults
         // Accept 'variant_name' from frontend but use 'name' for the database
         if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
-          console.error("Missing required fields for variant creation:", variantObj);
+          logger.error({ variantObj }, 'Missing required fields for variant creation');
           return reject(new Error("Missing required fields: product_id and variant name are required"));
         }
         
@@ -3159,11 +3160,11 @@ getProductTechSpecByID: async (productId) => {
             resolve({id: data.id});
           })
           .catch(function (err) {
-            console.error("Error creating product variant:", err);
+            logError('Error creating product variant', err);
             reject(new Error(err.message || "Failed to create product variant"));
           });
       } catch (err) {
-        console.error("Exception in createProductVariant:", err);
+        logError('Exception in createProductVariant', err);
         reject(new Error(err.message || "Exception in createProductVariant"));
       }
     });
@@ -3211,11 +3212,11 @@ getProductTechSpecByID: async (productId) => {
             resolve(data || []);
           })
           .catch(function (err) {
-            console.error("Error in getProductVariants query:", err);
+            logError('Error in getProductVariants query', err);
             reject(new Error(err.message || "Database error in getProductVariants"));
           });
       } catch (error) {
-        console.error("Error in getProductVariants:", error);
+        logError('Error in getProductVariants', error);
         reject(new Error(error.message || "Exception in getProductVariants"));
       }
     });
@@ -3264,7 +3265,7 @@ getProductTechSpecByID: async (productId) => {
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid start_date format:", e);
+            logError('Invalid start_date format', e);
           }
         }
         
@@ -3279,7 +3280,7 @@ getProductTechSpecByID: async (productId) => {
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid end_date format:", e);
+            logError('Invalid end_date format', e);
           }
         }
         
@@ -3371,11 +3372,11 @@ getProductTechSpecByID: async (productId) => {
             resolve(data);
           })
           .catch(function (err) {
-            console.error("Error in searchProductVariants:", err);
+            logError('Error in searchProductVariants', err);
             resolve([]);  // Return empty array on error to maintain consistent behavior
           });
       } catch (error) {
-        console.error("Exception in searchProductVariants:", error);
+        logError('Exception in searchProductVariants', error);
         resolve([]);  // Return empty array on exception to maintain consistent behavior
       }
     });
@@ -3437,7 +3438,7 @@ getProductTechSpecByID: async (productId) => {
         
         // Only proceed if we have fields to update
         if (updateFields.length === 0) {
-          console.error("No fields to update in updateProductVariant");
+          logger.error('No fields to update in updateProductVariant');
           reject(new Error("No valid fields provided for update"));
           return;
         }
@@ -3457,7 +3458,7 @@ getProductTechSpecByID: async (productId) => {
             resolve(data);
           })
           .catch(function (err) {
-            console.error(`Error in updateProductVariant for ID ${variantId}:`, err);
+            logError(`Error in updateProductVariant for ID ${variantId}`, err);
             
             // Try with a simpler, more direct query as fallback
             const fallbackQuery = `
@@ -3481,12 +3482,12 @@ getProductTechSpecByID: async (productId) => {
                 resolve(fallbackData);
               })
               .catch(function (fallbackErr) {
-                console.error("Fallback update also failed:", fallbackErr);
+                logError('Fallback update also failed', fallbackErr);
                 reject(new Error(`Failed to update variant: ${fallbackErr.message}`));
               });
           });
       } catch (error) {
-        console.error("Exception in updateProductVariant:", error);
+        logError('Exception in updateProductVariant', error);
         reject(new Error(error.message || "Exception in updateProductVariant"));
       }
     });
@@ -3583,11 +3584,11 @@ getProductTechSpecByID: async (productId) => {
             resolve(data);
           })
           .catch(function (err) {
-            console.error("Error in getProductVariantDetails:", err);
+            logError('Error in getProductVariantDetails', err);
             reject(new Error(`Failed to get variant details: ${err.message}`));
           });
       } catch (err) {
-        console.error("Exception in getProductVariantDetails:", err);
+        logError('Exception in getProductVariantDetails', err);
         reject(new Error(`Exception in getProductVariantDetails: ${err.message}`));
       }
     });
@@ -3635,16 +3636,16 @@ getProductTechSpecByID: async (productId) => {
                 resolve(data);
               })
               .catch(function (err) {
-                console.error("Error creating mapping:", err);
+                logError('Error creating mapping', err);
                 reject(new Error(`Failed to create mapping: ${err.message}`));
               });
           })
           .catch(function (err) {
-            console.error("Error checking existing mapping:", err);
+            logError('Error checking existing mapping', err);
             reject(new Error(`Failed to check existing mapping: ${err.message}`));
           });
       } catch (err) {
-        console.error("Exception in mapVariantWithVendor:", err);
+        logError('Exception in mapVariantWithVendor', err);
         reject(new Error(`Exception in mapVariantWithVendor: ${err.message}`));
       }
     });
@@ -3679,11 +3680,11 @@ getProductTechSpecByID: async (productId) => {
             resolve(data);
           })
           .catch(function (err) {
-            console.error("Error updating mapping:", err);
+            logError('Error updating mapping', err);
             reject(new Error(`Failed to update mapping: ${err.message}`));
           });
       } catch (err) {
-        console.error("Exception in updateVariantVendorMapping:", err);
+        logError('Exception in updateVariantVendorMapping', err);
         reject(new Error(`Exception in updateVariantVendorMapping: ${err.message}`));
       }
     });
@@ -3728,7 +3729,7 @@ getProductTechSpecByID: async (productId) => {
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error in checkDuplicateVariantName:", err);
+          logError('Error in checkDuplicateVariantName', err);
           // In case of error, treat as if no duplicates exist to avoid blocking creation
           // but log the error for debugging
           resolve([]);
@@ -3833,7 +3834,7 @@ getProductTechSpecByID: async (productId) => {
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid start_date format:", e);
+            logError('Invalid start_date format', e);
           }
         }
 
@@ -3847,7 +3848,7 @@ getProductTechSpecByID: async (productId) => {
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid end_date format:", e);
+            logError('Invalid end_date format', e);
           }
         }
 
@@ -4059,7 +4060,7 @@ getProductTechSpecByID: async (productId) => {
                 });
               })
               .catch(function (err) {
-                console.error("Error in getVariantVendorMappings data query:", err);
+                logError('Error in getVariantVendorMappings data query', err);
                 // Resolve with empty array instead of rejecting to maintain consistent behavior
                 resolve({
                   data: [],
@@ -4073,7 +4074,7 @@ getProductTechSpecByID: async (productId) => {
               });
           })
           .catch(function (err) {
-            console.error("Error in getVariantVendorMappings count query:", err);
+            logError('Error in getVariantVendorMappings count query', err);
             // Resolve with empty array instead of rejecting to maintain consistent behavior
             resolve({
               data: [],
@@ -4086,7 +4087,7 @@ getProductTechSpecByID: async (productId) => {
             });
           });
       } catch (error) {
-        console.error("Exception in getVariantVendorMappings:", error);
+        logError('Exception in getVariantVendorMappings', error);
         // Resolve with empty array to maintain consistent behavior with other search functions
         resolve({
           data: [],
@@ -4104,7 +4105,7 @@ getProductTechSpecByID: async (productId) => {
   // Changes by Agnij May 02, 2025 [Added function to approve/reject mappings]
   approveMapping: async (mappingObj, mappingId) => {
 
-    console.log("Mapping Object:", mappingObj);
+    logger.debug({ mappingObj }, 'Mapping Object');
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
       const values = [mappingId];
@@ -4116,7 +4117,7 @@ getProductTechSpecByID: async (productId) => {
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error approving mapping:", err);
+          logError('Error approving mapping', err);
           let error = new Error(err);
           reject(error);
         });
@@ -4218,7 +4219,7 @@ WHERE m.id = $1;
           resolve(data);
         })
         .catch(function (err) {
-          console.error('Error getting mapping by ID:', err);
+          logError('Error getting mapping by ID', err);
           let error = new Error(err);
           reject(error);
         });
@@ -4238,7 +4239,7 @@ WHERE m.id = $1;
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error updating product variant:", err);
+          logError('Error updating product variant', err);
           let error = new Error(err);
           reject(error);
         });
@@ -4257,7 +4258,7 @@ WHERE m.id = $1;
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error updating product variant vendor mapping:", err);
+          logError('Error updating product variant vendor mapping', err);
           let error = new Error(err);
           reject(error);
         });
@@ -4292,7 +4293,7 @@ WHERE m.id = $1;
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error deleting variant-vendor mapping:", err);
+          logError('Error deleting variant-vendor mapping', err);
           let error = new Error(err);
           reject(error);
         });
@@ -4326,7 +4327,7 @@ WHERE m.id = $1;
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error updating variant approval:", err);
+          logError('Error updating variant approval', err);
           reject(err);
         });
     });
@@ -4371,7 +4372,7 @@ WHERE m.id = $1;
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid start_date format:", e);
+            logError('Invalid start_date format', e);
           }
         }
 
@@ -4385,7 +4386,7 @@ WHERE m.id = $1;
               paramIndex++;
             }
           } catch (e) {
-            console.error("Invalid end_date format:", e);
+            logError('Invalid end_date format', e);
           }
         }
 
@@ -4494,11 +4495,11 @@ WHERE m.id = $1;
             resolve(data);
           })
           .catch(function (err) {
-            console.error("Error in searchProductVariants:", err);
+            logError('Error in searchProductVariants', err);
             reject(err);
           });
       } catch (error) {
-        console.error("Error in searchProductVariants try/catch:", error);
+        logError('Error in searchProductVariants try/catch', error);
         reject(error);
       }
     });
@@ -4546,7 +4547,7 @@ WHERE m.id = $1;
               params.push(startDate);
               paramIndex++;
             }
-          } catch (e) { console.error("Invalid start_date:", e); }
+          } catch (e) { logError('Invalid start_date', e); }
         }
 
         if (end_date) {
@@ -4558,7 +4559,7 @@ WHERE m.id = $1;
               params.push(endDate);
               paramIndex++;
             }
-          } catch (e) { console.error("Invalid end_date:", e); }
+          } catch (e) { logError('Invalid end_date', e); }
         }
 
         // Handle vendor filter

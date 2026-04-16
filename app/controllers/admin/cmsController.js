@@ -2,6 +2,7 @@
 import cmsModel from '../../models/cmsModel.js';
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug, deleteFileFromS3 } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
@@ -84,7 +85,7 @@ const cmsController = {
   create_banner: async (req, res, next) => {
     try {
       let created_by = req.user.id;
-      console.log('created_by--', created_by);
+      logger.debug('created_by--', created_by);
       // return false;
       const now = currentDateTime();
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
@@ -131,7 +132,7 @@ const cmsController = {
   create_logo: async (req, res, next) => {
     try {
       let created_by = req.user.id;
-      console.log('created_by--', created_by);
+      logger.debug('created_by--', created_by);
       // return false;
       const now = currentDateTime();
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
@@ -735,10 +736,7 @@ const cmsController = {
 
         // delete existing file
         fs.unlink(file_link, (err) => {
-          if (err) console.log(err);
-          else {
-            //   console.log(file_link);
-          }
+          if (err) logError('Failed to delete banner file', err);
         });
 
         if (update_with_image) {
@@ -771,10 +769,7 @@ const cmsController = {
         const file_path = Config.upload.banner_image;
         const file_link = `${file_path}/${find_one_banner[0].filename}`;
         fs.unlink(file_link, (err) => {
-          if (err) console.log(err);
-          else {
-            //   console.log(file_link);
-          }
+          if (err) logError('Failed to delete banner file', err);
         });
       }
       let cms = await cmsModel.delete_banner(banner_id);
@@ -1650,7 +1645,7 @@ const cmsController = {
         return res.status(400).json({ error: 'No data provided to update.' });
       }
     } catch (err) {
-      console.error("Error updating location:", err);
+      logError("Error updating location:", err);
       // Directly send an error response without calling next()
       return res.status(500).json({ error: "An error occurred while updating location" });
     }
@@ -1693,10 +1688,10 @@ const cmsController = {
      try {
       // Call service to delete the city
       const result = await cmsModel.deleteLocations(city_id);
-      console.log('Deletion result:', result);
+      logger.debug('Deletion result:', result);
       res.status(200).json(result);
     } catch (error) {
-      console.error('Error during deletion:', error);
+      logError('Error during deletion:', error);
       next(error); // Pass error to error-handling middleware
     }
   },
@@ -1708,7 +1703,7 @@ const cmsController = {
             product_id: product_id,
            description: content
           };
-          console.log("---------------------------",product_id,content);
+          logger.debug('addProductDescription params:', product_id, content);
           const response = await cmsModel.addProductDescription(productDescriptionObj);
          
           if (response) {
@@ -1875,8 +1870,7 @@ const cmsController = {
       }
       
     } catch (error) {
-      console.log(error);
-      logError(error);
+      logError('Failed to add product tech spec', error);
       res
         .status(400)
         .json({

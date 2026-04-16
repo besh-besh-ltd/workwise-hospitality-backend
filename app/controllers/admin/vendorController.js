@@ -16,6 +16,7 @@ import {
   notificationMail,
   addDefaultNotifications
 } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 // import jwtHelper from '../../helper/jwtHelper.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
@@ -623,7 +624,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         updated_by: req.user.id,
       };
 
-      console.log("locationData====>", locationData)
+      logger.debug('updateVendorLocation locationData:', locationData)
       await rfqModel.update('tbl_company_location', locationData, id);
 
       return res.status(200).json({
@@ -1177,8 +1178,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       current_page: page
     });
   } catch (error) {
-    console.error("Error in getVendorProfileDocuments:", error);
-    logError(error);
+    logError('Error in getVendorProfileDocuments', error);
     return res.status(500).json({
       status: 3,
       message: Config.errorText.value
@@ -1222,7 +1222,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     }
 
   } catch (error) {
-    console.error('Error updating vendor document:', error);
+    logError('Error updating vendor document', error);
     res.status(500).json({
       status: 3,
       message: "Internal server error"
@@ -1478,7 +1478,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       const spocExist = await vendorModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
-        console.log("Adding new spoc");
+        logger.debug('Adding new spoc');
         // Set initial status based on who's creating the SPOC
         // Auto-approve (status=1) if:
         // 1. Creator is admin (user_type=1)

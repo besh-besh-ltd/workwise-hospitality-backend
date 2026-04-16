@@ -132,7 +132,7 @@ WHERE NOT EXISTS (
       `;
 
       const res = await db.any(q, [rfqId]);
-      console.log('[getVariantsCountForRFQ] res => ', res);
+      logger.debug({ data: res }, '[getVariantsCountForRFQ] result');
 
       return res;
     } catch (error) {
@@ -351,7 +351,7 @@ WHERE NOT EXISTS (
       );
       return res;
     } catch (error) {
-      console.log(error);
+      logError('persistAIJobInDB failed', error);
       throw error;
     }
   },
@@ -685,7 +685,7 @@ WHERE NOT EXISTS (
         return rfq_id;
       });
     } catch (error) {
-      console.error('Transaction failed. All operations rolled back.', error);
+      logError('Transaction failed. All operations rolled back.', error);
       throw error;
     }
   },
@@ -747,7 +747,7 @@ WHERE NOT EXISTS (
         });
       });
     } catch (error) {
-      console.error('Transaction failed. All operations rolled back.', error);
+      logError('Transaction failed. All operations rolled back.', error);
       throw error;
     }
   },
@@ -1074,7 +1074,7 @@ WHERE NOT EXISTS (
       const result = await db_con.query(query, conditionValues);
       return result; // Number of rows deleted
     } catch (error) {
-      console.error(`Error deleting from ${table}:`, error);
+      logError(`Error deleting from ${table}`, error);
       throw error;
     }
   },
@@ -1128,7 +1128,7 @@ WHERE NOT EXISTS (
             .then(() => resolve(ids));
         })
         .catch((error) => {
-          console.error(`Error deleting from ${table}:`, error);
+          logError(`Error deleting from ${table}`, error);
           reject(error);
         });
     });
@@ -1172,7 +1172,7 @@ WHERE NOT EXISTS (
 
       return await db.query(query, Object.values(conditions || {}));
     } catch (error) {
-      console.error(`Error finding all from ${table}:`, error);
+      logError(`Error finding all from ${table}`, error);
       throw error;
     }
   },
@@ -1195,7 +1195,7 @@ WHERE NOT EXISTS (
       const results = await db.query(query, Object.values(conditions || {}));
       return results.length > 0 ? results[0] : null;
     } catch (error) {
-      console.error(`Error finding one from ${table}:`, error);
+      logError(`Error finding one from ${table}`, error);
       throw error;
     }
   },
@@ -1382,7 +1382,7 @@ WHERE NOT EXISTS (
           }
         })
         .catch((err) => {
-          console.error('Error checking if all products are finalized:', err);
+          logError('Error checking if all products are finalized', err);
           reject(new Error(err));
         });
     });
@@ -1425,7 +1425,7 @@ WHERE NOT EXISTS (
           }
         })
         .catch((err) => {
-          console.error('Error checking if all products are finalized for ARC:', err);
+          logError('Error checking if all products are finalized for ARC', err);
           reject(new Error(err));
         });
     });
@@ -1571,7 +1571,7 @@ WHERE NOT EXISTS (
       return await db.any(query, [rfq_id]);
     } catch (error) {
       // Sampling table might not exist or have different structure
-      console.log('Sampling data not available:', error.message);
+      logger.warn('Sampling data not available: %s', error.message);
       return [];
     }
   },
@@ -2321,11 +2321,11 @@ WHERE NOT EXISTS (
           ORDER BY tu.name
         `;
 
-      console.log("GET DRAFT VENDORS:", q);
+      logger.debug({ data: q }, 'GET DRAFT VENDORS query');
 
       return db.any(q, [draftId, rfqProductId, vendor_name]);
     } catch (error) {
-      console.log('ERROR -> ', error);
+      logError('getDraftProductVendors failed', error);
       throw error;
     }
   },
@@ -3115,7 +3115,7 @@ bulkSearchVendorsByCategory: async (
       totalPages: Math.ceil(parseInt(countResult[0]?.total || 0) / parseInt(limit))
     };
   } catch (err) {
-    console.error('Error in bulkSearchVendorsByCategory:', err);
+    logError('Error in bulkSearchVendorsByCategory', err);
     throw err;
   }
 },
@@ -3272,17 +3272,17 @@ LIMIT 2;
 
     try {
       const countResult = await db.query(countQuery);
-      console.log('countQueery', countQuery);
+      logger.debug({ data: countQuery }, 'searchVendorWithoutLogin countQuery');
       const totalCount = countResult[0].total;
       
       const dataResult = await db.query(dataQuery);
-      console.log('dataQuwry', dataQuery);
+      logger.debug({ data: dataQuery }, 'searchVendorWithoutLogin dataQuery');
       return {
         total: totalCount,
         vendor: dataResult.length > 0 ? dataResult : null
       };
     } catch (err) {
-      console.error('Error in searchVendor:', err);
+      logError('Error in searchVendor', err);
       throw new Error(err);
     }
   },
@@ -3343,6 +3343,14 @@ LIMIT 2;
             FROM tbl_quotes tq
             WHERE tq.rfq_id = RFQ.id
           ) AS is_finalized,
+          -- is_quotes_present: used by canEditRfq to block editing after bid deadline
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_quotes _tq_exists
+              WHERE _tq_exists.rfq_id = RFQ.id
+              LIMIT 1
+            )
+          ) AS is_quotes_present,
           -- po_completed: ALL products have an approved (or beyond) PO
           (
             SELECT CASE
@@ -3794,7 +3802,7 @@ LIMIT 2;
       });
       return result;
     } catch (err) {
-      console.error('computeLifecycleStages error:', err);
+      logError('computeLifecycleStages error', err);
       return {};
     }
   },
@@ -3948,7 +3956,7 @@ LIMIT 2;
           }
         }
       } catch (err) {
-        console.error('getActionHoldersForRFQs approval error:', err);
+        logError('getActionHoldersForRFQs approval error', err);
         for (const rfq of approvalRfqs) {
           result[rfq.id] = null;
         }
@@ -3999,7 +4007,7 @@ LIMIT 2;
           }
         }
       } catch (err) {
-        console.error('getActionHoldersForRFQs permission error:', err);
+        logError('getActionHoldersForRFQs permission error', err);
         for (const rfq of permissionRfqs) {
           result[rfq.id] = null;
         }
@@ -4154,16 +4162,18 @@ LIMIT 2;
 
         // Finalization data
         db.any(`
-          SELECT qf.product_variant_id, qf.vendor_id,
-            COALESCE(pv.name, 'Product') AS product_name, rp.variant,
+          SELECT rp.id AS rfq_product_id, qf.product_variant_id, qf.vendor_id,
+            COALESCE(pv.name, 'Product') AS product_name, qf.variant,
             u_vendor.name AS finalized_vendor_name,
             COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS finalized_vendor_company,
             qi.unit_price AS finalized_price, qi.total_price AS total_price,
             u_buyer.name AS finalized_by_name,
             qf.timestamp AS finalized_at
           FROM tbl_quote_finalization qf
-          LEFT JOIN tbl_rfq_products rp ON rp.id = qf.product_variant_id
-          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          LEFT JOIN tbl_rfq_products rp ON rp.product_variant_id = qf.product_variant_id
+            AND COALESCE(rp.variant, 0) = COALESCE(qf.variant, 0)
+            AND rp.rfq_id = qf.rfq_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = qf.product_variant_id
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = qf.vendor_id
           LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           LEFT JOIN tbl_users u_buyer ON u_buyer.id = qf.created_by
@@ -4491,10 +4501,10 @@ LIMIT 2;
 
         // Add finalization data
         for (const f of finalizationData) {
-          const key = f.product_variant_id;
+          const key = f.rfq_product_id || f.product_variant_id;
           if (!productMap[key]) {
             productMap[key] = {
-              product_id: f.product_variant_id,
+              product_id: key,
               product_name: f.product_name + (f.variant && f.variant !== '0' ? ` (${f.variant})` : ''),
               finalization: null,
               negotiation_rounds: [],
@@ -4832,7 +4842,7 @@ LIMIT 2;
               const resolved = stepResults.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
               if (resolved.length > 0) actors.approver_steps = resolved;
             }
-          } catch (e) { console.error(`Policy resolution failed for ${entityType}:`, e.message); }
+          } catch (e) { logError(`Policy resolution failed for ${entityType}`, e); }
         }
 
         if (actors.evaluators || actors.approver_steps) phase.upcoming_actors = actors;
@@ -4916,7 +4926,7 @@ LIMIT 2;
         phases,
       };
     } catch (err) {
-      console.error('getLifecycleSummary error:', err);
+      logError('getLifecycleSummary error', err);
       return { rfq_id: rfqId, current_stage: null, phases: [] };
     }
   },
@@ -5835,7 +5845,8 @@ LIMIT 2;
     company_id,
     TA_Vendors,
     no_freight,
-    rfq_product_id
+    rfq_product_id,
+    include_negotiation = false
   ) => {
     if(rfq_product_id) {
       rfq_product_id = rfq_product_id.split(",").map(Number);
@@ -6173,6 +6184,66 @@ LIMIT 2;
               AND TQI.variant = TRF.variant              
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
+
+        ${include_negotiation ? `
+        , (
+          SELECT json_build_object(
+            'id', NR.id, 'rfq_id', NR.rfq_id, 'rfq_product_id', NR.rfq_product_id,
+            'round_number', NR.round_number, 'target_price', NR.target_price,
+            'status', NR.status, 'end_date', NR.end_date,
+            'approved_at', NR.approved_at, 'published_at', NR.published_at,
+            'closed_at', NR.closed_at, 'created_by', NR.created_by,
+            'created_by_name', NRU.name, 'created_by_email', NRU.email,
+            'remarks', NR.remarks, 'created_at', NR.created_at
+          )
+          FROM tbl_negotiation_rounds NR
+          LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
+          WHERE NR.rfq_product_id = TRF.id
+            AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+          ORDER BY NR.round_number DESC
+          LIMIT 1
+        ) AS "active_round"
+
+        , (
+          SELECT json_agg(sub ORDER BY sub.submitted_at DESC)
+          FROM (
+            SELECT
+              NRQ.id, NRQ.negotiation_round_id,
+              NRQ.vendor_id, NRQU.name AS vendor_name,
+              NRQU.email AS vendor_email,
+              COALESCE(NRQCO.company_name, NRQU.organization_name, NRQU.name) AS organization_name,
+              NRQ.rfq_product_id,
+              NRQ.quoted_price, NRQ.previous_price,
+              NRQ.submitted_at
+            FROM tbl_negotiation_round_quotes NRQ
+            LEFT JOIN tbl_users NRQU ON NRQU.id = NRQ.vendor_id
+            LEFT JOIN tbl_company NRQCO ON NRQCO.id = NRQU.company_id
+            WHERE NRQ.negotiation_round_id = (
+              SELECT NR2.id FROM tbl_negotiation_rounds NR2
+              WHERE NR2.rfq_product_id = TRF.id
+                AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+              ORDER BY NR2.round_number DESC LIMIT 1
+            )
+          ) sub
+        ) AS "active_round_quotes"
+
+        , (
+          SELECT json_build_object(
+            'has_pending_approval', (AI.status = 'PENDING'),
+            'approval_instance', json_build_object(
+              'id', AI.id, 'status', AI.status, 'current_step', AI.current_step,
+              'metadata', AI.metadata,
+              'created_at', AI.created_at, 'completed_at', AI.completed_at
+            )
+          )
+          FROM tbl_approval_instances AI
+          WHERE AI.entity_type = 'NEGOTIATION_QUOTE'
+            AND AI.entity_id = TRF.id
+          ORDER BY AI.created_at DESC
+          LIMIT 1
+        ) AS "quote_approval_status"
+        ` : ''}
+
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = $1
         ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
@@ -6467,7 +6538,7 @@ LIMIT 2;
 
       return result; // Return the rows from the query
     } catch (error) {
-      console.error('Error in getRFQActivity:', error);
+      logError('Error in getRFQActivity', error);
       throw new Error(error);
     }
   },
@@ -7116,7 +7187,7 @@ WHERE row_num_by_name_category = 1
          ${vendor_name ? 'similarity_score DESC, group_rand' : 'group_rand'};
   `;
 
-  console.log("QUERY SEARCH VENDOR:", q);
+  logger.debug({ data: q }, 'QUERY SEARCH VENDOR');
 
     const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
@@ -7233,7 +7304,7 @@ WHERE row_num_by_name_category = 1
           resolve(data);
         })
         .catch(function (err) {
-          console.log('ERROR: ', err);
+          logError('genericSearchVendors failed', err);
           let error = new Error(err);
           reject(error);
         });
@@ -7249,7 +7320,7 @@ WHERE row_num_by_name_category = 1
       throw new Error('Buyer not found or no company associated');
     const companyId = buyer.company_id;
 
-    console.log(' mukul  =>         ', buyer);
+    logger.debug({ data: buyer }, 'searchVendorsByName buyer');
 
     let q = `
     SELECT *
@@ -7341,7 +7412,7 @@ WHERE row_num_by_name_category = 1
 
     const values = vendor_name ? [vendor_name] : [];
 
-    console.log('   values ', values);
+    logger.debug({ data: values }, 'searchVendorsByName values');
 
     return new Promise(function (resolve, reject) {
       db.query(q, values)
@@ -7349,9 +7420,7 @@ WHERE row_num_by_name_category = 1
           resolve(data);
         })
         .catch(function (err) {
-          console.log(' ---------------------------------  ');
-          console.log(err);
-          console.log(' ---------------------------------  ');
+          logError('searchVendorsByName failed', err);
           let error = new Error(err);
           reject(error);
         });
@@ -8004,10 +8073,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
 
     // Validate parameters
     if (isNaN(safeVendorId) || isNaN(safeRfqNumber)) {
-      console.error('Invalid parameters for getVendorRfqToken:', {
-        vendorId,
-        rfqNumber
-      });
+      logger.error({ vendorId, rfqNumber }, 'Invalid parameters for getVendorRfqToken');
       return Promise.reject(
         new Error(
           `Invalid parameters: vendorId=${vendorId}, rfqNumber=${rfqNumber}`
@@ -8015,10 +8081,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
       );
     }
 
-    console.log('Querying token with:', {
-      vendorId: safeVendorId,
-      rfqNumber: safeRfqNumber
-    });
+    logger.debug({ vendorId: safeVendorId, rfqNumber: safeRfqNumber }, 'Querying token');
 
     return new Promise(function (resolve, reject) {
       db.any(
@@ -8026,7 +8089,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         [safeVendorId, safeRfqNumber]
       )
         .then(function (data) {
-          console.log('Token data:', data, safeVendorId, safeRfqNumber);
+          logger.debug({ data, safeVendorId, safeRfqNumber }, 'Token data');
           resolve(data);
         })
         .catch(function (err) {
@@ -8076,14 +8139,14 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
 
         // In case when product is existing but there is a change in the product details.
         if (item) {
-          console.log('COMING INSIDE NO CHANGE BLOCK');
+          logger.debug('COMING INSIDE NO CHANGE BLOCK');
           existingProductWithNoChange = false;
         }
 
         // we process all products with unitprices and having comment
 
         if (!existingProductWithNoChange) {
-          console.log('COMING INSIDE CHANGE BLOCK');
+          logger.debug('COMING INSIDE CHANGE BLOCK');
           let updatedItem = [];
           if (item) {
             // Move existing quote to quote history table
@@ -8234,7 +8297,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           });
         }
       } catch (error) {
-        console.error('Error in updateQuoteItemWithHistory:', error);
+        logError('Error in updateQuoteItemWithHistory', error);
         reject(error);
       }
     });
@@ -8255,7 +8318,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
       const item = result[0] || null;
       return item;
     } catch (error) {
-      console.error('Get QuoteItem: ', error);
+      logError('Get QuoteItem', error);
       throw error;
     }
   },
@@ -9177,9 +9240,7 @@ ORDER BY m.created_at;
         const techEvalId = techEval.id;
 
         // Changes by Agnij 2025-05-14 [Improve bulk clause insertion with chunking and better error handling]
-        console.log(
-          `Preparing to insert ${clauses.length} clauses for tech evaluation ID ${techEvalId}`
-        );
+        logger.info(`Preparing to insert ${clauses.length} clauses for tech evaluation ID ${techEvalId}`);
 
         // Filter invalid clauses and prepare values
         const validClauses = clauses.filter(
@@ -9193,7 +9254,7 @@ ORDER BY m.created_at;
           });
         }
 
-        console.log(`Found ${validClauses.length} valid clauses for insertion`);
+        logger.info(`Found ${validClauses.length} valid clauses for insertion`);
 
         // Prepare values for insertion
         const clauseValues = validClauses.map((clause) => ({
@@ -9225,24 +9286,15 @@ ORDER BY m.created_at;
             const insertedChunk = await db.many(insertQuery);
             insertedCount += insertedChunk.length;
 
-            console.log(
-              `Inserted chunk ${i / CHUNK_SIZE + 1} with ${
-                insertedChunk.length
-              } clauses`
-            );
+            logger.info(`Inserted chunk ${i / CHUNK_SIZE + 1} with ${insertedChunk.length} clauses`);
           } catch (chunkError) {
-            console.error(
-              `Error inserting clause chunk ${i / CHUNK_SIZE + 1}:`,
-              chunkError
-            );
+            logError(`Error inserting clause chunk ${i / CHUNK_SIZE + 1}`, chunkError);
             // Continue with next chunk instead of failing completely
           }
         }
 
         // Successfully inserted clauses
-        console.log(
-          `Successfully inserted ${insertedCount} of ${validClauses.length} clauses`
-        );
+        logger.info(`Successfully inserted ${insertedCount} of ${validClauses.length} clauses`);
 
         // Changes by Agnij 2025-05-14 [Improve response with detailed counts]
         resolve({
@@ -9255,7 +9307,7 @@ ORDER BY m.created_at;
           total: validClauses.length
         });
       } catch (error) {
-        console.error('Error in addManyClauses:', error);
+        logError('Error in addManyClauses', error);
         resolve({
           status: 0,
           message: 'Error adding clauses',
@@ -9375,7 +9427,7 @@ ORDER BY m.created_at;
           });
         })
         .catch((error) => {
-          console.error('Error adding clause:', error);
+          logError('Error adding clause', error);
           reject({
             status: 0,
             message: 'Error in adding clauses or associated files.',
@@ -9526,10 +9578,10 @@ ORDER BY m.created_at;
                   filesToDelete
                 ])
                   .then(() => {
-                    console.log(`Deleted files: ${filesToDelete}`);
+                    logger.info(`Deleted files: ${filesToDelete}`);
                   })
                   .catch((error) => {
-                    console.error(`Error deleting files: ${error.message}`);
+                    logError('Error deleting files', error);
                     reject({
                       success: false,
                       message: 'Error deleting files.',
@@ -9549,9 +9601,7 @@ ORDER BY m.created_at;
                       // console.log(`Inserted file: ${fileUrl}`);
                     })
                     .catch((error) => {
-                      console.error(
-                        `Error inserting file: ${fileUrl}. Error: ${error.message}`
-                      );
+                      logError(`Error inserting file: ${fileUrl}`, error);
                       reject({
                         success: false,
                         message: 'Error inserting files.',
@@ -9567,9 +9617,7 @@ ORDER BY m.created_at;
               });
             })
             .catch((error) => {
-              console.error(
-                `Error retrieving existing files: ${error.message}`
-              );
+              logError('Error retrieving existing files', error);
               reject({
                 success: false,
                 message: 'Error retrieving existing files.',
@@ -9582,16 +9630,14 @@ ORDER BY m.created_at;
               tbl_rfq_product_tech_evaluation_clauses_id
             ])
               .then(() => {
-                console.log(
-                  `All files deleted for clause ID: ${tbl_rfq_product_tech_evaluation_clauses_id}`
-                );
+                logger.info(`All files deleted for clause ID: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
                 resolve({
                   success: true,
                   message: 'Clause updated successfully, and all files deleted.'
                 });
               })
               .catch((error) => {
-                console.error(`Error deleting all files: ${error.message}`);
+                logError('Error deleting all files', error);
                 reject({
                   success: false,
                   message: 'Error deleting all files.',
@@ -9601,7 +9647,7 @@ ORDER BY m.created_at;
           }
         })
         .catch((error) => {
-          console.error(`Error updating clause: ${error.message}`);
+          logError('Error updating clause', error);
           reject({
             success: false,
             message: 'Error updating clause.',
@@ -9996,7 +10042,7 @@ ORDER BY m.created_at;
           });
         })
         .catch((error) => {
-          console.error('Error fetching clauses and files:', error);
+          logError('Error fetching clauses and files', error);
           reject({
             success: false,
             message: 'Error fetching clauses and files.',
@@ -10059,7 +10105,7 @@ ORDER BY m.created_at;
           try {
             await db.query(insertFileQuery, [commentId, sender_id, file_url]);
           } catch (fileError) {
-            console.error(`Error adding file: ${file_url}`, fileError.message);
+            logError(`Error adding file: ${file_url}`, fileError);
             throw {
               status: 0,
               message: 'Failed to add files associated with the comment.',
@@ -10077,7 +10123,7 @@ ORDER BY m.created_at;
       };
     } catch (error) {
       // Handle errors
-      console.error('Error:', error.message);
+      logError('addTechComment error', error);
       throw error;
     }
   },
@@ -10121,7 +10167,7 @@ ORDER BY m.created_at;
         data
       };
     } catch (error) {
-      console.error('Error:', error.message);
+      logError('getTechComments error', error);
       throw error;
     }
   },
@@ -10290,7 +10336,7 @@ ORDER BY m.created_at;
             await db
               .query(insertFileQuery, [responseId, url])
               .catch((fileError) => {
-                console.error(`Error adding file: ${url}`, fileError.message);
+                logError(`Error adding file: ${url}`, fileError);
                 reject({
                   status: 0,
                   message:
@@ -10319,7 +10365,7 @@ ORDER BY m.created_at;
           });
         })
         .catch((error) => {
-          console.error('Error in addVendorResponses:', error);
+          logError('Error in addVendorResponses', error);
           reject({
             status: 0,
             message: 'Error adding vendor responses or associated files.',
@@ -10505,7 +10551,7 @@ ORDER BY m.created_at;
           });
         })
         .catch((error) => {
-          console.error('Error fetching vendor details:', error);
+          logError('Error fetching vendor details', error);
           reject({
             status: 0,
             message: 'Error in fetching vendor details.',
@@ -10775,7 +10821,7 @@ ORDER BY m.created_at;
           data: rfqDetails
         });
       } catch (error) {
-        console.error('Error fetching RFQ details:', error);
+        logError('Error fetching RFQ details', error);
         reject({
           status: 0,
           message: 'Error in fetching RFQ details.',
@@ -11344,7 +11390,7 @@ ORDER BY m.created_at;
       const { rows } = await db.query(q, [search_key]);
       return rows;
     } catch (error) {
-      console.error(error.stack);
+      logError('searchProductForCMS error', error);
       // Return empty array instead of throwing error to avoid breaking the API response
       return [];
     }
@@ -11352,9 +11398,7 @@ ORDER BY m.created_at;
 
   // Changes by Agnij May 01, 2025 [Added method to search for variant vendors]
   searchVariantVendors: async (product_id, variant_id) => {
-    console.log(
-      `[RFQ Model] searchVariantVendors called with product_id: ${product_id}, variant_id: ${variant_id}`
-    );
+    logger.debug(`[RFQ Model] searchVariantVendors called with product_id: ${product_id}, variant_id: ${variant_id}`);
 
     // SQL query to find vendors associated with a product variant
     const q = `
@@ -11386,22 +11430,12 @@ ORDER BY m.created_at;
   `;
 
     try {
-      console.log(
-        `[RFQ Model] Executing variant vendors search query for ${
-          variant_id ? 'variant' : 'product'
-        } ID: ${variant_id || product_id}`
-      );
+      logger.debug(`[RFQ Model] Executing variant vendors search query for ${variant_id ? 'variant' : 'product'} ID: ${variant_id || product_id}`);
       const { rows } = await db.query(q, [variant_id || product_id]);
-      console.log(
-        `[RFQ Model] searchVariantVendors found ${rows.length} results`
-      );
+      logger.debug(`[RFQ Model] searchVariantVendors found ${rows.length} results`);
       return rows;
     } catch (error) {
-      console.error(
-        '[RFQ Model] Error in searchVariantVendors:',
-        error.message
-      );
-      console.error(error.stack);
+      logError('[RFQ Model] Error in searchVariantVendors', error);
       // Return empty array instead of throwing error to avoid breaking the API response
       return [];
     }
@@ -11755,7 +11789,7 @@ ORDER BY m.created_at;
       if (result.length > 0) return result;
       else return [];
     } catch (error) {
-      console.error(`[MODEL ERROR] Failed to execute ${type} query:`, error);
+      logError(`[MODEL ERROR] Failed to execute ${type} query`, error);
       throw error;
     }
   },
@@ -11779,7 +11813,7 @@ ORDER BY tq.timestamp DESC;
       if (result.length > 0) return result;
       else return [];
     } catch (error) {
-      console.error(`[MODEL ERROR] Failed to execute quote history query:`, error);
+      logError('[MODEL ERROR] Failed to execute quote history query', error);
       throw error;
     }
   },
@@ -12103,7 +12137,7 @@ ORDER BY tq.timestamp DESC;
         dynamicJoins +=
           'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
         dynamicConditions +=
-          'GROUP BY RFQ.id, P.name, H.name HAVING COUNT(RFQ_T_E.id) > 0';
+          'GROUP BY RFQ.id, P.name, H.name, D.title HAVING COUNT(RFQ_T_E.id) > 0';
         // te_completed = true when ALL products have >= 5 cleared vendors
         dynamicSelectColumns += `,
           (
@@ -12218,13 +12252,8 @@ ORDER BY tq.timestamp DESC;
           dynamicJoins +=
             'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
         }
-        // po_completed = true only when ALL POs for this RFQ are fully approved or beyond
+        // po_completed is now always included in the main SELECT
         dynamicSelectColumns += `,
-          (
-            SELECT BOOL_AND(_po_chk.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed', 'invoice_raised'))
-            FROM tbl_rfq_purchase_order _po_chk
-            WHERE _po_chk.rfq_id = RFQ.id
-          ) AS po_completed,
           -- has_draft_po: any PO in draft status
           EXISTS (
             SELECT 1 FROM tbl_rfq_purchase_order po_draft
@@ -12279,6 +12308,17 @@ ORDER BY tq.timestamp DESC;
         RFQ.timestamp,
         RFQ.hospitality_company_id,
         RFQ.hotel_id,
+        RFQ.is_published,
+        RFQ.created_by,
+        RFQ.tender_publish_date,
+        RFQ.vendor_clarification_date,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_quotes _tq_exists
+            WHERE _tq_exists.rfq_id = RFQ.id
+            LIMIT 1
+          )
+        ) AS is_quotes_present,
         (
           SELECT
             CASE
@@ -12430,13 +12470,32 @@ ORDER BY tq.timestamp DESC;
               ) _partial
             )
           END
-        ) AS finalization_partially_approved
+        ) AS finalization_partially_approved,
+        (
+          SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+            ELSE (
+              SELECT BOOL_AND(has_approved)
+              FROM (
+                SELECT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po2
+                  WHERE _po2.rfq_id = RFQ.id
+                    AND _po2.rfq_product_id @> ARRAY[_rp3.id]
+                    AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                ) AS has_approved
+                FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
+              ) _chk
+            )
+          END
+        ) AS po_completed
+        , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       LEFT JOIN tbl_hospitality_company_hotels H
       ON H.id = RFQ.hotel_id
       AND H.is_deleted = 0
+      LEFT JOIN tbl_department D ON D.id = RFQ.department_id
 
       ${dynamicJoins}
       WHERE (${
@@ -12795,7 +12854,7 @@ ORDER BY tq.timestamp DESC;
           message: 'Failed to save minimum passing score.'
         });
       } catch (error) {
-        console.error('Error updating minimum passing score:', error);
+        logError('Error updating minimum passing score', error);
         reject({
           status: 0,
           message: 'Error updating minimum passing score.',
@@ -12820,7 +12879,7 @@ ORDER BY tq.timestamp DESC;
           resolve(null);
         }
       } catch (error) {
-        console.error('Error fetching clause type:', error);
+        logError('Error fetching clause type', error);
         reject(error);
       }
     });
@@ -12897,7 +12956,7 @@ ORDER BY tq.timestamp DESC;
           message: 'Buyer marks and remark updated successfully.'
         });
       } catch (error) {
-        console.error('Error updating buyer marks:', error);
+        logError('Error updating buyer marks', error);
         reject({
           status: 0,
           message: 'Error updating buyer marks.',

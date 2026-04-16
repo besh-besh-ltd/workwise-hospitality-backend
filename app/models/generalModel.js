@@ -18,6 +18,7 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import s3Client from "../config/s3config.js";
 import fs from "fs";
 import { logger } from '../util/logger.js';
+import { logError } from '../helper/common.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -85,10 +86,7 @@ const generalModel = {
         const result = await db.any(query);
         resolve(result);
       } catch (error) {
-        console.error(
-          `Error fetching unique values for ${tableName}.${columnName}:`,
-          error
-        );
+        logError(`Error fetching unique values for ${tableName}.${columnName}:`, error);
         reject(error);
       }
     });
@@ -131,7 +129,7 @@ const generalModel = {
         const result = await db.any(query, idArray);
         resolve(result); // Returns deleted rows
       } catch (error) {
-        console.error(`Error deleting from ${tableName}:`, error);
+        logError(`Error deleting from ${tableName}:`, error);
         reject(error);
       }
     });
@@ -209,11 +207,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       return updated;
     } catch (err) {
       // Log with context; rethrow a clean error
-      console.error(`updateMany failed for ${tableName}:`, {
-        message: err?.message,
-        code: err?.code,
-        detail: err?.detail
-      });
+      logger.error({ err, code: err?.code, detail: err?.detail }, `updateMany failed for ${tableName}`);
       throw new Error('Failed to batch update records. Please try again or check server logs.');
     }
   },
@@ -265,7 +259,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           resolve(data);
         })
         .catch(function (err) {
-          console.log(err);
+          logError('Failed to get cities', err);
           let error = new Error(err);
           reject(error);
         });
@@ -337,7 +331,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           }
         })
         .catch((err) => {
-          console.error('Error executing query', err);
+          logError('Error executing query', err);
           reject(new Error('Database error'));
         });
     });
@@ -2073,11 +2067,16 @@ export async function createApprovalInstance({
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
     // 1. Check for existing pending/approved instance for this entity
+    // For NEGOTIATION type, allow new instances even if a previous one was APPROVED,
+    // because multiple rounds can exist per product and each needs its own approval.
+    const allowReapproval = entity_type === 'NEGOTIATION';
+    const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
+
     const existingInstance = await t.oneOrNone(`
       SELECT id, status FROM tbl_approval_instances
-      WHERE entity_type = $1 AND entity_id = $2 AND status IN ('PENDING', 'APPROVED')
+      WHERE entity_type = $1 AND entity_id = $2 AND status = ANY($3::text[])
       ORDER BY created_at DESC LIMIT 1
-    `, [entity_type, entity_id]);
+    `, [entity_type, entity_id, blockingStatuses]);
 
     if (existingInstance) {
       if (existingInstance.status === 'APPROVED') {
@@ -2304,7 +2303,7 @@ export async function createApprovalInstance({
         });
       }
     } catch (emailError) {
-      console.error('Error sending approval step notification:', emailError);
+      logError('Error sending approval step notification', emailError);
     }
 
     return {
@@ -2823,7 +2822,7 @@ export async function submitApprovalAction({
         });
       } catch (lifecycleError) {
         // Log but don't fail the transaction
-        console.error('Error recording lifecycle event:', lifecycleError);
+        logError('Error recording lifecycle event', lifecycleError);
       }
 
       return {
@@ -2914,7 +2913,7 @@ export async function submitApprovalAction({
         });
       } catch (lifecycleError) {
         // Log but don't fail the transaction
-        console.error('Error recording lifecycle event:', lifecycleError);
+        logError('Error recording lifecycle event', lifecycleError);
       }
 
       return {
@@ -2962,7 +2961,7 @@ export async function submitApprovalAction({
         });
       }
     } catch (emailError) {
-      console.error('Error sending next step approval notification:', emailError);
+      logError('Error sending next step approval notification', emailError);
     }
   }
 
@@ -3127,6 +3126,13 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
     WHERE ${conditions.join(' AND ')}
+      AND NOT (
+        i.entity_type IN ('RFQ', 'TENDER')
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq r
+          WHERE r.id = i.entity_id AND r.is_published = 1
+        )
+      )
     GROUP BY i.entity_type
   `;
 
@@ -3137,44 +3143,49 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
 
 export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   try {
+    const newStatus = reject ? PO_STATUSES.REJECTED : PO_STATUSES.ACCEPTANCE_PENDING;
     const purchaseOrder = await t.one(
       `UPDATE tbl_rfq_purchase_order
        SET status = $2,
            updated_at = NOW()
        WHERE id = $1 RETURNING *`,
-      [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
+      [po_id, newStatus]
     );
 
-    // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
+    // Send acceptance request email to vendor (vendor must accept/reject before PO proceeds)
     if(!reject) {
-      await sendPONotificationToVendor(purchaseOrder, user);
+      const { sendPOAcceptanceRequestToVendor } = await import('../controllers/po/purchaseOrderEmails.js');
+      const rfqDetails = await t.oneOrNone(
+        `SELECT id, rfq_no, title, created_by FROM tbl_rfq WHERE id = $1`,
+        [purchaseOrder.rfq_id]
+      );
+      sendPOAcceptanceRequestToVendor(purchaseOrder, rfqDetails).catch(err => {
+        logError('Failed to send PO acceptance request to vendor (legacy)', err);
+      });
     }
 
     return true;
   } catch (error) {
-    console.error('Failed to mark PO status chnged:', error);
+    logError('Failed to mark PO status changed', error);
     throw error;
   }
 };
 
 export const uploadToS3 = async (filePath, s3Key) => {
   try {
-    console.log('='.repeat(60));
-    console.log('[S3-UPLOAD] Starting upload process...');
-    console.log('[S3-UPLOAD] File path:', filePath);
-    console.log('[S3-UPLOAD] S3 key:', s3Key);
+    logger.debug({ filePath, s3Key }, '[S3-UPLOAD] Starting upload process');
 
     // Check file exists
     if (!fs.existsSync(filePath)) {
-      console.error('[S3-UPLOAD] ERROR: File not found:', filePath);
+      logger.error('[S3-UPLOAD] File not found: %s', filePath);
       throw new Error(`File not found: ${filePath}`);
     }
 
     const fileStats = fs.statSync(filePath);
-    console.log('[S3-UPLOAD] File found, size:', fileStats.size, 'bytes');
+    logger.debug({ size: fileStats.size }, '[S3-UPLOAD] File found');
 
     const fileBuffer = fs.readFileSync(filePath);
-    console.log('[S3-UPLOAD] File read into buffer, length:', fileBuffer.length);
+    logger.debug({ bufferLength: fileBuffer.length }, '[S3-UPLOAD] File read into buffer');
 
     // Use s3Key as-is if it contains a path, otherwise prepend purchase-order for backward compatibility
     const finalKey = s3Key.includes('/') ? s3Key : `purchase-order/${s3Key}`;
@@ -3186,21 +3197,16 @@ export const uploadToS3 = async (filePath, s3Key) => {
       ContentType: "application/pdf",
     };
 
-    console.log('[S3-UPLOAD] Upload params:');
-    console.log('[S3-UPLOAD] - Bucket:', process.env.AWS_S3_BUCKET);
-    console.log('[S3-UPLOAD] - Key:', finalKey);
-    console.log('[S3-UPLOAD] - ContentType:', uploadParams.ContentType);
+    logger.debug({ bucket: process.env.AWS_S3_BUCKET, key: finalKey, contentType: uploadParams.ContentType }, '[S3-UPLOAD] Upload params');
 
     const command = new PutObjectCommand(uploadParams);
-    console.log('[S3-UPLOAD] Sending upload command...');
+    logger.debug('[S3-UPLOAD] Sending upload command');
 
     const response = await s3Client.send(command);
-    console.log('[S3-UPLOAD] Upload success!');
-    console.log('[S3-UPLOAD] Response ETag:', response.ETag);
+    logger.info({ etag: response.ETag }, '[S3-UPLOAD] Upload success');
 
     const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${finalKey}`;
-    console.log('[S3-UPLOAD] Document URL:', url);
-    console.log('='.repeat(60));
+    logger.info({ url }, '[S3-UPLOAD] Document URL generated');
 
     return {
       ok: true,
@@ -3208,17 +3214,13 @@ export const uploadToS3 = async (filePath, s3Key) => {
       etag: response.ETag
     };
   } catch (err) {
-    console.log('='.repeat(60));
-    console.error('[S3-UPLOAD] Upload FAILED!');
-    console.error('[S3-UPLOAD] Error name:', err.name);
-    console.error('[S3-UPLOAD] Error message:', err.message);
-    console.error('[S3-UPLOAD] Error code:', err.code);
-    if (err.$metadata) {
-      console.error('[S3-UPLOAD] Request ID:', err.$metadata.requestId);
-      console.error('[S3-UPLOAD] HTTP Status:', err.$metadata.httpStatusCode);
-    }
-    console.error('[S3-UPLOAD] Full error:', err);
-    console.log('='.repeat(60));
+    logger.error({
+      err,
+      errorName: err.name,
+      errorCode: err.code,
+      requestId: err.$metadata?.requestId,
+      httpStatus: err.$metadata?.httpStatusCode
+    }, '[S3-UPLOAD] Upload FAILED');
     return {
       ok: false,
       error: err.message

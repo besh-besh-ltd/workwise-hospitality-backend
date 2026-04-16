@@ -17,17 +17,8 @@ const initOptions = {
       // A connection-related error;
       // Connections are reported back with the password hashed,
       // for safe errors logging, without exposing passwords.
-      console.log('CN:', e.cn);
-      console.log('EVENT:', error.message || error);
-
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: Config.developers, // list of receivers
-        subject: `URL || Work wise || Dev DB Error`, // Subject line
-        html: `Error: ${JSON.stringify(e.cn)} <br> ${JSON.stringify(
-          error.message
-        )} <br> ${JSON.stringify(error)}` // plain text body
-      });
+      logger.error({ cn: e.cn }, 'Database connection error');
+      logger.error({ event: error.message || error }, 'Database error event');
     }
   }
 };

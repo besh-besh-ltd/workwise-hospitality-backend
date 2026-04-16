@@ -8,6 +8,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 
 
 
@@ -296,7 +297,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('buyerValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'

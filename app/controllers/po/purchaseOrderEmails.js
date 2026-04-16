@@ -1,9 +1,12 @@
 import config from "../../config/app.config.js";
 import db from "../../config/dbConn.js";
-import { sendMail } from "../../helper/common.js";
+import { sendMail, logError } from "../../helper/common.js";
+import { logger } from '../../util/logger.js';
 import { generateEmailTemplate } from "../../helper/notificationEmailLayout.js";
 import userModel from "../../models/userModel.js";
 import vendorModel from "../../models/vendorModel.js";
+import rbacModel from "../../models/rbacModel.js";
+import hospitalityModel from "../../models/hospitalityModel.js";
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
   return new Promise(async (resolve, reject) => {
@@ -77,7 +80,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
 export const sendPONotificationToVendor = async (purchaseOrder, user) => {
     try {
-        console.log("PO TEST -> PURCHASE ORDER EMAIL TRIGGERED!")
+        logger.info("PO TEST -> PURCHASE ORDER EMAIL TRIGGERED!")
         let company = await userModel.getCompanyDetail(user.id);
         if(company) company = company[0];
 
@@ -151,8 +154,8 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
             // ]
         };
         
-        console.log("PO TEST -> VENDOR:", vendor);
-        console.log("PO TEST -> MAIL RECIPIENTS:", mailRecipients);
+        logger.debug({ vendor }, "PO TEST -> VENDOR");
+        logger.debug({ mailRecipients }, "PO TEST -> MAIL RECIPIENTS");
 
         // if (spocList && spocList.length > 0) {
         //     mailRecipients.to = spocList.map(spoc => spoc.email);
@@ -163,9 +166,381 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         sendMail(mailRecipients);
 
-        console.log("PO TEST -> EMAIL HAS BEEN SENT!")
+        logger.info("PO TEST -> EMAIL HAS BEEN SENT!")
     } catch (error) {
-        console.error(error);
+        logError('sendPONotificationToVendor error', error);
         throw error;
     }
 }
+
+/**
+ * Send email to vendor requesting them to accept or reject the PO.
+ * Called when PO is fully approved internally and moves to acceptance_pending.
+ */
+export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails) => {
+  try {
+    let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    if (!vendor || !vendor[0]) throw new Error("Vendor Not Found!");
+    vendor = vendor[0];
+
+    const products = await db.any(
+      `SELECT P.id, P.name FROM tbl_rfq_products TRP
+       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
+       WHERE TRP.id = ANY($1)`,
+      [purchaseOrder.rfq_product_id]
+    );
+
+    const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
+
+    const reviewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+
+    const containerContent = `
+      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+        <p>
+          A <strong>Purchase Order</strong> has been raised for you for
+          RFQ <strong>#${rfqDetails?.rfq_no || ''}</strong>.
+          Your action is required to proceed.
+        </p>
+
+        <h4>Purchase Order Details</h4>
+        <ul>
+          <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
+          <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
+          <li><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
+          <li><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+        </ul>
+
+        <div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; padding:16px; margin:16px 0; border-radius:4px;">
+          <p style="margin:0; font-weight:600; color:#92400E;">
+            Please review and accept or reject this Purchase Order.
+          </p>
+          <p style="margin:8px 0 0; color:#92400E;">
+            If you are unable to fulfill this order, you may reject it and the buyer will be notified to finalize an alternative vendor.
+          </p>
+        </div>
+
+        <div style="text-align:center; margin-top:24px;">
+          <a href="${reviewUrl}"
+             style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+            Review Purchase Order
+          </a>
+        </div>
+
+        <p style="text-align:center; margin-top: 30px;">
+          Thank you for your prompt response.<br/>
+          <strong>— Phileein Hospitality Team</strong>
+        </p>
+      </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    sendMail({
+      from: config.webmasterMail,
+      to: vendor.email,
+      subject: `Action Required: PO #${purchaseOrder.po_number} for RFQ #${rfqDetails?.rfq_no || ''} — Accept or Reject`,
+      html: dynamicHTML
+    });
+
+    logger.info(`Sent PO acceptance request email to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
+  } catch (error) {
+    logError('sendPOAcceptanceRequestToVendor error', error);
+    throw error;
+  }
+};
+
+/**
+ * Send email to Commercial Evaluators when vendor rejects a PO.
+ */
+export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserId, reason) => {
+  try {
+    let vendor = await userModel.getUserById(vendorUserId);
+    vendor = vendor?.[0];
+    const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+
+    const rfqDetails = await db.oneOrNone(
+      `SELECT r.id, r.rfq_no, r.title, r.hotel_id
+       FROM tbl_rfq r WHERE r.id = $1`,
+      [purchaseOrder.rfq_id]
+    );
+
+    const products = await db.any(
+      `SELECT P.name FROM tbl_rfq_products TRP
+       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
+       WHERE TRP.id = ANY($1)`,
+      [purchaseOrder.rfq_product_id]
+    );
+
+    // Get commercial evaluators for this BU
+    const evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
+      [rfqDetails?.hotel_id],
+      'quote-compare',
+      ['read', 'create'],
+      null
+    );
+
+    if (!evaluators || evaluators.length === 0) {
+      logger.info('No commercial evaluators to notify for vendor PO rejection');
+      return;
+    }
+
+    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq_id=${purchaseOrder.rfq_id}`;
+
+    for (const user of evaluators) {
+      const headerContent = `<h2>Hello ${user.name},</h2>`;
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <div style="background-color:#FEE2E2; border-left:4px solid #EF4444; padding:16px; margin:16px 0; border-radius:4px;">
+            <p style="margin:0; font-weight:600; color:#991B1B;">
+              ${vendorName} has rejected PO #${purchaseOrder.po_number}
+            </p>
+          </div>
+
+          <h4>Details</h4>
+          <ul>
+            <li><strong>RFQ:</strong> #${rfqDetails?.rfq_no || ''} ${rfqDetails?.title ? `— ${rfqDetails.title}` : ''}</li>
+            <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
+            <li><strong>Vendor:</strong> ${vendorName}</li>
+            ${reason ? `<li><strong>Reason:</strong> ${reason}</li>` : ''}
+          </ul>
+
+          <p>
+            The vendor has been de-finalized for this RFQ. Please review the Quote Comparison
+            and finalize an alternative vendor to proceed.
+          </p>
+
+          <div style="text-align:center; margin-top:24px;">
+            <a href="${quoteCompareUrl}"
+               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              Go to Quote Compare
+            </a>
+          </div>
+
+          <p style="text-align:center; margin-top: 30px;">
+            Your prompt action is appreciated.<br/>
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: user.email,
+        subject: `PO Rejected by Vendor — ${vendorName} rejected PO #${purchaseOrder.po_number}`,
+        html: dynamicHTML
+      });
+    }
+
+    logger.info(`Sent vendor rejection notifications to ${evaluators.length} commercial evaluators for PO ${purchaseOrder.po_number}`);
+  } catch (error) {
+    logError('sendVendorRejectionNotification error', error);
+  }
+};
+
+/**
+ * Send reminder email to vendor for a PO still in acceptance_pending status.
+ * @param {Object} purchaseOrder - PO row
+ * @param {Object} rfqDetails - { rfq_no }
+ * @param {number} reminderNumber - 1, 2, or 3
+ */
+export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails, reminderNumber) => {
+  try {
+    let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    if (!vendor || !vendor[0]) return;
+    vendor = vendor[0];
+
+    const products = await db.any(
+      `SELECT P.name FROM tbl_rfq_products TRP
+       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
+       WHERE TRP.id = ANY($1)`,
+      [purchaseOrder.rfq_product_id]
+    );
+
+    const subjects = {
+      1: `Gentle Reminder: PO #${purchaseOrder.po_number} awaiting your response`,
+      2: `Reminder: PO #${purchaseOrder.po_number} still requires your action`,
+      3: `Final Reminder: PO #${purchaseOrder.po_number} needs your immediate attention`,
+    };
+
+    const tones = {
+      1: 'This is a gentle reminder that the following Purchase Order is awaiting your response.',
+      2: 'This is a reminder that the following Purchase Order still requires your action. Please respond at your earliest convenience.',
+      3: 'This is the final reminder. The following Purchase Order urgently needs your attention. Please accept or reject this order immediately.',
+    };
+
+    const bgColors = {
+      1: '#FEF3C7',
+      2: '#FED7AA',
+      3: '#FEE2E2',
+    };
+    const borderColors = {
+      1: '#F59E0B',
+      2: '#F97316',
+      3: '#EF4444',
+    };
+    const textColors = {
+      1: '#92400E',
+      2: '#9A3412',
+      3: '#991B1B',
+    };
+
+    const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
+    const reviewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+
+    const containerContent = `
+      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+        <p>${tones[reminderNumber] || tones[1]}</p>
+
+        <h4>Purchase Order Details</h4>
+        <ul>
+          <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
+          <li><strong>RFQ:</strong> #${rfqDetails?.rfq_no || ''}</li>
+          <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
+          <li><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
+          <li><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+        </ul>
+
+        <div style="background-color:${bgColors[reminderNumber] || bgColors[1]}; border-left:4px solid ${borderColors[reminderNumber] || borderColors[1]}; padding:16px; margin:16px 0; border-radius:4px;">
+          <p style="margin:0; font-weight:600; color:${textColors[reminderNumber] || textColors[1]};">
+            Please accept or reject this Purchase Order.
+          </p>
+        </div>
+
+        <div style="text-align:center; margin-top:24px;">
+          <a href="${reviewUrl}"
+             style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+            Review Purchase Order
+          </a>
+        </div>
+
+        <p style="text-align:center; margin-top: 30px;">
+          Thank you for your prompt response.<br/>
+          <strong>— Phileein Hospitality Team</strong>
+        </p>
+      </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    sendMail({
+      from: config.webmasterMail,
+      to: vendor.email,
+      subject: subjects[reminderNumber] || subjects[1],
+      html: dynamicHTML
+    });
+
+    logger.info(`Sent PO acceptance reminder #${reminderNumber} to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
+  } catch (error) {
+    logError('sendPOAcceptanceReminderToVendor error', error);
+  }
+};
+
+/**
+ * Send email to all internal BU members when vendor accepts a PO.
+ */
+export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails) => {
+  try {
+    let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    vendor = vendor?.[0];
+    const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+
+    const products = await db.any(
+      `SELECT P.name FROM tbl_rfq_products TRP
+       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
+       WHERE TRP.id = ANY($1)`,
+      [purchaseOrder.rfq_product_id]
+    );
+
+    // Get company details
+    const companyDetails = await db.oneOrNone(`
+      SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1
+    `, [rfqDetails?.hospitality_company_id]);
+
+    // Get users mapped to this specific hotel + company-level admins
+    const hotelUsers = await hospitalityModel.getUserMappingsForCompany(
+      rfqDetails?.hospitality_company_id,
+      1,
+      rfqDetails?.hotel_id
+    );
+    const companyAdmins = await hospitalityModel.getUserMappingsForCompany(
+      rfqDetails?.hospitality_company_id,
+      0
+    );
+
+    // Deduplicate by user_id
+    const userMap = new Map();
+    [...hotelUsers, ...companyAdmins].forEach(m => {
+      if (!userMap.has(m.user_id)) {
+        userMap.set(m.user_id, { id: m.user_id, name: m.name, email: m.email });
+      }
+    });
+    const usersToNotify = Array.from(userMap.values());
+
+    if (usersToNotify.length === 0) {
+      logger.debug('No users to notify for PO vendor acceptance');
+      return;
+    }
+
+    const poUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+
+    for (const user of usersToNotify) {
+      const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            Great news! The vendor has accepted the Purchase Order.
+          </p>
+
+          <div style="background-color:#F0FDF4; border-left:4px solid #10B981; padding:16px; margin:16px 0; border-radius:4px;">
+            <p style="margin:0; font-size:18px; font-weight:600; color:#166534;">
+              ${vendorName} has accepted PO #${purchaseOrder.po_number}
+            </p>
+          </div>
+
+          <h4 style="margin-top:24px; color:#1F2937;">RFQ Details</h4>
+          <ul style="list-style:none; padding-left:0;">
+            <li style="padding:4px 0;"><strong>RFQ Number:</strong> ${rfqDetails?.rfq_no || 'N/A'}</li>
+            ${rfqDetails?.title ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqDetails.title}</li>` : ''}
+          </ul>
+
+          <h4 style="margin-top:24px; color:#1F2937;">Purchase Order Details</h4>
+          <ul style="list-style:none; padding-left:0;">
+            <li style="padding:4px 0;"><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
+            <li style="padding:4px 0;"><strong>Product(s):</strong> ${products.map(p => p.name).join(', ') || 'N/A'}</li>
+            <li style="padding:4px 0;"><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
+            <li style="padding:4px 0;"><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+          </ul>
+
+          <h4 style="margin-top:24px; color:#1F2937;">Vendor Details</h4>
+          <ul style="list-style:none; padding-left:0;">
+            <li style="padding:4px 0;"><strong>Vendor:</strong> ${vendorName}</li>
+            <li style="padding:4px 0;"><strong>Email:</strong> ${vendor?.email || 'N/A'}</li>
+          </ul>
+
+          <div style="text-align:center; margin-top:24px;">
+            <a href="${poUrl}"
+               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              View Purchase Order
+            </a>
+          </div>
+
+          <p style="text-align:center; margin-top: 30px;">
+            <strong>— ${companyDetails?.company_name || 'Phileein Hospitality'} Team</strong>
+          </p>
+        </div>`;
+
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: user.email,
+        subject: `Vendor Accepted PO #${purchaseOrder.po_number} for RFQ #${rfqDetails?.rfq_no || ''}`,
+        html: dynamicHTML
+      });
+    }
+
+    logger.info(`Sent PO accepted notifications to ${usersToNotify.length} users for PO ${purchaseOrder.po_number}`);
+  } catch (error) {
+    logError('sendPOAcceptedNotificationToTeam error', error);
+  }
+};

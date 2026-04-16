@@ -18,7 +18,8 @@ import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import bcrypt from 'bcryptjs';
-import axios from 'axios';
+import httpClient from '../../util/httpClient.js';
+import { logger } from '../../util/logger.js';
 import FormData from 'form-data';
 import Razorpay from 'razorpay';
 import Moment from 'moment';
@@ -53,7 +54,7 @@ try {
     process.env.PRIVATE_VAPID_KEY
   );
 } catch (err) {
-  console.error('Failed to set VAPID details — push notifications will not work:', err.message);
+  logError('Failed to set VAPID details — push notifications will not work', err);
 }
 
 const cryptr = new Cryptr(Config.cryptR.secret);
@@ -144,7 +145,7 @@ const bulkMapVendorVariantsFromCategories = async (
   subcategories = []
 ) => {
   try {
-    console.log('[BULK_MAP] Starting for vendor:', vendorId, 'categories:', categories, 'subcategories:', subcategories);
+    logger.debug({ vendorId, categories, subcategories }, '[BULK_MAP] Starting for vendor');
     
     const allIdsSet = new Set();
 
@@ -163,10 +164,10 @@ const bulkMapVendorVariantsFromCategories = async (
     }
 
     const allIds = Array.from(allIdsSet);
-    console.log('[BULK_MAP] All category IDs to map:', allIds);
+    logger.debug({ allIds }, '[BULK_MAP] All category IDs to map');
     
     if (!allIds.length) {
-      console.log('[BULK_MAP] No category IDs found, skipping');
+      logger.debug('[BULK_MAP] No category IDs found, skipping');
       return;
     }
 
@@ -174,10 +175,10 @@ const bulkMapVendorVariantsFromCategories = async (
       allIds.map((id) => ({ id }))
     );
     
-    console.log('[BULK_MAP] Found variants:', variants?.length || 0);
+    logger.debug({ count: variants?.length || 0 }, '[BULK_MAP] Found variants');
 
     if (!variants || !variants.length) {
-      console.log('[BULK_MAP] No variants found for categories');
+      logger.debug('[BULK_MAP] No variants found for categories');
       return;
     }
 
@@ -188,7 +189,7 @@ const bulkMapVendorVariantsFromCategories = async (
       make_list: []
     }));
 
-    console.log('[BULK_MAP] Creating mappings:', mappings.length);
+    logger.debug({ count: mappings.length }, '[BULK_MAP] Creating mappings');
     await productModel.bulkInsertVariantVendorMappings(mappings, vendorId);
 
     // Ensure new mappings are treated as approved so they are visible in searches/UI
@@ -196,7 +197,7 @@ const bulkMapVendorVariantsFromCategories = async (
       new Set(variants.map((v) => parseInt(v.variant_id, 10)).filter(Boolean))
     );
     if (variantIds.length) {
-      console.log('[BULK_MAP] Approving', variantIds.length, 'variant mappings');
+      logger.debug({ count: variantIds.length }, '[BULK_MAP] Approving variant mappings');
       await db.none(
         `UPDATE tbl_product_variant_vendor_mapping
          SET is_approved = TRUE
@@ -205,10 +206,9 @@ const bulkMapVendorVariantsFromCategories = async (
         [vendorId, variantIds]
       );
     }
-    console.log('[BULK_MAP] Completed successfully');
+    logger.debug('[BULK_MAP] Completed successfully');
   } catch (error) {
-    console.error('[BULK_MAP] Error:', error);
-    logError(error);
+    logError('[BULK_MAP] Error', error);
     // Do not block registration on mapping failures
   }
 };
@@ -851,7 +851,7 @@ create_buyer_company_users: async (req, res, next) => {
           await hospitalityModel.insertUserMappings(mappingRows);
         }
       } catch (mapErr) {
-        console.error("Hospitality mapping failed (user was created):", mapErr.message);
+        logError("Hospitality mapping failed (user was created)", mapErr);
       }
     }
 
@@ -901,7 +901,7 @@ create_buyer_company_users: async (req, res, next) => {
         });
       }
     } catch (subErr) {
-      console.error("Subscription setup failed (user was created):", subErr.message);
+      logError("Subscription setup failed (user was created)", subErr);
     }
 
     /* -------------------- EMAIL (non-critical) -------------------- */
@@ -925,7 +925,7 @@ create_buyer_company_users: async (req, res, next) => {
         html: emailHTML
       });
     } catch (emailErr) {
-      console.error("Email sending failed (user was created):", emailErr.message);
+      logError("Email sending failed (user was created)", emailErr);
     }
 
     return res.status(200).json({
@@ -935,7 +935,7 @@ create_buyer_company_users: async (req, res, next) => {
     });
 
   } catch (err) {
-    console.error("create_buyer_company_users error:", err);
+    logError("create_buyer_company_users error", err);
     return res.status(500).json({
       status: false,
       message: "Error creating buyer company user.",
@@ -1281,7 +1281,7 @@ get_company_users: async (req, res, next) => {
     // const subscription = req.body;
 
     const { subscription, token } = req.body;
-    console.log('subscription', subscription);
+    logger.debug({ data: subscription }, 'subscription');
 
     // global_subscription = subscription;
     let error = 0;
@@ -1546,7 +1546,7 @@ get_company_users: async (req, res, next) => {
   renew_token: async (user_id) => {
     try {
       const user = await userModel.user_profile_detail(user_id);
-      console.log('user--', user);
+      logger.debug({ data: user }, 'renew_token user');
       const userData = {
         user_id: cryptr.encrypt(user_id),
         name: user[0].name,
@@ -1569,13 +1569,13 @@ get_company_users: async (req, res, next) => {
         // const tokenData = await renew_token(user_id);
         const secret_jwt = Config.jwt.secret;
         var newSecretJwt = generateRandomString();
-        console.log('secret--', secret_jwt);
+        logger.debug('refresh_token secret loaded');
         const envFilePath = '.env';
 
-        console.log('envFilePath--', envFilePath);
+        logger.debug({ envFilePath }, 'refresh_token envFilePath');
         fs.readFile(envFilePath, 'utf-8', function (err, data) {
           if (err) {
-            console.log('err--', err);
+            logError('refresh_token readFile error', err);
             return false;
           } else {
             var newValue = data.replace(
@@ -1587,10 +1587,10 @@ get_company_users: async (req, res, next) => {
           // console.log('newValue--', newValue);
           fs.writeFile(envFilePath, newValue, 'utf-8', function (err, data) {
             if (err) {
-              console.log('err2--', err);
+              logError('refresh_token writeFile error', err);
               return false;
             } else {
-              console.log('Done!');
+              logger.info('refresh_token env file updated');
               const token = JWT.sign(
                 {
                   iss: 'Des Technico',
@@ -1605,7 +1605,7 @@ get_company_users: async (req, res, next) => {
                 },
                 newSecretJwt
               );
-              console.log('token123--', token);
+              logger.debug('refresh_token token generated');
               const response = {
                 user_id: user_id,
                 token: token
@@ -1686,16 +1686,12 @@ get_company_users: async (req, res, next) => {
       };
 
       // Send email using existing helper (fire-and-forget) and log for debugging
-      console.log('[OTP] Triggering registration OTP email', {
-        to: email,
-        otp,
-      });
+      logger.info({ to: email }, '[OTP] Triggering registration OTP email');
 
       try {
         sendMail(mailRecipients);
       } catch (emailError) {
-        console.error('[OTP] Failed to trigger OTP email for:', email, emailError);
-        logError(emailError);
+        logError(`[OTP] Failed to trigger OTP email for: ${email}`, emailError);
       }
 
       res.status(200).json({
@@ -1866,7 +1862,7 @@ get_company_users: async (req, res, next) => {
       let user_dtls = await userModel.user_detail_otp_exists(otp);
       // console.log('userDetail-->', user_dtls);
       user_dtls = Object.assign({}, ...user_dtls);
-      console.log('user_dtls-->', user_dtls);
+      logger.debug({ data: user_dtls }, 'forgot_password_otp_authenticate user_dtls');
 
       if (user_dtls) {
         password = generatePassword(password);
@@ -2093,56 +2089,6 @@ update_user_detail: async (req, res, next) => {
   },
   get_profile: async (req, res, next) => {
     try {
-
-      // if req.is_verified is true then there must be token in the query
-      if (!req.is_verified && !req.query.token) {
-        return res
-          .status(401)
-          .json({
-            status: 0,
-            message: 'Access denied. Please provide a valid token.'
-          });
-      }
-
-      // if user try to uplaod file without login
-      // then we take token in the query and take the vendor
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        // Check if the token exists
-        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-
-        if (!tokenData || tokenData.length === 0) {
-          // Token is not valid
-          return res
-            .status(400)
-            .json({
-              status: 0,
-              message: 'Invalid or expired token!'
-            })
-            .end();
-        }
-
-        // Retrieve user data associated with the token
-        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-        if (!userData || userData.length === 0) {
-          // User data is not valid
-          return res
-            .status(404)
-            .json({
-              status: 0,
-              message: 'User not found!'
-            })
-            .end();
-        }
-        // Remove password from user data
-        const { password, ...userWithoutPassword } = userData[0];
-        // Assign the user data to req.user
-        req.user = userWithoutPassword;
-      }
-
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
@@ -2157,7 +2103,7 @@ update_user_detail: async (req, res, next) => {
         const userapprovedbyvendor = await userModel.userapprovedbyvendor(
           user_id
         );
-        console.log('userapprovedbyvendor-->', userapprovedbyvendor);
+        logger.debug({ data: userapprovedbyvendor }, 'get_profile userapprovedbyvendor');
         const b = [];
         let vendor_arr = userapprovedbyvendor.map((ele) => ele.id);
 
@@ -2173,10 +2119,10 @@ update_user_detail: async (req, res, next) => {
         user.user_key = cryptr.encrypt(user_id.toString());
         
         // Check hospitality subscription status for vendors
-        console.log('[get_profile] user_type:', user.user_type, typeof user.user_type, '| is_hospitality:', user.is_hospitality, typeof user.is_hospitality);
+        logger.debug({ user_type: user.user_type, is_hospitality: user.is_hospitality }, '[get_profile] user_type and is_hospitality');
         if (user.user_type == 3 && user.is_hospitality == 1) {
           const hasValidSubscription = await hospitalityModel.hasValidPaidSubscription(user_id);
-          console.log('[get_profile] hasValidSubscription:', hasValidSubscription);
+          logger.debug({ hasValidSubscription }, '[get_profile] hasValidSubscription');
           user.has_valid_hospitality_subscription = hasValidSubscription;
           
           // Get pending subscriptions for payment initiation
@@ -2344,7 +2290,7 @@ update_user_detail: async (req, res, next) => {
           }
         })
         .then(async (response) => {
-          console.log('response--->', response.data.email);
+          logger.debug({ email: response.data.email }, 'google_login response email');
           // return false;
           id = response.data.id;
           email = response.data.email?.toLowerCase();
@@ -2472,9 +2418,8 @@ update_user_detail: async (req, res, next) => {
           }
         })
         .catch((error) => {
-          console.log('catch block--->');
           // Handle errors
-          console.error('Error fetching data:', error);
+          logError('google_login error fetching data', error);
           res
             .status(400)
             .json({
@@ -2515,8 +2460,8 @@ update_user_detail: async (req, res, next) => {
         data: data
       };
 
-      axios.request(config).then((response) => {
-        console.log(JSON.stringify(response.data));
+      httpClient.request(config).then((response) => {
+        logger.debug({ responseData: response.data }, 'OTP SMS sent');
       });
 
       let user_detail = await userModel.getUserDetailByMobile(mobile);
@@ -2599,60 +2544,8 @@ update_user_detail: async (req, res, next) => {
     }
   },
   upload_documents: async (req, res, next) => {
-    
     try {
-      let user_id;
-
-      // if req.is_verified is true then there must be token in the query
-      if (!req.is_verified && !req.query.token) {
-        return res
-          .status(401)
-          .json({
-            status: 0,
-            message: 'Access denied. Please provide a valid token.'
-          });
-      }
-
-      // if user try to uplaod file without login
-      // then we take token in the query and take the vendor
-
-      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
-
-      if (withoutLoginUserToken) {
-        // Check if the token exists
-        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-
-        if (!tokenData || tokenData.length === 0) {
-          // Token is not valid
-          return res
-            .status(400)
-            .json({
-              status: 0,
-              message: 'Invalid or expired token!'
-            })
-            .end();
-        }
-
-        // Retrieve user data associated with the token
-        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-        if (!userData || userData.length === 0) {
-          // User data is not valid
-          return res
-            .status(404)
-            .json({
-              status: 0,
-              message: 'User not found!'
-            })
-            .end();
-        }
-        // Remove password from user data
-        const { password, ...userWithoutPassword } = userData[0];
-        // Assign the user data to req.user
-        req.user = userWithoutPassword;
-      }
-
-      user_id = req.user.id;
+      const user_id = req.user.id;
 
       let { doc_type } = req.body;
       if (!doc_type) {
@@ -2743,7 +2636,7 @@ enhance_vendor_profile: async (req, res, next) => {
     //     message: "No files or text provided"
     //   }).end();
     // }
-  console.log("doc type ", doc_type);
+  logger.debug({ doc_type }, 'upload_vendor_profile doc_type');
     const result = await userModel.insertAssets(
       user_id,
       files,
@@ -2807,7 +2700,7 @@ upload_payment_terms :  async (req, res, next) => {
     });
 
   } catch (error) {
-    console.error("Error in upload_payment_terms:", error);
+    logError("Error in upload_payment_terms", error);
     next(error);
   }
 },
@@ -2846,7 +2739,7 @@ get_payment_terms: async (req, res, next) => {
       data: terms || [],
     });
   } catch (error) {
-    console.error("Error in get_payment_terms:", error);
+    logError("Error in get_payment_terms", error);
     next(error);
   }
 },
@@ -4082,14 +3975,11 @@ publish_profile_reviews: async (req, res, next) => {
           date: Moment().format('YYYY-MM-DD')
         };
 
-        console.log(
-          'subscriptionPaymentObj ==>>>>>>>>>',
-          subscriptionPaymentObj
-        );
+        logger.debug({ data: subscriptionPaymentObj }, 'razorpay_webhook subscriptionPaymentObj');
         let paymentUpdate = await subscriptionModel.updateSubscriptionPayment(
           subscriptionPaymentObj
         );
-      console.log('PAYMENT UPDATE => ', paymentUpdate);
+      logger.debug({ data: paymentUpdate }, 'razorpay_webhook PAYMENT UPDATE');
         
         if (paymentUpdate.length > 0) {
           const condition = `user_id = ${parseInt(
@@ -4120,10 +4010,7 @@ publish_profile_reviews: async (req, res, next) => {
             paymentUpdate[0].user_subscriptions_id,
             paymentUpdate[0].user_id
           );
-          console.log(
-            '🚀 ~ razorpay_webhook: ~ userSubscription:',
-            userSubscription
-          );
+          logger.debug({ data: userSubscription }, 'razorpay_webhook userSubscription');
           await subscriptionModel.updateUserSubscriptionId(
             userSubscription[0].plan_id,
             paymentUpdate[0].user_id
@@ -4683,7 +4570,7 @@ publish_profile_reviews: async (req, res, next) => {
           const page = await browser.newPage();
           let pdfOptions = { format: 'A4' };
           const outputPath = `${Config.upload.invoice_file}/invoice-${orderEntity.receipt}.pdf`;
-          console.log('outputPath ===>> ', outputPath);
+          logger.debug({ outputPath }, 'razorpay_webhook invoice outputPath');
           await page.setContent(htmlPdf);
           await page.pdf({
             path: outputPath,
@@ -5386,8 +5273,7 @@ publish_profile_reviews: async (req, res, next) => {
         })
         .end();
     } catch (error) {
-      console.log(error)
-      logError(error);
+      logError('get_dashboard_data error', error);
       res
         .status(400)
         .json({
@@ -5964,8 +5850,7 @@ publish_profile_reviews: async (req, res, next) => {
 
 
     } catch (error) {
-      console.log("ERROR --------- ", error)
-      logError("Error in getting top vendors and products for user dashboard: ", error);
+      logError("Error in getting top vendors and products for user dashboard", error);
       res.status(400)
       .json({
         status: 3,
@@ -6085,8 +5970,7 @@ publish_profile_reviews: async (req, res, next) => {
         .end();
 
     } catch (error) {
-      console.error("Error getting buyer account limits:", error);
-      logError(error);
+      logError("Error getting buyer account limits", error);
       res
         .status(400)
         .json({

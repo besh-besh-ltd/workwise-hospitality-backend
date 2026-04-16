@@ -1,6 +1,7 @@
 import db from './app/config/dbConn.js';
 import Config from './app/config/app.config.js';
 import { logError, sendMail, notificationMail } from './app/helper/common.js';
+import { logger } from './app/util/logger.js';
 import { sendNotification } from './app/services/notificationService.js';
 import { generateEmailTemplate } from './app/helper/notificationEmailLayout.js';
 import notificationModel from './app/models/notificationModel.js';
@@ -25,7 +26,7 @@ async function markExpiredHospitalitySubscriptions() {
          AND end_date < CURRENT_DATE`
     );
     if (result.rowCount > 0) {
-      console.log(`Marked ${result.rowCount} hospitality vendor subscriptions as expired`);
+      logger.info(`Marked ${result.rowCount} hospitality vendor subscriptions as expired`);
     }
   } catch (err) {
     logError('Error marking expired hospitality subscriptions:', err);

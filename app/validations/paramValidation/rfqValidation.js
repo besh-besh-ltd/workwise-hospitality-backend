@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -407,7 +408,7 @@ export const rfqSchemas = {
         next();
       });
     } catch (err) {
-      console.error('Server error:', err);
+      logError('rfqValidation server error', err);
       res.status(500).json({ status: 3, message: 'server error' });
     }
   },
@@ -590,7 +591,7 @@ export const rfqSchemas = {
         next();
       });
     } catch (err) {
-      console.error('Server error:', err);
+      logError('rfqValidation server error', err);
       res.status(500).json({ status: 3, message: 'server error' });
     }
   },

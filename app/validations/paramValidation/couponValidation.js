@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 
 var store_profile_images = multer.diskStorage({
   destination: function (req, file, callback) {
@@ -131,7 +132,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('couponValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'

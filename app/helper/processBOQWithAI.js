@@ -1,5 +1,6 @@
-import axios from 'axios';
+import httpClient from '../util/httpClient.js';
 import productModel from '../models/productModel.js';
+import { logger } from '../util/logger.js';
 import { logError } from './common.js';
 import s3Client from '../config/s3config.js';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
@@ -78,7 +79,7 @@ export const extractDatasheetSummary = async (file) => {
     form.append("file", buffer, { filename: originalName, contentType: "application/pdf" });
     form.append("mode", "vlm");
 
-    const response = await axios.post(`${AI_BASE_URL}/extract_datasheet`, form, {
+    const response = await httpClient.post(`${AI_BASE_URL}/extract_datasheet`, form, {
       headers: {
         ...form.getHeaders(),
       },
@@ -117,9 +118,9 @@ export const extractDatasheetSummary = async (file) => {
   } catch (err) {
     const apiData = err?.response?.data;
     if (apiData) {
-      console.log("ERR RES:", apiData);
+      logger.error({ apiData }, 'AI datasheet extraction error response');
     } else {
-      console.log("ERR:", err?.message || err);
+      logger.error({ errMessage: err?.message || err }, 'AI datasheet extraction error');
     }
     logError(err);
     return { status: 0, message: err.message, clauses: [] };
@@ -186,7 +187,7 @@ Document text:
 ${pdfText}
 `;
 
-      const response = await axios.post(
+      const response = await httpClient.post(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
         {
           contents: [{ parts: [{ text: prompt }] }]
@@ -237,7 +238,7 @@ ${pdfText}
         secureUrl.replace('localhost', '0.0.0.0')
       }
 
-      const downloadResponse = await axios.get(secureUrl);
+      const downloadResponse = await httpClient.get(secureUrl);
 
       return downloadResponse?.data || [] ;
     } catch (error) {
@@ -259,7 +260,7 @@ summariseTechDeviation: async (techClause) => {
   }
 
   try {
-    const response = await axios.post(
+    const response = await httpClient.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
       {
         contents: [{
@@ -292,7 +293,7 @@ summariseTechDeviation: async (techClause) => {
     
     return JSON.parse(cleanedText);
   } catch (error) {
-    console.error('Gemini API error:', error.response?.data || error.message);
+    logError('Gemini API error', error);
     throw new Error(`AI service error: ${error.message}`);
   }
 }

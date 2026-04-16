@@ -1,4 +1,6 @@
 import { fetchPublicUsers, handleAddPublicUsers, handleGetProducts, handleGetVendors, handleGetAllHotels } from "../../models/publicModel.js";
+import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 
 export const getProducts = async (req, res) => {
     try {
@@ -10,7 +12,7 @@ export const getProducts = async (req, res) => {
             data: result,
         })
     } catch (error) {
-        console.error(error);
+        logError('getProducts error', error);
         return res.status(500).json({
             status: 0,
             message: error.message || 'An error occurred while approving the PO.',
@@ -30,7 +32,7 @@ export const getVendors = async (req, res) => {
             data: result,
         })
     } catch (error) {
-        console.error(error);
+        logError('getVendors error', error);
         return res.status(500).json({
             status: 0,
             message: error.message || 'An error occurred while approving the PO.',
@@ -48,7 +50,7 @@ export const getAllHotels = async (req, res) => {
             data: result,
         })
     } catch (error) {
-        console.error(error);
+        logError('getAllHotels error', error);
         return res.status(500).json({
             status: 0,
             message: error.message || 'An error occurred while fetching hotels.',
@@ -140,7 +142,7 @@ export const getPublicUsers = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Error fetching public users:", error);
+    logError('Error fetching public users', error);
 
     return res.status(500).json({
       status: 0,
