@@ -2351,16 +2351,28 @@ const HospitalityController = {
       // Unpaid self-registration rows stay in pending state; only paid or admin-assigned
       // active rows on approved vendors count as active.
       const now = Moment().startOf('day');
-      const isVendorApproved = req.user?.status === 1 || req.user?.status === '1';
+      // A subscription row is "valid to surface" when it is either linked to
+      // a successful payment OR admin-assigned (payment_id IS NULL — only
+      // admin endpoints and the free-modification path produce these).
+      // Previously we also required the row to be 'active' and the vendor
+      // to be approved for the NULL-payment branch, which hid admin-
+      // assigned rows that had since transitioned to 'expired' (they were
+      // no longer 'active') and hid admin-assigned rows for vendors still
+      // pending approval. Those rows are legitimate and must appear so the
+      // vendor can see their history and renew.
       const isValidSub = (s) =>
         s.payment_status === 'paid' ||
         s.payment_status === 'success' ||
-        (s.status === 'active' && !s.payment_id && isVendorApproved);
+        !s.payment_id;
       const activeSubs = allSubs.filter(s =>
-        Moment(s.end_date).isSameOrAfter(now, 'day') && isValidSub(s)
+        Moment(s.end_date).isSameOrAfter(now, 'day') &&
+        isValidSub(s) &&
+        s.status !== 'cancelled'
       );
       const expiredSubs = allSubs.filter(s =>
-        Moment(s.end_date).isBefore(now, 'day') && isValidSub(s)
+        Moment(s.end_date).isBefore(now, 'day') &&
+        isValidSub(s) &&
+        s.status !== 'cancelled'
       );
       const pendingSubs = allSubs.filter(s =>
         s.payment_status === 'created' || s.payment_status === 'pending'
@@ -2834,18 +2846,28 @@ const HospitalityController = {
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
       const history = await hospitalityModel.getVendorPaymentHistory(vendorId, { limit: 50 });
 
-      const isVendorApproved = req.user?.status === 1 || req.user?.status === '1';
+      // A subscription row is "valid to surface" when it is either linked to
+      // a successful payment OR admin-assigned (payment_id IS NULL — only
+      // admin endpoints and the free-modification path produce these).
+      // Previously we also required the row to be 'active' and the vendor
+      // to be approved for the NULL-payment branch, which hid admin-
+      // assigned rows that had since transitioned to 'expired' (they were
+      // no longer 'active') and hid admin-assigned rows for vendors still
+      // pending approval. Those rows are legitimate and must appear so the
+      // vendor can see their history and renew.
       const isValidSub = (s) =>
         s.payment_status === 'paid' ||
         s.payment_status === 'success' ||
-        (s.status === 'active' && !s.payment_id && isVendorApproved);
+        !s.payment_id;
 
       const now = Moment().startOf('day');
       const activeSubs = allSubs.filter(s =>
         Moment(s.end_date).isSameOrAfter(now, 'day') && isValidSub(s) && s.status === 'active'
       );
       const expiredSubs = allSubs.filter(s =>
-        Moment(s.end_date).isBefore(now, 'day') && isValidSub(s)
+        Moment(s.end_date).isBefore(now, 'day') &&
+        isValidSub(s) &&
+        s.status !== 'cancelled'
       );
       const pendingSubs = allSubs.filter(s =>
         s.payment_status === 'created' || s.payment_status === 'pending' || s.status === 'pending'

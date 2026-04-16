@@ -1361,35 +1361,59 @@ get_company_users: async (req, res, next) => {
           // Update req.user to reflect approval for downstream logic
           req.user.status = '1';
         } else {
-        // Fetch pending subscriptions for this vendor
-        const pendingSubscriptions = await hospitalityModel.getPendingSubscriptionsForVendor(req.user.id);
-        
-        // Extract categories and hotels from pending subscriptions
+        // Fetch pending subscriptions for this vendor.
+        // If the vendor has none (typical renewal case), fall back to their
+        // past-due subscriptions so the login response still carries the
+        // items that will be renewed. Without this fallback, vendors whose
+        // rows weren't cleanly marked 'expired' by the cron would hit the
+        // "No valid hospitality items selected for subscription" 400 error
+        // from /hospitality/subscription-payment and be unable to log in.
+        let subscriptionsForModal = await hospitalityModel.getPendingSubscriptionsForVendor(req.user.id);
+        if (!subscriptionsForModal || subscriptionsForModal.length === 0) {
+          subscriptionsForModal = await hospitalityModel.getExpiredSubscriptionsForVendor(req.user.id);
+        }
+
+        // Extract categories, subcategories and hotels from the resolved set.
+        // Subcategories MUST be surfaced even though they are priced at zero —
+        // without them, subcategory-only vendors (typically admin-assigned)
+        // would reach the renewal endpoint with an empty item list.
         const categories = [];
+        const subcategories = [];
         const hotels = [];
         const categoryNames = [];
+        const subcategoryNames = [];
         const hotelNames = [];
-        
-        if (pendingSubscriptions && pendingSubscriptions.length > 0) {
-          for (const sub of pendingSubscriptions) {
+
+        if (subscriptionsForModal && subscriptionsForModal.length > 0) {
+          for (const sub of subscriptionsForModal) {
             if (sub.item_type === 'category') {
-              categories.push(sub.item_id);
-              // Fetch category name
-              const catDetails = await productModel.parentIdExists(sub.item_id);
-              if (catDetails && catDetails.length > 0) {
-                categoryNames.push(catDetails[0].title || catDetails[0].name);
+              if (!categories.includes(sub.item_id)) {
+                categories.push(sub.item_id);
+                const catDetails = await productModel.parentIdExists(sub.item_id);
+                if (catDetails && catDetails.length > 0) {
+                  categoryNames.push(catDetails[0].title || catDetails[0].name);
+                }
+              }
+            } else if (sub.item_type === 'subcategory') {
+              if (!subcategories.includes(sub.item_id)) {
+                subcategories.push(sub.item_id);
+                const subCatDetails = await productModel.parentIdExists(sub.item_id);
+                if (subCatDetails && subCatDetails.length > 0) {
+                  subcategoryNames.push(subCatDetails[0].title || subCatDetails[0].name);
+                }
               }
             } else if (sub.item_type === 'hotel') {
-              hotels.push(sub.item_id);
-              // Fetch hotel name
-              const hotelDetails = await hospitalityModel.getHotelById(sub.item_id);
-              if (hotelDetails) {
-                hotelNames.push(hotelDetails.name);
+              if (!hotels.includes(sub.item_id)) {
+                hotels.push(sub.item_id);
+                const hotelDetails = await hospitalityModel.getHotelById(sub.item_id);
+                if (hotelDetails) {
+                  hotelNames.push(hotelDetails.name);
+                }
               }
             }
           }
         }
-        
+
         const hospitalityUser = {
           user_key: cryptr.encrypt(req.user.id),
           name: req.user.name,
@@ -1397,8 +1421,10 @@ get_company_users: async (req, res, next) => {
           mobile: req.user.mobile,
           organization_name: req.user.organization_name,
           categories: categories,
+          subcategories: subcategories,
           hotels: hotels,
           categoryNames: categoryNames,
+          subcategoryNames: subcategoryNames,
           hotelNames: hotelNames
         };
         return res
@@ -3237,8 +3263,12 @@ publish_profile_reviews: async (req, res, next) => {
           }
         }
 
-        // Fallback: if still empty, try expired subscriptions (renewal scenario)
-        if (!categoryIds.length && !hotelIds.length) {
+        // Fallback: if still empty, try expired subscriptions (renewal scenario).
+        // This is the critical path for vendors logging in with past-due rows —
+        // getExpiredSubscriptionsForVendor intentionally returns past-due rows
+        // regardless of payment state so stuck 'active' rows are still
+        // renewable.
+        if (!categoryIds.length && !subcategoryIds.length && !hotelIds.length) {
           const expiredSubs = await hospitalityModel.getExpiredSubscriptionsForVendor(decryptedUserId);
           if (expiredSubs && expiredSubs.length > 0) {
             for (const sub of expiredSubs) {
@@ -3299,11 +3329,85 @@ publish_profile_reviews: async (req, res, next) => {
         }
       }
 
-      if (!subscriptionRows.length || totalAmount <= 0) {
+      // Subcategories are priced at zero under the current pricing model but
+      // still need to be persisted so the vendor retains access after
+      // renewal. Without this, a vendor whose only access was subcategory-
+      // based (common for admin-assigned, payment_id IS NULL cases) would
+      // hit "No renewable items" and be locked out of login.
+      const uniqueSubcategoryIds = [...new Set(subcategoryIds)];
+      if (uniqueSubcategoryIds.length) {
+        for (const sid of uniqueSubcategoryIds) {
+          subscriptionRows.push({
+            vendor_id: decryptedUserId,
+            item_type: 'subcategory',
+            item_id: sid,
+            fee_amount: 0,
+            start_date: startDate.format('YYYY-MM-DD'),
+            end_date: fyEndDateStr,
+            status: 'active'
+          });
+        }
+      }
+
+      if (!subscriptionRows.length) {
+        // Genuinely nothing to renew — vendor has no pending or past-due
+        // subscription rows AND the frontend did not pass any items. Surface
+        // a specific code so the frontend can redirect the vendor to the
+        // category/hotel selection flow rather than silently failing login.
         return res.status(400).json({
           status: 2,
-          message: 'No valid hospitality items selected for subscription'
+          code: 'NO_RENEWABLE_ITEMS',
+          message:
+            'No subscription items available to renew. Please select your categories and hotels to continue, or contact support.'
         });
+      }
+
+      // Free renewal path: the vendor has items to renew but the total is 0
+      // (admin previously assigned at no charge, or the only items are
+      // hotels/subcategories which are zero-priced). We complete the renewal
+      // server-side without involving Razorpay and instruct the frontend to
+      // re-login. This mirrors the "modification_free" path used in
+      // hospitalityController.modifySubscription.
+      if (totalAmount <= 0) {
+        let freePaymentId = null;
+        try {
+          freePaymentId = await hospitalityModel.createVendorPayment({
+            vendor_id: decryptedUserId,
+            razorpay_order_id: null,
+            razorpay_payment_id: null,
+            razorpay_signature: null,
+            amount: 0,
+            currency: 'INR',
+            payment_status: 'success',
+            metadata: {
+              type: 'free_renewal',
+              subscription_items: subscriptionRows,
+              fy_end_date: fyEndDateStr
+            }
+          });
+        } catch (payErr) {
+          logError('Free renewal payment record creation failed (non-fatal):', payErr);
+        }
+
+        const rowsToInsert = subscriptionRows.map(r => ({
+          ...r,
+          payment_id: freePaymentId
+        }));
+        await hospitalityModel.createVendorHotelCategorySubscription(rowsToInsert);
+
+        // Approve the vendor now that the renewal is complete so the next
+        // login proceeds down the normal path.
+        await userModel.updateUserAccount(decryptedUserId, { status: 1 });
+
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            free_renewal: true,
+            message:
+              'Subscription renewed successfully. Please log in again to access your account.'
+          })
+          .end();
       }
 
       // Create Razorpay order for computed amount
