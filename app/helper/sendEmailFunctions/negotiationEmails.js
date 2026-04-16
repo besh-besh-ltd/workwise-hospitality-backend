@@ -222,8 +222,8 @@ export const sendNegotiationRoundCreatedNotification = async ({
     const statusText = autoApproved ? 'Auto-Approved & Live' : 'Submitted — Awaiting Approval';
 
     const bodyMessage = autoApproved
-      ? 'Your negotiation round has been <strong>auto-approved</strong> and is now <strong>live</strong>. Vendors can submit their quotes.'
-      : 'Your negotiation round has been <strong>submitted</strong> and is <strong>awaiting approval</strong> from the approval committee.';
+      ? 'You have <strong>Initiated</strong> a negotiation round which has now been <strong>auto-approved</strong> and is now <strong>live</strong>. Vendors can submit their quotes.'
+      : 'You have <strong>Initiated</strong> a negotiation round which has been <strong>submitted</strong> and is <strong>awaiting approval</strong> from the approval committee.';
 
     const headerContent = `<h2>Hello ${initiator.name || 'User'},</h2>`;
 
