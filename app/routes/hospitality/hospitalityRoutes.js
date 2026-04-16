@@ -289,12 +289,19 @@ HospitalityRoutes.post(
 
 /**
  * @route POST /api/v1/hospitality/verify-payment
- * @description Verify Razorpay payment with signature validation (replaces insecure test webhook)
- * @access Private (Vendors only - authenticated via JWT)
+ * @description Verify Razorpay payment with signature validation (replaces insecure test webhook).
+ * @access Public — authenticated by the Razorpay HMAC-SHA256 signature, NOT
+ * by JWT. The login flow uses this endpoint BEFORE the vendor has a token
+ * (hospitality_pending renewal), so a passportSignIn middleware here would
+ * 401 the call and re-break login. Security is preserved: only a caller
+ * that completed a real Razorpay checkout can produce a valid
+ * order_id|payment_id signature against our secret, and the endpoint
+ * derives the target vendor from the matched tbl_vendor_payments row —
+ * not from any caller-supplied identity. This matches how
+ * /api/v1/users/razorpay-webhook is also exposed without JWT.
  */
 HospitalityRoutes.post(
   '/verify-payment',
-  passportSignIn,
   hospitalityController.verifyPayment
 );
 

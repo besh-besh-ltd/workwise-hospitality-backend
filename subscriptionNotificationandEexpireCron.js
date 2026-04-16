@@ -10,17 +10,19 @@ import dateFormat from 'dateformat';
 import fs from 'fs';
 
 // Mark all expired hospitality vendor subscriptions
+// NOTE: We intentionally do NOT filter by payment_status here. Any row that is
+// still 'active' past its end_date must transition to 'expired' so it is
+// surfaced correctly in the renewal flow. Filtering by paid/success previously
+// left rows with abandoned payment attempts (payment_status='created') or
+// admin-assigned rows (payment_id IS NULL) stranded forever, which broke login
+// for those vendors.
 async function markExpiredHospitalitySubscriptions() {
   try {
     const result = await db.result(
       `UPDATE tbl_vendor_hotel_category_subscription
        SET status = 'expired'
        WHERE status = 'active'
-         AND end_date < CURRENT_DATE
-         AND payment_id IN (
-           SELECT id FROM tbl_vendor_payments
-           WHERE payment_status IN ('paid', 'success')
-         )`
+         AND end_date < CURRENT_DATE`
     );
     if (result.rowCount > 0) {
       console.log(`Marked ${result.rowCount} hospitality vendor subscriptions as expired`);
