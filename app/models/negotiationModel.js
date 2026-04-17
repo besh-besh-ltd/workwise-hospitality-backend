@@ -840,11 +840,20 @@ const negotiationModel = {
     const enrichedRounds = roundsHistory.map(round => {
       let roundApprovals = negotiationInstances[String(round.id)] || [];
       if (roundApprovals.length === 0) {
-        // Backward compat: old instances keyed by rfq_product_id — filter by metadata.round_id
+        // Backward compat: old instances keyed by rfq_product_id
         const productBucket = negotiationInstances[String(round.rfq_product_id)] || [];
-        roundApprovals = productBucket.filter(inst =>
-          inst.metadata && (inst.metadata.round_id === round.id || inst.metadata.round_id === String(round.id))
-        );
+        roundApprovals = productBucket.filter(inst => {
+          if (!inst.metadata) return false;
+          // New instances: match by round_id in metadata
+          if (inst.metadata.round_id) {
+            return inst.metadata.round_id === round.id || inst.metadata.round_id === String(round.id);
+          }
+          // Old instances without round_id: match by round_number if available, otherwise include
+          if (inst.metadata.round_number != null) {
+            return inst.metadata.round_number === round.round_number || inst.metadata.round_number === String(round.round_number);
+          }
+          return true;
+        });
       }
       return {
         ...round,

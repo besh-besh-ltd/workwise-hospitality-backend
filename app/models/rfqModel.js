@@ -6272,6 +6272,21 @@ LIMIT 2;
           ) pv_sub
         ) AS "product_vendors"
 
+        , (
+          SELECT json_build_object(
+            'has_pending_approval', (AI.status = 'PENDING'),
+            'approval_instance', json_build_object(
+              'id', AI.id, 'status', AI.status, 'current_step', AI.current_step,
+              'metadata', AI.metadata,
+              'created_at', AI.created_at, 'completed_at', AI.completed_at
+            )
+          )
+          FROM tbl_approval_instances AI
+          WHERE AI.entity_type = 'NEGOTIATION_QUOTE'
+            AND AI.entity_id = TRF.id
+          ORDER BY AI.created_at DESC
+          LIMIT 1
+        ) AS "quote_approval_status"
         ` : ''}
 
         FROM tbl_rfq_products TRF
