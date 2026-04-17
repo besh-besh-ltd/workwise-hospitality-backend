@@ -1469,14 +1469,14 @@ export async function createApprovalPolicy({
   is_active = true,
   is_master = false,
   is_department_scoped = true
-}) {
+}, t = db) {
   if (!entity_type || !hospitality_company_id || !created_by) {
     throw new Error('entity_type, hospitality_company_id, and created_by are required');
   }
 
   // If process_id provided, validate it belongs to the parent company
   if (process_id) {
-    const hospCompany = await db.oneOrNone(
+    const hospCompany = await t.oneOrNone(
       `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
       [hospitality_company_id]
     );
@@ -1485,7 +1485,7 @@ export async function createApprovalPolicy({
       throw new Error(`Hospitality company with ID ${hospitality_company_id} does not exist`);
     }
 
-    const process = await db.oneOrNone(
+    const process = await t.oneOrNone(
       `SELECT id FROM tbl_approval_processes
        WHERE id = $1 AND company_id = $2 AND is_active = true`,
       [process_id, hospCompany.company_id]
@@ -1497,7 +1497,7 @@ export async function createApprovalPolicy({
   }
 
   // Check for duplicate policy with same scope (including process_id)
-  const existing = await db.oneOrNone(
+  const existing = await t.oneOrNone(
     `SELECT id FROM tbl_approval_policies
      WHERE entity_type = $1
        AND hospitality_company_id = $2
@@ -1512,7 +1512,7 @@ export async function createApprovalPolicy({
     throw new Error(`An active policy already exists for this scope. Policy ID: ${existing.id}`);
   }
 
-  return db.one(
+  return t.one(
     `INSERT INTO tbl_approval_policies
      (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master, is_department_scoped)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
@@ -1523,7 +1523,7 @@ export async function createApprovalPolicy({
 /**
  * Update an existing approval policy
  */
-export async function updateApprovalPolicy(id, patch) {
+export async function updateApprovalPolicy(id, patch, t = db) {
   if (!id) throw new Error('Policy ID is required');
 
   const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master', 'is_department_scoped'];
@@ -1533,19 +1533,19 @@ export async function updateApprovalPolicy(id, patch) {
 
   // If process_id is being updated, validate it
   if (patch.hasOwnProperty('process_id') && patch.process_id !== null) {
-    const policy = await db.oneOrNone(
+    const policy = await t.oneOrNone(
       `SELECT hospitality_company_id FROM tbl_approval_policies WHERE id = $1`,
       [id]
     );
 
     if (policy) {
-      const hospCompany = await db.oneOrNone(
+      const hospCompany = await t.oneOrNone(
         `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
         [policy.hospitality_company_id]
       );
 
       if (hospCompany) {
-        const process = await db.oneOrNone(
+        const process = await t.oneOrNone(
           `SELECT id FROM tbl_approval_processes
            WHERE id = $1 AND company_id = $2 AND is_active = true`,
           [patch.process_id, hospCompany.company_id]
@@ -1570,7 +1570,7 @@ export async function updateApprovalPolicy(id, patch) {
   }
 
   vals.push(id);
-  return db.oneOrNone(
+  return t.oneOrNone(
     `UPDATE tbl_approval_policies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx} RETURNING *`,
     vals
   );
@@ -1774,12 +1774,14 @@ export async function deleteApprovalPolicy(id) {
 /**
  * Insert steps for a policy (transactional)
  */
-export async function insertPolicySteps(steps, approval_policy_id) {
+export async function insertPolicySteps(steps, approval_policy_id, t = null) {
   if (!steps || !Array.isArray(steps) || steps.length === 0) {
     throw new Error('At least one step is required');
   }
 
-  return db.tx(async t => {
+  // Run inside the caller's tx if provided; otherwise create our own so the
+  // batch insert remains atomic.
+  const run = async (tx) => {
     const results = [];
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
@@ -1795,7 +1797,7 @@ export async function insertPolicySteps(steps, approval_policy_id) {
         throw new Error(`Step ${i + 1}: Invalid decision_rule. Must be ALL or ANY`);
       }
 
-      const r = await t.one(`
+      const r = await tx.one(`
         INSERT INTO tbl_approval_policy_steps
         (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
@@ -1811,14 +1813,16 @@ export async function insertPolicySteps(steps, approval_policy_id) {
       results.push(r);
     }
     return results;
-  });
+  };
+
+  return t ? run(t) : db.tx(run);
 }
 
 /**
  * Delete all steps for a policy
  */
-export async function deletePolicySteps(approval_policy_id) {
-  return db.none('DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1', [approval_policy_id]);
+export async function deletePolicySteps(approval_policy_id, t = db) {
+  return t.none('DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1', [approval_policy_id]);
 }
 
 // ============= APPROVAL INSTANCES =============
@@ -2516,9 +2520,10 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
 
   if (!instance) throw new Error('Approval instance not found');
 
-  // Get all steps with approvers
+  // Get all steps with approvers (include mid-flight tracking fields)
   const steps = await db.any(`
-    SELECT s.*, ps.approval_type, ps.approver_source_type, ps.approver_source_id
+    SELECT s.*, s.added_mid_flight, s.removed_mid_flight,
+           ps.approval_type, ps.approver_source_type, ps.approver_source_id
     FROM tbl_approval_instance_steps s
     LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
     WHERE s.approval_instance_id = $1
@@ -2558,7 +2563,10 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       employee_code: ap.employee_code,
       status: ap.status,
       acted_at: ap.acted_at,
-      comment: ap.comment
+      comment: ap.comment,
+      added_mid_flight: ap.added_mid_flight || false,
+      removed_at: ap.removed_at || null,
+      removal_reason: ap.removal_reason || null
     }));
 
     // Check if current user can approve at this step
@@ -2625,6 +2633,8 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       status: step.status,
       approval_type: step.approval_type,
       completed_at: step.completed_at,
+      added_mid_flight: step.added_mid_flight || false,
+      removed_mid_flight: step.removed_mid_flight || false,
       approvers: step.approvers
     })),
     action_history: actionHistory.map(a => ({
@@ -2833,9 +2843,10 @@ export async function submitApprovalAction({
     }
 
     // 8. Handle APPROVE - check decision rule
+    // Filter out REMOVED approvers — they no longer participate in the decision
     const allApprovers = await t.any(`
       SELECT status FROM tbl_approval_step_approvers
-      WHERE approval_instance_step_id = $1
+      WHERE approval_instance_step_id = $1 AND status != 'REMOVED'
     `, [stepId]);
 
     const allApproved = allApprovers.every(a => a.status === 'APPROVED');
@@ -2869,8 +2880,8 @@ export async function submitApprovalAction({
       ORDER BY step_order ASC
     `, [approval_instance_id]);
 
-    // Find the next PENDING step (skip over steps that were auto-completed at creation)
-    const nextStep = allSteps.find(s => s.step_order > currentStep.step_order && s.status !== 'APPROVED');
+    // Find the next PENDING step (skip APPROVED, REMOVED, SKIPPED steps)
+    const nextStep = allSteps.find(s => s.step_order > currentStep.step_order && s.status === 'PENDING');
 
     if (nextStep) {
       // Move to next step

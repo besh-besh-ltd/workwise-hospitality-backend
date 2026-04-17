@@ -16,6 +16,11 @@ import projectModel from '../../models/projectModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import {
+  simulateApproverImpact,
+  revalidateApproverMembership,
+  dispatchPropagationEmails
+} from '../../services/approvalPropagationService.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -1161,7 +1166,52 @@ const HospitalityController = {
         });
       }
 
+      // Pre-flight check: would removing this mapping auto-approve any instances?
+      if (!req.body.confirmed_approval_impact) {
+        const impact = await simulateApproverImpact(userId, 'scope_removed', {
+          companyId, hotelId
+        });
+
+        if (impact.willAutoComplete) {
+          return res.status(400).json({
+            status: 3,
+            code: 'APPROVAL_AUTO_COMPLETE_BLOCKED',
+            message: 'Cannot remove mapping. This would auto-approve pending instances. Assign roles to another user first.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+
+        if (impact.affectedInstances.length > 0) {
+          return res.status(200).json({
+            status: 0,
+            code: 'APPROVAL_IMPACT_WARNING',
+            message: 'This user has pending approvals in this scope. Removing mapping will skip their approval.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+      }
+
       await hospitalityModel.deleteUserMappings(userId, companyId, mappingType, hotelId);
+
+      // Propagate: remove user from pending instances in this scope
+      try {
+        const propResult = await db.tx(async t => {
+          return revalidateApproverMembership({
+            userId,
+            changedBy: req.user?.id || userId,
+            changeType: 'scope_removed',
+            companyId, hotelId,
+            txContext: t
+          });
+        });
+        // Fire emails AFTER tx commits (fire-and-forget) — same pattern as
+        // policy-change and user role/dept change paths.
+        if (propResult?._emailData) {
+          dispatchPropagationEmails(propResult._emailData, req.user?.id || userId, 'scope_removed');
+        }
+      } catch (propErr) {
+        logError('Error propagating scope removal to approvals', propErr);
+      }
 
       return res.status(200).json({
         status: 1,
