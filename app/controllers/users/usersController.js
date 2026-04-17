@@ -41,6 +41,12 @@ import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
+import {
+  simulateApproverImpact,
+  revalidateApproverMembership,
+  handleAutoCompletedInstances,
+  dispatchPropagationEmails
+} from '../../services/approvalPropagationService.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -1956,6 +1962,143 @@ update_user_detail: async (req, res, next) => {
       });
     }
 
+    /* ---- SNAPSHOT OLD STATE for approval impact analysis ----
+       Snapshots are taken BEFORE any DB mutation. We capture the full
+       {role_id, company_id, hotel_id, department_id} tuple for role scopes
+       so scope-only changes (e.g., removing role 6 @ hotel 31 while keeping
+       role 6 @ hotel 30) are correctly diffed. The previous role_id-only
+       diff missed these and skipped propagation, leaving the user listed as
+       a PENDING approver on instances where they no longer qualified. */
+    let oldRoleScopes = [], oldRoleIds = [], oldDeptIds = [], oldStatus = null;
+    let approvalRelevantChange = false;
+    let scopeRemoveContext = null; // populated when scope-level removals exist
+
+    if (isAdmin) {
+      oldRoleScopes = await db.any(
+        `SELECT role_id,
+                COALESCE(company_id, 0)    AS company_id,
+                COALESCE(hotel_id, 0)      AS hotel_id,
+                COALESCE(department_id, 0) AS department_id
+         FROM tbl_user_role_scopes WHERE user_id = $1`,
+        [targetUserId]
+      );
+      oldRoleIds = oldRoleScopes.map(r => r.role_id);
+
+      const oldDepts = await db.any('SELECT department_id FROM tbl_user_department WHERE user_id = $1', [targetUserId]);
+      oldDeptIds = oldDepts.map(d => d.department_id);
+
+      const oldUser = await db.oneOrNone('SELECT status FROM tbl_users WHERE id = $1', [targetUserId]);
+      oldStatus = oldUser?.status;
+
+      // Build scope-aware new state from request.
+      const newRoleIds = Array.isArray(reqData.roles) ? reqData.roles.map(r => r.role_id) : null;
+      const newDeptIds = Array.isArray(reqData.department_ids) ? reqData.department_ids : null;
+      const newStatus = reqData.status;
+
+      const newRoleScopes = Array.isArray(reqData.roles)
+        ? reqData.roles.map(r => ({
+            role_id: r.role_id,
+            company_id: r.company_id || loggedInUser.company_id || 0,
+            hotel_id: r.hotel_id || 0,
+            department_id: r.department_id || 0,
+          }))
+        : null;
+
+      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}`;
+      const oldScopeKeySet = new Set(oldRoleScopes.map(scopeKey));
+      const newScopeKeySet = newRoleScopes ? new Set(newRoleScopes.map(scopeKey)) : null;
+
+      // Tuple-level diff: detects scope-only changes (same role_id, different scope).
+      const removedScopes = newRoleScopes
+        ? oldRoleScopes.filter(s => !newScopeKeySet.has(scopeKey(s)))
+        : [];
+      const addedScopes = newRoleScopes
+        ? newRoleScopes.filter(s => !oldScopeKeySet.has(scopeKey(s)))
+        : [];
+
+      const rolesChanging = removedScopes.length > 0 || addedScopes.length > 0;
+      const deptsChanging = newDeptIds !== null && (
+        oldDeptIds.length !== newDeptIds.length ||
+        oldDeptIds.some(id => !newDeptIds.includes(id)) ||
+        newDeptIds.some(id => !oldDeptIds.includes(id))
+      );
+      const statusDeactivating = newStatus !== undefined && Number(oldStatus) === 1 && Number(newStatus) === 0;
+      const statusActivating = newStatus !== undefined && Number(oldStatus) === 0 && Number(newStatus) === 1;
+
+      approvalRelevantChange = rolesChanging || deptsChanging || statusDeactivating || statusActivating;
+
+      // Stash the diff so the propagation block downstream can reuse the
+      // already-computed scope sets without re-querying the DB.
+      const preflightRemovedDeptIds = newDeptIds !== null
+        ? oldDeptIds.filter(id => !newDeptIds.includes(id))
+        : [];
+      scopeRemoveContext = {
+        removedScopes,
+        addedScopes,
+        affectedRemovedRoleIds: [...new Set(removedScopes.map(s => s.role_id))],
+        affectedAddedRoleIds: [...new Set(addedScopes.map(s => s.role_id))],
+        removedDeptIds: preflightRemovedDeptIds,
+        addedDeptIds: newDeptIds !== null
+          ? newDeptIds.filter(id => !oldDeptIds.includes(id))
+          : [],
+        statusDeactivating,
+        statusActivating,
+        newRoleIds,
+        newDeptIds,
+      };
+
+      logger.info(`[UpdateUser ${targetUserId}] role scopes: old=${oldRoleScopes.length}, new=${newRoleScopes?.length ?? 'n/a'}, removedScopes=${removedScopes.length}, addedScopes=${addedScopes.length}`);
+
+      /* ---- PRE-FLIGHT CHECK for approval impact ----
+         Only fires for actual REMOVALS — pure additions cannot disqualify
+         the user from any pending approval. Scope-aware: removing
+         "role 6 @ hotel 31" while keeping "role 6 @ hotel 30" now correctly
+         counts as a removal, even though the role_id is still present. */
+      const hasRemovals = removedScopes.length > 0
+        || preflightRemovedDeptIds.length > 0
+        || statusDeactivating;
+
+      if (hasRemovals && !reqData.confirmed_approval_impact) {
+        const changeType = statusDeactivating ? 'user_deactivated'
+          : removedScopes.length > 0 ? 'role_removed'
+          : 'dept_removed';
+
+        logger.info(`[UpdateUser ${targetUserId}] running pre-flight check (changeType=${changeType})`);
+
+        // NOTE: do NOT pass loggedInUser.company_id here. simulateApproverImpact
+        // filters by tbl_approval_instances.hospitality_company_id (a hospitality
+        // entity ID), but loggedInUser.company_id is the buyer's parent company
+        // ID — different number space. Passing it here matches zero rows and the
+        // pre-flight check silently no-ops. The user mutation is global, so the
+        // impact check must be global too.
+        const impact = await simulateApproverImpact(targetUserId, changeType);
+
+        logger.info(`[UpdateUser ${targetUserId}] pre-flight result: willAutoComplete=${impact.willAutoComplete}, affectedInstances=${impact.affectedInstances.length}`);
+
+        if (impact.willAutoComplete) {
+          logger.info(`[UpdateUser ${targetUserId}] ⊘ returning APPROVAL_AUTO_COMPLETE_BLOCKED — save aborted, frontend should show blocked modal`);
+          return res.status(400).json({
+            status: 3,
+            code: 'APPROVAL_AUTO_COMPLETE_BLOCKED',
+            message: 'Cannot proceed. This change would auto-approve pending approval instances. You must assign the role to another user first.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+
+        if (impact.affectedInstances.length > 0) {
+          logger.info(`[UpdateUser ${targetUserId}] ⚠ returning APPROVAL_IMPACT_WARNING — save aborted, frontend should show warning modal (admin must Proceed to apply)`);
+          return res.status(200).json({
+            status: 0,
+            code: 'APPROVAL_IMPACT_WARNING',
+            message: 'This user has pending approvals. This change will skip their approval on affected instances.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+
+        logger.info(`[UpdateUser ${targetUserId}] ✓ pre-flight clear, proceeding to save`);
+      }
+    }
+
     /* -------------------- UPDATE USER CORE DATA -------------------- */
     const updateData = {
       updated_at: currentDateTime(),
@@ -1966,7 +2109,7 @@ update_user_detail: async (req, res, next) => {
     if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
     if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
-    
+
     // Handle hospitality employee fields
     if (isAdmin && reqData.employee_type !== undefined) {
       updateData.employee_type = reqData.employee_type;
@@ -1989,19 +2132,18 @@ update_user_detail: async (req, res, next) => {
 
     await rfqModel.updateWhere("tbl_users", updateData, whereClause);
 
-    /* -------------------- UPDATE DEPARTMENTS -------------------- */
+    /* -------------------- UPDATE DEPARTMENTS (atomic) -------------------- */
     if (isAdmin && Array.isArray(reqData.department_ids)) {
-      await rbacModel.deleteUserDepartments(targetUserId);
-      await rbacModel.assignUserDepartments(
-        targetUserId,
-        reqData.department_ids
-      );
+      await db.tx(async t => {
+        await rbacModel.deleteUserDepartments(targetUserId, t);
+        await rbacModel.assignUserDepartments(targetUserId, reqData.department_ids, t);
+      });
     }
 
-    /* -------------------- UPDATE ROLE SCOPES -------------------- */
+    /* -------------------- UPDATE ROLE SCOPES (atomic) --------------------
+       Wrapped in a single tx so a failed insert rolls back the delete,
+       avoiding the half-state where the user temporarily has no scopes. */
     if (isAdmin && Array.isArray(reqData.roles)) {
-      await rbacModel.deleteUserRoleScopes(targetUserId);
-
       const roleScopes = reqData.roles.map(r => ({
         user_id: targetUserId,
         role_id: r.role_id,
@@ -2010,7 +2152,89 @@ update_user_detail: async (req, res, next) => {
         department_id: r.department_id || null
       }));
 
-      await rbacModel.assignUserRoleScopes(roleScopes);
+      logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);
+
+      await db.tx(async t => {
+        await rbacModel.deleteUserRoleScopes(targetUserId, t);
+        await rbacModel.assignUserRoleScopes(roleScopes, t);
+      });
+
+      // Sanity-check what actually landed in the DB. If this ever diverges
+      // from roleScopes.length, the next investigation has a clean log line
+      // to start from.
+      const verifyScopes = await db.any(
+        'SELECT role_id, company_id, hotel_id, department_id FROM tbl_user_role_scopes WHERE user_id = $1',
+        [targetUserId]
+      );
+      logger.info(`[UpdateUser ${targetUserId}] post-write verify: DB has ${verifyScopes.length} scopes`);
+    }
+
+    /* ---- PROPAGATE APPROVAL MEMBERSHIP CHANGES ----
+       Uses the scope-aware diff computed in the snapshot block. Even when a
+       role_id is unchanged at the role-id level (still present at another
+       scope), a scope removal still requires revalidation — the user may
+       have been a PENDING approver on an instance whose policy step
+       resolves to that specific scope. The revalidate function re-resolves
+       per-instance and only marks REMOVED if the user truly no longer
+       qualifies, so over-passing role_ids is safe. */
+    if (isAdmin && approvalRelevantChange && scopeRemoveContext) {
+      try {
+        const ctx = scopeRemoveContext;
+
+        // Removals branch — fires on scope-only changes too.
+        if (ctx.removedScopes.length > 0 || ctx.removedDeptIds.length > 0 || ctx.statusDeactivating) {
+          const changeType = ctx.statusDeactivating ? 'user_deactivated'
+            : ctx.removedScopes.length > 0 ? 'role_removed'
+            : 'dept_removed';
+
+          logger.info(`[UpdateUser ${targetUserId}] propagating ${changeType} — affectedRoleIds=[${ctx.affectedRemovedRoleIds.join(',')}], removedDeptIds=[${ctx.removedDeptIds.join(',')}]`);
+
+          const removeResult = await db.tx(async t => {
+            return revalidateApproverMembership({
+              userId: targetUserId,
+              changedBy: loggedInUser.id,
+              changeType,
+              changedRoleIds: ctx.statusDeactivating ? [] : ctx.affectedRemovedRoleIds,
+              changedDeptIds: ctx.statusDeactivating ? [] : ctx.removedDeptIds,
+              txContext: t
+            });
+          });
+
+          // Fire emails AFTER the tx commits (fire-and-forget). Without this,
+          // approvers added/removed via membership change get no email — the
+          // policy-change controller used to be the only path that dispatched.
+          if (removeResult?._emailData) {
+            dispatchPropagationEmails(removeResult._emailData, loggedInUser.id, changeType);
+          }
+        }
+
+        // Additions branch.
+        if (ctx.addedScopes.length > 0 || ctx.addedDeptIds.length > 0 || ctx.statusActivating) {
+          const changeType = ctx.statusActivating ? 'user_activated'
+            : ctx.addedScopes.length > 0 ? 'role_added'
+            : 'dept_added';
+
+          logger.info(`[UpdateUser ${targetUserId}] propagating ${changeType} — affectedRoleIds=[${ctx.affectedAddedRoleIds.join(',')}], addedDeptIds=[${ctx.addedDeptIds.join(',')}]`);
+
+          const addResult = await db.tx(async t => {
+            return revalidateApproverMembership({
+              userId: targetUserId,
+              changedBy: loggedInUser.id,
+              changeType,
+              changedRoleIds: ctx.statusActivating ? (ctx.newRoleIds || []) : ctx.affectedAddedRoleIds,
+              changedDeptIds: ctx.statusActivating ? (ctx.newDeptIds || []) : ctx.addedDeptIds,
+              txContext: t
+            });
+          });
+
+          if (addResult?._emailData) {
+            dispatchPropagationEmails(addResult._emailData, loggedInUser.id, changeType);
+          }
+        }
+      } catch (propErr) {
+        // Log but don't fail the user update — propagation is best-effort.
+        logError(`[UpdateUser ${targetUserId}] propagation failed (user update was still saved)`, propErr);
+      }
     }
 
     return res.status(200).json({

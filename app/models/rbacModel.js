@@ -32,29 +32,24 @@ const rbacModel = {
     `, [departmentId]);
   },
 
-  assignUserDepartments: (userId, departmentIds = []) => {
+  assignUserDepartments: (userId, departmentIds = [], t = null) => {
     if (!departmentIds.length) return Promise.resolve();
 
-    const values = departmentIds.map(depId => ({
-      user_id: userId,
-      department_id: depId
-    }));
-
-    return db.tx(t =>
-      t.batch(
-        values.map(v =>
-          t.none(
-            `INSERT INTO tbl_user_department (user_id, department_id)
-             VALUES ($1, $2)`,
-            [v.user_id, v.department_id]
-          )
+    const run = (tx) => tx.batch(
+      departmentIds.map(depId =>
+        tx.none(
+          `INSERT INTO tbl_user_department (user_id, department_id)
+           VALUES ($1, $2)`,
+          [userId, depId]
         )
       )
     );
+
+    return t ? run(t) : db.tx(run);
   },
 
-  deleteUserDepartments: (userId) => {
-    return db.none(
+  deleteUserDepartments: (userId, t = db) => {
+    return t.none(
       `DELETE FROM tbl_user_department WHERE user_id = $1`,
       [userId]
     );
@@ -88,29 +83,31 @@ const rbacModel = {
 
   /* -------------------- ROLES & SCOPES -------------------- */
 
-  assignUserRoleScopes: (scopes = []) => {
+  assignUserRoleScopes: (scopes = [], t = null) => {
     if (!scopes.length) return Promise.resolve();
 
-    return db.tx(t =>
-      t.batch(
-        scopes.map(s =>
-          t.none(
-            `
-            INSERT INTO tbl_user_role_scopes
-              (user_id, role_id, company_id, hotel_id, department_id)
-            VALUES ($1, $2, $3, $4, $5)
-            `,
-            [
-              s.user_id,
-              s.role_id,
-              s.company_id,
-              s.hotel_id || null,
-              s.department_id || null
-            ]
-          )
+    // Run inside the caller's tx if provided, else create our own so the batch
+    // insert remains atomic.
+    const run = (tx) => tx.batch(
+      scopes.map(s =>
+        tx.none(
+          `
+          INSERT INTO tbl_user_role_scopes
+            (user_id, role_id, company_id, hotel_id, department_id)
+          VALUES ($1, $2, $3, $4, $5)
+          `,
+          [
+            s.user_id,
+            s.role_id,
+            s.company_id,
+            s.hotel_id || null,
+            s.department_id || null
+          ]
         )
       )
     );
+
+    return t ? run(t) : db.tx(run);
   },
   getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(
@@ -236,8 +233,8 @@ const rbacModel = {
     );
   },
 
-  deleteUserRoleScopes: (userId) => {
-    return db.none(
+  deleteUserRoleScopes: (userId, t = db) => {
+    return t.none(
       `DELETE FROM tbl_user_role_scopes WHERE user_id = $1`,
       [userId]
     );
