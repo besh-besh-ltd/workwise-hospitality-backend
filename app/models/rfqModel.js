@@ -5846,7 +5846,8 @@ LIMIT 2;
     TA_Vendors,
     no_freight,
     rfq_product_id,
-    include_negotiation = false
+    include_negotiation = false,
+    vendor_filter_id = null
   ) => {
     if(rfq_product_id) {
       rfq_product_id = rfq_product_id.split(",").map(Number);
@@ -6194,12 +6195,15 @@ LIMIT 2;
             'approved_at', NR.approved_at, 'published_at', NR.published_at,
             'closed_at', NR.closed_at, 'created_by', NR.created_by,
             'created_by_name', NRU.name, 'created_by_email', NRU.email,
-            'remarks', NR.remarks, 'created_at', NR.created_at
+            'remarks', NR.remarks, 'created_at', NR.created_at,
+            'vendor_ids', NR.vendor_ids,
+            'vendor_approvals', NR.vendor_approvals
           )
           FROM tbl_negotiation_rounds NR
           LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
           WHERE NR.rfq_product_id = TRF.id
             AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+            AND ($5::int IS NULL OR $5 = ANY(NR.vendor_ids))
           ORDER BY NR.round_number DESC
           LIMIT 1
         ) AS "active_round"
@@ -6222,10 +6226,51 @@ LIMIT 2;
               SELECT NR2.id FROM tbl_negotiation_rounds NR2
               WHERE NR2.rfq_product_id = TRF.id
                 AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+                AND ($5::int IS NULL OR $5 = ANY(NR2.vendor_ids))
               ORDER BY NR2.round_number DESC LIMIT 1
             )
           ) sub
         ) AS "active_round_quotes"
+
+        , (
+          SELECT json_agg(pv_sub ORDER BY pv_sub.in_active_round ASC, pv_sub.organization_name ASC)
+          FROM (
+            SELECT
+              RPV_U.id,
+              RPV_U.name,
+              RPV_U.email,
+              RPV_U.organization_name,
+              COALESCE(RPV_C.company_name, RPV_U.organization_name) AS company_name,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM tbl_negotiation_rounds ANR
+                WHERE ANR.rfq_product_id = TRF.id
+                  AND ANR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR.vendor_ids)
+              ) THEN true ELSE false END AS in_active_round,
+              (
+                SELECT json_build_object('round_id', ANR2.id, 'round_number', ANR2.round_number, 'status', ANR2.status)
+                FROM tbl_negotiation_rounds ANR2
+                WHERE ANR2.rfq_product_id = TRF.id
+                  AND ANR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR2.vendor_ids)
+                ORDER BY ANR2.round_number DESC LIMIT 1
+              ) AS active_round_info
+            FROM tbl_rfq_product_vendors RPV
+            JOIN tbl_users RPV_U ON RPV_U.id = RPV.user_id
+            LEFT JOIN tbl_company RPV_C ON RPV_C.id = RPV_U.company_id
+            WHERE RPV.rfq_id = TRF.rfq_id
+              AND RPV.product_variant_id = TRF.product_variant_id
+              AND RPV.variant = TRF.variant
+              AND EXISTS (
+                SELECT 1 FROM tbl_quotes _pv_q
+                JOIN tbl_quote_items _pv_qi ON _pv_qi.quote_id = _pv_q.id
+                WHERE _pv_q.rfq_id = TRF.rfq_id
+                  AND _pv_q.created_by = RPV_U.id
+                  AND _pv_qi.product_variant_id = TRF.product_variant_id
+                  AND _pv_qi.variant = TRF.variant
+              )
+          ) pv_sub
+        ) AS "product_vendors"
 
         , (
           SELECT json_build_object(
@@ -6249,7 +6294,7 @@ LIMIT 2;
         ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
         ;`;
 
-      db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
+      db.query(mainQuery, [id, user_id, company_id, rfq_product_id, vendor_filter_id])
         .then(function (data) {
           resolve(data);
         })

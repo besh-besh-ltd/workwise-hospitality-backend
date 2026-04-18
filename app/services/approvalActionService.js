@@ -69,6 +69,7 @@ const postActionRegistry = {
   },
   NEGOTIATION: {
     APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval),
+    REJECTED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationRejection),
   },
   NEGOTIATION_QUOTE: {
     APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval),
