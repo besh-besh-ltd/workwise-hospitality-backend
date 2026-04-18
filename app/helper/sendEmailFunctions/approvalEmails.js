@@ -802,3 +802,335 @@ export const sendApprovalCancelledNotification = async ({
     return false;
   }
 };
+
+// ============================================================================
+// MID-FLIGHT POLICY / MEMBERSHIP CHANGE NOTIFICATIONS
+// ============================================================================
+
+/**
+ * Notify remaining active approvers that the approval policy was changed mid-flight.
+ * @param {Object} params
+ * @param {string} params.entityType
+ * @param {number} params.entityId
+ * @param {string} params.entityIdentifier
+ * @param {string} params.changedByName - Admin who made the change
+ * @param {string} params.changeReason - 'policy_change' | 'role_removed' | etc.
+ * @param {Object} params.changeSummary - { approversAdded: number, approversRemoved: number, ... }
+ * @param {Array}  params.approvers - Array of { user_id, user_name, user_email }
+ * @param {Object} [params.extraContext]
+ */
+export const sendPolicyChangeNotification = async ({
+  entityType, entityId, entityIdentifier, changedByName,
+  changeReason, changeSummary, approvers, extraContext = {}
+}) => {
+  try {
+    if (!approvers || approvers.length === 0) return false;
+
+    const label = ENTITY_LABELS[entityType] || entityType;
+    const linkFn = ENTITY_LINK_MAP[entityType];
+    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+
+    const reasonLabel = changeReason === 'policy_change' ? 'approval policy update'
+      : changeReason === 'role_removed' || changeReason === 'role_added' ? 'role assignment change'
+      : changeReason === 'user_deactivated' ? 'user deactivation'
+      : changeReason === 'dept_removed' || changeReason === 'dept_added' ? 'department assignment change'
+      : 'administrative change';
+
+    const subject = `Approval Policy Updated — ${label} #${entityIdentifier}`;
+
+    const summaryItems = [];
+    if (changeSummary.approversRemoved > 0) summaryItems.push(`${changeSummary.approversRemoved} approver(s) removed`);
+    if (changeSummary.approversAdded > 0) summaryItems.push(`${changeSummary.approversAdded} approver(s) added`);
+    if (changeSummary.stepsRemoved > 0) summaryItems.push(`${changeSummary.stepsRemoved} step(s) removed`);
+    if (changeSummary.stepsAdded > 0) summaryItems.push(`${changeSummary.stepsAdded} step(s) added`);
+    if (changeSummary.rulesChanged > 0) summaryItems.push(`${changeSummary.rulesChanged} decision rule(s) changed`);
+    const summaryText = summaryItems.length > 0 ? summaryItems.join(', ') : 'Minor adjustments';
+
+    for (const approver of approvers) {
+      const headerContent = `<h2>Hello ${approver.user_name || 'Approver'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            The approval workflow for <strong>${label} #${entityIdentifier}</strong> has been updated
+            due to ${reasonLabel !== 'administrative change' ? `a ${reasonLabel}` : 'an administrative change'}
+            by <strong>${changedByName || 'an administrator'}</strong>.
+          </p>
+
+          <div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; padding:12px 16px; margin:16px 0; border-radius:4px;">
+            <span style="color:#92400E; font-weight:600;">Changes: ${summaryText}</span>
+          </div>
+
+          <p><strong>Your approval is still required.</strong> Please review the updated workflow and take action.</p>
+
+          <div style="text-align:center; margin-top:24px;">
+            <a href="${actionUrl}"
+               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              Review & Approve
+            </a>
+          </div>
+
+          <p style="text-align:center; margin-top:30px;">
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: approver.user_email,
+        subject,
+        html: htmlContent
+      });
+    }
+
+    logger.info(`[Policy Change] Notified ${approvers.length} remaining approvers for ${label} #${entityIdentifier}`);
+    return true;
+  } catch (err) {
+    logError('[Policy Change] Error sending notification:', err);
+    return false;
+  }
+};
+
+/**
+ * Notify an approver that they have been REMOVED from an approval mid-flight.
+ * @param {Object} params
+ * @param {string} params.entityType
+ * @param {number} params.entityId
+ * @param {string} params.entityIdentifier
+ * @param {string} params.changedByName
+ * @param {string} params.changeReason - 'policy_change' | 'role_removed' | 'user_deactivated' | etc.
+ * @param {number} params.stepOrder - The step they were on
+ * @param {Array}  params.approvers - Array of { user_id, user_name, user_email }
+ * @param {Object} [params.extraContext]
+ */
+export const sendApproverRemovedNotification = async ({
+  entityType, entityId, entityIdentifier, changedByName,
+  changeReason, stepOrder, approvers, extraContext = {}
+}) => {
+  try {
+    if (!approvers || approvers.length === 0) return false;
+
+    const label = ENTITY_LABELS[entityType] || entityType;
+
+    const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
+      : changeReason === 'role_removed' ? 'your role assignment was changed'
+      : changeReason === 'user_deactivated' ? 'your account was deactivated'
+      : changeReason === 'dept_removed' ? 'your department assignment was changed'
+      : changeReason === 'scope_removed' ? 'your company/hotel access was changed'
+      : 'an administrative change';
+
+    const subject = `You've Been Removed from Approval — ${label} #${entityIdentifier}`;
+
+    for (const approver of approvers) {
+      const headerContent = `<h2>Hello ${approver.user_name || 'User'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            You have been removed from the approval workflow for
+            <strong>${label} #${entityIdentifier}</strong>${stepOrder ? ` (Step ${stepOrder})` : ''}.
+          </p>
+
+          <div style="background-color:#F3F4F6; border-left:4px solid #6B7280; padding:12px 16px; margin:16px 0; border-radius:4px;">
+            <span style="color:#374151; font-weight:600;">No action required</span>
+            <div style="color:#6B7280; font-size:13px; margin-top:4px;">
+              Reason: ${reasonLabel} by ${changedByName || 'an administrator'}
+            </div>
+          </div>
+
+          <p>Your approval is no longer needed for this ${label.toLowerCase()}. No further action is required from you.</p>
+
+          <p style="text-align:center; margin-top:30px;">
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: approver.user_email,
+        subject,
+        html: htmlContent
+      });
+    }
+
+    logger.info(`[Approver Removed] Notified ${approvers.length} removed approver(s) for ${label} #${entityIdentifier}`);
+    return true;
+  } catch (err) {
+    logError('[Approver Removed] Error sending notification:', err);
+    return false;
+  }
+};
+
+/**
+ * Notify an approver whose role/source was removed from a policy step but who
+ * had ALREADY APPROVED before the change. Their approval still counts; this
+ * email is purely informational so they understand why their name no longer
+ * appears in the active approver list for the entity.
+ * @param {Object} params
+ * @param {string} params.entityType
+ * @param {number} params.entityId
+ * @param {string} params.entityIdentifier
+ * @param {string} params.changedByName
+ * @param {string} params.changeReason - 'policy_change' | 'role_removed' | etc.
+ * @param {number} params.stepOrder - The step they had approved
+ * @param {Array}  params.approvers - Array of { user_id, user_name, user_email }
+ * @param {Object} [params.extraContext]
+ */
+export const sendApprovalStandsNotification = async ({
+  entityType, entityId, entityIdentifier, changedByName,
+  changeReason, stepOrder, approvers, extraContext = {}
+}) => {
+  try {
+    if (!approvers || approvers.length === 0) return false;
+
+    const label = ENTITY_LABELS[entityType] || entityType;
+
+    const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
+      : changeReason === 'role_removed' ? 'a role assignment was changed'
+      : changeReason === 'user_deactivated' ? 'a user account was deactivated'
+      : changeReason === 'dept_removed' ? 'a department assignment was changed'
+      : changeReason === 'scope_removed' ? 'a company/hotel access was changed'
+      : 'an administrative change';
+
+    const subject = `Approval Policy Updated — Your Prior Approval Still Counts (${label} #${entityIdentifier})`;
+
+    for (const approver of approvers) {
+      const headerContent = `<h2>Hello ${approver.user_name || 'User'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            The approval workflow for <strong>${label} #${entityIdentifier}</strong>${stepOrder ? ` (Step ${stepOrder})` : ''}
+            was updated, and your role is no longer part of the active approver list for this step.
+          </p>
+
+          <div style="background-color:#DCFCE7; border-left:4px solid #16A34A; padding:12px 16px; margin:16px 0; border-radius:4px;">
+            <span style="color:#166534; font-weight:600;">Your prior approval still counts — no action required</span>
+            <div style="color:#15803D; font-size:13px; margin-top:4px;">
+              You already approved this ${label.toLowerCase()} before the policy change, so your decision remains recorded and effective.
+            </div>
+          </div>
+
+          <p style="color:#6B7280; font-size:13px;">
+            Reason: ${reasonLabel} by ${changedByName || 'an administrator'}.
+          </p>
+
+          <p>This message is informational only. You do not need to do anything.</p>
+
+          <p style="text-align:center; margin-top:30px;">
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: approver.user_email,
+        subject,
+        html: htmlContent
+      });
+    }
+
+    logger.info(`[Approval Stands] Notified ${approvers.length} prior-approver(s) for ${label} #${entityIdentifier}`);
+    return true;
+  } catch (err) {
+    logError('[Approval Stands] Error sending notification:', err);
+    return false;
+  }
+};
+
+/**
+ * Notify an approver that they have been ADDED to an approval mid-flight.
+ * Only sent if the approver is on the current active step.
+ * @param {Object} params
+ * @param {string} params.entityType
+ * @param {number} params.entityId
+ * @param {string} params.entityIdentifier
+ * @param {string} params.changedByName
+ * @param {string} params.changeReason
+ * @param {number} params.stepOrder
+ * @param {number} params.totalSteps
+ * @param {string} params.initiatorName
+ * @param {Array}  params.approvers - Array of { user_id, user_name, user_email }
+ * @param {Object} [params.extraContext]
+ */
+export const sendApproverAddedMidFlightNotification = async ({
+  entityType, entityId, entityIdentifier, changedByName,
+  changeReason, stepOrder, totalSteps, initiatorName,
+  approvers, extraContext = {}
+}) => {
+  try {
+    if (!approvers || approvers.length === 0) return false;
+
+    const label = ENTITY_LABELS[entityType] || entityType;
+    const linkFn = ENTITY_LINK_MAP[entityType];
+    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+
+    const reasonLabel = changeReason === 'policy_change' ? 'a policy update'
+      : changeReason === 'role_added' ? 'a role assignment change'
+      : changeReason === 'user_activated' ? 'your account activation'
+      : changeReason === 'dept_added' ? 'a department assignment change'
+      : changeReason === 'scope_added' ? 'a company/hotel access change'
+      : 'an administrative change';
+
+    const subject = `Action Required: Added as Approver — ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`;
+
+    for (const approver of approvers) {
+      const headerContent = `<h2>Hello ${approver.user_name || 'Approver'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            You have been added as an approver for <strong>${label} #${entityIdentifier}</strong>
+            due to ${reasonLabel} by <strong>${changedByName || 'an administrator'}</strong>.
+          </p>
+
+          <div style="background-color:#DBEAFE; border-left:4px solid #3B82F6; padding:12px 16px; margin:16px 0; border-radius:4px;">
+            <span style="color:#1E40AF; font-weight:600;">Added Mid-Approval — Step ${stepOrder} of ${totalSteps}</span>
+          </div>
+
+          <ul style="list-style:none; padding-left:0; margin-top:16px;">
+            <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
+            <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
+            <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
+            <li style="padding:4px 0;"><strong>Added By:</strong> ${changedByName || 'N/A'}</li>
+          </ul>
+
+          <p><strong>Your approval is required.</strong> Please review and take action.</p>
+
+          <div style="text-align:center; margin-top:24px;">
+            <a href="${actionUrl}"
+               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              Review & Approve
+            </a>
+          </div>
+
+          <p style="text-align:center; margin-top:30px;">
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: approver.user_email,
+        subject,
+        html: htmlContent
+      });
+    }
+
+    logger.info(`[Approver Added Mid-Flight] Notified ${approvers.length} approver(s) for ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`);
+    return true;
+  } catch (err) {
+    logError('[Approver Added Mid-Flight] Error sending notification:', err);
+    return false;
+  }
+};

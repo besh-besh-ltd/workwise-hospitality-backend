@@ -694,20 +694,25 @@ const hospitalityModel = {
 
   hasValidPaidSubscription: async (vendorId) => {
     // A subscription is valid when it is:
-    // 1. Paid successfully, or
-    // 2. Manually assigned by admin (active row with no payment_id on an approved vendor).
-    // Pending self-registration rows must not count as active.
+    // 1. Paid successfully (vendor_payments.payment_status IN paid/success), or
+    // 2. Admin-assigned directly (vhcs.payment_id IS NULL — only admin endpoints
+    //    and the free-modification path can create these rows).
+    // Previously this also required the vendor to have u.status = 1 for the
+    // NULL-payment branch, but that created a circular dependency: login
+    // only approves the vendor AFTER hasValidPaidSubscription returns true,
+    // so an admin-assigned vendor whose status was still 0 could never
+    // authenticate. We now trust NULL-payment rows on their own merit and
+    // let user_login auto-flip the vendor to status=1.
     const result = await db.oneOrNone(
       `SELECT COUNT(*) as count
        FROM tbl_vendor_hotel_category_subscription vhcs
-       JOIN tbl_users u ON u.id = vhcs.vendor_id
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
          AND vhcs.status = 'active'
          AND vhcs.end_date >= CURRENT_DATE
          AND (
            vp.payment_status IN ('paid', 'success')
-           OR (vhcs.payment_id IS NULL AND u.status = 1)
+           OR vhcs.payment_id IS NULL
          )`,
       [vendorId]
     );
@@ -729,19 +734,33 @@ const hospitalityModel = {
   },
 
   getExpiredSubscriptionsForVendor: async (vendorId) => {
+    // Returns any past-due subscription rows for the vendor so they can be
+    // renewed. We intentionally DO NOT filter by payment_status or vendor
+    // approval status: the purpose of this query is to identify which items
+    // the vendor previously held so the renewal payment modal can be
+    // populated. Gating on payment state previously caused vendors whose
+    // rows were stuck 'active' past end_date (e.g. abandoned payment
+    // attempts, admin-assigned rows on unapproved vendors) to be unable to
+    // log in or renew. We exclude items for which the vendor already has a
+    // still-valid row so we don't re-prompt for something they already hold.
     return db.any(
-      `SELECT vhcs.*, vp.payment_status
+      `SELECT DISTINCT ON (vhcs.item_type, vhcs.item_id)
+              vhcs.*, vp.payment_status
        FROM tbl_vendor_hotel_category_subscription vhcs
-       JOIN tbl_users u ON u.id = vhcs.vendor_id
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
          AND vhcs.status IN ('active', 'expired')
          AND vhcs.end_date < CURRENT_DATE
-         AND (
-           vp.payment_status IN ('paid', 'success')
-           OR (vhcs.payment_id IS NULL AND u.status = 1)
+         AND NOT EXISTS (
+           SELECT 1
+             FROM tbl_vendor_hotel_category_subscription vhcs2
+            WHERE vhcs2.vendor_id = vhcs.vendor_id
+              AND vhcs2.item_type = vhcs.item_type
+              AND vhcs2.item_id = vhcs.item_id
+              AND vhcs2.status = 'active'
+              AND vhcs2.end_date >= CURRENT_DATE
          )
-       ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
+       ORDER BY vhcs.item_type, vhcs.item_id, vhcs.end_date DESC, vhcs.id DESC`,
       [vendorId]
     );
   },
@@ -778,42 +797,29 @@ const hospitalityModel = {
   },
 
   markExpiredSubscriptions: async (vendorId) => {
+    // Any past-due active row for this vendor transitions to 'expired'. The
+    // old payment-filter gate stranded rows tied to abandoned payments or
+    // admin-assigned rows on unapproved vendors — those rows then remained
+    // 'active' forever and were invisible to the summary / renewal flows.
     return db.result(
       `UPDATE tbl_vendor_hotel_category_subscription
        SET status = 'expired'
        WHERE vendor_id = $1
          AND status = 'active'
-         AND end_date < CURRENT_DATE
-         AND (
-           payment_id IN (
-             SELECT id FROM tbl_vendor_payments
-             WHERE payment_status IN ('paid', 'success')
-           )
-           OR payment_id IS NULL AND EXISTS (
-             SELECT 1 FROM tbl_users u WHERE u.id = $1 AND u.status = 1
-           )
-         )`,
+         AND end_date < CURRENT_DATE`,
       [vendorId]
     );
   },
 
   markAllExpiredSubscriptions: async () => {
+    // See note on markExpiredSubscriptions: the payment-status / vendor-
+    // approval gate previously left admin-assigned and abandoned-payment
+    // rows stuck 'active' past their end_date.
     return db.result(
       `UPDATE tbl_vendor_hotel_category_subscription
        SET status = 'expired'
        WHERE status = 'active'
-         AND end_date < CURRENT_DATE
-         AND (
-           payment_id IN (
-             SELECT id FROM tbl_vendor_payments
-             WHERE payment_status IN ('paid', 'success')
-           )
-           OR payment_id IS NULL AND EXISTS (
-             SELECT 1 FROM tbl_users u
-             WHERE u.id = tbl_vendor_hotel_category_subscription.vendor_id
-               AND u.status = 1
-           )
-         )`
+         AND end_date < CURRENT_DATE`
     );
   },
 
@@ -1812,11 +1818,18 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   cancelSubscriptionItems: async (vendorId, subscriptionIds, { tx } = {}) => {
     if (!subscriptionIds?.length) return 0;
     const conn = tx || db;
+    // Also collapse end_date to today so the row's effective coverage
+    // period is accurate. cancelled_at captures the exact timestamp for
+    // audit; end_date captures the last day of access. Without this, a
+    // cancelled row keeps its originally-paid end_date in the future,
+    // which misleads summary views and makes "active period" reporting
+    // incorrect.
     const result = await conn.result(
       `UPDATE tbl_vendor_hotel_category_subscription
        SET status = 'cancelled',
            cancelled_at = NOW(),
-           cancelled_by = $1
+           cancelled_by = $1,
+           end_date = CURRENT_DATE
        WHERE id = ANY($2::int[])
          AND vendor_id = $1
          AND status = 'active'`,
@@ -1835,11 +1848,16 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   cancelSubcategoriesByParentCategoryIds: async (vendorId, parentCategoryIds, { tx } = {}) => {
     if (!parentCategoryIds?.length) return [];
     const conn = tx || db;
+    // Same rationale as cancelSubscriptionItems: end_date is collapsed to
+    // today so the cancelled row's effective period reflects reality. The
+    // cancelled_at timestamp preserves the precise cancellation event for
+    // audit/reporting.
     const cancelled = await conn.any(
       `UPDATE tbl_vendor_hotel_category_subscription s
        SET status = 'cancelled',
            cancelled_at = NOW(),
-           cancelled_by = $1
+           cancelled_by = $1,
+           end_date = CURRENT_DATE
        FROM tbl_category sc
        WHERE s.item_id = sc.id
          AND s.item_type = 'subcategory'

@@ -12524,8 +12524,9 @@ ORDER BY tq.timestamp DESC;
               FROM (
                 SELECT EXISTS (
                   SELECT 1 FROM tbl_rfq_purchase_order _po2
+                  JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
                   WHERE _po2.rfq_id = RFQ.id
-                    AND _po2.rfq_product_id @> ARRAY[_rp3.id]
+                    AND _pop2.rfq_product_id = _rp3.id
                     AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
                 ) AS has_approved
                 FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
