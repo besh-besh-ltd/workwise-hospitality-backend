@@ -1941,6 +1941,7 @@ WHERE NOT EXISTS (
           'department_id', RFQ.department_id,
           'process_id', RFQ.process_id,
           'title', RFQ.title,
+          'created_by', RFQ.created_by,
 
           -- Selected Terms
           'terms', (
@@ -3469,7 +3470,7 @@ LIMIT 2;
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
           ) AS "products",
-          -- can_edit: user has 'update' permission for this RFQ's hotel + resource type
+          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type
           EXISTS (
             SELECT 1 FROM tbl_user_role_scopes _urs
             JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
@@ -3479,6 +3480,11 @@ LIMIT 2;
               AND _p.action = 'update'
               AND _urs.company_id = RFQ.hospitality_company_id
               AND (_urs.hotel_id IS NULL OR _urs.hotel_id = RFQ.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs.department_id = RFQ.department_id
+                OR _urs.department_id IS NULL
+              )
           ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
@@ -3503,6 +3509,11 @@ LIMIT 2;
           AND _p2.action = 'read'
           AND _urs2.company_id = RFQ.hospitality_company_id
           AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+          AND (
+            RFQ.department_id IS NULL
+            OR _urs2.department_id = RFQ.department_id
+            OR _urs2.department_id IS NULL
+          )
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -4812,28 +4823,18 @@ LIMIT 2;
           try {
             const policy = await findBestMatchingPolicy({ entity_type: entityType, hospitality_company_id: companyId, hotel_id: hotelId, department_id: deptId, process_id: processId });
             if (policy) {
-              // Mirror the createApprovalInstance pattern: honor policy.is_department_scoped.
-              // If true → filter approvers by RFQ's department (using tbl_department.access_type).
-              // If false → ignore department, return all role-holders in the business unit.
-              const isDeptScoped = policy.is_department_scoped === true;
-              const resolveDeptId = isDeptScoped ? deptId : null;
-              let departmentAccessType = null;
-              if (resolveDeptId) {
-                const deptRow = await db.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
-                departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
-              }
+              // All entities are department-scoped
+              const resolveDeptId = deptId;
 
               const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
               const resourceForEntity = ENTITY_APPROVE_RESOURCE_MAP[entityType] || entityType.toLowerCase();
               const stepResults = await Promise.allSettled(
                 policySteps.map(async (step) => {
-                  // Mirror the createApprovalInstance filter: a ROLE step is only valid
-                  // if the role has BOTH read AND approve permissions for this entity's resource.
                   if (step.approver_source_type === 'ROLE') {
                     const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resourceForEntity, db);
                     if (!hasBoth) return null;
                   }
-                  const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, departmentAccessType, db, null);
+                  const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, db, null);
                   if (!ids?.length) return null;
                   const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);
                   return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', approvers: names.map(u => ({ id: u.id, name: u.name })) };
@@ -4970,6 +4971,11 @@ LIMIT 2;
             AND _p2.action = 'read'
             AND _urs2.company_id = RFQ.hospitality_company_id
             AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs2.department_id = RFQ.department_id
+              OR _urs2.department_id IS NULL
+            )
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -5150,7 +5156,7 @@ LIMIT 2;
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
           ) AS "products",
-          -- can_edit: user has 'update' permission for this RFQ's hotel + resource type
+          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type
           EXISTS (
             SELECT 1 FROM tbl_user_role_scopes _urs
             JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
@@ -5160,6 +5166,11 @@ LIMIT 2;
               AND _p.action = 'update'
               AND _urs.company_id = RFQ.hospitality_company_id
               AND (_urs.hotel_id IS NULL OR _urs.hotel_id = RFQ.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs.department_id = RFQ.department_id
+                OR _urs.department_id IS NULL
+              )
           ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
@@ -5175,6 +5186,22 @@ LIMIT 2;
           AND (
             (ai.entity_type IN ('RFQ', 'TENDER') AND ai.entity_id = RFQ.id)
             OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
+          )
+      )
+      -- Permission filter: only RFQs the user has read access for
+      AND EXISTS (
+        SELECT 1 FROM tbl_user_role_scopes _urs2
+        JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+        JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+        WHERE _urs2.user_id = ${user_id}
+          AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+          AND _p2.action = 'read'
+          AND _urs2.company_id = RFQ.hospitality_company_id
+          AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+          AND (
+            RFQ.department_id IS NULL
+            OR _urs2.department_id = RFQ.department_id
+            OR _urs2.department_id IS NULL
           )
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
@@ -5223,6 +5250,22 @@ LIMIT 2;
             AND (
               (ai.entity_type IN ('RFQ', 'TENDER') AND ai.entity_id = RFQ.id)
               OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
+            )
+        )
+        -- Permission filter: only RFQs the user has read access for
+        AND EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = ${user_id}
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs2.department_id = RFQ.department_id
+              OR _urs2.department_id IS NULL
             )
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
@@ -5846,7 +5889,8 @@ LIMIT 2;
     TA_Vendors,
     no_freight,
     rfq_product_id,
-    include_negotiation = false
+    include_negotiation = false,
+    vendor_filter_id = null
   ) => {
     if(rfq_product_id) {
       rfq_product_id = rfq_product_id.split(",").map(Number);
@@ -6194,12 +6238,15 @@ LIMIT 2;
             'approved_at', NR.approved_at, 'published_at', NR.published_at,
             'closed_at', NR.closed_at, 'created_by', NR.created_by,
             'created_by_name', NRU.name, 'created_by_email', NRU.email,
-            'remarks', NR.remarks, 'created_at', NR.created_at
+            'remarks', NR.remarks, 'created_at', NR.created_at,
+            'vendor_ids', NR.vendor_ids,
+            'vendor_approvals', NR.vendor_approvals
           )
           FROM tbl_negotiation_rounds NR
           LEFT JOIN tbl_users NRU ON NRU.id = NR.created_by
           WHERE NR.rfq_product_id = TRF.id
             AND NR.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+            AND ($5::int IS NULL OR $5 = ANY(NR.vendor_ids))
           ORDER BY NR.round_number DESC
           LIMIT 1
         ) AS "active_round"
@@ -6222,10 +6269,51 @@ LIMIT 2;
               SELECT NR2.id FROM tbl_negotiation_rounds NR2
               WHERE NR2.rfq_product_id = TRF.id
                 AND NR2.status IN ('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')
+                AND ($5::int IS NULL OR $5 = ANY(NR2.vendor_ids))
               ORDER BY NR2.round_number DESC LIMIT 1
             )
           ) sub
         ) AS "active_round_quotes"
+
+        , (
+          SELECT json_agg(pv_sub ORDER BY pv_sub.in_active_round ASC, pv_sub.organization_name ASC)
+          FROM (
+            SELECT
+              RPV_U.id,
+              RPV_U.name,
+              RPV_U.email,
+              RPV_U.organization_name,
+              COALESCE(RPV_C.company_name, RPV_U.organization_name) AS company_name,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM tbl_negotiation_rounds ANR
+                WHERE ANR.rfq_product_id = TRF.id
+                  AND ANR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR.vendor_ids)
+              ) THEN true ELSE false END AS in_active_round,
+              (
+                SELECT json_build_object('round_id', ANR2.id, 'round_number', ANR2.round_number, 'status', ANR2.status)
+                FROM tbl_negotiation_rounds ANR2
+                WHERE ANR2.rfq_product_id = TRF.id
+                  AND ANR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND RPV_U.id = ANY(ANR2.vendor_ids)
+                ORDER BY ANR2.round_number DESC LIMIT 1
+              ) AS active_round_info
+            FROM tbl_rfq_product_vendors RPV
+            JOIN tbl_users RPV_U ON RPV_U.id = RPV.user_id
+            LEFT JOIN tbl_company RPV_C ON RPV_C.id = RPV_U.company_id
+            WHERE RPV.rfq_id = TRF.rfq_id
+              AND RPV.product_variant_id = TRF.product_variant_id
+              AND RPV.variant = TRF.variant
+              AND EXISTS (
+                SELECT 1 FROM tbl_quotes _pv_q
+                JOIN tbl_quote_items _pv_qi ON _pv_qi.quote_id = _pv_q.id
+                WHERE _pv_q.rfq_id = TRF.rfq_id
+                  AND _pv_q.created_by = RPV_U.id
+                  AND _pv_qi.product_variant_id = TRF.product_variant_id
+                  AND _pv_qi.variant = TRF.variant
+              )
+          ) pv_sub
+        ) AS "product_vendors"
 
         , (
           SELECT json_build_object(
@@ -6249,7 +6337,7 @@ LIMIT 2;
         ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
         ;`;
 
-      db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
+      db.query(mainQuery, [id, user_id, company_id, rfq_product_id, vendor_filter_id])
         .then(function (data) {
           resolve(data);
         })
@@ -11531,6 +11619,11 @@ ORDER BY m.created_at;
             AND _p2.action = 'read'
             AND _urs2.company_id = RFQ.hospitality_company_id
             AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs2.department_id = RFQ.department_id
+              OR _urs2.department_id IS NULL
+            )
         )
         OR EXISTS (
           SELECT 1
@@ -11539,6 +11632,11 @@ ORDER BY m.created_at;
           JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
             AND _urs3.company_id = hch.hospitality_company_id
             AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs3.department_id = RFQ.department_id
+              OR _urs3.department_id IS NULL
+            )
           JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
           JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
           WHERE rhm.rfq_id = RFQ.id
@@ -11599,6 +11697,11 @@ ORDER BY m.created_at;
               AND _p2.action = 'read'
               AND _urs2.company_id = RFQ.hospitality_company_id
               AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs2.department_id = RFQ.department_id
+                OR _urs2.department_id IS NULL
+              )
           )
           OR EXISTS (
             SELECT 1
@@ -11607,6 +11710,11 @@ ORDER BY m.created_at;
             JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
               AND _urs3.company_id = hch.hospitality_company_id
               AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs3.department_id = RFQ.department_id
+                OR _urs3.department_id IS NULL
+              )
             JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
             JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
             WHERE rhm.rfq_id = RFQ.id
@@ -12125,7 +12233,8 @@ ORDER BY tq.timestamp DESC;
     sort,
     is_tender,
     rfq_id,
-    hotel_id = null
+    hotel_id = null,
+    quote_compare = false
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -12233,13 +12342,7 @@ ORDER BY tq.timestamp DESC;
               AND (
                 RFQ.department_id IS NULL
                 OR urs.department_id = RFQ.department_id
-                OR (
-                  urs.department_id IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM tbl_user_department ud
-                    WHERE ud.user_id = ${user_id} AND ud.department_id = RFQ.department_id
-                  )
-                )
+                OR urs.department_id IS NULL
               )
           )`;
       }
@@ -12295,8 +12398,49 @@ ORDER BY tq.timestamp DESC;
                     )
                   )
                 )
+                AND (
+                  RFQ.department_id IS NULL
+                  OR urs.department_id = RFQ.department_id
+                  OR urs.department_id IS NULL
+                )
             )`;
         }
+      }
+
+      // Filter out RFQs where user lacks negotiation.read or quote-compare.read for the quote-compare sidebar
+      if (quote_compare && !tech_eval && !po) {
+        dynamicWhereFilters += `
+          AND EXISTS (
+            SELECT 1
+            FROM tbl_user_role_scopes urs
+            JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+            JOIN tbl_permissions p ON p.id = rp.permission_id
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
+            WHERE urs.user_id = ${user_id}
+              AND urs.company_id = hch.hospitality_company_id
+              AND (p.resource = 'negotiation' OR p.resource = 'quote-compare')
+              AND p.action = 'read'
+              AND (
+                urs.hotel_id = RFQ.hotel_id
+                OR (
+                  urs.hotel_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM tbl_hospitality_user_mappings hum
+                    WHERE hum.user_id = ${user_id}
+                      AND (
+                        hum.hospitality_hotel_id = RFQ.hotel_id
+                        OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                            AND hum.hospitality_company_id = hch.hospitality_company_id)
+                      )
+                  )
+                )
+              )
+              AND (
+                RFQ.department_id IS NULL
+                OR urs.department_id = RFQ.department_id
+                OR urs.department_id IS NULL
+              )
+          )`;
       }
 
       let q = `

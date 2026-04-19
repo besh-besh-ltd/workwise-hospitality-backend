@@ -671,11 +671,11 @@ const handleNegotiationRoundExpiration = async (roundId) => {
           [roundId]
         );
 
-        // Cancel pending approval instances
+        // Cancel pending approval instances (entity_id = round_id)
         await t.none(
           `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW()
            WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
-          [round.rfq_product_id]
+          [roundId]
         );
 
         // Cancel pending approval steps
@@ -685,7 +685,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
              SELECT id FROM tbl_approval_instances
              WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'CANCELLED'
            ) AND status = 'PENDING'`,
-          [round.rfq_product_id]
+          [roundId]
         );
 
         // Note: tbl_approval_step_approvers only allows PENDING/APPROVED/REJECTED.

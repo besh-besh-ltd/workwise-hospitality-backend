@@ -288,14 +288,8 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
     [instance.id]
   );
 
-  // Determine department scoping (same logic as createApprovalInstance)
-  const isDeptScoped = policy.is_department_scoped === true;
-  const resolveDeptId = isDeptScoped ? instance.department_id : null;
-  let departmentAccessType = null;
-  if (resolveDeptId) {
-    const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
-    departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
-  }
+  // All entities are department-scoped
+  const resolveDeptId = instance.department_id;
 
   // Process diffs in order. Handle STEP_ADDED renumbering carefully.
   // Sort diffs: process removals first, then modifications, then additions (to avoid renumbering conflicts)
@@ -381,7 +375,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
     // Handle approver source change
     if (d.sourceChanged) {
       logger.info(`[PropagateModify] Step ${d.step_order}: source changed from ${d.oldStep.approver_source_type}/${d.oldStep.approver_source_id} to ${d.newStep.approver_source_type}/${d.newStep.approver_source_id}`);
-      logger.info(`[PropagateModify] Resolving with scope: company=${instance.hospitality_company_id}, hotel=${instance.hotel_id}, dept=${resolveDeptId}, deptAccessType=${departmentAccessType}`);
+      logger.info(`[PropagateModify] Resolving with scope: company=${instance.hospitality_company_id}, hotel=${instance.hotel_id}, dept=${resolveDeptId}`);
 
       // Reconcile against ACTUAL current approvers in the DB rather than against
       // the old policy step's resolution. The DB is the source of truth — using
@@ -398,7 +392,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       // Resolve NEW approvers (from new policy step definition)
       const newResolvedIds = await resolveApprovers(
         d.newStep, instance.hospitality_company_id, instance.hotel_id,
-        resolveDeptId, departmentAccessType, t
+        resolveDeptId, t
       );
 
       logger.info(`[PropagateModify] Current DB approvers (non-REMOVED): [${currentApproverIds.join(',')}], New resolved: [${newResolvedIds.join(',')}]`);
@@ -563,7 +557,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       // Future step — insert as PENDING with resolved approvers
       const newResolvedIds = await resolveApprovers(
         d.newStep, instance.hospitality_company_id, instance.hotel_id,
-        resolveDeptId, departmentAccessType, t
+        resolveDeptId, t
       );
 
       if (newResolvedIds.length === 0) {
@@ -781,18 +775,27 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
  * @returns {{ willAutoComplete: boolean, affectedInstances: Array }}
  */
 export async function simulateApproverImpact(userId, changeType, options = {}) {
-  const { companyId, hotelId } = options;
+  const { companyId, hotelId, changedRoleIds = [], changedDeptIds = [] } = options;
 
-  // Find all PENDING instances where this user is a PENDING approver.
+  // Find PENDING instances where this user is a PENDING approver on
+  // ROLE/DEPARTMENT-based steps. Mirrors revalidateApproverMembership query.
   // Published RFQs are excluded — see SKIP_PUBLISHED_RFQ_SQL.
+  // NOTE: Join policy steps via approval_policy_id + step_order (not the stale
+  // policy_step_id, which points to deleted rows after policy updates).
   let query = `
     SELECT DISTINCT
       ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
       ai.metadata, ai.approval_policy_id,
-      ais.id as step_id, ais.step_order, ais.decision_rule, ais.status as step_status
+      ai.hospitality_company_id, ai.hotel_id, ai.department_id,
+      ais.id as step_id, ais.step_order, ais.decision_rule, ais.status as step_status,
+      ais.policy_step_id,
+      ps.approver_source_type, ps.approver_source_id
     FROM tbl_approval_instances ai
     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+    LEFT JOIN tbl_approval_policy_steps ps
+      ON ps.approval_policy_id = ai.approval_policy_id
+      AND ps.step_order = ais.step_order
     WHERE ai.status = 'PENDING'
       AND asa.approver_user_id = $1
       AND asa.status = 'PENDING'
@@ -809,6 +812,22 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
     query += ` AND ai.hotel_id = $${params.length}`;
   }
 
+  // Scope by changed role/dept IDs — only check steps tied to the roles/depts
+  // actually being removed. This prevents false positives where the user is an
+  // approver via a DIFFERENT role that is being kept.
+  if (changeType !== 'user_deactivated' && (changedRoleIds.length > 0 || changedDeptIds.length > 0)) {
+    const sourceIdConditions = [];
+    if (changedRoleIds.length > 0) {
+      params.push(changedRoleIds);
+      sourceIdConditions.push(`(ps.approver_source_type = 'ROLE' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+    }
+    if (changedDeptIds.length > 0) {
+      params.push(changedDeptIds);
+      sourceIdConditions.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+    }
+    query += ` AND (${sourceIdConditions.join(' OR ')})`;
+  }
+
   query += ' ORDER BY ai.id ASC';
   const affected = await db.any(query, params);
 
@@ -820,6 +839,14 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
   const affectedInstances = [];
 
   for (const row of affected) {
+    // NOTE: No re-resolution here. This simulation runs BEFORE DB mutations,
+    // so resolveApprovers() would always find the user still qualified via
+    // their current (not-yet-removed) roles — defeating the whole check.
+    // The query scoping by changedRoleIds/changedDeptIds (above) already
+    // prevents false positives by only matching steps tied to the roles/depts
+    // actually being removed. The actual re-resolution happens post-mutation
+    // in revalidateApproverMembership().
+
     // Get all OTHER approvers for this step (excluding the user being removed and already REMOVED ones)
     const otherApprovers = await db.any(
       `SELECT status FROM tbl_approval_step_approvers
@@ -915,6 +942,8 @@ export async function revalidateApproverMembership({
 
   // Find PENDING instances where user is a PENDING approver on
   // ROLE/DEPARTMENT-based steps. Published RFQs are excluded.
+  // NOTE: Join policy steps via approval_policy_id + step_order (not the stale
+  // policy_step_id, which points to deleted rows after policy updates).
   let removeQuery = `
     SELECT DISTINCT
       ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
@@ -925,7 +954,9 @@ export async function revalidateApproverMembership({
     FROM tbl_approval_instances ai
     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
-    LEFT JOIN tbl_approval_policy_steps ps ON ais.policy_step_id = ps.id
+    LEFT JOIN tbl_approval_policy_steps ps
+      ON ps.approval_policy_id = ai.approval_policy_id
+      AND ps.step_order = ais.step_order
     WHERE ai.status = 'PENDING'
       AND asa.approver_user_id = $1
       AND asa.status = 'PENDING'
@@ -968,19 +999,14 @@ export async function revalidateApproverMembership({
     const policy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [row.approval_policy_id]);
     if (!policy) continue;
 
-    const isDeptScoped = policy.is_department_scoped === true;
-    const resolveDeptId = isDeptScoped ? row.department_id : null;
-    let departmentAccessType = null;
-    if (resolveDeptId) {
-      const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
-      departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
-    }
+    // All entities are department-scoped
+    const resolveDeptId = row.department_id;
 
     // Re-resolve approvers for this step
     const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
     const resolvedIds = await resolveApprovers(
       policyStep, row.hospitality_company_id, row.hotel_id,
-      resolveDeptId, departmentAccessType, t
+      resolveDeptId, t
     );
 
     if (!resolvedIds.includes(userId)) {
@@ -1022,6 +1048,7 @@ export async function revalidateApproverMembership({
   if (['role_added', 'dept_added', 'user_activated', 'scope_added'].includes(changeType)) {
     // Find policy steps that reference the changed roles/departments.
     // Published RFQs are excluded.
+    // NOTE: Join instance steps to current policy steps via step_order (not stale policy_step_id)
     let addQuery = `
       SELECT DISTINCT
         ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
@@ -1032,7 +1059,9 @@ export async function revalidateApproverMembership({
       FROM tbl_approval_instances ai
       JOIN tbl_approval_policies p ON ai.approval_policy_id = p.id
       JOIN tbl_approval_policy_steps ps ON ps.approval_policy_id = p.id
-      JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.policy_step_id = ps.id
+      JOIN tbl_approval_instance_steps ais
+        ON ais.approval_instance_id = ai.id
+        AND ais.step_order = ps.step_order
       WHERE ai.status = 'PENDING'
         AND ais.status = 'PENDING'
         AND ps.approver_source_type IN ('ROLE', 'DEPARTMENT')
@@ -1080,19 +1109,14 @@ export async function revalidateApproverMembership({
       const policy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [row.approval_policy_id]);
       if (!policy) continue;
 
-      const isDeptScoped = policy.is_department_scoped === true;
-      const resolveDeptId = isDeptScoped ? row.department_id : null;
-      let departmentAccessType = null;
-      if (resolveDeptId) {
-        const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
-        departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
-      }
+      // All entities are department-scoped
+      const resolveDeptId = row.department_id;
 
       // Re-resolve all approvers for this step to confirm user should be included
       const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
       const resolvedIds = await resolveApprovers(
         policyStep, row.hospitality_company_id, row.hotel_id,
-        resolveDeptId, departmentAccessType, t
+        resolveDeptId, t
       );
 
       if (resolvedIds.includes(userId)) {

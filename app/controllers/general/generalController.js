@@ -35,7 +35,7 @@ import {
   simulateApproverImpact,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
-import { AVAILABLE_HIERARCHY_TYPES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../../util/constants.js';
+import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 
@@ -380,7 +380,6 @@ const hospitalityApprovalController = {
         process_id,
         is_active,
         is_master,
-        is_department_scoped,
         steps,
         id,
         confirmed_approval_impact
@@ -471,10 +470,7 @@ const hospitalityApprovalController = {
             department_id,
             process_id,
             is_active,
-            is_master,
-            is_department_scoped: is_department_scoped !== undefined
-              ? is_department_scoped
-              : undefined
+            is_master
           }, t);
 
           let newSteps = [];
@@ -546,10 +542,7 @@ const hospitalityApprovalController = {
             process_id: process_id ? parseInt(process_id) : null,
             created_by,
             is_active,
-            is_master: is_master || false,
-            is_department_scoped: is_department_scoped !== undefined
-              ? is_department_scoped
-              : DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type)
+            is_master: is_master || false
           }, t);
           if (steps && steps.length > 0) {
             await insertPolicySteps(steps, newPolicy.id, t);

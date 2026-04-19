@@ -6644,6 +6644,27 @@ const rfqController = {
 
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
+      // RBAC check for non-vendor users: must have rfq.read/boq.read for this RFQ's business unit
+      if (rfqData?.id && user_type != 3) {
+        const resource = rfqData.is_tender == 1 ? 'boq' : 'rfq';
+        const hasAccess = await db.oneOrNone(`
+          SELECT 1 FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = $1
+            AND p.resource = $2
+            AND p.action = 'read'
+            AND urs.company_id = $3
+            AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+            AND ($5::int IS NULL OR urs.department_id = $5 OR urs.department_id IS NULL)
+          LIMIT 1
+        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id, rfqData.department_id || null]);
+
+        if (!hasAccess) {
+          return res.status(403).json({ status: 0, message: 'You do not have permission to view this RFQ' });
+        }
+      }
+
       let lifecycleMap = {};
       if (rfqData?.id) {
         lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
@@ -7896,6 +7917,8 @@ const rfqController = {
         );
         rfQItem = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
       } else {
+        // Vendors (user_type 3) see only negotiation rounds they are selected for
+        const vendor_filter_id = req.user.user_type == 3 ? (req.user.vendor_id || id) : null;
         rfQItem = await rfqModel.getQuotesByRfqById2(
           rfq_id,
           id,
@@ -7903,7 +7926,8 @@ const rfqController = {
           TA_Vendors,
           no_freight,
           rfq_product_id,
-          include_negotiation === 'true'
+          include_negotiation === 'true',
+          vendor_filter_id
         );
       }
       // rfQItem = processQuotations(rfQItem);
@@ -8159,7 +8183,7 @@ const rfqController = {
         // shapes depending on the entity_type. We catch every shape:
         //   • RFQ/TENDER:        entity_id = rfq_id
         //   • PO:                entity_id = po_id (FK to tbl_rfq_purchase_order)
-        //   • NEGOTIATION:       entity_id = rfq_product_id (FK to tbl_rfq_products)
+        //   • NEGOTIATION:       entity_id = round_id (FK to tbl_negotiation_rounds)
         //   • NEGOTIATION_QUOTE: entity_id = rfq_product_id
         //   • ARC:               entity_id = rfq_product_id
         //   • TECHNICAL:         entity_id = tech_evaluation round id (FK to tbl_rfq_product_tech_evaluation)
@@ -8176,7 +8200,11 @@ const rfqController = {
                   AND entity_id IN (SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1)
                 )
                 OR (
-                  entity_type IN ('NEGOTIATION','NEGOTIATION_QUOTE','ARC')
+                  entity_type = 'NEGOTIATION'
+                  AND entity_id IN (SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1)
+                )
+                OR (
+                  entity_type IN ('NEGOTIATION_QUOTE','ARC')
                   AND entity_id IN (SELECT id FROM tbl_rfq_products WHERE rfq_id = $1)
                 )
                 OR (
@@ -14274,6 +14302,7 @@ getClauses: async (req, res) => {
       let {
         tech_eval,
         po = 'false',
+        quote_compare = 'false',
         page = 1,
         limit = 10,
         project_id,
@@ -14288,6 +14317,7 @@ getClauses: async (req, res) => {
       // Convert string query parameters to proper types
       tech_eval = tech_eval === 'true';
       po = po === 'true';
+      quote_compare = quote_compare === 'true';
 
       page = parseInt(page) || 1;
       limit = parseInt(limit) || 10;
@@ -14324,7 +14354,8 @@ getClauses: async (req, res) => {
         sort,
         is_tender,
         rfq_id,
-        hotel_id
+        hotel_id,
+        quote_compare
       );
 
       // Enrich each RFQ with approval_required flag

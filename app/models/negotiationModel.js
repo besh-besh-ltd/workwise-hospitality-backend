@@ -26,7 +26,9 @@ const negotiationModel = {
       end_date,
       status = 'DRAFT',
       created_by,
-      remarks = null
+      remarks = null,
+      vendor_ids = null,
+      vendor_approvals = null
     } = roundData;
 
     if (!rfq_product_id) {
@@ -35,10 +37,10 @@ const negotiationModel = {
 
     return (txContext || db).one(
       `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
        RETURNING *`,
-      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks]
+      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || [])]
     );
   },
 
@@ -53,10 +55,11 @@ const negotiationModel = {
   },
 
   /**
-   * Get all rounds for an RFQ (optionally filtered by product)
+   * Get all rounds for an RFQ (optionally filtered by product).
+   * When vendorId is provided, returns only rounds where that vendor is in vendor_ids.
    */
-  getRoundsByRfqId: async (rfqId, rfqProductId = null) => {
-    let query = `SELECT 
+  getRoundsByRfqId: async (rfqId, rfqProductId = null, vendorId = null) => {
+    let query = `SELECT
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
@@ -67,23 +70,30 @@ const negotiationModel = {
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1`;
-    
+
     const values = [rfqId];
-    
+
     if (rfqProductId) {
-      query += ` AND nr.rfq_product_id = $2`;
       values.push(rfqProductId);
+      query += ` AND nr.rfq_product_id = $${values.length}`;
     }
-    
+
+    if (vendorId) {
+      values.push(vendorId);
+      query += ` AND $${values.length} = ANY(nr.vendor_ids)`;
+    }
+
     query += ` ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`;
-    
+
     return db.any(query, values);
   },
 
   /**
-   * Get active round for a product
+   * Get active round for a product.
+   * When vendorId is provided, returns only the round assigned to that vendor.
+   * When vendorId is omitted, returns the most recent active round (admin view).
    */
-  getActiveRound: async (rfqId, rfqProductId, includeEnded = false) => {
+  getActiveRound: async (rfqId, rfqProductId, includeEnded = false, vendorId = null) => {
     if (!rfqProductId) {
       throw new Error('rfq_product_id is required');
     }
@@ -91,6 +101,28 @@ const negotiationModel = {
     const statusFilter = includeEnded
       ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
       : `('PENDING_APPROVAL', 'ACTIVE')`;
+
+    if (vendorId) {
+      return db.oneOrNone(
+        `SELECT
+          nr.*,
+          u.name as created_by_name,
+          u.email as created_by_email,
+          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_users u ON u.id = nr.created_by
+         LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+         LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+         LEFT JOIN tbl_product P ON P.id = PV.product_id
+         WHERE nr.rfq_id = $1
+           AND nr.rfq_product_id = $2
+           AND nr.status IN ${statusFilter}
+           AND $3 = ANY(nr.vendor_ids)
+         ORDER BY nr.round_number DESC
+         LIMIT 1`,
+        [rfqId, rfqProductId, vendorId]
+      );
+    }
 
     return db.oneOrNone(
       `SELECT
@@ -368,11 +400,11 @@ const negotiationModel = {
   },
 
   /**
-   * Get vendor's negotiation quote status for a product (checks active rounds)
+   * Get vendor's negotiation quote status for a product (checks active rounds).
+   * Only considers rounds where the vendor is assigned.
    */
   getVendorNegotiationStatus: async (rfqId, rfqProductId, vendorId) => {
-    // Find the latest negotiation round for this product
-    // Prioritize ACTIVE rounds, then fall back to most recent by created_at
+    // Find the latest negotiation round assigned to this vendor for this product
     const latestRound = await db.oneOrNone(
       `SELECT nr.*,
         COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
@@ -382,12 +414,13 @@ const negotiationModel = {
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
+         AND $3 = ANY(nr.vendor_ids)
        ORDER BY
          CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
          nr.round_number DESC,
          nr.created_at DESC
        LIMIT 1`,
-      [rfqId, rfqProductId]
+      [rfqId, rfqProductId, vendorId]
     );
 
     if (!latestRound) {
@@ -424,10 +457,11 @@ const negotiationModel = {
   },
 
   /**
-   * Get latest rounds for an RFQ (per product) with vendor quote status
+   * Get latest rounds for an RFQ (per product) with vendor quote status.
+   * Only returns rounds where the vendor is assigned via the vendor_ids array column.
    */
   getActiveRoundsWithVendorStatus: async (rfqId, vendorId) => {
-    // Get the latest round per product (prioritize ACTIVE, then most recent)
+    // Get the latest round per product assigned to this vendor
     const latestRounds = await db.any(
       `SELECT DISTINCT ON (nr.rfq_product_id) nr.*,
         COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
@@ -440,6 +474,7 @@ const negotiationModel = {
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = $2
        WHERE nr.rfq_id = $1
+         AND $2 = ANY(nr.vendor_ids)
        ORDER BY nr.rfq_product_id,
          CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
          nr.round_number DESC,
@@ -583,15 +618,20 @@ const negotiationModel = {
   },
 
   getApprovalBundleForRfq: async (rfqId, userId) => {
-    // 1. Get all rfq_product_ids for this RFQ
-    const products = await db.any(
-      `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`,
-      [rfqId]
-    );
+    // 1. Get all rfq_product_ids and round_ids for this RFQ
+    // NEGOTIATION instances use round_id as entity_id; NEGOTIATION_QUOTE uses product_id
+    const [products, rounds] = await Promise.all([
+      db.any(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`, [rfqId]),
+      db.any(`SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqId])
+    ]);
     const productIds = products.map(p => p.id);
+    const roundIds = rounds.map(r => r.id);
     if (productIds.length === 0) {
       return { negotiation_instances: {}, negotiation_quote_instances: {}, rounds_history: [] };
     }
+
+    // Combine both ID sets for querying (NEGOTIATION uses roundIds, NEGOTIATION_QUOTE uses productIds)
+    const allEntityIds = [...new Set([...productIds, ...roundIds])];
 
     // 2. Fetch rounds history, approval instances, steps, approvers, and actions in parallel
     const [roundsHistory, instances, allSteps, allApprovers, allActions] = await Promise.all([
@@ -608,7 +648,7 @@ const negotiationModel = {
          ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`,
         [rfqId]
       ),
-      // All approval instances for NEGOTIATION and NEGOTIATION_QUOTE entity types
+      // All approval instances for NEGOTIATION (entity_id = round_id) and NEGOTIATION_QUOTE (entity_id = product_id)
       db.any(
         `SELECT
            i.*,
@@ -631,7 +671,7 @@ const negotiationModel = {
          WHERE i.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
            AND i.entity_id = ANY($1::int[])
          ORDER BY i.created_at DESC`,
-        [productIds]
+        [allEntityIds]
       ),
       // All steps for those instances
       db.any(
@@ -644,7 +684,7 @@ const negotiationModel = {
              AND entity_id = ANY($1::int[])
          )
          ORDER BY s.step_order ASC`,
-        [productIds]
+        [allEntityIds]
       ),
       // All approvers for those steps
       db.any(
@@ -671,7 +711,7 @@ const negotiationModel = {
                AND entity_id = ANY($1::int[])
            )
          )`,
-        [productIds]
+        [allEntityIds]
       ),
       // All actions for those instances
       db.any(
@@ -689,7 +729,7 @@ const negotiationModel = {
              AND entity_id = ANY($1::int[])
          )
          ORDER BY a.created_at ASC`,
-        [productIds]
+        [allEntityIds]
       )
     ]);
 
@@ -795,8 +835,26 @@ const negotiationModel = {
     }
 
     // 5. Attach round-level approvals to rounds_history
+    // New rounds use entity_id = round.id; old rounds used entity_id = rfq_product_id.
+    // Try round.id first, then fall back to matching via metadata.round_id from the product bucket.
     const enrichedRounds = roundsHistory.map(round => {
-      const roundApprovals = negotiationInstances[String(round.rfq_product_id)] || [];
+      let roundApprovals = negotiationInstances[String(round.id)] || [];
+      if (roundApprovals.length === 0) {
+        // Backward compat: old instances keyed by rfq_product_id
+        const productBucket = negotiationInstances[String(round.rfq_product_id)] || [];
+        roundApprovals = productBucket.filter(inst => {
+          if (!inst.metadata) return false;
+          // New instances: match by round_id in metadata
+          if (inst.metadata.round_id) {
+            return inst.metadata.round_id === round.id || inst.metadata.round_id === String(round.id);
+          }
+          // Old instances without round_id: match by round_number if available, otherwise include
+          if (inst.metadata.round_number != null) {
+            return inst.metadata.round_number === round.round_number || inst.metadata.round_number === String(round.round_number);
+          }
+          return true;
+        });
+      }
       return {
         ...round,
         approvals: roundApprovals.length > 0
@@ -883,6 +941,211 @@ const negotiationModel = {
       LEFT JOIN tbl_product P ON P.id = PV.product_id
       WHERE nr.id = $1
     `, [roundId]);
+  },
+
+  // ============= ROUND VENDOR ASSIGNMENT =============
+
+  /**
+   * Get vendor IDs currently assigned to PENDING_APPROVAL or ACTIVE rounds for a product.
+   * Uses the vendor_ids integer array column on tbl_negotiation_rounds.
+   */
+  getVendorsInActiveRounds: async (rfqId, rfqProductId) => {
+    const rows = await db.any(
+      `SELECT vendor_ids
+       FROM tbl_negotiation_rounds
+       WHERE rfq_id = $1
+         AND rfq_product_id = $2
+         AND status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND vendor_ids IS NOT NULL`,
+      [rfqId, rfqProductId]
+    );
+    // Flatten all vendor_ids arrays into a unique set
+    const allIds = new Set();
+    for (const row of rows) {
+      if (Array.isArray(row.vendor_ids)) {
+        row.vendor_ids.forEach(id => allIds.add(id));
+      }
+    }
+    return [...allIds];
+  },
+
+  /**
+   * Check if a vendor is assigned to a specific round
+   */
+  isVendorAssignedToRound: async (roundId, vendorId) => {
+    const result = await db.oneOrNone(
+      `SELECT $2 = ANY(vendor_ids) AS assigned
+       FROM tbl_negotiation_rounds
+       WHERE id = $1`,
+      [roundId, vendorId]
+    );
+    return result ? result.assigned : false;
+  },
+
+  /**
+   * Get all vendors for a product with their active negotiation round status.
+   * Returns every vendor with `in_active_round` flag and `active_round_number` so
+   * the frontend can show which vendors are available vs already in a round.
+   */
+  getVendorsForProductWithStatus: async (rfqId, rfqProductId) => {
+    return db.any(
+      `SELECT
+         u.id,
+         u.name,
+         u.email,
+         u.organization_name,
+         c.company_name,
+         CASE WHEN active_nr.id IS NOT NULL THEN true ELSE false END AS in_active_round,
+         active_nr.id AS active_round_id,
+         active_nr.round_number AS active_round_number,
+         active_nr.status AS active_round_status
+       FROM tbl_rfq_products rp
+       JOIN tbl_rfq_product_vendors rpv
+         ON rpv.rfq_id = rp.rfq_id
+         AND rpv.product_variant_id = rp.product_variant_id
+         AND rpv.variant = rp.variant
+       JOIN tbl_users u ON u.id = rpv.user_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       LEFT JOIN LATERAL (
+         SELECT nr.id, nr.round_number, nr.status
+         FROM tbl_negotiation_rounds nr
+         WHERE nr.rfq_id = $2
+           AND nr.rfq_product_id = $1
+           AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+           AND u.id = ANY(nr.vendor_ids)
+         ORDER BY nr.round_number DESC
+         LIMIT 1
+       ) active_nr ON true
+       WHERE rp.id = $1
+         AND rp.rfq_id = $2
+       ORDER BY
+         CASE WHEN active_nr.id IS NOT NULL THEN 1 ELSE 0 END,
+         COALESCE(c.company_name, u.organization_name, u.name)`,
+      [rfqProductId, rfqId]
+    );
+  },
+
+  /**
+   * Get vendor details for a specific round (from vendor_ids array column)
+   */
+  getVendorsForRound: async (roundId) => {
+    return db.any(
+      `SELECT u.id, u.name, u.email, u.organization_name, c.company_name
+       FROM tbl_negotiation_rounds nr
+       JOIN LATERAL unnest(nr.vendor_ids) AS vid ON true
+       JOIN tbl_users u ON u.id = vid
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE nr.id = $1
+         AND nr.vendor_ids IS NOT NULL
+       ORDER BY COALESCE(c.company_name, u.organization_name, u.name)`,
+      [roundId]
+    );
+  },
+
+  // ============= VENDOR-LEVEL APPROVAL =============
+
+  /**
+   * Update a single vendor's approval status within a round's vendor_approvals JSONB.
+   * Returns the updated round row.
+   */
+  updateVendorApprovalStatus: async (roundId, vendorId, status, remarks, actedBy, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_negotiation_rounds
+       SET vendor_approvals = (
+         SELECT jsonb_agg(
+           CASE
+             WHEN (elem->>'vendor_id')::int = $2
+             THEN jsonb_build_object(
+               'vendor_id', $2::int,
+               'status', $3::text,
+               'remarks', $4::text,
+               'acted_by', $5::int,
+               'acted_at', NOW()::text
+             )
+             ELSE elem
+           END
+         )
+         FROM jsonb_array_elements(vendor_approvals) AS elem
+       ),
+       updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [roundId, vendorId, status, remarks || null, actedBy]
+    );
+  },
+
+  /**
+   * Bulk update all vendor approval statuses in a round.
+   * Used when the entire round is approved/rejected at the round level.
+   */
+  updateAllVendorsStatus: async (roundId, status, remarks, actedBy, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_negotiation_rounds
+       SET vendor_approvals = (
+         SELECT jsonb_agg(
+           jsonb_build_object(
+             'vendor_id', (elem->>'vendor_id')::int,
+             'status', $2::text,
+             'remarks', $3::text,
+             'acted_by', $4::int,
+             'acted_at', NOW()::text
+           )
+         )
+         FROM jsonb_array_elements(vendor_approvals) AS elem
+       ),
+       updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [roundId, status, remarks || null, actedBy]
+    );
+  },
+
+  /**
+   * Check if all vendors in a round have been approved.
+   */
+  areAllVendorsApproved: async (roundId, txContext = null) => {
+    const result = await (txContext || db).one(
+      `SELECT
+         (jsonb_array_length(vendor_approvals) > 0)
+         AND NOT EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(vendor_approvals) AS elem
+           WHERE elem->>'status' != 'APPROVED'
+         ) AS all_approved
+       FROM tbl_negotiation_rounds
+       WHERE id = $1`,
+      [roundId]
+    );
+    return result.all_approved;
+  },
+
+  /**
+   * Reset a rejected vendor back to PENDING for re-evaluation.
+   */
+  resubmitRoundVendor: async (roundId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_negotiation_rounds
+       SET vendor_approvals = (
+         SELECT jsonb_agg(
+           CASE
+             WHEN (elem->>'vendor_id')::int = $2
+             THEN jsonb_build_object(
+               'vendor_id', $2::int,
+               'status', 'PENDING',
+               'remarks', null,
+               'acted_by', null,
+               'acted_at', null
+             )
+             ELSE elem
+           END
+         )
+         FROM jsonb_array_elements(vendor_approvals) AS elem
+       ),
+       updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [roundId, vendorId]
+    );
   }
 };
 
