@@ -6644,6 +6644,27 @@ const rfqController = {
 
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
+      // RBAC check for non-vendor users: must have rfq.read/boq.read for this RFQ's business unit
+      if (rfqData?.id && user_type != 3) {
+        const resource = rfqData.is_tender == 1 ? 'boq' : 'rfq';
+        const hasAccess = await db.oneOrNone(`
+          SELECT 1 FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = $1
+            AND p.resource = $2
+            AND p.action = 'read'
+            AND urs.company_id = $3
+            AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+            AND ($5::int IS NULL OR urs.department_id = $5 OR urs.department_id IS NULL)
+          LIMIT 1
+        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id, rfqData.department_id || null]);
+
+        if (!hasAccess) {
+          return res.status(403).json({ status: 0, message: 'You do not have permission to view this RFQ' });
+        }
+      }
+
       let lifecycleMap = {};
       if (rfqData?.id) {
         lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
@@ -14274,6 +14295,7 @@ getClauses: async (req, res) => {
       let {
         tech_eval,
         po = 'false',
+        quote_compare = 'false',
         page = 1,
         limit = 10,
         project_id,
@@ -14288,6 +14310,7 @@ getClauses: async (req, res) => {
       // Convert string query parameters to proper types
       tech_eval = tech_eval === 'true';
       po = po === 'true';
+      quote_compare = quote_compare === 'true';
 
       page = parseInt(page) || 1;
       limit = parseInt(limit) || 10;
@@ -14324,7 +14347,8 @@ getClauses: async (req, res) => {
         sort,
         is_tender,
         rfq_id,
-        hotel_id
+        hotel_id,
+        quote_compare
       );
 
       // Enrich each RFQ with approval_required flag

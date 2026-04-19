@@ -1974,21 +1974,23 @@ update_user_detail: async (req, res, next) => {
     let scopeRemoveContext = null; // populated when scope-level removals exist
 
     if (isAdmin) {
-      oldRoleScopes = await db.any(
-        `SELECT role_id,
-                COALESCE(company_id, 0)    AS company_id,
-                COALESCE(hotel_id, 0)      AS hotel_id,
-                COALESCE(department_id, 0) AS department_id
-         FROM tbl_user_role_scopes WHERE user_id = $1`,
-        [targetUserId]
-      );
+      // Parallelize snapshot queries — these are independent reads
+      const [oldScopesResult, oldDeptsResult, oldUserResult] = await Promise.all([
+        db.any(
+          `SELECT role_id,
+                  COALESCE(company_id, 0)    AS company_id,
+                  COALESCE(hotel_id, 0)      AS hotel_id,
+                  COALESCE(department_id, 0) AS department_id
+           FROM tbl_user_role_scopes WHERE user_id = $1`,
+          [targetUserId]
+        ),
+        db.any('SELECT department_id FROM tbl_user_department WHERE user_id = $1', [targetUserId]),
+        db.oneOrNone('SELECT status FROM tbl_users WHERE id = $1', [targetUserId])
+      ]);
+      oldRoleScopes = oldScopesResult;
       oldRoleIds = oldRoleScopes.map(r => r.role_id);
-
-      const oldDepts = await db.any('SELECT department_id FROM tbl_user_department WHERE user_id = $1', [targetUserId]);
-      oldDeptIds = oldDepts.map(d => d.department_id);
-
-      const oldUser = await db.oneOrNone('SELECT status FROM tbl_users WHERE id = $1', [targetUserId]);
-      oldStatus = oldUser?.status;
+      oldDeptIds = oldDeptsResult.map(d => d.department_id);
+      oldStatus = oldUserResult?.status;
 
       // Build scope-aware new state from request.
       const newRoleIds = Array.isArray(reqData.roles) ? reqData.roles.map(r => r.role_id) : null;
@@ -2071,7 +2073,13 @@ update_user_detail: async (req, res, next) => {
         // ID — different number space. Passing it here matches zero rows and the
         // pre-flight check silently no-ops. The user mutation is global, so the
         // impact check must be global too.
-        const impact = await simulateApproverImpact(targetUserId, changeType);
+        // Pass changedRoleIds/changedDeptIds so the simulation only checks steps
+        // tied to the roles/depts actually being removed (prevents false positives
+        // where user is an approver via a different, kept role).
+        const impact = await simulateApproverImpact(targetUserId, changeType, {
+          changedRoleIds: scopeRemoveContext.affectedRemovedRoleIds,
+          changedDeptIds: scopeRemoveContext.removedDeptIds
+        });
 
         logger.info(`[UpdateUser ${targetUserId}] pre-flight result: willAutoComplete=${impact.willAutoComplete}, affectedInstances=${impact.affectedInstances.length}`);
 
@@ -2132,41 +2140,35 @@ update_user_detail: async (req, res, next) => {
 
     await rfqModel.updateWhere("tbl_users", updateData, whereClause);
 
-    /* -------------------- UPDATE DEPARTMENTS (atomic) -------------------- */
-    if (isAdmin && Array.isArray(reqData.department_ids)) {
-      await db.tx(async t => {
-        await rbacModel.deleteUserDepartments(targetUserId, t);
-        await rbacModel.assignUserDepartments(targetUserId, reqData.department_ids, t);
-      });
-    }
+    /* -------------------- UPDATE DEPARTMENTS + ROLE SCOPES (single tx) ---- */
+    const hasDeptUpdate = isAdmin && Array.isArray(reqData.department_ids);
+    const hasRoleUpdate = isAdmin && Array.isArray(reqData.roles);
 
-    /* -------------------- UPDATE ROLE SCOPES (atomic) --------------------
-       Wrapped in a single tx so a failed insert rolls back the delete,
-       avoiding the half-state where the user temporarily has no scopes. */
-    if (isAdmin && Array.isArray(reqData.roles)) {
-      const roleScopes = reqData.roles.map(r => ({
-        user_id: targetUserId,
-        role_id: r.role_id,
-        company_id: r.company_id || loggedInUser.company_id,
-        hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
-      }));
+    if (hasDeptUpdate || hasRoleUpdate) {
+      const roleScopes = hasRoleUpdate
+        ? reqData.roles.map(r => ({
+            user_id: targetUserId,
+            role_id: r.role_id,
+            company_id: r.company_id || loggedInUser.company_id,
+            hotel_id: r.hotel_id || null,
+            department_id: r.department_id || null
+          }))
+        : null;
 
-      logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);
+      if (hasRoleUpdate) {
+        logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);
+      }
 
       await db.tx(async t => {
-        await rbacModel.deleteUserRoleScopes(targetUserId, t);
-        await rbacModel.assignUserRoleScopes(roleScopes, t);
+        if (hasDeptUpdate) {
+          await rbacModel.deleteUserDepartments(targetUserId, t);
+          await rbacModel.assignUserDepartments(targetUserId, reqData.department_ids, t);
+        }
+        if (hasRoleUpdate) {
+          await rbacModel.deleteUserRoleScopes(targetUserId, t);
+          await rbacModel.assignUserRoleScopes(roleScopes, t);
+        }
       });
-
-      // Sanity-check what actually landed in the DB. If this ever diverges
-      // from roleScopes.length, the next investigation has a clean log line
-      // to start from.
-      const verifyScopes = await db.any(
-        'SELECT role_id, company_id, hotel_id, department_id FROM tbl_user_role_scopes WHERE user_id = $1',
-        [targetUserId]
-      );
-      logger.info(`[UpdateUser ${targetUserId}] post-write verify: DB has ${verifyScopes.length} scopes`);
     }
 
     /* ---- PROPAGATE APPROVAL MEMBERSHIP CHANGES ----
@@ -2336,7 +2338,9 @@ update_user_detail: async (req, res, next) => {
         user.spoc = spoc;
 
         // Fetch user-to-company/hotel mappings
-        const userMappings = await hospitalityModel.getUserMappings(user_id);
+        // includeHotelRows: expand company-level mappings into individual hotel rows
+        // so frontend hotel filters/dropdowns show all accessible hotels
+        const userMappings = await hospitalityModel.getUserMappings(user_id, { includeHotelRows: true });
         user.hospitality_mappings = userMappings || [];
 
         // Add user_key for hospitality payments
