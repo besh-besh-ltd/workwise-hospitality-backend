@@ -8,7 +8,6 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
-import { DEPARTMENT_SCOPED_RESOURCES } from '../util/constants.js';
 
 /**
  * RBAC permission middleware
@@ -35,18 +34,20 @@ export const can = (permKey, needEvery = false) => {
       }
 
       const userId = req.user.id;
-      const companyId = req.headers["x-company-id"] || req.user.company_id;
+      const companyId = req.headers["x-company-id"]
+        || req.headers["x-hospitality-company"]
+        || req.user.company_id;
 
       // Multi-hotel support: parse from header or query
-      // Priority: x-hotel-ids (multiple) > x-hotel-id (single) > query.hotel_id
+      // Priority: x-hotel-ids (multiple) > x-hotel-id / x-hospitality-hotel (single) > query.hotel_id
       let hotelIds = [];
       if (req.headers["x-hotel-ids"]) {
         hotelIds = req.headers["x-hotel-ids"]
           .split(",")
           .map(id => parseInt(id.trim(), 10))
           .filter(id => !isNaN(id) && id > 0);
-      } else if (req.headers["x-hotel-id"]) {
-        const id = parseInt(req.headers["x-hotel-id"], 10);
+      } else if (req.headers["x-hotel-id"] || req.headers["x-hospitality-hotel"]) {
+        const id = parseInt(req.headers["x-hotel-id"] || req.headers["x-hospitality-hotel"], 10);
         if (!isNaN(id) && id > 0) hotelIds = [id];
       } else if (req.query.hotel_id) {
         const id = parseInt(req.query.hotel_id, 10);
@@ -74,12 +75,8 @@ export const can = (permKey, needEvery = false) => {
         }
       }
 
-      // Only apply department filter when ALL requested permissions are for department-scoped resources
-      const allDeptScoped = permKeys.every(key => {
-        const [resource] = key.split(".");
-        return DEPARTMENT_SCOPED_RESOURCES.includes(resource);
-      });
-      const effectiveDeptId = allDeptScoped ? departmentId : null;
+      // All resources are department-scoped — always apply department filter when provided
+      const effectiveDeptId = departmentId;
 
       let hasPermission;
 
@@ -102,10 +99,7 @@ export const can = (permKey, needEvery = false) => {
             AND (
               $6::int IS NULL
               OR urs.department_id = $6
-              OR (
-                urs.department_id IS NULL
-                AND EXISTS (SELECT 1 FROM tbl_user_department ud WHERE ud.user_id = urs.user_id AND ud.department_id = $6)
-              )
+              OR urs.department_id IS NULL
             )
           GROUP BY urs.user_id
           HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $5
@@ -130,10 +124,7 @@ export const can = (permKey, needEvery = false) => {
             AND (
               $5::int IS NULL
               OR urs.department_id = $5
-              OR (
-                urs.department_id IS NULL
-                AND EXISTS (SELECT 1 FROM tbl_user_department ud WHERE ud.user_id = urs.user_id AND ud.department_id = $5)
-              )
+              OR urs.department_id IS NULL
             )
           LIMIT 1
           `,

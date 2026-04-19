@@ -1,5 +1,4 @@
 import rbacModel from "../../models/rbacModel.js";
-import { DEPARTMENT_SCOPED_RESOURCES } from "../../util/constants.js";
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 
@@ -8,56 +7,19 @@ const rbacController = {
   /* -------------------- DEPARTMENTS -------------------- */
   getDepartments: async (req, res) => {
     try {
+      const userId = req.user?.id;
+      const hotelId = req.query.hotel_id ? parseInt(req.query.hotel_id) : null;
+      const resource = req.query.resource || null;
+
+      // When hotel and resource context are provided, filter by user's role scopes
+      if (userId && hotelId && resource) {
+        const rows = await rbacModel.getDepartmentsForUserScope(userId, hotelId, resource, 'create');
+        return res.json({ status: true, data: rows });
+      }
+
+      // Fallback: return all departments (backward compatibility)
       const rows = await rbacModel.getDepartments();
       return res.json({ status: true, data: rows });
-    } catch (err) {
-      return res.status(500).json({ status: false, message: err.message });
-    }
-  },
-
-  getDepartmentAccessMatrix: async (req, res) => {
-    try {
-      const rows = await rbacModel.getDepartments();
-      // Group: ALL departments first, then INDIVIDUAL
-      const allDepts = rows.filter(d => d.access_type === 'ALL');
-      const individualDepts = rows.filter(d => d.access_type === 'INDIVIDUAL');
-      return res.json({
-        status: true,
-        data: {
-          departments: [...allDepts, ...individualDepts],
-          summary: {
-            all_count: allDepts.length,
-            individual_count: individualDepts.length
-          }
-        }
-      });
-    } catch (err) {
-      return res.status(500).json({ status: false, message: err.message });
-    }
-  },
-
-  updateDepartmentAccessMatrix: async (req, res) => {
-    try {
-      const { departments } = req.body;
-      if (!Array.isArray(departments) || departments.length === 0) {
-        return res.status(400).json({ status: false, message: 'departments array is required' });
-      }
-      const valid = departments.every(d => d.id && ['ALL', 'INDIVIDUAL'].includes(d.access_type));
-      if (!valid) {
-        return res.status(400).json({ status: false, message: 'Each entry must have id and access_type (ALL or INDIVIDUAL)' });
-      }
-      await rbacModel.updateDepartmentAccessTypes(departments);
-      const rows = await rbacModel.getDepartments();
-      const allDepts = rows.filter(d => d.access_type === 'ALL');
-      const individualDepts = rows.filter(d => d.access_type === 'INDIVIDUAL');
-      return res.json({
-        status: true,
-        message: 'Department access matrix updated',
-        data: {
-          departments: [...allDepts, ...individualDepts],
-          summary: { all_count: allDepts.length, individual_count: individualDepts.length }
-        }
-      });
     } catch (err) {
       return res.status(500).json({ status: false, message: err.message });
     }
@@ -462,10 +424,8 @@ const rbacController = {
       }
 
       // Step 2: Get permissions for valid hotels (optionally filtered by key)
-      // Only pass department_id for department-scoped resources
-      const effectiveDeptId = (key && DEPARTMENT_SCOPED_RESOURCES.includes(key))
-        ? (department_id ? parseInt(department_id, 10) : null)
-        : null;
+      // All resources are department-scoped — always pass department_id through
+      const effectiveDeptId = department_id ? parseInt(department_id, 10) : null;
 
       const permissions = await rbacModel.getUserPermissionsForHotels(
         userId,

@@ -626,6 +626,7 @@ export function validateGetRfqsQuery(req, res, next) {
     page: Joi.number().integer().min(1).required(),
     limit: Joi.number().integer().min(1).max(100).required(),
     tech_eval: Joi.boolean().required(),
+    quote_compare: Joi.boolean().optional(),
     project_id: Joi.number().optional(),
     sort: Joi.string().valid('ASC', 'DESC').optional(),
     rfq_no: Joi.number().optional().allow(null),
