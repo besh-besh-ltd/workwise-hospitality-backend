@@ -4090,30 +4090,34 @@ const _applyModificationFromMetadata = async (payment, t) => {
     }
   }
 
-  // 5. Unmap product variants for removed categories
-  const removedCatIds = [
-    ...(Array.isArray(metadata.cancel_subscription_ids) ? [] : []),
-    ...(Array.isArray(metadata.cascade_parent_category_ids) ? metadata.cascade_parent_category_ids : [])
-  ];
-  // We need the actual category IDs that were removed — extract from the
-  // subscription items that were cancelled. The metadata stores the
-  // subscription row IDs, not the category IDs directly. But we also have
-  // the category names lists. Let's use the cancel_subscription_ids to look
-  // up what was cancelled, or more simply use the removed category names to
-  // find their IDs. The simplest: use cascade_parent_category_ids (those are
-  // the parent category IDs that were removed) plus any explicitly removed
-  // category/subcategory item_ids from the add_subscription_items inverse.
-  // Actually, the metadata doesn't store removed item_ids directly. Let's
-  // query what was just cancelled.
+  // 5. Unmap product variants for removed categories.
+  // Use metadata-driven cancel IDs instead of a time-based query to avoid
+  // accidentally unmapping categories that were cancelled in a PRIOR
+  // modification (e.g., vendor removes then re-adds a category quickly).
   try {
-    const cancelledRows = await db.any(
-      `SELECT item_id, item_type FROM tbl_vendor_hotel_category_subscription
-       WHERE vendor_id = $1 AND status = 'cancelled'
-         AND cancelled_at >= NOW() - INTERVAL '1 minute'
-         AND item_type IN ('category', 'subcategory')`,
-      [vendorId]
-    );
-    const cancelledCatIds = cancelledRows.map(r => r.item_id);
+    const cancelSubIds = Array.isArray(metadata.cancel_subscription_ids)
+      ? metadata.cancel_subscription_ids.filter(Boolean)
+      : [];
+    const cascadeParentIds = Array.isArray(metadata.cascade_parent_category_ids)
+      ? metadata.cascade_parent_category_ids.filter(Boolean)
+      : [];
+
+    let cancelledCatIds = [...cascadeParentIds];
+
+    // Look up category IDs from the cancelled subscription row IDs
+    if (cancelSubIds.length > 0) {
+      const cancelledRows = await db.any(
+        `SELECT item_id FROM tbl_vendor_hotel_category_subscription
+         WHERE id = ANY($1::int[]) AND item_type IN ('category', 'subcategory')`,
+        [cancelSubIds]
+      );
+      cancelledCatIds.push(...cancelledRows.map(r => r.item_id));
+    }
+
+    // Exclude any categories that were ADDED in this same modification
+    const addedSet = new Set(addedCatIds);
+    cancelledCatIds = cancelledCatIds.filter(id => !addedSet.has(id));
+
     if (cancelledCatIds.length > 0) {
       await _unmapProductsForCategories(vendorId, cancelledCatIds);
     }
