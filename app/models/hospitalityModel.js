@@ -1827,6 +1827,24 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     // cancelled row keeps its originally-paid end_date in the future,
     // which misleads summary views and makes "active period" reporting
     // incorrect.
+
+    // Remove stale cancelled rows that would conflict with the new cancel
+    // on the unique constraint (vendor_id, item_type, item_id, end_date).
+    // This happens when a vendor cancels, re-adds, then cancels again on
+    // the same day — the prior cancelled row already has end_date = today.
+    await conn.none(
+      `DELETE FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1
+         AND status = 'cancelled'
+         AND end_date = CURRENT_DATE
+         AND (item_type, item_id) IN (
+           SELECT item_type, item_id
+           FROM tbl_vendor_hotel_category_subscription
+           WHERE id = ANY($2::int[]) AND vendor_id = $1
+         )`,
+      [vendorId, subscriptionIds]
+    );
+
     const result = await conn.result(
       `UPDATE tbl_vendor_hotel_category_subscription
        SET status = 'cancelled',
@@ -1855,6 +1873,29 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     // today so the cancelled row's effective period reflects reality. The
     // cancelled_at timestamp preserves the precise cancellation event for
     // audit/reporting.
+
+    // Remove stale cancelled rows that would conflict on the unique
+    // constraint (vendor_id, item_type, item_id, end_date) when a
+    // subcategory is cancelled again on the same day.
+    await conn.none(
+      `DELETE FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1
+         AND status = 'cancelled'
+         AND end_date = CURRENT_DATE
+         AND item_type = 'subcategory'
+         AND item_id IN (
+           SELECT sc.id FROM tbl_category sc
+           WHERE sc.parent_id = ANY($2::int[])
+         )
+         AND id NOT IN (
+           SELECT s2.id FROM tbl_vendor_hotel_category_subscription s2
+           WHERE s2.vendor_id = $1 AND s2.status = 'active'
+             AND s2.item_type = 'subcategory'
+             AND s2.item_id IN (SELECT sc2.id FROM tbl_category sc2 WHERE sc2.parent_id = ANY($2::int[]))
+         )`,
+      [vendorId, parentCategoryIds]
+    );
+
     const cancelled = await conn.any(
       `UPDATE tbl_vendor_hotel_category_subscription s
        SET status = 'cancelled',
