@@ -1802,7 +1802,7 @@ WHERE NOT EXISTS (
         });
     });
   },
-  getRfqByUser: async (limit, offset, user_id) => {
+  getRfqByUser: async (limit, offset, user_id, filters = {}) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT
@@ -1892,9 +1892,20 @@ WHERE NOT EXISTS (
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
+        ${filters?.search_val ? `AND (RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%' OR RFQ.company_name ILIKE '%' || $4 || '%')` : ''}
+        ${filters?.rfq_status === 'open' ? `AND RFQ.status = 1 AND (RFQ.bid_end_date = '' OR DATE(RFQ.bid_end_date) >= CURRENT_DATE)` : ''}
+        ${filters?.rfq_status === 'closed' ? `AND (RFQ.status != 1 OR (RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) < CURRENT_DATE))` : ''}
+        ${filters?.bid_ends_in === '3d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
+        ${filters?.bid_ends_in === '5d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
+        ${filters?.bid_ends_in === '1w' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
+        ${filters?.bid_ends_in === '1m' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+        ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
+        ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3)` : ''}
+        ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3 AND TQ.is_regret = 0)` : ''}
+        ${filters?.quote_status === 'rejected' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3 AND TQ.is_regret = 1)` : ''}
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
-        [offset, limit, user_id]
+        [offset, limit, user_id, filters?.search_val]
       )
         .then(function (data) {
           resolve(data);
@@ -8563,14 +8574,25 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-  getVendorRfqCount: async (user_id) => {
+  getVendorRfqCount: async (user_id, filters = {}) => {
     return new Promise((resolve, reject) => {
       db.one(
         `SELECT COUNT(DISTINCT v.rfq_id)
          FROM tbl_rfq_product_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
-        [user_id]
+         WHERE v.user_id = $1 AND r.is_published = 1 AND r.status NOT IN (3, 4)
+         ${filters?.search_val ? `AND (r.rfq_no::text LIKE '%' || $2 || '%' OR r.title ILIKE '%' || $2 || '%' OR r.company_name ILIKE '%' || $2 || '%')` : ''}
+         ${filters?.rfq_status === 'open' ? `AND r.status = 1 AND (r.bid_end_date = '' OR DATE(r.bid_end_date) >= CURRENT_DATE)` : ''}
+         ${filters?.rfq_status === 'closed' ? `AND (r.status != 1 OR (r.bid_end_date != '' AND DATE(r.bid_end_date) < CURRENT_DATE))` : ''}
+         ${filters?.bid_ends_in === '3d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
+         ${filters?.bid_ends_in === '5d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
+         ${filters?.bid_ends_in === '1w' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
+         ${filters?.bid_ends_in === '1m' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+         ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
+         ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1)` : ''}
+         ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1 AND TQ.is_regret = 0)` : ''}
+         ${filters?.quote_status === 'rejected' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1 AND TQ.is_regret = 1)` : ''}`,
+        [user_id, filters?.search_val]
       )
         .then(function (data) {
           resolve(data);
@@ -8580,6 +8602,30 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           reject(error);
         });
     });
+  },
+
+  getVendorRfqStats: async (user_id) => {
+    return db.one(
+      `SELECT
+         COUNT(DISTINCT v.rfq_id) as total,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1)
+         ) as pending,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1 AND q.is_regret = 0)
+         ) as quoted,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
+           AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1)
+         ) as closing_soon,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE EXISTS (SELECT 1 FROM tbl_quote_finalization qf WHERE qf.rfq_id = v.rfq_id AND qf.vendor_id = $1)
+         ) as finalized
+       FROM tbl_rfq_product_vendors v
+       JOIN tbl_rfq r ON v.rfq_id = r.id
+       WHERE v.user_id = $1 AND r.is_published = 1 AND r.status NOT IN (3, 4)`,
+      [user_id]
+    );
   },
 
   getAllRfqsForAdmin: async (

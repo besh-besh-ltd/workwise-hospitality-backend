@@ -6552,15 +6552,28 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
-      const totalRFQ = await rfqModel.getVendorRfqCount(user_id);
+      // Server-side filters
+      const filters = {
+        search_val: req.body.search_val || null,
+        quote_status: req.body.quote_status || null,
+        rfq_status: req.body.rfq_status || null,
+        bid_ends_in: req.body.bid_ends_in || null,
+        hotel_ids: Array.isArray(req.body.hotel_ids) ? req.body.hotel_ids.filter(Boolean) : [],
+      };
+
+      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, filters);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, filters);
+
+      // Stats for dashboard cards
+      const stats = await rfqModel.getVendorRfqStats(user_id);
 
       res
         .status(200)
         .json({
           status: 1,
           data: listRfq,
-          totalRFQ
+          totalRFQ,
+          stats,
         })
         .end();
     } catch (error) {
