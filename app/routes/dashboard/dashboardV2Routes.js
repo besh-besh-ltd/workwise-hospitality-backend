@@ -13,5 +13,6 @@ DashboardRoutes.get('/category-insights', passportSignIn, dashboardController.ge
 DashboardRoutes.get('/workflow-efficiency', passportSignIn, dashboardController.getWorkflowEfficiency);
 DashboardRoutes.get('/smart-insights', passportSignIn, dashboardController.getSmartInsights);
 DashboardRoutes.get('/pending-approvals', passportSignIn, dashboardController.getPendingApprovals);
+DashboardRoutes.get('/rejected-pos', passportSignIn, dashboardController.getRejectedPOs);
 
 export default DashboardRoutes;

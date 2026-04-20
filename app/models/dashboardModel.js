@@ -39,42 +39,67 @@ function hotelFilter(alias = 'r', paramIdx = 4) {
  * If selectedHotelIds are provided, intersects with the allowed set.
  */
 async function resolveUserScope(user_id, selectedHotelIds = []) {
-  const mappings = await db.any(
-    `SELECT hum.hospitality_company_id, hum.hospitality_hotel_id, hum.mapping_type,
-            hc.buyer_company_id
-     FROM tbl_hospitality_user_mappings hum
-     JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id
-     WHERE hum.user_id = $1`,
+  // Check user type
+  const userInfo = await db.oneOrNone(
+    `SELECT user_type, company_id FROM tbl_users WHERE id = $1`,
     [user_id]
   );
 
-  if (mappings.length === 0) return null;
+  if (!userInfo) return null;
 
-  const buyer_company_id = mappings[0].buyer_company_id;
+  let buyer_company_id;
+  let allAllowed = [];
 
-  // Collect company-level company IDs (user sees ALL hotels in these)
-  const companyLevelIds = mappings
-    .filter((m) => m.mapping_type === 0)
-    .map((m) => m.hospitality_company_id);
+  if (parseInt(userInfo.user_type) === 7) {
+    // Admin (user_type=7): full access to all hospitality companies under their company
+    if (!userInfo.company_id) return null;
 
-  // Collect hotel-level hotel IDs
-  const hotelLevelIds = mappings
-    .filter((m) => m.mapping_type === 1 && m.hospitality_hotel_id)
-    .map((m) => m.hospitality_hotel_id);
+    buyer_company_id = userInfo.company_id;
 
-  // For company-level mappings, fetch ALL hotels in those companies
-  let companyHotelIds = [];
-  if (companyLevelIds.length > 0) {
-    const rows = await db.any(
-      `SELECT id FROM tbl_hospitality_company_hotels
-       WHERE hospitality_company_id = ANY($1) AND is_deleted = 0`,
-      [companyLevelIds]
+    const allHotels = await db.any(
+      `SELECT hch.id FROM tbl_hospitality_company_hotels hch
+       JOIN tbl_hospitality_companies hc ON hc.id = hch.hospitality_company_id
+       WHERE hc.buyer_company_id = $1 AND hch.is_deleted = 0`,
+      [buyer_company_id]
     );
-    companyHotelIds = rows.map((h) => h.id);
-  }
 
-  // Merge: all hotels from company-level + specific hotel-level
-  const allAllowed = [...new Set([...companyHotelIds, ...hotelLevelIds])];
+    if (allHotels.length === 0) return null;
+    allAllowed = allHotels.map((h) => h.id);
+  } else {
+    // Non-admin: use explicit hospitality user mappings
+    const mappings = await db.any(
+      `SELECT hum.hospitality_company_id, hum.hospitality_hotel_id, hum.mapping_type,
+              hc.buyer_company_id
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id
+       WHERE hum.user_id = $1`,
+      [user_id]
+    );
+
+    if (mappings.length === 0) return null;
+
+    buyer_company_id = mappings[0].buyer_company_id;
+
+    const companyLevelIds = mappings
+      .filter((m) => m.mapping_type === 0)
+      .map((m) => m.hospitality_company_id);
+
+    const hotelLevelIds = mappings
+      .filter((m) => m.mapping_type === 1 && m.hospitality_hotel_id)
+      .map((m) => m.hospitality_hotel_id);
+
+    let companyHotelIds = [];
+    if (companyLevelIds.length > 0) {
+      const rows = await db.any(
+        `SELECT id FROM tbl_hospitality_company_hotels
+         WHERE hospitality_company_id = ANY($1) AND is_deleted = 0`,
+        [companyLevelIds]
+      );
+      companyHotelIds = rows.map((h) => h.id);
+    }
+
+    allAllowed = [...new Set([...companyHotelIds, ...hotelLevelIds])];
+  }
 
   // Intersect with user's filter selection
   let effective;
@@ -117,6 +142,7 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
        i.entity_type IN ('RFQ', 'TENDER')
        AND EXISTS (SELECT 1 FROM tbl_rfq r WHERE r.id = i.entity_id AND r.is_published = 1)
      )
+     AND i.created_at BETWEEN $2 AND $3
      AND i.hotel_id = ANY($4)`,
     [...params, user_id]
   );
@@ -147,11 +173,21 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
     params
   );
 
+  // Only count rejected POs where no replacement PO exists for the same product
   const rejectedVendorsQuery = db.one(
     `SELECT COUNT(*) as count
      FROM tbl_rfq_purchase_order po
+     JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
      JOIN tbl_rfq r ON r.id = po.rfq_id
      WHERE ${companyScope()} AND po.status = 'rejected_by_vendor'
+     AND NOT EXISTS (
+       SELECT 1 FROM tbl_rfq_purchase_order po2
+       JOIN tbl_purchase_order_product pop2 ON pop2.purchase_order_id = po2.id
+       WHERE po2.rfq_id = po.rfq_id
+       AND pop2.rfq_product_id = pop.rfq_product_id
+       AND po2.id != po.id
+       AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
+     )
      ${dateFilterPo} ${hf}`,
     params
   );
@@ -708,8 +744,7 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
 // ─────────────────────────────────────────────────────────────────────
 // 8. Pending Approvals (detailed list for modal)
 // ─────────────────────────────────────────────────────────────────────
-async function getPendingApprovalsDetail(buyer_company_id, user_id) {
-  // Same filtering logic as the counts API (getPendingApprovalCountsByEntityType)
+async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, end_date) {
   return db.any(
     `SELECT
        i.id as approval_id,
@@ -739,8 +774,56 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id) {
        i.entity_type IN ('RFQ', 'TENDER')
        AND EXISTS (SELECT 1 FROM tbl_rfq r2 WHERE r2.id = i.entity_id AND r2.is_published = 1)
      )
+     AND i.created_at BETWEEN $3 AND $4
      ORDER BY i.created_at ASC`,
-    [buyer_company_id, user_id]
+    [buyer_company_id, user_id, start_date, end_date]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 9. Rejected POs (detail list for modal)
+// ─────────────────────────────────────────────────────────────────────
+async function getRejectedPOsDetail(buyer_company_id, hotel_ids = []) {
+  return db.any(
+    `SELECT
+       po.id as po_id,
+       po.rfq_id,
+       po.status,
+       po.created_at,
+       po.vendor_action_at as rejected_at,
+       r.title as rfq_title,
+       r.rfq_no,
+       u_vendor.name as vendor_name,
+       COALESCE(c_vendor.company_name, u_vendor.organization_name) as vendor_company,
+       hch.name as hotel_name,
+       (SELECT STRING_AGG(COALESCE(pv.name, 'Product'), ', ' ORDER BY pop2.id)
+        FROM tbl_purchase_order_product pop2
+        LEFT JOIN tbl_rfq_products rp ON rp.id = pop2.rfq_product_id
+        LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+        WHERE pop2.purchase_order_id = po.id
+       ) as product_names,
+       COALESCE(SUM(pop.total_price), 0) as po_value
+     FROM tbl_rfq_purchase_order po
+     JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+     JOIN tbl_rfq r ON r.id = po.rfq_id
+     LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.finalized_vendor_id
+     LEFT JOIN tbl_company c_vendor ON c_vendor.id = u_vendor.company_id
+     LEFT JOIN tbl_rfq_hotel_mappings rhm ON rhm.rfq_id = r.id
+     LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+     WHERE ${companyScope()} AND po.status = 'rejected_by_vendor'
+     AND NOT EXISTS (
+       SELECT 1 FROM tbl_rfq_purchase_order po2
+       JOIN tbl_purchase_order_product pop2 ON pop2.purchase_order_id = po2.id
+       WHERE po2.rfq_id = po.rfq_id
+       AND pop2.rfq_product_id = pop.rfq_product_id
+       AND po2.id != po.id
+       AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
+     )
+     AND rhm.hotel_id = ANY($2)
+     GROUP BY po.id, po.rfq_id, po.status, po.created_at, po.vendor_action_at,
+       r.title, r.rfq_no, u_vendor.name, c_vendor.company_name, u_vendor.organization_name, hch.name
+     ORDER BY po.vendor_action_at DESC NULLS LAST`,
+    [buyer_company_id, hotel_ids]
   );
 }
 
@@ -754,4 +837,5 @@ export default {
   getWorkflowEfficiencyData,
   getSmartInsightsData,
   getPendingApprovalsDetail,
+  getRejectedPOsDetail,
 };

@@ -5668,7 +5668,7 @@ const rfqController = {
       const sort = req.body.sort || 'DESC';
       const reverse_auction = req.body.reverse_auction || '-1';
       const rfq_type = req.body.rfq_type || '';
-      const rfq_no = req.body.rfq_no || null;
+      const rfq_no = req.body.search_val || req.body.rfq_no || null;
       const hotel_ids = req.body.hotel_ids || [];
 
       const result = await rfqModel.getAllDraftRfqs(
@@ -6925,7 +6925,11 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status, hotel_ids } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, search_val, is_tender, completed_status, hotel_ids } = req.body;
+      // Support unified search_val (searches both title and rfq_no)
+      if (search_val && !rfq_no) {
+        rfq_no = search_val;
+      }
       if (project_id == -1) {
         project_id = null;
       }
@@ -7025,7 +7029,8 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, search_val, is_tender, hotel_ids } = req.body;
+      if (search_val && !rfq_no) rfq_no = search_val;
       if (project_id == -1) {
         project_id = null;
       }
@@ -7050,7 +7055,8 @@ const rfqController = {
         reverse_auction,
         rfq_type,
         rfq_no,
-        is_tender
+        is_tender,
+        hotel_ids
       );
 
       let count = await rfqModel.getPendingApprovalRfqCount(
@@ -7059,7 +7065,8 @@ const rfqController = {
         rfq_type,
         reverse_auction,
         rfq_no,
-        is_tender
+        is_tender,
+        hotel_ids
       );
 
       // Enrich with lifecycle stage

@@ -3518,7 +3518,7 @@ LIMIT 2;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
+      AND ($6 IS NULL OR RFQ.rfq_no::text LIKE '%' || $6 || '%' OR RFQ.title ILIKE '%' || $6 || '%') -- Search by rfq_no or title
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
       ${completed_status === 'completed' ? `AND (
         (SELECT CASE
@@ -4980,7 +4980,7 @@ LIMIT 2;
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL) -- Filter by rfq_no if provided
+        AND ($4 IS NULL OR RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%') -- Search by rfq_no or title
         ${isTenderFilter}
         ${completed_status === 'completed' ? `AND (
           (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
@@ -5029,7 +5029,8 @@ LIMIT 2;
     reverse_auction,
     rfq_type,
     rfq_no,
-    is_tender
+    is_tender,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -5207,8 +5208,9 @@ LIMIT 2;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
-      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL)
+      AND ($6 IS NULL OR RFQ.rfq_no::text LIKE '%' || $6 || '%' OR RFQ.title ILIKE '%' || $6 || '%')
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND RFQ.hotel_id IN (${hotel_ids.map(Number).filter(Boolean).join(',')})` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -5228,12 +5230,17 @@ LIMIT 2;
     rfq_type,
     reverse_auction,
     rfq_no,
-    is_tender
+    is_tender,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let isTenderFilter = '';
       if (is_tender !== null && is_tender !== undefined) {
         isTenderFilter = `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}`;
+      }
+      let hotelFilter = '';
+      if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+        hotelFilter = `AND RFQ.hotel_id IN (${hotel_ids.map(Number).filter(Boolean).join(',')})`;
       }
       db.any(
         `SELECT COUNT(*) from tbl_rfq RFQ
@@ -5271,8 +5278,9 @@ LIMIT 2;
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
-        ${isTenderFilter};
+        AND ($4 IS NULL OR RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%')
+        ${isTenderFilter}
+        ${hotelFilter};
         `,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
