@@ -33,6 +33,24 @@ const jwtHelper = {
       },
       Config.jwt.secret
     );
+  },
+
+  /** Generate a short-lived JWT for guest/token-based vendor access.
+   *  userData.user_id and userData.user_agent must already be encrypted. */
+  signGuestAccessToken: (userData, expirySeconds = 1800) => {
+    return JWT.sign(
+      {
+        iss: 'Des Technico',
+        sub: userData.user_id,
+        name: userData.name,
+        ag: userData.user_agent,
+        user: true,
+        guest: true,
+        iat: Math.round(new Date().getTime() / 1000),
+        exp: Math.round(new Date().getTime() / 1000) + expirySeconds,
+      },
+      Config.jwt.secret
+    );
   }
 };
 
