@@ -3407,9 +3407,9 @@ LIMIT 2;
                   LEFT JOIN tbl_quotes tq
                     ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
                   LEFT JOIN tbl_quote_items qi
-                    ON trpv.product_variant_id = qi.product_variant_id 
+                    ON trpv.product_variant_id = qi.product_variant_id
                     AND trpv.variant = qi.variant
-                    AND trpv.rfq_id = qi.rfq_id 
+                    AND trpv.rfq_id = qi.rfq_id
                     AND qi.quote_id = tq.id
                     AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
@@ -3417,9 +3417,21 @@ LIMIT 2;
                   GROUP BY
                     trpv.user_id
                   HAVING
-                    BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
+                    AND COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
                 ) AS fully_quoted_vendors
+              ),
+              'quote_regretted',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT trpv.user_id
+                  FROM tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  WHERE trpv.rfq_id = rfq.id
+                  GROUP BY trpv.user_id
+                  HAVING BOOL_OR(tq.is_regret = 1)
+                ) AS regretted_vendors
               )
             )
             FROM tbl_rfq_product_vendors trpv
@@ -3428,14 +3440,14 @@ LIMIT 2;
           ) AS "vendors",
           ARRAY(
               SELECT json_build_object(
-                  'id', RFQ_P.id, 
+                  'id', RFQ_P.id,
                   'product_id', RFQ_P.product_variant_id,
                   'product_specs', (
                       SELECT json_agg(json_build_object(
-                          'title', RFQ_P_SPEC.title, 
-                          'value', RFQ_P_SPEC.value, 
-                          'id', RFQ_P_SPEC.id, 
-                          'product_id', RFQ_P_SPEC.product_variant_id, 
+                          'title', RFQ_P_SPEC.title,
+                          'value', RFQ_P_SPEC.value,
+                          'id', RFQ_P_SPEC.id,
+                          'product_id', RFQ_P_SPEC.product_variant_id,
                           'rfq_id', RFQ_P_SPEC.rfq_id))
                       FROM tbl_rfq_products_specs RFQ_P_SPEC
                       WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
@@ -5103,9 +5115,21 @@ LIMIT 2;
                   GROUP BY
                     trpv.user_id
                   HAVING
-                    BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
+                    AND COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
                 ) AS fully_quoted_vendors
+              ),
+              'quote_regretted',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT trpv.user_id
+                  FROM tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  WHERE trpv.rfq_id = rfq.id
+                  GROUP BY trpv.user_id
+                  HAVING BOOL_OR(tq.is_regret = 1)
+                ) AS regretted_vendors
               )
             )
             FROM tbl_rfq_product_vendors trpv
