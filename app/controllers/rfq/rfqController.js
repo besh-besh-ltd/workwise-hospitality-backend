@@ -1032,15 +1032,17 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
       }
       })
 
-      // send message to vendor
-      const whatsappPayload ={
-        mobile:user.mobile,
-        token:vendorToken,
-        rfq_id:rfq_id,
-        message:message,
-        name:vendorName
+      // send message to vendor (skip if mobile not available, e.g. token-auth users)
+      if (user.mobile) {
+        const whatsappPayload ={
+          mobile:user.mobile,
+          token:vendorToken,
+          rfq_id:rfq_id,
+          message:message,
+          name:vendorName
+        }
+        await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
       }
-      await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
     }
   
   
@@ -12617,20 +12619,24 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       if (status) {
-        const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
-        await sendRevisedQuotationEmailToVendor(
-          buyerDetails,
-          user,
-          rfq_id,
-          rfq_no
-        );
-        await sendRevisedQuotationEmailToBuyer(
-          buyerDetails,
-          quoteItemChanges,
-          user,
-          rfq_id,
-          rfq_no
-        );
+        try {
+          const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+          await sendRevisedQuotationEmailToVendor(
+            buyerDetails,
+            user,
+            rfq_id,
+            rfq_no
+          );
+          await sendRevisedQuotationEmailToBuyer(
+            buyerDetails,
+            quoteItemChanges,
+            user,
+            rfq_id,
+            rfq_no
+          );
+        } catch (notificationError) {
+          logError('Failed to send quote update notifications', notificationError);
+        }
       }
 
       return res.status(200).json({
