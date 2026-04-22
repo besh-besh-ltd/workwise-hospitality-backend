@@ -256,7 +256,7 @@ RfqRoutes.get(
   rfqController.getQuoteHistoryForvendor
 );
 
-RfqRoutes.get(
+RfqRoutes.post(
   '/close-rfq/:id',
   passportSignIn,
   validateDbBody.user_id_profileexists,
