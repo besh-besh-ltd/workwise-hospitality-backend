@@ -255,7 +255,10 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
   try {
     let vendor = await userModel.getUserById(vendorUserId);
     vendor = vendor?.[0];
+    let vendorCompany = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
+    vendorCompany = vendorCompany?.[0];
     const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+    const companyName = vendorCompany?.company_name || 'Company';
 
     const rfqDetails = await db.oneOrNone(
       `SELECT r.id, r.rfq_no, r.title, r.hotel_id
@@ -291,7 +294,7 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
           <div style="background-color:#FEE2E2; border-left:4px solid #EF4444; padding:16px; margin:16px 0; border-radius:4px;">
             <p style="margin:0; font-weight:600; color:#991B1B;">
-              ${vendorName} has rejected PO #${purchaseOrder.po_number}
+              ${companyName} has rejected PO #${purchaseOrder.po_number}
             </p>
           </div>
 
@@ -440,8 +443,11 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
 export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails) => {
   try {
     let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    let vendorCompany = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
     vendor = vendor?.[0];
+    vendorCompany = vendorCompany?.[0];
     const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+    const companyName = vendorCompany?.company_name || 'Company';
 
     const products = await db.any(
       `SELECT P.name FROM tbl_rfq_products TRP
@@ -493,7 +499,7 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
 
           <div style="background-color:#F0FDF4; border-left:4px solid #10B981; padding:16px; margin:16px 0; border-radius:4px;">
             <p style="margin:0; font-size:18px; font-weight:600; color:#166534;">
-              ${vendorName} has accepted PO #${purchaseOrder.po_number}
+              ${companyName} has accepted PO #${purchaseOrder.po_number}
             </p>
           </div>
 
