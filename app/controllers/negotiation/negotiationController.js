@@ -21,7 +21,7 @@ import {
   createQuoteVisibilityError,
 } from '../../helper/quoteVisibility.js';
 import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } from '../../helper/cronManager.js';
-import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
+import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification, sendNegotiationRoundVendorNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
 
@@ -520,18 +520,16 @@ const NegotiationController = {
         );
 
         // If auto-approved (initiator is the only approver), activate immediately
-        // only if all vendors are also approved (for single-vendor rounds or no-step policies)
         if (!approvalResult || approvalResult.autoApproved) {
-          const allVendorsApproved = vendor_approvals.length === 0 ||
-            vendor_approvals.every(v => v.status === 'APPROVED');
-          if (allVendorsApproved) {
-            await t.none(
-              `UPDATE tbl_negotiation_rounds
-               SET status = 'ACTIVE', published_at = NOW()
-               WHERE id = $1`,
-              [round.id]
-            );
-          }
+          // Propagate approval to all vendor_approvals entries
+          await negotiationModel.updateAllVendorsStatus(round.id, 'APPROVED', null, user_id, t);
+
+          await t.none(
+            `UPDATE tbl_negotiation_rounds
+             SET status = 'ACTIVE', approved_at = NOW(), published_at = NOW()
+             WHERE id = $1`,
+            [round.id]
+          );
         }
 
         // Get updated round status
@@ -580,6 +578,50 @@ const NegotiationController = {
               initiator,
               autoApproved: isAutoApproved
             });
+          }
+
+          // If auto-approved, also notify evaluators and vendors
+          if (isAutoApproved) {
+            // Notify commercial evaluators (same as organic approval flow)
+            const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
+            const commercialEvaluators = hotelIds.length > 0
+              ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+              : [];
+
+            // Send only to evaluators (initiator already gets the "Auto-Approved & Live" creation email)
+            const evaluatorOnly = commercialEvaluators
+              .filter(u => u.email && u.email !== initiator?.email)
+              .map(u => ({ name: u.name, email: u.email }));
+            if (evaluatorOnly.length > 0) {
+              await sendNegotiationRoundApprovedNotification({
+                round: roundWithContext || { ...result, rfq_id },
+                rfqNo: rfqData.rfq_no,
+                productName,
+                initiator: evaluatorOnly[0],
+                commercialEvaluators: evaluatorOnly.slice(1)
+              });
+            }
+
+            // Notify vendors
+            const vendors = await negotiationModel.getVendorsForRound(result.id);
+            if (vendors.length > 0) {
+              const vendorsWithTokens = await Promise.all(
+                vendors.map(async (v) => {
+                  const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
+                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                })
+              );
+              const buyerCompanyRow = rfqData.hospitality_company_id
+                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
+                : null;
+              await sendNegotiationRoundVendorNotification({
+                round: roundWithContext || { ...result, rfq_id },
+                rfqNo: rfqData.rfq_no,
+                productName,
+                buyerCompanyName: buyerCompanyRow?.company_name || '',
+                vendors: vendorsWithTokens
+              });
+            }
           }
         } catch (emailErr) {
           logError('Failed to send round creation email', emailErr);
@@ -829,6 +871,27 @@ const NegotiationController = {
                 productName: roundWithContext?.product_name || 'Product',
                 initiator,
                 commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+              });
+            }
+
+            // Send vendor notification emails
+            const vendors = await negotiationModel.getVendorsForRound(round_id);
+            if (vendors.length > 0) {
+              const vendorsWithTokens = await Promise.all(
+                vendors.map(async (v) => {
+                  const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
+                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                })
+              );
+              const buyerCompanyRow = rfqData.hospitality_company_id
+                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
+                : null;
+              await sendNegotiationRoundVendorNotification({
+                round: roundWithContext || round,
+                rfqNo: rfqData.rfq_no,
+                productName: roundWithContext?.product_name || 'Product',
+                buyerCompanyName: buyerCompanyRow?.company_name || '',
+                vendors: vendorsWithTokens
               });
             }
           } catch (emailErr) {
