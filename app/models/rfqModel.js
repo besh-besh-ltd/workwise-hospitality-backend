@@ -6571,9 +6571,11 @@ LIMIT 2;
   getRFQCreatedBy: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.mobile,tbl_users.organization_name
+        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.mobile,tbl_users.organization_name,
+                c.company_name AS company_name
         FROM tbl_rfq
         LEFT JOIN tbl_users ON tbl_rfq.created_by = tbl_users.id
+        LEFT JOIN tbl_company c ON c.id = tbl_users.company_id
         WHERE tbl_rfq.id = $1;`,
         [id]
       )
