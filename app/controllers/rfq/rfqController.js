@@ -5291,7 +5291,65 @@ const rfqController = {
           [rfq_id]
         ));
 
-        assertEditAllowed(current, userId, { hasQuotes });
+        // 1c. Check for dead-end products — allows editing even after bid
+        //     window closes when all eligible vendors' POs were rejected.
+        const hasDeadEndProduct = !!(await t.oneOrNone(`
+          SELECT 1 FROM tbl_rfq_products rp_de
+          WHERE rp_de.rfq_id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization qf_de
+              WHERE qf_de.rfq_id = $1
+                AND qf_de.product_variant_id = rp_de.product_variant_id
+                AND qf_de.variant = rp_de.variant
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order po_de
+              JOIN tbl_purchase_order_product pop_de ON pop_de.purchase_order_id = po_de.id
+              WHERE po_de.rfq_id = $1
+                AND pop_de.rfq_product_id = rp_de.id
+                AND po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            )
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order po_rej
+              JOIN tbl_purchase_order_product pop_rej ON pop_rej.purchase_order_id = po_rej.id
+              WHERE po_rej.rfq_id = $1
+                AND pop_rej.rfq_product_id = rp_de.id
+                AND po_rej.status IN ('rejected', 'rejected_by_vendor')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_items qi_de
+              JOIN tbl_quotes q_de ON q_de.id = qi_de.quote_id
+              WHERE q_de.rfq_id = $1
+                AND qi_de.product_variant_id = rp_de.product_variant_id
+                AND qi_de.variant = rp_de.variant
+                AND (q_de.is_regret IS NULL OR q_de.is_regret != 1)
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation te_chk
+                    WHERE te_chk.tbl_rfq_product_id = rp_de.id
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors tecv
+                    JOIN tbl_rfq_product_tech_evaluation te
+                      ON tecv.tbl_rfq_product_tech_evaluation_id = te.id
+                    WHERE te.tbl_rfq_product_id = rp_de.id
+                      AND tecv.vendor_id = q_de.created_by
+                      AND tecv.status = 1
+                  )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order po_v
+                  JOIN tbl_purchase_order_product pop_v ON pop_v.purchase_order_id = po_v.id
+                  WHERE po_v.rfq_id = $1
+                    AND pop_v.rfq_product_id = rp_de.id
+                    AND po_v.finalized_vendor_id = q_de.created_by
+                    AND po_v.status IN ('rejected', 'rejected_by_vendor')
+                )
+            )
+          LIMIT 1
+        `, [rfq_id]));
+
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless

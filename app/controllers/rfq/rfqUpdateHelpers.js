@@ -29,7 +29,7 @@ import {
  *   4. bid_end_date is still in the future
  *   5. (per-product PO lock check happens inside applyProductChanges)
  */
-export function assertEditAllowed(rfq, userId, { hasQuotes = false } = {}) {
+export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false } = {}) {
   if (!rfq) {
     throw httpError(404, 'RFQ not found.');
   }
@@ -42,7 +42,9 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false } = {}) {
   if (rfq.bid_end_date && new Date(rfq.bid_end_date) <= new Date()) {
     // Allow editing when bid window closed but no vendors submitted quotes,
     // so the creator can extend the deadline.
-    if (hasQuotes) {
+    // Also allow editing when a product is dead-ended (all eligible vendors'
+    // POs were rejected) so the creator can add new vendors or modify specs.
+    if (hasQuotes && !hasDeadEndProduct) {
       throw httpError(
         400,
         'The bid window has closed; this RFQ can no longer be edited.'

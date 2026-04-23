@@ -2398,6 +2398,63 @@ WHERE NOT EXISTS (
           LIMIT 1
         )
       ) AS is_quotes_present,
+      -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_products _rp_de
+          WHERE _rp_de.rfq_id = RFQ.id
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization _qf_de
+              WHERE _qf_de.rfq_id = RFQ.id
+                AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                AND _qf_de.variant = _rp_de.variant
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po_de
+              JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+              WHERE _po_de.rfq_id = RFQ.id
+                AND _pop_de.rfq_product_id = _rp_de.id
+                AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            )
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+              JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+              WHERE _po_rej.rfq_id = RFQ.id
+                AND _pop_rej.rfq_product_id = _rp_de.id
+                AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_items _qi_de
+              JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+              WHERE _q_de.rfq_id = RFQ.id
+                AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                AND _qi_de.variant = _rp_de.variant
+                AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                    WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                    JOIN tbl_rfq_product_tech_evaluation _te
+                      ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                    WHERE _te.tbl_rfq_product_id = _rp_de.id
+                      AND _tecv.vendor_id = _q_de.created_by
+                      AND _tecv.status = 1
+                  )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                  JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                  WHERE _po_v.rfq_id = RFQ.id
+                    AND _pop_v.rfq_product_id = _rp_de.id
+                    AND _po_v.finalized_vendor_id = _q_de.created_by
+                    AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                )
+            )
+        )
+      ) AS has_dead_end_product,
 
       ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
@@ -2856,6 +2913,59 @@ LIMIT 1;`;
             WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
               AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
         ) AS has_approved_po
+        -- is_dead_end: this product has all eligible vendors' POs rejected with no replacement
+        ,(
+          NOT EXISTS (
+            SELECT 1 FROM tbl_quote_finalization _qf_de2
+            WHERE _qf_de2.rfq_id = RFQ_P.rfq_id
+              AND _qf_de2.product_variant_id = RFQ_P.product_variant_id
+              AND _qf_de2.variant = RFQ_P.variant
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po_de2
+            JOIN tbl_purchase_order_product _pop_de2 ON _pop_de2.purchase_order_id = _po_de2.id
+            WHERE _po_de2.rfq_id = RFQ_P.rfq_id
+              AND _pop_de2.rfq_product_id = RFQ_P.id
+              AND _po_de2.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+          AND EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po_rej2
+            JOIN tbl_purchase_order_product _pop_rej2 ON _pop_rej2.purchase_order_id = _po_rej2.id
+            WHERE _po_rej2.rfq_id = RFQ_P.rfq_id
+              AND _pop_rej2.rfq_product_id = RFQ_P.id
+              AND _po_rej2.status IN ('rejected', 'rejected_by_vendor')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_quote_items _qi_de2
+            JOIN tbl_quotes _q_de2 ON _q_de2.id = _qi_de2.quote_id
+            WHERE _q_de2.rfq_id = RFQ_P.rfq_id
+              AND _qi_de2.product_variant_id = RFQ_P.product_variant_id
+              AND _qi_de2.variant = RFQ_P.variant
+              AND (_q_de2.is_regret IS NULL OR _q_de2.is_regret != 1)
+              AND (
+                NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk2
+                  WHERE _te_chk2.tbl_rfq_product_id = RFQ_P.id
+                )
+                OR EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv2
+                  JOIN tbl_rfq_product_tech_evaluation _te2
+                    ON _tecv2.tbl_rfq_product_tech_evaluation_id = _te2.id
+                  WHERE _te2.tbl_rfq_product_id = RFQ_P.id
+                    AND _tecv2.vendor_id = _q_de2.created_by
+                    AND _tecv2.status = 1
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_v2
+                JOIN tbl_purchase_order_product _pop_v2 ON _pop_v2.purchase_order_id = _po_v2.id
+                WHERE _po_v2.rfq_id = RFQ_P.rfq_id
+                  AND _pop_v2.rfq_product_id = RFQ_P.id
+                  AND _po_v2.finalized_vendor_id = _q_de2.created_by
+                  AND _po_v2.status IN ('rejected', 'rejected_by_vendor')
+              )
+          )
+        ) AS is_dead_end
 
     FROM
         tbl_rfq_products RFQ_P
@@ -3389,6 +3499,90 @@ LIMIT 2;
               )
             END
           ) AS po_partially_completed,
+          -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_products _rp_de
+              WHERE _rp_de.rfq_id = RFQ.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_finalization _qf_de
+                  WHERE _qf_de.rfq_id = RFQ.id
+                    AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                    AND _qf_de.variant = _rp_de.variant
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_de
+                  JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+                  WHERE _po_de.rfq_id = RFQ.id
+                    AND _pop_de.rfq_product_id = _rp_de.id
+                    AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+                  JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+                  WHERE _po_rej.rfq_id = RFQ.id
+                    AND _pop_rej.rfq_product_id = _rp_de.id
+                    AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_items _qi_de
+                  JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+                  WHERE _q_de.rfq_id = RFQ.id
+                    AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                    AND _qi_de.variant = _rp_de.variant
+                    AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                    AND (
+                      NOT EXISTS (
+                        SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                        WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                        JOIN tbl_rfq_product_tech_evaluation _te
+                          ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                        WHERE _te.tbl_rfq_product_id = _rp_de.id
+                          AND _tecv.vendor_id = _q_de.created_by
+                          AND _tecv.status = 1
+                      )
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                      JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                      WHERE _po_v.rfq_id = RFQ.id
+                        AND _pop_v.rfq_product_id = _rp_de.id
+                        AND _po_v.finalized_vendor_id = _q_de.created_by
+                        AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                    )
+                )
+            )
+          ) AS has_dead_end_product,
+          -- has_po_rejection: any product has a rejected PO with no replacement
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_products _rp_rej
+              WHERE _rp_rej.rfq_id = RFQ.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_finalization _qf_rej
+                  WHERE _qf_rej.rfq_id = RFQ.id
+                    AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
+                    AND _qf_rej.variant = _rp_rej.variant
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                  JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                  WHERE _po_r.rfq_id = RFQ.id
+                    AND _pop_r.rfq_product_id = _rp_rej.id
+                    AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                      JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                      WHERE _po_repl.rfq_id = RFQ.id
+                        AND _pop_repl.rfq_product_id = _rp_rej.id
+                        AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                    )
+                )
+            )
+          ) AS has_po_rejection,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -12632,7 +12826,91 @@ ORDER BY tq.timestamp DESC;
               ) _chk
             )
           END
-        ) AS po_completed
+        ) AS po_completed,
+        -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_products _rp_de
+            WHERE _rp_de.rfq_id = RFQ.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization _qf_de
+                WHERE _qf_de.rfq_id = RFQ.id
+                  AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qf_de.variant = _rp_de.variant
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_de
+                JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+                WHERE _po_de.rfq_id = RFQ.id
+                  AND _pop_de.rfq_product_id = _rp_de.id
+                  AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+                JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+                WHERE _po_rej.rfq_id = RFQ.id
+                  AND _pop_rej.rfq_product_id = _rp_de.id
+                  AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_items _qi_de
+                JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+                WHERE _q_de.rfq_id = RFQ.id
+                  AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qi_de.variant = _rp_de.variant
+                  AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                      WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                      JOIN tbl_rfq_product_tech_evaluation _te
+                        ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                      WHERE _te.tbl_rfq_product_id = _rp_de.id
+                        AND _tecv.vendor_id = _q_de.created_by
+                        AND _tecv.status = 1
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                    JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                    WHERE _po_v.rfq_id = RFQ.id
+                      AND _pop_v.rfq_product_id = _rp_de.id
+                      AND _po_v.finalized_vendor_id = _q_de.created_by
+                      AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                  )
+              )
+          )
+        ) AS has_dead_end_product,
+        -- has_po_rejection: any product has a rejected PO with no replacement
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_products _rp_rej
+            WHERE _rp_rej.rfq_id = RFQ.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization _qf_rej
+                WHERE _qf_rej.rfq_id = RFQ.id
+                  AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
+                  AND _qf_rej.variant = _rp_rej.variant
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                WHERE _po_r.rfq_id = RFQ.id
+                  AND _pop_r.rfq_product_id = _rp_rej.id
+                  AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                    JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                    WHERE _po_repl.rfq_id = RFQ.id
+                      AND _pop_repl.rfq_product_id = _rp_rej.id
+                      AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                  )
+              )
+          )
+        ) AS has_po_rejection
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
