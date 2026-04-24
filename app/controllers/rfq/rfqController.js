@@ -5349,7 +5349,20 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct });
+        // 1d. Check for tech-eval-stuck products — allows restricted editing
+        //     (only bid_end_date + vendor refresh) when all vendors failed tech eval.
+        const hasTechStuckProduct = !!(await t.oneOrNone(`
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation te_stuck
+          WHERE te_stuck.rfq_id = $1
+            AND te_stuck.blocked_insufficient_vendors = TRUE
+            AND COALESCE(te_stuck.total_passed_verified, 0) = 0
+          LIMIT 1
+        `, [rfq_id]));
+
+        // Restricted edit = tech-stuck but NOT PO dead-end (dead-end allows full edit)
+        const isRestrictedEdit = hasTechStuckProduct && !hasDeadEndProduct;
+
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5395,6 +5408,40 @@ const rfqController = {
         const diff = diffRfqSnapshot(current, snapshot);
         if (diff.isEmpty) {
           return { noop: true };
+        }
+
+        // 5b. Enforce restricted edit mode — only bid_end_date + vendor refresh allowed
+        if (isRestrictedEdit) {
+          const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
+          if (disallowedFields.length > 0) {
+            throw updateHttpError(400,
+              `Restricted edit: only bid submission end date can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+            );
+          }
+          if (diff.products.added.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot add new products.');
+          }
+          if (diff.products.removed.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot remove products.');
+          }
+          for (const update of diff.products.updated) {
+            if (update.commentChanged) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.');
+            }
+            if (update.specs.added.length > 0 || update.specs.removed.length > 0 || update.specs.updated.length > 0) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.');
+            }
+            if (update.files.added.length > 0 || update.files.removed.length > 0) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product files.');
+            }
+            if (update.techEvalChanged) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.');
+            }
+            // vendors.added IS allowed (from Refresh Vendors)
+          }
+          if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
+          }
         }
 
         // 6. Apply changes — order matters because the field UPDATE on tbl_rfq

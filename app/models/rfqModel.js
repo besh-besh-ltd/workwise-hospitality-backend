@@ -2455,6 +2455,15 @@ WHERE NOT EXISTS (
             )
         )
       ) AS has_dead_end_product,
+      -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+          WHERE _te_stuck.rfq_id = RFQ.id
+            AND _te_stuck.blocked_insufficient_vendors = TRUE
+            AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+        )
+      ) AS has_tech_stuck_product,
 
       ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
@@ -2966,6 +2975,15 @@ LIMIT 1;`;
               )
           )
         ) AS is_dead_end
+        -- is_tech_stuck: this product has all vendors tech-failed, no replacements available
+        ,(
+          EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_s
+            WHERE _te_s.tbl_rfq_product_id = RFQ_P.id
+              AND _te_s.blocked_insufficient_vendors = TRUE
+              AND COALESCE(_te_s.total_passed_verified, 0) = 0
+          )
+        ) AS is_tech_stuck
 
     FROM
         tbl_rfq_products RFQ_P
@@ -3583,6 +3601,15 @@ LIMIT 2;
                 )
             )
           ) AS has_po_rejection,
+          -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+              WHERE _te_stuck.rfq_id = RFQ.id
+                AND _te_stuck.blocked_insufficient_vendors = TRUE
+                AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+            )
+          ) AS has_tech_stuck_product,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -3823,21 +3850,20 @@ LIMIT 2;
       tech_latest AS (
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
-      -- Products where tech eval is done: all eligible (responded) vendors
-      -- have been evaluated (exist in cleared_vendors, passed or failed).
+      -- Products where tech eval is done AND at least one vendor passed.
+      -- Excludes tech-stuck products (blocked_insufficient_vendors + zero passed).
       products_with_cleared AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
         WHERE te.rfq_id = ANY($1::int[])
+          AND NOT (te.blocked_insufficient_vendors = true AND COALESCE(te.total_passed_verified, 0) = 0)
           AND (
             te.is_complete = true
             OR (
-              -- At least 1 vendor evaluated
               EXISTS (
                 SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
                 WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
               )
-              -- AND no responded vendor left unevaluated
               AND NOT EXISTS (
                 SELECT DISTINCT vr.vendor_id
                 FROM tbl_rfq_product_tech_evaluation_vendors_response vr
@@ -3853,6 +3879,23 @@ LIMIT 2;
             )
           )
         GROUP BY te.rfq_id
+      ),
+      -- Products where tech eval is stuck (all vendors failed, no replacements)
+      products_tech_stuck AS (
+        SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_stuck
+        FROM tbl_rfq_product_tech_evaluation te
+        WHERE te.rfq_id = ANY($1::int[])
+          AND te.blocked_insufficient_vendors = true
+          AND COALESCE(te.total_passed_verified, 0) = 0
+        GROUP BY te.rfq_id
+      ),
+      -- All evaluated products = cleared + stuck (used to determine if TE phase is "done")
+      products_all_evaluated AS (
+        SELECT
+          COALESCE(c.rfq_id, s.rfq_id) AS rfq_id,
+          COALESCE(c.products_cleared, 0) + COALESCE(s.products_stuck, 0) AS products_evaluated
+        FROM products_with_cleared c
+        FULL OUTER JOIN products_tech_stuck s ON c.rfq_id = s.rfq_id
       ),
       -- Active negotiation rounds
       active_negotiations AS (
@@ -3949,10 +3992,17 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated)
-          WHEN pwc.products_cleared IS NOT NULL AND tepc.te_products IS NOT NULL
-            AND pwc.products_cleared >= tepc.te_products
+          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated,
+          -- whether cleared or stuck. Some products may be stuck but the cleared ones can proceed.)
+          WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pae.products_evaluated >= tepc.te_products
+            AND COALESCE(pwc.products_cleared, 0) > 0
             THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5a-stuck: All TE products evaluated but ALL are stuck (zero cleared)
+          WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pae.products_evaluated >= tepc.te_products
+            AND COALESCE(pwc.products_cleared, 0) = 0
+            THEN 'RFQ_STUCK_TECHNICAL'
           -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
           WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
@@ -4000,6 +4050,8 @@ LIMIT 2;
       LEFT JOIN product_counts pc ON pc.rfq_id = rd.id
       LEFT JOIN tech_latest tl ON tl.rfq_id = rd.id
       LEFT JOIN products_with_cleared pwc ON pwc.rfq_id = rd.id
+      LEFT JOIN products_tech_stuck pts ON pts.rfq_id = rd.id
+      LEFT JOIN products_all_evaluated pae ON pae.rfq_id = rd.id
       LEFT JOIN active_negotiations an ON an.rfq_id = rd.id
       LEFT JOIN neg_quote_pending nqp ON nqp.rfq_id = rd.id
       LEFT JOIN neg_quote_approved nqa ON nqa.rfq_id = rd.id
@@ -4895,7 +4947,26 @@ LIMIT 2;
         else if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
         else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
         else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
-        else if (currentStage === 'RFQ_STUCK_TECHNICAL') subStatus = 'no_vendors_participated';
+        else if (currentStage === 'RFQ_STUCK_TECHNICAL') {
+          // Distinguish: vendors were evaluated but all failed vs no vendors at all
+          if (totalFailed > 0) {
+            subStatus = 'all_vendors_failed';
+            summary = `All ${totalFailed} evaluated vendor${totalFailed === 1 ? '' : 's'} failed technical evaluation across ${techProducts.length} product${techProducts.length === 1 ? '' : 's'}. Extend the bid deadline and refresh vendors to proceed.`;
+          } else {
+            subStatus = 'no_vendors_participated';
+          }
+        }
+
+        // Check for partially stuck: some products passed tech eval, but others
+        // are tech-stuck (all vendors failed, no replacements). This can happen when
+        // the lifecycle advanced past technical for cleared products.
+        const stuckProducts = techProducts ? techProducts.filter(p => p.passed === 0 && p.failed > 0) : [];
+        const hasStuckProducts = stuckProducts.length > 0;
+        if (hasStuckProducts && status === 'completed') {
+          subStatus = 'partially_stuck';
+          const clearedCount = techProducts.length - stuckProducts.length;
+          summary = `${clearedCount} of ${techProducts.length} products cleared. ${stuckProducts.length} product${stuckProducts.length === 1 ? ' is' : 's are'} stuck — all vendors failed technical evaluation.`;
+        }
 
         const awaitingQuotes = ['TECHNICAL_AWAITING_QUOTES', 'RFQ_STUCK_TECHNICAL'].includes(currentStage)
           ? buildAwaitingQuotesSnapshot()
@@ -4908,6 +4979,7 @@ LIMIT 2;
 
         phases.push({
           key: 'technical', label: 'Technical Evaluation', status, summary, sub_status: subStatus,
+          has_stuck_products: hasStuckProducts,
           is_cancelled: latestTechInstance?.status === 'CANCELLED',
           evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
           products: techProducts,
@@ -12934,7 +13006,16 @@ ORDER BY tq.timestamp DESC;
                   )
               )
           )
-        ) AS has_po_rejection
+        ) AS has_po_rejection,
+        -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+            WHERE _te_stuck.rfq_id = RFQ.id
+              AND _te_stuck.blocked_insufficient_vendors = TRUE
+              AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+          )
+        ) AS has_tech_stuck_product
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
