@@ -3639,7 +3639,7 @@ LIMIT 2;
                     trpv.user_id
                   HAVING
                     NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
-                    AND COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    AND COUNT(DISTINCT qi.id) > 0
                 ) AS fully_quoted_vendors
               ),
               'quote_regretted',
@@ -3962,6 +3962,30 @@ LIMIT 2;
           AND (is_regret IS NULL OR is_regret != 1)
         GROUP BY rfq_id HAVING COUNT(*) > 0
       ),
+      -- Whether any product has a vendor-rejected PO that still needs action
+      -- (product not yet re-finalized and no active replacement PO)
+      po_vendor_rejected AS (
+        SELECT po_rej.rfq_id
+        FROM tbl_rfq_purchase_order po_rej
+        JOIN tbl_purchase_order_product pop_rej ON pop_rej.purchase_order_id = po_rej.id
+        JOIN tbl_rfq_products rp_rej ON rp_rej.id = pop_rej.rfq_product_id
+        WHERE po_rej.rfq_id = ANY($1::int[])
+          AND po_rej.status = 'rejected_by_vendor'
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_quote_finalization qf_rej
+            WHERE qf_rej.rfq_id = po_rej.rfq_id
+              AND qf_rej.product_variant_id = rp_rej.product_variant_id
+              AND qf_rej.variant = rp_rej.variant
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order po_repl
+            JOIN tbl_purchase_order_product pop_repl ON pop_repl.purchase_order_id = po_repl.id
+            WHERE po_repl.rfq_id = po_rej.rfq_id
+              AND pop_repl.rfq_product_id = pop_rej.rfq_product_id
+              AND po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+        GROUP BY po_rej.rfq_id
+      ),
       -- Whether the bid submission deadline has passed.
       -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
       bid_status AS (
@@ -3981,10 +4005,14 @@ LIMIT 2;
           -- Stage 9: Purchase Order Approval
           WHEN COALESCE(pd.pending_approval_pos, 0) > 0
             THEN 'PO_APPROVAL'
-          -- Stage 8: Awaiting PO Initiation (all products have approved quotes)
+          -- Stage 8b: PO Rejected by Vendor (all POs rejected, none active)
+          WHEN pvr.rfq_id IS NOT NULL
+            THEN 'PO_VENDOR_REJECTED'
+          -- Stage 8: Awaiting PO Initiation (all products have approved quotes AND none pending)
           WHEN nqa.approved_products IS NOT NULL
             AND pc.total_products IS NOT NULL
             AND nqa.approved_products >= pc.total_products
+            AND nqp.rfq_id IS NULL
             THEN 'AWAITING_PO'
           -- Stage 7: Quotation Approval
           WHEN nqp.rfq_id IS NOT NULL
@@ -4060,6 +4088,7 @@ LIMIT 2;
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
       LEFT JOIN tech_eval_product_count tepc ON tepc.rfq_id = rd.id
       LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
+      LEFT JOIN po_vendor_rejected pvr ON pvr.rfq_id = rd.id
       LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
 
@@ -4098,6 +4127,7 @@ LIMIT 2;
       AWAITING_QUOTES:           { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+      PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -4313,6 +4343,7 @@ LIMIT 2;
       NEGOTIATION_ONGOING: 'commercial',
       QUOTATION_APPROVAL: 'commercial',
       AWAITING_PO: 'purchase_order',
+      PO_VENDOR_REJECTED: 'purchase_order',
       PO_APPROVAL: 'purchase_order',
       APPROVED_COMPLETED: 'purchase_order',
     };
@@ -4541,24 +4572,24 @@ LIMIT 2;
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
             )::int AS participated,
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
                 AND quoted_products > 0
             )::int AS sent_quotes,
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
                 AND quoted_products = 0
             )::int AS technical_only,
             COUNT(*) FILTER (WHERE has_regret)::int AS regrets,
             COUNT(*) FILTER (
               WHERE NOT has_regret
-                AND submitted_products < assigned_products
+                AND submitted_products = 0
             )::int AS remaining
           FROM vendor_rollup
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
@@ -5050,6 +5081,7 @@ LIMIT 2;
 
         let subStatus = null;
         if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
+        else if (currentStage === 'PO_VENDOR_REJECTED') subStatus = 'vendor_rejected';
         else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
         else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
 
@@ -5382,7 +5414,7 @@ LIMIT 2;
                     trpv.user_id
                   HAVING
                     NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
-                    AND COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    AND COUNT(DISTINCT qi.id) > 0
                 ) AS fully_quoted_vendors
               ),
               'quote_regretted',
