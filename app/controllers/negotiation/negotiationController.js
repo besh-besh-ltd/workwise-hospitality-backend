@@ -2100,7 +2100,8 @@ const NegotiationController = {
                     // Get vendor's original quote item for quantity/unit
                     const vendorQuoteItem = await t.oneOrNone(
                       `SELECT qi.quantity, qi.unit, qi.unit_price, qi.id as quote_item_id,
-                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode
+                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
+                              qi.other_charges
                        FROM tbl_quote_items qi
                        JOIN tbl_quotes q ON q.id = qi.quote_id
                        WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
@@ -2129,7 +2130,8 @@ const NegotiationController = {
                             package_price: vendorQuoteItem.package_price,
                             package_mode: vendorQuoteItem.package_mode,
                             tax: vendorQuoteItem.tax,
-                            tax_mode: vendorQuoteItem.tax_mode
+                            tax_mode: vendorQuoteItem.tax_mode,
+                            other_charges: vendorQuoteItem.other_charges || []
                           },
                           finalized_vendor_id: selectedQuote.vendor_id
                         }

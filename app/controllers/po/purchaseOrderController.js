@@ -91,7 +91,8 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
     const dbRow = await dbCtx.oneOrNone(
       `SELECT qi.freight_price, qi.freight_mode,
               qi.package_price, qi.package_mode,
-              qi.tax, qi.tax_mode
+              qi.tax, qi.tax_mode,
+              qi.other_charges
        FROM tbl_quote_items qi
        WHERE qi.id = $1`,
       [quoteItemId]
@@ -112,7 +113,8 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
           package_price: dbRow.package_price,
           package_mode: dbRow.package_mode,
           tax: dbRow.tax,
-          tax_mode: dbRow.tax_mode
+          tax_mode: dbRow.tax_mode,
+          other_charges: dbRow.other_charges || []
         }
       }
     };

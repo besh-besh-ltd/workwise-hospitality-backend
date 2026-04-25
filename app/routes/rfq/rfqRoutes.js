@@ -844,6 +844,30 @@ RfqRoutes.get(
 );
 
 // ============================================
+// Charge Names
+// ============================================
+RfqRoutes.get(
+  '/charge-names',
+  noLogin.vendorTokenOrJwt,
+  rfqController.getChargeNames
+);
+RfqRoutes.post(
+  '/charge-names',
+  noLogin.vendorTokenOrJwt,
+  rfqController.createChargeName
+);
+RfqRoutes.put(
+  '/charge-names/:id',
+  noLogin.vendorTokenOrJwt,
+  rfqController.updateChargeName
+);
+RfqRoutes.delete(
+  '/charge-names/:id',
+  noLogin.vendorTokenOrJwt,
+  rfqController.deleteChargeName
+);
+
+// ============================================
 // Internal Scheduler Endpoints
 // ============================================
 

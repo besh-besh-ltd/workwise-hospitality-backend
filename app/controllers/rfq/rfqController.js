@@ -7310,7 +7310,8 @@ const rfqController = {
       term_and_condition_files,
       is_regret,
       regret_reason,
-      vendorGSTIN
+      vendorGSTIN,
+      global_charges
     } = req.body;
 
     const user = req.user;
@@ -7606,7 +7607,8 @@ const rfqController = {
             global_comment: globalComment,
             regret_reason,
             payment_id: tenderPaymentId,
-            gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null
+            gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null,
+            global_charges: JSON.stringify(global_charges || [])
           };
 
           // check quote is already exists or not
@@ -7626,19 +7628,17 @@ const rfqController = {
               product_id,
               product_name,
               unit_price,
-              package_price,
               tax,
-              freight_price,
               total_price,
               comment,
               delivery_period,
               quantity,
               variant,
               document_files,
-              freight_mode,
-              package_mode,
-              tax_mode
+              tax_mode,
+              other_charges
             }) => {
+              const chargesJson = JSON.stringify(other_charges || []);
               if (unit_price != '') {
                 quote_items_data.push({
                   rfq_id,
@@ -7646,17 +7646,18 @@ const rfqController = {
                   product_variant_id: product_id,
                   product_name,
                   unit_price,
-                  package_price,
+                  package_price: 0,
                   tax,
-                  freight_price,
+                  freight_price: 0,
                   total_price,
                   comment,
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               } else if (comment != '' || document_files?.length > 0) {
                 quote_items_data.push({
@@ -7665,17 +7666,18 @@ const rfqController = {
                   product_variant_id: product_id,
                   product_name,
                   unit_price: 0,
-                  package_price,
+                  package_price: 0,
                   tax,
-                  freight_price,
+                  freight_price: 0,
                   total_price,
                   comment,
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               } else if (is_regret) {
                 quote_items_data.push({
@@ -7692,9 +7694,10 @@ const rfqController = {
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               }
             }
@@ -7735,7 +7738,8 @@ const rfqController = {
                 'variant',
                 'freight_mode',
                 'package_mode',
-                'tax_mode'
+                'tax_mode',
+                'other_charges'
               ];
               await rfqModel.insertArray(
                 quote_items_data,
@@ -7868,7 +7872,8 @@ const rfqController = {
               'variant',
               'freight_mode',
               'package_mode',
-              'tax_mode'
+              'tax_mode',
+              'other_charges'
             ];
             let quotes_items = await rfqModel.insertArray(
               quote_items_data,
@@ -12378,7 +12383,8 @@ sendFollowUpEmails: async (req, res) => {
       globalComment,
       global_payment_term_list,
       term_and_condition_files,
-      vendorGSTIN
+      vendorGSTIN,
+      global_charges
     } = req.body;
 
     const user = req.user;
@@ -12552,7 +12558,8 @@ sendFollowUpEmails: async (req, res) => {
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
         globalComment !== quoteExists[0].global_comment ||
-        newGstin !== currentGstin
+        newGstin !== currentGstin ||
+        JSON.stringify(global_charges || []) !== JSON.stringify(quoteExists[0].global_charges || [])
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -12564,7 +12571,8 @@ sendFollowUpEmails: async (req, res) => {
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment,
-          gstin: newGstin
+          gstin: newGstin,
+          global_charges: JSON.stringify(global_charges || [])
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
@@ -15532,6 +15540,133 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });
+    }
+  },
+
+  // ============================================
+  // Charge Names CRUD
+  // ============================================
+
+  getChargeNames: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const rows = await db.any(
+        `SELECT id, name, is_global, created_by FROM tbl_charge_names
+         WHERE created_by IS NULL OR created_by = $1
+         ORDER BY created_by IS NULL DESC, id ASC`,
+        [userId]
+      );
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError('Failed to fetch charge names', error);
+      return res.status(500).json({ status: 0, message: 'Error fetching charge names' });
+    }
+  },
+
+  createChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { name, is_global } = req.body;
+
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ status: 0, message: 'Name is required' });
+      }
+
+      const trimmedName = String(name).trim();
+
+      // Check for duplicate (case-insensitive) among system defaults and vendor's own
+      const existing = await db.oneOrNone(
+        `SELECT id FROM tbl_charge_names
+         WHERE LOWER(name) = LOWER($1) AND (created_by IS NULL OR created_by = $2)`,
+        [trimmedName, userId]
+      );
+      if (existing) {
+        return res.status(400).json({ status: 0, message: 'Charge name already exists' });
+      }
+
+      const row = await db.one(
+        `INSERT INTO tbl_charge_names (name, is_global, created_by)
+         VALUES ($1, $2, $3) RETURNING id, name, is_global`,
+        [trimmedName, is_global ?? false, userId]
+      );
+      return res.status(201).json({ status: 1, data: row });
+    } catch (error) {
+      logError('Failed to create charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error creating charge name' });
+    }
+  },
+
+  updateChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { id } = req.params;
+      const { name, is_global } = req.body;
+
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ status: 0, message: 'Name is required' });
+      }
+
+      const trimmedName = String(name).trim();
+
+      // Only allow updating vendor's own custom charges
+      const existing = await db.oneOrNone(
+        `SELECT id, created_by FROM tbl_charge_names WHERE id = $1`,
+        [id]
+      );
+      if (!existing) {
+        return res.status(404).json({ status: 0, message: 'Charge name not found' });
+      }
+      if (existing.created_by === null) {
+        return res.status(403).json({ status: 0, message: 'Cannot edit default charge names' });
+      }
+
+      // Check for duplicate
+      const duplicate = await db.oneOrNone(
+        `SELECT id FROM tbl_charge_names
+         WHERE LOWER(name) = LOWER($1) AND id != $2 AND (created_by IS NULL OR created_by = $3)`,
+        [trimmedName, id, userId]
+      );
+      if (duplicate) {
+        return res.status(400).json({ status: 0, message: 'Charge name already exists' });
+      }
+
+      const row = await db.one(
+        `UPDATE tbl_charge_names SET name = $1, is_global = $2
+         WHERE id = $3 AND created_by = $4
+         RETURNING id, name, is_global`,
+        [trimmedName, is_global ?? false, id, userId]
+      );
+      return res.status(200).json({ status: 1, data: row });
+    } catch (error) {
+      logError('Failed to update charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error updating charge name' });
+    }
+  },
+
+  deleteChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { id } = req.params;
+
+      const existing = await db.oneOrNone(
+        `SELECT id, created_by FROM tbl_charge_names WHERE id = $1`,
+        [id]
+      );
+      if (!existing) {
+        return res.status(404).json({ status: 0, message: 'Charge name not found' });
+      }
+      if (existing.created_by === null) {
+        return res.status(403).json({ status: 0, message: 'Cannot delete default charge names' });
+      }
+
+      await db.none(
+        `DELETE FROM tbl_charge_names WHERE id = $1 AND created_by = $2`,
+        [id, userId]
+      );
+      return res.status(200).json({ status: 1, message: 'Charge name deleted' });
+    } catch (error) {
+      logError('Failed to delete charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error deleting charge name' });
     }
   }
 };
