@@ -389,37 +389,42 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
     if(!purchaseOrder) throw new Error("Purchase order is required to handle Reject Case")
     if(!t) throw new Error("Transaction is required for PO Rejection Case handling")
 
-    for (let product of purchaseOrder.rfq_product_id) {
-      const alreadyExists = await t.one(`
-        SELECT TQF.* FROM tbl_quote_finalization TQF
-        JOIN tbl_rfq_products TRP ON TRP.id = $2
-        WHERE TQF.rfq_id = $1
-        AND TQF.product_variant_id = TRP.product_variant_id AND TQF.variant = TRP.variant
-        LIMIT 1
-      `, [purchaseOrder.rfq_id, product])
+    // Query ALL products from tbl_purchase_order_product (source of truth)
+    const poProducts = await t.any(`
+      SELECT pop.rfq_product_id, rp.product_variant_id, rp.variant
+      FROM tbl_purchase_order_product pop
+      JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+      WHERE pop.purchase_order_id = $1
+    `, [purchaseOrder.id]);
 
-      const history_data = {
-        rfq_id: alreadyExists.rfq_id,
-        rfq_no: alreadyExists.rfq_no,
-        product_variant_id: alreadyExists.product_variant_id,
-        vendor_id: alreadyExists.vendor_id,
-        quote_id: alreadyExists.quote_id,
-        created_by: alreadyExists.created_by,
-        timestamp: alreadyExists.timestamp,
-        variant: alreadyExists.variant,
-        changed_by: rejectedBy
-      };
+    for (const product of poProducts) {
+      const finalization = await t.oneOrNone(`
+        SELECT * FROM tbl_quote_finalization
+        WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+        LIMIT 1
+      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant]);
+
+      if (!finalization) continue;
 
       await rfqModel.insert(
         'tbl_quote_finalization_history',
-        history_data,
+        {
+          rfq_id: finalization.rfq_id,
+          rfq_no: finalization.rfq_no,
+          product_variant_id: finalization.product_variant_id,
+          vendor_id: finalization.vendor_id,
+          quote_id: finalization.quote_id,
+          created_by: finalization.created_by,
+          timestamp: finalization.timestamp,
+          variant: finalization.variant,
+          changed_by: rejectedBy
+        },
         t
       );
 
-      await t.one(`
-        DELETE FROM tbl_quote_finalization
-        WHERE id = $1 RETURNING *
-      `, [alreadyExists.id]);
+      await t.none(`
+        DELETE FROM tbl_quote_finalization WHERE id = $1
+      `, [finalization.id]);
     }
   } catch (error) {
     logError(error);
@@ -538,15 +543,18 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
       });
       const usersToNotify = Array.from(userMap.values());
 
-      // Build approval history from action_history
-      const approvalHistory = instanceDetails?.action_history?.map(action => ({
-        step_order: instanceDetails.steps?.find(s =>
-          s.approvers?.some(a => a.user_id === action.actor?.user_id)
-        )?.step_order || 1,
-        approver_name: action.actor?.name || 'Unknown',
-        action: action.action,
-        created_at: action.created_at
-      })) || [];
+      // Build approval history from action_history (filter out system audit entries)
+      const DISPLAYABLE_ACTIONS = ['APPROVE', 'REJECT', 'APPROVER_REMOVED', 'STEP_REMOVED'];
+      const approvalHistory = (instanceDetails?.action_history || [])
+        .filter(action => DISPLAYABLE_ACTIONS.includes(action.action))
+        .map(action => ({
+          step_order: instanceDetails.steps?.find(s =>
+            s.approvers?.some(a => a.user_id === action.actor?.user_id)
+          )?.step_order || 1,
+          approver_name: action.actor?.name || 'Unknown',
+          action: action.action,
+          created_at: action.created_at
+        }));
 
       // Fire-and-forget notification (internal team: PO approved, sent to vendor for acceptance)
       sendPOApprovalCompletionNotification({
@@ -559,8 +567,8 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         poDetails: {
           id: purchaseOrder.id,
           po_number: purchaseOrder.po_number,
-          total_value: purchaseOrder.total_value,
-          quantity: purchaseOrder.quantity,
+          total_value: products.reduce((sum, p) => sum + Number(p.total_price || 0), 0),
+          quantity: products.reduce((sum, p) => sum + Number(p.quantity || 0), 0),
           po_pdf_url: purchaseOrder.po_pdf_url,
           created_at: purchaseOrder.created_at
         },
