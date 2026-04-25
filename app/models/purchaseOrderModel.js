@@ -338,7 +338,17 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       throw new Error("No Purchase Order found by id:", po_id);
     }
 
-    const { rfq_id, project_id, total_value, rfq_product_id, quantity, unit_price, finalized_vendor_id } = purchaseOrder;
+    const { rfq_id, project_id, finalized_vendor_id } = purchaseOrder;
+
+    // Get actual product data from tbl_purchase_order_product (source of truth)
+    const poProducts = await t.any(`
+      SELECT pop.rfq_product_id, pop.quantity, pop.unit_price, pop.total_price
+      FROM tbl_purchase_order_product pop
+      WHERE pop.purchase_order_id = $1
+    `, [purchaseOrder.id]);
+    const computedTotal = poProducts.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = poProducts.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
+    const productIds = poProducts.map(p => p.rfq_product_id);
 
     // Get RFQ details to check if it's a hospitality RFQ
     const rfq = await t.oneOrNone(`
@@ -367,11 +377,11 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
             po_number: purchaseOrder.po_number,
             rfq_id: rfq_id,
             rfq_no: rfq.rfq_no,
-            total_value: total_value,
+            total_value: computedTotal,
             vendor_id: finalized_vendor_id,
             is_tender: rfq.is_tender,
             project_id: project_id,
-            rfq_product_id: rfq_product_id
+            rfq_product_ids: productIds
           },
           txContext: t
         });
@@ -402,11 +412,11 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       const meta = {
         rfq_id,
         project_id,
-        rfq_product_id,
-        quantity,
-        unit_price,
+        rfq_product_ids: productIds,
+        quantity: computedQuantity,
+        unit_price: poProducts.reduce((sum, p) => sum + Number(p.unit_price || 0), 0),
         finalized_vendor_id,
-        total_value,
+        total_value: computedTotal,
         po_id: purchaseOrder.id
       };
 
@@ -611,6 +621,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 COALESCE(VENDOR_COMPANY.company_name, VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
+                COALESCE(BUYER_HC.name, BUYER_COMPANY.company_name) AS buyer_company_name,
                 -- Check if user is approver (supports both old and new workflows)
                 CASE
                   WHEN po.approval_instance_id IS NOT NULL THEN (
@@ -696,6 +707,9 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
         JOIN tbl_users TU ON TU.id = po.initiated_by
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
         LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
+        JOIN tbl_rfq BUYER_RFQ ON BUYER_RFQ.id = po.rfq_id
+        LEFT JOIN tbl_hospitality_companies BUYER_HC ON BUYER_HC.id = BUYER_RFQ.hospitality_company_id
+        LEFT JOIN tbl_company BUYER_COMPANY ON BUYER_COMPANY.id = po.company_id
          ${whereClause}
          ORDER BY po.created_at DESC
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`

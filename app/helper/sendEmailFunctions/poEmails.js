@@ -34,21 +34,31 @@ export const sendPOApprovalCompletionNotification = async ({
     const vendorName = vendorDetails?.company_name || vendorDetails?.organization_name || vendorDetails?.name || 'Vendor';
 
     // Format approval history as HTML table rows
+    const ACTION_DISPLAY = {
+      'APPROVE':          { label: 'Approved',              color: '#10B981' },
+      'REJECT':           { label: 'Rejected',              color: '#EF4444' },
+      'APPROVER_REMOVED': { label: 'Removed from workflow', color: '#6B7280' },
+      'STEP_REMOVED':     { label: 'Step removed',          color: '#6B7280' },
+    };
+
     const approvalHistoryHTML = approvalHistory && approvalHistory.length > 0
-      ? approvalHistory.map(action => `
+      ? approvalHistory.map(action => {
+          const display = ACTION_DISPLAY[action.action] || { label: action.action, color: '#6B7280' };
+          return `
           <tr>
             <td style="padding:8px; border:1px solid #e5e7eb;">Step ${action.step_order}</td>
             <td style="padding:8px; border:1px solid #e5e7eb;">${action.approver_name}</td>
             <td style="padding:8px; border:1px solid #e5e7eb;">
-              <span style="color:${action.action === 'APPROVE' ? '#10B981' : '#EF4444'}; font-weight:600;">
-                ${action.action === 'APPROVE' ? 'Approved' : 'Rejected'}
+              <span style="color:${display.color}; font-weight:600;">
+                ${display.label}
               </span>
             </td>
             <td style="padding:8px; border:1px solid #e5e7eb;">
               ${new Date(action.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
             </td>
           </tr>
-        `).join('')
+        `;
+        }).join('')
       : '<tr><td colspan="4" style="padding:8px; text-align:center;">No approval history available</td></tr>';
 
     for (const user of users) {

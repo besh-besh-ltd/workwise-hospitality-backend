@@ -2026,7 +2026,9 @@ export async function createApprovalInstance({
     // 1. Check for existing pending/approved instance for this entity
     // For NEGOTIATION type, allow new instances even if a previous one was APPROVED,
     // because multiple rounds can exist per product and each needs its own approval.
-    const allowReapproval = entity_type === 'NEGOTIATION';
+    // For NEGOTIATION_QUOTE, allow re-approval because a vendor may reject a PO,
+    // requiring re-finalization and a fresh approval cycle while preserving the old approved instance.
+    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE';
     const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
 
     const existingInstance = await t.oneOrNone(`

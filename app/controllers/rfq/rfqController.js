@@ -5359,8 +5359,8 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck but NOT PO dead-end (dead-end allows full edit)
-        const isRestrictedEdit = hasTechStuckProduct && !hasDeadEndProduct;
+        // Restricted edit = tech-stuck or PO dead-end (only bid_end_date + vendor refresh)
+        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct;
 
         assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
 
@@ -6839,8 +6839,8 @@ const rfqController = {
             po.vendor_action_at AS rejected_at
           FROM tbl_rfq_purchase_order po
           JOIN tbl_users u ON u.id = po.finalized_vendor_id
-          CROSS JOIN LATERAL unnest(po.rfq_product_id) AS pid(val)
-          JOIN tbl_rfq_products rp ON rp.id = pid.val
+          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+          JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
           WHERE po.rfq_id = $1
             AND po.status = 'rejected_by_vendor'
             AND NOT EXISTS (
@@ -9114,28 +9114,9 @@ const rfqController = {
                     approvalTriggered = true;
                     negotiationQuoteApprovalPending = true;
                   } else {
-                    // If there's an old APPROVED instance whose PO was rejected by vendor,
-                    // cancel it so a fresh approval cycle can begin for re-finalization.
-                    const existingApproved = existingApprovals.find(inst => inst.status === 'APPROVED');
-                    if (existingApproved) {
-                      const linkedPO = await t.oneOrNone(`
-                        SELECT id, status FROM tbl_rfq_purchase_order
-                        WHERE rfq_id = $1 AND status = 'rejected_by_vendor'
-                          AND rfq_product_id @> ARRAY[$2]::int[]
-                        ORDER BY updated_at DESC LIMIT 1
-                      `, [rfq_id, rfqProduct.id]);
-
-                      if (linkedPO) {
-                        await t.none(`
-                          UPDATE tbl_approval_instances
-                          SET status = 'CANCELLED', completed_at = NOW()
-                          WHERE id = $1
-                        `, [existingApproved.id]);
-                        logger.info(`Cancelled old NEGOTIATION_QUOTE approval ${existingApproved.id} for re-finalization after vendor PO rejection`);
-                      }
-                    }
-
                     // Try to create NEGOTIATION_QUOTE approval instance
+                    // Note: createApprovalInstance allows re-approval for NEGOTIATION_QUOTE,
+                    // so old APPROVED instances are preserved as historical records.
                     const approvalResult = await createApprovalInstance({
                       entity_type: 'NEGOTIATION_QUOTE',
                       entity_id: rfqProduct.id,
