@@ -7595,6 +7595,24 @@ const rfqController = {
           }
         }
 
+        // Build slug map for enriching charges
+        const chargeNamesRows = await db.any(
+          `SELECT name, slug FROM tbl_charge_names WHERE created_by IS NULL OR created_by = $1`,
+          [user.id]
+        );
+        const slugMap = new Map(chargeNamesRows.map(c => [c.name.toLowerCase(), c.slug]));
+        const enrichCharges = (charges) => (charges || []).map(c => ({
+          ...c,
+          slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
+        }));
+
+        // Enrich other_charges with slugs for each product
+        for (const product of products) {
+          if (product.other_charges) {
+            product.other_charges = enrichCharges(product.other_charges);
+          }
+        }
+
         return await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
@@ -7608,7 +7626,7 @@ const rfqController = {
             regret_reason,
             payment_id: tenderPaymentId,
             gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null,
-            global_charges: JSON.stringify(global_charges || [])
+            global_charges: JSON.stringify(enrichCharges(global_charges))
           };
 
           // check quote is already exists or not
@@ -12531,6 +12549,26 @@ sendFollowUpEmails: async (req, res) => {
         });
       }
 
+      // Build slug map for enriching charges
+      const chargeNamesRows = await db.any(
+        `SELECT name, slug FROM tbl_charge_names WHERE created_by IS NULL OR created_by = $1`,
+        [user.id]
+      );
+      const slugMap = new Map(chargeNamesRows.map(c => [c.name.toLowerCase(), c.slug]));
+      const enrichCharges = (charges) => (charges || []).map(c => ({
+        ...c,
+        slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
+      }));
+
+      // Enrich other_charges with slugs for each product
+      for (const product of products) {
+        if (product.other_charges) {
+          product.other_charges = enrichCharges(product.other_charges);
+        }
+      }
+
+      const enrichedGlobalCharges = enrichCharges(global_charges);
+
       let paymentTermAndCommentChanges = false;
 
       // update global comment, payment term and gstin
@@ -12540,7 +12578,7 @@ sendFollowUpEmails: async (req, res) => {
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
         globalComment !== quoteExists[0].global_comment ||
         newGstin !== currentGstin ||
-        JSON.stringify(global_charges || []) !== JSON.stringify(quoteExists[0].global_charges || [])
+        JSON.stringify(enrichedGlobalCharges) !== JSON.stringify(quoteExists[0].global_charges || [])
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -12553,7 +12591,7 @@ sendFollowUpEmails: async (req, res) => {
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment,
           gstin: newGstin,
-          global_charges: JSON.stringify(global_charges || [])
+          global_charges: JSON.stringify(enrichedGlobalCharges)
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
@@ -15528,11 +15566,25 @@ getClauses: async (req, res) => {
   // Charge Names CRUD
   // ============================================
 
+  _generateChargeSlug: (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
+
+  getAllChargeNames: async (req, res) => {
+    try {
+      const rows = await db.any(
+        `SELECT name, slug, created_by FROM tbl_charge_names WHERE is_global = false ORDER BY created_by IS NULL DESC, id ASC`
+      );
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError('Failed to fetch all charge names', error);
+      return res.status(500).json({ status: 0, message: 'Error fetching charge names' });
+    }
+  },
+
   getChargeNames: async (req, res) => {
     try {
       const userId = req.user.id;
       const rows = await db.any(
-        `SELECT id, name, is_global, created_by FROM tbl_charge_names
+        `SELECT id, name, slug, is_global, created_by FROM tbl_charge_names
          WHERE created_by IS NULL OR created_by = $1
          ORDER BY created_by IS NULL DESC, id ASC`,
         [userId]
@@ -15565,10 +15617,11 @@ getClauses: async (req, res) => {
         return res.status(400).json({ status: 0, message: 'Charge name already exists' });
       }
 
+      const slug = rfqController._generateChargeSlug(trimmedName);
       const row = await db.one(
-        `INSERT INTO tbl_charge_names (name, is_global, created_by)
-         VALUES ($1, $2, $3) RETURNING id, name, is_global`,
-        [trimmedName, is_global ?? false, userId]
+        `INSERT INTO tbl_charge_names (name, slug, is_global, created_by)
+         VALUES ($1, $2, $3, $4) RETURNING id, name, slug, is_global`,
+        [trimmedName, slug, is_global ?? false, userId]
       );
       return res.status(201).json({ status: 1, data: row });
     } catch (error) {
@@ -15611,11 +15664,12 @@ getClauses: async (req, res) => {
         return res.status(400).json({ status: 0, message: 'Charge name already exists' });
       }
 
+      const slug = rfqController._generateChargeSlug(trimmedName);
       const row = await db.one(
-        `UPDATE tbl_charge_names SET name = $1, is_global = $2
-         WHERE id = $3 AND created_by = $4
-         RETURNING id, name, is_global`,
-        [trimmedName, is_global ?? false, id, userId]
+        `UPDATE tbl_charge_names SET name = $1, slug = $2, is_global = $3
+         WHERE id = $4 AND created_by = $5
+         RETURNING id, name, slug, is_global`,
+        [trimmedName, slug, is_global ?? false, id, userId]
       );
       return res.status(200).json({ status: 1, data: row });
     } catch (error) {

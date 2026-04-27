@@ -357,29 +357,29 @@ const NegotiationController = {
    */
   createRound: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, target_price, end_date, vendor_ids } = req.body;
+      const { rfq_id, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
       const user_id = req.user.id;
 
-      if (!rfq_id || !rfq_product_id || !target_price || !end_date) {
+      if (!rfq_id || !rfq_product_id || !end_date) {
         return res.status(400).json({
           status: 2,
-          message: 'rfq_id, rfq_product_id, target_price, and end_date are required'
+          message: 'rfq_id, rfq_product_id, and end_date are required'
         });
       }
 
-      // Validate vendor_ids
-      if (!vendor_ids || !Array.isArray(vendor_ids) || vendor_ids.length === 0) {
+      // Validate vendor_targets
+      if (!vendor_targets || !Array.isArray(vendor_targets) || vendor_targets.length === 0) {
         return res.status(400).json({
           status: 2,
-          message: 'vendor_ids is required and must be a non-empty array of vendor IDs'
+          message: 'vendor_targets is required and must be a non-empty array'
         });
       }
 
-      const parsedVendorIds = vendor_ids.map(id => parseInt(id)).filter(id => !isNaN(id));
+      const parsedVendorIds = vendor_targets.map(v => parseInt(v.vendor_id)).filter(id => !isNaN(id));
       if (parsedVendorIds.length === 0) {
         return res.status(400).json({
           status: 2,
-          message: 'vendor_ids must contain valid integer vendor IDs'
+          message: 'vendor_targets must contain valid vendor IDs'
         });
       }
 
@@ -427,12 +427,9 @@ const NegotiationController = {
         });
       }
 
-      // Validate vendor_ids: check eligibility and overlap with active rounds
+      // Validate vendor eligibility
       const allVendors = await negotiationModel.getVendorsForProductWithStatus(rfq_id, rfq_product_id);
       const allVendorIds = new Set(allVendors.map(v => v.id));
-      const activeVendorIds = new Set(
-        allVendors.filter(v => v.in_active_round).map(v => v.id)
-      );
 
       const notEligible = parsedVendorIds.filter(id => !allVendorIds.has(id));
       if (notEligible.length > 0) {
@@ -442,15 +439,31 @@ const NegotiationController = {
         });
       }
 
-      const overlapping = parsedVendorIds.filter(id => activeVendorIds.has(id));
-      if (overlapping.length > 0) {
-        const overlappingNames = allVendors
-          .filter(v => overlapping.includes(v.id))
-          .map(v => v.organization_name || v.company_name || v.name);
-        return res.status(400).json({
-          status: 2,
-          message: `The following vendor(s) are already in an active negotiation round for this product: ${overlappingNames.join(', ')}. Please select different vendors or wait for the existing round to complete.`
-        });
+      // Check for field-level overlap with active rounds
+      const activeRounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, false);
+      const productActiveRounds = (activeRounds || []).filter(r => r.rfq_product_id === rfq_product_id);
+
+      for (const vt of vendor_targets) {
+        const vid = parseInt(vt.vendor_id);
+        const newFields = (vt.fields || []).map(f => f.name);
+        if (newFields.length === 0) continue;
+
+        for (const round of productActiveRounds) {
+          const vendorApproval = (round.vendor_approvals || []).find(va => va.vendor_id === vid);
+          if (!vendorApproval) continue;
+
+          const activeFields = (vendorApproval.negotiation_fields || []).map(f => f.name);
+          const overlappingFields = newFields.filter(f => activeFields.includes(f));
+
+          if (overlappingFields.length > 0) {
+            const vendorInfo = allVendors.find(v => v.id === vid);
+            const vendorName = vendorInfo?.organization_name || vendorInfo?.company_name || vendorInfo?.name || vid;
+            return res.status(400).json({
+              status: 2,
+              message: `${vendorName} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
+            });
+          }
+        }
       }
 
       // Check if approval workflow exists for NEGOTIATION before creating the round
@@ -472,13 +485,15 @@ const NegotiationController = {
       // Get next round number for this product
       const round_number = await negotiationModel.getNextRoundNumber(rfq_id, rfq_product_id);
 
-      // Build vendor_approvals JSONB array with PENDING status for each vendor
+      // Build vendor_approvals JSONB array with PENDING status and negotiation_fields per vendor
+      const vendorTargetsMap = new Map(vendor_targets.map(v => [parseInt(v.vendor_id), v.fields || []]));
       const vendor_approvals = parsedVendorIds.map(vid => ({
         vendor_id: vid,
         status: 'PENDING',
         remarks: null,
         acted_by: null,
-        acted_at: null
+        acted_at: null,
+        negotiation_fields: vendorTargetsMap.get(vid) || []
       }));
 
       // Create round in transaction
@@ -487,7 +502,7 @@ const NegotiationController = {
           rfq_id,
           rfq_product_id,
           round_number,
-          target_price,
+          target_price: target_price || null,
           end_date,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
@@ -758,11 +773,17 @@ const NegotiationController = {
       let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, true);
 
       // Vendors (user_type 3) should only see rounds assigned to them and fully approved (ACTIVE)
+      // Also filter vendor_approvals to only include the current vendor's entry
       if (req.user.user_type == 3) {
         const vendorId = req.user.vendor_id || req.user.id;
-        rounds = (rounds || []).filter(r =>
-          r.status === 'ACTIVE' && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
-        );
+        rounds = (rounds || [])
+          .filter(r =>
+            r.status === 'ACTIVE' && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
+          )
+          .map(({ vendor_ids, ...r }) => ({
+            ...r,
+            vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId)
+          }));
       }
 
       return res.status(200).json({

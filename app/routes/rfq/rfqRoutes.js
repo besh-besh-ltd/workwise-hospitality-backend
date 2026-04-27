@@ -847,6 +847,12 @@ RfqRoutes.get(
 // Charge Names
 // ============================================
 RfqRoutes.get(
+  '/charge-names/all',
+  passportSignIn,
+  acl([2, 8, 10]),
+  rfqController.getAllChargeNames
+);
+RfqRoutes.get(
   '/charge-names',
   noLogin.vendorTokenOrJwt,
   rfqController.getChargeNames

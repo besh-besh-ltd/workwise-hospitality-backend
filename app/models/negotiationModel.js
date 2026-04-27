@@ -1083,8 +1083,7 @@ const negotiationModel = {
       `UPDATE tbl_negotiation_rounds
        SET vendor_approvals = (
          SELECT jsonb_agg(
-           jsonb_build_object(
-             'vendor_id', (elem->>'vendor_id')::int,
+           elem || jsonb_build_object(
              'status', $2::text,
              'remarks', $3::text,
              'acted_by', $4::int,
