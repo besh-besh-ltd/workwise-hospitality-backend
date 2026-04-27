@@ -497,6 +497,7 @@ export const getPOItemDetails = async (purchase_order, t) => {
         pop.charges_meta->>'freight_mode'  AS freight_mode,
         pop.charges_meta->>'package_mode'  AS package_mode,
         pop.charges_meta->>'tax_mode'      AS tax_mode,
+        COALESCE(pop.charges_meta->'other_charges', '[]'::jsonb) AS other_charges,
         pv.name                            AS product_name,
         pop.quantity,
         pop.unit,

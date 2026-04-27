@@ -2477,6 +2477,7 @@ WHERE NOT EXISTS (
         'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment,
+        'global_charges', TQ.global_charges,
         'gstin', TQ.gstin
       )
       FROM tbl_quotes TQ
@@ -2545,15 +2546,12 @@ WHERE NOT EXISTS (
               'variant', TQI.variant,
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
               'tax', TQI.tax,
-              'freight_price', TQI.freight_price,
+              'tax_mode', TQI.tax_mode,
               'total_price', TQI.total_price,
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
-              'freight_mode', TQI.freight_mode,
-              'package_mode', TQI.package_mode,
-              'tax_mode', TQI.tax_mode,
+              'other_charges', TQI.other_charges,
               'previous_document_files', (
                     SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
                     FROM tbl_quote_item_files QIF
@@ -5913,6 +5911,7 @@ LIMIT 2;
                     'freight_mode', TQI.freight_mode,
                     'package_mode', TQI.package_mode,
                     'tax_mode', TQI.tax_mode,
+                    'other_charges', TQI.other_charges,
                     'total_price', TQI.total_price,
                     'quantity', TQI.quantity,
                     'product_name', TQI.product_name,
@@ -6030,6 +6029,7 @@ LIMIT 2;
                     'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
+                    'global_charges', TQ.global_charges,
 
         'vendor_details', (
                         SELECT json_agg(json_build_object(
@@ -6077,21 +6077,12 @@ LIMIT 2;
                             'variant', TQI.variant,
                             'product_name', TQI.product_name,
                             'unit_price', TQI.unit_price,
-                            'total_price', ${
-                              no_freight === 'true'
-                                ? 'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))'
-                                : 'TQI.total_price'
-                            },
+                            'total_price', TQI.total_price,
                             'comment', TQI.comment,
                             'delivery_period', TQI.delivery_period,
-                            'package_price', TQI.package_price,
-                            'package_mode', TQI.package_mode,
                             'tax', TQI.tax,
                             'tax_mode', TQI.tax_mode,
-                            'freight_price', ${
-                              no_freight === 'true' ? '0' : 'TQI.freight_price'
-                            },
-                            'freight_mode', TQI.freight_mode,
+                            'other_charges', TQI.other_charges,
                             'quantity', TQI.quantity,
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
@@ -6277,13 +6268,10 @@ LIMIT 2;
             'changed_at', TQFH.changed_at,
             'quote_info', json_build_object(
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
               'tax', TQI.tax,
-              'freight_price', TQI.freight_price,
-              'freight_mode', TQI.freight_mode,
-              'package_mode', TQI.package_mode,
               'tax_mode', TQI.tax_mode,
-              'total_price', TQI.total_price
+              'total_price', TQI.total_price,
+              'other_charges', TQI.other_charges
             )
           )
           FROM tbl_quote_finalization_history TQFH
@@ -6303,9 +6291,7 @@ LIMIT 2;
         (
           SELECT json_build_object(
            'unit_price', TQI1.unit_price,
-            'package_price', TQI1.package_price,
             'tax', TQI1.tax,
-            'freight_price', TQI1.freight_price,
             'total_price', TQI1.total_price,
             'quantity', TQI1.quantity,
             'timestamp', TQF1.timestamp
@@ -6323,13 +6309,10 @@ LIMIT 2;
           SELECT
               json_build_object(
                 'unit_price', TQI.unit_price,
-                'package_price', TQI.package_price,
                 'tax', TQI.tax,
-                'freight_price', TQI.freight_price,
-                'freight_mode', TQI.freight_mode,
-                'package_mode', TQI.package_mode,
                 'tax_mode', TQI.tax_mode,
                 'total_price', TQI.total_price,
+                'other_charges', TQI.other_charges,
                 'quantity', TQI.quantity,
                 'product_name', TQI.product_name,
                 'rfq_no', TQI.rfq_no,
@@ -6370,19 +6353,10 @@ LIMIT 2;
               'quote_item_id', TQI.id,
               'quote_id', TQI.quote_id,
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
-              'package_mode', TQI.package_mode,
               'tax', TQI.tax,
               'tax_mode', TQI.tax_mode,
-              'freight_price', ${
-                no_freight === 'true' ? '0' : 'TQI.freight_price'
-              },
-              'freight_mode', TQI.freight_mode,
-              'total_price', ${
-                no_freight === 'true'
-                  ? 'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))'
-                  : 'TQI.total_price'
-              },
+              'other_charges', TQI.other_charges,
+              'total_price', TQI.total_price,
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
               'quantity', TQI.quantity,
@@ -6487,7 +6461,8 @@ LIMIT 2;
               ),
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
-              
+              'global_charges', TQ.global_charges,
+
               -- payment term list
                'payment_terms',
                (
@@ -6516,19 +6491,10 @@ LIMIT 2;
                     'rfq_id', TH.rfq_id,
                     'product_id', TH.product_variant_id,
                     'unit_price', TH.unit_price,
-                    'package_price', TH.package_price,
                     'tax', TH.tax,
-                    'freight_price', ${
-                      no_freight === 'true' ? '0' : 'TH.freight_price'
-                    },
-                    'freight_mode', TH.freight_mode,
-                    'package_mode', TH.package_mode,
                     'tax_mode', TH.tax_mode,
-                    'total_price', ${
-                      no_freight === 'true'
-                        ? 'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))'
-                        : 'TH.total_price'
-                    },
+                    'other_charges', TH.other_charges,
+                    'total_price', TH.total_price,
                     'comment', TH.comment,
                     'delivery_period', TH.delivery_period,
                     'quantity', TH.quantity,
@@ -8529,7 +8495,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
       WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10 OR freight_mode != $11 OR package_mode != $12 OR tax_mode != $13)
+       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8 OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,
@@ -8537,15 +8503,12 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           product.variant,
           (product.unit_price =
             product.unit_price != '' ? product.unit_price : 0),
-          product.package_price,
           product.tax,
-          product.freight_price,
           product.total_price,
           product.comment,
           product.delivery_period,
-          product.freight_mode,
-          product.package_mode,
-          product.tax_mode
+          product.tax_mode,
+          JSON.stringify(product.other_charges || [])
         ]);
         const item = result[0];
 
@@ -8562,10 +8525,10 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           let updatedItem = [];
           if (item) {
             // Move existing quote to quote history table
-            const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
+            const insertHistoryQuery = `INSERT INTO tbl_quote_item_history
           (quote_item_id, rfq_id, product_variant_id, unit_price, package_price, tax, freight_price, total_price,
-           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, timestamp)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`;
+           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, other_charges, timestamp)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`;
             await db.query(insertHistoryQuery, [
               item.id,
               item.rfq_id,
@@ -8581,28 +8544,31 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               item.variant,
               item.freight_mode,
               item.package_mode,
-              item.tax_mode
+              item.tax_mode,
+              JSON.stringify(item.other_charges || [])
             ]);
 
             // Update existing item with new data
             const updateQuery = `UPDATE tbl_quote_items SET
           unit_price = $1, package_price = $2, tax = $3, freight_price = $4,
-          total_price = $5, comment = $6, delivery_period = $7, 
-          freight_mode = $8, package_mode = $9, tax_mode = $10
-          WHERE id = $11 RETURNING *`;
+          total_price = $5, comment = $6, delivery_period = $7,
+          freight_mode = $8, package_mode = $9, tax_mode = $10,
+          other_charges = $11
+          WHERE id = $12 RETURNING *`;
             const productPrice =
               product.unit_price != '' ? product.unit_price : 0;
             updatedItem = await db.query(updateQuery, [
               productPrice,
-              product.package_price,
+              0,
               product.tax,
-              product.freight_price,
+              0,
               product.total_price,
               product.comment,
               product.delivery_period,
-              product.freight_mode,
-              product.package_mode,
+              null,
+              null,
               product.tax_mode,
+              JSON.stringify(product.other_charges || []),
               item.id
             ]);
           } else {
@@ -8617,17 +8583,18 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 product_variant_id: product.product_id,
                 product_name: product.product_name,
                 unit_price: product.unit_price,
-                package_price: product.package_price,
+                package_price: 0,
                 tax: product.tax,
-                freight_price: product.freight_price,
+                freight_price: 0,
                 total_price: product.total_price,
                 comment: product.comment,
                 delivery_period: product.delivery_period,
                 quantity: product.quantity,
                 variant: product.variant,
-                freight_mode: product.freight_mode,
-                package_mode: product.package_mode,
-                tax_mode: product.tax_mode
+                freight_mode: null,
+                package_mode: null,
+                tax_mode: product.tax_mode,
+                other_charges: JSON.stringify(product.other_charges || [])
               }
             ];
 
@@ -8656,7 +8623,8 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'variant',
               'freight_mode',
               'package_mode',
-              'tax_mode'
+              'tax_mode',
+              'other_charges'
             ];
 
             let quotes_items = await rfqModel.insertArray(
@@ -11515,6 +11483,7 @@ ORDER BY m.created_at;
                             'is_regret', TQ.is_regret,
                             'global_payment_term', TQ.global_payment_term,
                             'global_comment', TQ.global_comment,
+                            'global_charges', TQ.global_charges,
                             'regret_reason', TQ.regret_reason,
                             'quote_items', (
                                 SELECT JSONB_AGG(
@@ -11527,11 +11496,12 @@ ORDER BY m.created_at;
                                         'product_name', TQI.product_name,
                                         'freight_price', TQI.freight_price,
                                         'package_price', TQI.package_price,
-                                        'delivery_period', TQI.delivery_period
+                                        'delivery_period', TQI.delivery_period,
+                                        'other_charges', TQI.other_charges
                                     )
                                 )
                                 FROM tbl_quote_items TQI
-                                WHERE TQI.quote_id = TQ.id 
+                                WHERE TQI.quote_id = TQ.id
                                     AND TQI.product_variant_id = TRPV.product_variant_id
                             )
                         )
