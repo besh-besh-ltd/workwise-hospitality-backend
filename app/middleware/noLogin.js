@@ -64,7 +64,7 @@ const noLogin = {
                     return res.status(400).json({ status: 0, message: 'Invalid or expired token' });
                 }
                 const user = await db.oneOrNone(
-                    'SELECT id, name, email, user_type, company_id, status FROM tbl_users WHERE id = $1',
+                    'SELECT id, name, email, user_type, company_id, status, mobile FROM tbl_users WHERE id = $1',
                     [tokenData.vendor_id]
                 );
                 if (!user) {

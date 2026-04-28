@@ -2409,6 +2409,72 @@ WHERE NOT EXISTS (
           LIMIT 1
         )
       ) AS is_quotes_present,
+      -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_products _rp_de
+          WHERE _rp_de.rfq_id = RFQ.id
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization _qf_de
+              WHERE _qf_de.rfq_id = RFQ.id
+                AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                AND _qf_de.variant = _rp_de.variant
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po_de
+              JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+              WHERE _po_de.rfq_id = RFQ.id
+                AND _pop_de.rfq_product_id = _rp_de.id
+                AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            )
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+              JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+              WHERE _po_rej.rfq_id = RFQ.id
+                AND _pop_rej.rfq_product_id = _rp_de.id
+                AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_items _qi_de
+              JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+              WHERE _q_de.rfq_id = RFQ.id
+                AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                AND _qi_de.variant = _rp_de.variant
+                AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                    WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                    JOIN tbl_rfq_product_tech_evaluation _te
+                      ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                    WHERE _te.tbl_rfq_product_id = _rp_de.id
+                      AND _tecv.vendor_id = _q_de.created_by
+                      AND _tecv.status = 1
+                  )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                  JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                  WHERE _po_v.rfq_id = RFQ.id
+                    AND _pop_v.rfq_product_id = _rp_de.id
+                    AND _po_v.finalized_vendor_id = _q_de.created_by
+                    AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                )
+            )
+        )
+      ) AS has_dead_end_product,
+      -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+          WHERE _te_stuck.rfq_id = RFQ.id
+            AND _te_stuck.blocked_insufficient_vendors = TRUE
+            AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+        )
+      ) AS has_tech_stuck_product,
 
       ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
@@ -2422,6 +2488,7 @@ WHERE NOT EXISTS (
         'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment,
+        'global_charges', TQ.global_charges,
         'gstin', TQ.gstin
       )
       FROM tbl_quotes TQ
@@ -2490,15 +2557,12 @@ WHERE NOT EXISTS (
               'variant', TQI.variant,
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
               'tax', TQI.tax,
-              'freight_price', TQI.freight_price,
+              'tax_mode', TQI.tax_mode,
               'total_price', TQI.total_price,
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
-              'freight_mode', TQI.freight_mode,
-              'package_mode', TQI.package_mode,
-              'tax_mode', TQI.tax_mode,
+              'other_charges', TQI.other_charges,
               'previous_document_files', (
                     SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
                     FROM tbl_quote_item_files QIF
@@ -2867,6 +2931,68 @@ LIMIT 1;`;
             WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
               AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
         ) AS has_approved_po
+        -- is_dead_end: this product has all eligible vendors' POs rejected with no replacement
+        ,(
+          NOT EXISTS (
+            SELECT 1 FROM tbl_quote_finalization _qf_de2
+            WHERE _qf_de2.rfq_id = RFQ_P.rfq_id
+              AND _qf_de2.product_variant_id = RFQ_P.product_variant_id
+              AND _qf_de2.variant = RFQ_P.variant
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po_de2
+            JOIN tbl_purchase_order_product _pop_de2 ON _pop_de2.purchase_order_id = _po_de2.id
+            WHERE _po_de2.rfq_id = RFQ_P.rfq_id
+              AND _pop_de2.rfq_product_id = RFQ_P.id
+              AND _po_de2.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+          AND EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po_rej2
+            JOIN tbl_purchase_order_product _pop_rej2 ON _pop_rej2.purchase_order_id = _po_rej2.id
+            WHERE _po_rej2.rfq_id = RFQ_P.rfq_id
+              AND _pop_rej2.rfq_product_id = RFQ_P.id
+              AND _po_rej2.status IN ('rejected', 'rejected_by_vendor')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_quote_items _qi_de2
+            JOIN tbl_quotes _q_de2 ON _q_de2.id = _qi_de2.quote_id
+            WHERE _q_de2.rfq_id = RFQ_P.rfq_id
+              AND _qi_de2.product_variant_id = RFQ_P.product_variant_id
+              AND _qi_de2.variant = RFQ_P.variant
+              AND (_q_de2.is_regret IS NULL OR _q_de2.is_regret != 1)
+              AND (
+                NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk2
+                  WHERE _te_chk2.tbl_rfq_product_id = RFQ_P.id
+                )
+                OR EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv2
+                  JOIN tbl_rfq_product_tech_evaluation _te2
+                    ON _tecv2.tbl_rfq_product_tech_evaluation_id = _te2.id
+                  WHERE _te2.tbl_rfq_product_id = RFQ_P.id
+                    AND _tecv2.vendor_id = _q_de2.created_by
+                    AND _tecv2.status = 1
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_v2
+                JOIN tbl_purchase_order_product _pop_v2 ON _pop_v2.purchase_order_id = _po_v2.id
+                WHERE _po_v2.rfq_id = RFQ_P.rfq_id
+                  AND _pop_v2.rfq_product_id = RFQ_P.id
+                  AND _po_v2.finalized_vendor_id = _q_de2.created_by
+                  AND _po_v2.status IN ('rejected', 'rejected_by_vendor')
+              )
+          )
+        ) AS is_dead_end
+        -- is_tech_stuck: this product has all vendors tech-failed, no replacements available
+        ,(
+          EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_s
+            WHERE _te_s.tbl_rfq_product_id = RFQ_P.id
+              AND _te_s.blocked_insufficient_vendors = TRUE
+              AND COALESCE(_te_s.total_passed_verified, 0) = 0
+          )
+        ) AS is_tech_stuck
 
     FROM
         tbl_rfq_products RFQ_P
@@ -3400,6 +3526,99 @@ LIMIT 2;
               )
             END
           ) AS po_partially_completed,
+          -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_products _rp_de
+              WHERE _rp_de.rfq_id = RFQ.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_finalization _qf_de
+                  WHERE _qf_de.rfq_id = RFQ.id
+                    AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                    AND _qf_de.variant = _rp_de.variant
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_de
+                  JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+                  WHERE _po_de.rfq_id = RFQ.id
+                    AND _pop_de.rfq_product_id = _rp_de.id
+                    AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+                  JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+                  WHERE _po_rej.rfq_id = RFQ.id
+                    AND _pop_rej.rfq_product_id = _rp_de.id
+                    AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_items _qi_de
+                  JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+                  WHERE _q_de.rfq_id = RFQ.id
+                    AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                    AND _qi_de.variant = _rp_de.variant
+                    AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                    AND (
+                      NOT EXISTS (
+                        SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                        WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                        JOIN tbl_rfq_product_tech_evaluation _te
+                          ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                        WHERE _te.tbl_rfq_product_id = _rp_de.id
+                          AND _tecv.vendor_id = _q_de.created_by
+                          AND _tecv.status = 1
+                      )
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                      JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                      WHERE _po_v.rfq_id = RFQ.id
+                        AND _pop_v.rfq_product_id = _rp_de.id
+                        AND _po_v.finalized_vendor_id = _q_de.created_by
+                        AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                    )
+                )
+            )
+          ) AS has_dead_end_product,
+          -- has_po_rejection: any product has a rejected PO with no replacement
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_products _rp_rej
+              WHERE _rp_rej.rfq_id = RFQ.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_finalization _qf_rej
+                  WHERE _qf_rej.rfq_id = RFQ.id
+                    AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
+                    AND _qf_rej.variant = _rp_rej.variant
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                  JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                  WHERE _po_r.rfq_id = RFQ.id
+                    AND _pop_r.rfq_product_id = _rp_rej.id
+                    AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                      JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                      WHERE _po_repl.rfq_id = RFQ.id
+                        AND _pop_repl.rfq_product_id = _rp_rej.id
+                        AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                    )
+                )
+            )
+          ) AS has_po_rejection,
+          -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+              WHERE _te_stuck.rfq_id = RFQ.id
+                AND _te_stuck.blocked_insufficient_vendors = TRUE
+                AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+            )
+          ) AS has_tech_stuck_product,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -3418,9 +3637,9 @@ LIMIT 2;
                   LEFT JOIN tbl_quotes tq
                     ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
                   LEFT JOIN tbl_quote_items qi
-                    ON trpv.product_variant_id = qi.product_variant_id 
+                    ON trpv.product_variant_id = qi.product_variant_id
                     AND trpv.variant = qi.variant
-                    AND trpv.rfq_id = qi.rfq_id 
+                    AND trpv.rfq_id = qi.rfq_id
                     AND qi.quote_id = tq.id
                     AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
@@ -3428,9 +3647,21 @@ LIMIT 2;
                   GROUP BY
                     trpv.user_id
                   HAVING
-                    BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
+                    AND COUNT(DISTINCT qi.id) > 0
                 ) AS fully_quoted_vendors
+              ),
+              'quote_regretted',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT trpv.user_id
+                  FROM tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  WHERE trpv.rfq_id = rfq.id
+                  GROUP BY trpv.user_id
+                  HAVING BOOL_OR(tq.is_regret = 1)
+                ) AS regretted_vendors
               )
             )
             FROM tbl_rfq_product_vendors trpv
@@ -3439,14 +3670,14 @@ LIMIT 2;
           ) AS "vendors",
           ARRAY(
               SELECT json_build_object(
-                  'id', RFQ_P.id, 
+                  'id', RFQ_P.id,
                   'product_id', RFQ_P.product_variant_id,
                   'product_specs', (
                       SELECT json_agg(json_build_object(
-                          'title', RFQ_P_SPEC.title, 
-                          'value', RFQ_P_SPEC.value, 
-                          'id', RFQ_P_SPEC.id, 
-                          'product_id', RFQ_P_SPEC.product_variant_id, 
+                          'title', RFQ_P_SPEC.title,
+                          'value', RFQ_P_SPEC.value,
+                          'id', RFQ_P_SPEC.id,
+                          'product_id', RFQ_P_SPEC.product_variant_id,
                           'rfq_id', RFQ_P_SPEC.rfq_id))
                       FROM tbl_rfq_products_specs RFQ_P_SPEC
                       WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
@@ -3628,21 +3859,20 @@ LIMIT 2;
       tech_latest AS (
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
-      -- Products where tech eval is done: all eligible (responded) vendors
-      -- have been evaluated (exist in cleared_vendors, passed or failed).
+      -- Products where tech eval is done AND at least one vendor passed.
+      -- Excludes tech-stuck products (blocked_insufficient_vendors + zero passed).
       products_with_cleared AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
         WHERE te.rfq_id = ANY($1::int[])
+          AND NOT (te.blocked_insufficient_vendors = true AND COALESCE(te.total_passed_verified, 0) = 0)
           AND (
             te.is_complete = true
             OR (
-              -- At least 1 vendor evaluated
               EXISTS (
                 SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
                 WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
               )
-              -- AND no responded vendor left unevaluated
               AND NOT EXISTS (
                 SELECT DISTINCT vr.vendor_id
                 FROM tbl_rfq_product_tech_evaluation_vendors_response vr
@@ -3658,6 +3888,23 @@ LIMIT 2;
             )
           )
         GROUP BY te.rfq_id
+      ),
+      -- Products where tech eval is stuck (all vendors failed, no replacements)
+      products_tech_stuck AS (
+        SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_stuck
+        FROM tbl_rfq_product_tech_evaluation te
+        WHERE te.rfq_id = ANY($1::int[])
+          AND te.blocked_insufficient_vendors = true
+          AND COALESCE(te.total_passed_verified, 0) = 0
+        GROUP BY te.rfq_id
+      ),
+      -- All evaluated products = cleared + stuck (used to determine if TE phase is "done")
+      products_all_evaluated AS (
+        SELECT
+          COALESCE(c.rfq_id, s.rfq_id) AS rfq_id,
+          COALESCE(c.products_cleared, 0) + COALESCE(s.products_stuck, 0) AS products_evaluated
+        FROM products_with_cleared c
+        FULL OUTER JOIN products_tech_stuck s ON c.rfq_id = s.rfq_id
       ),
       -- Active negotiation rounds
       active_negotiations AS (
@@ -3724,6 +3971,30 @@ LIMIT 2;
           AND (is_regret IS NULL OR is_regret != 1)
         GROUP BY rfq_id HAVING COUNT(*) > 0
       ),
+      -- Whether any product has a vendor-rejected PO that still needs action
+      -- (product not yet re-finalized and no active replacement PO)
+      po_vendor_rejected AS (
+        SELECT po_rej.rfq_id
+        FROM tbl_rfq_purchase_order po_rej
+        JOIN tbl_purchase_order_product pop_rej ON pop_rej.purchase_order_id = po_rej.id
+        JOIN tbl_rfq_products rp_rej ON rp_rej.id = pop_rej.rfq_product_id
+        WHERE po_rej.rfq_id = ANY($1::int[])
+          AND po_rej.status = 'rejected_by_vendor'
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_quote_finalization qf_rej
+            WHERE qf_rej.rfq_id = po_rej.rfq_id
+              AND qf_rej.product_variant_id = rp_rej.product_variant_id
+              AND qf_rej.variant = rp_rej.variant
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order po_repl
+            JOIN tbl_purchase_order_product pop_repl ON pop_repl.purchase_order_id = po_repl.id
+            WHERE po_repl.rfq_id = po_rej.rfq_id
+              AND pop_repl.rfq_product_id = pop_rej.rfq_product_id
+              AND po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+        GROUP BY po_rej.rfq_id
+      ),
       -- Whether the bid submission deadline has passed.
       -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
       bid_status AS (
@@ -3743,10 +4014,14 @@ LIMIT 2;
           -- Stage 9: Purchase Order Approval
           WHEN COALESCE(pd.pending_approval_pos, 0) > 0
             THEN 'PO_APPROVAL'
-          -- Stage 8: Awaiting PO Initiation (all products have approved quotes)
+          -- Stage 8b: PO Rejected by Vendor (all POs rejected, none active)
+          WHEN pvr.rfq_id IS NOT NULL
+            THEN 'PO_VENDOR_REJECTED'
+          -- Stage 8: Awaiting PO Initiation (all products have approved quotes AND none pending)
           WHEN nqa.approved_products IS NOT NULL
             AND pc.total_products IS NOT NULL
             AND nqa.approved_products >= pc.total_products
+            AND nqp.rfq_id IS NULL
             THEN 'AWAITING_PO'
           -- Stage 7: Quotation Approval
           WHEN nqp.rfq_id IS NOT NULL
@@ -3754,10 +4029,17 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated)
-          WHEN pwc.products_cleared IS NOT NULL AND tepc.te_products IS NOT NULL
-            AND pwc.products_cleared >= tepc.te_products
+          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated,
+          -- whether cleared or stuck. Some products may be stuck but the cleared ones can proceed.)
+          WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pae.products_evaluated >= tepc.te_products
+            AND COALESCE(pwc.products_cleared, 0) > 0
             THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5a-stuck: All TE products evaluated but ALL are stuck (zero cleared)
+          WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pae.products_evaluated >= tepc.te_products
+            AND COALESCE(pwc.products_cleared, 0) = 0
+            THEN 'RFQ_STUCK_TECHNICAL'
           -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
           WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
@@ -3805,6 +4087,8 @@ LIMIT 2;
       LEFT JOIN product_counts pc ON pc.rfq_id = rd.id
       LEFT JOIN tech_latest tl ON tl.rfq_id = rd.id
       LEFT JOIN products_with_cleared pwc ON pwc.rfq_id = rd.id
+      LEFT JOIN products_tech_stuck pts ON pts.rfq_id = rd.id
+      LEFT JOIN products_all_evaluated pae ON pae.rfq_id = rd.id
       LEFT JOIN active_negotiations an ON an.rfq_id = rd.id
       LEFT JOIN neg_quote_pending nqp ON nqp.rfq_id = rd.id
       LEFT JOIN neg_quote_approved nqa ON nqa.rfq_id = rd.id
@@ -3813,6 +4097,7 @@ LIMIT 2;
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
       LEFT JOIN tech_eval_product_count tepc ON tepc.rfq_id = rd.id
       LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
+      LEFT JOIN po_vendor_rejected pvr ON pvr.rfq_id = rd.id
       LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
 
@@ -3851,6 +4136,7 @@ LIMIT 2;
       AWAITING_QUOTES:           { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+      PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -4066,6 +4352,7 @@ LIMIT 2;
       NEGOTIATION_ONGOING: 'commercial',
       QUOTATION_APPROVAL: 'commercial',
       AWAITING_PO: 'purchase_order',
+      PO_VENDOR_REJECTED: 'purchase_order',
       PO_APPROVAL: 'purchase_order',
       APPROVED_COMPLETED: 'purchase_order',
     };
@@ -4294,24 +4581,24 @@ LIMIT 2;
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
             )::int AS participated,
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
                 AND quoted_products > 0
             )::int AS sent_quotes,
             COUNT(*) FILTER (
               WHERE NOT has_regret
                 AND assigned_products > 0
-                AND submitted_products = assigned_products
+                AND submitted_products > 0
                 AND quoted_products = 0
             )::int AS technical_only,
             COUNT(*) FILTER (WHERE has_regret)::int AS regrets,
             COUNT(*) FILTER (
               WHERE NOT has_regret
-                AND submitted_products < assigned_products
+                AND submitted_products = 0
             )::int AS remaining
           FROM vendor_rollup
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
@@ -4700,7 +4987,26 @@ LIMIT 2;
         else if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
         else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
         else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
-        else if (currentStage === 'RFQ_STUCK_TECHNICAL') subStatus = 'no_vendors_participated';
+        else if (currentStage === 'RFQ_STUCK_TECHNICAL') {
+          // Distinguish: vendors were evaluated but all failed vs no vendors at all
+          if (totalFailed > 0) {
+            subStatus = 'all_vendors_failed';
+            summary = `All ${totalFailed} evaluated vendor${totalFailed === 1 ? '' : 's'} failed technical evaluation across ${techProducts.length} product${techProducts.length === 1 ? '' : 's'}. Extend the bid deadline and refresh vendors to proceed.`;
+          } else {
+            subStatus = 'no_vendors_participated';
+          }
+        }
+
+        // Check for partially stuck: some products passed tech eval, but others
+        // are tech-stuck (all vendors failed, no replacements). This can happen when
+        // the lifecycle advanced past technical for cleared products.
+        const stuckProducts = techProducts ? techProducts.filter(p => p.passed === 0 && p.failed > 0) : [];
+        const hasStuckProducts = stuckProducts.length > 0;
+        if (hasStuckProducts && status === 'completed') {
+          subStatus = 'partially_stuck';
+          const clearedCount = techProducts.length - stuckProducts.length;
+          summary = `${clearedCount} of ${techProducts.length} products cleared. ${stuckProducts.length} product${stuckProducts.length === 1 ? ' is' : 's are'} stuck — all vendors failed technical evaluation.`;
+        }
 
         const awaitingQuotes = ['TECHNICAL_AWAITING_QUOTES', 'RFQ_STUCK_TECHNICAL'].includes(currentStage)
           ? buildAwaitingQuotesSnapshot()
@@ -4713,6 +5019,7 @@ LIMIT 2;
 
         phases.push({
           key: 'technical', label: 'Technical Evaluation', status, summary, sub_status: subStatus,
+          has_stuck_products: hasStuckProducts,
           is_cancelled: latestTechInstance?.status === 'CANCELLED',
           evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
           products: techProducts,
@@ -4783,6 +5090,7 @@ LIMIT 2;
 
         let subStatus = null;
         if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
+        else if (currentStage === 'PO_VENDOR_REJECTED') subStatus = 'vendor_rejected';
         else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
         else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
 
@@ -5115,9 +5423,21 @@ LIMIT 2;
                   GROUP BY
                     trpv.user_id
                   HAVING
-                    BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                    NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
+                    AND COUNT(DISTINCT qi.id) > 0
                 ) AS fully_quoted_vendors
+              ),
+              'quote_regretted',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT trpv.user_id
+                  FROM tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  WHERE trpv.rfq_id = rfq.id
+                  GROUP BY trpv.user_id
+                  HAVING BOOL_OR(tq.is_regret = 1)
+                ) AS regretted_vendors
               )
             )
             FROM tbl_rfq_product_vendors trpv
@@ -5610,6 +5930,7 @@ LIMIT 2;
                     'freight_mode', TQI.freight_mode,
                     'package_mode', TQI.package_mode,
                     'tax_mode', TQI.tax_mode,
+                    'other_charges', TQI.other_charges,
                     'total_price', TQI.total_price,
                     'quantity', TQI.quantity,
                     'product_name', TQI.product_name,
@@ -5727,6 +6048,7 @@ LIMIT 2;
                     'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
+                    'global_charges', TQ.global_charges,
 
         'vendor_details', (
                         SELECT json_agg(json_build_object(
@@ -5774,21 +6096,12 @@ LIMIT 2;
                             'variant', TQI.variant,
                             'product_name', TQI.product_name,
                             'unit_price', TQI.unit_price,
-                            'total_price', ${
-                              no_freight === 'true'
-                                ? 'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))'
-                                : 'TQI.total_price'
-                            },
+                            'total_price', TQI.total_price,
                             'comment', TQI.comment,
                             'delivery_period', TQI.delivery_period,
-                            'package_price', TQI.package_price,
-                            'package_mode', TQI.package_mode,
                             'tax', TQI.tax,
                             'tax_mode', TQI.tax_mode,
-                            'freight_price', ${
-                              no_freight === 'true' ? '0' : 'TQI.freight_price'
-                            },
-                            'freight_mode', TQI.freight_mode,
+                            'other_charges', TQI.other_charges,
                             'quantity', TQI.quantity,
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
@@ -5974,13 +6287,10 @@ LIMIT 2;
             'changed_at', TQFH.changed_at,
             'quote_info', json_build_object(
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
               'tax', TQI.tax,
-              'freight_price', TQI.freight_price,
-              'freight_mode', TQI.freight_mode,
-              'package_mode', TQI.package_mode,
               'tax_mode', TQI.tax_mode,
-              'total_price', TQI.total_price
+              'total_price', TQI.total_price,
+              'other_charges', TQI.other_charges
             )
           )
           FROM tbl_quote_finalization_history TQFH
@@ -6000,9 +6310,7 @@ LIMIT 2;
         (
           SELECT json_build_object(
            'unit_price', TQI1.unit_price,
-            'package_price', TQI1.package_price,
             'tax', TQI1.tax,
-            'freight_price', TQI1.freight_price,
             'total_price', TQI1.total_price,
             'quantity', TQI1.quantity,
             'timestamp', TQF1.timestamp
@@ -6020,13 +6328,10 @@ LIMIT 2;
           SELECT
               json_build_object(
                 'unit_price', TQI.unit_price,
-                'package_price', TQI.package_price,
                 'tax', TQI.tax,
-                'freight_price', TQI.freight_price,
-                'freight_mode', TQI.freight_mode,
-                'package_mode', TQI.package_mode,
                 'tax_mode', TQI.tax_mode,
                 'total_price', TQI.total_price,
+                'other_charges', TQI.other_charges,
                 'quantity', TQI.quantity,
                 'product_name', TQI.product_name,
                 'rfq_no', TQI.rfq_no,
@@ -6067,19 +6372,10 @@ LIMIT 2;
               'quote_item_id', TQI.id,
               'quote_id', TQI.quote_id,
               'unit_price', TQI.unit_price,
-              'package_price', TQI.package_price,
-              'package_mode', TQI.package_mode,
               'tax', TQI.tax,
               'tax_mode', TQI.tax_mode,
-              'freight_price', ${
-                no_freight === 'true' ? '0' : 'TQI.freight_price'
-              },
-              'freight_mode', TQI.freight_mode,
-              'total_price', ${
-                no_freight === 'true'
-                  ? 'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))'
-                  : 'TQI.total_price'
-              },
+              'other_charges', TQI.other_charges,
+              'total_price', TQI.total_price,
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
               'quantity', TQI.quantity,
@@ -6184,7 +6480,8 @@ LIMIT 2;
               ),
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
-              
+              'global_charges', TQ.global_charges,
+
               -- payment term list
                'payment_terms',
                (
@@ -6213,19 +6510,10 @@ LIMIT 2;
                     'rfq_id', TH.rfq_id,
                     'product_id', TH.product_variant_id,
                     'unit_price', TH.unit_price,
-                    'package_price', TH.package_price,
                     'tax', TH.tax,
-                    'freight_price', ${
-                      no_freight === 'true' ? '0' : 'TH.freight_price'
-                    },
-                    'freight_mode', TH.freight_mode,
-                    'package_mode', TH.package_mode,
                     'tax_mode', TH.tax_mode,
-                    'total_price', ${
-                      no_freight === 'true'
-                        ? 'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))'
-                        : 'TH.total_price'
-                    },
+                    'other_charges', TH.other_charges,
+                    'total_price', TH.total_price,
                     'comment', TH.comment,
                     'delivery_period', TH.delivery_period,
                     'quantity', TH.quantity,
@@ -6590,9 +6878,11 @@ LIMIT 2;
   getRFQCreatedBy: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.mobile,tbl_users.organization_name
+        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.mobile,tbl_users.organization_name,
+                c.company_name AS company_name
         FROM tbl_rfq
         LEFT JOIN tbl_users ON tbl_rfq.created_by = tbl_users.id
+        LEFT JOIN tbl_company c ON c.id = tbl_users.company_id
         WHERE tbl_rfq.id = $1;`,
         [id]
       )
@@ -8224,7 +8514,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
       WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10 OR freight_mode != $11 OR package_mode != $12 OR tax_mode != $13)
+       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8 OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,
@@ -8232,15 +8522,12 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           product.variant,
           (product.unit_price =
             product.unit_price != '' ? product.unit_price : 0),
-          product.package_price,
           product.tax,
-          product.freight_price,
           product.total_price,
           product.comment,
           product.delivery_period,
-          product.freight_mode,
-          product.package_mode,
-          product.tax_mode
+          product.tax_mode,
+          JSON.stringify(product.other_charges || [])
         ]);
         const item = result[0];
 
@@ -8257,10 +8544,10 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           let updatedItem = [];
           if (item) {
             // Move existing quote to quote history table
-            const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
+            const insertHistoryQuery = `INSERT INTO tbl_quote_item_history
           (quote_item_id, rfq_id, product_variant_id, unit_price, package_price, tax, freight_price, total_price,
-           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, timestamp)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`;
+           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, other_charges, timestamp)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`;
             await db.query(insertHistoryQuery, [
               item.id,
               item.rfq_id,
@@ -8276,28 +8563,31 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               item.variant,
               item.freight_mode,
               item.package_mode,
-              item.tax_mode
+              item.tax_mode,
+              JSON.stringify(item.other_charges || [])
             ]);
 
             // Update existing item with new data
             const updateQuery = `UPDATE tbl_quote_items SET
           unit_price = $1, package_price = $2, tax = $3, freight_price = $4,
-          total_price = $5, comment = $6, delivery_period = $7, 
-          freight_mode = $8, package_mode = $9, tax_mode = $10
-          WHERE id = $11 RETURNING *`;
+          total_price = $5, comment = $6, delivery_period = $7,
+          freight_mode = $8, package_mode = $9, tax_mode = $10,
+          other_charges = $11
+          WHERE id = $12 RETURNING *`;
             const productPrice =
               product.unit_price != '' ? product.unit_price : 0;
             updatedItem = await db.query(updateQuery, [
               productPrice,
-              product.package_price,
+              0,
               product.tax,
-              product.freight_price,
+              0,
               product.total_price,
               product.comment,
               product.delivery_period,
-              product.freight_mode,
-              product.package_mode,
+              null,
+              null,
               product.tax_mode,
+              JSON.stringify(product.other_charges || []),
               item.id
             ]);
           } else {
@@ -8312,17 +8602,18 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 product_variant_id: product.product_id,
                 product_name: product.product_name,
                 unit_price: product.unit_price,
-                package_price: product.package_price,
+                package_price: 0,
                 tax: product.tax,
-                freight_price: product.freight_price,
+                freight_price: 0,
                 total_price: product.total_price,
                 comment: product.comment,
                 delivery_period: product.delivery_period,
                 quantity: product.quantity,
                 variant: product.variant,
-                freight_mode: product.freight_mode,
-                package_mode: product.package_mode,
-                tax_mode: product.tax_mode
+                freight_mode: null,
+                package_mode: null,
+                tax_mode: product.tax_mode,
+                other_charges: JSON.stringify(product.other_charges || [])
               }
             ];
 
@@ -8351,7 +8642,8 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'variant',
               'freight_mode',
               'package_mode',
-              'tax_mode'
+              'tax_mode',
+              'other_charges'
             ];
 
             let quotes_items = await rfqModel.insertArray(
@@ -11245,6 +11537,7 @@ ORDER BY m.created_at;
                             'is_regret', TQ.is_regret,
                             'global_payment_term', TQ.global_payment_term,
                             'global_comment', TQ.global_comment,
+                            'global_charges', TQ.global_charges,
                             'regret_reason', TQ.regret_reason,
                             'quote_items', (
                                 SELECT JSONB_AGG(
@@ -11257,11 +11550,12 @@ ORDER BY m.created_at;
                                         'product_name', TQI.product_name,
                                         'freight_price', TQI.freight_price,
                                         'package_price', TQI.package_price,
-                                        'delivery_period', TQI.delivery_period
+                                        'delivery_period', TQI.delivery_period,
+                                        'other_charges', TQI.other_charges
                                     )
                                 )
                                 FROM tbl_quote_items TQI
-                                WHERE TQI.quote_id = TQ.id 
+                                WHERE TQI.quote_id = TQ.id
                                     AND TQI.product_variant_id = TRPV.product_variant_id
                             )
                         )
@@ -12686,7 +12980,100 @@ ORDER BY tq.timestamp DESC;
               ) _chk
             )
           END
-        ) AS po_completed
+        ) AS po_completed,
+        -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_products _rp_de
+            WHERE _rp_de.rfq_id = RFQ.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization _qf_de
+                WHERE _qf_de.rfq_id = RFQ.id
+                  AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qf_de.variant = _rp_de.variant
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_de
+                JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+                WHERE _po_de.rfq_id = RFQ.id
+                  AND _pop_de.rfq_product_id = _rp_de.id
+                  AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+                JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+                WHERE _po_rej.rfq_id = RFQ.id
+                  AND _pop_rej.rfq_product_id = _rp_de.id
+                  AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_items _qi_de
+                JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+                WHERE _q_de.rfq_id = RFQ.id
+                  AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qi_de.variant = _rp_de.variant
+                  AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                      WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                      JOIN tbl_rfq_product_tech_evaluation _te
+                        ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                      WHERE _te.tbl_rfq_product_id = _rp_de.id
+                        AND _tecv.vendor_id = _q_de.created_by
+                        AND _tecv.status = 1
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                    JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                    WHERE _po_v.rfq_id = RFQ.id
+                      AND _pop_v.rfq_product_id = _rp_de.id
+                      AND _po_v.finalized_vendor_id = _q_de.created_by
+                      AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                  )
+              )
+          )
+        ) AS has_dead_end_product,
+        -- has_po_rejection: any product has a rejected PO with no replacement
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_products _rp_rej
+            WHERE _rp_rej.rfq_id = RFQ.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization _qf_rej
+                WHERE _qf_rej.rfq_id = RFQ.id
+                  AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
+                  AND _qf_rej.variant = _rp_rej.variant
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                WHERE _po_r.rfq_id = RFQ.id
+                  AND _pop_r.rfq_product_id = _rp_rej.id
+                  AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                    JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                    WHERE _po_repl.rfq_id = RFQ.id
+                      AND _pop_repl.rfq_product_id = _rp_rej.id
+                      AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+                  )
+              )
+          )
+        ) AS has_po_rejection,
+        -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+            WHERE _te_stuck.rfq_id = RFQ.id
+              AND _te_stuck.blocked_insufficient_vendors = TRUE
+              AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+          )
+        ) AS has_tech_stuck_product
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ

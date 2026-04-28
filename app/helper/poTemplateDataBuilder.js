@@ -141,6 +141,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       POP.charges_meta->>'freight_mode' AS freight_mode,
       COALESCE((POP.charges_meta->>'package_price')::numeric, 0) AS package_price,
       POP.charges_meta->>'package_mode' AS package_mode,
+      COALESCE(POP.charges_meta->'other_charges', '[]'::jsonb) AS other_charges,
       PV.name AS product_name,
       POHM.hsn_code,
       RPS_SIZE.value AS size,

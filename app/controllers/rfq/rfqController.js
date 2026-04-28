@@ -1032,15 +1032,17 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
       }
       })
 
-      // send message to vendor
-      const whatsappPayload ={
-        mobile:user.mobile,
-        token:vendorToken,
-        rfq_id:rfq_id,
-        message:message,
-        name:vendorName
+      // send message to vendor (skip if mobile not available, e.g. token-auth users)
+      if (user.mobile) {
+        const whatsappPayload ={
+          mobile:user.mobile,
+          token:vendorToken,
+          rfq_id:rfq_id,
+          message:message,
+          name:vendorName
+        }
+        await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
       }
-      await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
     }
   
   
@@ -5289,7 +5291,78 @@ const rfqController = {
           [rfq_id]
         ));
 
-        assertEditAllowed(current, userId, { hasQuotes });
+        // 1c. Check for dead-end products — allows editing even after bid
+        //     window closes when all eligible vendors' POs were rejected.
+        const hasDeadEndProduct = !!(await t.oneOrNone(`
+          SELECT 1 FROM tbl_rfq_products rp_de
+          WHERE rp_de.rfq_id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_finalization qf_de
+              WHERE qf_de.rfq_id = $1
+                AND qf_de.product_variant_id = rp_de.product_variant_id
+                AND qf_de.variant = rp_de.variant
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order po_de
+              JOIN tbl_purchase_order_product pop_de ON pop_de.purchase_order_id = po_de.id
+              WHERE po_de.rfq_id = $1
+                AND pop_de.rfq_product_id = rp_de.id
+                AND po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            )
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order po_rej
+              JOIN tbl_purchase_order_product pop_rej ON pop_rej.purchase_order_id = po_rej.id
+              WHERE po_rej.rfq_id = $1
+                AND pop_rej.rfq_product_id = rp_de.id
+                AND po_rej.status IN ('rejected', 'rejected_by_vendor')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_quote_items qi_de
+              JOIN tbl_quotes q_de ON q_de.id = qi_de.quote_id
+              WHERE q_de.rfq_id = $1
+                AND qi_de.product_variant_id = rp_de.product_variant_id
+                AND qi_de.variant = rp_de.variant
+                AND (q_de.is_regret IS NULL OR q_de.is_regret != 1)
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation te_chk
+                    WHERE te_chk.tbl_rfq_product_id = rp_de.id
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors tecv
+                    JOIN tbl_rfq_product_tech_evaluation te
+                      ON tecv.tbl_rfq_product_tech_evaluation_id = te.id
+                    WHERE te.tbl_rfq_product_id = rp_de.id
+                      AND tecv.vendor_id = q_de.created_by
+                      AND tecv.status = 1
+                  )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order po_v
+                  JOIN tbl_purchase_order_product pop_v ON pop_v.purchase_order_id = po_v.id
+                  WHERE po_v.rfq_id = $1
+                    AND pop_v.rfq_product_id = rp_de.id
+                    AND po_v.finalized_vendor_id = q_de.created_by
+                    AND po_v.status IN ('rejected', 'rejected_by_vendor')
+                )
+            )
+          LIMIT 1
+        `, [rfq_id]));
+
+        // 1d. Check for tech-eval-stuck products — allows restricted editing
+        //     (only bid_end_date + vendor refresh) when all vendors failed tech eval.
+        const hasTechStuckProduct = !!(await t.oneOrNone(`
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation te_stuck
+          WHERE te_stuck.rfq_id = $1
+            AND te_stuck.blocked_insufficient_vendors = TRUE
+            AND COALESCE(te_stuck.total_passed_verified, 0) = 0
+          LIMIT 1
+        `, [rfq_id]));
+
+        // Restricted edit = tech-stuck or PO dead-end (only bid_end_date + vendor refresh)
+        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct;
+
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5335,6 +5408,40 @@ const rfqController = {
         const diff = diffRfqSnapshot(current, snapshot);
         if (diff.isEmpty) {
           return { noop: true };
+        }
+
+        // 5b. Enforce restricted edit mode — only bid_end_date + vendor refresh allowed
+        if (isRestrictedEdit) {
+          const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
+          if (disallowedFields.length > 0) {
+            throw updateHttpError(400,
+              `Restricted edit: only bid submission end date can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+            );
+          }
+          if (diff.products.added.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot add new products.');
+          }
+          if (diff.products.removed.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot remove products.');
+          }
+          for (const update of diff.products.updated) {
+            if (update.commentChanged) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.');
+            }
+            if (update.specs.added.length > 0 || update.specs.removed.length > 0 || update.specs.updated.length > 0) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.');
+            }
+            if (update.files.added.length > 0 || update.files.removed.length > 0) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify product files.');
+            }
+            if (update.techEvalChanged) {
+              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.');
+            }
+            // vendors.added IS allowed (from Refresh Vendors)
+          }
+          if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
+          }
         }
 
         // 6. Apply changes — order matters because the field UPDATE on tbl_rfq
@@ -6745,8 +6852,8 @@ const rfqController = {
             po.vendor_action_at AS rejected_at
           FROM tbl_rfq_purchase_order po
           JOIN tbl_users u ON u.id = po.finalized_vendor_id
-          CROSS JOIN LATERAL unnest(po.rfq_product_id) AS pid(val)
-          JOIN tbl_rfq_products rp ON rp.id = pid.val
+          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+          JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
           WHERE po.rfq_id = $1
             AND po.status = 'rejected_by_vendor'
             AND NOT EXISTS (
@@ -7223,7 +7330,8 @@ const rfqController = {
       term_and_condition_files,
       is_regret,
       regret_reason,
-      vendorGSTIN
+      vendorGSTIN,
+      global_charges
     } = req.body;
 
     const user = req.user;
@@ -7507,6 +7615,24 @@ const rfqController = {
           }
         }
 
+        // Build slug map for enriching charges
+        const chargeNamesRows = await db.any(
+          `SELECT name, slug FROM tbl_charge_names WHERE created_by IS NULL OR created_by = $1`,
+          [user.id]
+        );
+        const slugMap = new Map(chargeNamesRows.map(c => [c.name.toLowerCase(), c.slug]));
+        const enrichCharges = (charges) => (charges || []).map(c => ({
+          ...c,
+          slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
+        }));
+
+        // Enrich other_charges with slugs for each product
+        for (const product of products) {
+          if (product.other_charges) {
+            product.other_charges = enrichCharges(product.other_charges);
+          }
+        }
+
         return await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
@@ -7519,7 +7645,8 @@ const rfqController = {
             global_comment: globalComment,
             regret_reason,
             payment_id: tenderPaymentId,
-            gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null
+            gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null,
+            global_charges: JSON.stringify(enrichCharges(global_charges))
           };
 
           // check quote is already exists or not
@@ -7539,19 +7666,17 @@ const rfqController = {
               product_id,
               product_name,
               unit_price,
-              package_price,
               tax,
-              freight_price,
               total_price,
               comment,
               delivery_period,
               quantity,
               variant,
               document_files,
-              freight_mode,
-              package_mode,
-              tax_mode
+              tax_mode,
+              other_charges
             }) => {
+              const chargesJson = JSON.stringify(other_charges || []);
               if (unit_price != '') {
                 quote_items_data.push({
                   rfq_id,
@@ -7559,17 +7684,18 @@ const rfqController = {
                   product_variant_id: product_id,
                   product_name,
                   unit_price,
-                  package_price,
+                  package_price: 0,
                   tax,
-                  freight_price,
+                  freight_price: 0,
                   total_price,
                   comment,
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               } else if (comment != '' || document_files?.length > 0) {
                 quote_items_data.push({
@@ -7578,17 +7704,18 @@ const rfqController = {
                   product_variant_id: product_id,
                   product_name,
                   unit_price: 0,
-                  package_price,
+                  package_price: 0,
                   tax,
-                  freight_price,
+                  freight_price: 0,
                   total_price,
                   comment,
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               } else if (is_regret) {
                 quote_items_data.push({
@@ -7605,9 +7732,10 @@ const rfqController = {
                   delivery_period,
                   quantity,
                   variant,
-                  freight_mode,
-                  package_mode,
-                  tax_mode
+                  freight_mode: null,
+                  package_mode: null,
+                  tax_mode,
+                  other_charges: chargesJson
                 });
               }
             }
@@ -7648,7 +7776,8 @@ const rfqController = {
                 'variant',
                 'freight_mode',
                 'package_mode',
-                'tax_mode'
+                'tax_mode',
+                'other_charges'
               ];
               await rfqModel.insertArray(
                 quote_items_data,
@@ -7781,7 +7910,8 @@ const rfqController = {
               'variant',
               'freight_mode',
               'package_mode',
-              'tax_mode'
+              'tax_mode',
+              'other_charges'
             ];
             let quotes_items = await rfqModel.insertArray(
               quote_items_data,
@@ -9027,28 +9157,9 @@ const rfqController = {
                     approvalTriggered = true;
                     negotiationQuoteApprovalPending = true;
                   } else {
-                    // If there's an old APPROVED instance whose PO was rejected by vendor,
-                    // cancel it so a fresh approval cycle can begin for re-finalization.
-                    const existingApproved = existingApprovals.find(inst => inst.status === 'APPROVED');
-                    if (existingApproved) {
-                      const linkedPO = await t.oneOrNone(`
-                        SELECT id, status FROM tbl_rfq_purchase_order
-                        WHERE rfq_id = $1 AND status = 'rejected_by_vendor'
-                          AND rfq_product_id @> ARRAY[$2]::int[]
-                        ORDER BY updated_at DESC LIMIT 1
-                      `, [rfq_id, rfqProduct.id]);
-
-                      if (linkedPO) {
-                        await t.none(`
-                          UPDATE tbl_approval_instances
-                          SET status = 'CANCELLED', completed_at = NOW()
-                          WHERE id = $1
-                        `, [existingApproved.id]);
-                        logger.info(`Cancelled old NEGOTIATION_QUOTE approval ${existingApproved.id} for re-finalization after vendor PO rejection`);
-                      }
-                    }
-
                     // Try to create NEGOTIATION_QUOTE approval instance
+                    // Note: createApprovalInstance allows re-approval for NEGOTIATION_QUOTE,
+                    // so old APPROVED instances are preserved as historical records.
                     const approvalResult = await createApprovalInstance({
                       entity_type: 'NEGOTIATION_QUOTE',
                       entity_id: rfqProduct.id,
@@ -12291,7 +12402,8 @@ sendFollowUpEmails: async (req, res) => {
       globalComment,
       global_payment_term_list,
       term_and_condition_files,
-      vendorGSTIN
+      vendorGSTIN,
+      global_charges
     } = req.body;
 
     const user = req.user;
@@ -12457,6 +12569,26 @@ sendFollowUpEmails: async (req, res) => {
         });
       }
 
+      // Build slug map for enriching charges
+      const chargeNamesRows = await db.any(
+        `SELECT name, slug FROM tbl_charge_names WHERE created_by IS NULL OR created_by = $1`,
+        [user.id]
+      );
+      const slugMap = new Map(chargeNamesRows.map(c => [c.name.toLowerCase(), c.slug]));
+      const enrichCharges = (charges) => (charges || []).map(c => ({
+        ...c,
+        slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
+      }));
+
+      // Enrich other_charges with slugs for each product
+      for (const product of products) {
+        if (product.other_charges) {
+          product.other_charges = enrichCharges(product.other_charges);
+        }
+      }
+
+      const enrichedGlobalCharges = enrichCharges(global_charges);
+
       let paymentTermAndCommentChanges = false;
 
       // update global comment, payment term and gstin
@@ -12465,7 +12597,8 @@ sendFollowUpEmails: async (req, res) => {
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
         globalComment !== quoteExists[0].global_comment ||
-        newGstin !== currentGstin
+        newGstin !== currentGstin ||
+        JSON.stringify(enrichedGlobalCharges) !== JSON.stringify(quoteExists[0].global_charges || [])
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -12477,7 +12610,8 @@ sendFollowUpEmails: async (req, res) => {
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment,
-          gstin: newGstin
+          gstin: newGstin,
+          global_charges: JSON.stringify(enrichedGlobalCharges)
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
@@ -12637,20 +12771,24 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       if (status) {
-        const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
-        await sendRevisedQuotationEmailToVendor(
-          buyerDetails,
-          user,
-          rfq_id,
-          rfq_no
-        );
-        await sendRevisedQuotationEmailToBuyer(
-          buyerDetails,
-          quoteItemChanges,
-          user,
-          rfq_id,
-          rfq_no
-        );
+        try {
+          const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+          await sendRevisedQuotationEmailToVendor(
+            buyerDetails,
+            user,
+            rfq_id,
+            rfq_no
+          );
+          await sendRevisedQuotationEmailToBuyer(
+            buyerDetails,
+            quoteItemChanges,
+            user,
+            rfq_id,
+            rfq_no
+          );
+        } catch (notificationError) {
+          logError('Failed to send quote update notifications', notificationError);
+        }
       }
 
       return res.status(200).json({
@@ -15441,6 +15579,149 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });
+    }
+  },
+
+  // ============================================
+  // Charge Names CRUD
+  // ============================================
+
+  _generateChargeSlug: (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
+
+  getAllChargeNames: async (req, res) => {
+    try {
+      const rows = await db.any(
+        `SELECT name, slug, created_by FROM tbl_charge_names WHERE is_global = false ORDER BY created_by IS NULL DESC, id ASC`
+      );
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError('Failed to fetch all charge names', error);
+      return res.status(500).json({ status: 0, message: 'Error fetching charge names' });
+    }
+  },
+
+  getChargeNames: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const rows = await db.any(
+        `SELECT id, name, slug, is_global, created_by FROM tbl_charge_names
+         WHERE created_by IS NULL OR created_by = $1
+         ORDER BY created_by IS NULL DESC, id ASC`,
+        [userId]
+      );
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError('Failed to fetch charge names', error);
+      return res.status(500).json({ status: 0, message: 'Error fetching charge names' });
+    }
+  },
+
+  createChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { name, is_global } = req.body;
+
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ status: 0, message: 'Name is required' });
+      }
+
+      const trimmedName = String(name).trim();
+
+      // Check for duplicate (case-insensitive) among system defaults and vendor's own
+      const existing = await db.oneOrNone(
+        `SELECT id FROM tbl_charge_names
+         WHERE LOWER(name) = LOWER($1) AND (created_by IS NULL OR created_by = $2)`,
+        [trimmedName, userId]
+      );
+      if (existing) {
+        return res.status(400).json({ status: 0, message: 'Charge name already exists' });
+      }
+
+      const slug = rfqController._generateChargeSlug(trimmedName);
+      const row = await db.one(
+        `INSERT INTO tbl_charge_names (name, slug, is_global, created_by)
+         VALUES ($1, $2, $3, $4) RETURNING id, name, slug, is_global`,
+        [trimmedName, slug, is_global ?? false, userId]
+      );
+      return res.status(201).json({ status: 1, data: row });
+    } catch (error) {
+      logError('Failed to create charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error creating charge name' });
+    }
+  },
+
+  updateChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { id } = req.params;
+      const { name, is_global } = req.body;
+
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ status: 0, message: 'Name is required' });
+      }
+
+      const trimmedName = String(name).trim();
+
+      // Only allow updating vendor's own custom charges
+      const existing = await db.oneOrNone(
+        `SELECT id, created_by FROM tbl_charge_names WHERE id = $1`,
+        [id]
+      );
+      if (!existing) {
+        return res.status(404).json({ status: 0, message: 'Charge name not found' });
+      }
+      if (existing.created_by === null) {
+        return res.status(403).json({ status: 0, message: 'Cannot edit default charge names' });
+      }
+
+      // Check for duplicate
+      const duplicate = await db.oneOrNone(
+        `SELECT id FROM tbl_charge_names
+         WHERE LOWER(name) = LOWER($1) AND id != $2 AND (created_by IS NULL OR created_by = $3)`,
+        [trimmedName, id, userId]
+      );
+      if (duplicate) {
+        return res.status(400).json({ status: 0, message: 'Charge name already exists' });
+      }
+
+      const slug = rfqController._generateChargeSlug(trimmedName);
+      const row = await db.one(
+        `UPDATE tbl_charge_names SET name = $1, slug = $2, is_global = $3
+         WHERE id = $4 AND created_by = $5
+         RETURNING id, name, slug, is_global`,
+        [trimmedName, slug, is_global ?? false, id, userId]
+      );
+      return res.status(200).json({ status: 1, data: row });
+    } catch (error) {
+      logError('Failed to update charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error updating charge name' });
+    }
+  },
+
+  deleteChargeName: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { id } = req.params;
+
+      const existing = await db.oneOrNone(
+        `SELECT id, created_by FROM tbl_charge_names WHERE id = $1`,
+        [id]
+      );
+      if (!existing) {
+        return res.status(404).json({ status: 0, message: 'Charge name not found' });
+      }
+      if (existing.created_by === null) {
+        return res.status(403).json({ status: 0, message: 'Cannot delete default charge names' });
+      }
+
+      await db.none(
+        `DELETE FROM tbl_charge_names WHERE id = $1 AND created_by = $2`,
+        [id, userId]
+      );
+      return res.status(200).json({ status: 1, message: 'Charge name deleted' });
+    } catch (error) {
+      logError('Failed to delete charge name', error);
+      return res.status(500).json({ status: 0, message: 'Error deleting charge name' });
     }
   }
 };

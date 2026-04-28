@@ -272,6 +272,92 @@ export const sendNegotiationRoundCreatedNotification = async ({
 };
 
 /**
+ * Send notification to selected vendors when a negotiation round becomes active.
+ * Each vendor receives an individual email with round details and a link to submit their quote.
+ * @param {Object} params
+ * @param {Object} params.round - The negotiation round record (with rfq_id, round_number, target_price, end_date)
+ * @param {string} params.rfqNo - RFQ number
+ * @param {string} params.productName - Product name
+ * @param {string} params.buyerCompanyName - Buyer company name
+ * @param {Array} params.vendors - Array of { id, name, email, token }
+ */
+export const sendNegotiationRoundVendorNotification = async ({
+  round,
+  rfqNo,
+  productName,
+  buyerCompanyName,
+  vendors = []
+}) => {
+  try {
+    if (!vendors || vendors.length === 0) {
+      logger.debug('No vendors to notify for negotiation round activation');
+      return false;
+    }
+
+    const subject = `Negotiation Round — RFQ #${rfqNo}`;
+
+    for (const vendor of vendors) {
+      const viewUrl = vendor.token
+        ? `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${round.rfq_id}&token=${vendor.token}`
+        : `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?rfq=${round.rfq_id}`;
+
+      const headerContent = `<h2>Hello ${vendor.name || 'Vendor'},</h2>`;
+
+      const containerContent = `
+        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+          <p>
+            You have been added to a <strong>Negotiation Round</strong> for the following product.
+            Please review the details below and submit your revised quote before the deadline.
+          </p>
+
+          <div style="background-color:#EFF6FF; border-left:4px solid #3B82F6; padding:12px 16px; margin:16px 0; border-radius:4px;">
+            <span style="color:#1E40AF; font-weight:600;">Round ${round.round_number || ''} — Active</span>
+          </div>
+
+          <ul style="list-style:none; padding-left:0; margin-top:16px;">
+            <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+            <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+            ${buyerCompanyName ? `<li style="padding:4px 0;"><strong>Buyer:</strong> ${buyerCompanyName}</li>` : ''}
+            <li style="padding:4px 0;"><strong>Target Price:</strong> ₹${parseFloat(round.target_price || 0).toLocaleString('en-IN')}</li>
+            <li style="padding:4px 0;"><strong>Deadline:</strong> ${formatDateIST(round.end_date)}</li>
+          </ul>
+
+          <p style="margin-top:16px;">
+            Please submit your best offer before <strong>${formatDateIST(round.end_date)}</strong>.
+            Quotes submission after the deadline will be restricted.
+          </p>
+
+          <div style="text-align:center; margin-top:24px;">
+            <a href="${viewUrl}"
+               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              Submit Quote
+            </a>
+          </div>
+
+          <p style="text-align:center; margin-top:30px;">
+            <strong>— Phileein Hospitality Team</strong>
+          </p>
+        </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      sendMail({
+        from: config.webmasterMail,
+        to: vendor.email,
+        subject,
+        html: htmlContent
+      });
+    }
+
+    logger.info(`Sent negotiation round vendor notifications to ${vendors.length} vendors for RFQ #${rfqNo}, Round ${round.round_number}`);
+    return true;
+  } catch (err) {
+    logError("Error sending negotiation round vendor notification:", err);
+    return false;
+  }
+};
+
+/**
  * Send notification when a negotiation round is fully approved and made live.
  * @param {Object} params
  * @param {Object} params.round - The negotiation round record

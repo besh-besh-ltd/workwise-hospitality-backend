@@ -21,7 +21,7 @@ import {
   createQuoteVisibilityError,
 } from '../../helper/quoteVisibility.js';
 import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } from '../../helper/cronManager.js';
-import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
+import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification, sendNegotiationRoundVendorNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
 
@@ -357,29 +357,29 @@ const NegotiationController = {
    */
   createRound: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, target_price, end_date, vendor_ids } = req.body;
+      const { rfq_id, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
       const user_id = req.user.id;
 
-      if (!rfq_id || !rfq_product_id || !target_price || !end_date) {
+      if (!rfq_id || !rfq_product_id || !end_date) {
         return res.status(400).json({
           status: 2,
-          message: 'rfq_id, rfq_product_id, target_price, and end_date are required'
+          message: 'rfq_id, rfq_product_id, and end_date are required'
         });
       }
 
-      // Validate vendor_ids
-      if (!vendor_ids || !Array.isArray(vendor_ids) || vendor_ids.length === 0) {
+      // Validate vendor_targets
+      if (!vendor_targets || !Array.isArray(vendor_targets) || vendor_targets.length === 0) {
         return res.status(400).json({
           status: 2,
-          message: 'vendor_ids is required and must be a non-empty array of vendor IDs'
+          message: 'vendor_targets is required and must be a non-empty array'
         });
       }
 
-      const parsedVendorIds = vendor_ids.map(id => parseInt(id)).filter(id => !isNaN(id));
+      const parsedVendorIds = vendor_targets.map(v => parseInt(v.vendor_id)).filter(id => !isNaN(id));
       if (parsedVendorIds.length === 0) {
         return res.status(400).json({
           status: 2,
-          message: 'vendor_ids must contain valid integer vendor IDs'
+          message: 'vendor_targets must contain valid vendor IDs'
         });
       }
 
@@ -427,12 +427,9 @@ const NegotiationController = {
         });
       }
 
-      // Validate vendor_ids: check eligibility and overlap with active rounds
+      // Validate vendor eligibility
       const allVendors = await negotiationModel.getVendorsForProductWithStatus(rfq_id, rfq_product_id);
       const allVendorIds = new Set(allVendors.map(v => v.id));
-      const activeVendorIds = new Set(
-        allVendors.filter(v => v.in_active_round).map(v => v.id)
-      );
 
       const notEligible = parsedVendorIds.filter(id => !allVendorIds.has(id));
       if (notEligible.length > 0) {
@@ -442,15 +439,31 @@ const NegotiationController = {
         });
       }
 
-      const overlapping = parsedVendorIds.filter(id => activeVendorIds.has(id));
-      if (overlapping.length > 0) {
-        const overlappingNames = allVendors
-          .filter(v => overlapping.includes(v.id))
-          .map(v => v.organization_name || v.company_name || v.name);
-        return res.status(400).json({
-          status: 2,
-          message: `The following vendor(s) are already in an active negotiation round for this product: ${overlappingNames.join(', ')}. Please select different vendors or wait for the existing round to complete.`
-        });
+      // Check for field-level overlap with active rounds
+      const activeRounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, false);
+      const productActiveRounds = (activeRounds || []).filter(r => r.rfq_product_id === rfq_product_id);
+
+      for (const vt of vendor_targets) {
+        const vid = parseInt(vt.vendor_id);
+        const newFields = (vt.fields || []).map(f => f.name);
+        if (newFields.length === 0) continue;
+
+        for (const round of productActiveRounds) {
+          const vendorApproval = (round.vendor_approvals || []).find(va => va.vendor_id === vid);
+          if (!vendorApproval) continue;
+
+          const activeFields = (vendorApproval.negotiation_fields || []).map(f => f.name);
+          const overlappingFields = newFields.filter(f => activeFields.includes(f));
+
+          if (overlappingFields.length > 0) {
+            const vendorInfo = allVendors.find(v => v.id === vid);
+            const vendorName = vendorInfo?.organization_name || vendorInfo?.company_name || vendorInfo?.name || vid;
+            return res.status(400).json({
+              status: 2,
+              message: `${vendorName} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
+            });
+          }
+        }
       }
 
       // Check if approval workflow exists for NEGOTIATION before creating the round
@@ -472,13 +485,15 @@ const NegotiationController = {
       // Get next round number for this product
       const round_number = await negotiationModel.getNextRoundNumber(rfq_id, rfq_product_id);
 
-      // Build vendor_approvals JSONB array with PENDING status for each vendor
+      // Build vendor_approvals JSONB array with PENDING status and negotiation_fields per vendor
+      const vendorTargetsMap = new Map(vendor_targets.map(v => [parseInt(v.vendor_id), v.fields || []]));
       const vendor_approvals = parsedVendorIds.map(vid => ({
         vendor_id: vid,
         status: 'PENDING',
         remarks: null,
         acted_by: null,
-        acted_at: null
+        acted_at: null,
+        negotiation_fields: vendorTargetsMap.get(vid) || []
       }));
 
       // Create round in transaction
@@ -487,7 +502,7 @@ const NegotiationController = {
           rfq_id,
           rfq_product_id,
           round_number,
-          target_price,
+          target_price: target_price || null,
           end_date,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
@@ -520,18 +535,16 @@ const NegotiationController = {
         );
 
         // If auto-approved (initiator is the only approver), activate immediately
-        // only if all vendors are also approved (for single-vendor rounds or no-step policies)
         if (!approvalResult || approvalResult.autoApproved) {
-          const allVendorsApproved = vendor_approvals.length === 0 ||
-            vendor_approvals.every(v => v.status === 'APPROVED');
-          if (allVendorsApproved) {
-            await t.none(
-              `UPDATE tbl_negotiation_rounds
-               SET status = 'ACTIVE', published_at = NOW()
-               WHERE id = $1`,
-              [round.id]
-            );
-          }
+          // Propagate approval to all vendor_approvals entries
+          await negotiationModel.updateAllVendorsStatus(round.id, 'APPROVED', null, user_id, t);
+
+          await t.none(
+            `UPDATE tbl_negotiation_rounds
+             SET status = 'ACTIVE', approved_at = NOW(), published_at = NOW()
+             WHERE id = $1`,
+            [round.id]
+          );
         }
 
         // Get updated round status
@@ -580,6 +593,50 @@ const NegotiationController = {
               initiator,
               autoApproved: isAutoApproved
             });
+          }
+
+          // If auto-approved, also notify evaluators and vendors
+          if (isAutoApproved) {
+            // Notify commercial evaluators (same as organic approval flow)
+            const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
+            const commercialEvaluators = hotelIds.length > 0
+              ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+              : [];
+
+            // Send only to evaluators (initiator already gets the "Auto-Approved & Live" creation email)
+            const evaluatorOnly = commercialEvaluators
+              .filter(u => u.email && u.email !== initiator?.email)
+              .map(u => ({ name: u.name, email: u.email }));
+            if (evaluatorOnly.length > 0) {
+              await sendNegotiationRoundApprovedNotification({
+                round: roundWithContext || { ...result, rfq_id },
+                rfqNo: rfqData.rfq_no,
+                productName,
+                initiator: evaluatorOnly[0],
+                commercialEvaluators: evaluatorOnly.slice(1)
+              });
+            }
+
+            // Notify vendors
+            const vendors = await negotiationModel.getVendorsForRound(result.id);
+            if (vendors.length > 0) {
+              const vendorsWithTokens = await Promise.all(
+                vendors.map(async (v) => {
+                  const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
+                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                })
+              );
+              const buyerCompanyRow = rfqData.hospitality_company_id
+                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
+                : null;
+              await sendNegotiationRoundVendorNotification({
+                round: roundWithContext || { ...result, rfq_id },
+                rfqNo: rfqData.rfq_no,
+                productName,
+                buyerCompanyName: buyerCompanyRow?.company_name || '',
+                vendors: vendorsWithTokens
+              });
+            }
           }
         } catch (emailErr) {
           logError('Failed to send round creation email', emailErr);
@@ -716,11 +773,17 @@ const NegotiationController = {
       let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, true);
 
       // Vendors (user_type 3) should only see rounds assigned to them and fully approved (ACTIVE)
+      // Also filter vendor_approvals to only include the current vendor's entry
       if (req.user.user_type == 3) {
         const vendorId = req.user.vendor_id || req.user.id;
-        rounds = (rounds || []).filter(r =>
-          r.status === 'ACTIVE' && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
-        );
+        rounds = (rounds || [])
+          .filter(r =>
+            r.status === 'ACTIVE' && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
+          )
+          .map(({ vendor_ids, ...r }) => ({
+            ...r,
+            vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId)
+          }));
       }
 
       return res.status(200).json({
@@ -829,6 +892,27 @@ const NegotiationController = {
                 productName: roundWithContext?.product_name || 'Product',
                 initiator,
                 commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+              });
+            }
+
+            // Send vendor notification emails
+            const vendors = await negotiationModel.getVendorsForRound(round_id);
+            if (vendors.length > 0) {
+              const vendorsWithTokens = await Promise.all(
+                vendors.map(async (v) => {
+                  const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
+                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                })
+              );
+              const buyerCompanyRow = rfqData.hospitality_company_id
+                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
+                : null;
+              await sendNegotiationRoundVendorNotification({
+                round: roundWithContext || round,
+                rfqNo: rfqData.rfq_no,
+                productName: roundWithContext?.product_name || 'Product',
+                buyerCompanyName: buyerCompanyRow?.company_name || '',
+                vendors: vendorsWithTokens
               });
             }
           } catch (emailErr) {
@@ -2037,7 +2121,8 @@ const NegotiationController = {
                     // Get vendor's original quote item for quantity/unit
                     const vendorQuoteItem = await t.oneOrNone(
                       `SELECT qi.quantity, qi.unit, qi.unit_price, qi.id as quote_item_id,
-                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode
+                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
+                              qi.other_charges
                        FROM tbl_quote_items qi
                        JOIN tbl_quotes q ON q.id = qi.quote_id
                        WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
@@ -2066,7 +2151,8 @@ const NegotiationController = {
                             package_price: vendorQuoteItem.package_price,
                             package_mode: vendorQuoteItem.package_mode,
                             tax: vendorQuoteItem.tax,
-                            tax_mode: vendorQuoteItem.tax_mode
+                            tax_mode: vendorQuoteItem.tax_mode,
+                            other_charges: vendorQuoteItem.other_charges || []
                           },
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
