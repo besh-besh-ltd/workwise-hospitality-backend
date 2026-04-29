@@ -6212,6 +6212,199 @@ const rfqController = {
       });
     }
   },
+
+  // Recommended products for the Start RFQ wizard.
+  // Combines: user history + staged-variant category similarity + popularity,
+  // filtered by vendor availability for the selected hotels.
+  getRecommendedProducts: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      const hotel_ids = Array.isArray(req.body.hotel_ids) ? req.body.hotel_ids : [];
+      const staged_variant_ids = Array.isArray(req.body.variant_ids)
+        ? req.body.variant_ids.map((v) => parseInt(v)).filter((n) => !isNaN(n))
+        : [];
+      const limit = parseInt(req.body.limit) || 4;
+
+      if (hotel_ids.length === 0) {
+        return res.status(200).json({ status: 1, data: [] });
+      }
+
+      const data = await rfqModel.getRecommendedProducts({
+        user_id,
+        hotel_ids,
+        staged_variant_ids,
+        limit,
+      });
+
+      return res.status(200).json({ status: 1, data });
+    } catch (error) {
+      logError('Error in getRecommendedProducts:', error);
+      return res.status(500).json({
+        status: 3,
+        message: 'Failed to fetch recommendations',
+      });
+    }
+  },
+
+  // Bulk variant of createOrUpdateRfqDraftWithProductVendors —
+  // creates a draft (or appends to an existing one) and adds an array
+  // of products to it in one round-trip. Frontend uses this when the
+  // user has staged multiple products and clicks "Create Draft".
+  createOrUpdateRfqDraftWithBulkProducts: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      const user = await userModel.userinfo(user_id);
+      if (!user) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      const is_tender = req.body.is_tender || 0;
+      const hotel_ids = req.body.hotel_ids || [];
+      const variants = Array.isArray(req.body.variants) ? req.body.variants : [];
+
+      if (variants.length === 0) {
+        return res.status(400).json({ status: 2, message: 'No products provided' });
+      }
+      if (!hotel_ids.length) {
+        return res.status(400).json({ status: 2, message: 'At least one business unit is required' });
+      }
+
+      let rfq_id;
+      let rfqData;
+      let isNew = false;
+
+      // Use existing draft if rfq_id provided, otherwise create new
+      if (req.body.rfq_id) {
+        const specificRfq = await rfqModel.findOne('tbl_rfq', {
+          id: req.body.rfq_id,
+          created_by: user_id,
+          is_published: 0,
+        });
+        if (!specificRfq) {
+          return res.status(404).json({
+            status: 2,
+            message: 'Specified draft not found or not authorized',
+          });
+        }
+        rfqData = specificRfq;
+        rfq_id = specificRfq.id;
+      } else {
+        const currentDate = new Date();
+        const bidEndDate = new Date();
+        bidEndDate.setDate(currentDate.getDate() + 30);
+
+        rfqData = {
+          company_name: user.organization_name || '',
+          response_email: user.email,
+          contact_name: user.name,
+          contact_number: user.mobile || '',
+          comment: '',
+          bid_end_date: bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
+          location: '',
+          is_published: 0,
+          created_by: user_id,
+          updated_by: user_id,
+          status: 1,
+          is_tender,
+        };
+
+        const nextRFQNumber = await getNextRfQNumber();
+        rfqData.rfq_no = nextRFQNumber;
+
+        const response = await rfqModel.insert('tbl_rfq', rfqData);
+        rfq_id = response[0].id;
+        isNew = true;
+
+        const rfqTerms = [];
+        for (let i = 1; i < 9; i++) {
+          rfqTerms.push({ rfq_id, terms_id: i });
+        }
+        await rfqModel.insertArray(
+          rfqTerms,
+          ['rfq_id', 'terms_id'],
+          'tbl_rfq_terms_map'
+        );
+      }
+
+      // Sync hotel mappings (works for both new and existing drafts)
+      await hospitalityModel.reconcileRFQHotels(rfq_id, hotel_ids, user_id);
+
+      // Pre-resolve eligible vendors per unique variant once to avoid
+      // re-querying for the same variant when added multiple times.
+      const variantVendorCache = new Map();
+
+      let added_count = 0;
+      const failed = [];
+
+      for (const v of variants) {
+        const variant_id = v.variant_id;
+        if (!variant_id) {
+          failed.push({ variant_id: null, reason: 'Missing variant_id' });
+          continue;
+        }
+
+        try {
+          // Get eligible vendors (cached per variant_id)
+          let vendorList = variantVendorCache.get(variant_id);
+          if (!vendorList) {
+            vendorList = await hospitalityModel.getEligibleVendorsForVariant(
+              variant_id,
+              hotel_ids
+            ) || [];
+            variantVendorCache.set(variant_id, vendorList);
+          }
+
+          const variantNum = await rfqModel.getNextVariant(rfq_id, variant_id);
+
+          await rfqModel.insert('tbl_rfq_products', {
+            rfq_id,
+            product_variant_id: variant_id,
+            variant: variantNum,
+            comment: '',
+            datasheet: '',
+            spec_file: '',
+            qap_file: '',
+            qap: '',
+            datasheet_file: '',
+            sheet_id: null,
+          });
+
+          for (const vendor of vendorList) {
+            await rfqModel.insert('tbl_rfq_product_vendors', {
+              rfq_id,
+              product_variant_id: variant_id,
+              user_id: vendor.id || vendor.vendor_id,
+              variant: variantNum,
+              sheet_id: null,
+            });
+          }
+
+          added_count++;
+        } catch (err) {
+          logError(`Error adding variant ${variant_id} to draft:`, err);
+          failed.push({ variant_id, reason: err?.message || 'Failed' });
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Products added to draft successfully',
+        data: {
+          rfq_id,
+          isNew,
+          added_count,
+          failed,
+        },
+      });
+    } catch (error) {
+      logError('Error in createOrUpdateRfqDraftWithBulkProducts:', error);
+      return res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request',
+      });
+    }
+  },
+
   fetchRfqFilters : async (req, res) => {
     try {
       const { rfq_id } = req.params;

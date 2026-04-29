@@ -57,6 +57,22 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
+// Bulk variant — accepts variants: [{ variant_id }, ...] and adds them all
+RfqRoutes.post(
+  '/add-products-to-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.createOrUpdateRfqDraftWithBulkProducts
+);
+
+// Recommended products for Start RFQ wizard
+RfqRoutes.post(
+  '/recommended-products',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getRecommendedProducts
+);
+
 RfqRoutes.get(
   '/fetch-rfq-filters/:rfq_id',
   passportSignIn,
