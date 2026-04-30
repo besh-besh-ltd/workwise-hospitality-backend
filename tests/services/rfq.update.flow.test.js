@@ -1,0 +1,887 @@
+// Wave-1 step-3.2 tests: rfqController.update — the WH-69 Edit RFQ flow.
+//
+// Surface tested: PUT /rfq/update with body { rfq_id, snapshot }. The
+// controller does:
+//   1. getFullRfqForEdit                       (canonical "current" state)
+//   2. assertEditAllowed                       (creator-only, status≠2, bid window)
+//   3. assertEditDateConstraints               (IST 2h / 1h / publish ordering)
+//   4. diffRfqSnapshot                          (current vs snapshot)
+//   5. applyRfqFieldChanges + applyProductChanges + applyTermsChanges
+//   6. recordChanges into tbl_rfq_change_history
+//   7. cancelAndReissueApproval IF material AND not yet published
+//   8. recordLifecycleEvent
+//   9. respond 200 + setImmediate(sendVendorEditNotifications)
+//
+// Per CONVENTIONS.md: every test calls the production controller, never
+// duplicates SQL. Setup uses raw INSERTs only for prerequisite state.
+//
+// Architectural defects locked here:
+//   - F-VALIDATION-001 (P2): the update path does NOT enforce ≥1 vendor per
+//     product whereas the create path does (rfqController.js:5073). Update
+//     allows the creator to remove all vendors of a product without error.
+
+import { describe, it, expect, afterAll, beforeEach, afterEach, jest } from "@jest/globals";
+import { db, closeDb } from "../setup/db.js";
+import { IDS } from "../fixtures/ids.js";
+import { makeRFQ } from "../factories/rfq.js";
+
+// Mock cronManager BEFORE the controller imports it. The Update path itself
+// doesn't schedule, but cancelAndReissueApproval → createApprovalInstance can
+// indirectly touch scheduler-adjacent helpers in some legacy code paths.
+const scheduleCalls = [];
+jest.unstable_mockModule("../../app/helper/cronManager.js", () => ({
+  scheduleMilestoneReminder: async () => {},
+  rescheduleMilestoneReminder: async () => {},
+  removeMilestoneReminder: () => {},
+  rescheduleAllMilestoneReminders: async () => {},
+  scheduleGRNReminders: async () => {},
+  publishRfqById: async () => {},
+  scheduleRfqPublish: async (rfq) => { scheduleCalls.push({ rfqId: rfq?.id }); },
+  removeRfqPublishJob: async () => ({ ok: true }),
+  rescheduleAllRfqPublishJobs: async () => {},
+  startVendorAcceptanceReminderCron: () => {},
+  scheduleNegotiationRoundExpiration: () => {},
+  removeNegotiationRoundExpiration: () => {},
+  rescheduleAllNegotiationRoundExpirations: async () => {},
+}));
+
+const { default: rfqController } = await import(
+  "../../app/controllers/rfq/rfqController.js"
+);
+const { default: rfqModel } = await import(
+  "../../app/models/rfqModel.js"
+);
+
+afterAll(async () => {
+  await closeDb();
+});
+
+function mockExpress(opts = {}) {
+  const calls = { status: null, body: null };
+  const res = {
+    statusCode: 200,
+    status(code) { this.statusCode = code; calls.status = code; return this; },
+    json(body) { calls.body = body; return this; },
+    end() { return this; },
+  };
+  return {
+    req: {
+      user: opts.user,
+      params: opts.params || {},
+      body: opts.body || {},
+      query: opts.query || {},
+    },
+    res,
+    next: jest.fn(),
+    calls,
+  };
+}
+
+const inserted = { rfqIds: [] };
+
+beforeEach(() => {
+  inserted.rfqIds = [];
+  scheduleCalls.length = 0;
+});
+
+afterEach(async () => {
+  if (!inserted.rfqIds.length) return;
+  // Cascade order: change_history → lifecycle → approvals → products+specs
+  // → rfq.
+  await db.none(`DELETE FROM tbl_rfq_change_history WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(
+    `DELETE FROM tbl_approval_actions
+     WHERE approval_instance_id IN (
+       SELECT id FROM tbl_approval_instances
+       WHERE entity_type IN ('RFQ','TENDER') AND entity_id = ANY($1::int[])
+     )`,
+    [inserted.rfqIds]
+  );
+  await db.none(
+    `DELETE FROM tbl_approval_step_approvers
+     WHERE approval_instance_step_id IN (
+       SELECT s.id FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_instances i ON i.id = s.approval_instance_id
+       WHERE i.entity_type IN ('RFQ','TENDER') AND i.entity_id = ANY($1::int[])
+     )`,
+    [inserted.rfqIds]
+  );
+  await db.none(
+    `DELETE FROM tbl_approval_instance_steps
+     WHERE approval_instance_id IN (
+       SELECT id FROM tbl_approval_instances
+       WHERE entity_type IN ('RFQ','TENDER') AND entity_id = ANY($1::int[])
+     )`,
+    [inserted.rfqIds]
+  );
+  await db.none(
+    `DELETE FROM tbl_approval_instances
+     WHERE entity_type IN ('RFQ','TENDER') AND entity_id = ANY($1::int[])`,
+    [inserted.rfqIds]
+  );
+  await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted.rfqIds]);
+});
+
+// ---- Setup helpers ---------------------------------------------------------
+
+// IST wall-clock string `offsetMs` ahead of now. Matches frontend convention
+// (no timezone suffix). assertEditDateConstraints anchors these to +05:30.
+function istString(offsetMs) {
+  const ist = new Date(Date.now() + offsetMs + 5.5 * 3600_000);
+  return ist.toISOString().replace("T", " ").slice(0, 19);
+}
+
+async function makeEditableRfq(overrides = {}) {
+  const tenderPub = istString(86400_000); // 1 day hence
+  const clarEnd = istString(5 * 86400_000); // 5 days hence
+  const bidEnd = istString(7 * 86400_000); // 7 days hence
+  const { rfq_id } = await makeRFQ(db, {
+    createdBy: IDS.users.a1_proc_buyer,
+    status: 0, // Draft — assertEditAllowed allows
+    is_published: 0,
+    tender_publish_date: tenderPub,
+    vendor_clarification_date: clarEnd,
+    bid_end_date: bidEnd,
+    hospitality: IDS.hospitality.A,
+    hotel: IDS.hotels.A1,
+    process: IDS.processes.A_P1,
+    comment: "initial comment",
+    ...overrides,
+  });
+  inserted.rfqIds.push(rfq_id);
+  return rfq_id;
+}
+
+async function attachOneProduct(rfq_id, productVariantId = 1) {
+  const { id } = await db.one(
+    `INSERT INTO tbl_rfq_products
+       (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
+    [rfq_id, productVariantId]
+  );
+  return id;
+}
+
+// Fetch the canonical snapshot the controller would read internally.
+const fetchSnapshot = (rfq_id) => rfqModel.getFullRfqForEdit(rfq_id);
+
+// ===========================================================================
+//  Input validation
+// ===========================================================================
+
+describe("rfqController.update — input validation", () => {
+  it("rejects when rfq_id is missing", async () => {
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { snapshot: {} },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/rfq_id and snapshot are required/i);
+  });
+
+  it("rejects when snapshot is missing", async () => {
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id: 1 },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+//  Auth + state gates
+// ===========================================================================
+
+describe("rfqController.update — assertEditAllowed gate", () => {
+  it("returns 404 when RFQ does not exist", async () => {
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id: 999999999, snapshot: { comment: "x" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(404);
+    expect(m.calls.body.message).toMatch(/not found/i);
+  });
+
+  it("returns 403 when caller is NOT the creator", async () => {
+    const rfq_id = await makeEditableRfq();
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_techApp }, // not the creator
+      body: { rfq_id, snapshot: { ...snap, comment: "tampered" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(403);
+    expect(m.calls.body.message).toMatch(/Only the RFQ creator/i);
+  });
+
+  it("rejects when RFQ is CLOSED (status=2)", async () => {
+    const rfq_id = await makeEditableRfq({ status: 2 });
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, comment: "after close" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/closed and can no longer be edited/i);
+  });
+});
+
+// ===========================================================================
+//  Date-constraint gate
+// ===========================================================================
+
+describe("rfqController.update — assertEditDateConstraints", () => {
+  it("rejects when bid_end_date is less than 2h from now", async () => {
+    const rfq_id = await makeEditableRfq();
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, bid_end_date: istString(60 * 60_000) }, // 1h hence
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+//  Post-publish lock
+// ===========================================================================
+
+describe("rfqController.update — post-publish field lock", () => {
+  it("rejects modifying tender_publish_date once is_published=1", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, tender_publish_date: istString(2 * 86400_000) },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Cannot modify 'tender_publish_date'/i);
+  });
+});
+
+// ===========================================================================
+//  No-op + happy paths
+// ===========================================================================
+
+describe("rfqController.update — no-op", () => {
+  it("returns success with change_count=0 when snapshot equals current state", async () => {
+    const rfq_id = await makeEditableRfq();
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: snap },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.message).toMatch(/No changes detected/i);
+    expect(m.calls.body.change_count).toBe(0);
+
+    // No history rows.
+    const hist = await db.any(
+      `SELECT 1 FROM tbl_rfq_change_history WHERE rfq_id=$1`, [rfq_id]
+    );
+    expect(hist.length).toBe(0);
+  });
+});
+
+describe("rfqController.update — happy path: persists field change + audit row", () => {
+  it("updates tbl_rfq.comment and writes one tbl_rfq_change_history row with edit_session_id", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, comment: "revised by creator" },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.status).toBe(1);
+    expect(m.calls.body.change_count).toBe(1);
+    const sessionId = m.calls.body.edit_session_id;
+    expect(typeof sessionId).toBe("string");
+
+    // tbl_rfq.comment now reflects the edit.
+    const after = await db.one(
+      `SELECT comment FROM tbl_rfq WHERE id=$1`, [rfq_id]
+    );
+    expect(after.comment).toBe("revised by creator");
+
+    // History row was recorded against the same session id.
+    const hist = await db.any(
+      `SELECT entity_type, field_name, old_value, new_value, change_type, changed_by, edit_session_id
+       FROM tbl_rfq_change_history WHERE rfq_id=$1`,
+      [rfq_id]
+    );
+    expect(hist.length).toBe(1);
+    expect(hist[0].entity_type).toBe("RFQ");
+    expect(hist[0].field_name).toBe("comment");
+    expect(hist[0].change_type).toBe("UPDATE");
+    expect(hist[0].changed_by).toBe(IDS.users.a1_proc_buyer);
+    expect(hist[0].edit_session_id).toBe(sessionId);
+    // old/new values are JSONB — they round-trip as plain strings here.
+    expect(String(hist[0].old_value).replace(/"/g, "")).toBe("initial comment");
+    expect(String(hist[0].new_value).replace(/"/g, "")).toBe("revised by creator");
+
+    // Lifecycle event recorded.
+    const lc = await db.oneOrNone(
+      `SELECT action FROM tbl_lifecycle_history
+       WHERE entity_id=$1 AND action='EDIT' LIMIT 1`,
+      [rfq_id]
+    );
+    expect(lc).not.toBeNull();
+  });
+});
+
+// ===========================================================================
+//  Material change → reapproval
+// ===========================================================================
+
+describe("rfqController.update — reapproval on material change", () => {
+  async function seedPendingApproval(rfq_id) {
+    // Seed a PENDING RFQ approval instance manually (simulate "submitted but
+    // not yet approved" state). cancelAndReissueApproval should flip this to
+    // CANCELLED and create a new instance.
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status,
+          hospitality_company_id, hotel_id, department_id, process_id,
+          initiated_by, current_step)
+       VALUES ('RFQ', $1, $2, 'PENDING', $3, $4, NULL, $5, $6, 1)
+       RETURNING id`,
+      [
+        rfq_id, IDS.policies.A1_P1_RFQ, IDS.hospitality.A, IDS.hotels.A1,
+        IDS.processes.A_P1, IDS.users.a1_proc_buyer,
+      ]
+    );
+    return inst.id;
+  }
+
+  it("a material edit on an UNPUBLISHED RFQ cancels existing PENDING instance + creates new one", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 0, status: 3 });
+    await attachOneProduct(rfq_id);
+    const oldInstanceId = await seedPendingApproval(rfq_id);
+    const snap = await fetchSnapshot(rfq_id);
+
+    // bid_end_date is a "material" field per is_material rules.
+    const newBidEnd = istString(10 * 86400_000);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: newBidEnd } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.material).toBe(true);
+
+    // Old instance flipped to CANCELLED.
+    const old = await db.one(
+      `SELECT status FROM tbl_approval_instances WHERE id=$1`, [oldInstanceId]
+    );
+    expect(old.status).toBe("CANCELLED");
+
+    // A new RFQ approval instance exists for this RFQ.
+    const fresh = await db.oneOrNone(
+      `SELECT id, status FROM tbl_approval_instances
+       WHERE entity_type='RFQ' AND entity_id=$1 AND status='PENDING'`,
+      [rfq_id]
+    );
+    expect(fresh).not.toBeNull();
+
+    // Reapproval result echoed in response.
+    expect(m.calls.body.reapproval).not.toBeNull();
+    expect(m.calls.body.reapproval.cancelledIds).toContain(oldInstanceId);
+  });
+
+  it("a material edit on a PUBLISHED RFQ does NOT trigger reapproval", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    await attachOneProduct(rfq_id);
+    const oldInstanceId = await seedPendingApproval(rfq_id);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, bid_end_date: istString(10 * 86400_000) },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    // Old instance unchanged (still PENDING).
+    const old = await db.one(
+      `SELECT status FROM tbl_approval_instances WHERE id=$1`, [oldInstanceId]
+    );
+    expect(old.status).toBe("PENDING");
+
+    // No new instance created.
+    const all = await db.any(
+      `SELECT id FROM tbl_approval_instances WHERE entity_type='RFQ' AND entity_id=$1`,
+      [rfq_id]
+    );
+    expect(all.length).toBe(1);
+
+    expect(m.calls.body.reapproval).toBeNull();
+  });
+});
+
+// ===========================================================================
+//  Comprehensive payload coverage — multi-field, products add/remove/update,
+//  specs, files, vendors, terms, PO-locked guard.
+// ===========================================================================
+
+describe("rfqController.update — multi-field RFQ change in one snapshot", () => {
+  it("changes comment + location + vendor_clarification_date together → 3 history rows under one edit_session_id", async () => {
+    const rfq_id = await makeEditableRfq();
+    const snap = await fetchSnapshot(rfq_id);
+
+    const newClar = istString(4 * 86400_000); // earlier than current
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: {
+          ...snap,
+          comment: "new comment",
+          location: "Mumbai BKC",
+          vendor_clarification_date: newClar,
+        },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(3);
+    const session = m.calls.body.edit_session_id;
+
+    const fields = await db.any(
+      `SELECT field_name FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND edit_session_id=$2 AND entity_type='RFQ'
+       ORDER BY field_name`,
+      [rfq_id, session]
+    );
+    expect(fields.map((r) => r.field_name).sort()).toEqual(
+      ["comment", "location", "vendor_clarification_date"]
+    );
+
+    // tbl_rfq actually carries the new values.
+    const after = await db.one(
+      `SELECT comment, location FROM tbl_rfq WHERE id=$1`, [rfq_id]
+    );
+    expect(after.comment).toBe("new comment");
+    expect(after.location).toBe("Mumbai BKC");
+  });
+});
+
+describe("rfqController.update — product changes (add / remove / update)", () => {
+  it("adds a new product (snapshot.products gains an entry with id=null) → tbl_rfq_products row inserted + PRODUCT history row", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products.push({
+      id: null, // new
+      product_variant_id: 2,
+      variant: 0,
+      product_name: "fixture variant 2",
+      comment: "added by buyer",
+      specs: { Quantity: "5", Unit: "NOS" },
+      files: { qap_file: [], spec_file: [], datasheet_file: [] },
+      vendors: [],
+      tech_eval_clauses: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBeGreaterThan(0);
+
+    const products = await db.any(
+      `SELECT product_variant_id FROM tbl_rfq_products WHERE rfq_id=$1 ORDER BY product_variant_id`,
+      [rfq_id]
+    );
+    expect(products.map((p) => p.product_variant_id).sort()).toEqual([1, 2]);
+
+    // History captured a PRODUCT CREATE row.
+    const created = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT' AND change_type='CREATE'`,
+      [rfq_id]
+    );
+    expect(created).not.toBeNull();
+  });
+
+  it("removes a product (snapshot omits one) → tbl_rfq_products row deleted + PRODUCT DELETE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    await attachOneProduct(rfq_id, 2);
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Drop product variant 2 from the snapshot.
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products = tampered.products.filter((p) => p.product_variant_id !== 2);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const products = await db.any(
+      `SELECT product_variant_id FROM tbl_rfq_products WHERE rfq_id=$1`, [rfq_id]
+    );
+    expect(products.map((p) => p.product_variant_id)).toEqual([1]);
+
+    const deleted = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT' AND change_type='DELETE'`,
+      [rfq_id]
+    );
+    expect(deleted).not.toBeNull();
+  });
+
+  it("updates an existing product's comment → tbl_rfq_products UPDATE + PRODUCT history row", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].comment = "buyer note on this product";
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const after = await db.one(
+      `SELECT comment FROM tbl_rfq_products WHERE rfq_id=$1`, [rfq_id]
+    );
+    expect(after.comment).toBe("buyer note on this product");
+
+    const hist = await db.oneOrNone(
+      `SELECT field_name FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT' AND field_name='comment'`,
+      [rfq_id]
+    );
+    expect(hist).not.toBeNull();
+  });
+});
+
+describe("rfqController.update — product specs (add / remove / update)", () => {
+  it("specs.added → tbl_rfq_products_specs INSERT + PRODUCT_SPEC CREATE history row", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].specs = { Quantity: "100", Unit: "NOS" };
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const specs = await db.any(
+      `SELECT title, value FROM tbl_rfq_products_specs
+       WHERE rfq_id=$1 ORDER BY title`, [rfq_id]
+    );
+    expect(specs.length).toBe(2);
+    expect(specs.find((s) => s.title === "Quantity").value).toBe("100");
+    expect(specs.find((s) => s.title === "Unit").value).toBe("NOS");
+
+    const created = await db.any(
+      `SELECT field_name FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC' AND change_type='CREATE'
+       ORDER BY field_name`,
+      [rfq_id]
+    );
+    expect(created.map((r) => r.field_name).sort()).toEqual(["Quantity", "Unit"]);
+  });
+
+  it("specs.updated → existing tbl_rfq_products_specs row UPDATEd + PRODUCT_SPEC UPDATE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    // Seed a spec.
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, 1, 'Quantity', '10', 0)`,
+      [rfq_id]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].specs = { ...tampered.products[0].specs, Quantity: "25" };
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const after = await db.one(
+      `SELECT value FROM tbl_rfq_products_specs WHERE rfq_id=$1 AND title='Quantity'`,
+      [rfq_id]
+    );
+    expect(after.value).toBe("25");
+
+    const updated = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC' AND field_name='Quantity' AND change_type='UPDATE'`,
+      [rfq_id]
+    );
+    expect(updated).not.toBeNull();
+  });
+
+  it("specs.removed → tbl_rfq_products_specs row deleted + PRODUCT_SPEC DELETE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, 1, 'Quantity', '10', 0), ($1, 1, 'Unit', 'KG', 0)`,
+      [rfq_id]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Snapshot drops Unit.
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].specs = { Quantity: snap.products[0].specs.Quantity };
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const remaining = await db.any(
+      `SELECT title FROM tbl_rfq_products_specs WHERE rfq_id=$1`, [rfq_id]
+    );
+    expect(remaining.map((r) => r.title)).toEqual(["Quantity"]);
+
+    const deleted = await db.oneOrNone(
+      `SELECT field_name FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC' AND field_name='Unit' AND change_type='DELETE'`,
+      [rfq_id]
+    );
+    expect(deleted).not.toBeNull();
+  });
+});
+
+describe("rfqController.update — product files (add / remove)", () => {
+  it("files.added → tbl_rfq_product_files INSERT + PRODUCT_FILE CREATE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    const productId = await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].files.qap_file = ["s3://bucket/qap-1.pdf"];
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const files = await db.any(
+      `SELECT file_type, file_url FROM tbl_rfq_product_files WHERE rfq_product_id=$1`,
+      [productId]
+    );
+    expect(files.length).toBe(1);
+    expect(files[0].file_url).toBe("s3://bucket/qap-1.pdf");
+
+    const created = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_FILE' AND change_type='CREATE'`,
+      [rfq_id]
+    );
+    expect(created).not.toBeNull();
+  });
+
+  it("files.removed → tbl_rfq_product_files DELETE + PRODUCT_FILE DELETE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    const productId = await attachOneProduct(rfq_id, 1);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_files (rfq_product_id, file_type, file_url)
+       VALUES ($1, 'QAP', 's3://bucket/qap-old.pdf')`,
+      [productId]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].files.qap_file = []; // drop
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const remaining = await db.any(
+      `SELECT 1 FROM tbl_rfq_product_files WHERE rfq_product_id=$1`, [productId]
+    );
+    expect(remaining.length).toBe(0);
+
+    const deleted = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_FILE' AND change_type='DELETE'`,
+      [rfq_id]
+    );
+    expect(deleted).not.toBeNull();
+  });
+});
+
+describe("rfqController.update — product vendor add (Edit RFQ flow allows ADD only)", () => {
+  it("vendors.added → tbl_rfq_product_vendors INSERT + PRODUCT_VENDOR CREATE history", async () => {
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].vendors = [IDS.users.vendor_alpha];
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const v = await db.any(
+      `SELECT user_id FROM tbl_rfq_product_vendors WHERE rfq_id=$1`, [rfq_id]
+    );
+    expect(v.map((r) => r.user_id)).toContain(IDS.users.vendor_alpha);
+
+    const created = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_VENDOR' AND change_type='CREATE'`,
+      [rfq_id]
+    );
+    expect(created).not.toBeNull();
+  });
+});
+
+describe("rfqController.update — terms (add / remove)", () => {
+  it("terms.added → tbl_rfq_terms_map INSERT + TERMS CREATE history; terms.removed → DELETE + history", async () => {
+    const rfq_id = await makeEditableRfq();
+    // Seed two terms on the RFQ.
+    await db.none(
+      `INSERT INTO tbl_rfq_terms_map (rfq_id, terms_id) VALUES ($1, 1), ($1, 2)`,
+      [rfq_id]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Drop terms_id=2, add terms_id=3.
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.terms = [1, 3];
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const after = await db.any(
+      `SELECT terms_id FROM tbl_rfq_terms_map WHERE rfq_id=$1 ORDER BY terms_id`,
+      [rfq_id]
+    );
+    expect(after.map((r) => r.terms_id)).toEqual([1, 3]);
+
+    const histTypes = await db.any(
+      `SELECT change_type FROM tbl_rfq_change_history
+       WHERE rfq_id=$1 AND entity_type='TERMS' ORDER BY change_type`,
+      [rfq_id]
+    );
+    const set = new Set(histTypes.map((r) => r.change_type));
+    expect(set.has("CREATE")).toBe(true);
+    expect(set.has("DELETE")).toBe(true);
+  });
+});
+
+describe("rfqController.update — hotel_ids tampering rejected", () => {
+  it("changing snapshot.hotel_ids returns 400 (defence in depth — hotels are not editable)", async () => {
+    const rfq_id = await makeEditableRfq();
+    await db.none(
+      `INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`,
+      [rfq_id, IDS.hotels.A1, IDS.users.a1_proc_buyer]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+    const tampered = { ...snap, hotel_ids: [IDS.hotels.A1, IDS.hotels.A2] };
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Hotel mappings cannot be changed/i);
+
+    await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id=$1`, [rfq_id]);
+  });
+});
+
+// ===========================================================================
+//  F-VALIDATION-001 — defect lock
+// ===========================================================================
+
+describe("rfqController.update — F-VALIDATION-001 (locked defect)", () => {
+  it("DEFECT — update path does NOT enforce ≥1 vendor per product (create path does)", async () => {
+    // Set up: RFQ + 1 product + 1 vendor mapping.
+    const rfq_id = await makeEditableRfq();
+    await attachOneProduct(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+       VALUES ($1, 1, $2, 0)`,
+      [rfq_id, IDS.users.vendor_alpha]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Build a snapshot that REMOVES the only vendor on the product.
+    const tampered = JSON.parse(JSON.stringify(snap));
+    if (tampered.products && tampered.products[0]) {
+      tampered.products[0].vendors = []; // strip all vendors
+    }
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+
+    // CURRENT BEHAVIOUR: update succeeds (HTTP 200). When the fix lands —
+    // mirror the create-time `checkProductVendors` guard inside applyProduct
+    // Changes — flip this to expect 400 + "≥1 vendor required" error.
+    expect(m.calls.status).toBe(200);
+    // Defect is logged in AUDIT_REPORT.md §7 as F-VALIDATION-001 (P2).
+  });
+});
