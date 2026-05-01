@@ -198,46 +198,6 @@ const validateBodyController = (schema, req, res) => {
   // next();
 };
 
-const academicItems = Joi.object({
-  id: Joi.number().optional(),
-  highest_education: Joi.string().required(),
-  institute_name: Joi.string().required(),
-  country: Joi.string().required(),
-  state: Joi.string().required(),
-  city: Joi.string().required(),
-  degree: Joi.string().required(),
-  backlogs: Joi.string().required(),
-  grade: Joi.string().required(),
-  score: Joi.string().required(),
-  primary_language: Joi.string().required(),
-  start_date: Joi.string().required(),
-  end_date: Joi.string().required(),
-  is_highest: Joi.string().optional()
-});
-const workExpItems = Joi.object({
-  id: Joi.number().optional(),
-  organization: Joi.string().required(),
-  position: Joi.string().required(),
-  job_profile: Joi.string().required(),
-  working_from: Joi.string().required(),
-  working_upto: Joi.string().required(),
-  mode_of_salary: Joi.string().required(),
-  current_status: Joi.string().required()
-});
-const englishTests = Joi.object({
-  id: Joi.number().optional(),
-  test_id: Joi.number().required(),
-  overall_score: Joi.string().required(),
-  doe: Joi.string().required(),
-  quantitative: Joi.string().required(),
-  verbal: Joi.string().required(),
-  analytical_writing: Joi.string().required()
-});
-
-const documents = Joi.object({
-  document_id: Joi.number().required()
-});
-
 const schemas = {
   create_category: Joi.object().keys({
     name: Joi.string().required(),
@@ -517,59 +477,6 @@ const schemas = {
     file: Joi.required()
   }),
 
-  agent_profile_image: Joi.object().keys({
-    file: Joi.optional().allow(null)
-  }),
-  submit_application_step_6: Joi.object().keys({
-    step: Joi.number().required(),
-    application_id: Joi.number().required(),
-    // items: Joi.array().items(documents).min(1).required(),
-    items: Joi.array().items(documents)
-  }),
-  create_student: Joi.object().keys({
-    step: Joi.number().required(),
-    name: Joi.string().required(),
-    email: Joi.string().trim().email().required(),
-    phone: Joi.string()
-      .trim()
-      .min(10)
-      .max(10)
-      .required()
-      .regex(/^[0-9]*$/),
-    student_url: Joi.string().optional(),
-    dob: Joi.string().required(),
-    gender: Joi.string().optional(),
-    marital_status: Joi.string().required(),
-    c_address_1: Joi.string().required(),
-    c_address_2: Joi.string().allow('').required(),
-    c_courntry: Joi.string().required(),
-    c_state: Joi.string().required(),
-    c_city: Joi.string().required(),
-    c_pincode: Joi.string().required(),
-    p_address_1: Joi.string().required(),
-    p_address_2: Joi.string().allow('').required(),
-    p_courntry: Joi.string().required(),
-    p_state: Joi.string().required(),
-    p_city: Joi.string().required(),
-    p_pincode: Joi.string().required(),
-    passport_no: Joi.string().required(),
-    issue_date: Joi.string().required(),
-    exp_date: Joi.string().required(),
-    issue_country: Joi.string().required(),
-    issue_place: Joi.string().required(),
-    birth_country: Joi.string().required(),
-    nationality: Joi.string().required(),
-    citizen: Joi.string().required(),
-    citizen_other_country: Joi.number().required(),
-    living_studying_other_country: Joi.number().required(),
-    applied_immigration: Joi.number().required(),
-    medical_condition: Joi.number().required(),
-    visa_refusal: Joi.number().required(),
-    criminal_record: Joi.number().required(),
-    gurdian_name: Joi.string().required(),
-    gurdian_relation: Joi.string().required(),
-    gurdian_email: Joi.string().trim().email().required()
-  }),
   subscription_payment: Joi.object().keys({
     sub_id: Joi.number().required(),
     coupon_code: Joi.string().trim().optional().allow(null, '')
@@ -991,74 +898,6 @@ const schema_posts = {
         status: 3,
         message: 'server error'
       });
-    }
-  },
-  upload_application_documents: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_document,
-        limits: {
-          fileSize: 1024 * 1024 * 500
-        },
-        fileFilter: function (_req, files, callback) {
-          var ext = path.extname(files.originalname).toLowerCase();
-          if (
-            ext !== '.pdf' &&
-            ext !== '.png' &&
-            ext !== '.jpg' &&
-            ext !== '.gif' &&
-            ext !== '.doc' &&
-            ext !== '.docx' &&
-            ext !== '.xlsx' &&
-            ext !== '.jpeg'
-          ) {
-            callback(
-              'Only files with the following extensions are allowed: pdf, png, jpg, jpeg',
-              null
-            );
-          } else {
-            const req = validateBody(schemas.user_document);
-            callback(null, true);
-          }
-        }
-      }).array('file', 10);
-
-      upload(req, res, async function (err) {
-        if (err) {
-          if (err.code == 'LIMIT_FILE_SIZE') {
-            //console.log('Please upload file of 8MB');
-          }
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: { file: err }
-            })
-            .end();
-        } else {
-          logger.debug({ files: req.files }, 'uploaded application documents');
-          if (req.files && req.files.length > 0) {
-            next();
-          } else {
-            res
-              .status(400)
-              .json({
-                status: 2,
-                errors: { message: 'File is Required.' }
-              })
-              .end();
-          }
-        }
-      });
-    } catch (err) {
-      logError('userValidation upload_application_documents error', err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'Error uploading files! Please try again later'
-        })
-        .end();
     }
   },
   buyerExcelUploadVendorFileHandler: async (req, res, next) => {
