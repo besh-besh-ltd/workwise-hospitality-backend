@@ -102,6 +102,9 @@ const negotiationModel = {
       ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
       : `('PENDING_APPROVAL', 'ACTIVE')`;
 
+    // When not including ended rounds, also exclude rounds whose end_date has passed
+    const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
+
     if (vendorId) {
       return db.oneOrNone(
         `SELECT
@@ -117,6 +120,7 @@ const negotiationModel = {
          WHERE nr.rfq_id = $1
            AND nr.rfq_product_id = $2
            AND nr.status IN ${statusFilter}
+           ${endDateFilter}
            AND $3 = ANY(nr.vendor_ids)
          ORDER BY nr.round_number DESC
          LIMIT 1`,
@@ -138,6 +142,7 @@ const negotiationModel = {
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
          AND nr.status IN ${statusFilter}
+         ${endDateFilter}
        ORDER BY nr.round_number DESC
        LIMIT 1`,
       [rfqId, rfqProductId]
@@ -152,6 +157,10 @@ const negotiationModel = {
       ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
       : `('PENDING_APPROVAL', 'ACTIVE')`;
 
+    // When not including ended rounds, also exclude rounds whose end_date has passed
+    // (cron may not have updated the status to ENDED yet)
+    const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
+
     return db.any(
       `SELECT
         nr.*,
@@ -165,6 +174,7 @@ const negotiationModel = {
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
          AND nr.status IN ${statusFilter}
+         ${endDateFilter}
        ORDER BY nr.rfq_product_id, nr.round_number DESC`,
       [rfqId]
     );
@@ -390,8 +400,9 @@ const negotiationModel = {
 
     if (!result) return null;
 
-    // Use status directly — cron sets ENDED/EXPIRED when end_date passes
-    const expired = result.status !== 'ACTIVE' && result.status !== 'PENDING_APPROVAL';
+    // Check both status and end_date as fallback in case cron hasn't fired yet
+    const endDatePassed = parseAsUTC(result.end_date) <= new Date();
+    const expired = (result.status !== 'ACTIVE' && result.status !== 'PENDING_APPROVAL') || endDatePassed;
     return {
       expired,
       endDate: result.end_date,
@@ -440,9 +451,11 @@ const negotiationModel = {
       [latestRound.id, vendorId]
     );
 
-    // Use status directly — cron sets ENDED/EXPIRED when end_date passes
-    const isActive = latestRound.status === 'ACTIVE';
-    const isExpired = latestRound.status === 'ENDED' || latestRound.status === 'EXPIRED' || latestRound.status === 'CLOSED' || latestRound.status === 'COMPLETED';
+    // Check both status and end_date as fallback in case cron hasn't fired yet
+    const endDatePassed = parseAsUTC(latestRound.end_date) <= new Date();
+    const effectiveStatus = (latestRound.status === 'ACTIVE' && endDatePassed) ? 'ENDED' : latestRound.status;
+    const isActive = effectiveStatus === 'ACTIVE';
+    const isExpired = effectiveStatus === 'ENDED' || effectiveStatus === 'EXPIRED' || effectiveStatus === 'CLOSED' || effectiveStatus === 'COMPLETED';
 
     return {
       hasActiveRound: isActive,
@@ -483,12 +496,14 @@ const negotiationModel = {
     );
 
     return latestRounds.map(round => {
-      // Use status directly — cron sets ENDED/EXPIRED when end_date passes
-      const isExpired = round.status === 'ENDED' || round.status === 'EXPIRED' || round.status === 'CLOSED' || round.status === 'COMPLETED';
+      // Check both status and end_date as fallback in case cron hasn't fired yet
+      const endDatePassed = parseAsUTC(round.end_date) <= new Date();
+      const effectiveStatus = (round.status === 'ACTIVE' && endDatePassed) ? 'ENDED' : round.status;
+      const isExpired = effectiveStatus === 'ENDED' || effectiveStatus === 'EXPIRED' || effectiveStatus === 'CLOSED' || effectiveStatus === 'COMPLETED';
       return {
         ...round,
         isExpired,
-        isActive: round.status === 'ACTIVE',
+        isActive: effectiveStatus === 'ACTIVE',
         hasSubmittedQuote: !!round.vendor_quote_id
       };
     });
@@ -956,6 +971,7 @@ const negotiationModel = {
        WHERE rfq_id = $1
          AND rfq_product_id = $2
          AND status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND (status != 'ACTIVE' OR end_date > NOW())
          AND vendor_ids IS NOT NULL`,
       [rfqId, rfqProductId]
     );
@@ -1012,6 +1028,7 @@ const negotiationModel = {
          WHERE nr.rfq_id = $2
            AND nr.rfq_product_id = $1
            AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+           AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())
            AND u.id = ANY(nr.vendor_ids)
          ORDER BY nr.round_number DESC
          LIMIT 1

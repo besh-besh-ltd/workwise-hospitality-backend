@@ -12560,6 +12560,27 @@ sendFollowUpEmails: async (req, res) => {
         slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
       }));
 
+      // Validate that charges with tax > 0 have a non-empty comment
+      const validateChargeComments = (charges, label) => {
+        for (const c of charges || []) {
+          if (Number(c.tax) > 0 && (!c.comment || !String(c.comment).trim())) {
+            return `${label}: "${c.name}" has tax greater than 0 but no comment/reason provided.`;
+          }
+        }
+        return null;
+      };
+
+      for (const product of products) {
+        const err = validateChargeComments(product.other_charges, `Product ${product.product_id}`);
+        if (err) {
+          return res.status(400).json({ status: 0, message: err });
+        }
+      }
+      const globalChargeErr = validateChargeComments(global_charges, 'Global charges');
+      if (globalChargeErr) {
+        return res.status(400).json({ status: 0, message: globalChargeErr });
+      }
+
       // Enrich other_charges with slugs for each product
       for (const product of products) {
         if (product.other_charges) {
