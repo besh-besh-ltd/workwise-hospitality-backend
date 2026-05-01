@@ -1,4 +1,3 @@
-import Promise from 'bluebird';
 import pg from 'pg-promise';
 import dotenv from 'dotenv';
 import Config from '../config/app.config.js';
@@ -8,7 +7,6 @@ import { logger } from '../util/logger.js';
 // env config
 dotenv.config();
 const initOptions = {
-  promiseLib: Promise,
   query(e) {
     // console.log(e.query);
   },
