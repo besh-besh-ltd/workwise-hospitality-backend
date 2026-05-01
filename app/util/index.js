@@ -3,11 +3,6 @@ import helmet from 'helmet';
 import compression from 'compression';
 
 import cors from 'cors';
-//import sequelize from '../database/index.js';
-//import swaggerUi from 'swagger-ui-express';
-// import { createRequire } from 'module';
-// const require = createRequire(import.meta.url);
-// const swaggerDocument = require('../resources/swagger/swagger.json');
 import v1Router from '../routes/index.js';
 import origin from './origin.js';
 import { errors } from 'celebrate';
@@ -42,8 +37,6 @@ const util = (app) => {
 
   app.use('/api/v1', v1Router);
 
-  // app.use('/agent/api/web/v1', v1Router);
-  // error response
   error(app);
   // validation errors
   app.use(errors());
