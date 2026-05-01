@@ -466,14 +466,6 @@ const schemas = {
     file: Joi.required()
   }),
 
-  subscription_payment: Joi.object().keys({
-    sub_id: Joi.number().required(),
-    coupon_code: Joi.string().trim().optional().allow(null, '')
-  }),
-  coupon_check: Joi.object().keys({
-    coupon_code: Joi.string().trim().required(),
-    sub_id: Joi.number().required()
-  }),
   buyer_private_vendor: Joi.object().keys({
     vendorName: Joi.string().required().trim().max(60), // Required, trimmed, and max length of 60 characters
     email: Joi.string().required().email().trim().max(50), // Required, valid email, trimmed, and max length of 50 characters

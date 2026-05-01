@@ -2,10 +2,7 @@ import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
-import subscriptionModel from '../../models/subscriptionModel.js';
-import couponModel from '../../models/couponModel.js';
 import { encode } from 'html-entities';
-import dateFormat from 'dateformat';
 import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 
@@ -104,52 +101,6 @@ const validateDbBody = {
         }
       }
 
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  subscription_and_coupon_id_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { sub_id, coupon_code } = req.body;
-      let subscriptionIdExist =
-        await subscriptionModel.subscriptionIdExist(sub_id, req.user.user_type);
-      if (subscriptionIdExist.length == 0) {
-        err++;
-        errors.id = 'Please a send a valid subscription plan';
-      }
-
-      if(coupon_code) {
-        let today = dateFormat(new Date(), 'yyyy-mm-dd');
-        let couponCodeExists = await couponModel.checkCouponCodeExists(
-          coupon_code,
-          today,
-          req.user.user_type
-        );
-        if (couponCodeExists.length == 0) {
-          err++;
-          errors.coupon_code = 'Invalid coupon code';
-        }
-      }
       if (err > 0) {
         res
           .status(400)

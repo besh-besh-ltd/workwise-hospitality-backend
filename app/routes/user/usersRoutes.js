@@ -274,25 +274,6 @@ UsersRoutes.get(
   UsersController.vendor_profile
 );
 UsersRoutes.post(
-  '/coupon-check',
-  passportSignIn,
-  acl([2, 3, 4]),
-  validateBody(schemas.coupon_check),
-  validateDbBody.subscription_and_coupon_id_exists,
-  UsersController.subscriptionDetails
-);
-
-UsersRoutes.post(
-  '/subscription-payment',
-  passportSignIn,
-  acl([2, 3, 4]),
-  validateBody(schemas.subscription_payment),
-  validateDbBody.subscription_and_coupon_id_exists,
-  UsersController.subscriptionPayment
-);
-UsersRoutes.post('/razorpay-webhook', UsersController.razorpay_webhook);
-UsersRoutes.post('/test-razorpay-webhook', UsersController.test_razorpay_webhook);
-UsersRoutes.post(
   '/create-vendor-review',
   passportSignIn,
   validateBody(schemas.vendor_review),
@@ -304,26 +285,6 @@ UsersRoutes.get(
   '/vendor-review-list',
   passportSignIn,
   UsersController.vendorreview_list
-);
-
-// mukul 07-06-2025 ,  not in use, cross check and remove
-UsersRoutes.post(
-  '/communication-settings',
-  passportSignIn,
-  UsersController.communicationSettings
-);
-
-// mukul 07-06-2025 ,  not in use, cross check and remove
-UsersRoutes.get(
-  '/communication-settings',
-  passportSignIn,
-  UsersController.getCommunicationSettings
-);
-
-// mukul 07-06-2025 ,  not in use, cross check and remove
-UsersRoutes.get(
-  '/communication-settings-list',
-  UsersController.communicationSettingsList
 );
 
 UsersRoutes.post(
