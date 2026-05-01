@@ -90,43 +90,6 @@ const validateDbBody = {
         .end();
     }
   },
-  otp_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { otp } = req.body;
-
-      if (otp) {
-        // const userEmailExists = await userModel.user_email_exist(email);
-        const userEmailExists = await userModel.user_detail_exists(otp);
-        if (userEmailExists.length < 1) {
-          err++;
-          errors.otp = 'Invalid OTP or already verified';
-        }
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   forgot_otp_exists: async (req, res, next) => {
     try {
       let errors = {};
@@ -138,79 +101,6 @@ const validateDbBody = {
         if (userEmailExists.length < 1) {
           err++;
           errors.otp = 'Invalid OTP or already verified';
-        }
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  verify_link: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { email } = req.body;
-
-      if (email) {
-        // const userEmailExists = await userModel.user_email_exist(email);
-        const userEmailExists = await userModel.user_email_temp_exist(email?.toLowerCase());
-        if (userEmailExists.length > 0) {
-          err++;
-          errors.user_name = 'User email already exists';
-        }
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  mobile_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { mobile } = req.body;
-
-      if (mobile) {
-        const userMobileExists = await userModel.user_mobile_exists(mobile);
-        if (userMobileExists.length < 1) {
-          err++;
-          errors.mobile = 'Mobile not registered';
         }
       }
 
@@ -376,45 +266,6 @@ const validateDbBody = {
         if (userIdExists.length < 1) {
           err++;
           errors.user = 'User not exists';
-        }
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  address_id_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-
-      var address_id = req.params.address_id;
-
-      if (address_id) {
-        const userAddressIdExists = await userModel.address_id_exists(
-          address_id
-        );
-        if (userAddressIdExists.length < 1) {
-          err++;
-          errors.mobile = 'Address ID not exists';
         }
       }
 
