@@ -1272,45 +1272,6 @@ const cmsModel = {
       );
     });
   },
-  agent_register: async (usrobj) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `insert into Users(fname, lname, email, mobile, password,  role_id, fcm_id) values( '${usrobj.first_name}','${usrobj.last_name}', '${usrobj.email}', '${usrobj.mobile}', '${usrobj.password}','${usrobj.role_id}','${usrobj.fcm_id}')`,
-        function (error, results, fields) {
-          if (error) throw error;
-          //console.log('user_id--->', results.insertId);
-
-          resolve(results.insertId);
-        }
-      );
-    });
-  },
-  agent_user_update: async (compObj) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `update Users SET fname = '${compObj.first_name}', lname = '${compObj.last_name}', mobile = '${compObj.mobile}',password = '${compObj.password}',fcm_id = '${compObj.fcm_id}' WHERE email = '${compObj.email}' `,
-        function (error, results, fields) {
-          if (error) throw error;
-          //console.log('user_id--->', results.insertId);
-
-          resolve(results);
-        }
-      );
-    });
-  },
-  agent_user_status_update: async (compObj) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `update Users SET profile_status= 'C' WHERE id = '${compObj.user_id}' `,
-        function (error, results, fields) {
-          if (error) throw error;
-          //console.log('user_id--->', results.insertId);
-
-          resolve(results);
-        }
-      );
-    });
-  },
   company_user_update: async (compObj) => {
     return new Promise(function (resolve, reject) {
       db.query(
@@ -1413,83 +1374,6 @@ const cmsModel = {
     });
   },
 
-  get_blog_detail: async (blog_id) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select * from Blogs where id = '${blog_id}'`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  get_blog_count: async () => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select count(*) AS blog_count from Blogs`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  get_blog_list: async (limit, offset) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select * from Blogs ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${offset} `,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  get_student_list_by_agent: async (user_id, limit, offset) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select A.*, (select B.fname from Users B where A.created_by = B.id) as created_fname, (select B.lname from Users B where A.created_by = B.id) as created_lname from Users A where A.agent_id = '${user_id}' and A.role_id='3'  ORDER BY A.fname ASC LIMIT ${limit} OFFSET ${offset} `,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  get_student_list_by_agent_count: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select * from Users where agent_id = ${user_id} and role_id='3'`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  assigned_councellors_by_student_id: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select B.* from Users A, Users B where A.id = ${user_id} and A.councellor_id = B.id`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
-  assigned_agent_by_student_id: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `select B.* from Users A, Users B where A.id = ${user_id} and A.agent_id = B.id`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  },
 
   get_course_count: async () => {
     return new Promise(function (resolve, reject) {
