@@ -2,7 +2,6 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
-import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
@@ -7114,7 +7113,6 @@ LIMIT 2;
         });
     });
   },
-  // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   getCategoryList: async (search_key) => {
     //   let q = `
