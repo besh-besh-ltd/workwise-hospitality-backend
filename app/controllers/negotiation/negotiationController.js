@@ -14,6 +14,15 @@ import {
   resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+
+// Parse date strings as UTC when no timezone suffix is present
+const parseAsUTC = (d) => {
+  if (!d) return null;
+  if (d instanceof Date) return d;
+  const s = String(d);
+  if (s.includes('+') || s.includes('Z')) return new Date(s);
+  return new Date(s.replace(' ', 'T') + 'Z');
+};
 import { draftPO } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
@@ -735,8 +744,9 @@ const NegotiationController = {
       const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
       const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true, vendorId);
 
-      // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
-      if (!round || (req.user.user_type == 3 && round.status !== 'ACTIVE')) {
+      // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds with end_date not yet passed
+      const isRoundActive = round && round.status === 'ACTIVE' && parseAsUTC(round.end_date) > new Date();
+      if (!round || (req.user.user_type == 3 && !isRoundActive)) {
         return res.status(200).json({
           status: 1,
           data: null,
@@ -778,7 +788,7 @@ const NegotiationController = {
         const vendorId = req.user.vendor_id || req.user.id;
         rounds = (rounds || [])
           .filter(r =>
-            r.status === 'ACTIVE' && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
+            r.status === 'ACTIVE' && parseAsUTC(r.end_date) > new Date() && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
           )
           .map(({ vendor_ids, ...r }) => ({
             ...r,

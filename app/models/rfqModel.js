@@ -6513,7 +6513,8 @@ LIMIT 2;
             JOIN tbl_quotes TQ ON TQI.quote_id = TQ.id
             WHERE TQI.rfq_id = $1
               AND TQI.product_variant_id = TRF.product_variant_id
-              AND TQI.variant = TRF.variant              
+              AND TQI.variant = TRF.variant
+              AND (TQ.is_regret IS NULL OR TQ.is_regret != 1)
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
 
@@ -6522,7 +6523,7 @@ LIMIT 2;
           SELECT json_build_object(
             'id', NR.id, 'rfq_id', NR.rfq_id, 'rfq_product_id', NR.rfq_product_id,
             'round_number', NR.round_number, 'target_price', NR.target_price,
-            'status', NR.status, 'end_date', NR.end_date,
+            'status', CASE WHEN NR.status = 'ACTIVE' AND NR.end_date <= NOW() THEN 'ENDED' ELSE NR.status END, 'end_date', NR.end_date,
             'approved_at', NR.approved_at, 'published_at', NR.published_at,
             'closed_at', NR.closed_at, 'created_by', NR.created_by,
             'created_by_name', NRU.name, 'created_by_email', NRU.email,
@@ -6576,10 +6577,11 @@ LIMIT 2;
                 SELECT 1 FROM tbl_negotiation_rounds ANR
                 WHERE ANR.rfq_product_id = TRF.id
                   AND ANR.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                  AND (ANR.status != 'ACTIVE' OR ANR.end_date > NOW())
                   AND RPV_U.id = ANY(ANR.vendor_ids)
               ) THEN true ELSE false END AS in_active_round,
               (
-                SELECT json_build_object('round_id', ANR2.id, 'round_number', ANR2.round_number, 'status', ANR2.status)
+                SELECT json_build_object('round_id', ANR2.id, 'round_number', ANR2.round_number, 'status', CASE WHEN ANR2.status = 'ACTIVE' AND ANR2.end_date <= NOW() THEN 'ENDED' ELSE ANR2.status END)
                 FROM tbl_negotiation_rounds ANR2
                 WHERE ANR2.rfq_product_id = TRF.id
                   AND ANR2.status IN ('PENDING_APPROVAL', 'ACTIVE')
@@ -6597,6 +6599,7 @@ LIMIT 2;
                 JOIN tbl_quote_items _pv_qi ON _pv_qi.quote_id = _pv_q.id
                 WHERE _pv_q.rfq_id = TRF.rfq_id
                   AND _pv_q.created_by = RPV_U.id
+                  AND (_pv_q.is_regret IS NULL OR _pv_q.is_regret != 1)
                   AND _pv_qi.product_variant_id = TRF.product_variant_id
                   AND _pv_qi.variant = TRF.variant
               )
