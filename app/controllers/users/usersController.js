@@ -1,7 +1,6 @@
 import userModel from '../../models/userModel.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import notificationModel from '../../models/notificationModel.js';
-import couponModel from '../../models/couponModel.js';
 import Config from '../../config/app.config.js';
 import {
   logError,
