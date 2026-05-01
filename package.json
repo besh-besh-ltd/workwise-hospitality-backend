@@ -87,7 +87,7 @@
   "devDependencies": {
     "cross-env": "^10.1.0",
     "dotenv": "^16.4.7",
-    "eslint": "^10.2.1",
+    "eslint": "^8.57.1",
     "jest": "^30.2.0",
     "knip": "^6.9.0",
     "nodemon": "^3.1.9",
