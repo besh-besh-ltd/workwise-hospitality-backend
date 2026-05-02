@@ -11,6 +11,7 @@ import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../.
 import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
 import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
+import pricingEngine from "../../services/pricingEngine.js";
 
 export const getPOByRFQ = async (req, res) => {
     try {
@@ -126,12 +127,26 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
 
 export const draftPO = async (poInfo, user, txn) => {
   try {
-    const { rfq_id, project_id, total_value, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
+    const { rfq_id, project_id, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
 
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
+
+    // Server-authoritative recompute: ignore the client's total_value and
+    // derive it from the engine using the charges_meta that will actually
+    // persist (which buildAuthoritativePOPayload may already have replaced
+    // with values from tbl_quote_items).
+    const meta = pricingEngine.normalizeChargesMeta(product_info.charges_meta || {});
+    const lineOut = pricingEngine.calculateLineTotal({
+      unit_price: product_info.unit_price,
+      quantity: product_info.quantity,
+      tax: meta.tax,
+      tax_mode: meta.tax_mode,
+      other_charges: meta.other_charges,
+    });
+    const total_value = lineOut.total;
 
     const result = await draftPurchaseOrder(
       rfq_id,

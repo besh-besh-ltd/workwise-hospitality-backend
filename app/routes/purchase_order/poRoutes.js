@@ -11,7 +11,10 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 const PORoutes = Router();
 
 PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
-PORoutes.put('/:po_id', passportSignIn, updatePO)
+// Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
+// check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
+// vendor user_types at the route layer.
+PORoutes.put('/:po_id', passportSignIn, noAcl([3]), updatePO)
 PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
 PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
 PORoutes.post('/approve/:po_id', passportSignIn, approvePO);

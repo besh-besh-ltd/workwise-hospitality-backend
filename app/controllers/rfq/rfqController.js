@@ -59,6 +59,8 @@ import {
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
 } from '../../helper/quoteVisibility.js';
+import pricingEngine from '../../services/pricingEngine.js';
+import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -7721,6 +7723,26 @@ const rfqController = {
             }
           );
 
+          // Server-authoritative recompute: discard the client-supplied
+          // total_price and derive it from the pricing engine. Prevents a
+          // buggy/malicious client from persisting incorrect totals.
+          quote_items_data.forEach((item) => {
+            let parsedOtherCharges = [];
+            try {
+              parsedOtherCharges = JSON.parse(item.other_charges || '[]');
+            } catch (_e) {
+              parsedOtherCharges = [];
+            }
+            const engineOut = pricingEngine.calculateLineTotal({
+              unit_price: item.unit_price,
+              quantity: item.quantity,
+              tax: item.tax,
+              tax_mode: item.tax_mode,
+              other_charges: parsedOtherCharges,
+            });
+            item.total_price = engineOut.total;
+          });
+
           if (is_regret) {
             let quote_rsp = await rfqModel.insert(
               'tbl_quotes',
@@ -8103,6 +8125,76 @@ const rfqController = {
         .end();
     }
   },
+
+  // Server-computed quote-compare view model. Same data as getQuotesByRfqById,
+  // but every line carries engine output (base, base_tax, charges[], total),
+  // every product carries comparison stats (bands, freight advantage,
+  // tie-broken lowest), and the response includes overall metrics (L1,
+  // baseline, savings, finalized total). The frontend never multiplies
+  // prices — it just renders these values.
+  getQuoteComparison: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { TA_Vendors, no_freight, rfq_product_id, normalize, freightFilter, pageSource, include_negotiation } = req.query;
+    const { id, company_id, user_type, vendor_id } = req.user;
+
+    try {
+      const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
+      let products;
+
+      if (quoteVisibility.locked) {
+        const lockedProducts = await rfqModel.getQuoteVisibilityLockedProductsByRfqId(rfq_id, rfq_product_id);
+        products = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
+      } else {
+        const vendor_filter_id = user_type == 3 ? (vendor_id || id) : null;
+        products = await rfqModel.getQuotesByRfqById2(
+          rfq_id, id, company_id,
+          TA_Vendors, no_freight, rfq_product_id,
+          include_negotiation === 'true',
+          vendor_filter_id
+        );
+      }
+
+      const normalizeApplied = normalize === '1' || normalize === 'true';
+      const enriched = enrichQuoteCompareData(products, {
+        normalizeApplied,
+        freightFilter: freightFilter === '1' || freightFilter === 'true',
+      });
+
+      // Mirror getQuotesByRfqById's quote-activity insert when this is the
+      // user's quote-compare visit, so analytics stays consistent.
+      if (pageSource === 'quote_compare') {
+        try {
+          const existing = await rfqModel.checkIfExists(
+            'tbl_quote_activity',
+            `rfq_id = ${rfq_id} AND created_by = ${id} AND current_status = 'QC'`
+          );
+          if (existing.length === 0) {
+            await rfqModel.insertIntoQuoteActivity({
+              rfq_id, current_status: 'QC', created_by: id,
+            });
+          }
+        } catch (activityErr) {
+          logError('quote-activity insert failed', activityErr);
+        }
+      }
+
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: enriched,
+          meta: { quoteVisibility, normalize_applied: normalizeApplied },
+        })
+        .end();
+    } catch (error) {
+      logError('getQuoteComparison failed', error);
+      return res
+        .status(400)
+        .json({ status: 3, message: Config.errorText.value })
+        .end();
+    }
+  },
+
   downloadQuoteResults: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
@@ -8137,7 +8229,7 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id, normalize } = req.query;
 
     const { id, company_id } = req.user;
 
@@ -8189,6 +8281,12 @@ const rfqController = {
 
         product.quotations = updatedQuotations;
       });
+
+      // Layer engine output on top so the Excel export sums match what the
+      // quote-compare page shows.
+      const normalizeApplied = normalize === '1' || normalize === 'true';
+      const enriched = enrichQuoteCompareData(rfQItem, { normalizeApplied });
+
        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
                                                           rfq_id: rfq_id,
                                                           current_status: "QC",
@@ -8200,7 +8298,8 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: rfQItem
+          data: enriched.products,
+          meta: { normalize_applied: normalizeApplied }
         })
         .end();
     } catch (error) {
@@ -12589,6 +12688,23 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       const enrichedGlobalCharges = enrichCharges(global_charges);
+
+      // Server-authoritative recompute: discard the client-supplied
+      // total_price on each product and derive it from the pricing engine.
+      // The engine uses the same enriched other_charges that will be
+      // persisted, so the stored total cannot drift from the inputs.
+      for (const product of products) {
+        const engineOut = pricingEngine.calculateLineTotal({
+          unit_price: product.unit_price,
+          quantity: product.quantity,
+          tax: product.tax,
+          tax_mode: product.tax_mode,
+          other_charges: Array.isArray(product.other_charges)
+            ? product.other_charges
+            : [],
+        });
+        product.total_price = engineOut.total;
+      }
 
       let paymentTermAndCommentChanges = false;
 

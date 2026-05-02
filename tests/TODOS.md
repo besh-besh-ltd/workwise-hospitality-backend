@@ -20,6 +20,7 @@ silently disappears into greppable code comments.
 | `po.acceptReject.test.js` (deferred-block) | F-EMAIL-SCOPE-001: BU buyer recipient list scope | Multi-hotel user fixtures | Task 30 |
 | `po.acceptReject.test.js` (deferred-block) | F-PO-REMINDER-001: cron tier-drift on missed days | Time-mock helper, refactor cron body to invokable fn | Task 13 (Wave 4) |
 | `rfq.create.flow.test.js` (deferred-block) | F-RBAC-001: `can('tender.create')` middleware blocks unprivileged user | HTTP-level test through full middleware stack | Task 12 (Wave 3 admin/RBAC audit) |
+| `pricing.serverAuthoritative.test.js` (5 todos) | Pricing engine server-authoritative write paths: createQuote / updateQuoteItems / draftPO / handleUpdatePO must overwrite client-supplied totals with engine output | Needs RFQ + vendor-mapping factories in a withTx context (similar to rfq.create.flow.test.js setup) | Tracks the pricing-centralization rollout |
 
 ## Discipline
 
