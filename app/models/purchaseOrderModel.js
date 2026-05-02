@@ -7,6 +7,7 @@ import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, 
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
+import pricingEngine from "../services/pricingEngine.js";
 import fs from 'fs';
 
 const getNextPONumber = async () => {
@@ -1246,6 +1247,55 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       `;
 
       await t.none(productUpdateQuery, values);
+    }
+
+    // --- 2b) Server-authoritative recompute of total_price per touched
+    // product, then re-aggregate the PO's total_value. The engine consumes
+    // the row state AFTER the patches above were applied, so any client-
+    // supplied `total_price` in the changes is silently overwritten.
+    const touchedRfqItemIds = Object.entries(productUpdates)
+      .filter(([, info]) => !info.remove)
+      .map(([id]) => Number(id));
+
+    for (const rfqItemId of touchedRfqItemIds) {
+      const row = await t.oneOrNone(
+        `SELECT quantity, unit_price, charges_meta
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1 AND rfq_product_id = $2`,
+        [poId, rfqItemId]
+      );
+      if (!row) continue;
+
+      const meta = pricingEngine.normalizeChargesMeta(row.charges_meta || {});
+      const lineOut = pricingEngine.calculateLineTotal({
+        unit_price: row.unit_price,
+        quantity: row.quantity,
+        tax: meta.tax,
+        tax_mode: meta.tax_mode,
+        other_charges: meta.other_charges,
+      });
+
+      await t.none(
+        `UPDATE tbl_purchase_order_product
+         SET total_price = $1
+         WHERE purchase_order_id = $2 AND rfq_product_id = $3`,
+        [lineOut.total, poId, rfqItemId]
+      );
+    }
+
+    // Refresh PO grand total whenever any product was touched (fields,
+    // charges, or removal — covers all paths that could shift the total).
+    if (Object.keys(productUpdates).length > 0) {
+      const summed = await t.oneOrNone(
+        `SELECT COALESCE(SUM(total_price), 0) AS total
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1`,
+        [poId]
+      );
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
+        [Number(summed?.total) || 0, poId]
+      );
     }
 
     // --- 3) Apply HSN updates (tbl_purchase_order_hsn_mapping) ---

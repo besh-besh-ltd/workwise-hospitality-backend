@@ -233,6 +233,16 @@ RfqRoutes.get(
   acl([2, 8, 10]),
   rfqController.getQuotesByRfqById
 );
+// Server-computed quote-compare view model: per-line engine output, per-product
+// comparison stats (bands, freight advantage, lowest), and overall metrics.
+// Same access control as get-quotes.
+RfqRoutes.get(
+  '/quote-compare/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8, 10]),
+  rfqController.getQuoteComparison
+);
 RfqRoutes.get(
   '/download-quote-results/:id',
   passportSignIn,
