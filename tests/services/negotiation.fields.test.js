@@ -435,8 +435,8 @@ describe("submitVendorQuote — one-shot enforcement + previous_price round-trip
 //  F-NEGO-001 (read leak) — vendor B sees vendor A's per-field targets
 // ===========================================================================
 
-describe("getActiveRound — F-NEGO-001 leak coverage on per-field targets (DEFECT, locked)", () => {
-  it("vendor B fetching getActiveRound exposes vendor A's negotiation_fields including custom-charge-style fields", async () => {
+describe("getActiveRound — F-NEGO-001 leak coverage on per-field targets", () => {
+  it("vendor B fetching getActiveRound MUST NOT see vendor A's negotiation_fields (custom-charge-style or otherwise)", async () => {
     const rfq_id = await makeBidEndedRfq();
     const product_id = await attachProduct(rfq_id, 1);
     await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
@@ -488,19 +488,15 @@ describe("getActiveRound — F-NEGO-001 leak coverage on per-field targets (DEFE
       ? data.vendor_approvals
       : JSON.parse(data.vendor_approvals || "[]");
 
-    // CURRENT BEHAVIOUR: vendor_beta sees vendor_alpha's approval slot
-    // including their per-field targets. Lock it as defect F-NEGO-001 — the
-    // fix is to scope vendor_approvals to the requesting vendor on
-    // user_type=3, OR drop the column from the vendor projection. When
-    // fixed, this test should flip to assert the slot is filtered out.
+    // POST-FIX: vendor_approvals is scoped to the requesting vendor; Vendor
+    // A's slot (with their per-field targets including custom-charge fields)
+    // MUST NOT appear when Vendor B reads the round. Vendor B's own slot
+    // remains visible.
     const alphaSlot = approvals.find((a) => a.vendor_id === IDS.users.vendor_alpha);
-    expect(alphaSlot).toBeDefined();
-    const alphaFieldNames = alphaSlot.negotiation_fields.map((f) => f.name).sort();
-    expect(alphaFieldNames).toEqual(["Freight", "base_price", "test_custom_charge"]);
-    // The exact target values are exposed too — that's the leak.
-    const alphaByName = Object.fromEntries(alphaSlot.negotiation_fields.map((f) => [f.name, f]));
-    expect(alphaByName["base_price"].target).toBe(425);
-    expect(alphaByName["Freight"].target).toBe(7);
-    expect(alphaByName["test_custom_charge"].target).toBe(100);
+    expect(alphaSlot).toBeUndefined();
+    const betaSlot = approvals.find((a) => a.vendor_id === IDS.users.vendor_beta);
+    expect(betaSlot).toBeDefined();
+    const betaFieldNames = betaSlot.negotiation_fields.map((f) => f.name).sort();
+    expect(betaFieldNames).toEqual(["Insurance", "base_price"]);
   });
 });
