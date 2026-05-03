@@ -5565,15 +5565,38 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
-       
-     let parsedError = {};
-       parsedError = JSON.parse(error?.message);
 
-      res.status(500).json({
+      // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
+      // throwing `new Error(JSON.stringify({message, status, ...}))`.
+      // Translate the structured-error shape to a sensible HTTP code so
+      // access-denied / validation failures don't surface as 500.
+      let parsedError = {};
+      let isStructured = false;
+      try {
+        parsedError = JSON.parse(error?.message);
+        isStructured = parsedError && typeof parsedError === 'object';
+      } catch {
+        // Plain string error — keep historical 500.
+      }
+
+      const innerMessage = isStructured ? (parsedError.message || error.message) : error.message;
+      let httpCode = 500;
+      if (isStructured) {
+        // saveRfqDraft uses status:2 for access-denied + status:3 for validation.
+        if (parsedError.status === 2) {
+          httpCode = /access|permission|forbidden|unauthor/i.test(innerMessage || '') ? 403 : 404;
+        } else if (parsedError.status === 3) {
+          httpCode = 400;
+        }
+      }
+
+      res.status(httpCode).json({
         status: 3,
-        message: 'An error occurred while saving the draft',
+        message: httpCode === 500
+          ? 'An error occurred while saving the draft'
+          : (innerMessage || 'An error occurred while saving the draft'),
         errors: {
-          rfq:error?.message || 'An error occurred while saving the draft',
+          rfq: innerMessage || 'An error occurred while saving the draft',
           details: parsedError?.details || [],
         }
       });
