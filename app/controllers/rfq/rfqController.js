@@ -14997,6 +14997,18 @@ getClauses: async (req, res) => {
         });
       }
 
+      // F-CLAR-002: require a non-empty response (or at least one file).
+      // Closing without answering used to silently leave the vendor's
+      // question unanswered + send no notification.
+      const responseText = typeof response === 'string' ? response.trim() : '';
+      const hasFiles = Array.isArray(response_files) && response_files.length > 0;
+      if (!responseText && !hasFiles) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Response is required to close a clarification.'
+        });
+      }
+
       // Resolve clarification with optional response
       const resolved = await rfqModel.resolveClarification(
         clarification_id,
