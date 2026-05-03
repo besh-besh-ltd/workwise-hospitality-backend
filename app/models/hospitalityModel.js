@@ -1973,6 +1973,29 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   },
 
   /**
+   * Return the most recent pending registration/renewal payment row for
+   * this vendor. The registration entrypoint (hospitalitySubscriptionPayment)
+   * stores metadata WITHOUT a `type` or `kind` field, so we identify a
+   * renewal pending row as one that is neither modification nor extension.
+   * Used to short-circuit duplicate Razorpay order creation on resubmit
+   * (F-SUB-002 idempotency, registration variant). Returns null if none.
+   */
+  getPendingRenewalForVendor: async (vendorId) => {
+    const row = await db.oneOrNone(
+      `SELECT id, razorpay_order_id, amount, currency, metadata
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1
+         AND payment_status IN ('created', 'pending')
+         AND COALESCE(metadata::jsonb->>'type', '') NOT IN ('modification', 'free_renewal')
+         AND COALESCE(metadata::jsonb->>'kind', '') <> 'extension'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [vendorId]
+    );
+    return row || null;
+  },
+
+  /**
    * Expire any abandoned "created" or "pending" modification payment records
    * for this vendor. Called before creating a new modification so stale
    * abandoned Razorpay orders don't permanently block the vendor.

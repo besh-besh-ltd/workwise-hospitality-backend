@@ -3686,6 +3686,28 @@ publish_profile_reviews: async (req, res, next) => {
           .end();
       }
 
+      // F-SUB-002 (registration) idempotency guard: if a pending Razorpay
+      // order already exists for this vendor's renewal, return it instead
+      // of minting a fresh one. Mirrors the same fix shape used for
+      // modifySubscription (4cdfb5e) and extendSubscription (ef97662).
+      // Without this guard, a vendor who double-clicks or back-refreshes
+      // the renewal page can produce two pending orders; if both auto-
+      // confirm at the bank side (UPI), they pay twice while only one
+      // tbl_vendor_payments row reaches 'success'.
+      const pendingRenewal = await hospitalityModel.getPendingRenewalForVendor(
+        decryptedUserId
+      );
+      if (pendingRenewal && pendingRenewal.razorpay_order_id) {
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            data: pendingRenewal.razorpay_order_id,
+            already_pending: true
+          })
+          .end();
+      }
+
       // Create Razorpay order for computed amount
       let digit = convertSixDigit(decryptedUserId);
       const razorpay = new Razorpay({
