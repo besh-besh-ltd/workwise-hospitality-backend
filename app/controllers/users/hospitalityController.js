@@ -2656,13 +2656,29 @@ const HospitalityController = {
         return res.status(400).json({ status: 2, message: 'Missing payment verification parameters' });
       }
 
-      // Validate Razorpay signature
+      // Validate Razorpay signature.
+      //
+      // F-SUB-005: use crypto.timingSafeEqual instead of plain `!==`. In
+      // Node.js the practical timing-attack risk on string compare is low
+      // (V8 string compare isn't a bit-by-bit C loop), but it's the
+      // security-best-practice Razorpay's docs explicitly call out — and a
+      // malformed-length signature flowing through the constant-time
+      // primitive throws RangeError, which we catch and treat as invalid
+      // (returning the same 400 path as a wrong-secret signature).
       const generatedSignature = crypto
         .createHmac('sha256', Config.razorpay.razorpay_secret)
         .update(razorpay_order_id + '|' + razorpay_payment_id)
         .digest('hex');
 
-      if (generatedSignature !== razorpay_signature) {
+      let isValidSignature = false;
+      try {
+        const a = Buffer.from(generatedSignature, 'hex');
+        const b = Buffer.from(String(razorpay_signature), 'hex');
+        isValidSignature = a.length === b.length && crypto.timingSafeEqual(a, b);
+      } catch {
+        isValidSignature = false;
+      }
+      if (!isValidSignature) {
         return res.status(400).json({ status: 2, message: 'Payment verification failed - invalid signature' });
       }
 

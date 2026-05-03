@@ -694,6 +694,28 @@ describe("verifyPayment (POST /verify-payment) — modification commit", () => {
     expect(liquorRow).not.toBeNull();
   });
 
+  it("F-SUB-005 — malformed-length signature is rejected cleanly (no 500 from constant-time compare)", async () => {
+    const { orderId } = await setupPendingModification({
+      targetCategories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+      targetHotels: [HOTEL_A1],
+    });
+
+    const m = mockExpress({
+      body: {
+        razorpay_order_id: orderId,
+        razorpay_payment_id: "pay_test_short_sig",
+        // Deliberately short / non-hex string. crypto.timingSafeEqual would
+        // throw RangeError on length mismatch; the handler must catch and
+        // treat as invalid → 400, not surface the throw as an HTTP 500.
+        razorpay_signature: "deadbeef",
+      },
+    });
+    await hospitalityController.verifyPayment(m.req, m.res);
+
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/invalid signature/i);
+  });
+
   it("rejects an invalid signature with 400 and leaves payment + subscription state unchanged", async () => {
     const { orderId } = await setupPendingModification({
       targetCategories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
