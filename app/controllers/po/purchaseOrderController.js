@@ -13,6 +13,19 @@ import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 import pricingEngine from "../../services/pricingEngine.js";
 
+// Tiny tagged-error class for controllers that need to map a thrown
+// failure mode to a specific HTTP status code (instead of the historic
+// "everything is 400/500" pattern). Used by acceptPO/rejectPO to
+// distinguish 404 (not-found) / 403 (wrong vendor) / 409 (wrong state)
+// per F-PO-IDEM-001.
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.name = 'HttpError';
+    this.statusCode = statusCode;
+  }
+}
+
 export const getPOByRFQ = async (req, res) => {
     try {
         const { rfq_id } = req.params;
@@ -795,13 +808,25 @@ export const acceptPO = async (req, res) => {
     const vendorUserId = req.user.id;
 
     const result = await db.tx(async t => {
-      const po = await t.oneOrNone(`
-        SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
-      `, [po_id, vendorUserId]);
-
+      // F-PO-IDEM-001: split the lookup into its three failure modes so the
+      // caller can distinguish (404 not-found / 403 wrong-vendor / 409
+      // wrong-state) instead of receiving an ambiguous lump.
+      const po = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        [po_id]
+      );
       if (!po) {
-        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+        throw new HttpError(404, 'PO not found.');
+      }
+      if (po.finalized_vendor_id !== vendorUserId) {
+        throw new HttpError(403, 'You are not the assigned vendor for this PO.');
+      }
+      if (po.status !== 'acceptance_pending') {
+        const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
+        const message = alreadyActioned
+          ? `PO has already been actioned (status: ${po.status}).`
+          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+        throw new HttpError(409, message);
       }
 
       await t.none(`
@@ -847,7 +872,8 @@ export const acceptPO = async (req, res) => {
     });
   } catch (error) {
     logError(error);
-    return res.status(400).json({
+    const statusCode = error instanceof HttpError ? error.statusCode : 400;
+    return res.status(statusCode).json({
       status: 0,
       message: error.message || 'Failed to accept PO.',
     });
@@ -868,13 +894,23 @@ export const rejectPO = async (req, res) => {
     const vendorUserId = req.user.id;
 
     const result = await db.tx(async t => {
-      const po = await t.oneOrNone(`
-        SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
-      `, [po_id, vendorUserId]);
-
+      // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
+      const po = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        [po_id]
+      );
       if (!po) {
-        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+        throw new HttpError(404, 'PO not found.');
+      }
+      if (po.finalized_vendor_id !== vendorUserId) {
+        throw new HttpError(403, 'You are not the assigned vendor for this PO.');
+      }
+      if (po.status !== 'acceptance_pending') {
+        const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
+        const message = alreadyActioned
+          ? `PO has already been actioned (status: ${po.status}).`
+          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+        throw new HttpError(409, message);
       }
 
       await t.none(`
@@ -917,7 +953,8 @@ export const rejectPO = async (req, res) => {
     });
   } catch (error) {
     logError(error);
-    return res.status(400).json({
+    const statusCode = error instanceof HttpError ? error.statusCode : 400;
+    return res.status(statusCode).json({
       status: 0,
       message: error.message || 'Failed to reject PO.',
     });

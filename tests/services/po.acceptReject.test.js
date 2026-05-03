@@ -179,13 +179,13 @@ async function attachProductToPo(po_id, rfq_product_id, quote_id) {
 // ===========================================================================
 
 describe("acceptPO — gates", () => {
-  it("returns 400 when PO does not exist", async () => {
+  it("returns 404 when PO does not exist (F-PO-IDEM-001)", async () => {
     const m = mockExpress({
       user: { id: IDS.users.vendor_alpha },
       params: { po_id: "999999999" },
     });
     await poController.acceptPO(m.req, m.res);
-    expect(m.calls.status).toBe(400);
+    expect(m.calls.status).toBe(404);
     expect(m.calls.body.message).toMatch(/PO not found/i);
   });
 
@@ -299,14 +299,15 @@ describe("rejectPO — gates", () => {
     expect(m.calls.status).toBe(400);
   });
 
-  it("returns 400 when PO does not exist", async () => {
+  it("returns 404 when PO does not exist (F-PO-IDEM-001)", async () => {
     const m = mockExpress({
       user: { id: IDS.users.vendor_alpha },
       params: { po_id: "999999999" },
       body: { reason: "no thanks" },
     });
     await poController.rejectPO(m.req, m.res);
-    expect(m.calls.status).toBe(400);
+    expect(m.calls.status).toBe(404);
+    expect(m.calls.body.message).toMatch(/PO not found/i);
   });
 
   it("happy path: status flips → rejected_by_vendor, reason stored, finalization moved to history", async () => {
