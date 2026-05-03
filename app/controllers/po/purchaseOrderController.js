@@ -412,12 +412,19 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
       WHERE pop.purchase_order_id = $1
     `, [purchaseOrder.id]);
 
+    // F-PO-CASCADE-001: scope the de-finalization cascade by the PO's
+    // finalized_vendor_id so a multi-vendor PO rejection only wipes the
+    // rejecting vendor's finalization rows. Without this guard, every
+    // finalization row matching (rfq_id, product_variant_id, variant) is
+    // moved to history — including other vendors' rows that happen to be
+    // finalized on the same product.
     for (const product of poProducts) {
       const finalization = await t.oneOrNone(`
         SELECT * FROM tbl_quote_finalization
         WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+          AND vendor_id = $4
         LIMIT 1
-      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant]);
+      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant, purchaseOrder.finalized_vendor_id]);
 
       if (!finalization) continue;
 
