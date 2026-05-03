@@ -18,7 +18,11 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { mockExpress } from "../helpers/mockExpress.js";
 import { makeRazorpayMock, signPayment } from "../helpers/razorpayMock.js";
-import { seedVendorSubscriptions } from "../fixtures/vendors.js";
+import {
+  seedPaidSubscription as seedPaidSubscriptionShared,
+  resetVendorSubscriptionState as resetVendorSubscriptionStateShared,
+  restoreBaseVendorFixture,
+} from "../helpers/subscriptionFixture.js";
 
 // The free path uses an inline `_sendSubscriptionConfirmationEmail` helper
 // inside hospitalityController.js that calls common.js `sendMail` — already
@@ -55,15 +59,13 @@ const hospitalityController = hospitalityModule.default;
 // ---------------------------------------------------------------------------
 
 afterAll(async () => {
-  // Restore the base vendor-subscription fixture state before closing.
-  // Cross-suite hygiene — tests that follow (harness.smoke compares
-  // before/after counts of tbl_vendor_hotel_category_subscription, and
-  // rfq.create.flow's eligibility query depends on the seeded shape) need
-  // the original 6-row fixture state, not whatever this test left behind.
-  await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`, [VENDOR_ID]);
-  await db.none(`DELETE FROM tbl_vendor_payments WHERE vendor_id = $1`, [VENDOR_ID]);
-  await db.tx((t) => seedVendorSubscriptions(t));
-
+  // Cross-suite hygiene — restore the base vendor-subscription fixture so
+  // tests that follow (harness.smoke compares before/after counts of
+  // tbl_vendor_hotel_category_subscription; rfq.create.flow's eligibility
+  // query depends on the seeded shape) see the original 6-row state, not
+  // whatever this test left behind.
+  await resetVendorSubscriptionState();
+  await restoreBaseVendorFixture(db);
   await closeDb();
 });
 
@@ -114,59 +116,12 @@ beforeAll(async () => {
   }
 });
 
-// Helper: clear vendor_alpha's subscription rows and the matching payment
-// rows, so each test starts with a known shape.
-async function resetVendorSubscriptionState() {
-  await db.none(
-    `DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`,
-    [VENDOR_ID]
-  );
-  await db.none(`DELETE FROM tbl_vendor_payments WHERE vendor_id = $1`, [VENDOR_ID]);
-}
-
-// Helper: seed a "paid" baseline subscription with `categories` + `hotels`
-// arrays. Returns { paymentId, sharedEndDate, subRows }.
-async function seedPaidSubscription({ categories = [], subcategories = [], hotels = [] } = {}) {
-  const today = new Date().toISOString().slice(0, 10);
-  const endDate = new Date(Date.now() + 300 * 86400_000).toISOString().slice(0, 10);
-
-  // 1. tbl_vendor_payments — one paid record covering the whole subscription.
-  const payment = await db.one(
-    `INSERT INTO tbl_vendor_payments
-       (vendor_id, razorpay_order_id, razorpay_payment_id, razorpay_signature,
-        amount, currency, payment_status, payment_type, receipt, before_payment_response, metadata)
-     VALUES ($1, $2, $3, $4, $5, 'INR', 'success', 'hospitality', $6, '{}'::jsonb, $7::jsonb)
-     RETURNING id`,
-    [
-      VENDOR_ID,
-      `order_seed_${VENDOR_ID}`,
-      `pay_seed_${VENDOR_ID}`,
-      `sig_seed_${VENDOR_ID}`,
-      categories.length * 500 + hotels.length * 1000, // fee math doesn't matter for the test
-      `rcpt_seed_${VENDOR_ID}`,
-      JSON.stringify({ type: "registration", seeded_by: "vendorSubscription.modify.test.js" }),
-    ]
-  );
-
-  // 2. tbl_vendor_hotel_category_subscription rows
-  const inserted = [];
-  const insertOne = async (item_type, item_id) => {
-    const row = await db.one(
-      `INSERT INTO tbl_vendor_hotel_category_subscription
-         (vendor_id, item_type, item_id, fee_amount, start_date, end_date, status, payment_id)
-       VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
-       RETURNING id`,
-      [VENDOR_ID, item_type, item_id, 500, today, endDate, payment.id]
-    );
-    inserted.push({ id: row.id, item_type, item_id });
-  };
-
-  for (const cid of categories) await insertOne("category", cid);
-  for (const sid of subcategories) await insertOne("subcategory", sid);
-  for (const hid of hotels) await insertOne("hotel", hid);
-
-  return { paymentId: payment.id, sharedEndDate: endDate, subRows: inserted };
-}
+// Thin wrappers that bind the shared fixture helpers to this suite's
+// vendor + the `db` connection.
+const resetVendorSubscriptionState = () =>
+  resetVendorSubscriptionStateShared(db, VENDOR_ID);
+const seedPaidSubscription = (opts = {}) =>
+  seedPaidSubscriptionShared(db, { vendorId: VENDOR_ID, ...opts });
 
 beforeEach(async () => {
   await resetVendorSubscriptionState();
