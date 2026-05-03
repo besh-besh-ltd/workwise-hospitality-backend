@@ -13609,6 +13609,15 @@ processBoqAndDownload : async (req, res) => {
         weightage
       );
 
+      // F-CLAUSE-NOTFOUND-001: the model returns {status:0, message} for
+      // not-found cases (RFQ id missing, rfq_product_id missing). Forwarding
+      // that as HTTP 200 misrepresents the outcome to any HTTP-level client.
+      // Map "does not exist" to 404, other status:0 results to 400.
+      if (result?.status === 0) {
+        const isNotFound = /does not exist|not found/i.test(result.message || '');
+        return res.status(isNotFound ? 404 : 400).json(result).end();
+      }
+
       res.status(200).json(result).end();
     } catch (error) {
       // console.log("controller error")
