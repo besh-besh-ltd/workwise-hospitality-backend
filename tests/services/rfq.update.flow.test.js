@@ -851,37 +851,17 @@ describe("rfqController.update — hotel_ids tampering rejected", () => {
 });
 
 // ===========================================================================
-//  F-VALIDATION-001 — defect lock
+//  Wave-3 / Wave-4 deferred locks for the Update path
 // ===========================================================================
+// F-VALIDATION-001 was triaged out (Edit-flow vendor enforcement deferred).
+// The two remaining Update-path defects need infrastructure that lands in
+// later waves; placeholders below keep them tracked.
 
-describe("rfqController.update — F-VALIDATION-001 (locked defect)", () => {
-  it("DEFECT — update path does NOT enforce ≥1 vendor per product (create path does)", async () => {
-    // Set up: RFQ + 1 product + 1 vendor mapping.
-    const rfq_id = await makeEditableRfq();
-    await attachOneProduct(rfq_id);
-    await db.none(
-      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
-       VALUES ($1, 1, $2, 0)`,
-      [rfq_id, IDS.users.vendor_alpha]
-    );
-    const snap = await fetchSnapshot(rfq_id);
-
-    // Build a snapshot that REMOVES the only vendor on the product.
-    const tampered = JSON.parse(JSON.stringify(snap));
-    if (tampered.products && tampered.products[0]) {
-      tampered.products[0].vendors = []; // strip all vendors
-    }
-
-    const m = mockExpress({
-      user: { id: IDS.users.a1_proc_buyer },
-      body: { rfq_id, snapshot: tampered },
-    });
-    await rfqController.update(m.req, m.res);
-
-    // CURRENT BEHAVIOUR: update succeeds (HTTP 200). When the fix lands —
-    // mirror the create-time `checkProductVendors` guard inside applyProduct
-    // Changes — flip this to expect 400 + "≥1 vendor required" error.
-    expect(m.calls.status).toBe(200);
-    // Defect is logged in AUDIT_REPORT.md §7 as F-VALIDATION-001 (P2).
-  });
+describe("rfqController.update — deferred defects (infra-blocked)", () => {
+  it.todo(
+    "F-UPDATE-002 (P1): publish-fire race — edit reading is_published=0 before tx must re-check inside the tx (SELECT … FOR UPDATE), so a concurrent scheduler fire cannot let the edit overwrite already-published fields. Wave 4 / concurrency harness."
+  );
+  it.todo(
+    "F-APPROVAL-002 (P1): cancelAndReissueApproval throw must NOT be swallowed at warn-level — edit either fails OR marks the RFQ with a 'reapproval_required' flag that gates further state transitions. Needs a way to make policy resolution throw mid-edit (mock generalModel.findBestMatchingPolicyTx)."
+  );
 });

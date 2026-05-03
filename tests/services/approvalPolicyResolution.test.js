@@ -22,6 +22,7 @@ import { db, withTx, closeDb } from "../setup/db.js";
 import {
   findBestMatchingPolicy,
   createApprovalInstance,
+  checkIfUserIsFinalApprover,
 } from "../../app/models/generalModel.js";
 import { IDS } from "../fixtures/ids.js";
 
@@ -209,6 +210,79 @@ describe("createApprovalInstance — zero-approver auto-skip", () => {
           txContext: t,
         })
       ).rejects.toThrow(/no approval steps configured/i);
+    });
+  });
+});
+
+// ============================================================================
+// F-APPROVAL-001 — auto-approve branch must scope by process_id
+//
+// Two distinct bug sites still in production:
+//   (a) checkIfUserIsFinalApprover (generalModel.js:2301) does not accept a
+//       process_id parameter; it then calls findBestMatchingPolicyTx WITHOUT
+//       process_id, falling through to process-agnostic policies (or returning
+//       null when no agnostic policy exists).
+//   (b) The auto-approve inline SQL at rfqController.js:3419-3437 omits
+//       process_id from its WHERE clause, so when the auto-approve branch IS
+//       entered for a multi-process tenant, it silently picks any process's
+//       policy by specificity ordering.
+//
+// These tests assert the POST-FIX correct behaviour: process_id is honoured at
+// every step of the auto-approve path. They will fail until both sites are
+// fixed. After the fix, this is the regression lock.
+// ============================================================================
+describe("F-APPROVAL-001 — auto-approve must scope by process_id", () => {
+  it("checkIfUserIsFinalApprover returns TRUE for the P2 final approver under a P2 RFQ", async () => {
+    // a1_proc_commApp (80015) is the SOLE step-1 ANY approver of A1_P2_RFQ
+    // (60041), and is therefore the final approver of any P2 RFQ at A1/proc.
+    // The function MUST accept process_id and resolve the P2 policy chain.
+    await withTx(async (t) => {
+      const result = await checkIfUserIsFinalApprover(
+        IDS.users.a1_proc_commApp,
+        "RFQ",
+        IDS.hospitality.A,
+        IDS.hotels.A1,
+        IDS.departments.proc,
+        t,
+        IDS.processes.A_P2 /* process_id — currently ignored by the function */
+      );
+      expect(result).toBe(true);
+    });
+  });
+
+  it("checkIfUserIsFinalApprover returns FALSE for a P1-only final approver under a P2 RFQ (no cross-process leak)", async () => {
+    // a1_proc_finance (80017) is the final approver of A1_P1_RFQ (2-step ALL,
+    // step 2 = finance user). They are NOT in the A1_P2_RFQ chain at all.
+    // For a P2 RFQ scope, the function must return FALSE — must not fall
+    // through to P1 to claim "yes you are a final approver".
+    await withTx(async (t) => {
+      const result = await checkIfUserIsFinalApprover(
+        IDS.users.a1_proc_finance,
+        "RFQ",
+        IDS.hospitality.A,
+        IDS.hotels.A1,
+        IDS.departments.proc,
+        t,
+        IDS.processes.A_P2
+      );
+      expect(result).toBe(false);
+    });
+  });
+
+  it("checkIfUserIsFinalApprover returns TRUE for the P1 final approver under a P1 RFQ", async () => {
+    // Positive control: a1_proc_finance IS the final approver of A1_P1_RFQ.
+    // Under process P1, the function must return TRUE.
+    await withTx(async (t) => {
+      const result = await checkIfUserIsFinalApprover(
+        IDS.users.a1_proc_finance,
+        "RFQ",
+        IDS.hospitality.A,
+        IDS.hotels.A1,
+        IDS.departments.proc,
+        t,
+        IDS.processes.A_P1
+      );
+      expect(result).toBe(true);
     });
   });
 });

@@ -105,8 +105,9 @@ const negotiationModel = {
     // When not including ended rounds, also exclude rounds whose end_date has passed
     const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
 
+    let row;
     if (vendorId) {
-      return db.oneOrNone(
+      row = await db.oneOrNone(
         `SELECT
           nr.*,
           u.name as created_by_name,
@@ -126,27 +127,38 @@ const negotiationModel = {
          LIMIT 1`,
         [rfqId, rfqProductId, vendorId]
       );
+    } else {
+      row = await db.oneOrNone(
+        `SELECT
+          nr.*,
+          u.name as created_by_name,
+          u.email as created_by_email,
+          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_users u ON u.id = nr.created_by
+         LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+         LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+         LEFT JOIN tbl_product P ON P.id = PV.product_id
+         WHERE nr.rfq_id = $1
+           AND nr.rfq_product_id = $2
+           AND nr.status IN ${statusFilter}
+           ${endDateFilter}
+         ORDER BY nr.round_number DESC
+         LIMIT 1`,
+        [rfqId, rfqProductId]
+      );
     }
 
-    return db.oneOrNone(
-      `SELECT
-        nr.*,
-        u.name as created_by_name,
-        u.email as created_by_email,
-        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
-       FROM tbl_negotiation_rounds nr
-       LEFT JOIN tbl_users u ON u.id = nr.created_by
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
-       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
-       LEFT JOIN tbl_product P ON P.id = PV.product_id
-       WHERE nr.rfq_id = $1
-         AND nr.rfq_product_id = $2
-         AND nr.status IN ${statusFilter}
-         ${endDateFilter}
-       ORDER BY nr.round_number DESC
-       LIMIT 1`,
-      [rfqId, rfqProductId]
-    );
+    // F-NEGO-001: when a vendor is reading the round, scope vendor_approvals
+    // to that vendor only — never expose other vendors' approval entries
+    // (which carry their custom_charges, approval status, and acted-by ids).
+    if (row && vendorId && Array.isArray(row.vendor_approvals)) {
+      row.vendor_approvals = row.vendor_approvals.filter(
+        (elem) => Number(elem?.vendor_id) === Number(vendorId)
+      );
+    }
+
+    return row;
   },
 
   /**
