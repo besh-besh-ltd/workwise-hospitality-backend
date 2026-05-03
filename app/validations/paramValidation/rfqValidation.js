@@ -249,7 +249,7 @@ export const rfqSchemas = {
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
-    process_id: Joi.number().integer().optional().allow(null),
+    process_id: Joi.number().integer().required(),
     title: Joi.string().required(),
   }),
   // WH-69: snapshot-based update. Frontend sends the full intended state of
