@@ -17,7 +17,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, jest } from "@je
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { mockExpress } from "../helpers/mockExpress.js";
-import { makeRazorpayMock } from "../helpers/razorpayMock.js";
+import { makeRazorpayMock, signPayment } from "../helpers/razorpayMock.js";
 import { seedVendorSubscriptions } from "../fixtures/vendors.js";
 
 // The free path uses an inline `_sendSubscriptionConfirmationEmail` helper
@@ -456,5 +456,343 @@ describe("modifySubscription — free path (no money moved)", () => {
       [VENDOR_ID, HOTEL_A1]
     );
     expect(hotelRow?.status).toBe("active");
+  });
+
+  // F-SUB-004 (P2) — locks the post-fix expectation that a free-path
+  // tbl_vendor_payments row is distinguishable from a real paid record. The
+  // current implementation writes razorpay_*=NULL + payment_status='success'
+  // with metadata.type='modification' and NO marker that uniquely identifies
+  // the row as a free modification (vs. a real paid payment that happened to
+  // have NULL Razorpay fields for some other reason). This test asserts the
+  // INTENDED post-fix shape: either a dedicated `payment_kind` / sub-type
+  // column, or at minimum metadata.kind === 'modification_free'.
+  it("F-SUB-004 — free-path payment row carries a marker distinguishing it from paid records", async () => {
+    await seedPaidSubscription({
+      categories: [CATEGORY_BEVERAGES],
+      hotels: [HOTEL_A1, HOTEL_A2],
+    });
+
+    const m = mockExpress(
+      vendorReq({
+        body: {
+          target_categories: [CATEGORY_BEVERAGES],
+          target_subcategories: [],
+          target_hotels: [HOTEL_A1], // dropped HOTEL_A2 → free
+          confirm_removals: true,
+        },
+      })
+    );
+    await hospitalityController.modifySubscription(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const freePayment = await db.one(
+      `SELECT amount, payment_status, razorpay_order_id, metadata
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1 AND amount = 0
+       ORDER BY id DESC LIMIT 1`,
+      [VENDOR_ID]
+    );
+    expect(parseFloat(freePayment.amount)).toBe(0);
+
+    const meta = typeof freePayment.metadata === "string"
+      ? JSON.parse(freePayment.metadata)
+      : freePayment.metadata;
+
+    // POST-FIX expectation: the row carries an unambiguous marker. Either:
+    //   (a) a dedicated DB column (e.g. tbl_vendor_payments.payment_kind),
+    //   (b) metadata.kind === 'modification_free' (or similar),
+    //   (c) hasValidPaidSubscription's contract is tightened so this row
+    //       cannot satisfy the "paid subscription" check.
+    // Today: the only marker is metadata.type='modification' which is shared
+    // with PAID modifications — no distinction.
+    const isExplicitlyMarkedFree =
+      meta?.kind === "modification_free" ||
+      meta?.is_free === true ||
+      freePayment.payment_kind === "free_modification";
+    expect(isExplicitlyMarkedFree).toBe(true);
+  });
+});
+
+// ===========================================================================
+// modify — paid path (Razorpay order created; commit deferred to verifyPayment)
+// ===========================================================================
+describe("modifySubscription — paid path (Razorpay)", () => {
+  beforeEach(() => {
+    razorpay.captured.instances.length = 0;
+    razorpay.captured.orders_create.length = 0;
+    razorpay.captured.payments_fetch.length = 0;
+  });
+
+  it("creates a Razorpay order with the correct amount (paise) + metadata when net cost > 0", async () => {
+    // Seed: 1 category + 1 hotel; modify adds a 2nd category + 2nd hotel.
+    await seedPaidSubscription({
+      categories: [CATEGORY_BEVERAGES],
+      hotels: [HOTEL_A1],
+    });
+
+    const m = mockExpress(
+      vendorReq({
+        body: {
+          target_categories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+          target_subcategories: [],
+          target_hotels: [HOTEL_A1, HOTEL_A2],
+        },
+      })
+    );
+    await hospitalityController.modifySubscription(m.req, m.res);
+
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.status).toBe(1);
+    expect(m.calls.body.data?.requires_payment).toBe(true);
+    expect(m.calls.body.data?.order_id).toMatch(/^order_modify_test_\d+$/);
+
+    // Razorpay was called exactly once.
+    expect(razorpay.captured.orders_create.length).toBe(1);
+    const orderCall = razorpay.captured.orders_create[0];
+    // Amount is in paise (Math.round(rupees * 100)).
+    const expectedPaise = Math.round((m.calls.body.data.amount || 0) * 100);
+    expect(orderCall.amount).toBe(expectedPaise);
+    expect(orderCall.currency).toBe("INR");
+    expect(orderCall.receipt).toMatch(/^MOD/);
+
+    // tbl_vendor_payments row written in 'created' state with metadata
+    // carrying the diff for verifyPayment to later commit.
+    const pendingPayment = await db.oneOrNone(
+      `SELECT payment_status, razorpay_order_id, metadata
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1 AND payment_status = 'created'
+       ORDER BY id DESC LIMIT 1`,
+      [VENDOR_ID]
+    );
+    expect(pendingPayment).not.toBeNull();
+    expect(pendingPayment.razorpay_order_id).toBe(orderCall.__returned.id);
+    const meta = typeof pendingPayment.metadata === "string"
+      ? JSON.parse(pendingPayment.metadata)
+      : pendingPayment.metadata;
+    expect(meta.type).toBe("modification");
+    expect(Array.isArray(meta.add_subscription_items)).toBe(true);
+    // The added LIQUOR + HOTEL_A2 should be in the metadata's add list.
+    const addedItemIds = meta.add_subscription_items.map((r) => r.item_id);
+    expect(addedItemIds).toContain(CATEGORY_LIQUOR);
+    expect(addedItemIds).toContain(HOTEL_A2);
+
+    // Subscription rows NOT yet inserted — that happens at verifyPayment time.
+    const beforeVerifyActive = await db.any(
+      `SELECT item_type, item_id FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND status = 'active'
+       ORDER BY item_type, item_id`,
+      [VENDOR_ID]
+    );
+    const itemPairs = beforeVerifyActive.map((r) => `${r.item_type}:${r.item_id}`);
+    expect(itemPairs).not.toContain(`category:${CATEGORY_LIQUOR}`);
+    expect(itemPairs).not.toContain(`hotel:${HOTEL_A2}`);
+  });
+
+  it("F-SUB-002 — re-submitted modify with an in-flight pending order MUST return the existing order_id (no duplicate Razorpay order)", async () => {
+    await seedPaidSubscription({
+      categories: [CATEGORY_BEVERAGES],
+      hotels: [HOTEL_A1],
+    });
+    const body = {
+      target_categories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+      target_subcategories: [],
+      target_hotels: [HOTEL_A1],
+    };
+
+    // First call — should create the order.
+    const first = mockExpress(vendorReq({ body }));
+    await hospitalityController.modifySubscription(first.req, first.res);
+    expect(first.calls.status).toBe(200);
+    const firstOrderId = first.calls.body.data.order_id;
+    expect(razorpay.captured.orders_create.length).toBe(1);
+
+    // Second call with the same target — should NOT create a new Razorpay
+    // order. POST-FIX: handler detects the pending tbl_vendor_payments row
+    // and returns the existing order_id. Today: handler creates a fresh
+    // order, abandoning the prior pending payment (vendor double-charge
+    // risk if both orders happen to get paid).
+    const second = mockExpress(vendorReq({ body }));
+    await hospitalityController.modifySubscription(second.req, second.res);
+    expect(second.calls.status).toBe(200);
+    expect(razorpay.captured.orders_create.length).toBe(1);
+    expect(second.calls.body.data.order_id).toBe(firstOrderId);
+  });
+});
+
+// ===========================================================================
+// verifyPayment — public signature-verified endpoint that commits the diff
+// ===========================================================================
+describe("verifyPayment (POST /verify-payment) — modification commit", () => {
+  // The controller reads Config.razorpay.razorpay_secret which originates
+  // from process.env.RAZORPAY_SECRET. .env.test sets it; mirror that value
+  // here so signPayment generates a matching HMAC.
+  const RAZORPAY_SECRET = process.env.RAZORPAY_SECRET || "test_secret";
+
+  // Helper: drive modifySubscription with a paid-path body, then return
+  // { orderId, paymentRowId, expectedAddedItems } so verifyPayment tests
+  // can build a signed body.
+  async function setupPendingModification({ targetCategories, targetHotels }) {
+    razorpay.captured.orders_create.length = 0;
+    await seedPaidSubscription({
+      categories: [CATEGORY_BEVERAGES],
+      hotels: [HOTEL_A1],
+    });
+    const m = mockExpress(
+      vendorReq({
+        body: {
+          target_categories: targetCategories,
+          target_subcategories: [],
+          target_hotels: targetHotels,
+        },
+      })
+    );
+    await hospitalityController.modifySubscription(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    const orderId = m.calls.body.data.order_id;
+    return { orderId, modifyResponse: m.calls.body.data };
+  }
+
+  it("happy path: valid signature commits the diff and flips payment_status to 'success'", async () => {
+    const { orderId } = await setupPendingModification({
+      targetCategories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+      targetHotels: [HOTEL_A1],
+    });
+
+    const paymentId = "pay_test_abc";
+    const sig = signPayment(orderId, paymentId, RAZORPAY_SECRET);
+
+    const m = mockExpress({
+      // Note: verifyPayment is the public signature-auth endpoint — no JWT.
+      body: {
+        razorpay_order_id: orderId,
+        razorpay_payment_id: paymentId,
+        razorpay_signature: sig,
+      },
+    });
+    await hospitalityController.verifyPayment(m.req, m.res);
+
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.status).toBe(1);
+    expect(m.calls.body.data.is_modification).toBe(true);
+
+    // Payment row flipped to 'success' with the captured payment id + sig.
+    const paid = await db.one(
+      `SELECT payment_status, razorpay_payment_id, razorpay_signature
+       FROM tbl_vendor_payments WHERE razorpay_order_id = $1`,
+      [orderId]
+    );
+    expect(paid.payment_status).toBe("success");
+    expect(paid.razorpay_payment_id).toBe(paymentId);
+    expect(paid.razorpay_signature).toBe(sig);
+
+    // The added category (LIQUOR) is now an active subscription row.
+    const liquorRow = await db.oneOrNone(
+      `SELECT status FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND item_type = 'category' AND item_id = $2 AND status = 'active'`,
+      [VENDOR_ID, CATEGORY_LIQUOR]
+    );
+    expect(liquorRow).not.toBeNull();
+  });
+
+  it("rejects an invalid signature with 400 and leaves payment + subscription state unchanged", async () => {
+    const { orderId } = await setupPendingModification({
+      targetCategories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+      targetHotels: [HOTEL_A1],
+    });
+
+    const paymentId = "pay_test_tampered";
+    // Wrong secret produces a wrong signature.
+    const badSig = signPayment(orderId, paymentId, "WRONG_SECRET");
+
+    const m = mockExpress({
+      body: {
+        razorpay_order_id: orderId,
+        razorpay_payment_id: paymentId,
+        razorpay_signature: badSig,
+      },
+    });
+    await hospitalityController.verifyPayment(m.req, m.res);
+
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/invalid signature/i);
+
+    // Payment row still 'created' — no state change.
+    const stillCreated = await db.one(
+      `SELECT payment_status, razorpay_payment_id
+       FROM tbl_vendor_payments WHERE razorpay_order_id = $1`,
+      [orderId]
+    );
+    expect(stillCreated.payment_status).toBe("created");
+    expect(stillCreated.razorpay_payment_id).toBeNull();
+
+    // LIQUOR not in active subscription rows.
+    const liquorRow = await db.oneOrNone(
+      `SELECT id FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND item_type = 'category' AND item_id = $2 AND status = 'active'`,
+      [VENDOR_ID, CATEGORY_LIQUOR]
+    );
+    expect(liquorRow).toBeNull();
+  });
+
+  it("F-SUB-006 — duplicate verifyPayment with the same signature must NOT apply the modification twice", async () => {
+    const { orderId } = await setupPendingModification({
+      targetCategories: [CATEGORY_BEVERAGES, CATEGORY_LIQUOR],
+      targetHotels: [HOTEL_A1],
+    });
+
+    const paymentId = "pay_test_double_fire";
+    const sig = signPayment(orderId, paymentId, RAZORPAY_SECRET);
+    const verifyBody = {
+      razorpay_order_id: orderId,
+      razorpay_payment_id: paymentId,
+      razorpay_signature: sig,
+    };
+
+    // First verify: commits.
+    const first = mockExpress({ body: verifyBody });
+    await hospitalityController.verifyPayment(first.req, first.res);
+    expect(first.calls.status).toBe(200);
+
+    // Snapshot the active subscription rows after the first commit.
+    const afterFirst = await db.any(
+      `SELECT item_type, item_id FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND status = 'active'
+       ORDER BY item_type, item_id`,
+      [VENDOR_ID]
+    );
+
+    // Second verify with the SAME signature (Razorpay webhook retry / double
+    // call). POST-FIX: the controller detects payment_status is already
+    // 'success' and skips _applyModificationFromMetadata. It either
+    // returns 200 with a "already-applied" flag OR returns 409 — what it
+    // MUST NOT do is re-run _applyModificationFromMetadata (which would
+    // re-cancel and re-insert rows, churning the audit log + risking
+    // duplicate keys on the underlying unique constraint).
+    const second = mockExpress({ body: verifyBody });
+    await hospitalityController.verifyPayment(second.req, second.res);
+    // Acceptable post-fix outcomes: 200 with already_applied indicator, OR
+    // 409 Conflict. Today's implementation re-applies, returning 200.
+    expect([200, 409]).toContain(second.calls.status);
+
+    // The active subscription row set must be IDENTICAL to the first commit.
+    // No new rows inserted, no rows churned.
+    const afterSecond = await db.any(
+      `SELECT item_type, item_id FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND status = 'active'
+       ORDER BY item_type, item_id`,
+      [VENDOR_ID]
+    );
+    expect(afterSecond).toEqual(afterFirst);
+
+    // Beyond the row set, the payment_actions audit history (tbl_vendor_payments
+    // metadata or any related audit table) should NOT show two modifications.
+    // We assert the simpler invariant: only ONE non-cancelled subscription
+    // row exists for the added LIQUOR category — no duplicates.
+    const liquorRows = await db.any(
+      `SELECT id, status FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND item_type = 'category' AND item_id = $2 AND status = 'active'`,
+      [VENDOR_ID, CATEGORY_LIQUOR]
+    );
+    expect(liquorRows.length).toBe(1);
   });
 });
