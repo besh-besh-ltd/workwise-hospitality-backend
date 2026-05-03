@@ -2974,7 +2974,9 @@ INSERT INTO tbl_rfq (
   vendor_clarification_date,
   hospitality_company_id,
   tender_fees,
-  hotel_id
+  hotel_id,
+  process_id,
+  department_id
 )
 SELECT
   (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
@@ -3003,7 +3005,9 @@ SELECT
   vendor_clarification_date,
   (SELECT hch.hospitality_company_id FROM tbl_hospitality_company_hotels hch WHERE hch.id = $2),
   tender_fees,
-  $2
+  $2,
+  process_id,
+  department_id
 FROM tbl_rfq
 WHERE id = $1
 RETURNING id;
