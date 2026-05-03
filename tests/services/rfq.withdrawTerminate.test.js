@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, jest } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { mockExpress } from "../helpers/mockExpress.js";
 import { makeRFQ, makePendingApproval } from "../factories/rfq.js";
 
 // ESM module mocking: replace cronManager with stubs BEFORE the controller is
@@ -57,17 +58,6 @@ const { default: rfqController } = await import("../../app/controllers/rfq/rfqCo
 // --- Test helpers -----------------------------------------------------------
 
 /** Mock req/res/next that captures status/json calls — minimal Express shape. */
-function mockExpress(req) {
-  const calls = { status: null, body: null, jsonCallCount: 0 };
-  const res = {
-    statusCode: 200,
-    status(code) { this.statusCode = code; calls.status = code; return this; },
-    json(body) { calls.body = body; calls.jsonCallCount += 1; return this; },
-    send(body) { calls.body = body; calls.jsonCallCount += 1; return this; },
-  };
-  const next = jest.fn();
-  return { req: { ...req }, res, next, calls };
-}
 
 /**
  * Per-test cleanup. Track RFQ ids inserted by each test in `inserted.rfqIds`

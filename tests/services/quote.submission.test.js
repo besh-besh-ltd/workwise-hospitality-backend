@@ -29,6 +29,7 @@ import {
 } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { mockExpress } from "../helpers/mockExpress.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
 
@@ -37,26 +38,6 @@ afterAll(async () => {
 });
 
 // Express req/res mock that captures status/json calls.
-function mockExpress(opts = {}) {
-  const calls = { status: null, body: null };
-  const res = {
-    statusCode: 200,
-    status(code) { this.statusCode = code; calls.status = code; return this; },
-    json(body) { calls.body = body; return this; },
-    end() { return this; },
-  };
-  return {
-    req: {
-      user: opts.user,
-      params: opts.params || {},
-      body: opts.body || {},
-      files: opts.files || [],
-    },
-    res,
-    next: jest.fn(),
-    calls,
-  };
-}
 
 // Vendor user shape that exists in fixtures AND has the user_type the
 // production code (incorrectly) expects. user_type=3 = legacy vendor convention;

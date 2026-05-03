@@ -21,6 +21,7 @@
 import { describe, it, expect, afterAll, beforeEach, afterEach, jest } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { mockExpress } from "../helpers/mockExpress.js";
 import { makeRFQ } from "../factories/rfq.js";
 
 // Mock cronManager — same as other update-flow tests; the unlock paths don't
@@ -52,21 +53,6 @@ afterAll(async () => {
   await closeDb();
 });
 
-function mockExpress(opts = {}) {
-  const calls = { status: null, body: null };
-  const res = {
-    statusCode: 200,
-    status(code) { this.statusCode = code; calls.status = code; return this; },
-    json(body) { calls.body = body; return this; },
-    end() { return this; },
-  };
-  return {
-    req: { user: opts.user, params: opts.params || {}, body: opts.body || {} },
-    res,
-    next: jest.fn(),
-    calls,
-  };
-}
 
 const inserted = { rfqIds: [] };
 

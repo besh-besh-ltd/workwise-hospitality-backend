@@ -18,6 +18,7 @@ import {
 } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { mockExpress } from "../helpers/mockExpress.js";
 import * as poController from "../../app/controllers/po/purchaseOrderController.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { approveFully, getInstanceState } from "../helpers/approval.js";
@@ -26,21 +27,6 @@ afterAll(async () => {
   await closeDb();
 });
 
-function mockExpress(opts = {}) {
-  const calls = { status: null, body: null };
-  const res = {
-    statusCode: 200,
-    status(code) { this.statusCode = code; calls.status = code; return this; },
-    json(body) { calls.body = body; return this; },
-    end() { return this; },
-  };
-  return {
-    req: { user: opts.user, params: opts.params || {}, body: opts.body || {} },
-    res,
-    next: jest.fn(),
-    calls,
-  };
-}
 
 // We track every PO-related id we insert so afterEach scrubs it.
 const inserted = {

@@ -44,6 +44,7 @@
 import { describe, it, expect, afterAll, beforeEach, afterEach, jest } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { mockExpress } from "../helpers/mockExpress.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
 
@@ -51,27 +52,6 @@ afterAll(async () => {
   await closeDb();
 });
 
-function mockExpress(opts = {}) {
-  const calls = { status: null, body: null };
-  const res = {
-    statusCode: 200,
-    status(code) { this.statusCode = code; calls.status = code; return this; },
-    json(body) { calls.body = body; return this; },
-    end() { return this; },
-  };
-  return {
-    req: {
-      user: opts.user,
-      params: opts.params || {},
-      body: opts.body || {},
-      query: opts.query || {},
-      files: opts.files || [],
-    },
-    res,
-    next: jest.fn(),
-    calls,
-  };
-}
 
 function vendorUser(userId = IDS.users.vendor_alpha) {
   return { id: userId, user_type: 3, company_id: IDS.companies.vendorAlpha };
