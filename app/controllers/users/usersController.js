@@ -3641,7 +3641,12 @@ publish_profile_reviews: async (req, res, next) => {
       if (totalAmount <= 0) {
         let freePaymentId = null;
         try {
-          freePaymentId = await hospitalityModel.createVendorPayment({
+          // F-SUB-009 fix: createVendorPayment returns the row `{ id: N }`
+          // (db.one + RETURNING id), so we extract the integer here.
+          // Passing the object straight through into payment_id below sent
+          // `{"id":N}` to a column declared as integer and crashed the
+          // free-renewal flow with `invalid input syntax for type integer`.
+          const paymentRow = await hospitalityModel.createVendorPayment({
             vendor_id: decryptedUserId,
             razorpay_order_id: null,
             razorpay_payment_id: null,
@@ -3655,6 +3660,7 @@ publish_profile_reviews: async (req, res, next) => {
               fy_end_date: fyEndDateStr
             }
           });
+          freePaymentId = paymentRow?.id ?? null;
         } catch (payErr) {
           logError('Free renewal payment record creation failed (non-fatal):', payErr);
         }
