@@ -37,11 +37,17 @@ export const applyChargeMode = (value, mode, base) => {
   return isPercentageMode(mode) ? (toNumber(base) * v) / 100 : v;
 };
 
+// Tri-state semantics for charge.tax:
+//   null / undefined / ""  → inherit base rate (when base tax_mode is %)
+//   0 (number)             → explicit no tax (never inherits)
+//   <positive number>      → explicit rate in charge.tax_mode
+// Anything that is "present" — i.e. not null/undefined/"" — is treated as
+// explicit, even if it's zero. Vendors who want a charge with no tax type 0
+// in the input; vendors who want inheritance leave the field blank.
 const hasExplicitChargeTax = (charge) =>
   charge?.tax !== null &&
   charge?.tax !== undefined &&
-  charge?.tax !== "" &&
-  toNumber(charge.tax) > 0;
+  charge?.tax !== "";
 
 // Compute one line's total. Returns the engine output that callers persist
 // and that the frontend renders.
@@ -407,6 +413,13 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
     };
   }
 
+  // When converting legacy flat charges to the canonical other_charges[]
+  // shape, the synthetic entry's tax must be `null` (inherit) when the
+  // legacy `*_tax` field is absent. Coercing absent legacy fields to 0
+  // would, under tri-state semantics, mean "explicit zero" — silently
+  // dropping the inherited base tax that historical totals were built on.
+  const legacyTaxOrNull = (raw) => (raw === null || raw === undefined || raw === "" ? null : toNumber(raw));
+
   const otherCharges = [];
   const freightPrice = toNumber(meta.freight_price);
   if (freightPrice > 0) {
@@ -414,7 +427,7 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
       name: "Freight",
       amount: freightPrice,
       amount_mode: meta.freight_mode ?? DEFAULT_MODE,
-      tax: toNumber(meta.freight_tax),
+      tax: legacyTaxOrNull(meta.freight_tax),
       tax_mode: meta.freight_tax_mode ?? DEFAULT_MODE,
     });
   }
@@ -424,7 +437,7 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
       name: "Packaging",
       amount: packagePrice,
       amount_mode: meta.package_mode ?? DEFAULT_MODE,
-      tax: toNumber(meta.package_tax),
+      tax: legacyTaxOrNull(meta.package_tax),
       tax_mode: meta.package_tax_mode ?? DEFAULT_MODE,
     });
   }

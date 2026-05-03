@@ -50,6 +50,13 @@ const getQuantityFromProductOrDetail = (product, detail) => {
 
 // Convert the legacy flat freight/packaging fields into engine other_charges
 // entries when the canonical array is missing (older quotes pre-migration).
+// Synthetic Freight/Packaging tax is `null` (= inherit base) when the legacy
+// freight_tax / package_tax field is absent; only an explicitly-set legacy
+// value becomes a non-null tax. This preserves historical totals under the
+// engine's tri-state tax semantics (null = inherit, 0 = explicit zero).
+const legacyTaxOrNull = (raw) =>
+  raw === null || raw === undefined || raw === "" ? null : toNumber(raw);
+
 const buildEngineCharges = (detail) => {
   const otherCharges = Array.isArray(detail?.other_charges) ? detail.other_charges : [];
   if (otherCharges.length > 0) return otherCharges;
@@ -61,7 +68,7 @@ const buildEngineCharges = (detail) => {
       name: "Freight",
       amount: freightPrice,
       amount_mode: detail.freight_mode || "percentage",
-      tax: toNumber(detail.freight_tax),
+      tax: legacyTaxOrNull(detail.freight_tax),
       tax_mode: detail.freight_tax_mode || "percentage",
     });
   }
@@ -71,7 +78,7 @@ const buildEngineCharges = (detail) => {
       name: "Packaging",
       amount: packagePrice,
       amount_mode: detail.package_mode || "percentage",
-      tax: toNumber(detail.package_tax),
+      tax: legacyTaxOrNull(detail.package_tax),
       tax_mode: detail.package_tax_mode || "percentage",
     });
   }

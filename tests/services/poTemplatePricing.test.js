@@ -80,18 +80,25 @@ describe("buildPOTemplatePricing", () => {
         tax_mode: "percentage",
         other_charges: [
           { name: "Freight", amount: 5, amount_mode: "percentage", tax: 9, tax_mode: "percentage" },
-          { name: "Custom", amount: 100, amount_mode: "absolute", tax: 0 },
+          // tax: null → inherit base 18% (not "explicit no tax")
+          { name: "Custom", amount: 100, amount_mode: "absolute", tax: null },
+          // tax: 0 → explicit no tax (the new tri-state escape hatch)
+          { name: "ZeroFee", amount: 50, amount_mode: "absolute", tax: 0 },
         ],
       },
     ];
     const out = buildPOTemplatePricing(items, "gst");
     const cd = out.items[0].charge_details;
-    expect(cd).toHaveLength(2);
+    expect(cd).toHaveLength(3);
     expect(cd[0].name).toBe("Freight");
     expect(cd[0].has_tax).toBe(true);
-    // Custom inherits base 18% rate → has_tax should be true even though charge.tax=0.
+    // Custom inherits base 18% rate → has_tax true (engine fills in 18%).
     expect(cd[1].name).toBe("Custom");
     expect(cd[1].has_tax).toBe(true);
+    // ZeroFee is explicit no-tax → has_tax false, no inheritance.
+    expect(cd[2].name).toBe("ZeroFee");
+    expect(cd[2].has_tax).toBe(false);
+    expect(Number(cd[2].tax)).toBe(0);
   });
 
   it("includes PO-level global charges in totalPrice but not in totalSubtotal", () => {

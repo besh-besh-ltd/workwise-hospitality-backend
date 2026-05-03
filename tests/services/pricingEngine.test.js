@@ -158,7 +158,7 @@ describe("pricingEngine.calculateLineTotal", () => {
     expect(out.total).toBe(1236);
   });
 
-  it("inherits the base tax rate when a charge has no explicit tax", () => {
+  it("inherits the base tax rate when a charge has no explicit tax (tax: null)", () => {
     const out = calculateLineTotal({
       unit_price: 100,
       quantity: 10,
@@ -169,7 +169,7 @@ describe("pricingEngine.calculateLineTotal", () => {
           name: "Freight",
           amount: 100,
           amount_mode: "absolute",
-          tax: 0, // no explicit tax → inherits base 18%
+          tax: null, // null → inherit base 18%
           tax_mode: "percentage",
         },
       ],
@@ -179,7 +179,7 @@ describe("pricingEngine.calculateLineTotal", () => {
     expect(out.total).toBe(1298);
   });
 
-  it("does NOT inherit base rate when base tax_mode is absolute", () => {
+  it("does NOT inherit base rate when base tax_mode is absolute (tax: null)", () => {
     const out = calculateLineTotal({
       unit_price: 100,
       quantity: 10,
@@ -190,7 +190,7 @@ describe("pricingEngine.calculateLineTotal", () => {
           name: "Freight",
           amount: 100,
           amount_mode: "absolute",
-          tax: 0,
+          tax: null,
           tax_mode: "percentage",
         },
       ],
@@ -200,7 +200,7 @@ describe("pricingEngine.calculateLineTotal", () => {
     expect(out.total).toBe(1150);
   });
 
-  it("treats explicit tax='' as 'no explicit tax' (legacy frontend convention)", () => {
+  it("treats tax: '' as 'inherit' (parity with null)", () => {
     const out = calculateLineTotal({
       unit_price: 100,
       quantity: 10,
@@ -219,46 +219,61 @@ describe("pricingEngine.calculateLineTotal", () => {
     expect(out.charges[0].tax).toBe(18);
   });
 
-  it("handles multiple other_charges with mixed modes", () => {
+  it("treats tax: undefined as 'inherit' (parity with null)", () => {
+    const out = calculateLineTotal({
+      unit_price: 100,
+      quantity: 10,
+      tax: 18,
+      tax_mode: "percentage",
+      other_charges: [
+        // tax field omitted entirely → still inherit
+        { name: "Freight", amount: 100, amount_mode: "absolute", tax_mode: "percentage" },
+      ],
+    });
+    expect(out.charges[0].tax).toBe(18);
+  });
+
+  it("treats tax: 0 as 'explicit no tax' — does NOT inherit base rate", () => {
+    // The whole point of tri-state. A vendor who types 0 in the tax field is
+    // saying "this charge has no tax", which must override base inheritance.
+    const out = calculateLineTotal({
+      unit_price: 100,
+      quantity: 10,
+      tax: 18,
+      tax_mode: "percentage",
+      other_charges: [
+        // explicit zero → no tax even though base is 18%
+        { name: "Freight", amount: 100, amount_mode: "absolute", tax: 0, tax_mode: "percentage" },
+      ],
+    });
+    // base 1000, base_tax 180, freight 100, NO inherited tax → 1280
+    expect(out.charges[0].tax).toBe(0);
+    expect(out.total).toBe(1280);
+  });
+
+  it("handles multiple other_charges mixing explicit, inherit, and explicit-zero", () => {
     const out = calculateLineTotal({
       unit_price: 100,
       quantity: 10,
       tax: 12,
       tax_mode: "percentage",
       other_charges: [
-        // explicit own tax → wins, no inheritance
+        // explicit own tax → wins
         { name: "Freight", amount: 5, amount_mode: "percentage", tax: 12, tax_mode: "percentage" },
-        // tax=0 is NOT considered explicit → inherits base 12% rate
-        { name: "Packaging", amount: 200, amount_mode: "absolute", tax: 0, tax_mode: "percentage" },
-        // tax=0 again → also inherits base 12%
+        // tax: null → inherits base 12%
+        { name: "Packaging", amount: 200, amount_mode: "absolute", tax: null, tax_mode: "percentage" },
+        // tax: 0 → explicit no tax
         { name: "Insurance", amount: 1, amount_mode: "percentage", tax: 0, tax_mode: "absolute" },
       ],
     });
     // base = 1000, base_tax = 120
     // freight:    amount 50,  own tax 6        → 56
     // packaging:  amount 200, inherited 12% 24 → 224
-    // insurance:  amount 10,  inherited 12% 1.2 → 11.2
-    // charges_total = 56 + 224 + 11.2 = 291.2
-    // total = 1000 + 120 + 291.2 = 1411.2 → round → 1411
-    expect(out.charges_total).toBeCloseTo(291.2, 10);
-    expect(out.total).toBe(1411);
-  });
-
-  it("a charge with explicit tax=0 inherits base rate (legacy 'has tax = >0' rule)", () => {
-    // Documented quirk preserved from sharedFunctions.calculateTotal: a charge
-    // is only treated as having its own tax when parseFloat(charge.tax) > 0.
-    // Setting tax=0 falls through to inheritance, which can surprise callers —
-    // hence this lock-in test.
-    const out = calculateLineTotal({
-      unit_price: 100,
-      quantity: 10,
-      tax: 18,
-      tax_mode: "percentage",
-      other_charges: [{ name: "Handling", amount: 100, amount_mode: "absolute", tax: 0 }],
-    });
-    // handling 100 inherits 18% → 18; line: 1000 + 180 + 100 + 18 = 1298
-    expect(out.charges[0].tax).toBe(18);
-    expect(out.total).toBe(1298);
+    // insurance:  amount 10,  no tax (explicit 0) → 10
+    // charges_total = 56 + 224 + 10 = 290
+    // total = 1000 + 120 + 290 = 1410
+    expect(out.charges_total).toBe(290);
+    expect(out.total).toBe(1410);
   });
 
   it("rounds only the final total — intermediates stay floating-point", () => {
@@ -770,7 +785,7 @@ describe("pricingEngine.normalizeChargesMeta", () => {
 describe("pricingEngine — integration scenarios", () => {
   it("matches the legacy quote formula on a typical send-quote line", () => {
     // Replicate a realistic vendor quote: ₹100 unit, qty 10, 18% GST on base,
-    // 5% freight (with 18% own tax), ₹200 packaging absolute (no own tax —
+    // 5% freight (with 18% own tax), ₹200 packaging absolute (tax: null →
     // inherits 18%).
     const out = calculateLineTotal({
       unit_price: 100,
@@ -779,7 +794,7 @@ describe("pricingEngine — integration scenarios", () => {
       tax_mode: "percentage",
       other_charges: [
         { name: "Freight", amount: 5, amount_mode: "percentage", tax: 18, tax_mode: "percentage" },
-        { name: "Packaging", amount: 200, amount_mode: "absolute", tax: 0, tax_mode: "percentage" },
+        { name: "Packaging", amount: 200, amount_mode: "absolute", tax: null, tax_mode: "percentage" },
       ],
     });
     // base 1000, base_tax 180
