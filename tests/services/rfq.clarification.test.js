@@ -274,7 +274,7 @@ describe("resolveClarification", () => {
     expect(persisted.responded_by).toBe(IDS.users.a1_proc_buyer);
   });
 
-  it("ALLOWS close WITHOUT a response (F-CLAR-002 — no notification sent — known gap)", async () => {
+  it("F-CLAR-002 — REJECTS close without a response body (buyer must answer or explicitly dismiss)", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const a = mockExpress({
       user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
@@ -288,13 +288,17 @@ describe("resolveClarification", () => {
       body: { clarification_id: claraId /* no response */ },
     });
     await rfqController.resolveClarification(r.req, r.res);
-    expect(r.calls.status).toBe(200);
+    // POST-FIX: closing a clarification without supplying a response (or an
+    // explicit dismissal flag) is a 400. The vendor's question must not be
+    // silently nuked. Today the controller accepts the close + leaves
+    // response NULL + sends no notification.
+    expect(r.calls.status).toBe(400);
+    expect(r.calls.body.message).toMatch(/response.*required|missing.*response|answer.*required/i);
     const persisted = await db.one(
       `SELECT status, response FROM tbl_rfq_clarifications WHERE id=$1`,
       [claraId]
     );
-    expect(persisted.status).toBe("CLOSED");
-    expect(persisted.response).toBeNull();
+    expect(persisted.status).toBe("OPEN"); // unchanged
   });
 
   it("rejects close by NON-creator (403)", async () => {

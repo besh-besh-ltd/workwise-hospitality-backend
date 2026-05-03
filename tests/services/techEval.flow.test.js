@@ -195,17 +195,20 @@ describe("addClause — input validation + happy path", () => {
     expect(m.calls.status).toBe(400);
   });
 
-  it("DEFECT — RFQ not found returns HTTP 200 with status=0 (should arguably be 404)", async () => {
-    // Locks current behaviour: model resolves with `{status: 0, message}` and
-    // controller sends 200 with that body. Documented as F-CLAUSE-NOTFOUND-001.
+  it("F-CLAUSE-NOTFOUND-001 — RFQ not found returns HTTP 404 (not 200/status=0)", async () => {
+    // POST-FIX: HTTP semantics align — when the requested RFQ doesn't exist,
+    // the controller returns 404. Today the model resolves with
+    // `{status: 0, message}` and the controller forwards 200 with that body,
+    // which masks the not-found state from any HTTP-level client.
+    // Fix: standardize the controller-trusts-model pattern — model throws or
+    // returns null; controller maps to 404.
     const m = mockExpress({
       user: { id: IDS.users.a1_proc_buyer },
       body: { rfq_id: 999999999, rfq_product_id: 1, clause_text: "x" },
     });
     await rfqController.addClause(m.req, m.res);
-    expect(m.calls.status).toBe(200);
-    expect(m.calls.body.status).toBe(0);
-    expect(m.calls.body.message).toMatch(/does not exist/i);
+    expect(m.calls.status).toBe(404);
+    expect(m.calls.body.message).toMatch(/(not found|does not exist)/i);
   });
 
   it("happy path: persists tbl_rfq_product_tech_evaluation + tbl_rfq_product_tech_evaluation_clauses", async () => {

@@ -362,4 +362,8 @@ describe("rfqController.update — Step 9: tech-eval-all-failed unlock (restrict
     );
     expect(v).not.toBeNull();
   });
+
+  it.todo(
+    "F-NOTIFY-001 (P2): refreshVendors MUST send a vendor-RFQ notification email to each newly-added vendor — today no email fires for the delta-set. Needs jest.unstable_mockModule on approvalEmails.sendVendorRfqNotification (or similar) to capture recipients."
+  );
 });

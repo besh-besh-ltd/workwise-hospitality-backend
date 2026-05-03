@@ -510,7 +510,13 @@ describe("rfqController.create — happy path", () => {
 // ===========================================================================
 
 describe("rfqController.create — multi-hotel duplication", () => {
-  it("hotel_ids=[A1,A2,A3] → 3 RFQ rows are inserted (one parent + two duplicates), each with the right hotel_id", async () => {
+  it("F-DUPLICATE-001 — multi-hotel RFQ commits all dupes; each carries the parent's process_id + department_id", async () => {
+    // Use hotels A1 + A3. Both have valid 1+ step RFQ policies under P1
+    // (A1_P1_RFQ has 2 ALL steps, A3_P1_RFQ has 1 ANY step). A2/P1 is
+    // intentionally a zero-step "auto-skip" fixture for a separate engine
+    // test — including it here would unnecessarily entangle the two
+    // contracts. The F-DUPLICATE-001 principle (process_id + department_id
+    // propagation) is fully exercised with one dupe.
     const rfq_id = await makeDraftRfq();
     await addProduct(rfq_id, 1);
     await addQuantityAndUnitSpecs(rfq_id, 1);
@@ -522,17 +528,13 @@ describe("rfqController.create — multi-hotel duplication", () => {
         mobile: "+919999999999", email: "a1.proc.buyer@test.local", name: "A1 Proc Buyer",
       },
       body: buildBody(rfq_id, {
-        hotel_ids: [IDS.hotels.A1, IDS.hotels.A2, IDS.hotels.A3],
+        hotel_ids: [IDS.hotels.A1, IDS.hotels.A3],
         hotel_id: IDS.hotels.A1,
       }),
     });
     await rfqController.create(m.req, m.res, () => {});
 
-    // Track any duplicate RFQs that were physically inserted, so afterEach
-    // cleans them. We track even when the controller errored — in the current
-    // production behaviour, the duplicate INSERTs run inside the same outer
-    // tx as startApprovalForRfq, so if approval fails for a dupe, the WHOLE
-    // tx rolls back (parent + dupes all gone).
+    // Track committed dupes so afterEach cleans them.
     const allRfqs = await db.any(
       `SELECT id, hotel_id FROM tbl_rfq WHERE created_by=$1`,
       [IDS.users.a1_proc_buyer]
@@ -541,30 +543,21 @@ describe("rfqController.create — multi-hotel duplication", () => {
       ...allRfqs.map((r) => r.id).filter((id) => id !== rfq_id && !inserted.rfqIds.includes(id))
     );
 
-    // F-DUPLICATE-001 — current behaviour: duplicateRfqForHotels' INSERT
-    // omits `process_id` and `department_id` (rfqController.js:2950-3007), so
-    // the duplicate RFQs land with NULL process_id. Then startApprovalForRfq
-    // fails for those dupes ("No approval policy found for RFQ in this scope"),
-    // and the savepoint cascade aborts the whole outer tx. As a result the
-    // entire create transaction rolls back — including the parent RFQ.
-    //
-    // Lock-in: the controller responds with a 400 (or non-200 error) and
-    // there's no committed RFQ-related state when this happens. The "fix"
-    // (copy process_id + department_id into the duplicate INSERT) will flip
-    // this assertion — at which point the test must invert to assert all 3
-    // RFQ rows present.
-    if (m.calls.status === 200) {
-      // Future-correct branch: 3 RFQ rows exist, one per hotel.
-      const dupes = allRfqs.filter((r) => r.id !== rfq_id);
-      expect(dupes.length).toBe(2);
-      const hotelIds = dupes.map((d) => d.hotel_id).sort();
-      expect(hotelIds).toEqual([IDS.hotels.A2, IDS.hotels.A3].sort());
-    } else {
-      // Current-broken branch: tx rolled back, dupes (and possibly parent
-      // status update) reverted. Document it.
-      expect([400, 500]).toContain(m.calls.status);
-      // Defect must remain logged in AUDIT_REPORT.md (F-DUPLICATE-001).
-    }
+    // POST-FIX: duplicateRfqForHotels' INSERT copies process_id + department_id
+    // from the parent, so each duplicate RFQ resolves its approval policy
+    // correctly. Both rows commit and the controller responds 200.
+    expect(m.calls.status).toBe(200);
+    const dupes = allRfqs.filter((r) => r.id !== rfq_id);
+    expect(dupes.length).toBe(1);
+    expect(dupes[0].hotel_id).toBe(IDS.hotels.A3);
+    // Duplicate carries the parent's process_id (not NULL) — and the parent's
+    // department_id (which makeDraftRfq leaves NULL by default in this test
+    // file, so we assert it matches the parent rather than asserting NOT NULL).
+    const parent = await db.one(`SELECT process_id, department_id FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    const dupe = await db.one(`SELECT process_id, department_id FROM tbl_rfq WHERE id=$1`, [dupes[0].id]);
+    expect(dupe.process_id).toBe(parent.process_id);
+    expect(dupe.process_id).toBe(IDS.processes.A_P1);
+    expect(dupe.department_id).toBe(parent.department_id);
   });
 });
 
@@ -610,4 +603,53 @@ describe("rfqController.create — deferred (Wave 3 / RBAC)", () => {
   it.todo(
     "F-RBAC-001: a user without `tender.create` permission is blocked by `can()` middleware (HTTP-stack test, Wave 3)"
   );
+});
+
+// ===========================================================================
+//  F-CREATE-WHATSAPP-001 — user without `mobile` must not crash the WA helper
+// ===========================================================================
+//
+// formatPhoneNumber(undefined) currently throws because it calls .replace(...)
+// on the input without a nullish-check. The WA notification call is wrapped
+// in try/catch in the controller, but the error path swallows the success
+// state — the caller may still get an inconsistent response. POST-FIX:
+// formatPhoneNumber returns null on undefined/empty AND the call site noops.
+// The RFQ creation succeeds and the controller returns a clean status:1.
+
+describe("rfqController.create — F-CREATE-WHATSAPP-001 (no-mobile resilience)", () => {
+  it("F-CREATE-WHATSAPP-001 — creator without mobile gets a clean status:1 response (no error swallow)", async () => {
+    const rfq_id = await makeDraftRfq();
+    await addProduct(rfq_id, 1);
+    await addQuantityAndUnitSpecs(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    const m = mockExpress({
+      user: {
+        id: IDS.users.a1_proc_buyer,
+        company_id: IDS.companies.A,
+        // mobile DELIBERATELY OMITTED — formatPhoneNumber(undefined) throws today.
+        email: "a1.proc.buyer@test.local",
+        name: "A1 Proc Buyer",
+      },
+      body: buildBody(rfq_id),
+    });
+    // Today the controller throws (uncaught) because formatPhoneNumber(undefined)
+    // in the WhatsApp helper crashes. Wrap so the test's assertion runs.
+    try {
+      await rfqController.create(m.req, m.res, () => {});
+    } catch {
+      /* expected to throw today; assertion below will fail until fixed */
+    }
+
+    // POST-FIX: clean success — status flag 1, status code 200, body has the
+    // success message. Today the WhatsApp throw path crashes the controller
+    // entirely, leaving m.calls.status undefined.
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.status).toBe(1);
+    expect(m.calls.body.message).not.toMatch(/error|fail|undefined/i);
+
+    // RFQ creation itself succeeded — status flipped + approval instance present.
+    const after = await db.one(`SELECT status FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    expect([3, 4]).toContain(after.status);
+  });
 });

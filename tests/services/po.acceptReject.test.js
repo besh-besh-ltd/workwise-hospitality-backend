@@ -189,7 +189,7 @@ describe("acceptPO — gates", () => {
     expect(m.calls.body.message).toMatch(/PO not found/i);
   });
 
-  it("returns 400 when PO status is not 'acceptance_pending'", async () => {
+  it("returns specific 'PO not in acceptance_pending state' message (not the ambiguous lump)", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
     const po_id = await makePo({
       rfq_id, vendorId: IDS.users.vendor_alpha, status: "draft",
@@ -200,12 +200,13 @@ describe("acceptPO — gates", () => {
       params: { po_id: String(po_id) },
     });
     await poController.acceptPO(m.req, m.res);
-    expect(m.calls.status).toBe(400);
-    // Same opaque error covers all three failure modes — see F-PO-IDEM-001.
-    expect(m.calls.body.message).toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
+    // POST-FIX: distinct status + message per failure mode (see F-PO-IDEM-001).
+    expect([400, 409]).toContain(m.calls.status);
+    expect(m.calls.body.message).toMatch(/not.*acceptance|wrong.*state|invalid.*state/i);
+    expect(m.calls.body.message).not.toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
   });
 
-  it("F-PO-IDEM-001 — returns the SAME ambiguous error when caller is NOT the assigned vendor (cannot distinguish from already-actioned)", async () => {
+  it("F-PO-IDEM-001 — wrong-vendor caller gets a distinct 403/forbidden error (NOT the ambiguous lump)", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor({
       vendorId: IDS.users.vendor_alpha,
     });
@@ -218,8 +219,11 @@ describe("acceptPO — gates", () => {
       params: { po_id: String(po_id) },
     });
     await poController.acceptPO(m.req, m.res);
-    expect(m.calls.status).toBe(400);
-    expect(m.calls.body.message).toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
+    // POST-FIX: a wrong-vendor caller is told distinctly that they are not
+    // the assigned vendor — caller can distinguish this from "already actioned".
+    expect([403, 400]).toContain(m.calls.status);
+    expect(m.calls.body.message).toMatch(/not.*assigned.*vendor|forbidden|unauthorized/i);
+    expect(m.calls.body.message).not.toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
     // Status MUST not change.
     const after = await db.one(`SELECT status FROM tbl_rfq_purchase_order WHERE id=$1`, [po_id]);
     expect(after.status).toBe("acceptance_pending");
@@ -245,7 +249,7 @@ describe("acceptPO — gates", () => {
     expect(after.vendor_action_at).not.toBeNull();
   });
 
-  it("F-PO-IDEM-001 — second accept on already-actioned PO returns the same ambiguous error", async () => {
+  it("F-PO-IDEM-001 — second accept on already-actioned PO returns 409 Conflict with a clear 'already actioned' message", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor({
       vendorId: IDS.users.vendor_alpha,
     });
@@ -258,12 +262,14 @@ describe("acceptPO — gates", () => {
       mockExpress({ user: { id: IDS.users.vendor_alpha }, params: { po_id: String(po_id) } }).req,
       mockExpress({}).res
     );
-    // Second call — should ideally be 409 Conflict with a clear "already
-    // accepted" message; current behaviour is 400 with the ambiguous error.
+    // POST-FIX: second call returns 409 Conflict with a specific "already
+    // accepted/actioned" message — caller can distinguish this from
+    // "wrong vendor" or "PO not found".
     const m2 = mockExpress({ user: { id: IDS.users.vendor_alpha }, params: { po_id: String(po_id) } });
     await poController.acceptPO(m2.req, m2.res);
-    expect(m2.calls.status).toBe(400);
-    expect(m2.calls.body.message).toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
+    expect(m2.calls.status).toBe(409);
+    expect(m2.calls.body.message).toMatch(/already.*(actioned|accepted)/i);
+    expect(m2.calls.body.message).not.toMatch(/PO not found, already actioned, or you are not the assigned vendor/i);
   });
 });
 
@@ -348,16 +354,18 @@ describe("rejectPO — gates", () => {
     inserted.finalizationHistoryIds.push(histRow.id);
   });
 
-  it("F-PO-CASCADE-001 — multi-vendor PO over-clear (DEFECT, locked as current behaviour)", async () => {
+  it("F-PO-CASCADE-001 — multi-vendor PO rejection cascades only the rejecting vendor's finalizations", async () => {
     // Construct a PO that contains products with finalizations from TWO
-    // different vendors (a state the current schema permits even if the
-    // happy-path UI never produces it). Vendor A rejects → handlePORejection
-    // queries `tbl_quote_finalization` only by (rfq_id, product_variant_id,
-    // variant) — it picks Vendor B's finalization too and moves it to history.
+    // different vendors. Vendor A rejects PO X → the de-finalization cascade
+    // MUST scope by (rejecting_vendor_id × products-in-this-PO):
+    //   - Vendor A's finalizations on PO X's products → moved to history.
+    //   - Vendor B's finalizations on PO X's products → UNTOUCHED.
     //
-    // This is the exact scenario F-PO-CASCADE-001 calls out. The fix would
-    // scope the cascade by `vendor_id`. Test asserts the buggy behaviour; if
-    // the fix lands, this test fails — at which point flip the assertions.
+    // Bug today: handlePORejection's cascade WHERE clause only filters by
+    // (rfq_id, product_variant_id, variant) — no vendor_id filter — so
+    // Vendor B's row is wiped too. Fix: add `AND vendor_id = $rejectingVendorId`.
+    //
+    // POST-FIX assertion below. Will fail until the fix lands.
     const { rfq_id, quote_id } = await makeRfqWithProductAndVendor({
       vendorId: IDS.users.vendor_alpha,
       productVariantId: 1,
@@ -409,21 +417,18 @@ describe("rejectPO — gates", () => {
     await poController.rejectPO(m.req, m.res);
     expect(m.calls.body.status).toBe(1);
 
-    // Both finalizations have been wiped — Vendor B's also went to history.
+    // POST-FIX expectation: only Vendor A's finalization moves to history.
+    // Vendor B's row stays in tbl_quote_finalization untouched.
     const a = await db.oneOrNone(`SELECT id FROM tbl_quote_finalization WHERE id=$1`, [finalizationA]);
     const b = await db.oneOrNone(`SELECT id FROM tbl_quote_finalization WHERE id=$1`, [finalizationB]);
     expect(a).toBeNull();
-    expect(b).toBeNull(); // ← this is the BUG. Should remain non-null.
+    expect(b).not.toBeNull();
     const hist = await db.any(
       `SELECT vendor_id FROM tbl_quote_finalization_history WHERE rfq_id=$1 ORDER BY vendor_id`,
       [rfq_id]
     );
     inserted.finalizationHistoryIds.push(...(await db.any(`SELECT id FROM tbl_quote_finalization_history WHERE rfq_id=$1`, [rfq_id])).map((r) => r.id));
-    expect(hist.map((r) => r.vendor_id).sort()).toEqual([IDS.users.vendor_alpha, IDS.users.vendor_beta].sort());
-    // Once the fix lands (`WHERE vendor_id = $rejectingVendor`), Vendor B's
-    // finalization should remain — flip the expects above to:
-    //   expect(b).not.toBeNull();
-    //   expect(hist.map((r) => r.vendor_id)).toEqual([IDS.users.vendor_alpha]);
+    expect(hist.map((r) => r.vendor_id)).toEqual([IDS.users.vendor_alpha]);
   });
 });
 
@@ -568,5 +573,8 @@ describe("PO full flow — remaining deferreds", () => {
   );
   it.todo(
     "F-PO-REMINDER-001: 3-tier reminder cron tier-drift on missed days (Wave 4 / Task 13 with time-mock)"
+  );
+  it.todo(
+    "F-PO-EMAIL-002 (P2): the vendor-side PO confirmation email (sendPONotificationToVendor) MUST include the approval history (approvers + dates), matching the internal sendPOApprovalCompletionNotification. Needs email-capture mock to assert HTML body contents."
   );
 });

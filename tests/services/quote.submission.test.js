@@ -400,20 +400,22 @@ describe("createQuote — RFQ-status + window gates", () => {
 // ===========================================================================
 
 describe("updateQuoteItems — gates", () => {
-  it("DEFECT — quote-not-found: controller crashes (HTTP 500) instead of returning the documented 404", async () => {
-    // F-QUOTE-NOTFOUND-001 (NEW finding): `updateQuoteItems` calls
-    // `rfqModel.checkIfExists('tbl_quotes', ...)` which returns an empty
-    // ARRAY (truthy) for missing rows. The `if (!quoteExists)` guard at
-    // rfqController.js:12405 therefore never fires; the next line
-    // `quoteExists[0].rfq_id` crashes with `Cannot read properties of
-    // undefined`. Documented current behaviour locked in here.
+  it("F-QUOTE-NOTFOUND-001 — quote-not-found returns 404 with a clear message (not a 500 crash)", async () => {
+    // POST-FIX: when the requested quote does not exist, `updateQuoteItems`
+    // returns 404 with a "quote not found" message — NOT an HTTP 500 from
+    // dereferencing `quoteExists[0]`. Today the guard `if (!quoteExists)`
+    // at rfqController.js:12405 fails to fire because checkIfExists returns
+    // an empty array (truthy), so the next line crashes. Fix: change the
+    // guard to `if (!quoteExists || quoteExists.length === 0)`, or have
+    // checkIfExists return null on no-match.
     const m = mockExpress({
       user: vendorUser(),
       params: { quoteId: "999999999" },
       body: { rfq_id: 1, rfq_no: 1, products: [{ product_id: 1 }] },
     });
     await rfqController.updateQuoteItems(m.req, m.res, m.next);
-    expect(m.calls.status).toBe(500); // documents the bug — should be 404
+    expect(m.calls.status).toBe(404);
+    expect(m.calls.body.message).toMatch(/quote.*not.*found|not.*found.*quote/i);
   });
 
   it("returns 400 when products miss product_id", async () => {
@@ -502,12 +504,10 @@ describe("updateQuoteItems — gates", () => {
     );
   });
 
-  // F-QUOTE-001 placeholder: updateQuoteItems likewise has no subscription check
-  // at controller level; the route's middleware skips it for non-user_type=3.
-  // Lock-in test deferred until subscription-middleware refactor (Wave 3 work).
-  it.todo(
-    "F-QUOTE-001: should reject vendor whose subscription expired between submit and update — currently allowed (middleware-only enforcement)"
-  );
+  // F-QUOTE-001 closed 2026-05-03: route-level middleware
+  // (requireActiveSubscriptionIfAuthenticated → hasValidPaidSubscription)
+  // already enforces vhcs.status='active' AND end_date >= CURRENT_DATE.
+  // Remaining vendor-identification concern is covered by F-USERTYPE-QUOTE.
 });
 
 // ===========================================================================

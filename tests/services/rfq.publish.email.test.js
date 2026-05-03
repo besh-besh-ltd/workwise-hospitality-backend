@@ -252,4 +252,8 @@ describe("publishRfqById — vendor recipient list", () => {
     const emails = users.map((u) => u.email);
     expect(emails).toContain("a1.proc.buyer@test.local");
   });
+
+  it.todo(
+    "F-PUBLISH-002: insertVendorRfqToken must dedupe — second publishRfqById on same vendor MUST NOT create duplicate token rows in tbl_rfq_publish_tokens (assert one row per (vendor, rfq) after retry)"
+  );
 });
