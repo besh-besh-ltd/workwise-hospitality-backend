@@ -3188,7 +3188,15 @@ const HospitalityController = {
             currency: 'INR',
             payment_status: 'success',
             metadata: {
+              // F-SUB-004 marker: kind='modification_free' distinguishes
+              // this audit row from a real paid modification (whose
+              // metadata.kind would be undefined or set to a paid variant).
+              // Consumers of tbl_vendor_payments that filter on
+              // payment_status='success' can use this to exclude no-money
+              // entries that would otherwise be indistinguishable from a
+              // genuine Razorpay-backed payment.
               type: 'modification',
+              kind: 'modification_free',
               shared_end_date,
               added_category_names: addedCategoryNames,
               added_subcategory_names: addedSubcategoryNames,
