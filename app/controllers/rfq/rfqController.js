@@ -7627,6 +7627,31 @@ const rfqController = {
           slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
         }));
 
+        // Per-product other_charges: comment is mandatory and capped at 30
+        // chars (matches the send-quote modal UI). Skip when regretting the
+        // quote — there are no real charges to comment on in that case.
+        const PRODUCT_CHARGE_COMMENT_MAX = 30;
+        const validateProductChargeComments = (charges, label) => {
+          for (const c of charges || []) {
+            const comment = c?.comment != null ? String(c.comment) : '';
+            if (!comment.trim()) {
+              return `${label}: "${c.name || 'Unnamed charge'}" requires a comment.`;
+            }
+            if (comment.length > PRODUCT_CHARGE_COMMENT_MAX) {
+              return `${label}: "${c.name || 'Unnamed charge'}" comment cannot exceed ${PRODUCT_CHARGE_COMMENT_MAX} characters.`;
+            }
+          }
+          return null;
+        };
+        if (!req.body.is_regret) {
+          for (const product of products) {
+            const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+            if (err) {
+              return res.status(400).json({ status: 0, message: err }).end();
+            }
+          }
+        }
+
         // Enrich other_charges with slugs for each product
         for (const product of products) {
           if (product.other_charges) {
@@ -12682,8 +12707,25 @@ sendFollowUpEmails: async (req, res) => {
         slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
       }));
 
-      // Validate that charges with tax > 0 have a non-empty comment
-      const validateChargeComments = (charges, label) => {
+      // Per-product other_charges: comment is mandatory and capped at 30
+      // chars (matches the send-quote modal UI). Stricter than the global
+      // charges rule below.
+      const PRODUCT_CHARGE_COMMENT_MAX = 30;
+      const validateProductChargeComments = (charges, label) => {
+        for (const c of charges || []) {
+          const comment = c?.comment != null ? String(c.comment) : '';
+          if (!comment.trim()) {
+            return `${label}: "${c.name || 'Unnamed charge'}" requires a comment.`;
+          }
+          if (comment.length > PRODUCT_CHARGE_COMMENT_MAX) {
+            return `${label}: "${c.name || 'Unnamed charge'}" comment cannot exceed ${PRODUCT_CHARGE_COMMENT_MAX} characters.`;
+          }
+        }
+        return null;
+      };
+      // Global charges keep the original "tax > 0 ⇒ comment required" rule —
+      // its UI hasn't been migrated to mandatory-everywhere yet.
+      const validateGlobalChargeComments = (charges, label) => {
         for (const c of charges || []) {
           if (Number(c.tax) > 0 && (!c.comment || !String(c.comment).trim())) {
             return `${label}: "${c.name}" has tax greater than 0 but no comment/reason provided.`;
@@ -12693,12 +12735,12 @@ sendFollowUpEmails: async (req, res) => {
       };
 
       for (const product of products) {
-        const err = validateChargeComments(product.other_charges, `Product ${product.product_id}`);
+        const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
         if (err) {
           return res.status(400).json({ status: 0, message: err });
         }
       }
-      const globalChargeErr = validateChargeComments(global_charges, 'Global charges');
+      const globalChargeErr = validateGlobalChargeComments(global_charges, 'Global charges');
       if (globalChargeErr) {
         return res.status(400).json({ status: 0, message: globalChargeErr });
       }
