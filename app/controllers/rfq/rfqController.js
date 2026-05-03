@@ -12492,13 +12492,17 @@ sendFollowUpEmails: async (req, res) => {
     }
 
     try {
-      // Check if the quote exists
+      // Check if the quote exists. F-QUOTE-NOTFOUND-001:
+      // rfqModel.checkIfExists returns an empty array (truthy) when no row
+      // matches, so the bare `if (!quoteExists)` guard never fires and the
+      // next line crashes on quoteExists[0]. Treat array-length zero as
+      // not-found and respond with 404.
       const quoteExists = await rfqModel.checkIfExists(
         'tbl_quotes',
         `id = '${quoteId}'`
       );
-      if (!quoteExists) {
-        return res.status(404).json({ message: 'Quote not found.' });
+      if (!quoteExists || quoteExists.length === 0) {
+        return res.status(404).json({ status: 0, message: 'Quote not found.' });
       }
 
       // Get RFQ details to check dates
