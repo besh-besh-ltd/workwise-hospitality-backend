@@ -1932,6 +1932,26 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   },
 
   /**
+   * Return the most recent pending (created/pending status) modification
+   * payment row for this vendor — used by modifySubscription to short-
+   * circuit a duplicate Razorpay order creation (F-SUB-002 idempotency).
+   * Returns null if no pending modification exists.
+   */
+  getPendingModificationForVendor: async (vendorId) => {
+    const row = await db.oneOrNone(
+      `SELECT id, razorpay_order_id, amount, currency, metadata
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1
+         AND payment_status IN ('created', 'pending')
+         AND metadata::jsonb->>'type' = 'modification'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [vendorId]
+    );
+    return row || null;
+  },
+
+  /**
    * Expire any abandoned "created" or "pending" modification payment records
    * for this vendor. Called before creating a new modification so stale
    * abandoned Razorpay orders don't permanently block the vendor.

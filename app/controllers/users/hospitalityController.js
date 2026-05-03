@@ -3107,8 +3107,35 @@ const HospitalityController = {
         });
       }
 
-      // Expire any stale/abandoned modification orders so the vendor
-      // can always start a fresh modification.
+      // F-SUB-002 idempotency: if there's already a pending modification
+      // payment in flight, return its existing order_id instead of creating
+      // a fresh Razorpay order. Without this guard, two clicks (or a back-
+      // refresh-resubmit) creates two orders — the vendor can end up paying
+      // both, with the prior payment landing on an "expired" record we
+      // overwrote here. The vendor must complete or abandon the existing
+      // payment (Razorpay's order TTL + our expiry cron will clean it up if
+      // truly abandoned) before a new modification can start.
+      const pendingMod = await hospitalityModel.getPendingModificationForVendor(vendorId);
+      if (pendingMod) {
+        const pendingMeta = typeof pendingMod.metadata === 'string'
+          ? JSON.parse(pendingMod.metadata)
+          : pendingMod.metadata;
+        return res.status(200).json({
+          status: 1,
+          data: {
+            requires_payment: true,
+            order_id: pendingMod.razorpay_order_id,
+            amount: parseFloat(pendingMod.amount),
+            currency: pendingMod.currency || 'INR',
+            shared_end_date: pendingMeta?.shared_end_date || null,
+            already_pending: true,
+            message: 'You have a pending modification payment. Complete it or wait for it to expire before starting a new one.'
+          }
+        });
+      }
+
+      // No pending order — clean up any orphan stale rows that the cron
+      // hasn't picked up yet, then proceed.
       const expiredCount = await hospitalityModel.expireStaleModifications(vendorId);
       if (expiredCount > 0) {
         logError(`Expired ${expiredCount} stale modification record(s) for vendor ${vendorId}`);
