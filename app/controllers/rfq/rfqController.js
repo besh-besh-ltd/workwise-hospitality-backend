@@ -6876,6 +6876,32 @@ const rfqController = {
         rfqData.vendor_rejections = [];
       }
 
+      // Attach close reason when RFQ is closed
+      if (rfqData && String(rfqData.status) === '2') {
+        try {
+          const closeEvent = await db.oneOrNone(
+            `SELECT lh.remarks
+               FROM tbl_lifecycle_history lh
+              WHERE lh.entity_id = $1
+                AND lh.entity_type IN ('RFQ', 'TENDER')
+                AND lh.action = 'RFQ_CLOSED'
+              ORDER BY lh.id DESC
+              LIMIT 1`,
+            [rfqData.id]
+          );
+          let rawComment = closeEvent?.remarks || null;
+          if (rawComment) {
+            rawComment = rawComment.replace(/^(RFQ|TENDER) closed by creator:\s*/i, '');
+            rfqData.close_comment = `Reason: ${rawComment}`;
+          } else {
+            rfqData.close_comment = null;
+          }
+        } catch (closeErr) {
+          logError('Error fetching close info for RFQ', closeErr);
+          rfqData.close_comment = null;
+        }
+      }
+
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
         rfqData.has_paid_tender_fees = rfqData.vendor_payment_status === 'success';
@@ -8429,7 +8455,10 @@ const rfqController = {
       }
 
       const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
-      const cancelReason = `${entityType} closed by creator`;
+      const comment = req.body.comment || '';
+      const cancelReason = comment
+        ? `${entityType} closed by creator: ${comment}`
+        : `${entityType} closed by creator`;
 
       // Captured inside the transaction, used outside the tx for emails.
       let cancelledInstances = [];
@@ -8577,7 +8606,7 @@ const rfqController = {
           company_name: rfqDetails.company_name || null,
         },
         closedByName: req.user.name,
-        users: buMembers,
+        users: buMembers.filter(u => String(u.id) !== String(id)),
       });
 
       // Notify each instance's current approvers that their approval is no longer needed.
@@ -8605,7 +8634,7 @@ const rfqController = {
             cancelled_approval_count: cancelledInstances.length,
             cancelled_negotiation_round_count: cancelledRoundCount,
           },
-          remarks: 'RFQ closed by creator'
+          remarks: comment || null
         });
       } catch (lifecycleErr) {
         logError('Failed to record lifecycle event for closed RFQ ${rfq_id}', lifecycleErr);
