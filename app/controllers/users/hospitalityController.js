@@ -2759,6 +2759,19 @@ const HospitalityController = {
       }
 
       // ---------- Existing registration / renewal / extension branch ----------
+      //
+      // F-SUB-007: this block handles three distinct flows that share the
+      // `metadata.subscription_items` shape but fan out very differently:
+      //   - Extension (`kind === 'extension'`): UPDATE existing active rows'
+      //     end_date in place. subscription_items is INFORMATIONAL — we
+      //     don't insert new rows from it.
+      //   - Renewal (receipt starts with 'RNW'): expire old rows + insert
+      //     fresh ones from subscription_items.
+      //   - Registration (default fallthrough): insert new rows for a
+      //     newly-paid vendor.
+      // A maintainer reading just the metadata payload would assume new
+      // rows are always created — they're not for extension. The branching
+      // below is the source of truth.
       if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
         const isExtension = metadata.kind === 'extension';
         const isRenewalPayment = payment.receipt && payment.receipt.startsWith('RNW');
@@ -3609,7 +3622,15 @@ const HospitalityController = {
         payment_capture: 1
       });
 
-      // Store as renewal-type metadata so verifyPayment's existing path handles it
+      // F-SUB-007: extensions piggy-back on the renewal-shape metadata so
+      // verifyPayment's existing `metadata.subscription_items` path runs,
+      // BUT the extension branch in verifyPayment doesn't insert new rows
+      // for these items — it does an UPDATE on existing tbl_vendor_*_subscription
+      // rows to bump their end_date (see verifyPayment's extension-handling
+      // block ~line 2757). The subscription_items array is therefore mostly
+      // INFORMATIONAL for extensions (used to derive the new end_date and
+      // the receipt's line-items). The `kind: 'extension'` marker below is
+      // load-bearing — verifyPayment branches on it.
       await hospitalityModel.createVendorPayment({
         vendor_id: vendorId,
         razorpay_order_id: razorpayOrder.id,
@@ -3619,7 +3640,7 @@ const HospitalityController = {
         currency: 'INR',
         payment_status: 'created',
         metadata: {
-          kind: 'extension',
+          kind: 'extension', // load-bearing: verifyPayment dispatches on this
           subscription_items: subscriptionRows.map(r => ({
             vendor_id: vendorId,
             item_type: r.item_type,
