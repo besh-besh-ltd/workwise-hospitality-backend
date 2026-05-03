@@ -1952,6 +1952,27 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   },
 
   /**
+   * Return the most recent pending extension payment row for this vendor.
+   * Same idempotency contract as getPendingModificationForVendor — used by
+   * extendSubscription to avoid creating duplicate Razorpay orders if the
+   * vendor double-clicks or back-refresh-resubmits.
+   * Returns null if no pending extension exists.
+   */
+  getPendingExtensionForVendor: async (vendorId) => {
+    const row = await db.oneOrNone(
+      `SELECT id, razorpay_order_id, amount, currency, metadata
+       FROM tbl_vendor_payments
+       WHERE vendor_id = $1
+         AND payment_status IN ('created', 'pending')
+         AND metadata::jsonb->>'kind' = 'extension'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [vendorId]
+    );
+    return row || null;
+  },
+
+  /**
    * Expire any abandoned "created" or "pending" modification payment records
    * for this vendor. Called before creating a new modification so stale
    * abandoned Razorpay orders don't permanently block the vendor.

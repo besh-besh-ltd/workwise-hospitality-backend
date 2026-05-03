@@ -3549,6 +3549,26 @@ const HospitalityController = {
         });
       }
 
+      // F-SUB-002 (extend) idempotency: if a pending extension Razorpay
+      // order already exists for this vendor, return its existing order_id
+      // rather than creating a duplicate. Same contract as the modify-flow
+      // F-SUB-002 fix (4cdfb5e). Vendor must complete or abandon the prior
+      // payment before a new extension can start.
+      const pendingExt = await hospitalityModel.getPendingExtensionForVendor(vendorId);
+      if (pendingExt) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            requires_payment: true,
+            order_id: pendingExt.razorpay_order_id,
+            amount: parseFloat(pendingExt.amount),
+            currency: pendingExt.currency || 'INR',
+            already_pending: true,
+            message: 'You have a pending extension payment. Complete it or wait for it to expire before starting a new one.'
+          }
+        });
+      }
+
       const current = await hospitalityModel.getActiveSubscriptionItemsForVendor(vendorId);
       if (!current.shared_end_date || !current.categories.length) {
         return res.status(400).json({

@@ -94,8 +94,13 @@ export async function seedPaidSubscription(db, opts = {}) {
 }
 
 /**
- * Wipe a single vendor's subscription + payment rows. Use in beforeEach
- * to start each test with a known empty state for that vendor.
+ * Wipe a single vendor's subscription + payment rows AND any product-variant
+ * mappings the modifySubscription auto-mapper might have created. Use in
+ * beforeEach to start each test with a known empty state for that vendor,
+ * and in afterAll to prevent cross-suite leakage into eligibility tests
+ * (vendorEligibility.test.js queries `tbl_product_variant_vendor_mapping`
+ * and was failing in batch runs because modify's `_autoMapProductsForCategories`
+ * left rows behind).
  */
 export async function resetVendorSubscriptionState(db, vendorId) {
   if (!vendorId) throw new Error("resetVendorSubscriptionState: vendorId is required");
@@ -104,6 +109,14 @@ export async function resetVendorSubscriptionState(db, vendorId) {
     [vendorId]
   );
   await db.none(`DELETE FROM tbl_vendor_payments WHERE vendor_id = $1`, [vendorId]);
+  // tbl_product_variant_vendor_mapping rows are inserted by
+  // hospitalityController._autoMapProductsForCategories on every successful
+  // modify (paid + free paths). They scope to vendor_id, so the cleanup is
+  // safely bounded to the test's vendor.
+  await db.none(
+    `DELETE FROM tbl_product_variant_vendor_mapping WHERE vendor_id = $1`,
+    [vendorId]
+  );
 }
 
 /**
