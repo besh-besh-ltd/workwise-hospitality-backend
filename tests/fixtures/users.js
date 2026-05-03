@@ -167,10 +167,16 @@ export async function seedUsers(t) {
   }
 
   // Insert vendor users (each tied to a vendor parent company in tbl_company).
+  // user_type=3 mirrors production: WH-74 public endpoints
+  // (hospitalitySubscriptionPayment, modifySubscription, extendSubscription,
+  // cancelSubscription) defensively check `user_type === 3` to confirm the
+  // caller is actually a vendor before letting them touch billing state.
+  // This is not RBAC routing — it's a belt-and-braces validation on flows
+  // that may run un-authenticated (subscription-payment) or token-only.
   for (const v of VENDORS) {
     await t.none(
-      `INSERT INTO tbl_users (id, name, email, status, company_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 1, $4, now(), now())
+      `INSERT INTO tbl_users (id, name, email, user_type, status, company_id, created_at, updated_at)
+       VALUES ($1, $2, $3, 3, 1, $4, now(), now())
        ON CONFLICT (id) DO NOTHING`,
       [v.id, v.name, v.email, v.company]
     );
