@@ -216,13 +216,22 @@ const getQtyFromProductOrDetail = (productOrDetail) => {
   return q > 0 ? q : 0;
 };
 
+// Normalise `quote.quote_details` to an array. The model's
+// `getQuotesByRfqById2` returns it as a single object in many shapes (carries
+// `created_by`, `timestamp`, `unit_price`, etc. directly) and as an array of
+// line items in others. Downstream `enrichProduct` already accepts both,
+// but the peer-fill loop iterates `quote_details` three times and needs
+// array semantics throughout.
+const detailsAsArray = (qd) =>
+  Array.isArray(qd) ? qd : (qd && typeof qd === "object" ? [qd] : []);
+
 export const fillMissingChargesFromPeers = (data = []) => {
   // Step 1: pre-normalize absolute → percentage so the pool is comparable.
   const preNormalized = (data || []).map((item) => ({
     ...item,
     quotations: (item.quotations || []).map((quote) => ({
       ...quote,
-      quote_details: (quote.quote_details || []).map((detail) => {
+      quote_details: detailsAsArray(quote.quote_details).map((detail) => {
         const unit = toNumber(detail.unit_price);
         const qty = getQtyFromProductOrDetail(detail) || getQtyFromProductOrDetail(item);
         const base = unit * qty;
