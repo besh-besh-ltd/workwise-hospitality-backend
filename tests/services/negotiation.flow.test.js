@@ -666,7 +666,7 @@ describe("submitVendorQuote — assigned vendor quotes on ACTIVE round", () => {
     expect(rows.length).toBe(0);
   });
 
-  it("F-NEGO-001 — vendor B fetching getActiveRound receives full vendor_approvals JSONB (per-vendor field leak; DEFECT, locked)", async () => {
+  it("F-NEGO-001 — vendor B fetching getActiveRound MUST NOT see vendor A's vendor_approvals entry", async () => {
     const { rfq_id, product_id, round_id } = await activeRoundForVendor([
       IDS.users.vendor_alpha, IDS.users.vendor_beta,
     ]);
@@ -680,17 +680,20 @@ describe("submitVendorQuote — assigned vendor quotes on ACTIVE round", () => {
     await negotiationController.getActiveRound(m.req, m.res);
     expect(m.calls.status).toBe(200);
 
-    // CURRENT BEHAVIOUR: response data exposes vendor_approvals for ALL vendors
-    // (including vendor_alpha). The fix is to scope vendor_approvals to the
-    // requesting vendor before returning. Lock the leak as test expectation —
-    // when fixed, this test must flip to assert isolation.
+    // POST-FIX expectation: when a vendor (user_type=3) reads the active
+    // round, vendor_approvals MUST be scoped to that vendor only — Vendor A's
+    // entry (incl. their custom_charges and approval status) must not appear.
+    // Today the controller returns the full JSONB array unfiltered. Until
+    // fixed (filter `WHERE user_id=$current_vendor` server-side, or drop the
+    // column from the vendor-side projection), this test fails.
     const data = m.calls.body.data;
     expect(data).not.toBeNull();
-    expect(Array.isArray(data.vendor_approvals)).toBe(true);
-    const alphaEntry = (data.vendor_approvals || []).find(
-      (va) => va.vendor_id === IDS.users.vendor_alpha
-    );
-    expect(alphaEntry).toBeDefined(); // leak: vendor_beta should not see this.
+    const vendorApprovals = Array.isArray(data.vendor_approvals) ? data.vendor_approvals : [];
+    const alphaEntry = vendorApprovals.find((va) => va.vendor_id === IDS.users.vendor_alpha);
+    expect(alphaEntry).toBeUndefined();
+    // Vendor B's own entry should still be present.
+    const betaEntry = vendorApprovals.find((va) => va.vendor_id === IDS.users.vendor_beta);
+    expect(betaEntry).toBeDefined();
   });
 });
 

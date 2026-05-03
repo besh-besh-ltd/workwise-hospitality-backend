@@ -26,7 +26,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals, findBestMatchingPolicyTx } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -2974,7 +2974,9 @@ INSERT INTO tbl_rfq (
   vendor_clarification_date,
   hospitality_company_id,
   tender_fees,
-  hotel_id
+  hotel_id,
+  process_id,
+  department_id
 )
 SELECT
   (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
@@ -3003,7 +3005,9 @@ SELECT
   vendor_clarification_date,
   (SELECT hch.hospitality_company_id FROM tbl_hospitality_company_hotels hch WHERE hch.id = $2),
   tender_fees,
-  $2
+  $2,
+  process_id,
+  department_id
 FROM tbl_rfq
 WHERE id = $1
 RETURNING id;
@@ -3408,33 +3412,25 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     rfq.hospitality_company_id,
     rfq.hotel_id,
     rfq.department_id,
-    txContext
+    txContext,
+    rfq.process_id
   );
 
   if (isFinalApprover) {
     // Creator is the final approver - auto-approve immediately
     logger.info(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
 
-    // Create an approved approval instance for audit trail
-    const policy = await dbContext.oneOrNone(`
-      SELECT p.*,
-             CASE
-               WHEN $4 IS NOT NULL AND $3 IS NOT NULL THEN 3
-               WHEN $3 IS NOT NULL THEN 2
-               ELSE 1
-             END as specificity_score
-      FROM tbl_approval_policies p
-      WHERE entity_type = $1
-        AND hospitality_company_id = $2
-        AND is_active = true
-        AND (
-          ($4 = department_id AND $3 = hotel_id)
-          OR (department_id IS NULL AND $3 = hotel_id)
-          OR (department_id IS NULL AND hotel_id IS NULL)
-        )
-      ORDER BY specificity_score DESC
-      LIMIT 1
-    `, [entityType, rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id]);
+    // Resolve the policy via the same process-scoped resolver the rest of the
+    // approval engine uses. Previously this site duplicated the lookup with
+    // an inline SQL that omitted process_id from the WHERE clause, allowing
+    // cross-process fall-through (F-APPROVAL-001).
+    const policy = await findBestMatchingPolicyTx({
+      entity_type: entityType,
+      hospitality_company_id: rfq.hospitality_company_id,
+      hotel_id: rfq.hotel_id,
+      department_id: rfq.department_id,
+      process_id: rfq.process_id,
+    }, dbContext);
 
     if (!policy) {
       throw new Error(`No approval policy found for ${entityType} in this scope`);
@@ -5569,15 +5565,38 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
-       
-     let parsedError = {};
-       parsedError = JSON.parse(error?.message);
 
-      res.status(500).json({
+      // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
+      // throwing `new Error(JSON.stringify({message, status, ...}))`.
+      // Translate the structured-error shape to a sensible HTTP code so
+      // access-denied / validation failures don't surface as 500.
+      let parsedError = {};
+      let isStructured = false;
+      try {
+        parsedError = JSON.parse(error?.message);
+        isStructured = parsedError && typeof parsedError === 'object';
+      } catch {
+        // Plain string error — keep historical 500.
+      }
+
+      const innerMessage = isStructured ? (parsedError.message || error.message) : error.message;
+      let httpCode = 500;
+      if (isStructured) {
+        // saveRfqDraft uses status:2 for access-denied + status:3 for validation.
+        if (parsedError.status === 2) {
+          httpCode = /access|permission|forbidden|unauthor/i.test(innerMessage || '') ? 403 : 404;
+        } else if (parsedError.status === 3) {
+          httpCode = 400;
+        }
+      }
+
+      res.status(httpCode).json({
         status: 3,
-        message: 'An error occurred while saving the draft',
+        message: httpCode === 500
+          ? 'An error occurred while saving the draft'
+          : (innerMessage || 'An error occurred while saving the draft'),
         errors: {
-          rfq:error?.message || 'An error occurred while saving the draft',
+          rfq: innerMessage || 'An error occurred while saving the draft',
           details: parsedError?.details || [],
         }
       });
@@ -12496,13 +12515,17 @@ sendFollowUpEmails: async (req, res) => {
     }
 
     try {
-      // Check if the quote exists
+      // Check if the quote exists. F-QUOTE-NOTFOUND-001:
+      // rfqModel.checkIfExists returns an empty array (truthy) when no row
+      // matches, so the bare `if (!quoteExists)` guard never fires and the
+      // next line crashes on quoteExists[0]. Treat array-length zero as
+      // not-found and respond with 404.
       const quoteExists = await rfqModel.checkIfExists(
         'tbl_quotes',
         `id = '${quoteId}'`
       );
-      if (!quoteExists) {
-        return res.status(404).json({ message: 'Quote not found.' });
+      if (!quoteExists || quoteExists.length === 0) {
+        return res.status(404).json({ status: 0, message: 'Quote not found.' });
       }
 
       // Get RFQ details to check dates
@@ -13608,6 +13631,15 @@ processBoqAndDownload : async (req, res) => {
         clause_type,
         weightage
       );
+
+      // F-CLAUSE-NOTFOUND-001: the model returns {status:0, message} for
+      // not-found cases (RFQ id missing, rfq_product_id missing). Forwarding
+      // that as HTTP 200 misrepresents the outcome to any HTTP-level client.
+      // Map "does not exist" to 404, other status:0 results to 400.
+      if (result?.status === 0) {
+        const isNotFound = /does not exist|not found/i.test(result.message || '');
+        return res.status(isNotFound ? 404 : 400).json(result).end();
+      }
 
       res.status(200).json(result).end();
     } catch (error) {
@@ -14962,6 +14994,18 @@ getClauses: async (req, res) => {
         return res.status(403).json({
           status: 0,
           message: 'Only the RFQ creator can close clarifications'
+        });
+      }
+
+      // F-CLAR-002: require a non-empty response (or at least one file).
+      // Closing without answering used to silently leave the vendor's
+      // question unanswered + send no notification.
+      const responseText = typeof response === 'string' ? response.trim() : '';
+      const hasFiles = Array.isArray(response_files) && response_files.length > 0;
+      if (!responseText && !hasFiles) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Response is required to close a clarification.'
         });
       }
 

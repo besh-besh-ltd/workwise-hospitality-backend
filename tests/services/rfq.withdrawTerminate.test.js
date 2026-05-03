@@ -353,3 +353,11 @@ describe("F-WITHDRAW-RACE (P0): concurrent withdraw vs scheduler fire", () => {
     "should refuse withdraw OR fully unwind when scheduler fires concurrently — needs FOR UPDATE row lock; bug logged in AUDIT_REPORT.md §7"
   );
 });
+
+// --- Scheduler-delete-failure swallow (F-WITHDRAW-001) ----------------------
+
+describe("F-WITHDRAW-001 (P1): scheduler-delete failure must not be swallowed", () => {
+  it.todo(
+    "Withdraw with a non-NotFound scheduler error (e.g. AccessDenied) MUST surface as 5xx OR roll back the status flip — not return 200 while leaving the EventBridge job armed. Needs jest.unstable_mockModule on cronManager.removeRfqPublishJob to throw a non-NotFound error."
+  );
+});

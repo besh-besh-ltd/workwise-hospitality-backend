@@ -316,7 +316,7 @@ describe("saveDraft — updates draft metadata before submission", () => {
     expect(after.process_id).toBe(IDS.processes.A_P1);
   });
 
-  it("rejects when caller does NOT have access to the chosen hospitality / hotel context (F-DRAFT-500: status code is wrong)", async () => {
+  it("F-DRAFT-500 — caller without access to the chosen hospitality / hotel context returns 4xx, not 500", async () => {
     const rfq_id = await makeBareDraft();
     // a1_proc_buyer is mapped to company A / hotel A1 only; pointing the
     // draft at company B / hotel B1 must trip the userHasContext rejection
@@ -332,13 +332,12 @@ describe("saveDraft — updates draft metadata before submission", () => {
       },
     });
     await rfqController.saveDraft(m.req, m.res);
-    // CURRENT BEHAVIOUR (defect F-DRAFT-500): controller always returns 500
-    // on any saveRfqDraft error — even business-logic ones like access
-    // denial — because the catch block hard-codes 500. The thrown error's
-    // serialized payload (status: 2) is lost. The error MESSAGE is preserved
-    // in errors.rfq so we can assert on it.
-    expect(m.calls.status).toBe(500);
+    // POST-FIX: business-logic rejections (auth/validation) map to 4xx —
+    // 403 for access-denied is most precise; 400 acceptable. The catch block
+    // must detect the rich-error shape (`error.message` is JSON-encoded
+    // `{message, status}`) and translate, OR `saveRfqDraft` must throw a
+    // structured `httpError` like the update controller does.
+    expect([400, 403]).toContain(m.calls.status);
     expect(m.calls.body.errors.rfq).toMatch(/do not have access/i);
-    // When fixed: status should be 4xx (400 or 403); update both expects.
   });
 });
