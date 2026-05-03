@@ -607,11 +607,14 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
   //   gstAmount     = 900 + 27 = 927           (base_tax + per-charge tax)
   //   totalSubtotal = 6077
   //   totalPrice    = 6077                     (no PO-level global)
-  it("Scenario A — explicit-zero per-charge tax INHERITS item.tax (the F-CHARGE-TAX-FALLBACK rule)", async () => {
+  it("Scenario A — explicit-null per-charge tax INHERITS item.tax (the F-CHARGE-TAX-FALLBACK rule)", async () => {
+    // Under the post-PR-#124 tri-state contract, only `tax: null` means
+    // "inherit base rate". `tax: 0` is now an explicit no-tax escape hatch
+    // (locked in by Scenario A2 below).
     const charges = [
-      { name: "Freight", slug: "freight", amount: 100, amount_mode: "absolute", tax: 0, tax_mode: "absolute",
+      { name: "Freight", slug: "freight", amount: 100, amount_mode: "absolute", tax: null, tax_mode: "absolute",
         comment: "no-tax stub" },
-      { name: "Packaging", slug: "packaging", amount: 50, amount_mode: "absolute", tax: 0, tax_mode: "absolute",
+      { name: "Packaging", slug: "packaging", amount: 50, amount_mode: "absolute", tax: null, tax_mode: "absolute",
         comment: "no-tax stub" },
     ];
     const scenario = await buildFullPOScenario({
@@ -645,6 +648,41 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
     expect(item.tax_detail_lines.length).toBeGreaterThan(0);
   });
 
+  // Scenario A2: the tri-state escape hatch from PR #124.
+  //   unit=500, qty=10, tax=18%, Freight=100 abs with EXPLICIT tax: 0
+  //   base         = 5000, base_tax = 900
+  //   Freight      = 100 abs; charge.tax = 0 (number) → explicit "no tax"
+  //                  → engine emits Freight tax = 0 (does NOT inherit 18%)
+  //   charges_total= 100
+  //   line total   = 5000 + 900 + 100 = 6000
+  //
+  // PDF rollup:
+  //   basicAmount   = 5000
+  //   totalCharges  = 100
+  //   gstAmount     = 900   (only base_tax — no per-charge tax)
+  //   totalSubtotal = 6000
+  it("Scenario A2 — explicit-zero per-charge tax does NOT inherit (tri-state escape hatch)", async () => {
+    const charges = [
+      { name: "Freight", slug: "freight", amount: 100, amount_mode: "absolute",
+        tax: 0, tax_mode: "absolute", comment: "explicit no-tax" },
+    ];
+    const scenario = await buildFullPOScenario({
+      unitPrice: 500, quantity: 10, taxPercent: 18, otherCharges: charges,
+    });
+    const data = await buildPOTemplateData(scenario.po_id);
+
+    expect(parseFloat(data.basicAmount)).toBe(5000);
+    expect(parseFloat(data.totalCharges)).toBe(100);
+    expect(parseFloat(data.gstAmount)).toBe(900);
+    expect(parseFloat(data.totalSubtotal)).toBe(6000);
+    expect(parseFloat(data.totalPrice)).toBe(6000);
+
+    const cd = data.items[0].charge_details.find((c) => c.name === "Freight");
+    expect(parseFloat(cd.amount)).toBe(100);
+    expect(parseFloat(cd.tax)).toBe(0);   // NOT inherited
+    expect(cd.has_tax).toBe(false);
+  });
+
   // Scenario B: explicit non-zero per-charge tax overrides inheritance.
   //   unit=1000, qty=5, tax=12%, Freight=10% pct + 18% pct tax, Insurance=200 abs no-tax
   //   base       = 5000, base_tax = 600
@@ -663,7 +701,10 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
     const charges = [
       { name: "Freight", slug: "freight", amount: 10, amount_mode: "percentage", tax: 18, tax_mode: "percentage",
         comment: "Pune→Mumbai" },
-      { name: "Insurance", slug: "insurance", amount: 200, amount_mode: "absolute", tax: 0, tax_mode: "absolute" },
+      // tax: null → inherits item tax (12%) under tri-state. Comment is now
+      // mandatory for every per-product charge (PR #124 Change B).
+      { name: "Insurance", slug: "insurance", amount: 200, amount_mode: "absolute", tax: null, tax_mode: "absolute",
+        comment: "stock-loss cover" },
     ];
     const scenario = await buildFullPOScenario({
       unitPrice: 1000, quantity: 5, taxPercent: 12, otherCharges: charges,
