@@ -2026,7 +2026,9 @@ export async function createApprovalInstance({
     // 1. Check for existing pending/approved instance for this entity
     // For NEGOTIATION type, allow new instances even if a previous one was APPROVED,
     // because multiple rounds can exist per product and each needs its own approval.
-    const allowReapproval = entity_type === 'NEGOTIATION';
+    // For NEGOTIATION_QUOTE, allow re-approval because a vendor may reject a PO,
+    // requiring re-finalization and a fresh approval cycle while preserving the old approved instance.
+    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE';
     const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
 
     const existingInstance = await t.oneOrNone(`
@@ -2271,7 +2273,7 @@ export async function createApprovalInstance({
 }
 
 // Transaction-safe version of findBestMatchingPolicy
-async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id = null }, t) {
+export async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id = null }, t) {
   const policies = await t.any(`
     SELECT p.*,
            CASE
@@ -2295,12 +2297,18 @@ async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, h
   return policies.length > 0 ? policies[0] : null;
 }
 
-// Export helper function to check if user is final approver
-export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null) {
+// Export helper function to check if user is final approver.
+//
+// process_id is load-bearing: a user who is the final approver of policy
+// chain (X, P1) must NOT be treated as the final approver of (X, P2).
+// findBestMatchingPolicyTx already filters by process_id; we forward it.
+// Passing `null` matches process-agnostic policies only (no cross-process
+// fall-through).
+export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null) {
   const t = txContext || db;
 
-  // Find the best matching master policy
-  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+  // Find the best matching master policy — process-scoped.
+  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
 
   if (!policy) {
     return false;

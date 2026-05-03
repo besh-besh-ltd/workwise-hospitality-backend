@@ -262,7 +262,7 @@ export const rfqSchemas = {
         // RFQ-level scalar fields (mirrors RFQ_EDITABLE_FIELDS in
         // app/controllers/rfq/rfqEditableFields.js — keep both in sync)
         title: Joi.string().required(),
-        comment: Joi.string().trim().max(1000).allow('', null),
+        comment: Joi.string().trim().allow('', null),
         contact_name: Joi.string().required(),
         contact_number: Joi.string().trim().min(6).max(17).required(),
         response_email: Joi.string().required(),

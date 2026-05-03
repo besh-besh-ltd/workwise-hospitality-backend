@@ -10,17 +10,20 @@ import hospitalityModel from "../../models/hospitalityModel.js";
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
   return new Promise(async (resolve, reject) => {
-    const quantity = purchaseOrder?.quantity || 'N/A';
-    const totalValue = purchaseOrder?.total_value || 'N/A';
-
     let user = await userModel.getUserById(userId);
     if (user) user = user[0];
     else reject('User not found!');
 
-    let product = await db.any(
-      `SELECT P.id, P.name FROM tbl_rfq_products trp JOIN tbl_product_variant P ON P.id = trp.product_variant_id WHERE trp.id = ANY($1)`,
-      [purchaseOrder.rfq_product_id]
+    const products = await db.any(
+      `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+       WHERE pop.purchase_order_id = $1`,
+      [purchaseOrder.id]
     );
+    const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
     let finalized = await db.oneOrNone(
         `SELECT id, name FROM tbl_users WHERE id = $1`,
@@ -29,7 +32,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
     const headerContent = `<h2>Hello ${user.name},</h2>`;
 
-    const containerContent = ` 
+    const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
             <p>
             A Purchase Order has been initiated in your company that needs your approval.
@@ -37,9 +40,9 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
             <h4>Purchase Order Details</h4>
             <ul>
-            <li><strong>Product(s) Name:</strong> ${product.map(p => p?.name).filter(Boolean).join(", ")}</li>
-            <li><strong>Quantity:</strong> ${quantity}</li>
-            <li><strong>Total Value:</strong> ₹${totalValue}.00</li>
+            <li><strong>Product(s) Name:</strong> ${products.map(p => p?.name).filter(Boolean).join(", ")}</li>
+            <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
+            <li><strong>Total Value:</strong> ₹${computedTotal.toLocaleString('en-IN')}</li>
             <li><strong>Finalized Vendor:</strong> ${finalized.name}</li>
             <li><strong>Created At:</strong> ${
                 purchaseOrder.created_at
@@ -84,10 +87,16 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
         let company = await userModel.getCompanyDetail(user.id);
         if(company) company = company[0];
 
-        const product = await db.any(
-            `SELECT P.id, P.name FROM tbl_rfq_products TRP JOIN tbl_product_variant P ON TRP.product_variant_id = P.id WHERE TRP.id = ANY($1)`,
-            [purchaseOrder.rfq_product_id]
-        )
+        const products = await db.any(
+            `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+             FROM tbl_purchase_order_product pop
+             JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+             JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+             WHERE pop.purchase_order_id = $1`,
+            [purchaseOrder.id]
+        );
+        const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+        const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
         let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
         if(!vendor) throw new Error("Vendor Not Found!");
@@ -97,7 +106,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         const fileName = `po-${purchaseOrder.po_number}.pdf`;
 
-        const containerContent = ` 
+        const containerContent = `
             <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
             <p>
                 We're excited to inform you that a <strong>Purchase Order</strong> has been created for your quote.
@@ -108,9 +117,9 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
             <h4>Purchase Order Details</h4>
             <ul>
                 <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
-                <li><strong>Product(s) Name:</strong> ${product.map(p => p.name).join(", ")}</li>
-                <li><strong>Quantity:</strong> ${purchaseOrder.quantity}</li>
-                <li><strong>Total Value:</strong> ₹${purchaseOrder.total_value}.00</li>
+                <li><strong>Product(s) Name:</strong> ${products.map(p => p.name).join(", ")}</li>
+                <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
+                <li><strong>Total Value:</strong> ₹${computedTotal.toLocaleString('en-IN')}</li>
                 <li><strong>Created At:</strong> ${new Date(purchaseOrder.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</li>
             </ul>
 
@@ -184,11 +193,16 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
     vendor = vendor[0];
 
     const products = await db.any(
-      `SELECT P.id, P.name FROM tbl_rfq_products TRP
-       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
-       WHERE TRP.id = ANY($1)`,
-      [purchaseOrder.rfq_product_id]
+      `SELECT pv.id, pv.name, pop.quantity, pop.unit, pop.unit_price, pop.total_price
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+       WHERE pop.purchase_order_id = $1`,
+      [purchaseOrder.id]
     );
+
+    const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
     const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
 
@@ -206,8 +220,8 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
         <ul>
           <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
           <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
-          <li><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
-          <li><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+          <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
+          <li><strong>Total Value:</strong> Rs. ${computedTotal.toLocaleString('en-IN')}</li>
         </ul>
 
         <div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; padding:16px; margin:16px 0; border-radius:4px;">
@@ -255,7 +269,10 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
   try {
     let vendor = await userModel.getUserById(vendorUserId);
     vendor = vendor?.[0];
+    let vendorCompany = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
+    vendorCompany = vendorCompany?.[0];
     const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+    const companyName = vendorCompany?.company_name || 'Company';
 
     const rfqDetails = await db.oneOrNone(
       `SELECT r.id, r.rfq_no, r.title, r.hotel_id
@@ -264,10 +281,12 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
     );
 
     const products = await db.any(
-      `SELECT P.name FROM tbl_rfq_products TRP
-       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
-       WHERE TRP.id = ANY($1)`,
-      [purchaseOrder.rfq_product_id]
+      `SELECT pv.name
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+       WHERE pop.purchase_order_id = $1`,
+      [purchaseOrder.id]
     );
 
     // Get commercial evaluators for this BU
@@ -291,7 +310,7 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
           <div style="background-color:#FEE2E2; border-left:4px solid #EF4444; padding:16px; margin:16px 0; border-radius:4px;">
             <p style="margin:0; font-weight:600; color:#991B1B;">
-              ${vendorName} has rejected PO #${purchaseOrder.po_number}
+              ${companyName} has rejected PO #${purchaseOrder.po_number}
             </p>
           </div>
 
@@ -350,11 +369,15 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
     vendor = vendor[0];
 
     const products = await db.any(
-      `SELECT P.name FROM tbl_rfq_products TRP
-       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
-       WHERE TRP.id = ANY($1)`,
-      [purchaseOrder.rfq_product_id]
+      `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+       WHERE pop.purchase_order_id = $1`,
+      [purchaseOrder.id]
     );
+    const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
     const subjects = {
       1: `Gentle Reminder: PO #${purchaseOrder.po_number} awaiting your response`,
@@ -396,8 +419,8 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
           <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
           <li><strong>RFQ:</strong> #${rfqDetails?.rfq_no || ''}</li>
           <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
-          <li><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
-          <li><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+          <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
+          <li><strong>Total Value:</strong> Rs. ${computedTotal.toLocaleString('en-IN')}</li>
         </ul>
 
         <div style="background-color:${bgColors[reminderNumber] || bgColors[1]}; border-left:4px solid ${borderColors[reminderNumber] || borderColors[1]}; padding:16px; margin:16px 0; border-radius:4px;">
@@ -440,15 +463,22 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
 export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails) => {
   try {
     let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    let vendorCompany = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
     vendor = vendor?.[0];
+    vendorCompany = vendorCompany?.[0];
     const vendorName = vendor?.organization_name || vendor?.name || 'Vendor';
+    const companyName = vendorCompany?.company_name || 'Company';
 
     const products = await db.any(
-      `SELECT P.name FROM tbl_rfq_products TRP
-       JOIN tbl_product_variant P ON TRP.product_variant_id = P.id
-       WHERE TRP.id = ANY($1)`,
-      [purchaseOrder.rfq_product_id]
+      `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+       WHERE pop.purchase_order_id = $1`,
+      [purchaseOrder.id]
     );
+    const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
     // Get company details
     const companyDetails = await db.oneOrNone(`
@@ -493,7 +523,7 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
 
           <div style="background-color:#F0FDF4; border-left:4px solid #10B981; padding:16px; margin:16px 0; border-radius:4px;">
             <p style="margin:0; font-size:18px; font-weight:600; color:#166534;">
-              ${vendorName} has accepted PO #${purchaseOrder.po_number}
+              ${companyName} has accepted PO #${purchaseOrder.po_number}
             </p>
           </div>
 
@@ -507,8 +537,8 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
           <ul style="list-style:none; padding-left:0;">
             <li style="padding:4px 0;"><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
             <li style="padding:4px 0;"><strong>Product(s):</strong> ${products.map(p => p.name).join(', ') || 'N/A'}</li>
-            <li style="padding:4px 0;"><strong>Quantity:</strong> ${purchaseOrder.quantity || 'N/A'}</li>
-            <li style="padding:4px 0;"><strong>Total Value:</strong> Rs. ${Number(purchaseOrder.total_value || 0).toLocaleString('en-IN')}</li>
+            <li style="padding:4px 0;"><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
+            <li style="padding:4px 0;"><strong>Total Value:</strong> Rs. ${computedTotal.toLocaleString('en-IN')}</li>
           </ul>
 
           <h4 style="margin-top:24px; color:#1F2937;">Vendor Details</h4>

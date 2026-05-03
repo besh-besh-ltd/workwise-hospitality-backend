@@ -16,7 +16,7 @@
       border-collapse: collapse;
     }
     td, th {
-      padding: 4px;
+      padding: 6px 8px;
       vertical-align: top;
     }
     .border {
@@ -27,6 +27,9 @@
     }
     .right {
       text-align: right;
+    }
+    .left {
+      text-align: left;
     }
     .bold {
       font-weight: bold;
@@ -239,17 +242,18 @@
     <span style="float:right;">All Rates & Amount are in INR</span>
   </div>
 
-  <!-- ITEMS TABLE - Updated with Size and Specification -->
+  <!-- ITEMS TABLE -->
   <table class="border">
     <thead>
-      <tr class="border bold center">
-        <th style="width: 5%;">Sl</th>
-        <th style="width: 40%;">Item Name & Description</th>
-        <th style="width: 8%;">UOM</th>
-        <th style="width: 10%;">Quantity</th>
-        <th style="width: 12%;">Rate</th>
-        <th style="width: 8%;">GST (%)</th>
-        <th style="width: 12%;">Basic</th>
+      <tr class="border bold">
+        <th class="center" style="width: 4%;">Sl</th>
+        <th class="left" style="width: 30%;">Item Name &amp; Charges</th>
+        <th class="center" style="width: 7%;">UOM</th>
+        <th class="right" style="width: 9%;">Quantity</th>
+        <th class="right" style="width: 10%;">Rate</th>
+        <th class="center" style="width: 12%;">GST (%)</th>
+        <th class="right" style="width: 12%;">Basic</th>
+        <th class="right" style="width: 16%;">Subtotal</th>
       </tr>
     </thead>
     <tbody>
@@ -276,6 +280,11 @@
           {{#if comment}}
             <br/><span class="small">Comment: {{{nl2br comment}}}</span>
           {{/if}}
+          {{#if charge_details}}
+            {{#each charge_details}}
+              <br/><span class="small">{{name}}: ₹{{amount}}{{#if has_tax}} <span style="color:#888;">incl. ₹{{tax}} tax</span>{{/if}}</span>
+            {{/each}}
+          {{/if}}
         </td>
         <td class="center">{{unit}}</td>
         <td class="right">{{quantity}}</td>
@@ -296,6 +305,7 @@
           {{/if}}
         </td>
         <td class="right">{{basic_amount}}</td>
+        <td class="right bold">{{subtotal}}</td>
       </tr>
       {{/each}}
     </tbody>
@@ -303,34 +313,42 @@
 
   <br/>
 
-  <!-- COST BREAKUP -->
+  <!-- COST BREAKUP — only aggregated totals + PO-level global charges. The
+       per-line freight / packaging / insurance breakdown is shown inline
+       in each row's Subtotal column above, so it's not repeated here. -->
   <table>
     <tr>
       <td style="width: 60%;"></td>
       <td style="width: 40%;">
         <table>
           <tr>
-            <td class="bold">BASIC</td>
+            <td class="bold">Total Basic</td>
             <td class="right">{{basicAmount}}</td>
           </tr>
-          {{#if totalFreight}}
+          {{#if totalCharges}}
           <tr>
-            <td>Freight</td>
-            <td class="right">{{totalFreight}}</td>
-          </tr>
-          {{/if}}
-          {{#if totalPackage}}
-          <tr>
-            <td>Packaging</td>
-            <td class="right">{{totalPackage}}</td>
+            <td>Total Charges</td>
+            <td class="right">{{totalCharges}}</td>
           </tr>
           {{/if}}
           {{#each summaryTaxRows}}
           <tr>
-            <td>{{label}} ({{rate_display}}%)</td>
+            <td>{{label}}</td>
             <td class="right">{{amount}}</td>
           </tr>
           {{/each}}
+          <tr class="bold">
+            <td>Subtotal</td>
+            <td class="right">{{totalSubtotal}}</td>
+          </tr>
+          {{#if globalCharges}}
+            {{#each globalCharges}}
+            <tr>
+              <td>{{name}} <small style="color:#888; font-weight:normal;">(PO-level)</small></td>
+              <td class="right">{{amount}}</td>
+            </tr>
+            {{/each}}
+          {{/if}}
           <tr class="bold">
             <td>Total PO Value :</td>
             <td class="right">{{totalPrice}}</td>
@@ -347,7 +365,7 @@
 
   <table>
     <tr>
-      <td style="width: 50%;">
+      <td style="width: 50%; vertical-align: top; padding-right: 20px;">
         <strong>Delivery Address:</strong><br/>
         {{#if delivery_location}}
           {{delivery_location}}
@@ -361,7 +379,7 @@
           </div>
         {{/if}}
       </td>
-      <td style="width: 50%;">
+      <td style="width: 50%; vertical-align: top; padding-left: 20px;">
         <strong>Buyer Details:</strong><br/>
         {{buyer.name}}<br/>
         {{#if buyer.business_unit_name}}

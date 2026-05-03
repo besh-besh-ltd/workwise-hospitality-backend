@@ -31,9 +31,9 @@ const cn = {
   host: process.env.HOST || null,
   port: process.env.DATABASE_PORT || null,
   dialect: process.env.DATABASE_DIALECT || null,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  // RDS requires SSL; local Postgres (e.g. tests via TEST_DB_NO_SSL=1) does not.
+  // Setting `ssl: false` lets node-postgres skip the TLS handshake entirely.
+  ssl: process.env.TEST_DB_NO_SSL === "1" ? false : { rejectUnauthorized: false }
 };
 // const cn = 'postgres://process.env.DB_USER:process.env.DB_PASS@process.env.DB_HOST:process.env.DB_PORT/process.env.DB_NAME';
 
