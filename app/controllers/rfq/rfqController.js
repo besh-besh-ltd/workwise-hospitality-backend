@@ -26,7 +26,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals, findBestMatchingPolicyTx } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -3408,33 +3408,25 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     rfq.hospitality_company_id,
     rfq.hotel_id,
     rfq.department_id,
-    txContext
+    txContext,
+    rfq.process_id
   );
 
   if (isFinalApprover) {
     // Creator is the final approver - auto-approve immediately
     logger.info(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
 
-    // Create an approved approval instance for audit trail
-    const policy = await dbContext.oneOrNone(`
-      SELECT p.*,
-             CASE
-               WHEN $4 IS NOT NULL AND $3 IS NOT NULL THEN 3
-               WHEN $3 IS NOT NULL THEN 2
-               ELSE 1
-             END as specificity_score
-      FROM tbl_approval_policies p
-      WHERE entity_type = $1
-        AND hospitality_company_id = $2
-        AND is_active = true
-        AND (
-          ($4 = department_id AND $3 = hotel_id)
-          OR (department_id IS NULL AND $3 = hotel_id)
-          OR (department_id IS NULL AND hotel_id IS NULL)
-        )
-      ORDER BY specificity_score DESC
-      LIMIT 1
-    `, [entityType, rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id]);
+    // Resolve the policy via the same process-scoped resolver the rest of the
+    // approval engine uses. Previously this site duplicated the lookup with
+    // an inline SQL that omitted process_id from the WHERE clause, allowing
+    // cross-process fall-through (F-APPROVAL-001).
+    const policy = await findBestMatchingPolicyTx({
+      entity_type: entityType,
+      hospitality_company_id: rfq.hospitality_company_id,
+      hotel_id: rfq.hotel_id,
+      department_id: rfq.department_id,
+      process_id: rfq.process_id,
+    }, dbContext);
 
     if (!policy) {
       throw new Error(`No approval policy found for ${entityType} in this scope`);
