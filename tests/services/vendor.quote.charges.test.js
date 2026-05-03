@@ -174,7 +174,11 @@ const CHARGE_INSURANCE_PCT = {
   comment: "transit insurance",
 };
 const CHARGE_LOADING_ABS = {
+  // tax: 0 is the deliberate tri-state escape hatch for genuinely
+  // non-taxable services (PR #124 Change A). Comment is now mandatory
+  // for every per-product charge (PR #124 Change B).
   name: "Loading/Unloading", amount: 1500, amount_mode: "absolute", tax: 0, tax_mode: "absolute",
+  comment: "crane + crew",
 };
 const CHARGE_CUSTOM_NEW = {
   name: "xyz 2.0", amount: 50, amount_mode: "absolute", tax: 50, tax_mode: "absolute",
@@ -494,7 +498,10 @@ describe("getQuoteComparison — per-charge tax fallback to item.tax when charge
           other_charges: [
             { name: "Freight", amount: 10, amount_mode: "percentage", tax: 9, tax_mode: "percentage",
               comment: "Pune → Mumbai trucking" },
-            { name: "Insurance", amount: 50, amount_mode: "absolute" /* no tax / no tax_mode */ },
+            // No tax / no tax_mode → falls through to inheritance (item.tax = 18%).
+            // Comment is mandatory under PR #124 Change B even when the test's
+            // intent is "no explicit tax".
+            { name: "Insurance", amount: 50, amount_mode: "absolute", comment: "transit cover" },
           ],
         })],
       },
@@ -579,8 +586,9 @@ describe("updateQuoteItems — revised other_charges + audit trail", () => {
           product_id: 1, variant: 0, unit_price: 500, tax: 18, tax_mode: "percentage",
           total_price: 5300, comment: "revised", delivery_period: "5d", quantity: "10",
           other_charges: [
+            // Comment ≤30 chars (PR #124 Change B caps per-product charge comments).
             { name: "Freight", amount: 300, amount_mode: "percentage", tax: 9, tax_mode: "percentage",
-              comment: "Pune → Mumbai trucking — revised" },
+              comment: "Pune→Mumbai (revised rate)" },
             { name: "Packaging", amount: 250, amount_mode: "absolute", tax: 18, tax_mode: "percentage",
               comment: "now using cardboard" },
           ],
@@ -588,6 +596,10 @@ describe("updateQuoteItems — revised other_charges + audit trail", () => {
       },
     });
     await rfqController.updateQuoteItems(update.req, update.res, update.next);
+    // Surface validation rejections explicitly. Without this guard, a
+    // future contract change that 400s would silently leak as a "row
+    // didn't change" assertion below.
+    expect(update.calls.status).toBe(200);
 
     // tbl_quote_items now holds the revised value.
     const liveItem = await db.one(
