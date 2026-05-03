@@ -22,18 +22,22 @@ const DEPARTMENTS = [
 
 export async function seedNetwork(t) {
   // Parent company identity rows. tbl_company holds top-level identity for
-  // both buyer entities (one row per buyer company) and vendors (one row per
-  // vendor user). is_hospitality flags the buyer-side rows.
+  // both buyer entities and vendors. `is_hospitality=1` marks any company
+  // (buyer OR vendor) that participates in the hospitality module — the
+  // gate that `modifySubscription`, `extendSubscription`, etc. check at the
+  // top of every WH-74 endpoint. We seed all vendor companies as
+  // hospitality vendors because Wave-2 tests exercise vendor-facing
+  // hospitality flows; non-hospitality vendors are out of scope here.
   await t.none(
     `INSERT INTO tbl_company (id, company_name, is_hospitality, "createdAt")
      VALUES
        ($1, 'Company A — Hospitality Group',  1, now()),
        ($2, 'Company B — Hospitality Group',  1, now()),
-       ($3, 'Alpha Vendor Pvt Ltd',           0, now()),
-       ($4, 'Beta Vendor Pvt Ltd',            0, now()),
-       ($5, 'Gamma Vendor Pvt Ltd',           0, now()),
-       ($6, 'Delta Vendor Pvt Ltd',           0, now()),
-       ($7, 'Epsilon Vendor Pvt Ltd',         0, now())
+       ($3, 'Alpha Vendor Pvt Ltd',           1, now()),
+       ($4, 'Beta Vendor Pvt Ltd',            1, now()),
+       ($5, 'Gamma Vendor Pvt Ltd',           1, now()),
+       ($6, 'Delta Vendor Pvt Ltd',           1, now()),
+       ($7, 'Epsilon Vendor Pvt Ltd',         1, now())
      ON CONFLICT (id) DO NOTHING`,
     [
       IDS.companies.A,
