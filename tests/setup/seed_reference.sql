@@ -2795,7 +2795,15 @@ INSERT INTO public.tbl_permissions VALUES
 	(29, 'awarding', 'approve', 5),
 	(32, 'tender', 'approve', 0),
 	(33, 'arc', 'approve', 0),
-	(34, 'awarding', 'regenerate', 5);
+	(34, 'awarding', 'regenerate', 5),
+	(35, 'tender', 'create', 0),
+	(36, 'tender', 'publish', 0),
+	(37, 'tender', 'update', 0),
+	(38, 'arc', 'create', 0),
+	(39, 'arc', 'send_back', 0),
+	(40, 'te', 'send_back', 0),
+	(41, 'negotiation', 'send_back', 0),
+	(42, 'rfq', 'bypass_arc', 0);
 
 
 --
@@ -50974,7 +50982,7 @@ SELECT pg_catalog.setval('public.tbl_country_code_id_seq', 249, true);
 -- Name: tbl_permissions_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public.tbl_permissions_id_seq', 34, true);
+SELECT pg_catalog.setval('public.tbl_permissions_id_seq', 42, true);
 
 
 --

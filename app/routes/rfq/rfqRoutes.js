@@ -22,7 +22,6 @@ RfqRoutes.post(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  // can('tender.create'),
   validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create

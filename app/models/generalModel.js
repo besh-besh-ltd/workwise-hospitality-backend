@@ -2060,7 +2060,42 @@ export async function createApprovalInstance({
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
+        // Tender-chain calls (any tender stage with an explicit process_id)
+        // surface a structured code so the FE can deep-link admins to the
+        // approval-process configuration rather than just showing a generic
+        // missing-policy message.
+        if (process_id && ['TENDER', 'TECHNICAL', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type)) {
+          const err = new Error(
+            `TENDER_POLICY_NOT_CONFIGURED: No ${entity_type} approval policy configured under process ${process_id} for this scope`
+          );
+          err.code = 'TENDER_POLICY_NOT_CONFIGURED';
+          err.details = { entity_type, process_id, hospitality_company_id, hotel_id, department_id };
+          throw err;
+        }
         throw new Error(`No approval policy found for ${entity_type} in this scope`);
+      }
+      // Strict process-match guard for the tender chain. findBestMatchingPolicyTx
+      // accepts NULL-process policies as a fallback (back-compat with legacy
+      // RFQ flows). For tenders we must NEVER fall back: a routine RFQ
+      // committee should not silently approve a tender stage. If the matched
+      // policy is process-agnostic while the caller specified a process_id
+      // and the entity is tender-chain, treat it as if no policy were found.
+      if (
+        process_id &&
+        ['TENDER', 'TECHNICAL', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type) &&
+        policy.process_id !== process_id
+      ) {
+        const err = new Error(
+          `TENDER_POLICY_NOT_CONFIGURED: A process-agnostic policy exists but tenders require a policy bound to process ${process_id}`
+        );
+        err.code = 'TENDER_POLICY_NOT_CONFIGURED';
+        err.details = {
+          entity_type,
+          process_id,
+          matched_policy_id: policy.id,
+          matched_policy_process_id: policy.process_id,
+        };
+        throw err;
       }
     }
 

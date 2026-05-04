@@ -250,6 +250,32 @@ export const rfqSchemas = {
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
     process_id: Joi.number().integer().optional().allow(null),
+    // Tender-only fields. Required when is_tender=1 (enforced in controller +
+    // tied to tender_scope-driven hotel count rules below).
+    tender_scope: Joi.string()
+      .valid('SINGLE', 'GROUP')
+      .when('is_tender', { is: 1, then: Joi.required(), otherwise: Joi.optional().allow(null) }),
+    arc_period_from: Joi.string()
+      .when('is_tender', { is: 1, then: Joi.required(), otherwise: Joi.optional().allow(null, '') })
+      .custom((value, helpers) => {
+        if (!value) return value;
+        const d = new Date(value);
+        if (isNaN(d.getTime())) return helpers.message('arc_period_from must be a valid date');
+        return value;
+      }),
+    arc_period_to: Joi.string()
+      .when('is_tender', { is: 1, then: Joi.required(), otherwise: Joi.optional().allow(null, '') })
+      .custom((value, helpers) => {
+        if (!value) return value;
+        const { arc_period_from } = helpers.state.ancestors[0];
+        const to = new Date(value);
+        if (isNaN(to.getTime())) return helpers.message('arc_period_to must be a valid date');
+        if (arc_period_from) {
+          const from = new Date(arc_period_from);
+          if (to <= from) return helpers.message('arc_period_to must be strictly after arc_period_from');
+        }
+        return value;
+      }),
     title: Joi.string().required(),
   }),
   // WH-69: snapshot-based update. Frontend sends the full intended state of

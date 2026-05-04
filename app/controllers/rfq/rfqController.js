@@ -11,6 +11,7 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
+import arcModel from '../../models/arcModel.js';
 import userModel from '../../models/userModel.js';
 import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
@@ -2150,6 +2151,9 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       termsChanged,
       termFilesChanged,
       title,
+      tender_scope,
+      arc_period_from,
+      arc_period_to,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
@@ -2316,6 +2320,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       hotel_id: hotel_id || null,
       department_id: department_id || null,
       process_id: process_id || null,
+      // Tender-only fields — persisted regardless of draft/published so a
+      // page refresh preserves them. The /create endpoint does a final
+      // authoritative UPDATE so any drift between draft and published is
+      // resolved there.
+      tender_scope: is_tender === 1 ? (tender_scope || null) : null,
+      arc_period_from: is_tender === 1 ? (arc_period_from || null) : null,
+      arc_period_to: is_tender === 1 ? (arc_period_to || null) : null,
       ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
       ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
@@ -4978,6 +4989,57 @@ const rfqController = {
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
 
+      // Tender gates — enforced before any DB write so a malformed tender
+      // request never produces a partial draft. The Joi schema covers field
+      // presence; this block covers cross-field invariants that depend on
+      // database state (process_type, hotel→company joins).
+      const isTender = req.body.is_tender === 1 || req.body.is_tender === '1';
+      if (isTender) {
+        const { tender_scope, hotel_ids, process_id, arc_period_from, arc_period_to } = req.body;
+        if (!process_id) {
+          return res.status(400).json({ status: 3, errors: { process_id: 'process_id is required for tenders' } }).end();
+        }
+        // Process must exist and be of process_type='TENDER'
+        const procRow = await db.oneOrNone(
+          `SELECT id, process_type, is_active FROM tbl_approval_processes WHERE id = $1`,
+          [process_id]
+        );
+        if (!procRow || !procRow.is_active) {
+          return res.status(400).json({ status: 3, errors: { process_id: 'Selected approval process is invalid or inactive' } }).end();
+        }
+        if (procRow.process_type !== 'TENDER') {
+          return res.status(400).json({ status: 3, errors: { process_id: `Selected process is of type '${procRow.process_type}', tenders require a TENDER process` } }).end();
+        }
+
+        const hotels = Array.isArray(hotel_ids) ? hotel_ids.map(Number).filter(Number.isFinite) : [];
+        if (tender_scope === 'SINGLE' && hotels.length !== 1) {
+          return res.status(400).json({ status: 3, errors: { hotel_ids: 'Single ARC requires exactly one hotel' } }).end();
+        }
+        if (tender_scope === 'GROUP' && hotels.length < 2) {
+          return res.status(400).json({ status: 3, errors: { hotel_ids: 'Group ARC requires at least two hotels' } }).end();
+        }
+        if (tender_scope === 'GROUP' && hotels.length >= 2) {
+          // All hotels must share one hospitality_company_id
+          const rows = await db.any(
+            `SELECT DISTINCT hospitality_company_id
+             FROM tbl_hospitality_company_hotels
+             WHERE id = ANY($1::int[]) AND is_deleted = 0`,
+            [hotels]
+          );
+          if (rows.length !== 1) {
+            return res.status(400).json({ status: 3, errors: { hotel_ids: 'Group ARC hotels must all belong to the same hospitality company' } }).end();
+          }
+        }
+
+        // Period: from must be today or later; to strictly after from (Joi
+        // already covered to>from formally; redo here to also block past dates)
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const fromDate = new Date(arc_period_from);
+        if (fromDate < today) {
+          return res.status(400).json({ status: 3, errors: { arc_period_from: 'ARC period start cannot be in the past' } }).end();
+        }
+      }
+
       // Normalize reverse_auction to boolean for consistent checks
       const isReverseAuctionEnabled = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
 
@@ -5109,13 +5171,21 @@ const rfqController = {
           hospitality_company_name = hotelRecord?.hospitality_company_name || null
         }
 
-        // Update RFQ with hotel_id, hospitality_company_id
-        // All RFQs start in PENDING_APPROVAL state (status=3, is_published=0)
-        // After approval completes, status transitions to READY_TO_PUBLISH (4)
-        // Then scheduler publishes when tender_publish_date is reached
+        // Update RFQ with hotel_id, hospitality_company_id (and tender fields
+        // when applicable). Tenders carry tender_scope + ARC period dates here;
+        // these are also written to the draft via saveRfqDraft above, but we
+        // keep this UPDATE authoritative so a stale draft cannot corrupt the
+        // final values.
         const updateResult = await t.any(
           `UPDATE tbl_rfq
-           SET is_published = 0, status = 3, hotel_id = $1, hospitality_company_id = $2, company_name = $3
+           SET is_published = 0,
+               status = 3,
+               hotel_id = $1,
+               hospitality_company_id = $2,
+               company_name = $3,
+               tender_scope = COALESCE($5, tender_scope),
+               arc_period_from = COALESCE($6::date, arc_period_from),
+               arc_period_to = COALESCE($7::date, arc_period_to)
            WHERE id = $4
            RETURNING *`,
           [
@@ -5123,11 +5193,19 @@ const rfqController = {
             hospitality_company_id,
             hospitality_company_name,
             rfq_id,
+            isTender ? req.body.tender_scope : null,
+            isTender ? (req.body.arc_period_from || null) : null,
+            isTender ? (req.body.arc_period_to || null) : null,
           ]
         );
 
-        // Duplicate RFQ for other hotels (passes transaction context)
-        const duplicationResult = await duplicateRfqForHotels(rfq_id, req.body.hotel_ids || [], user_id, t);
+        // Duplicate RFQ for other hotels — only for non-tender RFQs. Group ARC
+        // tenders are a SINGLE rfq_id covering N hotels via tbl_rfq_hotel_mappings;
+        // duplicating would produce N parallel tenders with N parallel approval
+        // chains, breaking the single-envelope-per-tender contract.
+        const duplicationResult = isTender
+          ? { originalRfqId: rfq_id, duplicatedRfqIds: [], allRfqIds: [rfq_id] }
+          : await duplicateRfqForHotels(rfq_id, req.body.hotel_ids || [], user_id, t);
 
         // Start approval process for all RFQs (original + duplicates)
         // IMPORTANT: For hospitality RFQs, approval policy is REQUIRED
@@ -9426,84 +9504,116 @@ const rfqController = {
             remarks: null
           });
 
-          // ARC Route: Create ARC approval immediately for this product (TENDER ONLY)
+          // ARC Route: Build the per-(rfq, vendor) envelope, attach this
+          // line item, and spawn a per-arc-item approval instance. The
+          // envelope is incrementally populated — each finalize call
+          // contributes one ARC item to the vendor's envelope. The
+          // committee then acts at the (product × vendor) cell granularity
+          // (Phase 3 matrix UI). Tenders only.
           if (selectedRoute === 'ARC') {
             try {
-              // Get RFQ details using model
               const rfqData = await rfqModel.getRfqWithHospitalityDetails(rfq_id, t);
-              
-              // VALIDATION: ARC is only applicable for tenders (is_tender = 1)
+
               if (!rfqData || rfqData.is_tender !== 1) {
                 throw new Error('ARC approval is only applicable for tenders (is_tender = 1). This RFQ is not a tender.');
               }
-              
-              // VALIDATION: Must be hospitality RFQ
               if (!rfqData.hospitality_company_id) {
                 throw new Error('ARC approval is only available for hospitality RFQs/Tenders');
               }
-              
-              // Get rfq_product_id using model
+
               const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
-              
               if (!rfqProduct) {
                 throw new Error('RFQ product not found');
               }
-              
               const rfqProductId = rfqProduct.id;
-              
-              // Check if ARC approval already exists for this product using model
-              const existingArcApprovals = await getApprovalInstancesByEntity('ARC', rfqProductId, t);
-              const existingArcApproval = existingArcApprovals.find(inst => 
-                inst.status === 'PENDING' || inst.status === 'APPROVED'
+
+              // 1) Resolve-or-create the per-vendor ARC envelope and copy
+              //    covered hotels from tbl_rfq_hotel_mappings.
+              const envelope = await arcModel.ensureEnvelope({
+                rfq_id,
+                vendor_id,
+                created_by: req.user.id,
+                txContext: t,
+              });
+
+              // 2) Insert the (product, vendor) line item under the envelope.
+              //    Quote unit price snapshotted from the chosen quote so the
+              //    contracted-price stays stable across later quote edits.
+              const quoteRow = await t.oneOrNone(
+                `SELECT unit_price, total_price, charges_meta
+                 FROM tbl_quote_items WHERE id = $1`,
+                [quote_item_id || quote_id]
               );
-              
-              if (existingArcApproval) {
-                // ARC approval already exists for this product
-                logger.debug('ARC approval already exists for product ${rfqProductId}');
-                arcApprovalCreated = true;
-              } else {
-                // Create ARC approval instance for this product
+
+              const arcItem = await arcModel.upsertItem({
+                arc_id: envelope.id,
+                rfq_product_id: rfqProductId,
+                product_variant_id,
+                variant,
+                quote_id,
+                unit_price: quoteRow?.unit_price ?? 0,
+                charges_meta: quoteRow?.charges_meta ?? null,
+                txContext: t,
+              });
+
+              // 3) Spawn the per-item approval instance — but only if one
+              //    isn't already attached. Re-finalization of the same
+              //    (product, vendor) is idempotent.
+              if (!arcItem.approval_instance_id) {
                 const arcApprovalResult = await createApprovalInstance({
                   entity_type: 'ARC',
-                  entity_id: rfqProductId, // Product-level, not RFQ-level
+                  entity_id: arcItem.id, // ARC-item level (was product-level)
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
                   department_id: rfqData.department_id || null,
                   process_id: rfqData.process_id || null,
                   initiated_by: req.user.id,
                   metadata: {
-                    rfq_id: rfq_id,
+                    rfq_id,
+                    arc_id: envelope.id,
+                    arc_item_id: arcItem.id,
                     rfq_product_id: rfqProductId,
                     rfq_number: rfq_no,
-                    product_variant_id: product_variant_id,
-                    variant: variant,
-                    vendor_id: vendor_id,
-                    quote_id: quote_id,
+                    product_variant_id,
+                    variant,
+                    vendor_id,
+                    quote_id,
                     is_tender: rfqData.is_tender,
                     company_name: rfqData.company_name,
-                    triggered_by: 'product_finalization'
+                    triggered_by: 'product_finalization',
                   },
-                  txContext: t
+                  txContext: t,
                 });
-                
+
                 if (arcApprovalResult) {
                   arcApprovalCreated = true;
-                  // Record lifecycle event for ARC submission
+                  if (arcApprovalResult.instance?.id) {
+                    await arcModel.setItemApprovalInstance({
+                      arc_item_id: arcItem.id,
+                      approval_instance_id: arcApprovalResult.instance.id,
+                      txContext: t,
+                    });
+                  }
                   await recordLifecycleEvent({
-                    entity_type: 'TENDER', // Always TENDER for ARC
+                    entity_type: 'TENDER',
                     entity_id: rfq_id,
-                    stage: 'ARC_SUBMITTED',
+                    stage: 'ARC_PENDING_COMMITTEE',
                     action: 'SUBMIT_ARC',
                     performed_by: req.user.id,
                     metadata: {
+                      arc_id: envelope.id,
+                      arc_item_id: arcItem.id,
+                      vendor_id,
                       rfq_product_id: rfqProductId,
                       approval_instance_id: arcApprovalResult.instance?.id,
-                      auto_approved: arcApprovalResult.autoApproved || false
+                      auto_approved: arcApprovalResult.autoApproved || false,
                     },
                     remarks: null,
-                    txContext: t
+                    txContext: t,
                   });
                 }
+              } else {
+                arcApprovalCreated = true;
               }
             } catch (arcError) {
               // Log error but don't fail the finalization

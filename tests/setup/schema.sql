@@ -150,7 +150,8 @@ CREATE TYPE public.lifecycle_entity_type AS ENUM (
     'INDENT',
     'TECHNICAL',
     'ARC',
-    'NEGOTIATION'
+    'NEGOTIATION',
+    'ARC_RELEASE'
 );
 
 
@@ -176,7 +177,10 @@ CREATE TYPE public.permission_action_type AS ENUM (
     'update',
     'delete',
     'approve',
-    'regenerate'
+    'regenerate',
+    'send_back',
+    'publish',
+    'bypass_arc'
 );
 
 
@@ -3623,7 +3627,16 @@ CREATE TABLE public.tbl_rfq (
     department_id integer,
     title character varying(500),
     technical_evaluation_by integer,
-    process_id integer
+    process_id integer,
+    tender_scope character varying(8),
+    arc_period_from date,
+    arc_period_to date,
+    bypass_arc smallint DEFAULT 0,
+    bypass_arc_reason text,
+    bypass_arc_recorded_by integer,
+    bypass_arc_recorded_at timestamp without time zone,
+    iteration_number integer DEFAULT 1 NOT NULL,
+    CONSTRAINT chk_tbl_rfq_tender_scope CHECK (tender_scope IS NULL OR tender_scope IN ('SINGLE', 'GROUP'))
 );
 
 
@@ -4507,7 +4520,7 @@ CREATE TABLE public.tbl_rfq_products_specs (
 
 CREATE TABLE public.tbl_rfq_purchase_order (
     id integer NOT NULL,
-    rfq_id integer NOT NULL,
+    rfq_id integer,
     project_id integer,
     company_id integer NOT NULL,
     po_number character varying(80) NOT NULL,
@@ -4528,7 +4541,9 @@ CREATE TABLE public.tbl_rfq_purchase_order (
     approval_instance_id integer,
     vendor_rejection_reason text,
     vendor_action_at timestamp with time zone,
-    vendor_reminder_count integer DEFAULT 0
+    vendor_reminder_count integer DEFAULT 0,
+    arc_release_id integer,
+    is_contracted smallint DEFAULT 0
 );
 
 
@@ -10913,6 +10928,179 @@ ALTER TABLE ONLY public.tbl_vendor_payments
 --
 -- PostgreSQL database dump complete
 --
+
+-- ============================================================================
+-- TENDER / ARC EXTENSIONS (Migration 001)
+-- New tables added in a single section to avoid scattering edits across the
+-- pg_dump output above. Production migration is in backend/migrations/001-tender-arc.sql.
+-- ============================================================================
+
+--
+-- Name: tbl_arc; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc (
+    id SERIAL PRIMARY KEY,
+    rfq_id integer NOT NULL,
+    vendor_id integer NOT NULL,
+    hospitality_company_id integer NOT NULL,
+    tender_scope character varying(8) NOT NULL,
+    period_from date NOT NULL,
+    period_to date NOT NULL,
+    status character varying(20) DEFAULT 'PENDING_COMMITTEE'::character varying NOT NULL,
+    document_url text,
+    document_generated_at timestamp without time zone,
+    created_by integer NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone,
+    CONSTRAINT uq_arc_rfq_vendor UNIQUE (rfq_id, vendor_id),
+    CONSTRAINT chk_arc_period CHECK (period_to > period_from),
+    CONSTRAINT chk_arc_status CHECK (status IN ('PENDING_COMMITTEE','PARTIALLY_DECIDED','DOC_GENERATED','ACTIVE','EXPIRED','VOID')),
+    CONSTRAINT chk_arc_scope CHECK (tender_scope IN ('SINGLE','GROUP')),
+    CONSTRAINT tbl_arc_rfq_id_fkey FOREIGN KEY (rfq_id) REFERENCES public.tbl_rfq(id)
+);
+CREATE INDEX idx_arc_rfq ON public.tbl_arc(rfq_id);
+CREATE INDEX idx_arc_vendor ON public.tbl_arc(vendor_id);
+CREATE INDEX idx_arc_status_period ON public.tbl_arc(status, period_to)
+    WHERE status IN ('ACTIVE','DOC_GENERATED');
+
+--
+-- Name: tbl_arc_hotels; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc_hotels (
+    id SERIAL PRIMARY KEY,
+    arc_id integer NOT NULL,
+    hotel_id integer NOT NULL,
+    CONSTRAINT uq_arc_hotel UNIQUE (arc_id, hotel_id),
+    CONSTRAINT tbl_arc_hotels_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+    CONSTRAINT tbl_arc_hotels_hotel_id_fkey FOREIGN KEY (hotel_id) REFERENCES public.tbl_hospitality_company_hotels(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_arc_hotels_hotel ON public.tbl_arc_hotels(hotel_id);
+
+--
+-- Name: tbl_arc_item; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc_item (
+    id SERIAL PRIMARY KEY,
+    arc_id integer NOT NULL,
+    rfq_product_id integer NOT NULL,
+    product_variant_id integer NOT NULL,
+    variant character varying(255),
+    quote_id integer NOT NULL,
+    unit_price numeric(14,2) NOT NULL,
+    charges_meta jsonb,
+    status character varying(20) DEFAULT 'PENDING'::character varying NOT NULL,
+    approval_instance_id integer,
+    approved_at timestamp without time zone,
+    approved_by integer,
+    rejection_remarks text,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT uq_arc_item UNIQUE (arc_id, product_variant_id, variant),
+    CONSTRAINT chk_arc_item_status CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+    CONSTRAINT tbl_arc_item_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_arc_item_product ON public.tbl_arc_item(product_variant_id);
+CREATE INDEX idx_arc_item_arc ON public.tbl_arc_item(arc_id);
+CREATE INDEX idx_arc_item_approval_instance ON public.tbl_arc_item(approval_instance_id)
+    WHERE approval_instance_id IS NOT NULL;
+
+--
+-- Name: tbl_arc_vendor_signing; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc_vendor_signing (
+    id SERIAL PRIMARY KEY,
+    arc_id integer NOT NULL,
+    status character varying(20) DEFAULT 'NOT_REQUIRED'::character varying,
+    signed_at timestamp without time zone,
+    signature_metadata jsonb,
+    reminder_count integer DEFAULT 0,
+    last_reminder_at timestamp without time zone,
+    CONSTRAINT chk_arc_signing_status CHECK (status IN ('NOT_REQUIRED','PENDING','SIGNED','REJECTED')),
+    CONSTRAINT tbl_arc_vendor_signing_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id)
+);
+CREATE INDEX idx_arc_signing_arc ON public.tbl_arc_vendor_signing(arc_id);
+
+--
+-- Name: tbl_arc_release; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc_release (
+    id SERIAL PRIMARY KEY,
+    arc_id integer NOT NULL,
+    hotel_id integer NOT NULL,
+    vendor_id integer NOT NULL,
+    created_by integer NOT NULL,
+    status character varying(20) DEFAULT 'DRAFT'::character varying,
+    total_value numeric(14,2),
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT chk_arc_release_status CHECK (status IN ('DRAFT','PO_DRAFTED','CANCELLED')),
+    CONSTRAINT tbl_arc_release_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id),
+    CONSTRAINT tbl_arc_release_hotel_id_fkey FOREIGN KEY (hotel_id) REFERENCES public.tbl_hospitality_company_hotels(id)
+);
+CREATE INDEX idx_arc_release_arc ON public.tbl_arc_release(arc_id);
+CREATE INDEX idx_arc_release_vendor_hotel ON public.tbl_arc_release(vendor_id, hotel_id);
+
+--
+-- Name: tbl_arc_release_items; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_arc_release_items (
+    id SERIAL PRIMARY KEY,
+    arc_release_id integer NOT NULL,
+    arc_item_id integer NOT NULL,
+    product_variant_id integer NOT NULL,
+    quantity numeric(14,3) NOT NULL,
+    unit_price numeric(14,2) NOT NULL,
+    total_price numeric(14,2) NOT NULL,
+    charges_meta jsonb,
+    CONSTRAINT tbl_arc_release_items_release_id_fkey FOREIGN KEY (arc_release_id) REFERENCES public.tbl_arc_release(id) ON DELETE CASCADE,
+    CONSTRAINT tbl_arc_release_items_item_id_fkey FOREIGN KEY (arc_item_id) REFERENCES public.tbl_arc_item(id)
+);
+CREATE INDEX idx_arc_release_items_release ON public.tbl_arc_release_items(arc_release_id);
+CREATE INDEX idx_arc_release_items_arc_item ON public.tbl_arc_release_items(arc_item_id);
+
+--
+-- Name: tbl_tender_sendback_history; Type: TABLE; Schema: public; Owner: -
+--
+CREATE TABLE public.tbl_tender_sendback_history (
+    id SERIAL PRIMARY KEY,
+    rfq_id integer NOT NULL,
+    iteration_number integer NOT NULL,
+    sent_back_from_stage character varying(40) NOT NULL,
+    sent_back_to_stage character varying(40) NOT NULL,
+    sent_back_by integer NOT NULL,
+    sent_back_at timestamp without time zone DEFAULT now(),
+    reason text NOT NULL,
+    snapshot_arc jsonb,
+    snapshot_finalization jsonb,
+    snapshot_negotiation jsonb,
+    snapshot_tech_eval jsonb,
+    snapshot_quotes jsonb,
+    snapshot_approval_instances jsonb,
+    affected_products integer[],
+    affected_vendors integer[],
+    metadata jsonb,
+    CONSTRAINT tbl_tender_sendback_history_rfq_id_fkey FOREIGN KEY (rfq_id) REFERENCES public.tbl_rfq(id)
+);
+CREATE INDEX idx_tender_sendback_rfq ON public.tbl_tender_sendback_history(rfq_id);
+CREATE INDEX idx_tender_sendback_iteration ON public.tbl_tender_sendback_history(rfq_id, iteration_number);
+
+--
+-- Indexes added to tbl_rfq for tender filters and contracted-item lookup
+--
+CREATE INDEX idx_tbl_rfq_tender_scope ON public.tbl_rfq(tender_scope)
+    WHERE tender_scope IS NOT NULL;
+CREATE INDEX idx_tbl_rfq_arc_period ON public.tbl_rfq(arc_period_to)
+    WHERE is_tender = 1;
+
+--
+-- FK + indexes added to tbl_rfq_purchase_order for contracted PO segregation
+--
+ALTER TABLE ONLY public.tbl_rfq_purchase_order
+    ADD CONSTRAINT tbl_rfq_purchase_order_arc_release_id_fkey
+    FOREIGN KEY (arc_release_id) REFERENCES public.tbl_arc_release(id);
+
+CREATE INDEX idx_po_arc_release ON public.tbl_rfq_purchase_order(arc_release_id)
+    WHERE arc_release_id IS NOT NULL;
+CREATE INDEX idx_po_is_contracted ON public.tbl_rfq_purchase_order(is_contracted)
+    WHERE is_contracted = 1;
 
 \unrestrict 4iYvkweprKpGCDEeusYa3UXb9A1ZL0elf3cmbvob2PGSgweg2r0CjiAlhJr4eYK
 
