@@ -66,6 +66,7 @@ const buildEngineCharges = (detail) => {
   if (freightPrice > 0) {
     synthesised.push({
       name: "Freight",
+      slug: "freight",
       amount: freightPrice,
       amount_mode: detail.freight_mode || "percentage",
       tax: legacyTaxOrNull(detail.freight_tax),
@@ -76,6 +77,7 @@ const buildEngineCharges = (detail) => {
   if (packagePrice > 0) {
     synthesised.push({
       name: "Packaging",
+      slug: "packaging",
       amount: packagePrice,
       amount_mode: detail.package_mode || "percentage",
       tax: legacyTaxOrNull(detail.package_tax),
@@ -224,12 +226,21 @@ const enrichProduct = (product, opts) => {
     ),
   };
 
-  // Freight advantage: lookup each vendor's "Freight" charge subtotal from the engine breakdown.
+  // Freight advantage: lookup each vendor's freight charge subtotal from the
+  // engine breakdown. Match by canonical slug (`freight`) rather than the
+  // user-typed name. After the migration to `other_charges`, vendors' freight
+  // entries can be named anything ("Freight Charges", "Transportation",
+  // "Logistics"), but the canonical seeded "Freight" charge always carries
+  // slug=`freight`. Legacy quotes without other_charges are synthesised with
+  // slug=`freight` in buildEngineCharges, so both paths converge on slug.
   const freightAdvantageEntries = quotations.map((quote) => {
     const detail = getDetail(quote) || {};
     const merged = mergedQuoteRow(quote, detail);
     const charges = detail.engine?.charges || [];
-    const freight = charges.find((c) => (c.name || "").toLowerCase() === "freight");
+    const freight = charges.find((c) => {
+      if (c?.slug) return c.slug === "freight";
+      return (c?.name || "").toLowerCase() === "freight";
+    });
     return {
       vendorId: merged.created_by,
       isRegret: isQuoteRegret(quote),

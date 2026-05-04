@@ -162,6 +162,11 @@ GeneralRoutes.get(
   hospitalityApprovalController.getPendingApprovalCounts
 );
 GeneralRoutes.get(
+  '/hospitality/approval/will-be-final-approver',
+  passportSignIn,
+  hospitalityApprovalController.willBeFinalApprover
+);
+GeneralRoutes.get(
   '/hospitality/approval/instance/:id/change-history',
   passportSignIn,
   hospitalityApprovalController.getInstanceChangeHistory

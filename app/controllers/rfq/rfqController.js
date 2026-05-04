@@ -6846,33 +6846,67 @@ const rfqController = {
         rfqData.po_initiators = [];
       }
 
-      // Fetch vendor PO rejections for this RFQ (used by Quote Compare to show rejection info)
+      // Fetch PO rejections (vendor-rejected AND approver-rejected) for this
+      // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
+      // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
+      //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
+      // - rejection_type='approver': PO row status='rejected'. Reason and
+      //   rejecter pulled from the matching tbl_approval_actions REJECT row,
+      //   joined via the PO's approval_instance_id.
       try {
         rfqData.vendor_rejections = await db.any(`
           SELECT
             rp.product_variant_id,
             rp.variant,
             po.finalized_vendor_id AS vendor_id,
-            u.name AS vendor_name,
-            u.organization_name AS vendor_organization,
+            vu.name AS vendor_name,
+            vu.organization_name AS vendor_organization,
             po.po_number,
-            po.vendor_rejection_reason,
-            po.vendor_action_at AS rejected_at
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
+              ELSE 'approver'
+            END AS rejection_type,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
+              ELSE aa.comment
+            END AS rejection_reason,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
+              ELSE aa.created_at
+            END AS rejected_at,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN vu.name
+              ELSE au.name
+            END AS rejected_by_name,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN NULL
+              ELSE au.email
+            END AS rejected_by_email
           FROM tbl_rfq_purchase_order po
-          JOIN tbl_users u ON u.id = po.finalized_vendor_id
+          JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
           JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+          LEFT JOIN LATERAL (
+            SELECT a.approver_user_id, a.comment, a.created_at
+            FROM tbl_approval_actions a
+            WHERE a.approval_instance_id = po.approval_instance_id
+              AND a.action = 'REJECT'
+            ORDER BY a.created_at DESC
+            LIMIT 1
+          ) aa ON TRUE
+          LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
           WHERE po.rfq_id = $1
-            AND po.status = 'rejected_by_vendor'
+            AND po.status IN ('rejected_by_vendor', 'rejected')
             AND NOT EXISTS (
               SELECT 1 FROM tbl_quote_finalization qf
               WHERE qf.rfq_id = po.rfq_id
                 AND qf.product_variant_id = rp.product_variant_id
                 AND qf.variant = rp.variant
             )
+          ORDER BY rejected_at DESC NULLS LAST
         `, [rfqData.id]);
       } catch (err) {
-        logError('Error fetching vendor rejections for RFQ', err);
+        logError('Error fetching PO rejections for RFQ', err);
         rfqData.vendor_rejections = [];
       }
 

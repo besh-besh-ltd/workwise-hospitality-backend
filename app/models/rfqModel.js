@@ -12737,6 +12737,23 @@ ORDER BY tq.timestamp DESC;
                 OR urs.department_id = RFQ.department_id
                 OR urs.department_id IS NULL
               )
+          )
+          AND (
+            -- RFQs that never went through tech eval are unaffected
+            NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_qc
+              WHERE _te_qc.rfq_id = RFQ.id
+            )
+            OR
+            -- Otherwise require at least one cleared+verified vendor on any product
+            EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_qc
+              JOIN tbl_rfq_product_tech_evaluation_cleared_vendors _cv_qc
+                ON _cv_qc.tbl_rfq_product_tech_evaluation_id = _te_qc.id
+              WHERE _te_qc.rfq_id = RFQ.id
+                AND _cv_qc.status = 1
+                AND _cv_qc.is_verified = TRUE
+            )
           )`;
       }
 
@@ -12987,7 +13004,11 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_dead_end_product,
-        -- has_po_rejection: any product has a rejected PO with no replacement
+        -- has_po_rejection: any product has a rejected PO with no replacement.
+        -- Two detection paths (defensive):
+        --   (a) tbl_rfq_purchase_order.status IN ('rejected','rejected_by_vendor')
+        --   (b) tbl_approval_instances entity_type='PO' status='REJECTED' for this RFQ
+        --       (covers approver-rejection paths even if the PO row update lags)
         (
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_products _rp_rej
@@ -12998,19 +13019,30 @@ ORDER BY tq.timestamp DESC;
                   AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
                   AND _qf_rej.variant = _rp_rej.variant
               )
-              AND EXISTS (
-                SELECT 1 FROM tbl_rfq_purchase_order _po_r
-                JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
-                WHERE _po_r.rfq_id = RFQ.id
-                  AND _pop_r.rfq_product_id = _rp_rej.id
-                  AND _po_r.status IN ('rejected', 'rejected_by_vendor')
-                  AND NOT EXISTS (
-                    SELECT 1 FROM tbl_rfq_purchase_order _po_repl
-                    JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
-                    WHERE _po_repl.rfq_id = RFQ.id
-                      AND _pop_repl.rfq_product_id = _rp_rej.id
-                      AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
-                  )
+              AND (
+                EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                  JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                  WHERE _po_r.rfq_id = RFQ.id
+                    AND _pop_r.rfq_product_id = _rp_rej.id
+                    AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                )
+                OR EXISTS (
+                  SELECT 1 FROM tbl_approval_instances _ai_rej
+                  JOIN tbl_rfq_purchase_order _po_ai ON _po_ai.id = _ai_rej.entity_id
+                  JOIN tbl_purchase_order_product _pop_ai ON _pop_ai.purchase_order_id = _po_ai.id
+                  WHERE _ai_rej.entity_type = 'PO'
+                    AND _ai_rej.status = 'REJECTED'
+                    AND _po_ai.rfq_id = RFQ.id
+                    AND _pop_ai.rfq_product_id = _rp_rej.id
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                WHERE _po_repl.rfq_id = RFQ.id
+                  AND _pop_repl.rfq_product_id = _rp_rej.id
+                  AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
               )
           )
         ) AS has_po_rejection,
