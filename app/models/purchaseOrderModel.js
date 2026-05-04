@@ -7,6 +7,7 @@ import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, 
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
+import pricingEngine from "../services/pricingEngine.js";
 import fs from 'fs';
 
 const getNextPONumber = async () => {
@@ -338,7 +339,17 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       throw new Error("No Purchase Order found by id:", po_id);
     }
 
-    const { rfq_id, project_id, total_value, rfq_product_id, quantity, unit_price, finalized_vendor_id } = purchaseOrder;
+    const { rfq_id, project_id, finalized_vendor_id } = purchaseOrder;
+
+    // Get actual product data from tbl_purchase_order_product (source of truth)
+    const poProducts = await t.any(`
+      SELECT pop.rfq_product_id, pop.quantity, pop.unit_price, pop.total_price
+      FROM tbl_purchase_order_product pop
+      WHERE pop.purchase_order_id = $1
+    `, [purchaseOrder.id]);
+    const computedTotal = poProducts.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
+    const computedQuantity = poProducts.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
+    const productIds = poProducts.map(p => p.rfq_product_id);
 
     // Get RFQ details to check if it's a hospitality RFQ
     const rfq = await t.oneOrNone(`
@@ -367,11 +378,11 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
             po_number: purchaseOrder.po_number,
             rfq_id: rfq_id,
             rfq_no: rfq.rfq_no,
-            total_value: total_value,
+            total_value: computedTotal,
             vendor_id: finalized_vendor_id,
             is_tender: rfq.is_tender,
             project_id: project_id,
-            rfq_product_id: rfq_product_id
+            rfq_product_ids: productIds
           },
           txContext: t
         });
@@ -402,11 +413,11 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       const meta = {
         rfq_id,
         project_id,
-        rfq_product_id,
-        quantity,
-        unit_price,
+        rfq_product_ids: productIds,
+        quantity: computedQuantity,
+        unit_price: poProducts.reduce((sum, p) => sum + Number(p.unit_price || 0), 0),
         finalized_vendor_id,
-        total_value,
+        total_value: computedTotal,
         po_id: purchaseOrder.id
       };
 
@@ -487,6 +498,7 @@ export const getPOItemDetails = async (purchase_order, t) => {
         pop.charges_meta->>'freight_mode'  AS freight_mode,
         pop.charges_meta->>'package_mode'  AS package_mode,
         pop.charges_meta->>'tax_mode'      AS tax_mode,
+        COALESCE(pop.charges_meta->'other_charges', '[]'::jsonb) AS other_charges,
         pv.name                            AS product_name,
         pop.quantity,
         pop.unit,
@@ -611,6 +623,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 COALESCE(VENDOR_COMPANY.company_name, VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
+                COALESCE(BUYER_HC.name, BUYER_COMPANY.company_name) AS buyer_company_name,
                 -- Check if user is approver (supports both old and new workflows)
                 CASE
                   WHEN po.approval_instance_id IS NOT NULL THEN (
@@ -696,6 +709,9 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
         JOIN tbl_users TU ON TU.id = po.initiated_by
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
         LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
+        JOIN tbl_rfq BUYER_RFQ ON BUYER_RFQ.id = po.rfq_id
+        LEFT JOIN tbl_hospitality_companies BUYER_HC ON BUYER_HC.id = BUYER_RFQ.hospitality_company_id
+        LEFT JOIN tbl_company BUYER_COMPANY ON BUYER_COMPANY.id = po.company_id
          ${whereClause}
          ORDER BY po.created_at DESC
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`
@@ -1231,6 +1247,55 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       `;
 
       await t.none(productUpdateQuery, values);
+    }
+
+    // --- 2b) Server-authoritative recompute of total_price per touched
+    // product, then re-aggregate the PO's total_value. The engine consumes
+    // the row state AFTER the patches above were applied, so any client-
+    // supplied `total_price` in the changes is silently overwritten.
+    const touchedRfqItemIds = Object.entries(productUpdates)
+      .filter(([, info]) => !info.remove)
+      .map(([id]) => Number(id));
+
+    for (const rfqItemId of touchedRfqItemIds) {
+      const row = await t.oneOrNone(
+        `SELECT quantity, unit_price, charges_meta
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1 AND rfq_product_id = $2`,
+        [poId, rfqItemId]
+      );
+      if (!row) continue;
+
+      const meta = pricingEngine.normalizeChargesMeta(row.charges_meta || {});
+      const lineOut = pricingEngine.calculateLineTotal({
+        unit_price: row.unit_price,
+        quantity: row.quantity,
+        tax: meta.tax,
+        tax_mode: meta.tax_mode,
+        other_charges: meta.other_charges,
+      });
+
+      await t.none(
+        `UPDATE tbl_purchase_order_product
+         SET total_price = $1
+         WHERE purchase_order_id = $2 AND rfq_product_id = $3`,
+        [lineOut.total, poId, rfqItemId]
+      );
+    }
+
+    // Refresh PO grand total whenever any product was touched (fields,
+    // charges, or removal — covers all paths that could shift the total).
+    if (Object.keys(productUpdates).length > 0) {
+      const summed = await t.oneOrNone(
+        `SELECT COALESCE(SUM(total_price), 0) AS total
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1`,
+        [poId]
+      );
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
+        [Number(summed?.total) || 0, poId]
+      );
     }
 
     // --- 3) Apply HSN updates (tbl_purchase_order_hsn_mapping) ---

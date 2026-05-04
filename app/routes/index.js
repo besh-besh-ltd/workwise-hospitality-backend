@@ -17,6 +17,7 @@ import NegotiationRoutes from './negotiation/negotiationRoutes.js';
 import PublicRoutes from './public/publicRoutes.js';
 import RbacRoutes from './rbac/rbacRoutes.js';
 import ArcRoutes from './arc/arcRoutes.js';
+import PricingRoutes from './pricing/pricingRoutes.js';
 
 const v1 = Router();
 
@@ -36,5 +37,6 @@ v1.use('/hospitality', HospitalityRoutes);
 v1.use('/negotiation', NegotiationRoutes);
 v1.use('/rbac', RbacRoutes);
 v1.use('/arc', ArcRoutes);
+v1.use('/pricing', PricingRoutes);
 
 export default v1;

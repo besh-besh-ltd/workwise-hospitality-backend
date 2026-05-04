@@ -15,7 +15,13 @@ import productModel from '../../models/productModel.js';
 import projectModel from '../../models/projectModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
+import rbacModel from '../../models/rbacModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import {
+  simulateApproverImpact,
+  revalidateApproverMembership,
+  dispatchPropagationEmails
+} from '../../services/approvalPropagationService.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -1161,11 +1167,68 @@ const HospitalityController = {
         });
       }
 
-      await hospitalityModel.deleteUserMappings(userId, companyId, mappingType, hotelId);
+      // Pre-flight check: would removing this mapping auto-approve any instances?
+      if (!req.body.confirmed_approval_impact) {
+        const impact = await simulateApproverImpact(userId, 'scope_removed', {
+          companyId, hotelId
+        });
+
+        if (impact.willAutoComplete) {
+          return res.status(400).json({
+            status: 3,
+            code: 'APPROVAL_AUTO_COMPLETE_BLOCKED',
+            message: 'Cannot remove mapping. This would auto-approve pending instances. Assign roles to another user first.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+
+        if (impact.affectedInstances.length > 0) {
+          return res.status(200).json({
+            status: 0,
+            code: 'APPROVAL_IMPACT_WARNING',
+            message: 'This user has pending approvals in this scope. Removing mapping will skip their approval.',
+            data: { affectedInstances: impact.affectedInstances }
+          });
+        }
+      }
+
+      // Delete mapping + cascade role scopes in a single transaction
+      let removedScopeCount = 0;
+      await db.tx(async t => {
+        await hospitalityModel.deleteUserMappings(userId, companyId, mappingType, hotelId, t);
+
+        // Cascade: remove all role scopes covering this company/hotel.
+        // For company mapping (type 0): remove ALL scopes in that company.
+        // For hotel mapping (type 1): remove scopes scoped to that specific hotel.
+        const scopeHotelId = mappingType === 0 ? null : hotelId;
+        removedScopeCount = await rbacModel.deleteUserRoleScopesForMapping(userId, companyId, scopeHotelId, t);
+      });
+
+      logger.info(`[DeleteMapping] user=${userId} company=${companyId} hotel=${hotelId} type=${mappingType} — removed ${removedScopeCount} role scopes`);
+
+      // Propagate: remove user from pending instances in this scope
+      try {
+        const propResult = await db.tx(async t => {
+          return revalidateApproverMembership({
+            userId,
+            changedBy: req.user?.id || userId,
+            changeType: 'scope_removed',
+            companyId, hotelId,
+            txContext: t
+          });
+        });
+        // Fire emails AFTER tx commits (fire-and-forget)
+        if (propResult?._emailData) {
+          dispatchPropagationEmails(propResult._emailData, req.user?.id || userId, 'scope_removed');
+        }
+      } catch (propErr) {
+        logError('Error propagating scope removal to approvals', propErr);
+      }
 
       return res.status(200).json({
         status: 1,
-        message: 'User mapping deleted successfully'
+        message: 'User mapping deleted successfully',
+        data: { removed_role_scopes: removedScopeCount }
       });
     } catch (error) {
       logError(error);

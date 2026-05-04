@@ -563,26 +563,8 @@ const hospitalityModel = {
     );
   },
 
-  getUserMappings: async (userId) => {
-    return db.any(
-      `SELECT
-        hum.id,
-        hum.user_id,
-        hum.mapping_type,
-        hum.hospitality_company_id,
-        hum.hospitality_hotel_id,
-        hum.auto_map_projects,
-        hum.created_by,
-        hum.created_at,
-        hc.name AS company_name,
-        hh.name AS hotel_name
-       FROM tbl_hospitality_user_mappings hum
-       JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id
-       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
-       WHERE hum.user_id = $1
-         AND hc.is_deleted = 0
-         AND (hh.id IS NULL OR hh.is_deleted = 0)
-
+  getUserMappings: async (userId, { includeHotelRows = false } = {}) => {
+    const expandCompanyMappings = includeHotelRows ? `
        UNION ALL
 
        SELECT
@@ -613,7 +595,28 @@ const hospitalityModel = {
              AND hum2.hospitality_company_id = hc.id
              AND hum2.hospitality_hotel_id = hh.id
              AND hum2.mapping_type = 1
-         )`,
+         )` : '';
+
+    return db.any(
+      `SELECT
+        hum.id,
+        hum.user_id,
+        hum.mapping_type,
+        hum.hospitality_company_id,
+        hum.hospitality_hotel_id,
+        hum.auto_map_projects,
+        hum.created_by,
+        hum.created_at,
+        hc.name AS company_name,
+        hh.name AS hotel_name
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
+       WHERE hum.user_id = $1
+         AND hc.is_deleted = 0
+         AND (hh.id IS NULL OR hh.is_deleted = 0)
+       ${expandCompanyMappings}
+       ORDER BY hospitality_company_id, mapping_type ASC, hotel_name ASC`,
       [userId]
     );
   },
@@ -837,8 +840,8 @@ const hospitalityModel = {
     );
   },
 
-  deleteUserMappings: async (userId, companyId, mappingType, hotelId = null) => {
-    return db.result(
+  deleteUserMappings: async (userId, companyId, mappingType, hotelId = null, t = db) => {
+    return t.result(
       `DELETE FROM tbl_hospitality_user_mappings
        WHERE user_id = $1
          AND hospitality_company_id = $2

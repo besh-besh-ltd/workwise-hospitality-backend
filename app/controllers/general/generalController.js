@@ -22,11 +22,23 @@ import generalModel, {
   getApprovalProcesses,
   updateApprovalProcess,
   deleteApprovalProcess,
-  getDepartmentSubGraphPreview
+  getDepartmentSubGraphPreview,
+  checkIfUserIsFinalApprover
 } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
-import { AVAILABLE_HIERARCHY_TYPES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../../util/constants.js';
+import {
+  snapshotPolicySteps,
+  computePolicyStepDiff,
+  propagatePolicyChangeToInstances,
+  handleAutoCompletedInstances,
+  getPendingInstancesForPolicy,
+  getInstanceChangeHistory as getInstanceChangeHistoryService,
+  simulateApproverImpact,
+  dispatchPropagationEmails
+} from '../../services/approvalPropagationService.js';
+import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
+import db from '../../config/dbConn.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -369,9 +381,9 @@ const hospitalityApprovalController = {
         process_id,
         is_active,
         is_master,
-        is_department_scoped,
         steps,
-        id
+        id,
+        confirmed_approval_impact
       } = req.body;
       const created_by = req.user?.id;
 
@@ -380,23 +392,128 @@ const hospitalityApprovalController = {
       }
 
       let policy;
+      let propagationResult = null;
       if (id) {
-        // Update existing policy
-        policy = await updateApprovalPolicy(id, {
-          entity_type,
-          hospitality_company_id,
-          hotel_id,
-          department_id,
-          process_id,
-          is_active,
-          is_master,
-          is_department_scoped: is_department_scoped !== undefined
-            ? is_department_scoped
-            : undefined
-        });
+        logger.info(`[PolicyUpdate] Starting update for policy ${id}, steps provided: ${!!(steps && steps.length > 0)}, step count: ${steps?.length || 0}, confirmed_approval_impact: ${!!confirmed_approval_impact}`);
+
+        // ── PHASE 1: Snapshot old steps BEFORE any mutations ──
+        let oldSteps = [];
         if (steps && steps.length > 0) {
-          await deletePolicySteps(id);
-          await insertPolicySteps(steps, id);
+          oldSteps = await snapshotPolicySteps(id);
+          logger.info(`[PolicyUpdate] Old steps snapshot: ${oldSteps.length} steps, IDs: [${oldSteps.map(s => s.id).join(',')}], orders: [${oldSteps.map(s => s.step_order).join(',')}]`);
+        }
+
+        // ── PHASE 2: Pre-flight impact check ──
+        // Compute diff against the proposed steps BEFORE applying any DB changes,
+        // so we can warn the admin if PENDING instances would be affected.
+        if (oldSteps.length > 0 && steps && steps.length > 0) {
+          const previewDiff = computePolicyStepDiff(oldSteps, steps);
+          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+
+          if (previewDiff.length > 0 && !confirmed_approval_impact) {
+            const pendingInstances = await getPendingInstancesForPolicy(id);
+            logger.info(`[PolicyUpdate] Pre-flight pending instances for policy ${id}: ${pendingInstances.length}`);
+
+            if (pendingInstances.length > 0) {
+              const instances = pendingInstances.map(inst => {
+                const metadata = typeof inst.metadata === 'string' ? JSON.parse(inst.metadata) : inst.metadata;
+                return {
+                  id: inst.id,
+                  entity_type: inst.entity_type,
+                  entity_id: inst.entity_id,
+                  current_step: inst.current_step,
+                  total_steps: parseInt(inst.total_steps),
+                  entity_identifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${inst.entity_id}`,
+                  created_at: inst.created_at
+                };
+              });
+
+              const diff_summary = {
+                steps_added: previewDiff.filter(d => d.type === 'STEP_ADDED').map(d => d.step_order),
+                steps_removed: previewDiff.filter(d => d.type === 'STEP_REMOVED').map(d => d.step_order),
+                steps_modified: previewDiff
+                  .filter(d => d.type === 'STEP_MODIFIED')
+                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged }))
+              };
+
+              logger.info(`[PolicyUpdate] Returning APPROVAL_IMPACT_WARNING for policy ${id} (${pendingInstances.length} pending) — save aborted`);
+              return res.status(200).json({
+                status: 0,
+                code: 'APPROVAL_IMPACT_WARNING',
+                message: 'This policy change will affect pending approvals. Confirmation required.',
+                data: {
+                  policy_id: id,
+                  entity_type,
+                  pending_count: pendingInstances.length,
+                  instances,
+                  diff_summary
+                }
+              });
+            }
+          }
+        }
+
+        // ── PHASE 3 + 4 (atomic): policy mutation + propagation in one tx ──
+        // - SELECT ... FOR UPDATE on the policy row at the start serializes
+        //   concurrent saves of the same policy (no more deadlocks from two
+        //   admins or a double-clicked save fighting for tbl_approval_policy_steps).
+        // - If propagation throws, the policy mutation rolls back too, so we
+        //   never leave a half-applied state ("policy saved but propagation failed").
+        const txResult = await db.tx(async t => {
+          // Acquire row-level lock on the policy. Any concurrent save against
+          // the same policy will block here until this tx commits/rolls back.
+          await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);
+
+          const updatedPolicy = await updateApprovalPolicy(id, {
+            entity_type,
+            hospitality_company_id,
+            hotel_id,
+            department_id,
+            process_id,
+            is_active,
+            is_master
+          }, t);
+
+          let newSteps = [];
+          if (steps && steps.length > 0) {
+            await deletePolicySteps(id, t);
+            newSteps = await insertPolicySteps(steps, id, t);
+          }
+
+          // PHASE 4: Compute diff against the steps we just wrote, propagate.
+          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${oldSteps.length}, newSteps=${newSteps.length}`);
+          let propResult = null;
+          if (oldSteps.length > 0 && newSteps.length > 0) {
+            const diff = computePolicyStepDiff(oldSteps, newSteps);
+            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+
+            if (diff.length > 0) {
+              // Re-read the policy inside the tx to get the up-to-date row.
+              const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
+
+              propResult = await propagatePolicyChangeToInstances({
+                policyId: id, diff, changedBy: created_by, policy: fullPolicy, t
+              });
+              logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted })}`);
+            }
+          } else {
+            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${oldSteps.length}, newSteps.length=${newSteps.length}`);
+          }
+
+          return { policy: updatedPolicy, propagationResult: propResult };
+        });
+
+        policy = txResult.policy;
+        propagationResult = txResult.propagationResult;
+
+        // Fire post-approval handlers for auto-completed instances (after tx commits)
+        if (propagationResult?.autoCompletedInstanceIds?.length > 0) {
+          handleAutoCompletedInstances(propagationResult.autoCompletedInstanceIds, created_by, 'policy_change');
+        }
+
+        // Send email notifications (fire-and-forget, after tx commits)
+        if (propagationResult?._emailData) {
+          dispatchPropagationEmails(propagationResult._emailData, created_by, 'policy_change');
         }
       } else {
         // Create new policy
@@ -415,26 +532,38 @@ const hospitalityApprovalController = {
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
-        policy = await createApprovalPolicy({
-          entity_type,
-          hospitality_company_id,
-          hotel_id,
-          department_id,
-          process_id: process_id ? parseInt(process_id) : null,
-          created_by,
-          is_active,
-          is_master: is_master || false,
-          is_department_scoped: is_department_scoped !== undefined
-            ? is_department_scoped
-            : DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type)
+        // Atomic create: policy row + steps in one tx, so a step-insert failure
+        // doesn't leave an orphan policy behind.
+        policy = await db.tx(async t => {
+          const newPolicy = await createApprovalPolicy({
+            entity_type,
+            hospitality_company_id,
+            hotel_id,
+            department_id,
+            process_id: process_id ? parseInt(process_id) : null,
+            created_by,
+            is_active,
+            is_master: is_master || false
+          }, t);
+          if (steps && steps.length > 0) {
+            await insertPolicySteps(steps, newPolicy.id, t);
+          }
+          return newPolicy;
         });
-        if (steps && steps.length > 0) {
-          await insertPolicySteps(steps, policy.id);
-        }
       }
 
       const fullPolicy = await getApprovalPolicyWithSteps(policy.id);
-      res.status(id ? 200 : 201).json({ status: 1, data: fullPolicy });
+      const response = { status: 1, data: fullPolicy };
+      if (propagationResult && propagationResult.instancesAffected > 0) {
+        response.propagation = {
+          instances_affected: propagationResult.instancesAffected,
+          total_approvers_added: propagationResult.totalApproversAdded,
+          total_approvers_removed: propagationResult.totalApproversRemoved,
+          instances_auto_completed: propagationResult.instancesAutoCompleted,
+          details: propagationResult.details
+        };
+      }
+      res.status(id ? 200 : 201).json(response);
     } catch (e) {
       logError(e);
       res.status(400).json({ status: 3, message: e.message || e?.detail || 'Failed to save approval policy' });
@@ -746,7 +875,154 @@ const hospitalityApprovalController = {
       });
     }
   },
+
+  /**
+   * Get pending instances that would be affected by a policy change.
+   * GET /hospitality/approval/policies/:id/pending-impact
+   */
+  async getPendingImpact(req, res) {
+    try {
+      const policyId = parseInt(req.params.id);
+      logger.info(`[PendingImpact] Called with policyId=${policyId}, params=${JSON.stringify(req.params)}`);
+      if (!policyId || isNaN(policyId)) {
+        return res.status(400).json({ status: 3, message: 'Invalid policy ID' });
+      }
+      const instances = await getPendingInstancesForPolicy(policyId);
+      logger.info(`[PendingImpact] Found ${instances.length} pending instances for policy ${policyId}`);
+
+      const data = instances.map(inst => {
+        const metadata = typeof inst.metadata === 'string' ? JSON.parse(inst.metadata) : inst.metadata;
+        return {
+          id: inst.id,
+          entity_type: inst.entity_type,
+          entity_id: inst.entity_id,
+          current_step: inst.current_step,
+          total_steps: parseInt(inst.total_steps),
+          entity_identifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${inst.entity_id}`,
+          created_at: inst.created_at
+        };
+      });
+
+      return res.json({ status: 1, data: { pending_count: data.length, instances: data } });
+    } catch (err) {
+      logError('getPendingImpact error', err);
+      return res.status(400).json({ status: 3, message: err.message || 'Failed to get pending impact' });
+    }
+  },
+
+  /**
+   * Get change history for an approval instance.
+   * GET /hospitality/approval/instance/:id/change-history
+   */
+  async getInstanceChangeHistory(req, res) {
+    try {
+      const instanceId = parseInt(req.params.id);
+      const history = await getInstanceChangeHistoryService(instanceId);
+      return res.json({ status: 1, data: history });
+    } catch (err) {
+      logError('getInstanceChangeHistory error', err);
+      return res.status(400).json({ status: 3, message: err.message || 'Failed to get change history' });
+    }
+  },
+
+  /**
+   * Predict whether the calling user would be the FINAL approver of an
+   * about-to-be-created approval instance for `entity_type`, given the
+   * RFQ's hospitality scope. Used by the QC finalize flow to gate the
+   * merge-PO prompt: only the final approver should be asked "merge into
+   * existing draft or start a new one?" because their action is what
+   * actually drafts the PO. Non-final approvers shouldn't see the prompt —
+   * the question naturally rolls up to whoever closes the chain.
+   *
+   * Two ways to call:
+   *   (a) ?entity_type=NEGOTIATION_QUOTE&rfq_id=123 (preferred; the
+   *       endpoint derives hospitality_company_id / hotel_id /
+   *       department_id / process_id from the RFQ — same scope the
+   *       NEGOTIATION_QUOTE instance would actually be created with).
+   *   (b) ?entity_type=...&hospitality_company_id=...&hotel_id=...&
+   *        department_id=...&process_id=... (manual scope).
+   *
+   * Without process_id the policy lookup defaults to process-agnostic
+   * matching, which is wrong when the RFQ uses a specific procurement
+   * process — that's exactly why finalize-time auto-approvals were
+   * silently skipping the merge prompt.
+   */
+  async willBeFinalApprover(req, res) {
+    try {
+      const entity_type = String(req.query.entity_type || '').trim();
+      if (!entity_type) {
+        return res.status(400).json({ status: 0, message: 'entity_type is required' });
+      }
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 3, message: 'Unauthorized' });
+      }
+
+      let hospitality_company_id = req.query.hospitality_company_id
+        ? parseInt(req.query.hospitality_company_id) : null;
+      let hotel_id = req.query.hotel_id ? parseInt(req.query.hotel_id) : null;
+      let department_id = req.query.department_id
+        ? parseInt(req.query.department_id) : null;
+      let process_id = req.query.process_id ? parseInt(req.query.process_id) : null;
+
+      // If rfq_id is supplied, derive scope from the RFQ so the policy
+      // resolver matches exactly what createApprovalInstance will use at
+      // submit time. This is the most reliable path because the FE doesn't
+      // need to know (or guess) every scope dimension.
+      const rfq_id = req.query.rfq_id ? parseInt(req.query.rfq_id) : null;
+      if (rfq_id) {
+        const rfq = await db.oneOrNone(
+          `SELECT id, hospitality_company_id, hotel_id, department_id, process_id
+             FROM tbl_rfq WHERE id = $1`,
+          [rfq_id]
+        );
+        if (!rfq) {
+          return res.status(404).json({ status: 2, message: 'RFQ not found' });
+        }
+        hospitality_company_id = rfq.hospitality_company_id || hospitality_company_id;
+        hotel_id = rfq.hotel_id ?? hotel_id;
+        department_id = rfq.department_id ?? department_id;
+        process_id = rfq.process_id ?? process_id;
+      }
+
+      if (!hospitality_company_id) {
+        return res.status(400).json({ status: 0, message: 'hospitality_company_id (or rfq_id) is required' });
+      }
+
+      const willBeFinal = await checkIfUserIsFinalApprover(
+        userId,
+        entity_type,
+        hospitality_company_id,
+        hotel_id,
+        department_id,
+        null,
+        process_id
+      );
+      return res.json({
+        status: 1,
+        data: {
+          willBeFinal: !!willBeFinal,
+          // Surface the resolved scope so the FE (and logs) can sanity-check
+          // what was actually probed.
+          resolved_scope: {
+            hospitality_company_id,
+            hotel_id,
+            department_id,
+            process_id,
+          },
+        },
+      });
+    } catch (err) {
+      logError('willBeFinalApprover error', err);
+      return res.status(400).json({ status: 3, message: err.message || 'Failed to check final approver status' });
+    }
+  },
 };
+
+// Note: the per-controller `_sendPropagationEmails` helper that used to live
+// here was hoisted into approvalPropagationService.js as `dispatchPropagationEmails`
+// so usersController and hospitalityController can call it after their
+// membership-change propagations too. The behaviour is identical.
 
 /**
  * Process Management Controller

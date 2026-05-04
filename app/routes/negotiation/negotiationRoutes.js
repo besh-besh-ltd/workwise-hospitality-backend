@@ -70,6 +70,33 @@ NegotiationRoutes.post(
   negotiationController.rejectRound
 );
 
+// Approve a specific vendor within a round
+NegotiationRoutes.post(
+  '/rounds/:id/approve-vendor',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.approveVendor
+);
+
+// Reject (disapprove) a specific vendor within a round
+NegotiationRoutes.post(
+  '/rounds/:id/reject-vendor',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.rejectVendor
+);
+
+// Resubmit a rejected vendor for re-evaluation
+NegotiationRoutes.post(
+  '/rounds/:id/resubmit-vendor',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.resubmitVendor
+);
+
 // Close a round
 NegotiationRoutes.post(
   '/rounds/:id/close',

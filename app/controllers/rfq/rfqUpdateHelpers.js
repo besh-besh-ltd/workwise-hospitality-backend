@@ -28,8 +28,13 @@ import {
  *   3. Status is not CLOSED (2)
  *   4. bid_end_date is still in the future
  *   5. (per-product PO lock check happens inside applyProductChanges)
+ *
+ * `hasReceivedQuotes` (any non-regret quote, even with bid window still open)
+ * does NOT block edit at this layer — it's accepted so the controller can pass
+ * the same option bag in and compute `isRestrictedEdit` from it. Mirrors
+ * the FE permission helper canEditRfq().
  */
-export function assertEditAllowed(rfq, userId, { hasQuotes = false } = {}) {
+export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false, hasTechStuckProduct = false, hasReceivedQuotes = false } = {}) {
   if (!rfq) {
     throw httpError(404, 'RFQ not found.');
   }
@@ -42,7 +47,11 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false } = {}) {
   if (rfq.bid_end_date && new Date(rfq.bid_end_date) <= new Date()) {
     // Allow editing when bid window closed but no vendors submitted quotes,
     // so the creator can extend the deadline.
-    if (hasQuotes) {
+    // Also allow editing when a product is dead-ended (all eligible vendors'
+    // POs were rejected) so the creator can add new vendors or modify specs.
+    // Also allow restricted editing when a product is tech-stuck (all vendors
+    // failed tech eval) so the creator can extend bid_end_date and refresh vendors.
+    if (hasQuotes && !hasDeadEndProduct && !hasTechStuckProduct) {
       throw httpError(
         400,
         'The bid window has closed; this RFQ can no longer be edited.'

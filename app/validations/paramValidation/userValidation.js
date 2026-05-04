@@ -416,6 +416,11 @@ const schemas = {
     employee_type: Joi.string().optional().allow('', null),
     employee_code: Joi.string().optional().allow('', null),
     payroll_company_id: Joi.number().integer().optional().allow(null),
+    // Set by the frontend after admin clicks "Proceed Anyway" on the approval
+    // impact warning modal. Bypasses the pre-flight check in the controller
+    // so the role/dept change actually applies (and propagates to pending
+    // approvals) instead of looping back to WARNING forever.
+    confirmed_approval_impact: Joi.boolean().optional(),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile

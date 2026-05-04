@@ -14,18 +14,6 @@ router.get(
   acl([7, 2]),
   rbacController.getDepartments
 );
-router.get(
-  '/departments/access-matrix',
-  passportSignIn,
-  acl([7, 2]),
-  rbacController.getDepartmentAccessMatrix
-);
-router.put(
-  '/departments/access-matrix',
-  passportSignIn,
-  acl([7]),
-  rbacController.updateDepartmentAccessMatrix
-);
 router.get('/roles', passportSignIn,acl([7, 2]), rbacController.getRoles);
 router.get(
   '/roles/:roleId/permissions',

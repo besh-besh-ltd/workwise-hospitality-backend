@@ -6,55 +6,64 @@ const rbacModel = {
 
   getDepartments: () => {
     return db.any(`
-      SELECT id, title, access_type
+      SELECT id, title
       FROM tbl_department
       ORDER BY title
     `);
   },
 
-  updateDepartmentAccessTypes: (updates = []) => {
-    if (!updates.length) return Promise.resolve();
-    return db.tx(t =>
-      t.batch(
-        updates.map(u =>
-          t.none(
-            `UPDATE tbl_department SET access_type = $1 WHERE id = $2`,
-            [u.access_type, u.id]
-          )
-        )
+  /**
+   * Get departments the user can create RFQs/Tenders in, based on their role scopes.
+   * Derives company_id from the hotel_id via tbl_hospitality_company_hotels.
+   * If the user has a scope with department_id IS NULL (hotel/company-wide grant),
+   * returns all departments. Otherwise, returns only the specifically scoped departments.
+   */
+  getDepartmentsForUserScope: (userId, hotelId, resource, action) => {
+    return db.any(`
+      WITH hotel_company AS (
+        SELECT hospitality_company_id
+        FROM tbl_hospitality_company_hotels
+        WHERE id = $2 AND is_deleted = 0
+        LIMIT 1
+      ),
+      user_scopes AS (
+        SELECT DISTINCT urs.department_id
+        FROM tbl_user_role_scopes urs
+        JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE urs.user_id = $1
+          AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
+          AND p.resource = $3
+          AND p.action = $4
       )
-    );
+      SELECT d.id, d.title
+      FROM tbl_department d
+      WHERE
+        -- If any scope has NULL department (all-departments grant), return all
+        EXISTS (SELECT 1 FROM user_scopes WHERE department_id IS NULL)
+        -- Otherwise, only return departments matching specific scopes
+        OR d.id IN (SELECT department_id FROM user_scopes WHERE department_id IS NOT NULL)
+      ORDER BY d.title
+    `, [userId, hotelId, resource, action]);
   },
 
-  getDepartmentAccessType: (departmentId) => {
-    return db.oneOrNone(`
-      SELECT access_type FROM tbl_department WHERE id = $1
-    `, [departmentId]);
-  },
-
-  assignUserDepartments: (userId, departmentIds = []) => {
+  assignUserDepartments: (userId, departmentIds = [], t = null) => {
     if (!departmentIds.length) return Promise.resolve();
 
-    const values = departmentIds.map(depId => ({
-      user_id: userId,
-      department_id: depId
-    }));
-
-    return db.tx(t =>
-      t.batch(
-        values.map(v =>
-          t.none(
-            `INSERT INTO tbl_user_department (user_id, department_id)
-             VALUES ($1, $2)`,
-            [v.user_id, v.department_id]
-          )
-        )
-      )
+    // Single multi-row INSERT instead of N individual inserts
+    const values = departmentIds.map((_, i) => `($1, $${i + 2})`).join(', ');
+    const params = [userId, ...departmentIds];
+    const run = (tx) => tx.none(
+      `INSERT INTO tbl_user_department (user_id, department_id) VALUES ${values}`,
+      params
     );
+
+    return t ? run(t) : db.tx(run);
   },
 
-  deleteUserDepartments: (userId) => {
-    return db.none(
+  deleteUserDepartments: (userId, t = db) => {
+    return t.none(
       `DELETE FROM tbl_user_department WHERE user_id = $1`,
       [userId]
     );
@@ -88,29 +97,23 @@ const rbacModel = {
 
   /* -------------------- ROLES & SCOPES -------------------- */
 
-  assignUserRoleScopes: (scopes = []) => {
+  assignUserRoleScopes: (scopes = [], t = null) => {
     if (!scopes.length) return Promise.resolve();
 
-    return db.tx(t =>
-      t.batch(
-        scopes.map(s =>
-          t.none(
-            `
-            INSERT INTO tbl_user_role_scopes
-              (user_id, role_id, company_id, hotel_id, department_id)
-            VALUES ($1, $2, $3, $4, $5)
-            `,
-            [
-              s.user_id,
-              s.role_id,
-              s.company_id,
-              s.hotel_id || null,
-              s.department_id || null
-            ]
-          )
-        )
-      )
+    // Single multi-row INSERT instead of N individual inserts
+    const params = [];
+    const placeholders = scopes.map((s) => {
+      const base = params.length;
+      params.push(s.user_id, s.role_id, s.company_id, s.hotel_id || null, s.department_id || null);
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+    });
+    const run = (tx) => tx.none(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+       VALUES ${placeholders.join(', ')}`,
+      params
     );
+
+    return t ? run(t) : db.tx(run);
   },
   getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(
@@ -132,13 +135,7 @@ const rbacModel = {
         AND (
           $4::int IS NULL
           OR urs.department_id = $4
-          OR (
-            urs.department_id IS NULL
-            AND EXISTS (
-              SELECT 1 FROM tbl_user_department ud
-              WHERE ud.user_id = urs.user_id AND ud.department_id = $4
-            )
-          )
+          OR urs.department_id IS NULL
         )
       `,
       [userId, companyId, hotelId, departmentId]
@@ -202,13 +199,7 @@ const rbacModel = {
         AND (
           $${deptParamIdx}::int IS NULL
           OR urs.department_id = $${deptParamIdx}
-          OR (
-            urs.department_id IS NULL
-            AND EXISTS (
-              SELECT 1 FROM tbl_user_department ud
-              WHERE ud.user_id = urs.user_id AND ud.department_id = $${deptParamIdx}
-            )
-          )
+          OR urs.department_id IS NULL
         )
       `,
       params
@@ -236,11 +227,32 @@ const rbacModel = {
     );
   },
 
-  deleteUserRoleScopes: (userId) => {
-    return db.none(
+  deleteUserRoleScopes: (userId, t = db) => {
+    return t.none(
       `DELETE FROM tbl_user_role_scopes WHERE user_id = $1`,
       [userId]
     );
+  },
+
+  /**
+   * Delete role scopes for a user within a specific company/hotel scope.
+   * - companyId only (hotelId=null): removes all scopes for that company
+   * - companyId + hotelId: removes scopes scoped to that specific hotel
+   * Returns the count of deleted rows.
+   */
+  deleteUserRoleScopesForMapping: (userId, companyId, hotelId = null, t = db) => {
+    if (hotelId) {
+      return t.result(
+        `DELETE FROM tbl_user_role_scopes
+         WHERE user_id = $1 AND company_id = $2 AND hotel_id = $3`,
+        [userId, companyId, hotelId]
+      ).then(r => r.rowCount);
+    }
+    return t.result(
+      `DELETE FROM tbl_user_role_scopes
+       WHERE user_id = $1 AND company_id = $2`,
+      [userId, companyId]
+    ).then(r => r.rowCount);
   },
 
   getUserRoleScopes: (userId) => {
@@ -459,15 +471,7 @@ const rbacModel = {
         AND (
           $3::int IS NULL
           OR urs.department_id = $3
-          OR (
-            urs.department_id IS NULL
-            AND EXISTS (
-              SELECT 1
-              FROM tbl_user_department ud
-              WHERE ud.user_id = u.id
-                AND ud.department_id = $3
-            )
-          )
+          OR urs.department_id IS NULL
         )
       GROUP BY u.id, u.name, u.email
       HAVING COUNT(DISTINCT CASE

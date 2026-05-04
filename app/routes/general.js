@@ -130,6 +130,7 @@ GeneralRoutes.get(
   hospitalityApprovalController.getApprovalPolicies
 );
 GeneralRoutes.get('/hospitality/approval/policies/:id/department-preview', passportSignIn, acl([7, 2]), hospitalityApprovalController.getDepartmentPreview);
+GeneralRoutes.get('/hospitality/approval/policies/:id/pending-impact', passportSignIn, acl([7, 2]), hospitalityApprovalController.getPendingImpact);
 GeneralRoutes.get(
   '/hospitality/approval/policies/:id',
   passportSignIn,
@@ -159,6 +160,16 @@ GeneralRoutes.get(
   '/hospitality/approval/pending/counts',
   passportSignIn,
   hospitalityApprovalController.getPendingApprovalCounts
+);
+GeneralRoutes.get(
+  '/hospitality/approval/will-be-final-approver',
+  passportSignIn,
+  hospitalityApprovalController.willBeFinalApprover
+);
+GeneralRoutes.get(
+  '/hospitality/approval/instance/:id/change-history',
+  passportSignIn,
+  hospitalityApprovalController.getInstanceChangeHistory
 );
 GeneralRoutes.get(
   '/hospitality/approval/instance/:id',
