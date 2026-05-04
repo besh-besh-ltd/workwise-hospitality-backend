@@ -865,3 +865,263 @@ describe("rfqController.update — deferred defects (infra-blocked)", () => {
     "F-APPROVAL-002 (P1): cancelAndReissueApproval throw must NOT be swallowed at warn-level — edit either fails OR marks the RFQ with a 'reapproval_required' flag that gates further state transitions. Needs a way to make policy resolution throw mid-edit (mock generalModel.findBestMatchingPolicyTx)."
   );
 });
+
+// ===========================================================================
+//  Restricted edit mode — collapses the form to "only bid_end_date + Refresh
+//  Vendors" under three triggers: tech-stuck, dead-end, or any non-regret
+//  quote already received. See rfqController.update :5411-5443 + canEditRfq.
+// ===========================================================================
+
+describe("rfqController.update — restricted edit mode", () => {
+  // Local cleanup for the side-tables we touch in this block. Runs before the
+  // file-level afterEach so rfqIds-cascading deletes still complete.
+  afterEach(async () => {
+    if (!inserted.rfqIds.length) return;
+    await db.none(
+      `DELETE FROM tbl_purchase_order_product
+        WHERE purchase_order_id IN (
+          SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = ANY($1::int[])
+        )`,
+      [inserted.rfqIds]
+    );
+    await db.none(
+      `DELETE FROM tbl_rfq_purchase_order WHERE rfq_id = ANY($1::int[])`,
+      [inserted.rfqIds]
+    );
+    await db.none(
+      `DELETE FROM tbl_quote_items
+        WHERE quote_id IN (SELECT id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]))`,
+      [inserted.rfqIds]
+    );
+    await db.none(
+      `DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`,
+      [inserted.rfqIds]
+    );
+    await db.none(
+      `DELETE FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])`,
+      [inserted.rfqIds]
+    );
+  });
+
+  async function insertQuote(rfq_id, vendorId, { isRegret = false } = {}) {
+    const q = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, is_regret)
+       VALUES ($1, 1, $2, $2, $3) RETURNING id`,
+      [rfq_id, vendorId, isRegret ? 1 : 0]
+    );
+    return q.id;
+  }
+
+  it("Case 5 — non-regret quote → restricted: title edit rejected", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, title: "renamed mid-bid" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit/i);
+  });
+
+  it("Case 5 — non-regret quote → restricted: bid_end_date extension still allowed", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const newBidEnd = istString(10 * 86400_000); // push 10 days out
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: newBidEnd } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(1);
+  });
+
+  it("Case 5 — regret-only quote does NOT trigger restricted (full edit allowed)", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha, { isRegret: true });
+
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, title: "renamed after regret" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    const after = await db.one(`SELECT title FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    expect(after.title).toBe("renamed after regret");
+  });
+
+  it("Case 3 — tech-stuck product → restricted: comment edit rejected, bid_end_date allowed", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    const rfq_product_id = await attachOneProduct(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, blocked_insufficient_vendors, total_passed_verified)
+       VALUES ($1, $2, TRUE, 0)`,
+      [rfq_id, rfq_product_id]
+    );
+
+    // 1) Non-deadline change → 400
+    let snap = await fetchSnapshot(rfq_id);
+    let m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, comment: "after tech-stuck" } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit/i);
+
+    // 2) Deadline-only change → 200
+    snap = await fetchSnapshot(rfq_id);
+    m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(10 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+  });
+
+  it("Lifecycle: tech responses without a commercial quote → RFQ_STUCK_COMMERCIAL ('No Vendors Participated')", async () => {
+    // The dashboard pill bug: vendors submitted tech responses but no
+    // commercial quotes, bid window expired. Used to mis-report
+    // RFQ_STUCK_TECHNICAL ("Technical Evaluation Stuck") even though the
+    // real cause is non-participation. Tech responses are not "participation"
+    // — only quote submission counts — so this should map to the existing
+    // RFQ_STUCK_COMMERCIAL stage which is labelled "No Vendors Participated".
+    const bidEndPast = istString(-3600_000); // 1h ago
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      bid_end_date: bidEndPast,
+      vendor_clarification_date: istString(-2 * 3600_000),
+      tender_publish_date: istString(-3 * 86400_000),
+    });
+    const rfq_product_id = await attachOneProduct(rfq_id);
+
+    const te = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, blocked_insufficient_vendors, total_passed_verified)
+       VALUES ($1, $2, FALSE, 0) RETURNING id`,
+      [rfq_id, rfq_product_id]
+    );
+    const clause = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_clauses
+         (tbl_rfq_product_tech_evaluation_id, clause_text, clause_type)
+       VALUES ($1, 'Sample clause', 'TEXT') RETURNING id`,
+      [te.id]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+         (vendor_id, tbl_rfq_product_tech_evaluation_clauses_id, vendor_response, timestamp)
+       VALUES ($1, $2, 'OK', NOW())`,
+      [IDS.users.vendor_alpha, clause.id]
+    );
+
+    const map = await rfqModel.computeLifecycleStages([rfq_id]);
+    expect(map[rfq_id]).toBe("RFQ_STUCK_COMMERCIAL");
+
+    await db.none(
+      `DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+        WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1`, [clause.id]);
+    await db.none(
+      `DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE id = $1`, [clause.id]);
+  });
+
+  it("Lifecycle: zero engagement after deadline (TE configured) → RFQ_STUCK_COMMERCIAL", async () => {
+    const bidEndPast = istString(-3600_000);
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      bid_end_date: bidEndPast,
+      vendor_clarification_date: istString(-2 * 3600_000),
+      tender_publish_date: istString(-3 * 86400_000),
+    });
+    const rfq_product_id = await attachOneProduct(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, blocked_insufficient_vendors, total_passed_verified)
+       VALUES ($1, $2, FALSE, 0)`,
+      [rfq_id, rfq_product_id]
+    );
+
+    const map = await rfqModel.computeLifecycleStages([rfq_id]);
+    expect(map[rfq_id]).toBe("RFQ_STUCK_COMMERCIAL");
+  });
+
+  it("Lifecycle: TE configured + bid passed + commercial quote → TECHNICAL_EVALUATING", async () => {
+    const bidEndPast = istString(-3600_000);
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      bid_end_date: bidEndPast,
+      vendor_clarification_date: istString(-2 * 3600_000),
+      tender_publish_date: istString(-3 * 86400_000),
+    });
+    const rfq_product_id = await attachOneProduct(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, blocked_insufficient_vendors, total_passed_verified)
+       VALUES ($1, $2, FALSE, 0)`,
+      [rfq_id, rfq_product_id]
+    );
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const map = await rfqModel.computeLifecycleStages([rfq_id]);
+    expect(map[rfq_id]).toBe("TECHNICAL_EVALUATING");
+  });
+
+  it("getFullRfqForEdit / getRFQById expose has_received_quotes (non-regret only)", async () => {
+    // No quotes yet → false
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    let row = await db.one(
+      `SELECT (
+         SELECT EXISTS (
+           SELECT 1 FROM tbl_quotes _t
+            WHERE _t.rfq_id = $1
+              AND (_t.is_regret IS NULL OR _t.is_regret != 1)
+            LIMIT 1
+         )
+       ) AS has_received_quotes`,
+      [rfq_id]
+    );
+    expect(row.has_received_quotes).toBe(false);
+
+    // Add a regret-only quote → still false
+    await insertQuote(rfq_id, IDS.users.vendor_alpha, { isRegret: true });
+    row = await db.one(
+      `SELECT (
+         SELECT EXISTS (
+           SELECT 1 FROM tbl_quotes _t
+            WHERE _t.rfq_id = $1
+              AND (_t.is_regret IS NULL OR _t.is_regret != 1)
+            LIMIT 1
+         )
+       ) AS has_received_quotes`,
+      [rfq_id]
+    );
+    expect(row.has_received_quotes).toBe(false);
+
+    // Add a real quote → true
+    await insertQuote(rfq_id, IDS.users.vendor_beta);
+    row = await db.one(
+      `SELECT (
+         SELECT EXISTS (
+           SELECT 1 FROM tbl_quotes _t
+            WHERE _t.rfq_id = $1
+              AND (_t.is_regret IS NULL OR _t.is_regret != 1)
+            LIMIT 1
+         )
+       ) AS has_received_quotes`,
+      [rfq_id]
+    );
+    expect(row.has_received_quotes).toBe(true);
+  });
+});

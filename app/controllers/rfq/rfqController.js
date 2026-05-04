@@ -5284,8 +5284,19 @@ const rfqController = {
 
         // 1b. Check for existing quotes early — needed by assertEditAllowed
         //     to allow editing when bid window closed but no vendors participated.
+        //     hasQuotes is regret-inclusive and feeds the post-deadline block message.
+        //     hasReceivedQuotes filters out regrets and triggers restricted-edit mode
+        //     for fairness once a vendor has actually started bidding in good faith
+        //     (even while bid window is still open).
         const hasQuotes = !!(await t.oneOrNone(
           'SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1',
+          [rfq_id]
+        ));
+        const hasReceivedQuotes = !!(await t.oneOrNone(
+          `SELECT 1 FROM tbl_quotes
+            WHERE rfq_id = $1
+              AND (is_regret IS NULL OR is_regret != 1)
+            LIMIT 1`,
           [rfq_id]
         ));
 
@@ -5357,10 +5368,11 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck or PO dead-end (only bid_end_date + vendor refresh)
-        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct;
+        // Restricted edit = tech-stuck OR dead-end OR a real (non-regret) quote has
+        // already been received. Only bid_end_date + vendor refresh are allowed.
+        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct || hasReceivedQuotes;
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct, hasReceivedQuotes });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5413,7 +5425,7 @@ const rfqController = {
           const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
           if (disallowedFields.length > 0) {
             throw updateHttpError(400,
-              `Restricted edit: only bid submission end date can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
             );
           }
           if (diff.products.added.length > 0) {

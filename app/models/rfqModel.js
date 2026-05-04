@@ -2398,6 +2398,17 @@ WHERE NOT EXISTS (
           LIMIT 1
         )
       ) AS is_quotes_present,
+      -- has_received_quotes: any non-regret quote exists. Drives restricted-edit
+      -- mode for fairness once a vendor has actually started bidding (WH-restrictive-edit).
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq_real
+          WHERE tq_real.rfq_id = RFQ.id
+            AND (tq_real.is_regret IS NULL OR tq_real.is_regret != 1)
+          LIMIT 1
+        )
+      ) AS has_received_quotes,
       -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
       (
         SELECT EXISTS (
@@ -3478,6 +3489,17 @@ LIMIT 2;
               LIMIT 1
             )
           ) AS is_quotes_present,
+          -- has_received_quotes: at least one non-regret quote exists. Triggers
+          -- restricted-edit mode (only bid_end_date + vendor refresh) so the creator
+          -- can't change RFQ specs once vendors have started bidding in good faith.
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_quotes _tq_real
+              WHERE _tq_real.rfq_id = RFQ.id
+                AND (_tq_real.is_regret IS NULL OR _tq_real.is_regret != 1)
+              LIMIT 1
+            )
+          ) AS has_received_quotes,
           -- po_completed: ALL products have an approved (or beyond) PO
           (
             SELECT CASE
@@ -3953,7 +3975,11 @@ LIMIT 2;
         FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
       ),
-      -- Whether any non-regret quotes have been received (= eligible vendors)
+      -- Whether any non-regret quotes have been received (= eligible vendors).
+      -- "Participation" in this codebase means commercial quote submission
+      -- only — tech-eval responses don't count, because the lifecycle pill
+      -- needs to differentiate "vendors actually bid" from "vendors only
+      -- engaged technically and never sent a quote".
       has_eligible_vendors AS (
         SELECT rfq_id FROM tbl_quotes
         WHERE rfq_id = ANY($1::int[])
@@ -4044,21 +4070,28 @@ LIMIT 2;
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating — TE configured, deadline passed, ≥1 eligible vendor
-          -- Also matches when latest approval is APPROVED but not all products cleared yet
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed,
+          -- ≥1 vendor submitted a commercial quote.
+          -- Also matches when latest approval is APPROVED but not all products cleared yet.
           WHEN rd.is_published = 1 AND rd.status = 1
             AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.9: Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          -- Stage 1.9: No vendors participated — TE configured, deadline passed,
+          -- zero commercial quotes (regardless of any tech-eval responses). We
+          -- intentionally use RFQ_STUCK_COMMERCIAL ("No Vendors Participated")
+          -- here instead of RFQ_STUCK_TECHNICAL so the pill reflects the true
+          -- cause: nobody bid. RFQ_STUCK_TECHNICAL is reserved for the genuine
+          -- case where all TE products were evaluated and zero cleared
+          -- (handled earlier as Stage 5a-stuck).
           WHEN rd.is_published = 1 AND rd.status = 1
             AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NULL
-            THEN 'RFQ_STUCK_TECHNICAL'
+            THEN 'RFQ_STUCK_COMMERCIAL'
           -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = false
@@ -12777,6 +12810,14 @@ ORDER BY tq.timestamp DESC;
             LIMIT 1
           )
         ) AS is_quotes_present,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_quotes _tq_real
+            WHERE _tq_real.rfq_id = RFQ.id
+              AND (_tq_real.is_regret IS NULL OR _tq_real.is_regret != 1)
+            LIMIT 1
+          )
+        ) AS has_received_quotes,
         (
           SELECT
             CASE
