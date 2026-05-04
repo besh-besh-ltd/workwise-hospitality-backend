@@ -5284,8 +5284,19 @@ const rfqController = {
 
         // 1b. Check for existing quotes early — needed by assertEditAllowed
         //     to allow editing when bid window closed but no vendors participated.
+        //     hasQuotes is regret-inclusive and feeds the post-deadline block message.
+        //     hasReceivedQuotes filters out regrets and triggers restricted-edit mode
+        //     for fairness once a vendor has actually started bidding in good faith
+        //     (even while bid window is still open).
         const hasQuotes = !!(await t.oneOrNone(
           'SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1',
+          [rfq_id]
+        ));
+        const hasReceivedQuotes = !!(await t.oneOrNone(
+          `SELECT 1 FROM tbl_quotes
+            WHERE rfq_id = $1
+              AND (is_regret IS NULL OR is_regret != 1)
+            LIMIT 1`,
           [rfq_id]
         ));
 
@@ -5357,10 +5368,11 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck or PO dead-end (only bid_end_date + vendor refresh)
-        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct;
+        // Restricted edit = tech-stuck OR dead-end OR a real (non-regret) quote has
+        // already been received. Only bid_end_date + vendor refresh are allowed.
+        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct || hasReceivedQuotes;
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct, hasReceivedQuotes });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5413,7 +5425,7 @@ const rfqController = {
           const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
           if (disallowedFields.length > 0) {
             throw updateHttpError(400,
-              `Restricted edit: only bid submission end date can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
             );
           }
           if (diff.products.added.length > 0) {
@@ -6846,33 +6858,67 @@ const rfqController = {
         rfqData.po_initiators = [];
       }
 
-      // Fetch vendor PO rejections for this RFQ (used by Quote Compare to show rejection info)
+      // Fetch PO rejections (vendor-rejected AND approver-rejected) for this
+      // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
+      // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
+      //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
+      // - rejection_type='approver': PO row status='rejected'. Reason and
+      //   rejecter pulled from the matching tbl_approval_actions REJECT row,
+      //   joined via the PO's approval_instance_id.
       try {
         rfqData.vendor_rejections = await db.any(`
           SELECT
             rp.product_variant_id,
             rp.variant,
             po.finalized_vendor_id AS vendor_id,
-            u.name AS vendor_name,
-            u.organization_name AS vendor_organization,
+            vu.name AS vendor_name,
+            vu.organization_name AS vendor_organization,
             po.po_number,
-            po.vendor_rejection_reason,
-            po.vendor_action_at AS rejected_at
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
+              ELSE 'approver'
+            END AS rejection_type,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
+              ELSE aa.comment
+            END AS rejection_reason,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
+              ELSE aa.created_at
+            END AS rejected_at,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN vu.name
+              ELSE au.name
+            END AS rejected_by_name,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN NULL
+              ELSE au.email
+            END AS rejected_by_email
           FROM tbl_rfq_purchase_order po
-          JOIN tbl_users u ON u.id = po.finalized_vendor_id
+          JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
           JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+          LEFT JOIN LATERAL (
+            SELECT a.approver_user_id, a.comment, a.created_at
+            FROM tbl_approval_actions a
+            WHERE a.approval_instance_id = po.approval_instance_id
+              AND a.action = 'REJECT'
+            ORDER BY a.created_at DESC
+            LIMIT 1
+          ) aa ON TRUE
+          LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
           WHERE po.rfq_id = $1
-            AND po.status = 'rejected_by_vendor'
+            AND po.status IN ('rejected_by_vendor', 'rejected')
             AND NOT EXISTS (
               SELECT 1 FROM tbl_quote_finalization qf
               WHERE qf.rfq_id = po.rfq_id
                 AND qf.product_variant_id = rp.product_variant_id
                 AND qf.variant = rp.variant
             )
+          ORDER BY rejected_at DESC NULLS LAST
         `, [rfqData.id]);
       } catch (err) {
-        logError('Error fetching vendor rejections for RFQ', err);
+        logError('Error fetching PO rejections for RFQ', err);
         rfqData.vendor_rejections = [];
       }
 

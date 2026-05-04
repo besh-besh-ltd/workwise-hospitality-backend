@@ -90,12 +90,20 @@ export const calculateLineTotal = (line = {}) => {
 
     const subtotal = amount + chargeTax;
     chargesTotal += subtotal;
-    charges.push({
+    const chargeOut = {
       name: charge.name ?? null,
       amount,
       tax: chargeTax,
       subtotal,
-    });
+    };
+    // Carry the canonical slug through when the input has one. Lets downstream
+    // consumers (e.g. quote-compare freight-advantage matcher) key off slug
+    // rather than the user-typed name. Omitted when absent to keep the legacy
+    // engine output shape stable for existing assertions.
+    if (charge.slug !== undefined && charge.slug !== null) {
+      chargeOut.slug = charge.slug;
+    }
+    charges.push(chargeOut);
   }
 
   const total = Math.round(base + baseTax + chargesTotal);

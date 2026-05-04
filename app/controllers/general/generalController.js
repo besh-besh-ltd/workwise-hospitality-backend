@@ -22,7 +22,8 @@ import generalModel, {
   getApprovalProcesses,
   updateApprovalProcess,
   deleteApprovalProcess,
-  getDepartmentSubGraphPreview
+  getDepartmentSubGraphPreview,
+  checkIfUserIsFinalApprover
 } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import {
@@ -921,6 +922,99 @@ const hospitalityApprovalController = {
     } catch (err) {
       logError('getInstanceChangeHistory error', err);
       return res.status(400).json({ status: 3, message: err.message || 'Failed to get change history' });
+    }
+  },
+
+  /**
+   * Predict whether the calling user would be the FINAL approver of an
+   * about-to-be-created approval instance for `entity_type`, given the
+   * RFQ's hospitality scope. Used by the QC finalize flow to gate the
+   * merge-PO prompt: only the final approver should be asked "merge into
+   * existing draft or start a new one?" because their action is what
+   * actually drafts the PO. Non-final approvers shouldn't see the prompt —
+   * the question naturally rolls up to whoever closes the chain.
+   *
+   * Two ways to call:
+   *   (a) ?entity_type=NEGOTIATION_QUOTE&rfq_id=123 (preferred; the
+   *       endpoint derives hospitality_company_id / hotel_id /
+   *       department_id / process_id from the RFQ — same scope the
+   *       NEGOTIATION_QUOTE instance would actually be created with).
+   *   (b) ?entity_type=...&hospitality_company_id=...&hotel_id=...&
+   *        department_id=...&process_id=... (manual scope).
+   *
+   * Without process_id the policy lookup defaults to process-agnostic
+   * matching, which is wrong when the RFQ uses a specific procurement
+   * process — that's exactly why finalize-time auto-approvals were
+   * silently skipping the merge prompt.
+   */
+  async willBeFinalApprover(req, res) {
+    try {
+      const entity_type = String(req.query.entity_type || '').trim();
+      if (!entity_type) {
+        return res.status(400).json({ status: 0, message: 'entity_type is required' });
+      }
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ status: 3, message: 'Unauthorized' });
+      }
+
+      let hospitality_company_id = req.query.hospitality_company_id
+        ? parseInt(req.query.hospitality_company_id) : null;
+      let hotel_id = req.query.hotel_id ? parseInt(req.query.hotel_id) : null;
+      let department_id = req.query.department_id
+        ? parseInt(req.query.department_id) : null;
+      let process_id = req.query.process_id ? parseInt(req.query.process_id) : null;
+
+      // If rfq_id is supplied, derive scope from the RFQ so the policy
+      // resolver matches exactly what createApprovalInstance will use at
+      // submit time. This is the most reliable path because the FE doesn't
+      // need to know (or guess) every scope dimension.
+      const rfq_id = req.query.rfq_id ? parseInt(req.query.rfq_id) : null;
+      if (rfq_id) {
+        const rfq = await db.oneOrNone(
+          `SELECT id, hospitality_company_id, hotel_id, department_id, process_id
+             FROM tbl_rfq WHERE id = $1`,
+          [rfq_id]
+        );
+        if (!rfq) {
+          return res.status(404).json({ status: 2, message: 'RFQ not found' });
+        }
+        hospitality_company_id = rfq.hospitality_company_id || hospitality_company_id;
+        hotel_id = rfq.hotel_id ?? hotel_id;
+        department_id = rfq.department_id ?? department_id;
+        process_id = rfq.process_id ?? process_id;
+      }
+
+      if (!hospitality_company_id) {
+        return res.status(400).json({ status: 0, message: 'hospitality_company_id (or rfq_id) is required' });
+      }
+
+      const willBeFinal = await checkIfUserIsFinalApprover(
+        userId,
+        entity_type,
+        hospitality_company_id,
+        hotel_id,
+        department_id,
+        null,
+        process_id
+      );
+      return res.json({
+        status: 1,
+        data: {
+          willBeFinal: !!willBeFinal,
+          // Surface the resolved scope so the FE (and logs) can sanity-check
+          // what was actually probed.
+          resolved_scope: {
+            hospitality_company_id,
+            hotel_id,
+            department_id,
+            process_id,
+          },
+        },
+      });
+    } catch (err) {
+      logError('willBeFinalApprover error', err);
+      return res.status(400).json({ status: 3, message: err.message || 'Failed to check final approver status' });
     }
   },
 };
