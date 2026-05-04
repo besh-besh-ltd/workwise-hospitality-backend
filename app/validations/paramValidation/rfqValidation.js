@@ -161,25 +161,21 @@ export const rfqSchemas = {
           'Contact number must be in the format +<country_code>-<mobile_number> or just <mobile_number>.'
       }),
     bid_end_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
+      .required()
       .custom((value, helpers) => {
-        if (value) {
-          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
-          if (new Date(value) < minAllowed) {
+        const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Quote Submission End Date must be at least 2 hours from now'
+          );
+        }
+        const { vendor_clarification_date } = helpers.state.ancestors[0];
+        if (vendor_clarification_date) {
+          const diffMs = new Date(value) - new Date(vendor_clarification_date);
+          if (diffMs < 24 * 60 * 60 * 1000) {
             return helpers.message(
-              'Quote Submission End Date must be at least 2 hours from now'
+              'Quote Submission End Date must be at least 24 hours after the Vendor Clarification End Date'
             );
-          }
-          const { vendor_clarification_date } = helpers.state.ancestors[0];
-          if (vendor_clarification_date) {
-            const diffMs = new Date(value) - new Date(vendor_clarification_date);
-            if (diffMs < 24 * 60 * 60 * 1000) {
-              return helpers.message(
-                'Quote Submission End Date must be at least 24 hours after the Vendor Clarification End Date'
-              );
-            }
           }
         }
         return value;
@@ -264,19 +260,15 @@ export const rfqSchemas = {
         return value;
       }),
     vendor_clarification_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
+      .required()
       .custom((value, helpers) => {
-        if (value) {
-          const { tender_publish_date } = helpers.state.ancestors[0];
-          if (tender_publish_date) {
-            const diffMs = new Date(value) - new Date(tender_publish_date);
-            if (diffMs < 5 * 60 * 1000) {
-              return helpers.message(
-                'Vendor Clarification End Date must be at least 5 minutes after the Publish Date & Time'
-              );
-            }
+        const { tender_publish_date } = helpers.state.ancestors[0];
+        if (tender_publish_date) {
+          const diffMs = new Date(value) - new Date(tender_publish_date);
+          if (diffMs < 5 * 60 * 1000) {
+            return helpers.message(
+              'Vendor Clarification End Date must be at least 5 minutes after the Publish Date & Time'
+            );
           }
         }
         return value;
