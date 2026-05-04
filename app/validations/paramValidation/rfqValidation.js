@@ -172,6 +172,15 @@ export const rfqSchemas = {
               'Quote Submission End Date must be at least 2 hours from now'
             );
           }
+          const { vendor_clarification_date } = helpers.state.ancestors[0];
+          if (vendor_clarification_date) {
+            const diffMs = new Date(value) - new Date(vendor_clarification_date);
+            if (diffMs < 24 * 60 * 60 * 1000) {
+              return helpers.message(
+                'Quote Submission End Date must be at least 24 hours after the Vendor Clarification End Date'
+              );
+            }
+          }
         }
         return value;
       }),
@@ -243,8 +252,35 @@ export const rfqSchemas = {
     term_and_condition_files: Joi.array().items(Joi.string()).optional(),
     is_tender: Joi.number().integer().valid(0, 1).optional().allow(null),
     tender_fees: Joi.number().integer().min(0).optional().allow(null),
-    tender_publish_date: Joi.string().optional().allow(null).allow(''),
-    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    tender_publish_date: Joi.string()
+      .required()
+      .custom((value, helpers) => {
+        const minAllowed = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Publish Date & Time must be at least 5 minutes from now'
+          );
+        }
+        return value;
+      }),
+    vendor_clarification_date: Joi.string()
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
+        if (value) {
+          const { tender_publish_date } = helpers.state.ancestors[0];
+          if (tender_publish_date) {
+            const diffMs = new Date(value) - new Date(tender_publish_date);
+            if (diffMs < 5 * 60 * 1000) {
+              return helpers.message(
+                'Vendor Clarification End Date must be at least 5 minutes after the Publish Date & Time'
+              );
+            }
+          }
+        }
+        return value;
+      }),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
