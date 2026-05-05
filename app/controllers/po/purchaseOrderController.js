@@ -150,16 +150,43 @@ export const draftPO = async (poInfo, user, txn) => {
     // Server-authoritative recompute: ignore the client's total_value and
     // derive it from the engine using the charges_meta that will actually
     // persist (which buildAuthoritativePOPayload may already have replaced
-    // with values from tbl_quote_items).
+    // with values from tbl_quote_items). Document-level global_charges live
+    // on tbl_quotes (one row per vendor's quote) — fetch them and roll them
+    // into total_value via calculateDocumentTotals so the stored grand total
+    // matches what the printed PO renders.
+    const dbCtx = txn || db;
     const meta = pricingEngine.normalizeChargesMeta(product_info.charges_meta || {});
-    const lineOut = pricingEngine.calculateLineTotal({
-      unit_price: product_info.unit_price,
-      quantity: product_info.quantity,
-      tax: meta.tax,
-      tax_mode: meta.tax_mode,
-      other_charges: meta.other_charges,
-    });
-    const total_value = lineOut.total;
+    let globalCharges = [];
+    if (quote_item_id) {
+      const quoteRow = await dbCtx.oneOrNone(
+        `SELECT TQ.global_charges
+           FROM tbl_quote_items TQI
+           JOIN tbl_quotes TQ ON TQ.id = TQI.quote_id
+          WHERE TQI.id = $1`,
+        [quote_item_id]
+      );
+      const raw = quoteRow?.global_charges;
+      if (Array.isArray(raw)) globalCharges = raw;
+      else if (typeof raw === 'string' && raw.trim()) {
+        try { globalCharges = JSON.parse(raw); } catch (_e) { globalCharges = []; }
+      }
+    }
+    const docOut = pricingEngine.calculateDocumentTotals(
+      [{
+        unit_price: product_info.unit_price,
+        quantity: product_info.quantity,
+        tax: meta.tax,
+        tax_mode: meta.tax_mode,
+        other_charges: meta.other_charges,
+      }],
+      globalCharges
+    );
+    // Line total = engine's per-line total (basic + base_tax + per-line charges)
+    // — written to tbl_purchase_order_product.total_price.
+    // Grand total = line total + document-level global charges — written to
+    // tbl_rfq_purchase_order.total_value (the PO header).
+    const line_total = docOut.lines[0]?.total ?? 0;
+    const total_value = docOut.grand_total;
 
     const result = await draftPurchaseOrder(
       rfq_id,
@@ -172,7 +199,9 @@ export const draftPO = async (poInfo, user, txn) => {
       user,
       existing_po_id,
       selected_hierarchy,
-      txn
+      txn,
+      globalCharges,
+      line_total
     );
 
     return result;

@@ -8250,7 +8250,7 @@ const rfqController = {
   // prices — it just renders these values.
   getQuoteComparison: async (req, res, next) => {
     const rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id, normalize, freightFilter, pageSource, include_negotiation } = req.query;
+    const { no_freight, rfq_product_id, normalize, freightFilter, pageSource, include_negotiation } = req.query;
     const { id, company_id, user_type, vendor_id } = req.user;
 
     try {
@@ -8262,9 +8262,13 @@ const rfqController = {
         products = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
       } else {
         const vendor_filter_id = user_type == 3 ? (vendor_id || id) : null;
+        // Quote Compare is a buyer view for awarding business; technically-rejected
+        // vendors must never appear here. Force tech-eval gating on the model
+        // regardless of what the FE sends — the model's gating still falls through
+        // for products / RFQs that don't have any technical clauses.
         products = await rfqModel.getQuotesByRfqById2(
           rfq_id, id, company_id,
-          TA_Vendors, no_freight, rfq_product_id,
+          'TA', no_freight, rfq_product_id,
           include_negotiation === 'true',
           vendor_filter_id
         );

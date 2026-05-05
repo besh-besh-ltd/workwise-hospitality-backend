@@ -70,6 +70,30 @@ beforeEach(() => { inserted.rfqIds = []; inserted.quoteIds = []; });
 
 afterEach(async () => {
   if (inserted.rfqIds.length) {
+    // Drop tech-eval rows + cleared_vendors verdicts before tbl_rfq_products
+    // (cleared_vendors FK -> tech_evaluation; clauses FK -> tech_evaluation;
+    //  no ON DELETE CASCADE on the rfq_id side).
+    const teRows = await db.any(
+      `SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])`,
+      [inserted.rfqIds]
+    );
+    const teIds = teRows.map((r) => r.id);
+    if (teIds.length) {
+      await db.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [teIds]
+      );
+      await db.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_clauses
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [teIds]
+      );
+      await db.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = ANY($1::int[])`,
+        [teIds]
+      );
+    }
     await db.none(`DELETE FROM tbl_quote_activity WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
     await db.none(`DELETE FROM tbl_quote_items WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
     await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
@@ -84,7 +108,7 @@ afterEach(async () => {
 const istString = (offsetMs) =>
   new Date(Date.now() + offsetMs).toISOString().replace("T", " ").slice(0, 19);
 
-async function makeRfqWithProduct({ bidEndOffsetMs = -3600_000 } = {}) {
+async function makeRfqWithProduct({ bidEndOffsetMs = -3600_000, productVariantId = 1 } = {}) {
   const oneDayAgo = istString(-86400_000);
   const oneHourAgo = istString(-3600_000);
   const { rfq_id } = await makeRFQ(db, {
@@ -98,21 +122,26 @@ async function makeRfqWithProduct({ bidEndOffsetMs = -3600_000 } = {}) {
     process: IDS.processes.A_P1,
   });
   inserted.rfqIds.push(rfq_id);
-  await db.none(
-    `INSERT INTO tbl_rfq_products
-       (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
-     VALUES ($1, '', '', '', '', '', 1, 0)`,
-    [rfq_id]
-  );
-  return rfq_id;
+  const rfq_product_id = await addProductToRfq(rfq_id, productVariantId);
+  return { rfq_id, rfq_product_id };
 }
 
-async function plantVendorQuote(rfq_id, vendorId, { unitPrice, quantity = 10, tax = 18, otherCharges = [] }) {
+async function addProductToRfq(rfq_id, productVariantId, variant = 0) {
+  const row = await db.one(
+    `INSERT INTO tbl_rfq_products
+       (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1, '', '', '', '', '', $2, $3) RETURNING id`,
+    [rfq_id, productVariantId, variant]
+  );
+  return row.id;
+}
+
+async function plantVendorQuote(rfq_id, vendorId, { unitPrice, quantity = 10, tax = 18, otherCharges = [], productVariantId = 1, variant = 0 }) {
   await db.none(
     `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
-     VALUES ($1, 1, $2, 0)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT DO NOTHING`,
-    [rfq_id, vendorId]
+    [rfq_id, productVariantId, vendorId, variant]
   );
   const rfq = await db.one(`SELECT rfq_no FROM tbl_rfq WHERE id=$1`, [rfq_id]);
   const q = await db.one(
@@ -125,13 +154,36 @@ async function plantVendorQuote(rfq_id, vendorId, { unitPrice, quantity = 10, ta
     `INSERT INTO tbl_quote_items
        (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
         package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
-     VALUES ($1, $2, $3, 1, $4, $5, 0, $6, 0, 0, '', '7', $7, 'percentage', $8)`,
+     VALUES ($1, $2, $3, $9, $4, $5, 0, $6, 0, $10, '', '7', $7, 'percentage', $8)`,
     [
       rfq_id, rfq.rfq_no, q.id, unitPrice, unitPrice * quantity, tax,
-      String(quantity), JSON.stringify(otherCharges),
+      String(quantity), JSON.stringify(otherCharges), productVariantId, variant,
     ]
   );
   return q.id;
+}
+
+// Seeds an empty tech-evaluation row for a product. The model's gating SQL
+// only checks tbl_rfq_product_tech_evaluation existence + cleared_vendors,
+// so we don't need clauses or scored responses for these tests.
+async function seedTechEval(rfq_id, rfq_product_id) {
+  const r = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation
+       (rfq_id, tbl_rfq_product_id, minimum_passing_score)
+     VALUES ($1, $2, 50) RETURNING id`,
+    [rfq_id, rfq_product_id]
+  );
+  return r.id;
+}
+
+// status: 1 = passed, 0 = failed.
+async function markVendorTechVerdict(eval_id, vendor_id, status) {
+  await db.none(
+    `INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
+       (tbl_rfq_product_tech_evaluation_id, vendor_id, status, is_verified)
+     VALUES ($1, $2, $3, true)`,
+    [eval_id, vendor_id, status]
+  );
 }
 
 // ===========================================================================
@@ -140,7 +192,7 @@ async function plantVendorQuote(rfq_id, vendorId, { unitPrice, quantity = 10, ta
 
 describe("getQuoteComparison — locked state (bid window still open)", () => {
   it("redacts quotations + comparison data when the deadline hasn't passed", async () => {
-    const rfq_id = await makeRfqWithProduct({ bidEndOffsetMs: 5 * 86400_000 });
+    const { rfq_id } = await makeRfqWithProduct({ bidEndOffsetMs: 5 * 86400_000 });
     await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, { unitPrice: 500 });
 
     const m = mockExpress({
@@ -165,7 +217,7 @@ describe("getQuoteComparison — locked state (bid window still open)", () => {
 
 describe("getQuoteComparison — unlocked state: engine totals match pricingEngine exactly", () => {
   it("each quotation's quote_details[i].engine output matches pricingEngine.calculateLineTotal for the same input", async () => {
-    const rfq_id = await makeRfqWithProduct();
+    const { rfq_id } = await makeRfqWithProduct();
     const charges = [
       { name: "Freight", slug: "freight", amount: 10, amount_mode: "percentage", tax: 9, tax_mode: "percentage", comment: "ok" },
       { name: "Insurance", slug: "insurance", amount: 50, amount_mode: "percentage", tax: 12, tax_mode: "percentage", comment: "ok" },
@@ -217,7 +269,7 @@ describe("getQuoteComparison — unlocked state: engine totals match pricingEngi
 
 describe("getQuoteComparison — comparison aggregates pick the lowest correctly", () => {
   it("two vendors quote different prices; the cheaper one wins lowest_vendor_id and l1_total", async () => {
-    const rfq_id = await makeRfqWithProduct();
+    const { rfq_id } = await makeRfqWithProduct();
     // Vendor alpha: ₹500 × 10 + 18% = 5900
     await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
       unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
@@ -256,7 +308,7 @@ describe("getQuoteComparison — comparison aggregates pick the lowest correctly
 
 describe("getQuoteComparison — ?normalize=1 applies payment-term normalization", () => {
   it("default (no query) → meta.normalize_applied = false", async () => {
-    const rfq_id = await makeRfqWithProduct();
+    const { rfq_id } = await makeRfqWithProduct();
     await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
       unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
     });
@@ -275,7 +327,7 @@ describe("getQuoteComparison — ?normalize=1 applies payment-term normalization
     // pricingEngine.fillMissingChargesFromPeers (detailsAsArray helper),
     // this would crash with TypeError because the model returns
     // quote.quote_details as a single object, not an array.
-    const rfq_id = await makeRfqWithProduct();
+    const { rfq_id } = await makeRfqWithProduct();
     await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
       unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
     });
@@ -309,7 +361,7 @@ describe("getQuoteComparison — ?normalize=1 applies payment-term normalization
 
 describe("getQuoteComparison — pageSource=quote_compare side effect", () => {
   it("inserts a tbl_quote_activity row on first visit; deduplicates on second visit", async () => {
-    const rfq_id = await makeRfqWithProduct();
+    const { rfq_id } = await makeRfqWithProduct();
     await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
       unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
     });
@@ -343,5 +395,389 @@ describe("getQuoteComparison — pageSource=quote_compare side effect", () => {
       [rfq_id, IDS.users.a1_proc_buyer]
     );
     expect(after2.length).toBe(1);
+  });
+});
+
+// ===========================================================================
+//  Technical-evaluation gating
+//
+//  Spec (carries over from the legacy /get-quotes endpoint, restored on the
+//  new /quote-compare endpoint by hardcoding TA_Vendors='TA' in the
+//  controller):
+//
+//    R1. RFQ has NO technical evaluation on any product → no gating; every
+//        vendor that quoted is shown.
+//    R2. The product itself has no tech eval → for that product the rule
+//        does not apply (Condition 2 of the SQL falls through), but the
+//        RFQ-level "passed somewhere" rule still applies — a vendor that
+//        failed every tech-eval'd product is hidden everywhere, including
+//        from the no-eval product.
+//    R3. Tech eval exists for the product. A vendor is shown only if they
+//        appear in tbl_rfq_product_tech_evaluation_cleared_vendors with
+//        status=1 for that product. Vendors with status=0 (failed) or no
+//        cleared_vendors row at all are hidden from that product.
+//    R4. If a vendor passed product A but failed product B, they appear
+//        ONLY under product A.
+//
+//  These tests exercise the controller end-to-end (model query +
+//  enrichQuoteCompareData), so they prove the regression is fixed at the
+//  observable HTTP-shape level — not just in the SQL.
+// ===========================================================================
+
+describe("getQuoteComparison — technical-evaluation gating", () => {
+  it("R1: RFQ has no tech eval at all → vendor is shown", async () => {
+    const { rfq_id } = await makeRfqWithProduct();
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products[0];
+    expect(product.quotations.length).toBe(1);
+    const detail = Array.isArray(product.quotations[0].quote_details)
+      ? product.quotations[0].quote_details[0]
+      : product.quotations[0].quote_details;
+    expect(detail.created_by).toBe(IDS.users.vendor_alpha);
+  });
+
+  it("R3-pass: tech eval exists, vendor passed (status=1) → shown", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+    const evalId = await seedTechEval(rfq_id, rfq_product_id);
+    await markVendorTechVerdict(evalId, IDS.users.vendor_alpha, 1);
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products[0];
+    expect(product.quotations.length).toBe(1);
+  });
+
+  it("R3-fail: tech eval exists, vendor explicitly failed (status=0) → hidden", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+    const evalId = await seedTechEval(rfq_id, rfq_product_id);
+    await markVendorTechVerdict(evalId, IDS.users.vendor_alpha, 0);
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products[0];
+    expect(product.quotations.length).toBe(0);
+  });
+
+  it("R3-missing: tech eval exists, vendor has no cleared_vendors row → hidden", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+    await seedTechEval(rfq_id, rfq_product_id); // no cleared_vendors verdict
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products[0];
+    expect(product.quotations.length).toBe(0);
+  });
+
+  it("R4: vendor passed product A but failed product B → shown only under A", async () => {
+    const { rfq_id, rfq_product_id: rfqProductA } = await makeRfqWithProduct({ productVariantId: 1 });
+    const rfqProductB = await addProductToRfq(rfq_id, 2);
+    const evalA = await seedTechEval(rfq_id, rfqProductA);
+    const evalB = await seedTechEval(rfq_id, rfqProductB);
+    await markVendorTechVerdict(evalA, IDS.users.vendor_alpha, 1);
+    await markVendorTechVerdict(evalB, IDS.users.vendor_alpha, 0);
+
+    // Vendor quoted both products in the same submission round.
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [], productVariantId: 1,
+    });
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 700, quantity: 10, tax: 18, otherCharges: [], productVariantId: 2,
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const productA = m.calls.body.data.products.find((p) => p.product_variant_id === 1);
+    const productB = m.calls.body.data.products.find((p) => p.product_variant_id === 2);
+    expect(productA.quotations.length).toBe(1);
+    expect(productB.quotations.length).toBe(0);
+  });
+
+  it("R2-pass: mixed RFQ (P1 has tech eval, P2 doesn't); vendor passed P1 → shown in BOTH", async () => {
+    // P2 has no tech eval at all → Condition 2 falls through for P2; vendor
+    // passed P1 → Condition 1 satisfied. So vendor must surface under both.
+    const { rfq_id, rfq_product_id: rfqProductP1 } = await makeRfqWithProduct({ productVariantId: 1 });
+    await addProductToRfq(rfq_id, 2);
+    const evalP1 = await seedTechEval(rfq_id, rfqProductP1);
+    await markVendorTechVerdict(evalP1, IDS.users.vendor_alpha, 1);
+
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [], productVariantId: 1,
+    });
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 700, quantity: 10, tax: 18, otherCharges: [], productVariantId: 2,
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const productP1 = m.calls.body.data.products.find((p) => p.product_variant_id === 1);
+    const productP2 = m.calls.body.data.products.find((p) => p.product_variant_id === 2);
+    expect(productP1.quotations.length).toBe(1);
+    expect(productP2.quotations.length).toBe(1);
+  });
+
+  it("R2-fail: mixed RFQ (P1 has tech eval, P2 doesn't); vendor failed P1 → hidden EVERYWHERE", async () => {
+    // The RFQ-level rule (Condition 1) wins: vendor never passed any product
+    // → hidden even from the no-eval product P2.
+    const { rfq_id, rfq_product_id: rfqProductP1 } = await makeRfqWithProduct({ productVariantId: 1 });
+    await addProductToRfq(rfq_id, 2);
+    const evalP1 = await seedTechEval(rfq_id, rfqProductP1);
+    await markVendorTechVerdict(evalP1, IDS.users.vendor_alpha, 0);
+
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [], productVariantId: 1,
+    });
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 700, quantity: 10, tax: 18, otherCharges: [], productVariantId: 2,
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const productP1 = m.calls.body.data.products.find((p) => p.product_variant_id === 1);
+    const productP2 = m.calls.body.data.products.find((p) => p.product_variant_id === 2);
+    expect(productP1.quotations.length).toBe(0);
+    expect(productP2.quotations.length).toBe(0);
+  });
+
+  it("Two vendors, one passed and one failed → only the passed vendor surfaces", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+    const evalId = await seedTechEval(rfq_id, rfq_product_id);
+    await markVendorTechVerdict(evalId, IDS.users.vendor_alpha, 1);
+    await markVendorTechVerdict(evalId, IDS.users.vendor_beta, 0);
+
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+    await plantVendorQuote(rfq_id, IDS.users.vendor_beta, {
+      unitPrice: 450, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products[0];
+    expect(product.quotations.length).toBe(1);
+    const detail = Array.isArray(product.quotations[0].quote_details)
+      ? product.quotations[0].quote_details[0]
+      : product.quotations[0].quote_details;
+    expect(detail.created_by).toBe(IDS.users.vendor_alpha);
+    // Aggregates reflect the post-gating set: only vendor_alpha is "eligible".
+    expect(product.aggregates.eligible_count).toBe(1);
+    expect(product.comparison.lowest_vendor_id).toBe(IDS.users.vendor_alpha);
+  });
+
+  it("Backend gates regardless of FE query param (TA_Vendors not sent)", async () => {
+    // Regression assertion: the FE never sends ?TA_Vendors=TA after switching
+    // to /quote-compare. This used to silently disable gating. Now the
+    // controller forces it on, and a failed vendor must still be hidden.
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+    const evalId = await seedTechEval(rfq_id, rfq_product_id);
+    await markVendorTechVerdict(evalId, IDS.users.vendor_alpha, 0);
+    await plantVendorQuote(rfq_id, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {}, // no TA_Vendors
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.data.products[0].quotations.length).toBe(0);
+  });
+});
+
+// ===========================================================================
+//  Document-level global_charges in the compare response
+// ===========================================================================
+//
+// The buyer's compare table reads `engine_grand_total` per quote and the
+// RFQ-level aggregates (`l1_total`, `finalized_total`, `vendor_totals`,
+// `bands.total`) for cross-vendor comparison. ALL OF THESE must include
+// document-level `global_charges` from `tbl_quotes.global_charges` — otherwise
+// the buyer compares apples to oranges (a vendor whose quote has 5% TCS looks
+// cheaper than they actually are because TCS isn't in the band/aggregate).
+//
+// Equally important: the number the buyer picks during compare MUST equal
+// the number that becomes `tbl_rfq_purchase_order.total_value` after
+// finalization + PO drafting. This test locks that contract end-to-end.
+describe("getQuoteComparison — document-level global_charges round-trip", () => {
+  it("engine_grand_total includes tbl_quotes.global_charges and equals the eventual PO total_value", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct();
+
+    // Mix both on-disk shapes the codebase supports: a TCS-style charge
+    // ({tax, tax_mode, is_global: true}) and a document fee
+    // ({amount, amount_mode}). Both must contribute to engine_grand_total.
+    const globalCharges = [
+      { name: "TCS", slug: "tcs", tax: 5, tax_mode: "percentage", is_global: true },
+      { name: "Document Fee", slug: "document_fee", amount: 500, amount_mode: "absolute" },
+    ];
+
+    const oneHourAgo = istString(-3600_000);
+    const rfq = await db.one(`SELECT rfq_no FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+       VALUES ($1, 1, $2, 0) ON CONFLICT DO NOTHING`,
+      [rfq_id, IDS.users.vendor_alpha]
+    );
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp", global_charges)
+       VALUES ($1, $2, $3, $3, 1, $4, $5) RETURNING id`,
+      [rfq_id, rfq.rfq_no, IDS.users.vendor_alpha, oneHourAgo, JSON.stringify(globalCharges)]
+    );
+    inserted.quoteIds.push(quote.id);
+    const qi = await db.one(
+      `INSERT INTO tbl_quote_items
+        (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+         package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 1, 500, 25000, 0, 0, 0, 0, 'a', '15', '50', 'absolute', '[]'::jsonb)
+       RETURNING id`,
+      [rfq_id, rfq.rfq_no, quote.id]
+    );
+
+    // Hand math the buyer sees:
+    //   line total      = 50 × 500 = 25,000 (no per-line tax/charges)
+    //   TCS 5% of 25k   = 1,250
+    //   Document Fee    = 500 absolute
+    //   global total    = 1,750
+    //   grand total     = 25,000 + 1,750 = 26,750
+    const EXPECTED_GRAND = 26750;
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer, user_type: 1, company_id: IDS.companies.A },
+      params: { id: String(rfq_id) },
+      query: {},
+    });
+    await rfqController.getQuoteComparison(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const product = m.calls.body.data.products.find((p) => p.product_variant_id === 1);
+    expect(product.quotations.length).toBe(1);
+    const q = product.quotations[0];
+
+    // ---- Per-quote engine output exposes line total + globals + grand total ----
+    expect(q.engine_total).toBe(25000);
+    expect(q.engine_global_charges_total).toBe(1750);
+    expect(q.engine_grand_total).toBe(EXPECTED_GRAND);
+    expect(Array.isArray(q.engine_global_charges)).toBe(true);
+    expect(q.engine_global_charges.length).toBe(2);
+
+    // ---- RFQ-level aggregate (l1_total) uses the grand total ----
+    // Without the fix in quoteCompareService.js this would have reported
+    // 25,000 (per-line subtotal), making vendors with global charges look
+    // artificially competitive on the comparison header.
+    expect(product.aggregates.l1_total).toBe(EXPECTED_GRAND);
+    expect(product.aggregates.finalized_total).toBe(0); // no finalization yet
+
+    // ---- engine_total stays per-line; engine_grand_total carries globals ----
+    // Critical contract for the FE compare matrix: the "Total" row reads
+    // engine.total (per-line) and uses it as the base for adding global
+    // charges on top (Global Taxes row + Grand Total row). If we conflated
+    // the two values, the FE would double-count: render "Total" with
+    // globals already in, then "Grand Total" = "Total" + globals again
+    // (this is exactly the bug RFQ 227 / PO 31 surfaced — Grand Total
+    // 9,296 instead of 8,852.55).
+    expect(q.engine_total).toBe(25000);
+    expect(q.engine_grand_total).toBe(EXPECTED_GRAND);
+    expect(q.engine_total).not.toBe(q.engine_grand_total);
+
+    // ---- engine_grand_total === eventual PO total ----
+    // THE PRODUCT-CONFIDENCE CONTRACT: whatever the buyer sees as the vendor's
+    // grand total during compare is precisely the value that lands in
+    // tbl_rfq_purchase_order.total_value once finalization + draftPO run.
+    const { buildAuthoritativePOPayload, draftPO } = await import(
+      "../../app/controllers/po/purchaseOrderController.js"
+    );
+    const poId = await db.tx(async (t) => {
+      const auth = await buildAuthoritativePOPayload(
+        {
+          rfq_id, project_id: null, total_value: 0,
+          quote_id: qi.id, quote_item_id: qi.id,
+          product_info: {
+            rfq_product_id, quantity: 50, unit: "pcs", unit_price: 500,
+            finalized_vendor_id: IDS.users.vendor_alpha,
+          },
+        },
+        t
+      );
+      const r = await draftPO(
+        auth,
+        { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        t
+      );
+      return r.po_id;
+    });
+    const poRow = await db.one(
+      `SELECT total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [poId]
+    );
+    expect(Number(poRow.total_value)).toBe(q.engine_grand_total);
+    expect(Number(poRow.total_value)).toBe(EXPECTED_GRAND);
+
+    // Cleanup PO so the global afterEach (which only resets RFQ/product/quote
+    // tables) doesn't leave orphans.
+    await db.none(`DELETE FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [poId]);
+    await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = $1`, [poId]);
   });
 });
