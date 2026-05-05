@@ -4528,7 +4528,8 @@ CREATE TABLE public.tbl_rfq_purchase_order (
     approval_instance_id integer,
     vendor_rejection_reason text,
     vendor_action_at timestamp with time zone,
-    vendor_reminder_count integer DEFAULT 0
+    vendor_reminder_count integer DEFAULT 0,
+    global_charges jsonb DEFAULT '[]'::jsonb NOT NULL
 );
 
 

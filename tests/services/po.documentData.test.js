@@ -560,6 +560,187 @@ describe("Vendor quote → drafted PO: other_charges MUST round-trip into charge
     const wrongTotalIfChargesDropped = 25000 + 25000 * 0.30; // = 32500
     expect(parseFloat(data.totalPrice)).not.toBe(wrongTotalIfChargesDropped);
   });
+
+  // -------------------------------------------------------------------------
+  // Document-level global_charges live on tbl_quotes.global_charges. They
+  // were never being snapshotted onto the PO at draft, so:
+  //   - tbl_rfq_purchase_order.total_value (used by the PO Details page)
+  //     was missing them, while
+  //   - the printed PDF re-derived them via a LATERAL JOIN to tbl_quotes
+  // → three readers, three different totals. The fix snapshots
+  // tbl_quotes.global_charges into a new tbl_rfq_purchase_order.global_charges
+  // column at draft time and lets total_value = line subtotal + global charges.
+  // -------------------------------------------------------------------------
+  it("draftPO snapshots tbl_quotes.global_charges onto the PO header and rolls them into total_value", async () => {
+    const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+    const buyerLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Mumbai', '400051', $2, NOW()) RETURNING id`,
+      [IDS.companies.A, IDS.users.a1_proc_buyer]
+    );
+    inserted.buyerLocationIds.push(buyerLoc.id);
+    const supplierLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Pune', '411019', $2, NOW()) RETURNING id`,
+      [IDS.companies.vendorAlpha, IDS.users.vendor_alpha]
+    );
+    inserted.supplierLocationIds.push(supplierLoc.id);
+
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, process_id, is_tender, title)
+       VALUES ($1, '<p>e2e</p>', '', 'b@a', 'A1', '+91', $2, 'Mumbai', 1, 1, $3, $3, NOW(),
+               $4, $5, $6, 0, 'global_charges snapshot test')
+       RETURNING id, rfq_no`,
+      [nextRfqNo(), oneDayAgo, IDS.users.a1_proc_buyer,
+       IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1]
+    );
+    inserted.rfqIds.push(rfq.id);
+
+    const rfqProd = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`,
+      [rfq.id]
+    );
+    inserted.rfqProductIds.push(rfqProd.id);
+
+    // Vendor's quote: empty per-line other_charges (irrelevant here),
+    // but global_charges populated on the PARENT quote row. Mix the two
+    // on-disk shapes — the {amount, amount_mode} shape (newer quote-tool
+    // input) and the legacy {tax, tax_mode, is_global: true} shape that the
+    // vendor send-quote screen still emits today for TCS/TDS-style document
+    // taxes — to lock that pricingEngine.normalizeGlobalCharge handles both.
+    const globalCharges = [
+      { name: "Document Fee",       slug: "document_fee", amount: 500, amount_mode: "absolute" },
+      { name: "TCS",                slug: "tcs",          tax: 2,      tax_mode: "percentage", is_global: true },
+    ];
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp", global_charges)
+       VALUES ($1, $2, $3, $3, 1, NOW(), $4) RETURNING id`,
+      [rfq.id, rfq.rfq_no, IDS.users.vendor_alpha, JSON.stringify(globalCharges)]
+    );
+    inserted.quoteIds.push(quote.id);
+
+    const qi = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+          package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 1, 500, 25000, 0, 0, 0, 0, 'flat', '15', '50', 'absolute', '[]'::jsonb)
+       RETURNING id`,
+      [rfq.id, rfq.rfq_no, quote.id]
+    );
+
+    // Drive the production drafting path.
+    const { buildAuthoritativePOPayload, draftPO } = await import(
+      "../../app/controllers/po/purchaseOrderController.js"
+    );
+
+    const poId = await db.tx(async (t) => {
+      const authPayload = await buildAuthoritativePOPayload(
+        {
+          rfq_id: rfq.id,
+          project_id: null,
+          total_value: 25000, // intentionally line-only; engine should override
+          quote_id: qi.id,
+          quote_item_id: qi.id,
+          product_info: {
+            rfq_product_id: rfqProd.id,
+            quantity: 50,
+            unit: "pcs",
+            unit_price: 500,
+            finalized_vendor_id: IDS.users.vendor_alpha,
+          },
+        },
+        t
+      );
+      const result = await draftPO(
+        authPayload,
+        { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        t
+      );
+      return result.po_id;
+    });
+    inserted.poIds.push(poId);
+
+    // ---- Assert 1: snapshot lives on the PO header ----
+    const poRow = await db.one(
+      `SELECT global_charges, total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [poId]
+    );
+    const snapshot = typeof poRow.global_charges === "string"
+      ? JSON.parse(poRow.global_charges)
+      : poRow.global_charges;
+    expect(Array.isArray(snapshot)).toBe(true);
+    expect(snapshot.length).toBe(2);
+    const slugs = snapshot.map((c) => c.slug).sort();
+    expect(slugs).toEqual(["document_fee", "tcs"]);
+    // Raw shape preserved exactly as the vendor stored it (legacy {tax} shape
+    // for TCS, newer {amount} shape for Document Fee).
+    const tcsRow = snapshot.find((c) => c.slug === "tcs");
+    expect(tcsRow.tax).toBe(2);
+    expect(tcsRow.tax_mode).toBe("percentage");
+
+    // ---- Assert 2: stored total_value includes global charges ----
+    // Hand math:
+    //   line total = 50 * 500 = 25000 (no per-line tax / freight / package / other_charges)
+    //   document_fee   = 500 (absolute)
+    //   tcs 2%         = 25000 * 0.02 = 500
+    //   global_charges_total = 1000
+    //   grand_total = 25000 + 1000 = 26000
+    expect(parseFloat(poRow.total_value)).toBe(26000);
+
+    // ---- Assert 3: PDF template data renders the same numbers ----
+    // The user-facing PDF must agree with the stored total. Reads
+    // PO.global_charges (snapshotted) — NOT the live tbl_quotes row, so the
+    // total is locked even if the source quote is later edited or deleted.
+    const data = await buildPOTemplateData(poId);
+    expect(parseFloat(data.totalPrice)).toBe(26000);
+    expect(Array.isArray(data.globalCharges)).toBe(true);
+    expect(data.globalCharges.length).toBe(2);
+    const gcByName = Object.fromEntries(
+      data.globalCharges.map((c) => [c.name, c])
+    );
+    expect(parseFloat(gcByName["Document Fee"].amount)).toBe(500);
+    expect(parseFloat(gcByName["TCS"].amount)).toBe(500);
+
+    // ---- Assert 4: snapshot survives source-quote tampering ----
+    // The whole point of snapshotting (vs. live LATERAL join) is that
+    // mutating the source quote AFTER draft must NOT change PO totals.
+    await db.none(
+      `UPDATE tbl_quotes SET global_charges = '[]'::jsonb WHERE id = $1`,
+      [quote.id]
+    );
+    const dataAfter = await buildPOTemplateData(poId);
+    expect(parseFloat(dataAfter.totalPrice)).toBe(26000);
+    expect(dataAfter.globalCharges.length).toBe(2);
+
+    // ---- Assert 5: PO Details API returns global_charges + correct total ----
+    // The buyer's PO Details page reads from getPODetailsById. It must surface
+    // global_charges and the same grand total the PDF prints.
+    const apiData = await getPODetailsById(poId, IDS.users.a1_proc_buyer);
+    expect(apiData).not.toBeNull();
+    expect(Number(apiData.total_value)).toBe(26000);
+    // Line aggregate (without global charges) is exposed separately so the
+    // FE can render Subtotal + Global Charges + Grand Total breakdown.
+    expect(Number(apiData.line_subtotal)).toBe(25000);
+    const apiGc = typeof apiData.global_charges === "string"
+      ? JSON.parse(apiData.global_charges)
+      : apiData.global_charges;
+    expect(Array.isArray(apiGc)).toBe(true);
+    expect(apiGc.length).toBe(2);
+    const apiSlugs = apiGc.map((c) => c.slug).sort();
+    expect(apiSlugs).toEqual(["document_fee", "tcs"]);
+
+    // Capture line for cleanup.
+    const popRow = await db.one(
+      `SELECT id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`,
+      [poId]
+    );
+    inserted.poLineIds.push(popRow.id);
+  });
 });
 
 // (F-PO-CHARGES-LOST: legacy POs render with wrong totals because their

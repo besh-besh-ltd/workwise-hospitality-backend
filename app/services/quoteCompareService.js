@@ -169,17 +169,28 @@ const enrichProduct = (product, opts) => {
       return { ...detail, engine: engineOut };
     });
 
-    // Resolve quote-level global charges (e.g. TCS) against the per-line sum.
-    // These are exposed as additive fields only — `engine_total` keeps its
-    // legacy meaning (per-line sum) so existing consumers (bands, lowest,
-    // FE total row) are unaffected. The negotiation modal reads
-    // `engine_global_charges*` / `engine_grand_total` to surface TCS.
+    // Resolve quote-level global charges (TCS, TDS, document fees, etc.)
+    // against the per-line sum. `engine_total` keeps its legacy meaning
+    // (per-line sum) so existing consumers (FE per-line rows) are unchanged.
+    // The negotiation modal + compare matrix read `engine_grand_total` to
+    // surface global charges.
+    //
+    // Both on-disk shapes are accepted: legacy `{tax, tax_mode, is_global: true}`
+    // for TCS-style document taxes and the newer `{amount, amount_mode}` for
+    // user-defined globals. `pricingEngine.normalizeGlobalCharge` collapses
+    // both into the canonical `{amount, amount_mode}` pair before applying.
     const savedGlobalCharges = Array.isArray(quote.global_charges) ? quote.global_charges : [];
-    const resolvedGlobalCharges = savedGlobalCharges.map((c) => ({
-      name: c.name ?? null,
-      slug: c.slug ?? null,
-      amount: pricingEngine.applyChargeMode(c.tax, c.tax_mode, engineQuoteTotal),
-    }));
+    const resolvedGlobalCharges = savedGlobalCharges
+      .map((c) => {
+        const norm = pricingEngine.normalizeGlobalCharge(c);
+        if (!norm) return null;
+        return {
+          name: norm.name,
+          slug: norm.slug,
+          amount: pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal),
+        };
+      })
+      .filter(Boolean);
     const globalChargesTotal = resolvedGlobalCharges.reduce((s, c) => s + c.amount, 0);
     const grandTotal = Math.round(engineQuoteTotal + globalChargesTotal);
 
@@ -199,6 +210,11 @@ const enrichProduct = (product, opts) => {
   // (created_by, timestamp) live on either the parent quote OR on
   // quote_details depending on the model output shape — merge both before
   // reading.
+  // `total` here is the document-level grand total (engine_grand_total)
+  // including document-level global_charges (TCS/TDS/document fees), so
+  // bands, l1, finalized aggregates, and vendor_totals all reflect the
+  // SAME number the buyer sees per quote and the SAME number that becomes
+  // tbl_rfq_purchase_order.total_value at PO drafting time.
   const columns = quotations.map((quote) => {
     const detail = getDetail(quote) || {};
     const merged = mergedQuoteRow(quote, detail);
@@ -206,6 +222,7 @@ const enrichProduct = (product, opts) => {
     const engine = detail.engine || { base: 0, base_tax: 0, charges_total: 0, total: toNumber(quote.engine_total) };
     const quantity = getQuantityFromProductOrDetail(product, merged);
     const unitPrice = toNumber(merged.unit_price);
+    const grandTotal = toNumber(quote.engine_grand_total ?? engine.total);
     return {
       vendor_id: vendorId,
       isRegret: isQuoteRegret(quote),
@@ -214,7 +231,7 @@ const enrichProduct = (product, opts) => {
       base: engine.base,
       base_tax: engine.base_tax,
       charges_total: engine.charges_total,
-      total: engine.total,
+      total: grandTotal,
       delivery: toNumber(merged.delivery_period),
       prev_worked: ((product.all_vendors || []).find(
         (v) => String(v.id) === String(vendorId)
@@ -306,7 +323,9 @@ const enrichProduct = (product, opts) => {
     const qCreatedBy = mergedQuoteRow(q, qDetail).created_by;
     return isFinalizedFor(product, qCreatedBy);
   });
-  const finalized_total = toNumber(finalizedQuote?.engine_total);
+  // Per-product finalized aggregate uses grand total (with global charges)
+  // so RFQ-level "Finalized Total" matches the eventual PO total exactly.
+  const finalized_total = toNumber(finalizedQuote?.engine_grand_total ?? finalizedQuote?.engine_total);
 
   return {
     ...productCopy,

@@ -117,6 +117,33 @@ export const calculateLineTotal = (line = {}) => {
   };
 };
 
+// Document-level global charges have two on-disk shapes that need to be
+// reconciled before they can be fed into the engine:
+//
+//   - newer / "amount" shape:  { name, amount, amount_mode, ... }
+//   - legacy / "tax" shape:    { name, tax,    tax_mode,    is_global: true, ... }
+//
+// The legacy shape is what the vendor send-quote screen produces today (TCS
+// 5%, TDS 1% etc. — quote-document-level taxes that piggyback on the same
+// JSONB array as user-defined "amount" global charges). Both shapes describe
+// the same arithmetic: add `value` percent/absolute on top of the document
+// subtotal. We normalise to a single { amount, amount_mode } pair before the
+// engine touches it; downstream consumers (engine, PO template, FE breakdown)
+// can stay shape-agnostic.
+export const normalizeGlobalCharge = (charge) => {
+  if (!charge || typeof charge !== 'object') return null;
+  const amount = charge.amount ?? charge.tax;
+  const amount_mode = charge.amount_mode ?? charge.tax_mode;
+  return {
+    name: charge.name ?? null,
+    slug: charge.slug ?? null,
+    amount: toNumber(amount),
+    amount_mode: amount_mode ?? DEFAULT_MODE,
+    is_global: charge.is_global === true ? true : undefined,
+    comment: charge.comment ?? undefined,
+  };
+};
+
 // Document-level aggregation across line items + invoice-wide global charges.
 // Global charges are applied as a percentage/absolute of the *grand subtotal*
 // (sum of line totals), matching today's send-quote behavior.
@@ -128,14 +155,17 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
 
   const grandSubtotal = lines.reduce((sum, l) => sum + l.total, 0);
 
-  const resolvedGlobalCharges = (globalCharges || []).map((charge) => {
-    const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
-    return {
-      name: charge.name ?? null,
-      slug: charge.slug ?? null,
-      amount,
-    };
-  });
+  const resolvedGlobalCharges = (globalCharges || [])
+    .map(normalizeGlobalCharge)
+    .filter(Boolean)
+    .map((charge) => {
+      const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
+      return {
+        name: charge.name ?? null,
+        slug: charge.slug ?? null,
+        amount,
+      };
+    });
 
   const globalChargesTotal = resolvedGlobalCharges.reduce(
     (sum, c) => sum + c.amount,
@@ -476,4 +506,5 @@ export default {
   pickLowestQuote,
   computeFreightAdvantage,
   normalizeChargesMeta,
+  normalizeGlobalCharge,
 };

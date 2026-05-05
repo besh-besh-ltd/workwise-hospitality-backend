@@ -194,15 +194,20 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
   // to the whole PO) as percentage/absolute against the items subtotal.
   // Global charges sit at the bottom — never per-row — so they're clearly
   // separated from the product-level charges already rendered inline.
+  // Normalise both shapes ({amount, amount_mode} and legacy {tax, tax_mode})
+  // before applying — the engine's normalizeGlobalCharge maps either to the
+  // canonical {amount, amount_mode} pair so TCS/TDS-style document taxes
+  // render correctly alongside user-defined global charges.
   const resolvedGlobalCharges = (globalChargesInput || [])
     .map((gc) => {
-      if (!gc) return null;
+      const norm = pricingEngine.normalizeGlobalCharge(gc);
+      if (!norm) return null;
       const amount = roundCurrency(
-        pricingEngine.applyChargeMode(gc.amount, gc.amount_mode, roundedSubtotal)
+        pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, roundedSubtotal)
       );
       if (amount <= 0) return null;
       return {
-        name: gc.name || 'Global Charge',
+        name: norm.name || 'Global Charge',
         amount: formatAmount(amount),
         amount_raw: amount,
       };
