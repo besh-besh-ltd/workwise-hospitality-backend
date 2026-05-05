@@ -2154,6 +2154,8 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       tender_scope,
       arc_period_from,
       arc_period_to,
+      bypass_arc,
+      bypass_arc_reason,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
@@ -2327,6 +2329,15 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       tender_scope: is_tender === 1 ? (tender_scope || null) : null,
       arc_period_from: is_tender === 1 ? (arc_period_from || null) : null,
       arc_period_to: is_tender === 1 ? (arc_period_to || null) : null,
+      // Phase 8: bypass-ARC override. Persist the buyer's reason on the
+      // RFQ row whenever it's supplied. Set bypass_arc=1 alongside the
+      // reason so downstream queries can filter without parsing the text.
+      // recorded_by and recorded_at are pinned to req.user.id / NOW() so
+      // the audit trail is the actor, not whatever the client sent.
+      bypass_arc: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? 1 : (bypass_arc === 1 ? 1 : 0),
+      bypass_arc_reason: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? bypass_arc_reason.trim() : null,
+      bypass_arc_recorded_by: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? user_id : null,
+      bypass_arc_recorded_at: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? new Date() : null,
       ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
       ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
@@ -5258,7 +5269,7 @@ const rfqController = {
             // Record lifecycle: SUBMITTED for approval (only if not auto-approved)
             // Auto-approved RFQs already have APPROVED lifecycle event recorded
             const rfqData = await t.oneOrNone(
-              `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
+              `SELECT is_tender, bypass_arc, bypass_arc_reason FROM tbl_rfq WHERE id = $1`,
               [id]
             );
             if (rfqData && approvalResult && !approvalResult.autoApproved) {
@@ -5272,7 +5283,23 @@ const rfqController = {
                 txContext: t
               });
             }
-            
+
+            // Phase 8: bypass-ARC audit event. Fires once per RFQ when
+            // an RFQ that overrides an active ARC is submitted. The
+            // reason is in metadata for the audit trail.
+            if (rfqData && rfqData.bypass_arc === 1 && rfqData.bypass_arc_reason) {
+              await recordLifecycleEvent({
+                entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+                entity_id: id,
+                stage: 'RFQ_BYPASS_ARC',
+                action: 'BYPASS_ARC',
+                performed_by: user_id,
+                metadata: { reason: rfqData.bypass_arc_reason },
+                remarks: rfqData.bypass_arc_reason,
+                txContext: t,
+              });
+            }
+
             return approvalResult;
           })
         );
