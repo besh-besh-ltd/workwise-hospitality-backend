@@ -383,12 +383,31 @@ const hospitalityApprovalController = {
         is_master,
         steps,
         id,
-        confirmed_approval_impact
+        confirmed_approval_impact,
+        // Group ARC global hierarchy fields. When is_global=1 the policy
+        // applies to every Group ARC tender for the parent company; all
+        // narrower scope columns (hospitality_company_id, hotel_id,
+        // department_id, process_id) MUST be null on the row.
+        is_global,
+        company_id,
       } = req.body;
       const created_by = req.user?.id;
+      const isGlobalPayload = is_global === 1 || is_global === true;
 
       if (!created_by) {
         return res.status(401).json({ status: 3, message: 'User authentication required' });
+      }
+
+      // Global policies must specify only company_id + entity_type. Reject
+      // mixed payloads early with a precise error so the admin UI can
+      // surface it without round-tripping through the DB CHECK.
+      if (isGlobalPayload) {
+        if (!company_id) {
+          return res.status(400).json({ status: 3, message: 'company_id is required for global policies' });
+        }
+        if (hospitality_company_id || hotel_id || department_id || process_id) {
+          return res.status(400).json({ status: 3, message: 'Global policies cannot be scoped by hospitality_company_id, hotel_id, department_id, or process_id' });
+        }
       }
 
       let policy;
@@ -466,12 +485,14 @@ const hospitalityApprovalController = {
 
           const updatedPolicy = await updateApprovalPolicy(id, {
             entity_type,
-            hospitality_company_id,
-            hotel_id,
-            department_id,
-            process_id,
+            hospitality_company_id: isGlobalPayload ? null : hospitality_company_id,
+            hotel_id: isGlobalPayload ? null : hotel_id,
+            department_id: isGlobalPayload ? null : department_id,
+            process_id: isGlobalPayload ? null : process_id,
             is_active,
-            is_master
+            is_master,
+            is_global: isGlobalPayload ? 1 : 0,
+            company_id: company_id || null,
           }, t);
 
           let newSteps = [];
@@ -517,10 +538,12 @@ const hospitalityApprovalController = {
         }
       } else {
         // Create new policy
-        if (!entity_type || !hospitality_company_id) {
+        if (!entity_type || (!isGlobalPayload && !hospitality_company_id)) {
           return res.status(400).json({
             status: 3,
-            message: 'entity_type and hospitality_company_id are required'
+            message: isGlobalPayload
+              ? 'entity_type and company_id are required for global policies'
+              : 'entity_type and hospitality_company_id are required'
           });
         }
 
@@ -532,18 +555,28 @@ const hospitalityApprovalController = {
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
+        // Global policies are restricted to the tender chain — there is no
+        // sense in a "global Group ARC PO policy". Enforce here.
+        if (isGlobalPayload && !['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type)) {
+          return res.status(400).json({
+            status: 3,
+            message: `Global policies are only valid for tender-chain entity types (TENDER, TECHNICAL, NEGOTIATION, NEGOTIATION_QUOTE, ARC). Got '${entity_type}'.`
+          });
+        }
         // Atomic create: policy row + steps in one tx, so a step-insert failure
         // doesn't leave an orphan policy behind.
         policy = await db.tx(async t => {
           const newPolicy = await createApprovalPolicy({
             entity_type,
-            hospitality_company_id,
-            hotel_id,
-            department_id,
-            process_id: process_id ? parseInt(process_id) : null,
+            hospitality_company_id: isGlobalPayload ? null : hospitality_company_id,
+            hotel_id: isGlobalPayload ? null : hotel_id,
+            department_id: isGlobalPayload ? null : department_id,
+            process_id: isGlobalPayload ? null : (process_id ? parseInt(process_id) : null),
             created_by,
             is_active,
-            is_master: is_master || false
+            is_master: is_master || false,
+            is_global: isGlobalPayload ? 1 : 0,
+            company_id: company_id || null,
           }, t);
           if (steps && steps.length > 0) {
             await insertPolicySteps(steps, newPolicy.id, t);
@@ -576,14 +609,18 @@ const hospitalityApprovalController = {
    */
   async getApprovalPolicies(req, res) {
     try {
-      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include } = req.query;
+      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include, is_global, company_id } = req.query;
       const filters = {
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
         process_id: process_id ? parseInt(process_id) : undefined,
-        include_inactive: include_inactive === 'true'
+        include_inactive: include_inactive === 'true',
+        // Group ARC global filter. The admin UI passes is_global=1 + company_id
+        // when listing the global hierarchy for a parent company.
+        is_global: is_global === '1' || is_global === 'true' ? 1 : (is_global === '0' || is_global === 'false' ? 0 : undefined),
+        company_id: company_id ? parseInt(company_id) : undefined,
       };
       const data = include === 'steps'
         ? await getApprovalPoliciesWithSteps(filters)

@@ -1544,7 +1544,7 @@ export async function createApprovalPolicy({
 export async function updateApprovalPolicy(id, patch, t = db) {
   if (!id) throw new Error('Policy ID is required');
 
-  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master'];
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master', 'is_global', 'company_id'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -1598,7 +1598,7 @@ export async function updateApprovalPolicy(id, patch, t = db) {
  * Get approval policies with optional filtering
  * Returns policies ordered by specificity (most specific first)
  */
-export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
+export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false, is_global, company_id }) {
   const conditions = ['TRUE'];
   const vals = [];
   let paramIdx = 1;
@@ -1622,6 +1622,18 @@ export async function getApprovalPolicies({ hospitality_company_id, hotel_id, de
   if (process_id !== undefined) {
     conditions.push(`(p.process_id IS NULL OR p.process_id = $${paramIdx++})`);
     vals.push(process_id);
+  }
+  // Group ARC global filter. Pass is_global=1 + company_id to fetch the
+  // network-wide tender chain policies; is_global=0 narrows to non-global
+  // (existing per-BU/per-hotel matrices).
+  if (is_global === 1 || is_global === '1' || is_global === true) {
+    conditions.push('p.is_global = 1');
+  } else if (is_global === 0 || is_global === '0' || is_global === false) {
+    conditions.push('p.is_global = 0');
+  }
+  if (company_id) {
+    conditions.push(`p.company_id = $${paramIdx++}`);
+    vals.push(company_id);
   }
   if (!include_inactive) {
     conditions.push('p.is_active = true');
