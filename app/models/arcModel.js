@@ -174,6 +174,54 @@ const arcModel = {
   },
 
   /**
+   * Read an envelope by id, with parent rfq metadata. Used by the
+   * release flow to validate that a buyer can call off against this ARC.
+   */
+  getEnvelopeForRelease: async ({ arc_id, txContext = null }) => {
+    const t = txContext || db;
+    return t.oneOrNone(
+      `SELECT a.*, r.rfq_no, r.title AS rfq_title, r.is_tender, r.tender_scope
+       FROM tbl_arc a
+       JOIN tbl_rfq r ON r.id = a.rfq_id
+       WHERE a.id = $1`,
+      [arc_id]
+    );
+  },
+
+  /**
+   * Confirm a hotel is part of the ARC's covered hotels.
+   * Group ARC may cover N hotels via tbl_arc_hotels; Single ARC covers
+   * exactly one. Returns true / false.
+   */
+  hotelCoveredByEnvelope: async ({ arc_id, hotel_id, txContext = null }) => {
+    const t = txContext || db;
+    const row = await t.oneOrNone(
+      `SELECT 1 FROM tbl_arc_hotels WHERE arc_id = $1 AND hotel_id = $2`,
+      [arc_id, hotel_id]
+    );
+    return !!row;
+  },
+
+  /**
+   * Bulk-fetch arc_items by id, scoped to a single envelope, for the
+   * release-create path. The release controller cross-checks every item
+   * against this list before snapshotting prices.
+   */
+  getApprovedItemsForRelease: async ({ arc_id, arc_item_ids = [], txContext = null }) => {
+    if (!arc_item_ids.length) return [];
+    const t = txContext || db;
+    return t.any(
+      `SELECT ai.*, pv.name AS product_name
+       FROM tbl_arc_item ai
+       LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+       WHERE ai.arc_id = $1
+         AND ai.id = ANY($2::int[])
+         AND ai.status = 'APPROVED'`,
+      [arc_id, arc_item_ids]
+    );
+  },
+
+  /**
    * For a given envelope, return the decision summary used by the
    * committee-completion gate (Phase 3 / handleArcPostApproval).
    *

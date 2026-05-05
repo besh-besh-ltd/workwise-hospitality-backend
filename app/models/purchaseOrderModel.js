@@ -317,6 +317,100 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
     }
 };
 
+/**
+ * Insert a Contracted PO drafted from an ARC release. Mirrors the
+ * non-existing_po branch of draftPurchaseOrder but with the
+ * contracted-PO shape:
+ *   - rfq_id is NULL (column is nullable since Phase 0 migration; the
+ *     parent is the ARC release, not an RFQ).
+ *   - is_contracted = 1, arc_release_id = the release id.
+ *   - terms_and_conditions sourced from the parent rfq's terms (the
+ *     tender ran the negotiation that produced these rates).
+ *   - quote_id array carries every snapshotted line's quote_item_id so
+ *     downstream charge lookups still find their source row.
+ *
+ * `release` shape:
+ *   { id, arc_id, hotel_id, vendor_id, total_value, items: [...] }
+ * `items` shape (per row):
+ *   { rfq_product_id, product_variant_id, quote_id, quantity, unit, unit_price,
+ *     total_price, charges_meta }
+ */
+export const draftPurchaseOrderFromArcRelease = async ({ release, source_rfq_id, company_id, initiated_by, t }) => {
+  const ctx = t || db;
+  const poNumber = await getNextPONumber();
+
+  // Carry tender T&Cs forward when available — the master ARC contract
+  // runs against those terms; the call-off PO inherits them.
+  let termsText = '';
+  if (source_rfq_id) {
+    const tcRow = await ctx.oneOrNone(
+      `SELECT STRING_AGG(t.term_content, ', ' ORDER BY t.id) AS terms_text
+         FROM tbl_rfq_terms_map tm
+         JOIN tbl_rfq_terms t ON t.id = tm.terms_id
+        WHERE tm.rfq_id = $1`,
+      [source_rfq_id]
+    );
+    termsText = tcRow?.terms_text || '';
+  }
+
+  const items = release.items || [];
+  if (items.length === 0) {
+    throw new Error('Cannot draft a contracted PO with no items');
+  }
+
+  // First item's headers populate the legacy single-item columns;
+  // tbl_purchase_order_product carries the per-line truth.
+  const head = items[0];
+
+  const po = await ctx.one(
+    `INSERT INTO tbl_rfq_purchase_order (
+        rfq_id, project_id, quote_id, po_number, total_value,
+        rfq_product_id, quantity, unit_price, finalized_vendor_id,
+        initiated_by, status, terms_and_conditions, company_id,
+        global_charges, arc_release_id, is_contracted
+     ) VALUES (
+        NULL, NULL, $1, $2, $3,
+        $4, $5, $6, $7,
+        $8, $9, $10, $11,
+        '[]'::jsonb, $12, 1
+     ) RETURNING id`,
+    [
+      items.map((i) => i.quote_id),
+      poNumber,
+      release.total_value,
+      items.map((i) => i.rfq_product_id),
+      head.quantity,
+      head.unit_price,
+      release.vendor_id,
+      initiated_by,
+      PO_STATUSES.DRAFT,
+      termsText,
+      company_id,
+      release.id,
+    ]
+  );
+
+  for (const item of items) {
+    await ctx.none(
+      `INSERT INTO tbl_purchase_order_product
+        (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        po.id,
+        item.rfq_product_id,
+        item.quote_id,
+        item.quantity,
+        item.unit || 'NOS',
+        item.unit_price,
+        item.charges_meta || null,
+        item.total_price,
+      ]
+    );
+  }
+
+  return po.id;
+};
+
 export const initiatePurchaseOrder = async (po_id, initiator, t) => {
   try {
     const purchaseOrder = await t.oneOrNone(

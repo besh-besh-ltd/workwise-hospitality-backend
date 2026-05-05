@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { acl } from '../../helper/common.js';
 import arcController from '../../controllers/arc/arcController.js';
+import arcReleaseController from '../../controllers/arc/arcReleaseController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
 import passport from '../../middleware/passport.js';
 
@@ -42,6 +43,34 @@ ArcRoutes.get(
   acl([2, 8]), // Procurement and Top Management
   hospitalityMiddleware.checkHospitality(false),
   arcController.getArcDocument
+);
+
+// Phase 7 — ARC Release / Direct-PO flow
+// Eligible vendors for a (hotel, product_variant) under any active ARC.
+ArcRoutes.get(
+  '/release/eligible-vendors',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.checkHospitality(false),
+  arcReleaseController.getEligibleVendors
+);
+
+// Create a release (call-off) and draft the Contracted PO.
+ArcRoutes.post(
+  '/release',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.requireHospitality,
+  arcReleaseController.createRelease
+);
+
+// Read a release.
+ArcRoutes.get(
+  '/release/:id',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.checkHospitality(false),
+  arcReleaseController.getRelease
 );
 
 export default ArcRoutes;
