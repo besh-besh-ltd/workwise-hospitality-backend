@@ -7,75 +7,78 @@
 // state per the matrix, increments tbl_rfq.iteration_number, emits a
 // TENDER_SENDBACK lifecycle event. All inside the supplied transaction.
 //
-// Stage matrix (from → to):
-//   ARC                  → TENDER_NEGOTIATION       (snapshot: arc, finalization, instances)
-//   ARC                  → TENDER_TECHNICAL_EVAL    (+ negotiation)
-//   ARC                  → TENDER_QUOTING           (+ tech_eval; quotes reopened, NOT deleted)
-//   ARC                  → DRAFT                    (full wipe; rfq → DRAFT)
-//   TENDER_NEGOTIATION   → TENDER_TECHNICAL_EVAL    (negotiation + instances)
-//   TENDER_NEGOTIATION   → TENDER_QUOTING           (+ tech_eval; quotes reopened)
-//   TENDER_TECHNICAL_EVAL→ TENDER_QUOTING           (tech_eval + instances; quotes reopened)
+// Stage matrix (from → to). Per product team: only two business-
+// sensible targets when the ARC committee sends a tender back.
 //
-// Quotes are never deleted unless the destination is DRAFT — vendor
-// effort survives a send-back. Approval instances are CANCELLED with
-// metadata.cancellation = { reason, sendback_from, sendback_to,
-// performed_by, at } so the audit trail stays whole.
+//   ARC → VENDOR_FINALIZATION
+//     Wipe ARC envelopes/items + quote_finalization. Buyer re-picks
+//     vendors from the same negotiation/quote data; tech-eval marks
+//     and negotiation rounds are kept.
+//
+//   ARC → TECHNICAL_EVALUATION
+//     Wipe ARC envelopes/items + quote_finalization + negotiation
+//     rounds + tech-eval rows. Tech evaluator clears clauses, vendors
+//     re-evaluated, then negotiation runs again, then re-finalize.
+//
+// Vendor quotes are NEVER deleted — vendors don't re-submit on
+// send-back. Approval instances are CANCELLED (status='CANCELLED'
+// with metadata.cancellation = { reason, sendback_from, sendback_to,
+// performed_by, at }) so the audit trail stays whole even after the
+// active state is gone.
 
 import db from '../config/dbConn.js';
 import { recordLifecycleEvent } from '../models/generalModel.js';
 import { logError } from '../helper/common.js';
 
-// Stages that can serve as "from" / "to". Keep these in lockstep with
-// the FE SendBackModal target dropdown.
-const FROM_STAGES = new Set([
-  'ARC',
-  'TENDER_NEGOTIATION',
-  'TENDER_TECHNICAL_EVAL',
-]);
+// Stages the committee can send a tender back FROM. Only ARC today —
+// earlier-stage approvers don't have a separate send-back path.
+const FROM_STAGES = new Set(['ARC']);
 
-// Allowed transitions: ordered earliest → latest. From any "from"
-// stage, you can only send back to a stage strictly earlier.
-const STAGE_ORDER = [
-  'DRAFT',
-  'TENDER_QUOTING',
-  'TENDER_TECHNICAL_EVAL',
-  'TENDER_NEGOTIATION',
-  'ARC',
-];
+// Stages the committee can send a tender back TO. Both targets keep
+// the vendor's submitted quotes intact; only the buyer-side state is
+// rewound.
+const TO_STAGES = new Set(['VENDOR_FINALIZATION', 'TECHNICAL_EVALUATION']);
 
 // Per-(from, to) descriptor of which active tables we wipe.
 const wipePlan = ({ from, to }) => {
-  const fromIdx = STAGE_ORDER.indexOf(from);
-  const toIdx = STAGE_ORDER.indexOf(to);
-  if (fromIdx <= 0 || toIdx < 0 || toIdx >= fromIdx) {
-    return null; // invalid transition
+  if (!FROM_STAGES.has(from) || !TO_STAGES.has(to)) return null;
+
+  // ARC → VENDOR_FINALIZATION: just clear the ARC envelope + the
+  //   quote-finalization rows so the buyer can re-finalize different
+  //   vendors against the EXISTING negotiation / tech-eval data.
+  if (from === 'ARC' && to === 'VENDOR_FINALIZATION') {
+    return {
+      arc: true,
+      finalization: true,
+      negotiation: false,
+      tech_eval: false,
+      quotes_delete: false,
+      quotes_reopen: false,
+      rfq_status_after: 1, // OPEN — quote-comparison / re-finalize phase
+      is_published_after: null,
+    };
   }
-  return {
-    arc:           fromIdx >= STAGE_ORDER.indexOf('ARC'),
-    negotiation:   fromIdx >= STAGE_ORDER.indexOf('TENDER_NEGOTIATION') && toIdx <= STAGE_ORDER.indexOf('TENDER_TECHNICAL_EVAL'),
-    finalization:  fromIdx >= STAGE_ORDER.indexOf('ARC'),
-    tech_eval:     toIdx <= STAGE_ORDER.indexOf('TENDER_QUOTING'),
-    // Quotes only fully delete on the all-the-way-back-to-DRAFT path;
-    // any other to_stage just reopens the quoting window.
-    quotes_delete: to === 'DRAFT',
-    quotes_reopen: to === 'TENDER_QUOTING' && fromIdx > STAGE_ORDER.indexOf('TENDER_QUOTING'),
-    rfq_status_after: to === 'DRAFT'
-      ? 0  // DRAFT
-      : to === 'TENDER_QUOTING'
-        ? 1  // OPEN — vendors quote
-        : to === 'TENDER_TECHNICAL_EVAL'
-          ? 1  // OPEN — back to tech-eval phase
-          : to === 'TENDER_NEGOTIATION'
-            ? 1  // OPEN — back to negotiation phase
-            : null,
-    is_published_after: to === 'DRAFT' ? 0 : null,
-  };
+
+  // ARC → TECHNICAL_EVALUATION: clear ARC + finalization + negotiation
+  //   rounds + tech-eval rows. Tech evaluator does it all over.
+  if (from === 'ARC' && to === 'TECHNICAL_EVALUATION') {
+    return {
+      arc: true,
+      finalization: true,
+      negotiation: true,
+      tech_eval: true,
+      quotes_delete: false,
+      quotes_reopen: false,
+      rfq_status_after: 1, // OPEN — back to tech-eval phase
+      is_published_after: null,
+    };
+  }
+
+  return null;
 };
 
 const ENTITY_TYPES_BY_FROM = {
-  ARC: ['ARC'],
-  TENDER_NEGOTIATION: ['NEGOTIATION', 'NEGOTIATION_QUOTE'],
-  TENDER_TECHNICAL_EVAL: ['TECHNICAL'],
+  ARC: ['ARC', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'TECHNICAL'],
 };
 
 /**
@@ -176,13 +179,7 @@ async function captureSnapshot(t, { rfq_id, plan }) {
   // Always snapshot every approval instance for the rfq across the
   // affected entity types — committee + earlier stage approvals all
   // get cancelled, so the audit needs every one.
-  const fromStages = Object.entries(ENTITY_TYPES_BY_FROM)
-    .filter(([fromKey]) => {
-      // Include all entity types from `from_stage` and earlier.
-      const idx = STAGE_ORDER.indexOf(fromKey);
-      return idx >= 0;
-    })
-    .flatMap(([, types]) => types);
+  const fromStages = Object.values(ENTITY_TYPES_BY_FROM).flat();
   const allTypes = [...new Set(['RFQ', 'TENDER', ...fromStages])];
 
   // We collect instances tied to this rfq. The legacy product-level
