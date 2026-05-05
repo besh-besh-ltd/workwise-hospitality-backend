@@ -122,6 +122,58 @@ const arcModel = {
   },
 
   /**
+   * For a given (hotel, product_variant) pair, return every ARC envelope
+   * that:
+   *   - is in an active state (DOC_GENERATED or ACTIVE),
+   *   - covers the hotel via tbl_arc_hotels,
+   *   - has an APPROVED tbl_arc_item for the product_variant_id,
+   *   - has a validity period that has NOT expired (period_to >= today).
+   *
+   * Returns rows enriched with vendor + price + period info so the
+   * frontend can show the "CONTRACTED ITEM" badge and pre-populate the
+   * release-PO modal without another round-trip.
+   *
+   * Bulk-friendly: pass arrays of product_variant_ids and hotel_ids and
+   * the helper returns one row per (arc, product, hotel) match. Callers
+   * can group by product_variant_id client-side.
+   */
+  findActiveArcsForProducts: async ({ product_variant_ids = [], hotel_ids = [], txContext = null }) => {
+    if (!product_variant_ids.length || !hotel_ids.length) return [];
+    const t = txContext || db;
+    return t.any(
+      `SELECT
+         a.id AS arc_id,
+         a.rfq_id AS source_tender_id,
+         a.vendor_id,
+         a.period_from,
+         a.period_to,
+         a.status AS envelope_status,
+         a.tender_scope,
+         ai.id AS arc_item_id,
+         ai.product_variant_id,
+         ai.unit_price,
+         ai.charges_meta,
+         ah.hotel_id,
+         u.organization_name AS vendor_name,
+         u.email AS vendor_email,
+         r.rfq_no AS source_rfq_no,
+         r.title AS source_rfq_title
+       FROM tbl_arc a
+       JOIN tbl_arc_hotels ah ON ah.arc_id = a.id
+       JOIN tbl_arc_item ai ON ai.arc_id = a.id
+       JOIN tbl_rfq r ON r.id = a.rfq_id
+       JOIN tbl_users u ON u.id = a.vendor_id
+       WHERE ai.product_variant_id = ANY($1::int[])
+         AND ah.hotel_id = ANY($2::int[])
+         AND ai.status = 'APPROVED'
+         AND a.status IN ('ACTIVE', 'DOC_GENERATED')
+         AND a.period_to >= CURRENT_DATE
+       ORDER BY ai.product_variant_id, a.period_to DESC, ai.unit_price ASC`,
+      [product_variant_ids, hotel_ids]
+    );
+  },
+
+  /**
    * For a given envelope, return the decision summary used by the
    * committee-completion gate (Phase 3 / handleArcPostApproval).
    *

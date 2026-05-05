@@ -9821,9 +9821,65 @@ const rfqController = {
         logger.debug({ data: error.message }, 'Product search record table not available');
       }
 
+      const dedupedProducts = removeDuplicates(productResult);
+
+      // Phase 6: enrich each product with `arc_info` describing any
+      // active Group-/Single-ARC contracts that cover the (hotel, product)
+      // pair. The FE renders a "CONTRACTED ITEM" badge and offers the
+      // release-PO flow when the user adds such a product to a draft.
+      // Skipped when no hotels are in scope (non-hospitality flow).
+      let arcInfoByProduct = {};
+      if (Array.isArray(hotel_ids) && hotel_ids.length > 0 && dedupedProducts.length > 0) {
+        const variantIds = dedupedProducts
+          .map((p) => p.product_variant_id || p.variant_id || p.id)
+          .filter(Number.isFinite);
+        if (variantIds.length > 0) {
+          try {
+            const arcRows = await arcModel.findActiveArcsForProducts({
+              product_variant_ids: variantIds,
+              hotel_ids: hotel_ids.map(Number).filter(Number.isFinite),
+            });
+            for (const row of arcRows) {
+              const key = row.product_variant_id;
+              if (!arcInfoByProduct[key]) arcInfoByProduct[key] = [];
+              arcInfoByProduct[key].push({
+                arc_id: row.arc_id,
+                arc_item_id: row.arc_item_id,
+                source_tender_id: row.source_tender_id,
+                source_rfq_no: row.source_rfq_no,
+                source_rfq_title: row.source_rfq_title,
+                vendor_id: row.vendor_id,
+                vendor_name: row.vendor_name,
+                hotel_id: row.hotel_id,
+                period_from: row.period_from,
+                period_to: row.period_to,
+                unit_price: row.unit_price,
+                envelope_status: row.envelope_status,
+                tender_scope: row.tender_scope,
+              });
+            }
+          } catch (arcEnrichErr) {
+            // Non-fatal — search must still succeed if ARC lookup fails.
+            logError('Failed to enrich product search with ARC info', arcEnrichErr);
+          }
+        }
+      }
+
+      const enriched = dedupedProducts.map((p) => {
+        const key = p.product_variant_id || p.variant_id || p.id;
+        const arcs = arcInfoByProduct[key] || [];
+        return {
+          ...p,
+          arc_info: {
+            is_under_arc: arcs.length > 0,
+            arcs,
+          },
+        };
+      });
+
       res.status(200).json({
         status: 1,
-        data: removeDuplicates(productResult),
+        data: enriched,
         categoryData: categoryResult
       });
     } catch (error) {
