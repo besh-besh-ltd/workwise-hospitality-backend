@@ -46,6 +46,84 @@ export const getPOByRFQ = async (req, res) => {
     }
 };
 
+/**
+ * GET /po/contracted
+ * List Contracted POs (rfq_id IS NULL, is_contracted = 1, drafted from
+ * an ARC release) scoped to the actor's parent company. Optional filters:
+ * status, hotel_id, vendor_id, page, limit, dateFrom, dateTo.
+ *
+ * SECURITY: scope is pinned to req.user.company_id. The query is also
+ * filtered by joined hotels' parent companies so a user can never see
+ * another tenant's contracted POs.
+ */
+export const getContractedPOs = async (req, res) => {
+  try {
+    const actorCompanyId = req.user?.company_id;
+    if (!actorCompanyId) {
+      return res.status(403).json({ status: 3, message: 'Your account is not associated with a parent company.' });
+    }
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit) || 20);
+    const offset = (page - 1) * limit;
+    const { status, hotel_id, vendor_id, dateFrom, dateTo, poNumber } = req.query;
+
+    const conditions = ['po.is_contracted = 1', 'po.company_id = $1'];
+    const vals = [actorCompanyId];
+    let p = 2;
+    if (status) { conditions.push(`po.status = $${p++}::po_status`); vals.push(status); }
+    if (hotel_id) {
+      conditions.push(`r.hotel_id = $${p++}`);
+      vals.push(parseInt(hotel_id));
+    }
+    if (vendor_id) { conditions.push(`po.finalized_vendor_id = $${p++}`); vals.push(parseInt(vendor_id)); }
+    if (dateFrom) { conditions.push(`po.created_at >= $${p++}::timestamptz`); vals.push(dateFrom); }
+    if (dateTo) { conditions.push(`po.created_at <= $${p++}::timestamptz`); vals.push(dateTo); }
+    if (poNumber) { conditions.push(`po.po_number ILIKE $${p++}`); vals.push(`%${poNumber}%`); }
+
+    const where = conditions.join(' AND ');
+
+    const data = await db.any(
+      `SELECT po.id, po.po_number, po.status, po.total_value, po.created_at,
+              po.finalized_vendor_id, po.arc_release_id,
+              u.organization_name AS vendor_name,
+              r.hotel_id, h.name AS hotel_name,
+              a.rfq_id AS source_tender_id, a.period_from, a.period_to,
+              src.rfq_no AS source_rfq_no
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_arc_release r ON r.id = po.arc_release_id
+       JOIN tbl_arc a ON a.id = r.arc_id
+       JOIN tbl_rfq src ON src.id = a.rfq_id
+       LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+       WHERE ${where}
+       ORDER BY po.created_at DESC
+       LIMIT ${limit} OFFSET ${offset}`,
+      vals
+    );
+
+    const totalRow = await db.one(
+      `SELECT COUNT(*)::int AS total
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_arc_release r ON r.id = po.arc_release_id
+       JOIN tbl_arc a ON a.id = r.arc_id
+       WHERE ${where}`,
+      vals
+    );
+
+    return res.status(200).json({
+      status: 1,
+      data,
+      total: totalRow.total,
+      page,
+      limit,
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({ status: 0, message: error.message || 'Failed to list contracted POs' });
+  }
+};
+
 export const getPODetails = async (req, res) => {
     try {
         const { po_id } = req.params;

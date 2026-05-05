@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getContractedPOs, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
@@ -9,6 +9,11 @@ import hospitalityMiddleware from '../../middleware/hospitality.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 const PORoutes = Router();
+
+// IMPORTANT: more specific routes MUST come before /:po_id, otherwise
+// Express interprets the path segment as a po_id. /contracted is a
+// fixed string, so registering it first keeps it from being shadowed.
+PORoutes.get('/contracted', passportSignIn, getContractedPOs);
 
 PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
