@@ -37,6 +37,18 @@ ArcRoutes.post(
   arcController.performAction
 );
 
+// Phase 3.5 — iteration history (send-back snapshots) for a tender.
+// Procurement + Top Management read access (same as the lifecycle
+// surface) so they can render the IterationHistoryPanel above the
+// timeline without a separate route.
+ArcRoutes.get(
+  '/tender/:rfq_id/iteration-history',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.checkHospitality(false),
+  arcController.iterationHistory
+);
+
 // Get ARC document URL
 ArcRoutes.get(
   '/document/:approval_instance_id',

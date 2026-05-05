@@ -7,6 +7,7 @@ import negotiationModel from '../../models/negotiationModel.js';
 import { getLifecycleHistory, getApprovalInstancesByEntity, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { generateAwardDocument, sendAwardDocumentToVendor } from './arcDocumentController.js';
+import { sendBackTender, getTenderIterationHistory } from '../../services/tenderSendbackService.js';
 import db from '../../config/dbConn.js';
 
 /**
@@ -553,79 +554,51 @@ const ArcController = {
           });
         }
       } else if (action === 'send_to') {
-        // Send to previous stage - cancel current approval and record lifecycle
+        // Phase 3.5: send-back delegates to tenderSendbackService for
+        // the full snapshot-and-wipe pipeline. The service captures
+        // the affected state into tbl_tender_sendback_history before
+        // any deletes, cancels (not deletes) every relevant approval
+        // instance, wipes the live tables per the wipe-plan matrix,
+        // and bumps tbl_rfq.iteration_number. The lifecycle event is
+        // emitted inside the service.
         if (!target_stage) {
+          return res.status(400).json({ status: 2, message: 'target_stage is required for send_to action' });
+        }
+        if (!remarks || remarks.trim().length < 30) {
           return res.status(400).json({
             status: 2,
-            message: 'target_stage is required for send_to action'
+            message: 'A reason of at least 30 characters is required when sending a tender back.',
           });
         }
-
-        // Cancel pending approval instance if exists and save target_stage in metadata
-        if (pendingInstance) {
-          try {
-            // First update metadata with target_stage so it's preserved after cancellation
-            const updatedMetadata = {
-              ...(pendingInstance.metadata || {}),
-              sent_back_to: target_stage.toUpperCase(),
-              sent_back_at: new Date().toISOString(),
-              sent_back_by: user_id,
-              sent_back_remarks: remarks || null
-            };
-
-            await db.none(`
-              UPDATE tbl_approval_instances
-              SET metadata = $1
-              WHERE id = $2
-            `, [JSON.stringify(updatedMetadata), pendingInstance.id]);
-
-            await cancelApprovalInstance(pendingInstance.id, user_id, `Sent back to ${target_stage}: ${remarks || 'No remarks'}`);
-          } catch (cancelError) {
-            logError('Error cancelling approval instance', cancelError);
-            // Continue even if cancellation fails
-          }
-        }
-
-        // Record lifecycle event
-        const stage = `SENT_TO_${target_stage.toUpperCase()}`;
-        const instanceMetadata = pendingInstance?.metadata || {};
-        const productId = instanceMetadata.rfq_product_id || rfq_product_id || null;
-
-        // Reset quote finalization if sending back to stages before ARC
-        if (productId) {
-          try {
-            await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `Sent back to ${target_stage}`, target_stage);
-          } catch (resetError) {
-            logError('Error resetting quote finalization', resetError);
-          }
-        }
-        
-        await recordLifecycleEvent({
-          entity_type: 'TENDER', // Always TENDER for ARC
-          entity_id: rfq_id,
-          stage,
-          action: 'SEND_TO',
-          performed_by: user_id,
-          metadata: {
-            rfq_product_id: productId,
-            target_stage: target_stage,
-            cancelled_instance_id: pendingInstance?.id || null
-          },
-          remarks: remarks || null
-        });
-
-        return res.status(200).json({
-          status: 1,
-          message: `Tender sent back to ${target_stage} successfully`,
-          data: {
+        const fromStage = 'ARC'; // this controller endpoint is the ARC committee surface
+        try {
+          const result = await sendBackTender({
             rfq_id,
-            action,
-            target_stage: target_stage,
-            stage,
+            from_stage: fromStage,
+            to_stage: target_stage.toUpperCase(),
+            reason: remarks,
             performed_by: user_id,
-            performed_at: new Date()
-          }
-        });
+          });
+          return res.status(200).json({
+            status: 1,
+            message: `Tender sent back to ${target_stage} successfully (iteration ${result.iteration_after}).`,
+            data: {
+              rfq_id,
+              action,
+              target_stage: target_stage.toUpperCase(),
+              stage: 'TENDER_SENDBACK',
+              ...result,
+              performed_by: user_id,
+              performed_at: new Date(),
+            },
+          });
+        } catch (sendBackErr) {
+          logError('Send-back failed', sendBackErr);
+          return res.status(400).json({
+            status: 2,
+            message: sendBackErr.message || 'Failed to send tender back',
+          });
+        }
       }
     } catch (error) {
       logError(error);
@@ -637,6 +610,25 @@ const ArcController = {
    * Get ARC document URL from approval instance metadata
    * GET /arc/document/:approval_instance_id
    */
+  /**
+   * GET /arc/tender/:rfq_id/iteration-history
+   * Returns the full snapshot history (newest first) for the
+   * IterationHistoryPanel on the FE.
+   */
+  iterationHistory: async (req, res) => {
+    try {
+      const rfq_id = parseInt(req.params.rfq_id);
+      if (!rfq_id) {
+        return res.status(400).json({ status: 2, message: 'rfq_id is required' });
+      }
+      const data = await getTenderIterationHistory(rfq_id);
+      return res.status(200).json({ status: 1, data });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
   getArcDocument: async (req, res) => {
     try {
       const approval_instance_id = parseInt(req.params.approval_instance_id);
