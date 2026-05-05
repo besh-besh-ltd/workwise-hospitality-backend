@@ -66,6 +66,7 @@ const postActionRegistry = {
   },
   ARC: {
     APPROVED: () => import('../controllers/arc/arcController.js').then(m => m.handleArcPostApproval),
+    REJECTED: () => import('../controllers/arc/arcController.js').then(m => m.handleArcRejection),
   },
   NEGOTIATION: {
     APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval),

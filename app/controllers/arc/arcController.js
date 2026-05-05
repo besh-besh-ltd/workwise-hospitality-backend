@@ -11,6 +11,106 @@ import { sendBackTender, getTenderIterationHistory } from '../../services/tender
 import db from '../../config/dbConn.js';
 
 /**
+ * Recompute the parent envelope's status after a per-cell decision and,
+ * if all items are decided AND ≥1 was approved, generate + upload the
+ * consolidated ARC PDF.
+ *
+ * Shared between handleArcPostApproval (APPROVED dispatch) and
+ * handleArcRejection (REJECTED dispatch) because both terminal cell
+ * transitions need to drive the same envelope-level state machine:
+ *
+ *   pending > 0          → PARTIALLY_DECIDED  (no PDF)
+ *   pending = 0, all rej → VOID               (no PDF)
+ *   pending = 0, ≥1 appr → ACTIVE             (+ PDF + email)
+ *
+ * This used to be inline inside handleArcPostApproval, which meant the
+ * REJECTED path could never drive the envelope to VOID — committee
+ * "all reject" envelopes stayed at PENDING_COMMITTEE forever.
+ */
+const recomputeEnvelopeAfterDecision = async ({ arc_id, rfq_id, approver_user_id, txContext }) => {
+  const t = txContext || db;
+
+  const counts = await arcModel.getEnvelopeDecisionCounts({ arc_id, txContext: t });
+
+  if (counts.pending > 0) {
+    await t.none(
+      `UPDATE tbl_arc SET status = 'PARTIALLY_DECIDED', updated_at = NOW()
+       WHERE id = $1 AND status = 'PENDING_COMMITTEE'`,
+      [arc_id]
+    );
+    await recordLifecycleEvent({
+      entity_type: 'TENDER',
+      entity_id: rfq_id,
+      stage: 'ARC_ITEM_DECIDED',
+      action: 'DECIDE_ITEM',
+      performed_by: approver_user_id,
+      metadata: { arc_id, decision_counts: counts },
+      txContext: t,
+    });
+    return;
+  }
+
+  if (counts.approved === 0) {
+    await t.none(`UPDATE tbl_arc SET status = 'VOID', updated_at = NOW() WHERE id = $1`, [arc_id]);
+    await recordLifecycleEvent({
+      entity_type: 'TENDER',
+      entity_id: rfq_id,
+      stage: 'ARC_VOID',
+      action: 'VOID_ENVELOPE',
+      performed_by: approver_user_id,
+      metadata: { arc_id, decision_counts: counts },
+      remarks: 'All ARC items rejected by committee',
+      txContext: t,
+    });
+    return;
+  }
+
+  // ≥1 item approved AND no pending → consolidated PDF + ACTIVE.
+  const pdfResult = await generateAwardDocument(arc_id, t);
+  if (!pdfResult.ok) {
+    logError(`ARC PDF generation failed for arc_id=${arc_id}: ${pdfResult.error}`);
+    return;
+  }
+
+  const envelope = await t.one(
+    `SELECT a.*, r.rfq_no FROM tbl_arc a
+     JOIN tbl_rfq r ON r.id = a.rfq_id WHERE a.id = $1`,
+    [arc_id]
+  );
+  const fileName = `arc-${envelope.rfq_no}-vendor-${envelope.vendor_id}-${Date.now()}.pdf`;
+  const s3Key = `arc-documents/${envelope.rfq_no}/${envelope.vendor_id}/${fileName}`;
+  const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
+  if (!s3Result.ok) {
+    logError(`ARC PDF upload failed for arc_id=${arc_id}: ${s3Result.error}`);
+    return;
+  }
+
+  await t.none(
+    `UPDATE tbl_arc
+     SET document_url = $2, document_generated_at = NOW(),
+         status = 'ACTIVE', updated_at = NOW()
+     WHERE id = $1`,
+    [arc_id, s3Result.url]
+  );
+  await sendAwardDocumentToVendor(arc_id, s3Result.url, t);
+
+  await recordLifecycleEvent({
+    entity_type: 'TENDER', entity_id: rfq_id,
+    stage: 'ARC_DOC_GENERATED', action: 'GENERATE_DOCUMENT',
+    performed_by: approver_user_id,
+    metadata: { arc_id, vendor_id: envelope.vendor_id, document_url: s3Result.url, decision_counts: counts },
+    txContext: t,
+  });
+  await recordLifecycleEvent({
+    entity_type: 'TENDER', entity_id: rfq_id,
+    stage: 'ARC_ACTIVE', action: 'ACTIVATE',
+    performed_by: approver_user_id,
+    metadata: { arc_id, vendor_id: envelope.vendor_id },
+    txContext: t,
+  });
+};
+
+/**
  * Handle ARC post-approval actions (document generation and email)
  * Called after ARC approval instance is fully approved
  *
@@ -24,153 +124,102 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, opt
   const t = txContext || db;
 
   try {
-    // Get approval instance. Per Phase 2, entity_id is the arc_item.id —
-    // each (product, vendor) cell in the committee matrix has its own
-    // approval instance.
     const instance = await getApprovalInstanceById(approval_instance_id, 'ARC', t);
-    if (!instance || instance.status !== 'APPROVED') {
-      return; // Not approved yet or not ARC type
-    }
+    if (!instance || instance.status !== 'APPROVED') return;
 
     const arc_item_id = instance.entity_id;
-    const metadata = instance.metadata || {};
-    const rfq_id = metadata.rfq_id;
+    const rfq_id = instance.metadata?.rfq_id;
 
-    // 1. Mark this ARC item APPROVED. Idempotent — a duplicate dispatch
-    //    just updates the timestamp.
+    // 1. Mark this ARC item APPROVED (idempotent).
     await t.none(
       `UPDATE tbl_arc_item
-       SET status = 'APPROVED',
-           approved_at = NOW(),
-           approved_by = $2
+        SET status = 'APPROVED', approved_at = NOW(), approved_by = $2
        WHERE id = $1`,
       [arc_item_id, approver_user_id]
     );
 
-    // 2. Look up the parent envelope.
-    const arcItem = await t.oneOrNone(
-      `SELECT * FROM tbl_arc_item WHERE id = $1`,
-      [arc_item_id]
-    );
+    const arcItem = await t.oneOrNone(`SELECT arc_id FROM tbl_arc_item WHERE id = $1`, [arc_item_id]);
     if (!arcItem) {
       logger.warn(`[ARC] Item ${arc_item_id} not found after approve — skipping envelope check`);
       return;
     }
-    const arc_id = arcItem.arc_id;
 
-    // 3. Are ALL items in the envelope decided? PARTIALLY_DECIDED is the
-    //    intermediate state. The PDF only fires on the last decision.
-    const counts = await arcModel.getEnvelopeDecisionCounts({ arc_id, txContext: t });
-    if (counts.pending > 0) {
-      // Mark the envelope as PARTIALLY_DECIDED so the buyer-side UI can
-      // show committee progress. Does not generate a doc yet.
-      await t.none(
-        `UPDATE tbl_arc SET status = 'PARTIALLY_DECIDED', updated_at = NOW()
-         WHERE id = $1 AND status = 'PENDING_COMMITTEE'`,
-        [arc_id]
-      );
-      await recordLifecycleEvent({
-        entity_type: 'TENDER',
-        entity_id: rfq_id,
-        stage: 'ARC_ITEM_APPROVED',
-        action: 'APPROVE_ITEM',
-        performed_by: approver_user_id,
-        metadata: { arc_id, arc_item_id, decision_counts: counts },
-        txContext: t,
-      });
-      return;
-    }
-
-    // 4. All items decided. If ALL were rejected, the envelope is VOID —
-    //    no PDF.
-    if (counts.approved === 0) {
-      await t.none(
-        `UPDATE tbl_arc SET status = 'VOID', updated_at = NOW() WHERE id = $1`,
-        [arc_id]
-      );
-      await recordLifecycleEvent({
-        entity_type: 'TENDER',
-        entity_id: rfq_id,
-        stage: 'ARC_VOID',
-        action: 'VOID_ENVELOPE',
-        performed_by: approver_user_id,
-        metadata: { arc_id, decision_counts: counts },
-        remarks: 'All ARC items rejected by committee',
-        txContext: t,
-      });
-      return;
-    }
-
-    // 5. ≥1 item approved — generate the consolidated per-vendor ARC PDF.
-    //    generateAwardDocument now takes arc_id and produces ONE document
-    //    listing every approved product for that vendor with period dates
-    //    and no quantity (per product team).
-    const pdfResult = await generateAwardDocument(arc_id, t);
-    if (!pdfResult.ok) {
-      logError(`ARC PDF generation failed for arc_id=${arc_id}: ${pdfResult.error}`);
-      return;
-    }
-
-    const envelope = await t.one(
-      `SELECT a.*, r.rfq_no FROM tbl_arc a
-       JOIN tbl_rfq r ON r.id = a.rfq_id
-       WHERE a.id = $1`,
-      [arc_id]
-    );
-    const fileName = `arc-${envelope.rfq_no}-vendor-${envelope.vendor_id}-${Date.now()}.pdf`;
-    const s3Key = `arc-documents/${envelope.rfq_no}/${envelope.vendor_id}/${fileName}`;
-    const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
-    if (!s3Result.ok) {
-      logError(`ARC PDF upload failed for arc_id=${arc_id}: ${s3Result.error}`);
-      return;
-    }
-
-    // 6. Persist the document URL on the envelope and transition status.
-    await t.none(
-      `UPDATE tbl_arc
-       SET document_url = $2,
-           document_generated_at = NOW(),
-           status = 'ACTIVE',
-           updated_at = NOW()
-       WHERE id = $1`,
-      [arc_id, s3Result.url]
-    );
-
-    // 7. Email the consolidated doc to the vendor.
-    await sendAwardDocumentToVendor(arc_id, s3Result.url, t);
-
-    // 8. Lifecycle: doc generated + envelope active.
-    await recordLifecycleEvent({
-      entity_type: 'TENDER',
-      entity_id: rfq_id,
-      stage: 'ARC_DOC_GENERATED',
-      action: 'GENERATE_DOCUMENT',
-      performed_by: approver_user_id,
-      metadata: {
-        arc_id,
-        vendor_id: envelope.vendor_id,
-        document_url: s3Result.url,
-        decision_counts: counts,
-      },
-      txContext: t,
-    });
-    await recordLifecycleEvent({
-      entity_type: 'TENDER',
-      entity_id: rfq_id,
-      stage: 'ARC_ACTIVE',
-      action: 'ACTIVATE',
-      performed_by: approver_user_id,
-      metadata: { arc_id, vendor_id: envelope.vendor_id },
-      txContext: t,
+    await recomputeEnvelopeAfterDecision({
+      arc_id: arcItem.arc_id, rfq_id, approver_user_id, txContext: t,
     });
   } catch (arcDocError) {
-    // Log but don't fail the transaction
     logError(arcDocError);
   }
 };
 
-// Export the helper function for use in general controller
-export { handleArcPostApproval };
+/**
+ * Handle ARC rejection — counterpart to handleArcPostApproval.
+ * Marks the arc_item REJECTED and recomputes envelope status. If the
+ * rejection completes the envelope (no pending) AND every cell was
+ * rejected, the envelope is set VOID; if ≥1 cell was approved earlier,
+ * the envelope still gets the PDF and goes ACTIVE.
+ */
+const handleArcRejection = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
+  const t = txContext || db;
+  try {
+    const instance = await getApprovalInstanceById(approval_instance_id, 'ARC', t);
+    if (!instance || instance.status !== 'REJECTED') return;
+
+    const arc_item_id = instance.entity_id;
+    const rfq_id = instance.metadata?.rfq_id;
+    const remarks = options?.comment || null;
+
+    await t.none(
+      `UPDATE tbl_arc_item
+        SET status = 'REJECTED', rejection_remarks = COALESCE($2, rejection_remarks)
+       WHERE id = $1`,
+      [arc_item_id, remarks]
+    );
+
+    const arcItem = await t.oneOrNone(
+      `SELECT ai.arc_id, ai.product_variant_id, ai.variant, a.vendor_id
+         FROM tbl_arc_item ai JOIN tbl_arc a ON a.id = ai.arc_id
+        WHERE ai.id = $1`,
+      [arc_item_id]
+    );
+    if (!arcItem) {
+      logger.warn(`[ARC] Item ${arc_item_id} not found after reject — skipping envelope check`);
+      return;
+    }
+
+    // Vendor-scoped finalization cleanup. ARC supports multi-vendor: a
+    // committee rejection of one (vendor, product) cell must only wipe
+    // that vendor's finalization row, not the row of any other vendor
+    // who also won the same product. The legacy
+    // resetQuoteFinalizationForSendback helper wipes everything by
+    // (rfq, product) and is wrong for the multi-vendor ARC contract.
+    const finRows = await t.any(
+      `SELECT * FROM tbl_quote_finalization
+        WHERE rfq_id = $1 AND vendor_id = $2 AND product_variant_id = $3 AND variant = $4`,
+      [rfq_id, arcItem.vendor_id, arcItem.product_variant_id, arcItem.variant]
+    );
+    for (const f of finRows) {
+      await t.none(
+        `INSERT INTO tbl_quote_finalization_history
+           (rfq_id, rfq_no, quote_id, product_variant_id, vendor_id, created_by, timestamp,
+            variant, changed_by, changed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+        [f.rfq_id, f.rfq_no, f.quote_id, f.product_variant_id, f.vendor_id, f.created_by,
+         f.timestamp, f.variant, approver_user_id]
+      );
+      await t.none(`DELETE FROM tbl_quote_finalization WHERE id = $1`, [f.id]);
+    }
+
+    await recomputeEnvelopeAfterDecision({
+      arc_id: arcItem.arc_id, rfq_id, approver_user_id, txContext: t,
+    });
+  } catch (arcRejectError) {
+    logError(arcRejectError);
+  }
+};
+
+export { handleArcPostApproval, handleArcRejection };
 
 const formatErrorResponse = (res, error) => {
   const message = error.message || Config.errorText.value;
@@ -437,32 +486,79 @@ const ArcController = {
       // Use 'ARC' as entity type for ARC approvals
       const entityType = 'ARC';
 
-      // Get approval instances (product-level)
+      // Resolve the pending instance.
+      //
+      // Phase 2 changed the entity_id of an ARC approval instance from
+      // rfq_product_id to arc_item.id (per-cell granularity for the
+      // committee matrix). The lookup paths must support both the new
+      // (matrix) callers and the older legacy callers:
+      //
+      //   1. New matrix UI: passes approval_instance_id directly. Fetch
+      //      it by id and validate it's PENDING + ARC + belongs to this
+      //      rfq. This is the preferred path.
+      //   2. Legacy product-level callers: pass rfq_product_id. Resolve
+      //      arc_items for that product within this rfq, then their
+      //      approval instances.
+      //   3. No identifier supplied: fall back to the first pending ARC
+      //      instance under any arc_item belonging to this rfq.
+      //
+      // entity_type='ARC' + entity_id=rfq_product_id is no longer a
+      // valid pairing — that data lookup never returns matches in the
+      // post-Phase-2 schema and was the cause of the 400 the committee
+      // matrix saw on every cell action.
       let approvalInstances = [];
       let pendingInstance = null;
-      
-      if (rfq_product_id) {
-        // Get approval instance for specific product
-        approvalInstances = await getApprovalInstancesByEntity(entityType, rfq_product_id);
-        pendingInstance = approvalInstances.find(inst => inst.status === 'PENDING');
-      } else {
-        // Get all product ARC approvals for this RFQ using model
-        const products = await rfqModel.getRfqProductIds(rfq_id);
-        
-        const allInstances = await Promise.all(
-          products.map(async (product) => {
-            return await getApprovalInstancesByEntity(entityType, product.id);
-          })
+
+      if (approval_instance_id) {
+        const direct = await getApprovalInstanceById(approval_instance_id, entityType);
+        if (!direct) {
+          return res.status(404).json({
+            status: 2,
+            message: `ARC approval instance ${approval_instance_id} not found`,
+          });
+        }
+        // Defence: the instance must belong to an arc_item under this rfq.
+        const ownership = await db.oneOrNone(
+          `SELECT 1 FROM tbl_arc_item ai
+             JOIN tbl_arc a ON a.id = ai.arc_id
+            WHERE ai.id = $1 AND a.rfq_id = $2 LIMIT 1`,
+          [direct.entity_id, rfq_id]
         );
-        
-        approvalInstances = allInstances.flat();
-        pendingInstance = approvalInstances.find(inst => inst.status === 'PENDING');
+        if (!ownership) {
+          return res.status(403).json({
+            status: 2,
+            message: 'Approval instance does not belong to this tender',
+          });
+        }
+        approvalInstances = [direct];
+        pendingInstance = direct.status === 'PENDING' ? direct : null;
+      } else {
+        // Discover via arc_item.id under the rfq, optionally narrowed by
+        // rfq_product_id.
+        const arcItemIds = (await db.any(
+          rfq_product_id
+            ? `SELECT ai.id FROM tbl_arc_item ai
+                 JOIN tbl_arc a ON a.id = ai.arc_id
+                 WHERE a.rfq_id = $1 AND ai.rfq_product_id = $2`
+            : `SELECT ai.id FROM tbl_arc_item ai
+                 JOIN tbl_arc a ON a.id = ai.arc_id
+                 WHERE a.rfq_id = $1`,
+          rfq_product_id ? [rfq_id, rfq_product_id] : [rfq_id]
+        )).map((r) => r.id);
+
+        if (arcItemIds.length > 0) {
+          const all = await Promise.all(
+            arcItemIds.map((id) => getApprovalInstancesByEntity(entityType, id))
+          );
+          approvalInstances = all.flat();
+          pendingInstance = approvalInstances.find((inst) => inst.status === 'PENDING') || null;
+        }
       }
-      
+
       if (!pendingInstance && (action === 'approve' || action === 'reject')) {
         return res.status(400).json({
           status: 2,
-          message: 'No pending ARC approval instance found' + (rfq_product_id ? ` for product ${rfq_product_id}` : ' for this RFQ')
+          message: 'No pending ARC approval instance found' + (rfq_product_id ? ` for product ${rfq_product_id}` : ' for this RFQ'),
         });
       }
 
@@ -492,18 +588,16 @@ const ArcController = {
             comment: remarks || null
           });
 
-          // If ARC is rejected, undo vendor finalization so vendors don't see it
-          if (actionType === 'REJECT') {
-            const instanceMetadata = pendingInstance?.metadata || {};
-            const productId = instanceMetadata.rfq_product_id || rfq_product_id || null;
-            if (productId) {
-              try {
-                await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `ARC rejected: ${remarks || 'No remarks'}`, 'NEGOTIATION');
-              } catch (resetError) {
-                logError('Error resetting quote finalization on ARC rejection', resetError);
-              }
-            }
-          }
+          // ARC rejection cleanup is handled inside handleArcRejection
+          // (dispatched by executeApprovalAction). It marks the arc_item
+          // REJECTED, wipes ONLY the (vendor, product) finalization row
+          // for the rejected cell, and recomputes envelope status.
+          //
+          // The legacy resetQuoteFinalizationForSendback helper used
+          // (rfq, product)-scoped wipe — wrong for multi-vendor ARC
+          // because rejecting one vendor's cell would also wipe other
+          // vendors' finalization rows for the same product. That call
+          // is intentionally removed here.
 
           // Record lifecycle event
           let stage = 'ARC_APPROVED';
