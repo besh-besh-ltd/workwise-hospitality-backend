@@ -2346,10 +2346,23 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     rfqData.project_id = null;
   }
 
+  // Strip keys the wizard didn't send. We were previously passing every
+  // shape-key with value `undefined → null` to updateWithTimestamp, which
+  // wrote NULL to NOT NULL columns (comment, company_name) on partial saves
+  // — caught when the Group ARC step-1 wizard exercised this path. Only
+  // update what the request explicitly carried; keep updated_by + flags
+  // since those are always set above.
+  const ALWAYS_WRITE = new Set(['updated_by', 'is_published', 'project_id']);
+  const partialRfqData = Object.fromEntries(
+    Object.entries(rfqData).filter(
+      ([k, v]) => ALWAYS_WRITE.has(k) || (v !== undefined && v !== null)
+    )
+  );
+
   let rfqDetail = null;
-  
+
   await db.tx(async (t) => {
-    rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
+    rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', partialRfqData, rfq_id, t);
     if(rfqDetail)
       rfqDetail = rfqDetail[0]
     else
@@ -2672,12 +2685,17 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       }
     }
 
+    // Partial saves (e.g. tender step-1, terms-only edits) may omit filters
+    // entirely — guard against the dereference instead of crashing the
+    // surrounding transaction.
     const hasGlobalOrLocalFilters =
-      hasValidFilters(filters.global) ||
-      (filters.local &&
-        Object.values(filters.local).some((rfqProductFilter) =>
-          hasValidFilters(rfqProductFilter)
-        ));
+      !!filters && (
+        hasValidFilters(filters.global) ||
+        (filters.local &&
+          Object.values(filters.local).some((rfqProductFilter) =>
+            hasValidFilters(rfqProductFilter)
+          ))
+      );
 
     if (hasGlobalOrLocalFilters) {
       let applicableFilters = generalModel.generateFilters(
@@ -9678,8 +9696,13 @@ const rfqController = {
               // 2) Insert the (product, vendor) line item under the envelope.
               //    Quote unit price snapshotted from the chosen quote so the
               //    contracted-price stays stable across later quote edits.
+              // tbl_quote_items uses `other_charges` (jsonb); tbl_arc_item
+              // mirrors that as `charges_meta`. Bug history: previously
+              // selected `charges_meta` from tbl_quote_items, which was
+              // a non-existent column → finalize for tenders silently
+              // failed and rolled back the entire ARC chain.
               const quoteRow = await t.oneOrNone(
-                `SELECT unit_price, total_price, charges_meta
+                `SELECT unit_price, total_price, other_charges
                  FROM tbl_quote_items WHERE id = $1`,
                 [quote_item_id || quote_id]
               );
@@ -9691,7 +9714,7 @@ const rfqController = {
                 variant,
                 quote_id,
                 unit_price: quoteRow?.unit_price ?? 0,
-                charges_meta: quoteRow?.charges_meta ?? null,
+                charges_meta: quoteRow?.other_charges ?? null,
                 txContext: t,
               });
 

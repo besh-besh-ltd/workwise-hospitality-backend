@@ -142,24 +142,95 @@ async function captureSnapshot(t, { rfq_id, plan }) {
   }
 
   if (plan.tech_eval) {
-    // tech-eval tables vary across the codebase; we capture what's there
-    // and skip silently when not.
-    try {
-      const techEval = await t.any(
-        `SELECT table_name FROM information_schema.tables
-         WHERE table_schema = 'public' AND table_name LIKE 'tbl_tech_eval%'`
+    // Tech-eval data lives across two parent tables (carry rfq_id) and a
+    // tree of children that must be reached via FK chain. Schema-correct
+    // names are explicit here — no LIKE-pattern guessing.
+    const evals = await t.any(
+      `SELECT * FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+    const evalIds = evals.map((e) => e.id);
+    const replacements = await t.any(
+      `SELECT * FROM tbl_rfq_product_tech_eval_vendor_replacements WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+
+    let clauses = [];
+    let clausesFiles = [];
+    let clearedVendors = [];
+    let comments = [];
+    let commentsFiles = [];
+    let vendorResponses = [];
+    let vendorResponseFiles = [];
+    let rounds = [];
+
+    if (evalIds.length > 0) {
+      clauses = await t.any(
+        `SELECT * FROM tbl_rfq_product_tech_evaluation_clauses
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
       );
-      const dump = {};
-      for (const { table_name } of techEval) {
-        try {
-          const rows = await t.any(`SELECT * FROM ${table_name} WHERE rfq_id = $1`, [rfq_id]);
-          if (rows.length > 0) dump[table_name] = rows;
-        } catch (_) { /* table may not have rfq_id */ }
+      clearedVendors = await t.any(
+        `SELECT * FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
+      );
+      rounds = await t.any(
+        `SELECT * FROM tbl_tech_evaluation_rounds
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
+      );
+
+      const clauseIds = clauses.map((c) => c.id);
+      if (clauseIds.length > 0) {
+        clausesFiles = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_clauses_files
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
+        comments = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_comments
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
+        vendorResponses = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_vendors_response
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
       }
-      out.snapshot_tech_eval = dump;
-    } catch (_) {
-      out.snapshot_tech_eval = {};
+
+      const commentIds = comments.map((c) => c.id);
+      if (commentIds.length > 0) {
+        commentsFiles = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_comments_files
+           WHERE tbl_rfq_product_tech_evaluation_comments_id = ANY($1::int[])`,
+          [commentIds]
+        );
+      }
+
+      const responseIds = vendorResponses.map((r) => r.id);
+      if (responseIds.length > 0) {
+        vendorResponseFiles = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_vendors_response_files
+           WHERE tbl_rfq_product_tech_evaluation_vendors_response_id = ANY($1::int[])`,
+          [responseIds]
+        );
+      }
     }
+
+    out.snapshot_tech_eval = {
+      tbl_rfq_product_tech_evaluation: evals,
+      tbl_rfq_product_tech_eval_vendor_replacements: replacements,
+      tbl_rfq_product_tech_evaluation_clauses: clauses,
+      tbl_rfq_product_tech_evaluation_clauses_files: clausesFiles,
+      tbl_rfq_product_tech_evaluation_cleared_vendors: clearedVendors,
+      tbl_rfq_product_tech_evaluation_comments: comments,
+      tbl_rfq_product_tech_evaluation_comments_files: commentsFiles,
+      tbl_rfq_product_tech_evaluation_vendors_response: vendorResponses,
+      tbl_rfq_product_tech_evaluation_vendors_response_files: vendorResponseFiles,
+      tbl_tech_evaluation_rounds: rounds,
+    };
   }
 
   if (plan.quotes_delete) {
@@ -285,18 +356,98 @@ async function wipeActiveState(t, { rfq_id, plan }) {
   }
 
   if (plan.tech_eval) {
-    // Best-effort: clear rows in any tbl_tech_eval_* table that
-    // carries an rfq_id column. Skips silently when the column is
-    // absent.
-    const tables = await t.any(
-      `SELECT table_name FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name LIKE 'tbl_tech_eval%'`
-    );
-    for (const { table_name } of tables) {
-      try {
-        await t.none(`DELETE FROM ${table_name} WHERE rfq_id = $1`, [rfq_id]);
-      } catch (_) { /* not a table with rfq_id */ }
+    // Wipe in dependency order — children first, parents last. The two
+    // tables that carry rfq_id directly are the only safe entry points;
+    // everything else must be reached via FK. Schema-correct names only.
+    const evalIds = (
+      await t.any(
+        `SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1`,
+        [rfq_id]
+      )
+    ).map((r) => r.id);
+
+    if (evalIds.length > 0) {
+      const clauseIds = (
+        await t.any(
+          `SELECT id FROM tbl_rfq_product_tech_evaluation_clauses
+           WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+          [evalIds]
+        )
+      ).map((r) => r.id);
+
+      if (clauseIds.length > 0) {
+        const commentIds = (
+          await t.any(
+            `SELECT id FROM tbl_rfq_product_tech_evaluation_comments
+             WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+            [clauseIds]
+          )
+        ).map((r) => r.id);
+        const responseIds = (
+          await t.any(
+            `SELECT id FROM tbl_rfq_product_tech_evaluation_vendors_response
+             WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+            [clauseIds]
+          )
+        ).map((r) => r.id);
+
+        if (commentIds.length > 0) {
+          await t.none(
+            `DELETE FROM tbl_rfq_product_tech_evaluation_comments_files
+             WHERE tbl_rfq_product_tech_evaluation_comments_id = ANY($1::int[])`,
+            [commentIds]
+          );
+        }
+        if (responseIds.length > 0) {
+          await t.none(
+            `DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response_files
+             WHERE tbl_rfq_product_tech_evaluation_vendors_response_id = ANY($1::int[])`,
+            [responseIds]
+          );
+        }
+
+        await t.none(
+          `DELETE FROM tbl_rfq_product_tech_evaluation_clauses_files
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
+        await t.none(
+          `DELETE FROM tbl_rfq_product_tech_evaluation_comments
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
+        await t.none(
+          `DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+           WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[])`,
+          [clauseIds]
+        );
+      }
+
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
+      );
+      await t.none(
+        `DELETE FROM tbl_tech_evaluation_rounds
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_clauses
+         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
+        [evalIds]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = ANY($1::int[])`,
+        [evalIds]
+      );
     }
+
+    await t.none(
+      `DELETE FROM tbl_rfq_product_tech_eval_vendor_replacements WHERE rfq_id = $1`,
+      [rfq_id]
+    );
   }
 
   if (plan.quotes_delete) {
