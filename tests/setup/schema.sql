@@ -4495,7 +4495,13 @@ CREATE TABLE public.tbl_rfq_products (
     variant integer,
     sheet_id bigint,
     created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone
+    updated_at timestamp with time zone,
+    bypass_arc_reason text,
+    bypass_arc_recorded_by integer,
+    bypass_arc_recorded_at timestamp without time zone,
+    CONSTRAINT chk_rfq_products_bypass_arc_reason_len CHECK (
+        bypass_arc_reason IS NULL OR char_length(bypass_arc_reason) >= 30
+    )
 );
 
 

@@ -318,12 +318,13 @@ export const rfqSchemas = {
         }
         return value;
       }),
-    // Phase 8: bypass-ARC override. The buyer chose to float an RFQ
-    // over an active ARC and supplied a reason. The controller persists
-    // these onto tbl_rfq.bypass_arc / bypass_arc_reason / recorded_by /
-    // recorded_at and emits a RFQ_BYPASS_ARC lifecycle event.
+    // Bypass-ARC override is captured per-product on add-product-to-draft
+    // (column lives on tbl_rfq_products, not tbl_rfq). These two fields
+    // remain accepted-and-ignored at the parent-create payload level so
+    // any in-flight drafts that were saved with the older shape don't
+    // 400 here. Server only writes per-product values.
     bypass_arc: Joi.number().integer().valid(0, 1).optional().allow(null),
-    bypass_arc_reason: Joi.string().min(30).max(2000).optional().allow(null, ''),
+    bypass_arc_reason: Joi.string().max(2000).optional().allow(null, ''),
     title: Joi.string().required(),
   }),
   // WH-69: snapshot-based update. Frontend sends the full intended state of

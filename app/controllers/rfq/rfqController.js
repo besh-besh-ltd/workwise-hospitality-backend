@@ -2154,8 +2154,6 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       tender_scope,
       arc_period_from,
       arc_period_to,
-      bypass_arc,
-      bypass_arc_reason,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
@@ -2329,15 +2327,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       tender_scope: is_tender === 1 ? (tender_scope || null) : null,
       arc_period_from: is_tender === 1 ? (arc_period_from || null) : null,
       arc_period_to: is_tender === 1 ? (arc_period_to || null) : null,
-      // Phase 8: bypass-ARC override. Persist the buyer's reason on the
-      // RFQ row whenever it's supplied. Set bypass_arc=1 alongside the
-      // reason so downstream queries can filter without parsing the text.
-      // recorded_by and recorded_at are pinned to req.user.id / NOW() so
-      // the audit trail is the actor, not whatever the client sent.
-      bypass_arc: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? 1 : (bypass_arc === 1 ? 1 : 0),
-      bypass_arc_reason: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? bypass_arc_reason.trim() : null,
-      bypass_arc_recorded_by: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? user_id : null,
-      bypass_arc_recorded_at: bypass_arc_reason && bypass_arc_reason.trim().length >= 30 ? new Date() : null,
+      // bypass-ARC override is now stored per-product on tbl_rfq_products
+      // (set at add-product-to-draft time). The parent rollup flag
+      // tbl_rfq.bypass_arc is updated by that endpoint when ANY product
+      // line gets a reason; saveRfqDraft no longer needs to write it.
       ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
       ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
@@ -5269,7 +5262,7 @@ const rfqController = {
             // Record lifecycle: SUBMITTED for approval (only if not auto-approved)
             // Auto-approved RFQs already have APPROVED lifecycle event recorded
             const rfqData = await t.oneOrNone(
-              `SELECT is_tender, bypass_arc, bypass_arc_reason FROM tbl_rfq WHERE id = $1`,
+              `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
               [id]
             );
             if (rfqData && approvalResult && !approvalResult.autoApproved) {
@@ -5284,21 +5277,11 @@ const rfqController = {
               });
             }
 
-            // Phase 8: bypass-ARC audit event. Fires once per RFQ when
-            // an RFQ that overrides an active ARC is submitted. The
-            // reason is in metadata for the audit trail.
-            if (rfqData && rfqData.bypass_arc === 1 && rfqData.bypass_arc_reason) {
-              await recordLifecycleEvent({
-                entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-                entity_id: id,
-                stage: 'RFQ_BYPASS_ARC',
-                action: 'BYPASS_ARC',
-                performed_by: user_id,
-                metadata: { reason: rfqData.bypass_arc_reason },
-                remarks: rfqData.bypass_arc_reason,
-                txContext: t,
-              });
-            }
+            // bypass-ARC lifecycle is now emitted per-product at the
+            // moment a contracted product is added to the draft (see
+            // createOrUpdateRfqDraftWithProductVendors). No need to
+            // re-emit at submit time — the audit trail is built up as
+            // contracted items are added.
 
             return approvalResult;
           })
@@ -6272,6 +6255,18 @@ const rfqController = {
 
       const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
+      // Phase 8 (refactor): bypass-ARC reason is a per-product attribute,
+      // captured at the moment the contracted item is added to the draft.
+      // Server enforces ≥30 chars (also a CHECK constraint at the DB
+      // layer). recorded_by/recorded_at are pinned to req.user / NOW()
+      // — never trust client-supplied audit metadata.
+      const rawBypassReason = typeof product.bypass_arc_reason === 'string'
+        ? product.bypass_arc_reason.trim()
+        : null;
+      const validBypassReason = rawBypassReason && rawBypassReason.length >= 30
+        ? rawBypassReason
+        : null;
+
       const productData = {
         rfq_id,
         product_variant_id: product.variant_id,
@@ -6282,10 +6277,43 @@ const rfqController = {
         qap_file: '',
         qap: '',
         datasheet_file: '',
-        sheet_id
+        sheet_id,
+        bypass_arc_reason: validBypassReason,
+        bypass_arc_recorded_by: validBypassReason ? user_id : null,
+        bypass_arc_recorded_at: validBypassReason ? new Date() : null,
       };
 
       await rfqModel.insert('tbl_rfq_products', productData);
+
+      // If this row was bypassed, set the rollup flag on the parent RFQ
+      // so listing-level filters can find it cheaply, and emit one
+      // RFQ_BYPASS_ARC lifecycle event (the lifecycle gets one entry per
+      // bypassed product to preserve the per-line audit trail).
+      if (validBypassReason) {
+        await db.none(
+          `UPDATE tbl_rfq SET bypass_arc = 1 WHERE id = $1 AND COALESCE(bypass_arc, 0) = 0`,
+          [rfq_id]
+        );
+        try {
+          await recordLifecycleEvent({
+            entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entity_id: rfq_id,
+            stage: 'RFQ_BYPASS_ARC',
+            action: 'BYPASS_ARC',
+            performed_by: user_id,
+            metadata: {
+              product_variant_id: product.variant_id,
+              variant,
+              reason: validBypassReason,
+            },
+            remarks: validBypassReason,
+          });
+        } catch (lcErr) {
+          // Non-fatal — the audit event is nice-to-have; the persisted
+          // row + rollup flag are the source of truth.
+          logError('Failed to record RFQ_BYPASS_ARC lifecycle event', lcErr);
+        }
+      }
 
       const vendorPromises = product.vendors.map(async (vendor) => {
         const vendorData = {
