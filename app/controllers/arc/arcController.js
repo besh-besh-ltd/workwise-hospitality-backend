@@ -221,28 +221,70 @@ const ArcController = {
       // Get lifecycle history
       const lifecycleHistory = await getLifecycleHistory('TENDER', rfq_id);
 
-      // Get ARC approval instances (product-level)
+      // Get ARC approval instances. Phase 2 changed entity_id from
+      // rfq_product_id to arc_item.id (each product-vendor cell now has
+      // its own approval). For back-compat we surface BOTH shapes:
+      //   - arcApprovalInstances (legacy flat list, kept for any UI
+      //     that hasn't migrated to the matrix model).
+      //   - arcEnvelopes / arcItems (new shape) so the matrix UI can
+      //     render rows=products, columns=vendors without N round-trips.
       const entityType = 'ARC';
       let arcApprovalInstances = [];
-      
-      if (rfq_product_id) {
-        // Get single product ARC approval
-        arcApprovalInstances = await getApprovalInstancesByEntity(entityType, rfq_product_id);
-      } else {
-        // Get all product ARC approvals for this RFQ using model
-        const products = await rfqModel.getRfqProductIds(rfq_id);
-        
-        const allInstances = await Promise.all(
-          products.map(async (product) => {
-            const instances = await getApprovalInstancesByEntity(entityType, product.id);
-            return instances.map(inst => ({ ...inst, rfq_product_id: product.id }));
-          })
-        );
-        
-        arcApprovalInstances = allInstances.flat();
-      }
-      
-      const pendingArcApproval = arcApprovalInstances.find(inst => inst.status === 'PENDING');
+
+      // Legacy path — entity_id was rfq_product_id.
+      const products = await rfqModel.getRfqProductIds(rfq_id);
+      const legacyByProduct = await Promise.all(
+        products.map(async (product) => {
+          const instances = await getApprovalInstancesByEntity(entityType, product.id);
+          return instances.map((inst) => ({ ...inst, rfq_product_id: product.id }));
+        })
+      );
+      arcApprovalInstances = legacyByProduct.flat();
+
+      // New path — load envelopes (per vendor) and items (per
+      // product-vendor cell) for this rfq, plus the approval instance
+      // attached to each item.
+      const arcEnvelopes = await db.any(
+        `SELECT a.*, u.organization_name AS vendor_name
+         FROM tbl_arc a
+         LEFT JOIN tbl_users u ON u.id = a.vendor_id
+         WHERE a.rfq_id = $1
+         ORDER BY a.created_at`,
+        [rfq_id]
+      );
+      const arcItems = await db.any(
+        `SELECT ai.*, pv.name AS product_name,
+                a.vendor_id, u.organization_name AS vendor_name,
+                ainst.id AS approval_instance_id_full,
+                ainst.status AS approval_status,
+                ainst.metadata AS approval_metadata
+         FROM tbl_arc_item ai
+         JOIN tbl_arc a ON a.id = ai.arc_id
+         LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+         LEFT JOIN tbl_users u ON u.id = a.vendor_id
+         LEFT JOIN tbl_approval_instances ainst ON ainst.id = ai.approval_instance_id
+         WHERE a.rfq_id = $1
+         ORDER BY ai.rfq_product_id, a.vendor_id`,
+        [rfq_id]
+      );
+
+      // Item-level approval instances — surface them alongside the
+      // legacy product-level ones so a forwards-only client can prefer
+      // them. The matrix UI uses these.
+      const itemInstances = await db.any(
+        `SELECT ainst.*, ai.id AS arc_item_id, ai.arc_id, ai.product_variant_id,
+                ai.rfq_product_id, ai.variant, ai.unit_price, a.vendor_id
+         FROM tbl_approval_instances ainst
+         JOIN tbl_arc_item ai ON ai.approval_instance_id = ainst.id
+         JOIN tbl_arc a ON a.id = ai.arc_id
+         WHERE ainst.entity_type = 'ARC'
+           AND a.rfq_id = $1
+         ORDER BY ai.rfq_product_id, a.vendor_id`,
+        [rfq_id]
+      );
+      arcApprovalInstances = [...arcApprovalInstances, ...itemInstances];
+
+      const pendingArcApproval = arcApprovalInstances.find((inst) => inst.status === 'PENDING');
 
       // Get all quotes with vendor details using model
       const quotes = await rfqModel.getQuotesWithVendorDetails(rfq_id);
@@ -300,7 +342,12 @@ const ArcController = {
           arcApproval: {
             instances: arcApprovalInstances || [],
             pending: pendingArcApproval || null,
-            entityType: entityType
+            entityType: entityType,
+            // Phase 3 matrix view: envelopes (per vendor) + items
+            // (per product-vendor cell) so the FE renders rows=products,
+            // columns=vendors without aggregating from instance metadata.
+            envelopes: arcEnvelopes || [],
+            items: arcItems || [],
           }
         }
       });
