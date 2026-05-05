@@ -169,10 +169,27 @@ const enrichProduct = (product, opts) => {
       return { ...detail, engine: engineOut };
     });
 
+    // Resolve quote-level global charges (e.g. TCS) against the per-line sum.
+    // These are exposed as additive fields only — `engine_total` keeps its
+    // legacy meaning (per-line sum) so existing consumers (bands, lowest,
+    // FE total row) are unaffected. The negotiation modal reads
+    // `engine_global_charges*` / `engine_grand_total` to surface TCS.
+    const savedGlobalCharges = Array.isArray(quote.global_charges) ? quote.global_charges : [];
+    const resolvedGlobalCharges = savedGlobalCharges.map((c) => ({
+      name: c.name ?? null,
+      slug: c.slug ?? null,
+      amount: pricingEngine.applyChargeMode(c.tax, c.tax_mode, engineQuoteTotal),
+    }));
+    const globalChargesTotal = resolvedGlobalCharges.reduce((s, c) => s + c.amount, 0);
+    const grandTotal = Math.round(engineQuoteTotal + globalChargesTotal);
+
     return {
       ...quote,
       quote_details: Array.isArray(quote.quote_details) ? annotatedDetails : annotatedDetails[0],
       engine_total: engineQuoteTotal,
+      engine_global_charges: resolvedGlobalCharges,
+      engine_global_charges_total: globalChargesTotal,
+      engine_grand_total: grandTotal,
       is_regret_resolved: isRegret,
     };
   });

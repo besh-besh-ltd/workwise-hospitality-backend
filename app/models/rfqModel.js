@@ -2530,6 +2530,8 @@ WHERE NOT EXISTS (
     ) AS "TERM_files",
     ${user_type == 3 ? `ARRAY(
     SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    'global_comment', TQ.global_comment,
+    'global_charges', TQ.global_charges,
 
     -- payment term list
     'payment_terms', COALESCE(
