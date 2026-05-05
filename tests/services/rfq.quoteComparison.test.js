@@ -730,6 +730,18 @@ describe("getQuoteComparison — document-level global_charges round-trip", () =
     expect(product.aggregates.l1_total).toBe(EXPECTED_GRAND);
     expect(product.aggregates.finalized_total).toBe(0); // no finalization yet
 
+    // ---- engine_total stays per-line; engine_grand_total carries globals ----
+    // Critical contract for the FE compare matrix: the "Total" row reads
+    // engine.total (per-line) and uses it as the base for adding global
+    // charges on top (Global Taxes row + Grand Total row). If we conflated
+    // the two values, the FE would double-count: render "Total" with
+    // globals already in, then "Grand Total" = "Total" + globals again
+    // (this is exactly the bug RFQ 227 / PO 31 surfaced — Grand Total
+    // 9,296 instead of 8,852.55).
+    expect(q.engine_total).toBe(25000);
+    expect(q.engine_grand_total).toBe(EXPECTED_GRAND);
+    expect(q.engine_total).not.toBe(q.engine_grand_total);
+
     // ---- engine_grand_total === eventual PO total ----
     // THE PRODUCT-CONFIDENCE CONTRACT: whatever the buyer sees as the vendor's
     // grand total during compare is precisely the value that lands in

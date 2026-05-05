@@ -571,6 +571,122 @@ describe("Vendor quote → drafted PO: other_charges MUST round-trip into charge
   // tbl_quotes.global_charges into a new tbl_rfq_purchase_order.global_charges
   // column at draft time and lets total_value = line subtotal + global charges.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Schema regression: tbl_purchase_order_product (quantity, unit_price,
+  // total_price) was originally typed integer/bigint, but tbl_quote_items
+  // stores quantity as varchar — vendors routinely submit fractional values
+  // like "45.799 kg". The audit's existing tests used integer fixtures and
+  // never tripped this. Lock the contract that fractional quote inputs flow
+  // into the PO without an integer-cast error.
+  // -------------------------------------------------------------------------
+  it("draftPO accepts fractional quantity from tbl_quote_items and persists it onto the PO line without integer-cast error", async () => {
+    const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+    const buyerLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Mumbai', '400051', $2, NOW()) RETURNING id`,
+      [IDS.companies.A, IDS.users.a1_proc_buyer]
+    );
+    inserted.buyerLocationIds.push(buyerLoc.id);
+    const supplierLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Pune', '411019', $2, NOW()) RETURNING id`,
+      [IDS.companies.vendorAlpha, IDS.users.vendor_alpha]
+    );
+    inserted.supplierLocationIds.push(supplierLoc.id);
+
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, process_id, is_tender, title)
+       VALUES ($1, '<p>e2e</p>', '', 'b@a', 'A1', '+91', $2, 'Mumbai', 1, 1, $3, $3, NOW(),
+               $4, $5, $6, 0, 'fractional quantity test')
+       RETURNING id, rfq_no`,
+      [nextRfqNo(), oneDayAgo, IDS.users.a1_proc_buyer,
+       IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1]
+    );
+    inserted.rfqIds.push(rfq.id);
+    const rfqProd = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`,
+      [rfq.id]
+    );
+    inserted.rfqProductIds.push(rfqProd.id);
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
+       VALUES ($1, $2, $3, $3, 1, NOW()) RETURNING id`,
+      [rfq.id, rfq.rfq_no, IDS.users.vendor_alpha]
+    );
+    inserted.quoteIds.push(quote.id);
+
+    // Real-world shape from production: quantity stored as varchar with
+    // fractional value, unit_price as a fractional real.
+    const FRACTIONAL_QTY_TEXT = "45.799";
+    const FRACTIONAL_UNIT_PRICE = 150.5;
+    const qi = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+          package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 1, $4, 0, 0, 18, 0, 0, 'frac', '15', $5, 'percentage', '[]'::jsonb)
+       RETURNING id`,
+      [rfq.id, rfq.rfq_no, quote.id, FRACTIONAL_UNIT_PRICE, FRACTIONAL_QTY_TEXT]
+    );
+
+    const { buildAuthoritativePOPayload, draftPO } = await import(
+      "../../app/controllers/po/purchaseOrderController.js"
+    );
+
+    // Drive the production drafting path with the fractional quantity from
+    // the quote item — exactly what rfqController.finalize / approveQuotes
+    // pass through to draftPO. Before the schema fix, this INSERT failed
+    // with "invalid input syntax for type integer: '45.799'".
+    const poId = await db.tx(async (t) => {
+      const auth = await buildAuthoritativePOPayload(
+        {
+          rfq_id: rfq.id, project_id: null, total_value: 0,
+          quote_id: qi.id, quote_item_id: qi.id,
+          product_info: {
+            rfq_product_id: rfqProd.id,
+            quantity: FRACTIONAL_QTY_TEXT,    // string varchar from quote
+            unit: "kg",
+            unit_price: FRACTIONAL_UNIT_PRICE, // fractional unit price
+            finalized_vendor_id: IDS.users.vendor_alpha,
+          },
+        },
+        t
+      );
+      const r = await draftPO(
+        auth,
+        { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        t
+      );
+      return r.po_id;
+    });
+    inserted.poIds.push(poId);
+
+    const popRow = await db.one(
+      `SELECT id, quantity, unit_price, total_price, charges_meta
+       FROM tbl_purchase_order_product WHERE purchase_order_id = $1`,
+      [poId]
+    );
+    inserted.poLineIds.push(popRow.id);
+
+    // Persisted fractional quantity round-trips exactly.
+    expect(Number(popRow.quantity)).toBe(45.799);
+    expect(Number(popRow.unit_price)).toBe(150.5);
+
+    // Engine math: 45.799 × 150.5 = 6892.7495; +18% tax = 8133.444... ; engine
+    // rounds the *line total* to 8133. PO header total_value mirrors that
+    // (no global charges in this scenario).
+    expect(Number(popRow.total_price)).toBe(8133);
+    const headerRow = await db.one(
+      `SELECT total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [poId]
+    );
+    expect(Number(headerRow.total_value)).toBe(8133);
+  });
+
   it("draftPO snapshots tbl_quotes.global_charges onto the PO header and rolls them into total_value", async () => {
     const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
     const buyerLoc = await db.one(
@@ -973,5 +1089,204 @@ describe("getPODetailsById — buyer PO Details API exposes the same data", () =
     expect(meta.other_charges.length).toBe(2);
     const slugs = meta.other_charges.map((c) => c.slug).sort();
     expect(slugs).toEqual(["freight", "packaging"]);
+  });
+});
+
+// ===========================================================================
+//  Two-line PO merge: TCS applied once on the combined subtotal
+// ===========================================================================
+//
+// Production scenario (RFQ 227 / PO 31): buyer finalized two products from
+// the same vendor and merged them into one PO. Both source quotes carried
+// TCS 5% on tbl_quotes.global_charges. The PO must have:
+//   1. ONE TCS snapshot on the header (not two — they're the same charge).
+//   2. total_value = (sum of line subtotals) + 5% × (sum of line subtotals),
+//      i.e., TCS applied once to the COMBINED subtotal — never per-line.
+//   3. Per-product total_price (line) excludes globals; the FE allocates
+//      globals proportionally for display so ΣproductTotal == total_value.
+//
+// This test pins the merge math and the snapshot policy so the per-line
+// "what if I only buy this one" view in compare doesn't get accidentally
+// summed into the merged PO's grand total.
+describe("Two-product PO merge — TCS applied once on combined subtotal", () => {
+  it("draftPO with existing_po_id appends a line; total_value reflects ONE TCS over the combined subtotal", async () => {
+    const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+    const buyerLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Mumbai', '400051', $2, NOW()) RETURNING id`,
+      [IDS.companies.A, IDS.users.a1_proc_buyer]
+    );
+    inserted.buyerLocationIds.push(buyerLoc.id);
+    const supplierLoc = await db.one(
+      `INSERT INTO tbl_company_location (company_id, address, postal_code, created_by, created_at)
+       VALUES ($1, 'Pune', '411019', $2, NOW()) RETURNING id`,
+      [IDS.companies.vendorAlpha, IDS.users.vendor_alpha]
+    );
+    inserted.supplierLocationIds.push(supplierLoc.id);
+
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, process_id, is_tender, title)
+       VALUES ($1, '<p>e2e</p>', '', 'b@a', 'A1', '+91', $2, 'Mumbai', 1, 1, $3, $3, NOW(),
+               $4, $5, $6, 0, 'two-product PO merge test')
+       RETURNING id, rfq_no`,
+      [nextRfqNo(), oneDayAgo, IDS.users.a1_proc_buyer,
+       IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1]
+    );
+    inserted.rfqIds.push(rfq.id);
+
+    // Two RFQ products: SLIPPERS-shape (qty 45.799, ₹150) and HAND
+    // SANITIZER-shape (qty 566, ₹10) — same numbers as the live PO 31.
+    const rfqProd1 = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`,
+      [rfq.id]
+    );
+    inserted.rfqProductIds.push(rfqProd1.id);
+    const rfqProd2 = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 2, 0) RETURNING id`,
+      [rfq.id]
+    );
+    inserted.rfqProductIds.push(rfqProd2.id);
+
+    // Vendor's quote: TCS 5% on the parent (legacy {tax, tax_mode} shape).
+    const tcs = [{ name: "TCS", slug: "tcs", tax: 5, tax_mode: "percentage", is_global: true }];
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp", global_charges)
+       VALUES ($1, $2, $3, $3, 1, NOW(), $4) RETURNING id`,
+      [rfq.id, rfq.rfq_no, IDS.users.vendor_alpha, JSON.stringify(tcs)]
+    );
+    inserted.quoteIds.push(quote.id);
+
+    // SLIPPERS quote item: unit_price 150, qty 45.799, tax 18%, freight 4%
+    // with auto-applied 18% tax. Engine line total = 8,431.
+    const qi1 = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+          package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 1, 150, 0, 0, 18, 0, 0, 'slippers', '15', '45.799', 'percentage',
+               '[{"name":"Freight","slug":"freight","amount":4,"amount_mode":"percentage","tax":null,"tax_mode":"percentage","comment":"GST"}]'::jsonb)
+       RETURNING id`,
+      [rfq.id, rfq.rfq_no, quote.id]
+    );
+    // HAND SANITIZER quote item: unit_price 10, qty 566, tax 18%, no other
+    // charges. Engine line total = 6,679.
+    const qi2 = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+          package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 2, 10, 0, 0, 18, 0, 0, 'sanitizer', '15', '566', 'percentage', '[]'::jsonb)
+       RETURNING id`,
+      [rfq.id, rfq.rfq_no, quote.id]
+    );
+
+    const { buildAuthoritativePOPayload, draftPO } = await import(
+      "../../app/controllers/po/purchaseOrderController.js"
+    );
+
+    // Step 1: finalize SLIPPERS → creates a new PO (no existing_po_id).
+    // total_value at this point is just the SLIPPERS grand total.
+    const poId = await db.tx(async (t) => {
+      const auth = await buildAuthoritativePOPayload(
+        {
+          rfq_id: rfq.id, project_id: null, total_value: 0,
+          quote_id: qi1.id, quote_item_id: qi1.id,
+          product_info: {
+            rfq_product_id: rfqProd1.id, quantity: "45.799", unit: "nos",
+            unit_price: 150, finalized_vendor_id: IDS.users.vendor_alpha,
+          },
+        },
+        t
+      );
+      const r = await draftPO(
+        auth,
+        { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        t
+      );
+      return r.po_id;
+    });
+    inserted.poIds.push(poId);
+
+    // After step 1: SLIPPERS line = 8,431, TCS 5% = 421.55, total = 8,852.55,
+    // rounded to whole rupees by pricingEngine.calculateDocumentTotals = 8853.
+    const afterStep1 = await db.one(
+      `SELECT total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [poId]
+    );
+    expect(Number(afterStep1.total_value)).toBe(8853);
+
+    // Step 2: finalize HAND SANITIZER with existing_po_id → appends to PO.
+    // CRITICAL: this used to leave total_value stale (only SLIPPERS' grand
+    // total, missing HAND SANITIZER entirely). Production behavior is that
+    // an additional aggregator (initiatePurchaseOrder or handleUpdatePO)
+    // recomputes total_value over both lines + the snapshot's TCS.
+    await db.tx(async (t) => {
+      const auth = await buildAuthoritativePOPayload(
+        {
+          rfq_id: rfq.id, project_id: null, total_value: 0,
+          quote_id: qi2.id, quote_item_id: qi2.id,
+          existing_po_id: poId,
+          product_info: {
+            rfq_product_id: rfqProd2.id, quantity: 566, unit: "pieces",
+            unit_price: 10, finalized_vendor_id: IDS.users.vendor_alpha,
+          },
+        },
+        t
+      );
+      await draftPO(
+        auth,
+        { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        t
+      );
+    });
+
+    // ---- Per-line totals on tbl_purchase_order_product (no globals) ----
+    const popRows = await db.any(
+      `SELECT id, rfq_product_id, total_price FROM tbl_purchase_order_product
+       WHERE purchase_order_id = $1 ORDER BY id ASC`,
+      [poId]
+    );
+    expect(popRows.length).toBe(2);
+    inserted.poLineIds.push(...popRows.map((r) => r.id));
+    // rfq_product_id is bigint on tbl_purchase_order_product, so pg-promise
+    // can hand it back as a string. Coerce both sides before matching.
+    const lineSlippers = popRows.find((r) => Number(r.rfq_product_id) === rfqProd1.id);
+    const lineSanitizer = popRows.find((r) => Number(r.rfq_product_id) === rfqProd2.id);
+    expect(lineSlippers).toBeDefined();
+    expect(lineSanitizer).toBeDefined();
+    expect(Number(lineSlippers.total_price)).toBe(8431);
+    expect(Number(lineSanitizer.total_price)).toBe(6679);
+
+    // ---- Snapshot on header still has ONE TCS (not duplicated) ----
+    const headerAfterStep2 = await db.one(
+      `SELECT total_value, global_charges
+       FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [poId]
+    );
+    const snapshot = typeof headerAfterStep2.global_charges === "string"
+      ? JSON.parse(headerAfterStep2.global_charges)
+      : headerAfterStep2.global_charges;
+    expect(Array.isArray(snapshot)).toBe(true);
+    expect(snapshot.length).toBe(1);
+    expect(snapshot[0].slug).toBe("tcs");
+
+    // ---- DOCUMENT-CONFIDENCE CONTRACT ----
+    // Sum of line subtotals (8,431 + 6,679 = 15,110) + ONE TCS at 5% on the
+    // combined subtotal (15,110 × 0.05 = 755.50) = 15,865.50, rounded to
+    // whole rupees by pricingEngine.calculateDocumentTotals = 15,866.
+    //
+    // The merge path in draftPurchaseOrder must re-aggregate total_value
+    // across all lines + the snapshotted globals. Without this, total_value
+    // would stay at step 1's value (8,853, just SLIPPERS) and the second
+    // line would silently drop off the document total.
+    expect(Number(headerAfterStep2.total_value)).toBe(15866);
+
+    // Cleanup: the global afterEach handles tbl_rfq_purchase_order via
+    // inserted.poIds and tbl_purchase_order_product via inserted.poLineIds.
   });
 });

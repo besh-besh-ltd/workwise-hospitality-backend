@@ -103,6 +103,15 @@ export const calculateLineTotal = (line = {}) => {
     if (charge.slug !== undefined && charge.slug !== null) {
       chargeOut.slug = charge.slug;
     }
+    // Preserve the vendor's comment on the charge so downstream renderers
+    // (PO Details page, printed PDF, quote-compare matrix) can show *why*
+    // the charge was applied. Comments are part of the contract — vendors
+    // explain TCS reasons, freight basis, etc. — and dropping them at the
+    // engine boundary erases that explanation. Gated on presence so existing
+    // toEqual assertions on commentless inputs aren't broken.
+    if (charge.comment !== undefined && charge.comment !== null && charge.comment !== '') {
+      chargeOut.comment = charge.comment;
+    }
     charges.push(chargeOut);
   }
 
@@ -160,11 +169,22 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
     .filter(Boolean)
     .map((charge) => {
       const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
-      return {
+      const out = {
         name: charge.name ?? null,
         slug: charge.slug ?? null,
         amount,
       };
+      // Preserve the vendor-supplied rate + mode so renderers can display
+      // "TCS (5%)" alongside the resolved currency value, and the comment
+      // so the buyer sees the vendor's explanation on the printed PO.
+      if (charge.amount !== undefined && charge.amount !== null) {
+        out.rate = charge.amount;
+        out.mode = charge.amount_mode;
+      }
+      if (charge.comment !== undefined && charge.comment !== null && charge.comment !== '') {
+        out.comment = charge.comment;
+      }
+      return out;
     });
 
   const globalChargesTotal = resolvedGlobalCharges.reduce(

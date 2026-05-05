@@ -210,11 +210,17 @@ const enrichProduct = (product, opts) => {
   // (created_by, timestamp) live on either the parent quote OR on
   // quote_details depending on the model output shape — merge both before
   // reading.
-  // `total` here is the document-level grand total (engine_grand_total)
-  // including document-level global_charges (TCS/TDS/document fees), so
-  // bands, l1, finalized aggregates, and vendor_totals all reflect the
-  // SAME number the buyer sees per quote and the SAME number that becomes
-  // tbl_rfq_purchase_order.total_value at PO drafting time.
+  //
+  // Two parallel totals are exposed deliberately:
+  //   - `total` is the per-line engine total (base + base_tax + per-line
+  //     charges). This is what the FE compare matrix renders as the "Total"
+  //     row AND what it uses as the base for adding global charges on top.
+  //     Conflating it with the grand total double-counts globals on the
+  //     compare display.
+  //   - `grand_total` is the document-level total (per-line + global_charges).
+  //     Used by RFQ-level aggregates (l1_total, finalized_total, vendor_totals)
+  //     so the comparison header reflects the SAME number that becomes
+  //     tbl_rfq_purchase_order.total_value at PO drafting time.
   const columns = quotations.map((quote) => {
     const detail = getDetail(quote) || {};
     const merged = mergedQuoteRow(quote, detail);
@@ -231,7 +237,8 @@ const enrichProduct = (product, opts) => {
       base: engine.base,
       base_tax: engine.base_tax,
       charges_total: engine.charges_total,
-      total: grandTotal,
+      total: engine.total,
+      grand_total: grandTotal,
       delivery: toNumber(merged.delivery_period),
       prev_worked: ((product.all_vendors || []).find(
         (v) => String(v.id) === String(vendorId)
@@ -285,13 +292,17 @@ const enrichProduct = (product, opts) => {
   });
   const freightAdvantageVendorIds = pricingEngine.computeFreightAdvantage(freightAdvantageEntries);
 
-  // Tie-broken lowest non-regret quote.
+  // Tie-broken lowest non-regret quote — keyed off the document-level grand
+  // total (line + global_charges) so the highlighted vendor on the compare
+  // matrix is the one whose final invoiceable amount is genuinely lowest,
+  // not just whoever's per-line subtotal looks smallest before TCS/document
+  // charges are added.
   const lowestPick = pricingEngine.pickLowestQuote(
     columns
       .filter((c) => !c.isRegret && c.unit_price > 0)
       .map((c) => ({
         vendorId: c.vendor_id,
-        total: c.total,
+        total: c.grand_total,
         prev_worked: c.prev_worked,
         timestamp: c.timestamp,
       }))
@@ -306,12 +317,15 @@ const enrichProduct = (product, opts) => {
     baseline_total = baselineOut.total;
   }
 
-  // L1 / finalized totals for this product.
-  const eligibleForL1 = columns.filter((c) => !c.isRegret && c.unit_price > 0 && c.total > 0);
+  // L1 total = the cheapest vendor's grand total (line + globals). Using
+  // grand_total here keeps the RFQ-level "lowest cost" consistent with the
+  // amount that becomes tbl_rfq_purchase_order.total_value if that vendor
+  // is finalized.
+  const eligibleForL1 = columns.filter((c) => !c.isRegret && c.unit_price > 0 && c.grand_total > 0);
   const l1Pick = pricingEngine.pickLowestQuote(
     eligibleForL1.map((c) => ({
       vendorId: c.vendor_id,
-      total: c.total,
+      total: c.grand_total,
       prev_worked: c.prev_worked,
       timestamp: c.timestamp,
     }))
@@ -423,7 +437,10 @@ export const enrichQuoteCompareData = (products, opts = {}) => {
       if (!detail) return;
       const merged = mergedQuoteRow(quote, detail);
       const engine = detail.engine || {};
-      acc.total += toNumber(engine.total);
+      // Cross-vendor RFQ-level total uses the grand total per quote (line +
+      // global_charges) so the comparison header matches the eventual PO
+      // total when this vendor is finalized.
+      acc.total += toNumber(quote.engine_grand_total ?? engine.total);
       acc.base += toNumber(engine.base);
       acc.base_tax += toNumber(engine.base_tax);
       acc.charges_total += toNumber(engine.charges_total);

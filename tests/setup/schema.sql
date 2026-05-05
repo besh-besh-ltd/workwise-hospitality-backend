@@ -3009,11 +3009,11 @@ CREATE TABLE public.tbl_purchase_order_product (
     purchase_order_id bigint NOT NULL,
     rfq_product_id bigint NOT NULL,
     quote_id bigint NOT NULL,
-    quantity integer NOT NULL,
+    quantity numeric NOT NULL,
     unit character varying(99) NOT NULL,
-    unit_price bigint NOT NULL,
+    unit_price numeric NOT NULL,
     charges_meta jsonb,
-    total_price bigint NOT NULL
+    total_price numeric NOT NULL
 );
 
 

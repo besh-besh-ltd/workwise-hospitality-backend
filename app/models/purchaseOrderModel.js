@@ -195,11 +195,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       let po = null;
 
       if(existing_po_id) {
-        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id]))) 
+        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
 
         po = await t.one(
-          `UPDATE tbl_rfq_purchase_order 
+          `UPDATE tbl_rfq_purchase_order
             SET
               selected_hierarchy = $1
 
@@ -217,6 +217,51 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
+
+        // Re-aggregate the header grand total over ALL lines now on this PO
+        // plus the existing snapshot of document-level global_charges. Without
+        // this, total_value would still reflect just the FIRST line's grand
+        // total even though we just appended a second product.
+        //
+        // Reuses pricingEngine.normalizeGlobalCharge so legacy {tax, tax_mode}
+        // and newer {amount, amount_mode} global-charge shapes both apply
+        // correctly. Globals stay at one occurrence on the snapshot — they're
+        // a document-level charge, applied once to the combined subtotal.
+        const summed = await t.oneOrNone(
+          `SELECT COALESCE(SUM(total_price), 0) AS sub
+             FROM tbl_purchase_order_product
+            WHERE purchase_order_id = $1`,
+          [existing_po_id]
+        );
+        const lineSubtotal = Number(summed?.sub) || 0;
+        const headerRow = await t.oneOrNone(
+          `SELECT global_charges FROM tbl_rfq_purchase_order WHERE id = $1`,
+          [existing_po_id]
+        );
+        const rawGc = headerRow?.global_charges;
+        let snapshotGlobals = [];
+        if (Array.isArray(rawGc)) snapshotGlobals = rawGc;
+        else if (typeof rawGc === 'string' && rawGc.trim()) {
+          try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
+        }
+        let gcTotal = 0;
+        for (const gc of snapshotGlobals) {
+          const norm = pricingEngine.normalizeGlobalCharge(gc);
+          if (!norm) continue;
+          gcTotal += pricingEngine.applyChargeMode(
+            norm.amount, norm.amount_mode, lineSubtotal
+          );
+        }
+        // Round to whole rupees, matching pricingEngine.calculateDocumentTotals
+        // (which is what the new-PO branch uses). Keeping rounding consistent
+        // across the new-PO path and the merge path means the stored
+        // total_value never drifts by 50 paisa just because a PO was built in
+        // two draftPO calls vs one.
+        const grandTotal = Math.round(lineSubtotal + gcTotal);
+        await t.none(
+          `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
+          [grandTotal, existing_po_id]
+        );
       } else {
         // 2. Insert new PO record
         const poNumber = await getNextPONumber();
