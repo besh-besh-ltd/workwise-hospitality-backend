@@ -384,29 +384,54 @@ const hospitalityApprovalController = {
         steps,
         id,
         confirmed_approval_impact,
-        // Group ARC global hierarchy fields. When is_global=1 the policy
-        // applies to every Group ARC tender for the parent company; all
-        // narrower scope columns (hospitality_company_id, hotel_id,
+        // Group ARC global hierarchy flag. When is_global=1 the policy
+        // applies to every Group ARC tender for the actor's parent company.
+        // ALL narrower scope columns (hospitality_company_id, hotel_id,
         // department_id, process_id) MUST be null on the row.
         is_global,
-        company_id,
+        // SECURITY: company_id is NEVER taken from the request body. We
+        // derive it from req.user.company_id so an authenticated admin
+        // from tenant A cannot create or modify tenant B's global policy
+        // by sending a forged company_id. The body field, if present, is
+        // ignored entirely.
       } = req.body;
       const created_by = req.user?.id;
+      const actorCompanyId = req.user?.company_id;
       const isGlobalPayload = is_global === 1 || is_global === true;
 
       if (!created_by) {
         return res.status(401).json({ status: 3, message: 'User authentication required' });
       }
 
-      // Global policies must specify only company_id + entity_type. Reject
-      // mixed payloads early with a precise error so the admin UI can
-      // surface it without round-tripping through the DB CHECK.
+      // Global policies must specify only entity_type. Reject mixed payloads
+      // early with a precise error so the admin UI can surface it without
+      // round-tripping through the DB CHECK.
       if (isGlobalPayload) {
-        if (!company_id) {
-          return res.status(400).json({ status: 3, message: 'company_id is required for global policies' });
+        if (!actorCompanyId) {
+          return res.status(403).json({ status: 3, message: 'Your account is not associated with a parent company; global policies cannot be configured.' });
         }
         if (hospitality_company_id || hotel_id || department_id || process_id) {
           return res.status(400).json({ status: 3, message: 'Global policies cannot be scoped by hospitality_company_id, hotel_id, department_id, or process_id' });
+        }
+        // SECURITY: when updating an existing global policy, re-load it and
+        // confirm it belongs to the actor's company. This prevents tenant A
+        // from updating tenant B's global by quoting B's policy id.
+        if (id) {
+          const existing = await db.oneOrNone(
+            `SELECT id, company_id, is_global FROM tbl_approval_policies WHERE id = $1`,
+            [id]
+          );
+          if (!existing) {
+            return res.status(404).json({ status: 3, message: 'Policy not found' });
+          }
+          if (existing.is_global !== 1) {
+            return res.status(400).json({ status: 3, message: 'This policy is not a global policy and cannot be edited via the global hierarchy endpoint.' });
+          }
+          if (existing.company_id !== actorCompanyId) {
+            // Deliberately a 404 instead of 403 to avoid confirming the
+            // existence of another tenant's policy.
+            return res.status(404).json({ status: 3, message: 'Policy not found' });
+          }
         }
       }
 
@@ -492,7 +517,11 @@ const hospitalityApprovalController = {
             is_active,
             is_master,
             is_global: isGlobalPayload ? 1 : 0,
-            company_id: company_id || null,
+            // SECURITY: company_id always comes from req.user, never from
+            // the client payload. For global policies it pins to the
+            // actor's tenant; for non-global the model resolves it from
+            // hospitality_company_id during creation, so leave undefined.
+            company_id: isGlobalPayload ? actorCompanyId : undefined,
           }, t);
 
           let newSteps = [];
@@ -542,7 +571,7 @@ const hospitalityApprovalController = {
           return res.status(400).json({
             status: 3,
             message: isGlobalPayload
-              ? 'entity_type and company_id are required for global policies'
+              ? 'entity_type is required for global policies'
               : 'entity_type and hospitality_company_id are required'
           });
         }
@@ -576,7 +605,9 @@ const hospitalityApprovalController = {
             is_active,
             is_master: is_master || false,
             is_global: isGlobalPayload ? 1 : 0,
-            company_id: company_id || null,
+            // SECURITY: pinned to req.user.company_id for globals; for
+            // non-globals the model derives from hospitality_company_id.
+            company_id: isGlobalPayload ? actorCompanyId : null,
           }, t);
           if (steps && steps.length > 0) {
             await insertPolicySteps(steps, newPolicy.id, t);
@@ -609,7 +640,13 @@ const hospitalityApprovalController = {
    */
   async getApprovalPolicies(req, res) {
     try {
-      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include, is_global, company_id } = req.query;
+      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include, is_global } = req.query;
+      const actorCompanyId = req.user?.company_id;
+      const wantsGlobal = is_global === '1' || is_global === 'true';
+      // SECURITY: when listing global policies, force the company_id filter
+      // to req.user.company_id. Any company_id in the query string is
+      // ignored — an authenticated admin must only ever see their own
+      // tenant's globals.
       const filters = {
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
@@ -617,11 +654,12 @@ const hospitalityApprovalController = {
         entity_type,
         process_id: process_id ? parseInt(process_id) : undefined,
         include_inactive: include_inactive === 'true',
-        // Group ARC global filter. The admin UI passes is_global=1 + company_id
-        // when listing the global hierarchy for a parent company.
-        is_global: is_global === '1' || is_global === 'true' ? 1 : (is_global === '0' || is_global === 'false' ? 0 : undefined),
-        company_id: company_id ? parseInt(company_id) : undefined,
+        is_global: wantsGlobal ? 1 : (is_global === '0' || is_global === 'false' ? 0 : undefined),
+        company_id: wantsGlobal ? actorCompanyId : undefined,
       };
+      if (wantsGlobal && !actorCompanyId) {
+        return res.status(403).json({ status: 3, message: 'Your account is not associated with a parent company; global policies cannot be listed.' });
+      }
       const data = include === 'steps'
         ? await getApprovalPoliciesWithSteps(filters)
         : await getApprovalPolicies(filters);
