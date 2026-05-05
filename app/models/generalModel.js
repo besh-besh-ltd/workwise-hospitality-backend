@@ -1450,23 +1450,58 @@ export async function createApprovalPolicy({
   process_id = null,
   created_by,
   is_active = true,
-  is_master = false
+  is_master = false,
+  // Group ARC fields. When is_global=1, hospitality_company_id/hotel_id/
+  // department_id/process_id MUST all be null and company_id is the parent
+  // tbl_company.id. Enforced by chk_arc_policy_global_scope.
+  is_global = 0,
+  company_id = null,
 }, t = db) {
-  if (!entity_type || !hospitality_company_id || !created_by) {
-    throw new Error('entity_type, hospitality_company_id, and created_by are required');
+  if (!entity_type || !created_by) {
+    throw new Error('entity_type and created_by are required');
   }
+
+  if (is_global === 1) {
+    if (!company_id) {
+      throw new Error('company_id is required for global policies');
+    }
+    if (hospitality_company_id || hotel_id || department_id || process_id) {
+      throw new Error('Global policies cannot be scoped by hospitality_company_id, hotel_id, department_id, or process_id');
+    }
+    // Ensure exactly one active global per (entity_type, company_id).
+    const existingGlobal = await t.oneOrNone(
+      `SELECT id FROM tbl_approval_policies
+       WHERE is_global = 1 AND entity_type = $1 AND company_id = $2 AND is_active = true`,
+      [entity_type, company_id]
+    );
+    if (existingGlobal) {
+      throw new Error(`An active global policy already exists for ${entity_type} under company ${company_id}. Policy ID: ${existingGlobal.id}`);
+    }
+    return t.one(
+      `INSERT INTO tbl_approval_policies
+         (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+          created_by, is_active, is_master, is_global, company_id)
+       VALUES ($1, NULL, NULL, NULL, NULL, $2, $3, $4, 1, $5) RETURNING *`,
+      [entity_type, created_by, is_active, is_master, company_id]
+    );
+  }
+
+  // Non-global path. hospitality_company_id is required and we resolve the
+  // parent company_id from the BU so the chk constraint passes.
+  if (!hospitality_company_id) {
+    throw new Error('hospitality_company_id is required for non-global policies');
+  }
+  const hospCompany = await t.oneOrNone(
+    `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
+    [hospitality_company_id]
+  );
+  if (!hospCompany) {
+    throw new Error(`Hospitality company with ID ${hospitality_company_id} does not exist`);
+  }
+  const resolvedCompanyId = company_id || hospCompany.company_id;
 
   // If process_id provided, validate it belongs to the parent company
   if (process_id) {
-    const hospCompany = await t.oneOrNone(
-      `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
-      [hospitality_company_id]
-    );
-
-    if (!hospCompany) {
-      throw new Error(`Hospitality company with ID ${hospitality_company_id} does not exist`);
-    }
-
     const process = await t.oneOrNone(
       `SELECT id FROM tbl_approval_processes
        WHERE id = $1 AND company_id = $2 AND is_active = true`,
@@ -1496,9 +1531,10 @@ export async function createApprovalPolicy({
 
   return t.one(
     `INSERT INTO tbl_approval_policies
-     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master]
+       (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+        created_by, is_active, is_master, is_global, company_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9) RETURNING *`,
+    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master, resolvedCompanyId]
   );
 }
 
@@ -2015,9 +2051,25 @@ export async function createApprovalInstance({
   approval_policy_id = null,
   initiated_by,
   metadata = {},
+  // Tender-scope routing for the Group ARC global hierarchy. When
+  // tender_scope='GROUP' is supplied alongside a tender-chain entity_type
+  // (TENDER, TECHNICAL, NEGOTIATION_QUOTE, ARC), the engine resolves the
+  // single global policy under company_id and skips the BU/hotel precedence.
+  // company_id is the parent tbl_company.id derived by the caller from any
+  // covered hotel.
+  tender_scope = null,
+  company_id = null,
   txContext = null  // Optional transaction context for participating in outer transaction
 }) {
-  if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
+  // Group ARC is BU-agnostic — hospitality_company_id is not required when
+  // tender_scope='GROUP'. company_id is required instead.
+  const isGroupArcTender = tender_scope === 'GROUP'
+    && ['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type);
+  if (isGroupArcTender) {
+    if (!entity_type || !entity_id || !company_id || !initiated_by) {
+      throw new Error('entity_type, entity_id, company_id, and initiated_by are required for Group ARC tender stages');
+    }
+  } else if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
     throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
   }
 
@@ -2057,14 +2109,28 @@ export async function createApprovalInstance({
       if (policy.hospitality_company_id !== hospitality_company_id) {
         throw new Error('Policy company does not match request company');
       }
+    } else if (isGroupArcTender) {
+      // Group ARC: resolve the single network-global policy for this stage
+      // under the parent company. NO fallback to non-global; the global
+      // hierarchy is the only path for Group ARC.
+      policy = await findGlobalPolicyTx({ entity_type, company_id }, t);
+      if (!policy) {
+        const err = new Error(
+          `TENDER_POLICY_NOT_CONFIGURED: No global ${entity_type} policy configured for company ${company_id}. ` +
+          `Configure the Group ARC hierarchy in the Hospitality Network admin.`
+        );
+        err.code = 'TENDER_POLICY_NOT_CONFIGURED';
+        err.details = { entity_type, company_id, scope: 'GROUP' };
+        throw err;
+      }
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
-        // Tender-chain calls (any tender stage with an explicit process_id)
-        // surface a structured code so the FE can deep-link admins to the
-        // approval-process configuration rather than just showing a generic
-        // missing-policy message.
-        if (process_id && ['TENDER', 'TECHNICAL', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type)) {
+        // Tender-chain calls (Single ARC; any tender stage with an explicit
+        // process_id) surface a structured code so the FE can deep-link admins
+        // to the approval-process configuration rather than just showing a
+        // generic missing-policy message.
+        if (process_id && ['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type)) {
           const err = new Error(
             `TENDER_POLICY_NOT_CONFIGURED: No ${entity_type} approval policy configured under process ${process_id} for this scope`
           );
@@ -2076,13 +2142,13 @@ export async function createApprovalInstance({
       }
       // Strict process-match guard for the tender chain. findBestMatchingPolicyTx
       // accepts NULL-process policies as a fallback (back-compat with legacy
-      // RFQ flows). For tenders we must NEVER fall back: a routine RFQ
-      // committee should not silently approve a tender stage. If the matched
-      // policy is process-agnostic while the caller specified a process_id
-      // and the entity is tender-chain, treat it as if no policy were found.
+      // RFQ flows). For Single ARC tenders we must NEVER fall back: a routine
+      // RFQ committee should not silently approve a tender stage. If the
+      // matched policy is process-agnostic while the caller specified a
+      // process_id and the entity is tender-chain, treat it as no policy.
       if (
         process_id &&
-        ['TENDER', 'TECHNICAL', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type) &&
+        ['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type) &&
         policy.process_id !== process_id
       ) {
         const err = new Error(
@@ -2319,7 +2385,8 @@ export async function findBestMatchingPolicyTx({ entity_type, hospitality_compan
              ELSE 0
            END as specificity_score
     FROM tbl_approval_policies p
-    WHERE p.entity_type = $1
+    WHERE p.is_global = 0
+      AND p.entity_type = $1
       AND p.hospitality_company_id = $2
       AND p.is_active = true
       AND p.department_id IS NULL
@@ -2330,6 +2397,25 @@ export async function findBestMatchingPolicyTx({ entity_type, hospitality_compan
   `, [entity_type, hospitality_company_id, hotel_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
+}
+
+// Resolve the single Group ARC global policy for a parent company at a given
+// tender stage. Used exclusively when tender_scope='GROUP' on the parent
+// tender. There is at most one active row per (entity_type, company_id) thanks
+// to uq_global_policy_per_entity_company; this helper just fetches it.
+export async function findGlobalPolicyTx({ entity_type, company_id }, t) {
+  if (!entity_type || !company_id) {
+    return null;
+  }
+  return t.oneOrNone(
+    `SELECT * FROM tbl_approval_policies
+     WHERE is_global = 1
+       AND entity_type = $1
+       AND company_id = $2
+       AND is_active = true
+     LIMIT 1`,
+    [entity_type, company_id]
+  );
 }
 
 // Export helper function to check if user is final approver.

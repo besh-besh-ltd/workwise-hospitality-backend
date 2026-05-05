@@ -197,11 +197,19 @@ const POLICIES = [
 
 export async function seedPolicies(t) {
   for (const p of POLICIES) {
+    // company_id (parent buyer company) is required by chk_arc_policy_global_scope
+    // for both global and non-global policy rows. For seeded fixtures we resolve
+    // it from the BU; tests that exercise the global-Group-ARC path will set it
+    // explicitly via their own helpers (no fixture seeds is_global=1 by default).
     await t.none(
       `INSERT INTO tbl_approval_policies
          (id, entity_type, hospitality_company_id, hotel_id, department_id,
-          is_active, created_by, process_id, is_master, is_department_scoped, version)
-       VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 1)
+          is_active, created_by, process_id, is_master, is_department_scoped, version,
+          company_id, is_global)
+       SELECT $1, $2, $3, $4, $5, true, $6, $7, $8, $9, 1,
+              hc.buyer_company_id, 0
+       FROM tbl_hospitality_companies hc
+       WHERE hc.id = $3
        ON CONFLICT (id) DO NOTHING`,
       [p.id, p.entity, p.hospitality, p.hotel, p.dept, p.createdBy, p.process, p.master, p.deptScoped]
     );

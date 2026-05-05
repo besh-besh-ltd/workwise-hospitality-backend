@@ -5018,18 +5018,10 @@ const rfqController = {
         if (tender_scope === 'GROUP' && hotels.length < 2) {
           return res.status(400).json({ status: 3, errors: { hotel_ids: 'Group ARC requires at least two hotels' } }).end();
         }
-        if (tender_scope === 'GROUP' && hotels.length >= 2) {
-          // All hotels must share one hospitality_company_id
-          const rows = await db.any(
-            `SELECT DISTINCT hospitality_company_id
-             FROM tbl_hospitality_company_hotels
-             WHERE id = ANY($1::int[]) AND is_deleted = 0`,
-            [hotels]
-          );
-          if (rows.length !== 1) {
-            return res.status(400).json({ status: 3, errors: { hotel_ids: 'Group ARC hotels must all belong to the same hospitality company' } }).end();
-          }
-        }
+        // Group ARC may span hotels from different hospitality companies
+        // (confirmed by product team 2026-05-04). The single global Group ARC
+        // hierarchy in the Hospitality Network governs approval regardless of
+        // which companies are covered, so no cross-company restriction here.
 
         // Period: from must be today or later; to strictly after from (Joi
         // already covered to>from formally; redo here to also block past dates)

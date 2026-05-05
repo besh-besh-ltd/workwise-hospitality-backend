@@ -707,7 +707,7 @@ CREATE TABLE public.tbl_approval_instances (
     approval_policy_id integer NOT NULL,
     status character varying(20) DEFAULT 'PENDING'::character varying,
     current_step integer DEFAULT 1,
-    hospitality_company_id integer NOT NULL,
+    hospitality_company_id integer,
     hotel_id integer,
     department_id integer,
     initiated_by integer NOT NULL,
@@ -747,7 +747,7 @@ ALTER SEQUENCE public.tbl_approval_instances_id_seq OWNED BY public.tbl_approval
 CREATE TABLE public.tbl_approval_policies (
     id integer NOT NULL,
     entity_type character varying(50) NOT NULL,
-    hospitality_company_id integer NOT NULL,
+    hospitality_company_id integer,
     hotel_id integer,
     department_id integer,
     is_active boolean DEFAULT true,
@@ -757,7 +757,21 @@ CREATE TABLE public.tbl_approval_policies (
     process_id integer,
     is_master boolean DEFAULT false NOT NULL,
     is_department_scoped boolean DEFAULT true NOT NULL,
-    version integer DEFAULT 1
+    version integer DEFAULT 1,
+    company_id integer,
+    is_global smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT chk_arc_policy_global_scope CHECK (
+        (is_global = 1
+            AND hospitality_company_id IS NULL
+            AND hotel_id IS NULL
+            AND department_id IS NULL
+            AND process_id IS NULL
+            AND company_id IS NOT NULL)
+        OR
+        (is_global = 0
+            AND hospitality_company_id IS NOT NULL
+            AND company_id IS NOT NULL)
+    )
 );
 
 
