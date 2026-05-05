@@ -28,8 +28,13 @@ import {
  *   3. Status is not CLOSED (2)
  *   4. bid_end_date is still in the future
  *   5. (per-product PO lock check happens inside applyProductChanges)
+ *
+ * `hasReceivedQuotes` (any non-regret quote, even with bid window still open)
+ * does NOT block edit at this layer — it's accepted so the controller can pass
+ * the same option bag in and compute `isRestrictedEdit` from it. Mirrors
+ * the FE permission helper canEditRfq().
  */
-export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false, hasTechStuckProduct = false } = {}) {
+export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false, hasTechStuckProduct = false, hasReceivedQuotes = false } = {}) {
   if (!rfq) {
     throw httpError(404, 'RFQ not found.');
   }

@@ -2398,6 +2398,17 @@ WHERE NOT EXISTS (
           LIMIT 1
         )
       ) AS is_quotes_present,
+      -- has_received_quotes: any non-regret quote exists. Drives restricted-edit
+      -- mode for fairness once a vendor has actually started bidding (WH-restrictive-edit).
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq_real
+          WHERE tq_real.rfq_id = RFQ.id
+            AND (tq_real.is_regret IS NULL OR tq_real.is_regret != 1)
+          LIMIT 1
+        )
+      ) AS has_received_quotes,
       -- has_dead_end_product: at least one product where ALL eligible vendors' POs were rejected
       (
         SELECT EXISTS (
@@ -2519,6 +2530,8 @@ WHERE NOT EXISTS (
     ) AS "TERM_files",
     ${user_type == 3 ? `ARRAY(
     SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    'global_comment', TQ.global_comment,
+    'global_charges', TQ.global_charges,
 
     -- payment term list
     'payment_terms', COALESCE(
@@ -3478,6 +3491,17 @@ LIMIT 2;
               LIMIT 1
             )
           ) AS is_quotes_present,
+          -- has_received_quotes: at least one non-regret quote exists. Triggers
+          -- restricted-edit mode (only bid_end_date + vendor refresh) so the creator
+          -- can't change RFQ specs once vendors have started bidding in good faith.
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_quotes _tq_real
+              WHERE _tq_real.rfq_id = RFQ.id
+                AND (_tq_real.is_regret IS NULL OR _tq_real.is_regret != 1)
+              LIMIT 1
+            )
+          ) AS has_received_quotes,
           -- po_completed: ALL products have an approved (or beyond) PO
           (
             SELECT CASE
@@ -3953,7 +3977,11 @@ LIMIT 2;
         FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
       ),
-      -- Whether any non-regret quotes have been received (= eligible vendors)
+      -- Whether any non-regret quotes have been received (= eligible vendors).
+      -- "Participation" in this codebase means commercial quote submission
+      -- only — tech-eval responses don't count, because the lifecycle pill
+      -- needs to differentiate "vendors actually bid" from "vendors only
+      -- engaged technically and never sent a quote".
       has_eligible_vendors AS (
         SELECT rfq_id FROM tbl_quotes
         WHERE rfq_id = ANY($1::int[])
@@ -4044,21 +4072,28 @@ LIMIT 2;
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating — TE configured, deadline passed, ≥1 eligible vendor
-          -- Also matches when latest approval is APPROVED but not all products cleared yet
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed,
+          -- ≥1 vendor submitted a commercial quote.
+          -- Also matches when latest approval is APPROVED but not all products cleared yet.
           WHEN rd.is_published = 1 AND rd.status = 1
             AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.9: Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          -- Stage 1.9: No vendors participated — TE configured, deadline passed,
+          -- zero commercial quotes (regardless of any tech-eval responses). We
+          -- intentionally use RFQ_STUCK_COMMERCIAL ("No Vendors Participated")
+          -- here instead of RFQ_STUCK_TECHNICAL so the pill reflects the true
+          -- cause: nobody bid. RFQ_STUCK_TECHNICAL is reserved for the genuine
+          -- case where all TE products were evaluated and zero cleared
+          -- (handled earlier as Stage 5a-stuck).
           WHEN rd.is_published = 1 AND rd.status = 1
             AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NULL
-            THEN 'RFQ_STUCK_TECHNICAL'
+            THEN 'RFQ_STUCK_COMMERCIAL'
           -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = false
@@ -12737,6 +12772,23 @@ ORDER BY tq.timestamp DESC;
                 OR urs.department_id = RFQ.department_id
                 OR urs.department_id IS NULL
               )
+          )
+          AND (
+            -- RFQs that never went through tech eval are unaffected
+            NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_qc
+              WHERE _te_qc.rfq_id = RFQ.id
+            )
+            OR
+            -- Otherwise require at least one cleared+verified vendor on any product
+            EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_qc
+              JOIN tbl_rfq_product_tech_evaluation_cleared_vendors _cv_qc
+                ON _cv_qc.tbl_rfq_product_tech_evaluation_id = _te_qc.id
+              WHERE _te_qc.rfq_id = RFQ.id
+                AND _cv_qc.status = 1
+                AND _cv_qc.is_verified = TRUE
+            )
           )`;
       }
 
@@ -12760,6 +12812,14 @@ ORDER BY tq.timestamp DESC;
             LIMIT 1
           )
         ) AS is_quotes_present,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_quotes _tq_real
+            WHERE _tq_real.rfq_id = RFQ.id
+              AND (_tq_real.is_regret IS NULL OR _tq_real.is_regret != 1)
+            LIMIT 1
+          )
+        ) AS has_received_quotes,
         (
           SELECT
             CASE
@@ -12987,7 +13047,11 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_dead_end_product,
-        -- has_po_rejection: any product has a rejected PO with no replacement
+        -- has_po_rejection: any product has a rejected PO with no replacement.
+        -- Two detection paths (defensive):
+        --   (a) tbl_rfq_purchase_order.status IN ('rejected','rejected_by_vendor')
+        --   (b) tbl_approval_instances entity_type='PO' status='REJECTED' for this RFQ
+        --       (covers approver-rejection paths even if the PO row update lags)
         (
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_products _rp_rej
@@ -12998,19 +13062,30 @@ ORDER BY tq.timestamp DESC;
                   AND _qf_rej.product_variant_id = _rp_rej.product_variant_id
                   AND _qf_rej.variant = _rp_rej.variant
               )
-              AND EXISTS (
-                SELECT 1 FROM tbl_rfq_purchase_order _po_r
-                JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
-                WHERE _po_r.rfq_id = RFQ.id
-                  AND _pop_r.rfq_product_id = _rp_rej.id
-                  AND _po_r.status IN ('rejected', 'rejected_by_vendor')
-                  AND NOT EXISTS (
-                    SELECT 1 FROM tbl_rfq_purchase_order _po_repl
-                    JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
-                    WHERE _po_repl.rfq_id = RFQ.id
-                      AND _pop_repl.rfq_product_id = _rp_rej.id
-                      AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
-                  )
+              AND (
+                EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po_r
+                  JOIN tbl_purchase_order_product _pop_r ON _pop_r.purchase_order_id = _po_r.id
+                  WHERE _po_r.rfq_id = RFQ.id
+                    AND _pop_r.rfq_product_id = _rp_rej.id
+                    AND _po_r.status IN ('rejected', 'rejected_by_vendor')
+                )
+                OR EXISTS (
+                  SELECT 1 FROM tbl_approval_instances _ai_rej
+                  JOIN tbl_rfq_purchase_order _po_ai ON _po_ai.id = _ai_rej.entity_id
+                  JOIN tbl_purchase_order_product _pop_ai ON _pop_ai.purchase_order_id = _po_ai.id
+                  WHERE _ai_rej.entity_type = 'PO'
+                    AND _ai_rej.status = 'REJECTED'
+                    AND _po_ai.rfq_id = RFQ.id
+                    AND _pop_ai.rfq_product_id = _rp_rej.id
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_repl
+                JOIN tbl_purchase_order_product _pop_repl ON _pop_repl.purchase_order_id = _po_repl.id
+                WHERE _po_repl.rfq_id = RFQ.id
+                  AND _pop_repl.rfq_product_id = _rp_rej.id
+                  AND _po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
               )
           )
         ) AS has_po_rejection,

@@ -161,15 +161,20 @@ export const rfqSchemas = {
           'Contact number must be in the format +<country_code>-<mobile_number> or just <mobile_number>.'
       }),
     bid_end_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
+      .required()
       .custom((value, helpers) => {
-        if (value) {
-          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
-          if (new Date(value) < minAllowed) {
+        const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Quote Submission End Date must be at least 2 hours from now'
+          );
+        }
+        const { vendor_clarification_date } = helpers.state.ancestors[0];
+        if (vendor_clarification_date) {
+          const diffMs = new Date(value) - new Date(vendor_clarification_date);
+          if (diffMs < 24 * 60 * 60 * 1000) {
             return helpers.message(
-              'Quote Submission End Date must be at least 2 hours from now'
+              'Quote Submission End Date must be at least 24 hours after the Vendor Clarification End Date'
             );
           }
         }
@@ -243,13 +248,40 @@ export const rfqSchemas = {
     term_and_condition_files: Joi.array().items(Joi.string()).optional(),
     is_tender: Joi.number().integer().valid(0, 1).optional().allow(null),
     tender_fees: Joi.number().integer().min(0).optional().allow(null),
-    tender_publish_date: Joi.string().optional().allow(null).allow(''),
-    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    tender_publish_date: Joi.string()
+      .required()
+      .custom((value, helpers) => {
+        const minAllowed = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Publish Date & Time must be at least 5 minutes from now'
+          );
+        }
+        return value;
+      }),
+    vendor_clarification_date: Joi.string()
+      .required()
+      .custom((value, helpers) => {
+        const { tender_publish_date } = helpers.state.ancestors[0];
+        if (tender_publish_date) {
+          const diffMs = new Date(value) - new Date(tender_publish_date);
+          if (diffMs < 5 * 60 * 1000) {
+            return helpers.message(
+              'Vendor Clarification End Date must be at least 5 minutes after the Publish Date & Time'
+            );
+          }
+        }
+        return value;
+      }),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
-    process_id: Joi.number().integer().optional().allow(null),
+    // qa branch (PR #131) made process_id required at the schema level for all
+    // RFQs. We keep that and layer our tender-specific fields below — the
+    // controller still enforces "process_id must be process_type='TENDER'" for
+    // tenders.
+    process_id: Joi.number().integer().required(),
     // Tender-only fields. Required when is_tender=1 (enforced in controller +
     // tied to tender_scope-driven hotel count rules below).
     tender_scope: Joi.string()

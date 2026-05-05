@@ -90,12 +90,29 @@ export const calculateLineTotal = (line = {}) => {
 
     const subtotal = amount + chargeTax;
     chargesTotal += subtotal;
-    charges.push({
+    const chargeOut = {
       name: charge.name ?? null,
       amount,
       tax: chargeTax,
       subtotal,
-    });
+    };
+    // Carry the canonical slug through when the input has one. Lets downstream
+    // consumers (e.g. quote-compare freight-advantage matcher) key off slug
+    // rather than the user-typed name. Omitted when absent to keep the legacy
+    // engine output shape stable for existing assertions.
+    if (charge.slug !== undefined && charge.slug !== null) {
+      chargeOut.slug = charge.slug;
+    }
+    // Preserve the vendor's comment on the charge so downstream renderers
+    // (PO Details page, printed PDF, quote-compare matrix) can show *why*
+    // the charge was applied. Comments are part of the contract — vendors
+    // explain TCS reasons, freight basis, etc. — and dropping them at the
+    // engine boundary erases that explanation. Gated on presence so existing
+    // toEqual assertions on commentless inputs aren't broken.
+    if (charge.comment !== undefined && charge.comment !== null && charge.comment !== '') {
+      chargeOut.comment = charge.comment;
+    }
+    charges.push(chargeOut);
   }
 
   const total = Math.round(base + baseTax + chargesTotal);
@@ -106,6 +123,33 @@ export const calculateLineTotal = (line = {}) => {
     charges,
     charges_total: chargesTotal,
     total,
+  };
+};
+
+// Document-level global charges have two on-disk shapes that need to be
+// reconciled before they can be fed into the engine:
+//
+//   - newer / "amount" shape:  { name, amount, amount_mode, ... }
+//   - legacy / "tax" shape:    { name, tax,    tax_mode,    is_global: true, ... }
+//
+// The legacy shape is what the vendor send-quote screen produces today (TCS
+// 5%, TDS 1% etc. — quote-document-level taxes that piggyback on the same
+// JSONB array as user-defined "amount" global charges). Both shapes describe
+// the same arithmetic: add `value` percent/absolute on top of the document
+// subtotal. We normalise to a single { amount, amount_mode } pair before the
+// engine touches it; downstream consumers (engine, PO template, FE breakdown)
+// can stay shape-agnostic.
+export const normalizeGlobalCharge = (charge) => {
+  if (!charge || typeof charge !== 'object') return null;
+  const amount = charge.amount ?? charge.tax;
+  const amount_mode = charge.amount_mode ?? charge.tax_mode;
+  return {
+    name: charge.name ?? null,
+    slug: charge.slug ?? null,
+    amount: toNumber(amount),
+    amount_mode: amount_mode ?? DEFAULT_MODE,
+    is_global: charge.is_global === true ? true : undefined,
+    comment: charge.comment ?? undefined,
   };
 };
 
@@ -120,14 +164,28 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
 
   const grandSubtotal = lines.reduce((sum, l) => sum + l.total, 0);
 
-  const resolvedGlobalCharges = (globalCharges || []).map((charge) => {
-    const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
-    return {
-      name: charge.name ?? null,
-      slug: charge.slug ?? null,
-      amount,
-    };
-  });
+  const resolvedGlobalCharges = (globalCharges || [])
+    .map(normalizeGlobalCharge)
+    .filter(Boolean)
+    .map((charge) => {
+      const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
+      const out = {
+        name: charge.name ?? null,
+        slug: charge.slug ?? null,
+        amount,
+      };
+      // Preserve the vendor-supplied rate + mode so renderers can display
+      // "TCS (5%)" alongside the resolved currency value, and the comment
+      // so the buyer sees the vendor's explanation on the printed PO.
+      if (charge.amount !== undefined && charge.amount !== null) {
+        out.rate = charge.amount;
+        out.mode = charge.amount_mode;
+      }
+      if (charge.comment !== undefined && charge.comment !== null && charge.comment !== '') {
+        out.comment = charge.comment;
+      }
+      return out;
+    });
 
   const globalChargesTotal = resolvedGlobalCharges.reduce(
     (sum, c) => sum + c.amount,
@@ -468,4 +526,5 @@ export default {
   pickLowestQuote,
   computeFreightAdvantage,
   normalizeChargesMeta,
+  normalizeGlobalCharge,
 };

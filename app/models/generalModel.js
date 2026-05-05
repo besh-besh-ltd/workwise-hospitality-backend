@@ -2727,6 +2727,19 @@ export async function submitApprovalAction({
       throw new Error('User is not an approver for this step');
     }
     if (approverRecord.status !== 'PENDING') {
+      // Idempotency: if the user already submitted the SAME action, treat the
+      // retry as a silent success. This protects against double-clicks and
+      // refreshes that race with backend completion. Only the genuinely
+      // conflicting case (user previously REJECTED and now sends APPROVE, or
+      // vice versa) still throws.
+      if (approverRecord.status === normalizedAction) {
+        return {
+          status: instance.status,
+          instance_status: instance.status,
+          message: `Already submitted ${normalizedAction.toLowerCase()}, no action taken`,
+          already_completed: true
+        };
+      }
       throw new Error(`User has already acted on this step with status: ${approverRecord.status}`);
     }
 

@@ -282,7 +282,12 @@
           {{/if}}
           {{#if charge_details}}
             {{#each charge_details}}
-              <br/><span class="small">{{name}}: ₹{{amount}}{{#if has_tax}} <span style="color:#888;">incl. ₹{{tax}} tax</span>{{/if}}</span>
+              <br/><span class="small">{{name}}{{#if rate_display}} ({{rate_display}}){{/if}}: ₹{{amount}}</span>
+              {{#if has_tax}}
+                <br/><span class="small" style="color:#888;">incl. ₹{{tax}} tax{{#if has_comment}} - {{comment}}{{/if}}</span>
+              {{else}}
+                {{#if has_comment}}<br/><span class="small" style="color:#888; font-style:italic;">- {{comment}}</span>{{/if}}
+              {{/if}}
             {{/each}}
           {{/if}}
         </td>
@@ -344,7 +349,11 @@
           {{#if globalCharges}}
             {{#each globalCharges}}
             <tr>
-              <td>{{name}} <small style="color:#888; font-weight:normal;">(PO-level)</small></td>
+              <td>
+                {{name}}{{#if rate_display}} <small style="color:#888; font-weight:normal;">({{rate_display}})</small>{{/if}}
+                <small style="color:#888; font-weight:normal;">(PO-level)</small>
+                {{#if has_comment}}<br/><small style="color:#888; font-style:italic; font-weight:normal;">- {{comment}}</small>{{/if}}
+              </td>
               <td class="right">{{amount}}</td>
             </tr>
             {{/each}}

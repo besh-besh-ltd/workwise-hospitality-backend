@@ -3156,10 +3156,15 @@ publish_profile_reviews: async (req, res, next) => {
     try {
       // let user_id = req.user.id;
       let subscription = false;
-      if (!req.is_verified || !req.user.subscription_plan_id) {
+      // showContact=true comes from the Quote Compare vendor card dropdown.
+      // Hospitality buyers are authenticated but lack a user-level subscription_plan_id
+      // (they're under hotel-level access), so the subscription gate would otherwise
+      // hide mobile/email. Bypass it for that entry point.
+      const showContact = req.query.showContact === 'true' && req.is_verified;
+      if (!req.is_verified || (!req.user.subscription_plan_id && !showContact)) {
         user = await userModel.vendorinfo(user_id);
       } else {
-        subscription = true;
+        subscription = !!req.user.subscription_plan_id;
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
 
