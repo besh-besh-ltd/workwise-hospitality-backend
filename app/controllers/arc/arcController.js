@@ -2,6 +2,7 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import rfqModel from '../../models/rfqModel.js';
+import arcModel from '../../models/arcModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
 import { getLifecycleHistory, getApprovalInstancesByEntity, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
@@ -22,70 +23,145 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, opt
   const t = txContext || db;
 
   try {
-    // Get approval instance
+    // Get approval instance. Per Phase 2, entity_id is the arc_item.id —
+    // each (product, vendor) cell in the committee matrix has its own
+    // approval instance.
     const instance = await getApprovalInstanceById(approval_instance_id, 'ARC', t);
-
     if (!instance || instance.status !== 'APPROVED') {
       return; // Not approved yet or not ARC type
     }
 
-    const rfq_product_id = instance.entity_id;
+    const arc_item_id = instance.entity_id;
     const metadata = instance.metadata || {};
     const rfq_id = metadata.rfq_id;
 
-    // Validate RFQ is a tender
-    const rfqData = await t.oneOrNone(`
-      SELECT is_tender FROM tbl_rfq WHERE id = $1
-    `, [rfq_id]);
+    // 1. Mark this ARC item APPROVED. Idempotent — a duplicate dispatch
+    //    just updates the timestamp.
+    await t.none(
+      `UPDATE tbl_arc_item
+       SET status = 'APPROVED',
+           approved_at = NOW(),
+           approved_by = $2
+       WHERE id = $1`,
+      [arc_item_id, approver_user_id]
+    );
 
-    if (!rfqData || rfqData.is_tender !== 1) {
-      throw new Error('ARC document generation is only applicable for tenders (is_tender = 1)');
+    // 2. Look up the parent envelope.
+    const arcItem = await t.oneOrNone(
+      `SELECT * FROM tbl_arc_item WHERE id = $1`,
+      [arc_item_id]
+    );
+    if (!arcItem) {
+      logger.warn(`[ARC] Item ${arc_item_id} not found after approve — skipping envelope check`);
+      return;
+    }
+    const arc_id = arcItem.arc_id;
+
+    // 3. Are ALL items in the envelope decided? PARTIALLY_DECIDED is the
+    //    intermediate state. The PDF only fires on the last decision.
+    const counts = await arcModel.getEnvelopeDecisionCounts({ arc_id, txContext: t });
+    if (counts.pending > 0) {
+      // Mark the envelope as PARTIALLY_DECIDED so the buyer-side UI can
+      // show committee progress. Does not generate a doc yet.
+      await t.none(
+        `UPDATE tbl_arc SET status = 'PARTIALLY_DECIDED', updated_at = NOW()
+         WHERE id = $1 AND status = 'PENDING_COMMITTEE'`,
+        [arc_id]
+      );
+      await recordLifecycleEvent({
+        entity_type: 'TENDER',
+        entity_id: rfq_id,
+        stage: 'ARC_ITEM_APPROVED',
+        action: 'APPROVE_ITEM',
+        performed_by: approver_user_id,
+        metadata: { arc_id, arc_item_id, decision_counts: counts },
+        txContext: t,
+      });
+      return;
     }
 
-    // Generate PDF document for this product
-    const pdfResult = await generateAwardDocument(rfq_product_id, t);
-
-    if (pdfResult.ok) {
-      // Upload to S3 with arc-documents folder
-      const fileName = `arc-award-${metadata.rfq_number || rfq_id}-product-${rfq_product_id}-${Date.now()}.pdf`;
-      const s3Key = `arc-documents/${fileName}`;
-
-      const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
-
-      if (s3Result.ok) {
-        // Update approval instance metadata with document URL
-        const updatedMetadata = {
-          ...metadata,
-          award_document_url: s3Result.url,
-          award_document_generated_at: new Date().toISOString(),
-          award_document_generated_by: approver_user_id
-        };
-
-        await t.none(`
-          UPDATE tbl_approval_instances
-          SET metadata = $1
-          WHERE id = $2
-        `, [JSON.stringify(updatedMetadata), approval_instance_id]);
-
-        // Send email to vendor for this product
-        await sendAwardDocumentToVendor(rfq_product_id, s3Result.url, t);
-
-        // Record lifecycle event
-        await recordLifecycleEvent({
-          entity_type: 'TENDER',
-          entity_id: rfq_id,
-          stage: 'ARC_DOCUMENT_GENERATED',
-          action: 'GENERATE_DOCUMENT',
-          performed_by: approver_user_id,
-          metadata: {
-            rfq_product_id: rfq_product_id,
-            document_url: s3Result.url,
-            approval_instance_id: approval_instance_id
-          },
-          txContext: t
-        });
-      }
+    // 4. All items decided. If ALL were rejected, the envelope is VOID —
+    //    no PDF.
+    if (counts.approved === 0) {
+      await t.none(
+        `UPDATE tbl_arc SET status = 'VOID', updated_at = NOW() WHERE id = $1`,
+        [arc_id]
+      );
+      await recordLifecycleEvent({
+        entity_type: 'TENDER',
+        entity_id: rfq_id,
+        stage: 'ARC_VOID',
+        action: 'VOID_ENVELOPE',
+        performed_by: approver_user_id,
+        metadata: { arc_id, decision_counts: counts },
+        remarks: 'All ARC items rejected by committee',
+        txContext: t,
+      });
+      return;
     }
+
+    // 5. ≥1 item approved — generate the consolidated per-vendor ARC PDF.
+    //    generateAwardDocument now takes arc_id and produces ONE document
+    //    listing every approved product for that vendor with period dates
+    //    and no quantity (per product team).
+    const pdfResult = await generateAwardDocument(arc_id, t);
+    if (!pdfResult.ok) {
+      logError(`ARC PDF generation failed for arc_id=${arc_id}: ${pdfResult.error}`);
+      return;
+    }
+
+    const envelope = await t.one(
+      `SELECT a.*, r.rfq_no FROM tbl_arc a
+       JOIN tbl_rfq r ON r.id = a.rfq_id
+       WHERE a.id = $1`,
+      [arc_id]
+    );
+    const fileName = `arc-${envelope.rfq_no}-vendor-${envelope.vendor_id}-${Date.now()}.pdf`;
+    const s3Key = `arc-documents/${envelope.rfq_no}/${envelope.vendor_id}/${fileName}`;
+    const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
+    if (!s3Result.ok) {
+      logError(`ARC PDF upload failed for arc_id=${arc_id}: ${s3Result.error}`);
+      return;
+    }
+
+    // 6. Persist the document URL on the envelope and transition status.
+    await t.none(
+      `UPDATE tbl_arc
+       SET document_url = $2,
+           document_generated_at = NOW(),
+           status = 'ACTIVE',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [arc_id, s3Result.url]
+    );
+
+    // 7. Email the consolidated doc to the vendor.
+    await sendAwardDocumentToVendor(arc_id, s3Result.url, t);
+
+    // 8. Lifecycle: doc generated + envelope active.
+    await recordLifecycleEvent({
+      entity_type: 'TENDER',
+      entity_id: rfq_id,
+      stage: 'ARC_DOC_GENERATED',
+      action: 'GENERATE_DOCUMENT',
+      performed_by: approver_user_id,
+      metadata: {
+        arc_id,
+        vendor_id: envelope.vendor_id,
+        document_url: s3Result.url,
+        decision_counts: counts,
+      },
+      txContext: t,
+    });
+    await recordLifecycleEvent({
+      entity_type: 'TENDER',
+      entity_id: rfq_id,
+      stage: 'ARC_ACTIVE',
+      action: 'ACTIVATE',
+      performed_by: approver_user_id,
+      metadata: { arc_id, vendor_id: envelope.vendor_id },
+      txContext: t,
+    });
   } catch (arcDocError) {
     // Log but don't fail the transaction
     logError(arcDocError);

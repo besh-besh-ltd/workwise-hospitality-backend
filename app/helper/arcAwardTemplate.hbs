@@ -120,7 +120,15 @@
     <div class="header-info">
       <p>This Procurement Services & Supply of Material (products) Agreement ("Agreement") is executed on this <strong>{{effective_date}}</strong> ("Effective Date"), by and between:</p>
     </div>
-    
+
+    <!-- ARC validity period -->
+    <div class="section" style="text-align: center; margin: 12px 0; padding: 10px; border: 1px solid #999; background: #fafafa;">
+      <div style="font-weight: bold; font-size: 13px;">PERIOD OF AGREEMENT</div>
+      <div style="margin-top: 4px; font-size: 13px;">
+        Effective from <strong>{{period_from}}</strong> to <strong>{{period_to}}</strong>
+      </div>
+    </div>
+
     <div class="parties">
       <div class="party-section">
         <div class="party-label">Phileein Hospitality Pvt. Ltd.</div>
@@ -129,9 +137,26 @@
           (hereinafter "Phileein" or the "Service Provider")
         </div>
       </div>
-      
+
       <div style="text-align: center; margin: 15px 0; font-weight: bold;">AND</div>
-      
+
+      {{#if is_group_arc}}
+      <!-- Group ARC: list every covered hotel; collectively "the Hotels". -->
+      <div class="party-section">
+        <div class="party-label">The Hotels covered under this Group Annual Rate Contract:</div>
+        <div class="section-content">
+          {{#each hotels}}
+          <div style="margin-top: 6px;">
+            <strong>{{this.name}}</strong>{{#if this.company_name}} ({{this.company_name}}){{/if}}<br>
+            <span style="font-size: 11px;">{{this.address}}</span>
+          </div>
+          {{/each}}
+          <div style="margin-top: 8px;">
+            (collectively, the "Hotels" — each a "Hotel")
+          </div>
+        </div>
+      </div>
+      {{else}}
       <div class="party-section">
         <div class="party-label">{{hotel.name}}</div>
         <div class="section-content">
@@ -139,8 +164,19 @@
           (hereinafter "{{hotel.name}}" or the "Hotel")
         </div>
       </div>
+      {{/if}}
+
+      <div style="text-align: center; margin: 15px 0; font-weight: bold;">AND</div>
+
+      <div class="party-section">
+        <div class="party-label">{{vendor.name}}</div>
+        <div class="section-content">
+          having its registered office at {{vendor.address}}{{#if vendor.gstin}}, GSTIN {{vendor.gstin}}{{/if}}<br>
+          (hereinafter the "Vendor")
+        </div>
+      </div>
     </div>
-    
+
     <div class="section">
       <div class="section-content">
         The Parties hereby agree as follows:
@@ -499,21 +535,54 @@
       </div>
     </div>
     
-    <!-- Product Details -->
+    <!-- Awarded Items: per-vendor consolidated rate card -->
+    <!--
+      NOTE on quantity: by design, the master ARC document does NOT list
+      quantity. Quantities are committed at release/call-off time, not at
+      contract signature, since the same vendor may serve many hotels and
+      many calls over the validity period. Buyer and vendor portals show
+      quantity in tracking views; the legal contract binds rate, period,
+      and scope.
+    -->
     <div class="section" style="margin-top: 30px; border-top: 2px solid #000; padding-top: 15px;">
-      <div class="section-title">AWARDED PRODUCT DETAILS</div>
+      <div class="section-title">AWARDED RATE CARD</div>
       <div class="section-content">
         <div><strong>Tender Number:</strong> {{rfq.rfq_no}}</div>
-        <div style="margin-top: 5px;"><strong>Product:</strong> {{product.name}}</div>
-        <div style="margin-top: 5px;"><strong>Category:</strong> {{product.category}}</div>
-        <div style="margin-top: 5px;"><strong>Quantity:</strong> {{product.quantity}} {{product.unit}}</div>
-        <div style="margin-top: 5px;"><strong>Unit Price:</strong> ₹{{product.unit_price}}</div>
-        <div style="margin-top: 5px;"><strong>Total Value:</strong> ₹{{product.total_price}}</div>
+        {{#if rfq.title}}
+        <div style="margin-top: 5px;"><strong>Tender Title:</strong> {{rfq.title}}</div>
+        {{/if}}
+        <div style="margin-top: 5px;"><strong>Validity:</strong> {{period_from}} to {{period_to}}</div>
         <div style="margin-top: 10px;"><strong>Awarded Vendor:</strong> {{vendor.name}}</div>
         <div style="margin-top: 5px;"><strong>Vendor Address:</strong> {{vendor.address}}</div>
         {{#if vendor.gstin}}
         <div style="margin-top: 5px;"><strong>Vendor GSTIN:</strong> {{vendor.gstin}}</div>
         {{/if}}
+
+        <table style="width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 12px;">
+          <thead>
+            <tr style="background: #f3f3f3;">
+              <th style="border: 1px solid #000; padding: 6px; text-align: left;">#</th>
+              <th style="border: 1px solid #000; padding: 6px; text-align: left;">Product</th>
+              <th style="border: 1px solid #000; padding: 6px; text-align: left;">Category</th>
+              <th style="border: 1px solid #000; padding: 6px; text-align: left;">Unit</th>
+              <th style="border: 1px solid #000; padding: 6px; text-align: right;">Unit Price (INR)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{#each products}}
+            <tr>
+              <td style="border: 1px solid #000; padding: 6px;">{{@index}}</td>
+              <td style="border: 1px solid #000; padding: 6px;">{{this.name}}</td>
+              <td style="border: 1px solid #000; padding: 6px;">{{this.category}}</td>
+              <td style="border: 1px solid #000; padding: 6px;">{{this.unit}}</td>
+              <td style="border: 1px solid #000; padding: 6px; text-align: right;">{{this.unit_price}}</td>
+            </tr>
+            {{/each}}
+          </tbody>
+        </table>
+        <div style="margin-top: 8px; font-style: italic; font-size: 11px; color: #555;">
+          Quantities are not bound by this Agreement; each release / call-off order under this contract will specify quantities and delivery schedules.
+        </div>
       </div>
     </div>
   </div>
