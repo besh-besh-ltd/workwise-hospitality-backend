@@ -27,7 +27,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals, findBestMatchingPolicyTx } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals, findBestMatchingPolicyTx, findGlobalPolicyTx } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -3342,7 +3342,8 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   const dbContext = txContext || db;
 
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id,
+            is_tender, tender_scope, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -3351,8 +3352,30 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     return null;
   }
 
-  // Non-hospitality RFQs - skip approval, go straight to publish
-  if (!rfq.hospitality_company_id) {
+  // Group ARC needs the parent company_id to look up the global policy.
+  // Derive from any covered hotel via tbl_rfq_hotel_mappings → BU → buyer
+  // company. All hotels under one tender belong to the same parent company
+  // by tenant isolation (RBAC), so any hotel works.
+  const isGroupArcTender = rfq.is_tender === 1 && rfq.tender_scope === 'GROUP';
+  let arcGroupCompanyId = null;
+  if (isGroupArcTender) {
+    const row = await dbContext.oneOrNone(
+      `SELECT hc.buyer_company_id AS company_id
+       FROM tbl_rfq_hotel_mappings rhm
+       JOIN tbl_hospitality_company_hotels h ON h.id = rhm.hotel_id
+       JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+       WHERE rhm.rfq_id = $1
+       LIMIT 1`,
+      [rfqId]
+    );
+    arcGroupCompanyId = row?.company_id || null;
+  }
+
+  // Non-hospitality RFQs - skip approval, go straight to publish.
+  // Group ARC tenders ALWAYS need the global policy regardless of
+  // hospitality_company_id (which may be null on the rfq row), so guard the
+  // skip path on (is_tender=0 AND no hospitality_company_id).
+  if (!rfq.hospitality_company_id && !isGroupArcTender) {
     await dbContext.none(`
       UPDATE tbl_rfq SET status = 4 WHERE id = $1
     `, [rfqId]);
@@ -3416,7 +3439,8 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   }
 
   // Check if the creator is the final approver
-  // If yes, auto-approve and set status to READY_TO_PUBLISH immediately
+  // If yes, auto-approve and set status to READY_TO_PUBLISH immediately.
+  // For Group ARC, route the lookup through the global hierarchy.
   const isFinalApprover = await checkIfUserIsFinalApprover(
     userId,
     entityType,
@@ -3424,7 +3448,8 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     rfq.hotel_id,
     rfq.department_id,
     txContext,
-    rfq.process_id
+    rfq.process_id,
+    isGroupArcTender ? { tender_scope: 'GROUP', company_id: arcGroupCompanyId } : {}
   );
 
   if (isFinalApprover) {
@@ -3435,19 +3460,23 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     // approval engine uses. Previously this site duplicated the lookup with
     // an inline SQL that omitted process_id from the WHERE clause, allowing
     // cross-process fall-through (F-APPROVAL-001).
-    const policy = await findBestMatchingPolicyTx({
-      entity_type: entityType,
-      hospitality_company_id: rfq.hospitality_company_id,
-      hotel_id: rfq.hotel_id,
-      department_id: rfq.department_id,
-      process_id: rfq.process_id,
-    }, dbContext);
+    const policy = isGroupArcTender
+      ? await findGlobalPolicyTx({ entity_type: entityType, company_id: arcGroupCompanyId }, dbContext)
+      : await findBestMatchingPolicyTx({
+          entity_type: entityType,
+          hospitality_company_id: rfq.hospitality_company_id,
+          hotel_id: rfq.hotel_id,
+          department_id: rfq.department_id,
+          process_id: rfq.process_id,
+        }, dbContext);
 
     if (!policy) {
       throw new Error(`No approval policy found for ${entityType} in this scope`);
     }
 
-    // Create approved instance for audit trail
+    // Create approved instance for audit trail. Group ARC stores no
+    // BU/hotel/dept/process scope on the instance row — the global policy
+    // is the authoritative scope marker.
     const approvedInstance = await dbContext.one(`
       INSERT INTO tbl_approval_instances
       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata, completed_at)
@@ -3457,13 +3486,15 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       rfqId,
       policy.id,
       userId,
-      rfq.hospitality_company_id,
-      rfq.hotel_id,
-      rfq.department_id,
-      rfq.process_id,
+      isGroupArcTender ? null : rfq.hospitality_company_id,
+      isGroupArcTender ? null : rfq.hotel_id,
+      isGroupArcTender ? null : rfq.department_id,
+      isGroupArcTender ? null : rfq.process_id,
       JSON.stringify({
         rfq_number: rfq.rfq_no,
         is_tender: rfq.is_tender,
+        tender_scope: rfq.tender_scope || null,
+        company_id: isGroupArcTender ? arcGroupCompanyId : null,
         company_name: rfq.company_name,
         auto_approved: true,
         reason: 'Created by final approver'
@@ -3538,8 +3569,12 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       metadata: {
         rfq_number: rfq.rfq_no,
         is_tender: rfq.is_tender,
+        tender_scope: rfq.tender_scope || null,
         company_name: rfq.company_name
       },
+      // Group ARC routes the lookup through the global hierarchy.
+      tender_scope: isGroupArcTender ? 'GROUP' : null,
+      company_id: isGroupArcTender ? arcGroupCompanyId : null,
       txContext  // Pass transaction context to createApprovalInstance
     });
   } catch (approvalError) {
@@ -4996,19 +5031,26 @@ const rfqController = {
       const isTender = req.body.is_tender === 1 || req.body.is_tender === '1';
       if (isTender) {
         const { tender_scope, hotel_ids, process_id, arc_period_from, arc_period_to } = req.body;
-        if (!process_id) {
-          return res.status(400).json({ status: 3, errors: { process_id: 'process_id is required for tenders' } }).end();
+        // Single ARC: process_id is required (per-hotel approval matrix).
+        // Group ARC: process_id is NOT required — the global Group ARC
+        // hierarchy in the Hospitality Network governs approval. If a
+        // process_id is sent anyway, validate it for consistency but it
+        // won't be used by the engine.
+        const requiresProcess = tender_scope !== 'GROUP';
+        if (requiresProcess && !process_id) {
+          return res.status(400).json({ status: 3, errors: { process_id: 'process_id is required for Single ARC tenders' } }).end();
         }
-        // Process must exist and be of process_type='TENDER'
-        const procRow = await db.oneOrNone(
-          `SELECT id, process_type, is_active FROM tbl_approval_processes WHERE id = $1`,
-          [process_id]
-        );
-        if (!procRow || !procRow.is_active) {
-          return res.status(400).json({ status: 3, errors: { process_id: 'Selected approval process is invalid or inactive' } }).end();
-        }
-        if (procRow.process_type !== 'TENDER') {
-          return res.status(400).json({ status: 3, errors: { process_id: `Selected process is of type '${procRow.process_type}', tenders require a TENDER process` } }).end();
+        if (process_id) {
+          const procRow = await db.oneOrNone(
+            `SELECT id, process_type, is_active FROM tbl_approval_processes WHERE id = $1`,
+            [process_id]
+          );
+          if (!procRow || !procRow.is_active) {
+            return res.status(400).json({ status: 3, errors: { process_id: 'Selected approval process is invalid or inactive' } }).end();
+          }
+          if (procRow.process_type !== 'TENDER') {
+            return res.status(400).json({ status: 3, errors: { process_id: `Selected process is of type '${procRow.process_type}', tenders require a TENDER process` } }).end();
+          }
         }
 
         const hotels = Array.isArray(hotel_ids) ? hotel_ids.map(Number).filter(Number.isFinite) : [];

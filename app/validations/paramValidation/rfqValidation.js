@@ -277,11 +277,21 @@ export const rfqSchemas = {
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
-    // qa branch (PR #131) made process_id required at the schema level for all
-    // RFQs. We keep that and layer our tender-specific fields below — the
-    // controller still enforces "process_id must be process_type='TENDER'" for
-    // tenders.
-    process_id: Joi.number().integer().required(),
+    // process_id is required for ad-hoc RFQs and Single ARC tenders (where
+    // each hotel has its own approval matrix configured under a process).
+    // For Group ARC tenders the single global hierarchy in the Hospitality
+    // Network is the approver — no per-process selection — so process_id is
+    // optional. The controller enforces "process_type='TENDER'" when supplied.
+    process_id: Joi.number().integer()
+      .when('is_tender', {
+        is: 1,
+        then: Joi.when('tender_scope', {
+          is: 'GROUP',
+          then: Joi.optional().allow(null),
+          otherwise: Joi.required(),
+        }),
+        otherwise: Joi.required(),
+      }),
     // Tender-only fields. Required when is_tender=1 (enforced in controller +
     // tied to tender_scope-driven hotel count rules below).
     tender_scope: Joi.string()

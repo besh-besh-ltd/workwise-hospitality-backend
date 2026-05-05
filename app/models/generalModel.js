@@ -2425,11 +2425,21 @@ export async function findGlobalPolicyTx({ entity_type, company_id }, t) {
 // findBestMatchingPolicyTx already filters by process_id; we forward it.
 // Passing `null` matches process-agnostic policies only (no cross-process
 // fall-through).
-export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null) {
+//
+// For Group ARC tender stages, pass `tender_scope='GROUP'` + `company_id`
+// (parent tbl_company.id) to resolve the single network-wide policy.
+export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null, options = {}) {
   const t = txContext || db;
 
-  // Find the best matching master policy — process-scoped.
-  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
+  const { tender_scope = null, company_id = null } = options;
+  const isGroupArcTender = tender_scope === 'GROUP'
+    && ['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'].includes(entity_type);
+
+  // Find the policy. Group ARC: resolve the single global. Otherwise: existing
+  // process-scoped precedence.
+  const policy = isGroupArcTender
+    ? await findGlobalPolicyTx({ entity_type, company_id }, t)
+    : await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
 
   if (!policy) {
     return false;
