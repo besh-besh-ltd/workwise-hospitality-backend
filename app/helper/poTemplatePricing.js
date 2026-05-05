@@ -121,9 +121,24 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
     // the template render "Charge: ₹X + ₹Y tax" only when a tax actually
     // applies (matches the engine's inheritance rule via the tax field
     // already being populated).
-    const chargeDetails = (engineOut.charges || []).map((c) => {
+    // Format the vendor's input rate so the PDF can show "Freight 4%
+    // (Transport surcharge)" instead of just an opaque ₹274.79. The engine
+    // output keeps the resolved currency value; the original input rate +
+    // mode live on `item.other_charges`. Match by index — the engine
+    // preserves the order of charges through calculateLineTotal.
+    const inputCharges = Array.isArray(item.other_charges) ? item.other_charges : [];
+    const chargeDetails = (engineOut.charges || []).map((c, chargeIdx) => {
       const amount = roundCurrency(c.amount);
       const tax = roundCurrency(c.tax);
+      const inputCharge = inputCharges[chargeIdx] || {};
+      const rateInput = inputCharge.amount;
+      const rateMode = inputCharge.amount_mode;
+      let rateDisplay = null;
+      if (rateInput !== undefined && rateInput !== null && rateInput !== '') {
+        rateDisplay = rateMode === 'percentage'
+          ? `${rateInput}%`
+          : `₹${formatAmount(Number(rateInput) || 0)}`;
+      }
       return {
         name: c.name || 'Other',
         amount: formatAmount(amount),
@@ -131,6 +146,9 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
         has_tax: tax > 0,
         amount_raw: amount,
         tax_raw: tax,
+        rate_display: rateDisplay,
+        comment: c.comment || null,
+        has_comment: !!c.comment,
       };
     });
 
@@ -194,17 +212,35 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
   // to the whole PO) as percentage/absolute against the items subtotal.
   // Global charges sit at the bottom — never per-row — so they're clearly
   // separated from the product-level charges already rendered inline.
+  // Normalise both shapes ({amount, amount_mode} and legacy {tax, tax_mode})
+  // before applying — the engine's normalizeGlobalCharge maps either to the
+  // canonical {amount, amount_mode} pair so TCS/TDS-style document taxes
+  // render correctly alongside user-defined global charges. Carries the
+  // vendor's rate (e.g. "5%") and comment through so the printed PO shows
+  // the original input alongside the resolved currency value.
   const resolvedGlobalCharges = (globalChargesInput || [])
     .map((gc) => {
-      if (!gc) return null;
+      const norm = pricingEngine.normalizeGlobalCharge(gc);
+      if (!norm) return null;
       const amount = roundCurrency(
-        pricingEngine.applyChargeMode(gc.amount, gc.amount_mode, roundedSubtotal)
+        pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, roundedSubtotal)
       );
       if (amount <= 0) return null;
+      const rateInput = norm.amount;
+      const rateMode = norm.amount_mode;
+      let rateDisplay = null;
+      if (rateInput !== undefined && rateInput !== null && rateInput !== '') {
+        rateDisplay = rateMode === 'percentage'
+          ? `${rateInput}%`
+          : `₹${formatAmount(Number(rateInput) || 0)}`;
+      }
       return {
-        name: gc.name || 'Global Charge',
+        name: norm.name || 'Global Charge',
         amount: formatAmount(amount),
         amount_raw: amount,
+        rate_display: rateDisplay,
+        comment: norm.comment || null,
+        has_comment: !!norm.comment,
       };
     })
     .filter(Boolean);

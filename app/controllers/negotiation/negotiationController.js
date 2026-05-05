@@ -23,7 +23,7 @@ const parseAsUTC = (d) => {
   if (s.includes('+') || s.includes('Z')) return new Date(s);
   return new Date(s.replace(' ', 'T') + 'Z');
 };
-import { draftPO } from '../po/purchaseOrderController.js';
+import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
   buildQuoteVisibilityMeta,
@@ -1977,7 +1977,8 @@ const NegotiationController = {
           }
 
           await db.tx(async (t) => {
-            const poResult = await draftPO(poPayload, metadata.po_user, t);
+            const authPayload = await buildAuthoritativePOPayload(poPayload, t);
+            const poResult = await draftPO(authPayload, metadata.po_user, t);
 
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
