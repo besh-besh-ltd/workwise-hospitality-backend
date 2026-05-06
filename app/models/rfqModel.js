@@ -9,6 +9,52 @@ import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqControll
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 
+/**
+ * Returns a SQL fragment that, when ORed onto an existing BU-scoped
+ * permission EXISTS, extends visibility to Group ARC tenders for users
+ * who hold (resource, action) at NETWORK scope.
+ *
+ * Architectural rule (see migration 004): Group ARC tenders are
+ * BU-agnostic. Visibility is gated EXCLUSIVELY by network-scope role
+ * grants. The two scopes do NOT cross-pollinate — a user with a hotel-
+ * scoped grant cannot see a Group ARC tender that happens to cover
+ * that hotel; conversely, a network-scope user cannot see a Single
+ * ARC / RFQ for any specific BU unless they also hold a BU grant.
+ *
+ * IMPORTANT: the caller MUST also gate the surrounding BU EXISTS on
+ * `RFQ.tender_scope IS DISTINCT FROM 'GROUP'` so the two paths stay
+ * mutually exclusive. Pattern:
+ *
+ *   AND (
+ *     (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
+ *       ...existing BU-scope clause with urs.is_network_scope = 0...
+ *     ))
+ *     ${groupArcNetworkScopeOr({ user_id, resource, action })}
+ *   )
+ *
+ * @param {Object} args
+ * @param {number|string} args.user_id   The buyer's user_id (interpolated literal).
+ * @param {string}        args.resource  e.g. 'te', 'awarding', 'quote-compare', 'boq'
+ * @param {string}        args.action    e.g. 'read', 'update'
+ * @param {string}        [args.rfqAlias='RFQ']  Alias of the rfq table in the surrounding query.
+ * @returns {string} SQL fragment starting with " OR ".
+ */
+const groupArcNetworkScopeOr = ({ user_id, resource, action, rfqAlias = 'RFQ' }) => `
+  OR (
+    ${rfqAlias}.tender_scope = 'GROUP'
+    AND EXISTS (
+      SELECT 1
+      FROM tbl_user_role_scopes urs_net
+      JOIN tbl_role_permissions rp_net ON rp_net.role_id = urs_net.role_id
+      JOIN tbl_permissions p_net ON p_net.id = rp_net.permission_id
+      WHERE urs_net.user_id = ${user_id}
+        AND urs_net.is_network_scope = 1
+        AND p_net.resource = '${resource}'
+        AND p_net.action = '${action}'
+    )
+  )
+`;
+
 
 const generateReminderTokenValue = () => {
   const timestamp = Date.now().toString();
@@ -3754,12 +3800,16 @@ LIMIT 2;
               AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
         )
       )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
-      -- Permission filter: only RFQs the user has read access for
-      AND EXISTS (
+      -- Permission filter: only RFQs the user has read access for.
+      -- Group ARC: visible via network-scope boq.read ONLY (BU path
+      -- is gated off with IS DISTINCT FROM 'GROUP' so a BU grant at
+      -- a covered hotel does not leak Group ARC visibility).
+      AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
         JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
         WHERE _urs2.user_id = ${user_id}
+          AND _urs2.is_network_scope = 0
           AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
           AND _p2.action = 'read'
           AND _urs2.company_id = RFQ.hospitality_company_id
@@ -3769,7 +3819,8 @@ LIMIT 2;
             OR _urs2.department_id = RFQ.department_id
             OR _urs2.department_id IS NULL
           )
-      )
+      ))
+      ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -12645,37 +12696,45 @@ ORDER BY tq.timestamp DESC;
         // Filter out RFQs where user lacks te.read permission for the RFQ's hotel + department
         // When role scope has hotel_id/department_id NULL (company-wide), verify user is
         // explicitly mapped to the RFQ's hotel and department
+        // Group ARC visibility: a Group ARC tender is visible in the
+        // tech-eval queue ONLY to users holding te.read at network
+        // scope. The two scopes do NOT cross-pollinate — see migration
+        // 004 + groupArcNetworkScopeOr() helper at the top of this file.
         dynamicWhereFilters += `
-          AND EXISTS (
-            SELECT 1
-            FROM tbl_user_role_scopes urs
-            JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-            JOIN tbl_permissions p ON p.id = rp.permission_id
-            JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
-            WHERE urs.user_id = ${user_id}
-              AND urs.company_id = hch.hospitality_company_id
-              AND p.resource = 'te'
-              AND p.action = 'read'
-              AND (
-                urs.hotel_id = RFQ.hotel_id
-                OR (
-                  urs.hotel_id IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM tbl_hospitality_user_mappings hum
-                    WHERE hum.user_id = ${user_id}
-                      AND (
-                        hum.hospitality_hotel_id = RFQ.hotel_id
-                        OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
-                            AND hum.hospitality_company_id = hch.hospitality_company_id)
-                      )
+          AND (
+            (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
+              SELECT 1
+              FROM tbl_user_role_scopes urs
+              JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+              JOIN tbl_permissions p ON p.id = rp.permission_id
+              JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
+              WHERE urs.user_id = ${user_id}
+                AND urs.is_network_scope = 0
+                AND urs.company_id = hch.hospitality_company_id
+                AND p.resource = 'te'
+                AND p.action = 'read'
+                AND (
+                  urs.hotel_id = RFQ.hotel_id
+                  OR (
+                    urs.hotel_id IS NULL
+                    AND EXISTS (
+                      SELECT 1 FROM tbl_hospitality_user_mappings hum
+                      WHERE hum.user_id = ${user_id}
+                        AND (
+                          hum.hospitality_hotel_id = RFQ.hotel_id
+                          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                              AND hum.hospitality_company_id = hch.hospitality_company_id)
+                        )
+                    )
                   )
                 )
-              )
-              AND (
-                RFQ.department_id IS NULL
-                OR urs.department_id = RFQ.department_id
-                OR urs.department_id IS NULL
-              )
+                AND (
+                  RFQ.department_id IS NULL
+                  OR urs.department_id = RFQ.department_id
+                  OR urs.department_id IS NULL
+                )
+            ))
+            ${groupArcNetworkScopeOr({ user_id, resource: 'te', action: 'read' })}
           )`;
       }
 
@@ -12702,18 +12761,64 @@ ORDER BY tq.timestamp DESC;
               AND ai_po.status = 'PENDING'
           ) AS has_pending_po_approval`;
 
-        // Only show RFQs where user has awarding.read permission for the RFQ's business unit
+        // Only show RFQs where user has awarding.read permission for the RFQ's business unit.
+        // Group ARC: visible only via network-scope awarding.read (BU path
+        // gated off with IS DISTINCT FROM 'GROUP').
         if (user_type != 3) {
           dynamicWhereFilters += `
-            AND EXISTS (
+            AND (
+              (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
+                SELECT 1
+                FROM tbl_user_role_scopes urs
+                JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+                JOIN tbl_permissions p ON p.id = rp.permission_id
+                JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
+                WHERE urs.user_id = ${user_id}
+                  AND urs.is_network_scope = 0
+                  AND urs.company_id = hch.hospitality_company_id
+                  AND p.resource = 'awarding'
+                  AND p.action = 'read'
+                  AND (
+                    urs.hotel_id = RFQ.hotel_id
+                    OR (
+                      urs.hotel_id IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM tbl_hospitality_user_mappings hum
+                        WHERE hum.user_id = ${user_id}
+                          AND (
+                            hum.hospitality_hotel_id = RFQ.hotel_id
+                            OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                                AND hum.hospitality_company_id = hch.hospitality_company_id)
+                          )
+                      )
+                    )
+                  )
+                  AND (
+                    RFQ.department_id IS NULL
+                    OR urs.department_id = RFQ.department_id
+                    OR urs.department_id IS NULL
+                  )
+              ))
+              ${groupArcNetworkScopeOr({ user_id, resource: 'awarding', action: 'read' })}
+            )`;
+        }
+      }
+
+      // Filter out RFQs where user lacks negotiation.read or quote-compare.read for the quote-compare sidebar.
+      // Group ARC: visible only via network-scope negotiation.read OR quote-compare.read.
+      if (quote_compare && !tech_eval && !po) {
+        dynamicWhereFilters += `
+          AND (
+            (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
               SELECT 1
               FROM tbl_user_role_scopes urs
               JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
               JOIN tbl_permissions p ON p.id = rp.permission_id
               JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
               WHERE urs.user_id = ${user_id}
+                AND urs.is_network_scope = 0
                 AND urs.company_id = hch.hospitality_company_id
-                AND p.resource = 'awarding'
+                AND (p.resource = 'negotiation' OR p.resource = 'quote-compare')
                 AND p.action = 'read'
                 AND (
                   urs.hotel_id = RFQ.hotel_id
@@ -12735,43 +12840,20 @@ ORDER BY tq.timestamp DESC;
                   OR urs.department_id = RFQ.department_id
                   OR urs.department_id IS NULL
                 )
-            )`;
-        }
-      }
-
-      // Filter out RFQs where user lacks negotiation.read or quote-compare.read for the quote-compare sidebar
-      if (quote_compare && !tech_eval && !po) {
-        dynamicWhereFilters += `
-          AND EXISTS (
-            SELECT 1
-            FROM tbl_user_role_scopes urs
-            JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-            JOIN tbl_permissions p ON p.id = rp.permission_id
-            JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
-            WHERE urs.user_id = ${user_id}
-              AND urs.company_id = hch.hospitality_company_id
-              AND (p.resource = 'negotiation' OR p.resource = 'quote-compare')
-              AND p.action = 'read'
-              AND (
-                urs.hotel_id = RFQ.hotel_id
-                OR (
-                  urs.hotel_id IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM tbl_hospitality_user_mappings hum
-                    WHERE hum.user_id = ${user_id}
-                      AND (
-                        hum.hospitality_hotel_id = RFQ.hotel_id
-                        OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
-                            AND hum.hospitality_company_id = hch.hospitality_company_id)
-                      )
-                  )
-                )
+            ))
+            OR (
+              RFQ.tender_scope = 'GROUP'
+              AND EXISTS (
+                SELECT 1
+                FROM tbl_user_role_scopes urs_net
+                JOIN tbl_role_permissions rp_net ON rp_net.role_id = urs_net.role_id
+                JOIN tbl_permissions p_net ON p_net.id = rp_net.permission_id
+                WHERE urs_net.user_id = ${user_id}
+                  AND urs_net.is_network_scope = 1
+                  AND (p_net.resource = 'negotiation' OR p_net.resource = 'quote-compare')
+                  AND p_net.action = 'read'
               )
-              AND (
-                RFQ.department_id IS NULL
-                OR urs.department_id = RFQ.department_id
-                OR urs.department_id IS NULL
-              )
+            )
           )
           AND (
             -- RFQs that never went through tech eval are unaffected
