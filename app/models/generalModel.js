@@ -1885,11 +1885,27 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  * @param {number|null} department_id - Department ID for filtering (optional)
  * @returns {Array<number>} Array of user IDs
  */
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, options = {}) {
   const userIds = [];
+  const isNetworkScope = options.is_global === true;
 
   if (step.approver_source_type === 'USER') {
-    if (department_id) {
+    if (isNetworkScope) {
+      // Network scope: the picked user must be an active user holding
+      // at least one network-scope role grant. The Global ARC wizard
+      // restricts the USER picker to those users — but we re-verify
+      // server-side so a stale tampered approver_source_id can't slip
+      // through. BU mappings are NOT consulted here: Group ARC is
+      // explicitly BU-agnostic.
+      const ok = await t.oneOrNone(`
+        SELECT 1 FROM tbl_users u
+         WHERE u.id = $1 AND u.status = 1
+           AND EXISTS (SELECT 1 FROM tbl_user_role_scopes urs
+                        WHERE urs.user_id = u.id AND urs.is_network_scope = 1)
+        LIMIT 1
+      `, [step.approver_source_id]);
+      if (ok) userIds.push(step.approver_source_id);
+    } else if (department_id) {
       // Validate company/hotel access + user has role scope covering this department
       const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
       const hasDeptScope = await t.oneOrNone(`
@@ -1913,31 +1929,50 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
       }
     }
   } else if (step.approver_source_type === 'ROLE') {
-    // A user qualifies if their role scope covers this department:
-    //   1. role grant is explicitly scoped to this department, OR
-    //   2. role grant is unrestricted (urs.department_id IS NULL) = all-department access
-    const deptClause = department_id
-      ? `AND (urs.department_id = $5 OR urs.department_id IS NULL)`
-      : '';
-    const users = await t.any(`
-      SELECT DISTINCT u.id
-      FROM tbl_users u
-      JOIN tbl_user_role_scopes urs
-        ON urs.user_id = u.id
-       AND urs.role_id = $1
-       AND urs.company_id = $2
-       AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
-       ${deptClause}
-      JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
-      WHERE u.status = 1
-        AND hum.hospitality_company_id = $2
-        AND (
-          ($3::int IS NULL AND hum.mapping_type = 0)
-          OR (hum.hospitality_hotel_id = $3)
-          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
-        )
-    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
-    userIds.push(...users.map(u => u.id));
+    if (isNetworkScope) {
+      // Network scope: every active user holding this role via a
+      // network-scope grant is an approver. BU mappings are NOT
+      // consulted — Group ARC is BU-agnostic. Department scoping does
+      // not apply because network-scope grants are unscoped by design
+      // (CHECK constraint in tbl_user_role_scopes enforces this).
+      const users = await t.any(`
+        SELECT DISTINCT u.id
+        FROM tbl_users u
+        JOIN tbl_user_role_scopes urs
+          ON urs.user_id = u.id
+         AND urs.role_id = $1
+         AND urs.is_network_scope = 1
+        WHERE u.status = 1
+      `, [step.approver_source_id]);
+      userIds.push(...users.map(u => u.id));
+    } else {
+      // BU-scoped resolution (RFQ + Single ARC path).
+      // A user qualifies if their role scope covers this department:
+      //   1. role grant is explicitly scoped to this department, OR
+      //   2. role grant is unrestricted (urs.department_id IS NULL) = all-department access
+      const deptClause = department_id
+        ? `AND (urs.department_id = $5 OR urs.department_id IS NULL)`
+        : '';
+      const users = await t.any(`
+        SELECT DISTINCT u.id
+        FROM tbl_users u
+        JOIN tbl_user_role_scopes urs
+          ON urs.user_id = u.id
+         AND urs.role_id = $1
+         AND urs.company_id = $2
+         AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+         ${deptClause}
+        JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
+        WHERE u.status = 1
+          AND hum.hospitality_company_id = $2
+          AND (
+            ($3::int IS NULL AND hum.mapping_type = 0)
+            OR (hum.hospitality_hotel_id = $3)
+            OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+          )
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
+      userIds.push(...users.map(u => u.id));
+    }
   } else if (step.approver_source_type === 'DEPARTMENT') {
     // DEPARTMENT type: always resolve to users in the specified department
     const users = await t.any(`
@@ -2117,8 +2152,13 @@ export async function createApprovalInstance({
       if (!policy) {
         throw new Error('Specified policy not found or is inactive');
       }
-      // Validate policy scope matches the request
-      if (policy.hospitality_company_id !== hospitality_company_id) {
+      // Validate policy scope matches the request. Network-scope (Group
+      // ARC) policies have hospitality_company_id IS NULL and the
+      // caller may legitimately pass undefined/null. Treat nullish on
+      // both sides as a match.
+      const policyCompany = policy.hospitality_company_id ?? null;
+      const requestCompany = hospitality_company_id ?? null;
+      if (policyCompany !== requestCompany) {
         throw new Error('Policy company does not match request company');
       }
     } else if (isGroupArcTender) {
@@ -2206,8 +2246,14 @@ export async function createApprovalInstance({
         if (!hasBoth) continue;
       }
 
-      // Resolve approvers for this step
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by);
+      // Resolve approvers for this step. Group ARC (is_global policy) routes
+      // ROLE/USER source resolution through tbl_user_role_scopes.is_network_scope=1
+      // — BU mappings and dept scoping are NOT applied because Group ARC is
+      // explicitly BU-agnostic (covers hotels possibly across companies).
+      const approverUserIds = await resolveApprovers(
+        policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by,
+        { is_global: policy.is_global === 1 }
+      );
 
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {

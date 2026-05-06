@@ -5221,10 +5221,18 @@ CREATE TABLE public.tbl_user_role_scopes (
     id integer NOT NULL,
     user_id integer NOT NULL,
     role_id integer NOT NULL,
-    company_id integer NOT NULL,
+    company_id integer,
     hotel_id integer,
-    department_id integer
+    department_id integer,
+    is_network_scope smallint NOT NULL DEFAULT 0,
+    CONSTRAINT chk_user_role_scopes_network_shape CHECK (
+      (is_network_scope = 1 AND company_id IS NULL AND hotel_id IS NULL AND department_id IS NULL)
+      OR
+      (is_network_scope = 0 AND company_id IS NOT NULL)
+    )
 );
+CREATE INDEX idx_user_role_scopes_network
+  ON public.tbl_user_role_scopes(role_id, user_id) WHERE is_network_scope = 1;
 
 
 --
