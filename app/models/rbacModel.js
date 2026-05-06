@@ -97,18 +97,41 @@ const rbacModel = {
 
   /* -------------------- ROLES & SCOPES -------------------- */
 
+  /**
+   * Insert one or more (user, role) scope rows.
+   *
+   * Each scope shape supports two forms:
+   *   - BU-scoped: { user_id, role_id, company_id, hotel_id?, department_id? }
+   *     → row has is_network_scope=0 (default) and the BU columns set.
+   *   - Network-scoped: { user_id, role_id, is_network_scope: 1 }
+   *     → row has is_network_scope=1 and ALL of company_id/hotel_id/
+   *       department_id forced to NULL (the CHECK constraint refuses
+   *       any other shape; we sanitise here so callers can pass mixed
+   *       payloads safely).
+   *
+   * Network-scoped grants are exclusively for Group ARC entities. They
+   * do NOT cross-pollinate with BU-scoped grants — see migration 004
+   * for the architectural rationale.
+   */
   assignUserRoleScopes: (scopes = [], t = null) => {
     if (!scopes.length) return Promise.resolve();
 
-    // Single multi-row INSERT instead of N individual inserts
     const params = [];
     const placeholders = scopes.map((s) => {
       const base = params.length;
-      params.push(s.user_id, s.role_id, s.company_id, s.hotel_id || null, s.department_id || null);
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+      const isNetwork = s.is_network_scope === 1 || s.is_network_scope === true ? 1 : 0;
+      // Network-scope rows MUST be all-NULL on BU columns (enforced by
+      // the CHECK constraint). Force-null here so a sloppy caller can't
+      // smuggle a hotel_id past the constraint and either fail noisily
+      // or — worse — succeed against a future relaxation of the check.
+      const companyId = isNetwork ? null : (s.company_id ?? null);
+      const hotelId = isNetwork ? null : (s.hotel_id || null);
+      const departmentId = isNetwork ? null : (s.department_id || null);
+      params.push(s.user_id, s.role_id, companyId, hotelId, departmentId, isNetwork);
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
     });
     const run = (tx) => tx.none(
-      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, is_network_scope)
        VALUES ${placeholders.join(', ')}`,
       params
     );
@@ -265,7 +288,8 @@ const rbacModel = {
         r.title AS role_title,
         urs.company_id,
         urs.hotel_id,
-        urs.department_id
+        urs.department_id,
+        urs.is_network_scope
       FROM tbl_user_role_scopes urs
       JOIN tbl_roles r
         ON r.id = urs.role_id
@@ -281,7 +305,8 @@ const rbacModel = {
       `
       SELECT urs.id, urs.user_id, urs.role_id,
         r.title AS role_title,
-        urs.company_id, urs.hotel_id, urs.department_id
+        urs.company_id, urs.hotel_id, urs.department_id,
+        urs.is_network_scope
       FROM tbl_user_role_scopes urs
       JOIN tbl_roles r
         ON r.id = urs.role_id
@@ -481,7 +506,123 @@ const rbacModel = {
       `,
       params
     );
-  }
+  },
+
+  /* -------------------- NETWORK-SCOPE (Group ARC) -------------------- */
+  //
+  // Network-scope grants (tbl_user_role_scopes.is_network_scope = 1) are
+  // the EXCLUSIVE permission axis for Group ARC entities. They do not
+  // overlap with BU-scoped grants — a user holding te.read at hotel A1
+  // cannot evaluate a Group ARC tender that covers A1; they need a
+  // separate network-scope te.read grant. The functions below are the
+  // canonical way for controllers to ask "does this user hold X at
+  // network scope?" without joining tbl_user_role_scopes by hand.
+
+  /**
+   * Return the distinct (resource, action) permission pairs a user
+   * holds via NETWORK-SCOPE role grants only. Used by Group ARC
+   * entity controllers to render the user's permitted actions on
+   * Group ARC tenders.
+   */
+  getUserNetworkPermissions: async (userId) => {
+    if (!userId) return [];
+    return db.any(
+      `
+      SELECT DISTINCT p.resource, p.action
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE urs.user_id = $1 AND urs.is_network_scope = 1
+      ORDER BY p.resource, p.action
+      `,
+      [userId]
+    );
+  },
+
+  /**
+   * Boolean: does this user hold ANY of the given permission keys at
+   * network scope? Pass an array of "resource.action" strings. Returns
+   * true if at least one is granted via a network-scope role.
+   *
+   * Use this in controllers that gate a Group ARC list/detail endpoint:
+   *   if (!await rbacModel.userHasAnyNetworkPermission(userId, ['te.read'])) return 403;
+   */
+  userHasAnyNetworkPermission: async (userId, permKeys = []) => {
+    if (!userId || !Array.isArray(permKeys) || permKeys.length === 0) return false;
+    const row = await db.oneOrNone(
+      `
+      SELECT 1
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE urs.user_id = $1
+        AND urs.is_network_scope = 1
+        AND (p.resource || '.' || p.action) = ANY($2::text[])
+      LIMIT 1
+      `,
+      [userId, permKeys]
+    );
+    return !!row;
+  },
+
+  /**
+   * Roles that have ALL the given (resource, action) permissions —
+   * not scoped to any user. Used by the Global ARC Hierarchy wizard
+   * to filter the role-source picker for each stage. e.g. for the
+   * TENDER stage, only show roles holding tender.approve. For the
+   * ARC stage, only roles holding arc.approve. The UI calls this
+   * with permKeys = ['tender.approve'] or similar.
+   */
+  getRolesWithAllPermissions: async (permKeys = []) => {
+    if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
+    return db.any(
+      `
+      SELECT r.id, r.title
+      FROM tbl_roles r
+      WHERE EXISTS (
+        SELECT 1
+        FROM tbl_role_permissions rp
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = r.id
+          AND (p.resource || '.' || p.action) = ANY($1::text[])
+        GROUP BY rp.role_id
+        HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $2
+      )
+      ORDER BY r.title
+      `,
+      [permKeys, permKeys.length]
+    );
+  },
+
+  /**
+   * Active users holding ALL the given permissions at NETWORK scope.
+   * The Global ARC Hierarchy wizard's USER picker calls this so it
+   * only shows valid candidates per stage. e.g. at the TENDER stage,
+   * only users with tender.approve via a network-scope grant.
+   */
+  getUsersWithAllNetworkPermissions: async (permKeys = []) => {
+    if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
+    return db.any(
+      `
+      SELECT u.id, u.name, u.email
+      FROM tbl_users u
+      WHERE u.status = 1
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = u.id
+            AND urs.is_network_scope = 1
+            AND (p.resource || '.' || p.action) = ANY($1::text[])
+          GROUP BY urs.user_id
+          HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $2
+        )
+      ORDER BY u.name
+      `,
+      [permKeys, permKeys.length]
+    );
+  },
 
 };
 
