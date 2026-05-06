@@ -86,7 +86,10 @@ export const getContractedPOs = async (req, res) => {
     const data = await db.any(
       `SELECT po.id, po.po_number, po.status, po.total_value, po.created_at,
               po.finalized_vendor_id, po.arc_release_id,
-              u.organization_name AS vendor_name,
+              -- Vendor display-name fallback through tbl_company →
+              -- u.organization_name → u.name. Vendor users routinely
+              -- have organization_name NULL.
+              COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
               r.hotel_id, h.name AS hotel_name,
               a.rfq_id AS source_tender_id, a.period_from, a.period_to,
               src.rfq_no AS source_rfq_no
@@ -95,6 +98,7 @@ export const getContractedPOs = async (req, res) => {
        JOIN tbl_arc a ON a.id = r.arc_id
        JOIN tbl_rfq src ON src.id = a.rfq_id
        LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
        WHERE ${where}
        ORDER BY po.created_at DESC

@@ -169,6 +169,11 @@
     <tr>
       <td class="center bold" colspan="3" style="font-size: 22px; font-weight: 800; padding-bottom: 10px;">
         PURCHASE ORDER
+        {{#if is_contracted_po}}
+          <span style="display: inline-block; margin-left: 10px; padding: 3px 10px; background: #2E5BA8; color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0.6px; border-radius: 999px; vertical-align: middle;">
+            CONTRACTED
+          </span>
+        {{/if}}
         {{#if buyer.name}}
           <br/><span style="font-size: 12px; font-weight: normal;">
             Company Name: {{buyer.name}}{{#if buyer.business_unit_name}}, Business Unit: {{buyer.business_unit_name}}{{/if}}
@@ -180,6 +185,31 @@
       </td>
     </tr>
   </table>
+
+  {{#if is_contracted_po}}
+  <table style="margin-top: 4px; border: 1px solid #c7d2fe; background: #eef4ff; border-left: 4px solid #2E5BA8; border-radius: 6px;">
+    <tr>
+      <td style="padding: 10px 14px;">
+        <div style="font-size: 10px; font-weight: 700; color: #2E5BA8; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 4px;">
+          Released against an active rate contract
+        </div>
+        <div style="font-size: 11px; color: #1e293b; line-height: 1.6;">
+          This PO was raised directly off
+          {{#if tender_no}}<strong>Tender #{{tender_no}}</strong>{{#if tender_title}} &mdash; {{tender_title}}{{/if}}{{else}}<strong>an approved tender</strong>{{/if}}
+          under
+          {{#if arc_id}}<strong>ARC #{{arc_id}}{{#if arc_tender_scope_label}} ({{arc_tender_scope_label}}){{/if}}</strong>{{else}}<strong>an Annual Rate Contract</strong>{{/if}}{{#if arc_period_range}}, valid <strong>{{arc_period_range}}</strong>{{/if}}.
+          The unit price, taxes and other charges in this PO are those committed in the rate contract; no fresh negotiation has taken place.
+          {{#if arc_document_url}}
+            <br/>
+            <a href="{{arc_document_url}}" style="color: #2E5BA8; font-weight: 600; text-decoration: underline;">
+              View signed ARC Document &rarr;
+            </a>
+          {{/if}}
+        </div>
+      </td>
+    </tr>
+  </table>
+  {{/if}}
 
   <br/>
 
@@ -207,20 +237,48 @@
           <br/>Email: {{supplier.email}}
         {{/if}}
       </td>
-      <!-- Right Column: RFQ No, PO Number, PO Date -->
+      <!-- Right Column: PO reference. Tender / ARC labels for
+           contracted POs; RFQ labels for open-market. -->
       <td style="width: 50%;">
         <table>
-          {{#if rfq_no}}
-          <tr>
-            <td class="bold" style="width: 40%;">RFQ No</td>
-            <td>{{rfq_no}}</td>
-          </tr>
-          {{/if}}
-          {{#if rfq_title}}
-          <tr>
-            <td class="bold" style="width: 40%;">RFQ Title</td>
-            <td>{{rfq_title}}</td>
-          </tr>
+          {{#if is_contracted_po}}
+            {{#if tender_no}}
+            <tr>
+              <td class="bold" style="width: 40%;">Tender No</td>
+              <td>{{tender_no}}</td>
+            </tr>
+            {{/if}}
+            {{#if tender_title}}
+            <tr>
+              <td class="bold" style="width: 40%;">Tender Title</td>
+              <td>{{tender_title}}</td>
+            </tr>
+            {{/if}}
+            {{#if arc_id}}
+            <tr>
+              <td class="bold">ARC No</td>
+              <td>#{{arc_id}}{{#if arc_tender_scope_label}} &middot; {{arc_tender_scope_label}}{{/if}}</td>
+            </tr>
+            {{/if}}
+            {{#if arc_period_range}}
+            <tr>
+              <td class="bold">Contract Validity</td>
+              <td>{{arc_period_range}}</td>
+            </tr>
+            {{/if}}
+          {{else}}
+            {{#if rfq_no}}
+            <tr>
+              <td class="bold" style="width: 40%;">RFQ No</td>
+              <td>{{rfq_no}}</td>
+            </tr>
+            {{/if}}
+            {{#if rfq_title}}
+            <tr>
+              <td class="bold" style="width: 40%;">RFQ Title</td>
+              <td>{{rfq_title}}</td>
+            </tr>
+            {{/if}}
           {{/if}}
           <tr>
             <td class="bold">PO Number</td>

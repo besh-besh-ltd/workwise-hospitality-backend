@@ -58,12 +58,18 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       PO.*,
       PO.initiated_by,
       INITIATOR.name AS prepared_by_name,
+      -- Contracted POs (PO.arc_release_id NOT NULL) carry rfq_id=NULL,
+      -- so resolve the parent tender via tbl_arc_release → tbl_arc.rfq_id
+      -- and prefer the arc_release.hotel_id (the hotel served by THIS
+      -- release) over the parent tender's lead hotel.
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
       RFQ.title AS rfq_title,
       RFQ.comment AS rfq_comment,
       RFQ.hospitality_company_id,
-      RFQ.hotel_id,
+      RFQ.hotel_id AS rfq_hotel_id,
+      RFQ.is_tender,
+      COALESCE(AR.hotel_id, RFQ.hotel_id) AS hotel_id,
       PROJ.name AS project_name,
       POQ.id AS source_quote_id,
       POQ.gstin AS quote_gstin,
@@ -81,10 +87,22 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       RFQ.location AS rfq_delivery_location,
       RFQ.contact_name AS buyer_contact_name,
       RFQ.contact_number AS buyer_contact_number,
-      RFQ.response_email AS buyer_contact_email
+      RFQ.response_email AS buyer_contact_email,
+      -- ARC / contracted-PO context. NULL for open-market POs.
+      CASE WHEN PO.arc_release_id IS NOT NULL THEN 1 ELSE 0 END AS is_contracted_po,
+      AR.id AS arc_release_id_resolved,
+      ARC.id AS arc_id,
+      ARC.tender_scope AS arc_tender_scope,
+      ARC.period_from AS arc_period_from,
+      ARC.period_to AS arc_period_to,
+      ARC.status AS arc_status,
+      ARC.document_url AS arc_document_url,
+      ARC.document_generated_at AS arc_document_generated_at
 
     FROM tbl_rfq_purchase_order PO
-    JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
+    LEFT JOIN tbl_arc_release AR ON AR.id = PO.arc_release_id
+    LEFT JOIN tbl_arc ARC ON ARC.id = AR.arc_id
+    LEFT JOIN tbl_rfq RFQ ON RFQ.id = COALESCE(PO.rfq_id, ARC.rfq_id)
     LEFT JOIN tbl_users INITIATOR ON INITIATOR.id = PO.initiated_by
     LEFT JOIN tbl_projects PROJ ON PROJ.id = RFQ.project_id
     LEFT JOIN LATERAL (
@@ -98,7 +116,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     ) POQ ON TRUE
     LEFT JOIN tbl_company TC ON TC.id = PO.company_id
     LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
-    LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
+    LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = COALESCE(AR.hotel_id, RFQ.hotel_id)
     WHERE PO.id = $1
   `, [po_id]);
 
@@ -260,10 +278,41 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
 
   const approvalData = await getApprovalDataForPO(po_id, poData, conn);
 
+  // Format ARC validity period for the contracted-PO band on the PDF.
+  // Buyers want the contract dates in plain "DD MMM YYYY" form so it
+  // reads naturally on a printed PO ("Valid 06 May 2026 → 30 Mar 2027").
+  const formatArcDate = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+  const isContractedPO = !!poData.is_contracted_po;
+  const arcInfo = isContractedPO ? {
+    is_contracted_po: true,
+    arc_id: poData.arc_id,
+    arc_release_id: poData.arc_release_id_resolved,
+    arc_tender_scope: poData.arc_tender_scope,
+    arc_tender_scope_label: poData.arc_tender_scope === 'GROUP' ? 'Group ARC' : 'Single ARC',
+    arc_period_from: formatArcDate(poData.arc_period_from),
+    arc_period_to: formatArcDate(poData.arc_period_to),
+    arc_period_range: poData.arc_period_from && poData.arc_period_to
+      ? `${formatArcDate(poData.arc_period_from)} to ${formatArcDate(poData.arc_period_to)}`
+      : null,
+    arc_document_url: poData.arc_document_url || null,
+    // The "tender" labels alias the same data so the template can
+    // switch wording (RFQ → Tender) without changing the source binding.
+    tender_no: poData.rfq_no,
+    tender_title: poData.rfq_title,
+  } : { is_contracted_po: false };
+
   return {
     project_name: poData.project_name,
     rfq_title: poData.rfq_title,
     rfq_no: poData.rfq_no,
+    // Contracted-PO context — the template uses these to swap RFQ
+    // labels for tender/contract wording and to surface the ARC doc.
+    ...arcInfo,
     supplier: {
       name: supplier?.organization_name || supplier?.name,
       address: supplierAddress,

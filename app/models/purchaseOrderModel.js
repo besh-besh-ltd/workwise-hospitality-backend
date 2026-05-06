@@ -391,10 +391,15 @@ export const draftPurchaseOrderFromArcRelease = async ({ release, source_rfq_id,
   );
 
   for (const item of items) {
+    // tbl_purchase_order_product.charges_meta is jsonb. pg-promise
+    // serialises JS arrays/objects as text[] when bound positionally,
+    // which fails the column's jsonb cast — JSON.stringify + ::jsonb
+    // is the canonical fix used elsewhere (arcModel.upsertItem).
+    const chargesMetaJson = item.charges_meta == null ? null : JSON.stringify(item.charges_meta);
     await ctx.none(
       `INSERT INTO tbl_purchase_order_product
         (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
       [
         po.id,
         item.rfq_product_id,
@@ -402,7 +407,7 @@ export const draftPurchaseOrderFromArcRelease = async ({ release, source_rfq_id,
         item.quantity,
         item.unit || 'NOS',
         item.unit_price,
-        item.charges_meta || null,
+        chargesMetaJson,
         item.total_price,
       ]
     );
@@ -414,8 +419,8 @@ export const draftPurchaseOrderFromArcRelease = async ({ release, source_rfq_id,
 export const initiatePurchaseOrder = async (po_id, initiator, t) => {
   try {
     const purchaseOrder = await t.oneOrNone(
-      `SELECT 
-        PO.*, 
+      `SELECT
+        PO.*,
         TC.company_name,
         TC.cin,
         TC.website,
@@ -458,22 +463,28 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
             MIN(CAST(TQI.delivery_period AS INTEGER)), ' - ', MAX(CAST(TQI.delivery_period AS INTEGER))
           )
           FROM tbl_quote_items TQI
-          WHERE 
+          WHERE
             TQI.id = ANY(PO.quote_id)
             AND TQI.delivery_period <> ''
         ) AS deliveryTerms
 
         FROM tbl_rfq_purchase_order PO
-        JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
+        -- Contracted POs (drafted from an ARC release) carry rfq_id=NULL.
+        -- Resolve the parent tender via tbl_arc_release → tbl_arc.rfq_id
+        -- so RFQ-derived columns (delivery_location etc.) populate
+        -- uniformly. Open-market POs fall through po.rfq_id directly.
+        LEFT JOIN tbl_arc_release AR ON AR.id = PO.arc_release_id
+        LEFT JOIN tbl_arc ARC ON ARC.id = AR.arc_id
+        LEFT JOIN tbl_rfq RFQ ON RFQ.id = COALESCE(PO.rfq_id, ARC.rfq_id)
         LEFT JOIN LATERAL (
           SELECT * FROM tbl_quotes
-          WHERE rfq_id = PO.rfq_id AND created_by = PO.finalized_vendor_id
+          WHERE rfq_id = COALESCE(PO.rfq_id, ARC.rfq_id) AND created_by = PO.finalized_vendor_id
           ORDER BY timestamp DESC LIMIT 1
         ) TQ ON TRUE
         JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
         JOIN tbl_users FIN ON FIN.id = PO.initiated_by
         JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
-        JOIN tbl_company TC ON TC.id = PO.company_id 
+        JOIN tbl_company TC ON TC.id = PO.company_id
 
       WHERE PO.id = $1`,
       [po_id]
@@ -483,7 +494,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       throw new Error("No Purchase Order found by id:", po_id);
     }
 
-    const { rfq_id, project_id, finalized_vendor_id } = purchaseOrder;
+    const { rfq_id, project_id, finalized_vendor_id, arc_release_id } = purchaseOrder;
 
     // Get actual product data from tbl_purchase_order_product (source of truth)
     const poProducts = await t.any(`
@@ -495,36 +506,108 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
     const computedQuantity = poProducts.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
     const productIds = poProducts.map(p => p.rfq_product_id);
 
-    // Get RFQ details to check if it's a hospitality RFQ
-    const rfq = await t.oneOrNone(`
-      SELECT id, hospitality_company_id, hotel_id, department_id, process_id, rfq_no, is_tender
-      FROM tbl_rfq WHERE id = $1
-    `, [rfq_id]);
+    // Resolve the approval scope. Two flavours:
+    //   - Open-market PO: read scope from tbl_rfq via po.rfq_id (legacy).
+    //   - Contracted PO:  po.rfq_id is NULL. Read scope from the ARC
+    //                     envelope + release directly — no RFQ lookup
+    //                     required. The release pins the hotel served
+    //                     by THIS PO (Group ARCs cover N hotels), and
+    //                     the envelope pins the hospitality_company.
+    //                     The source tender's process_id is still
+    //                     needed for policy resolution under the
+    //                     tender's approval process.
+    let approvalScope;
+    if (arc_release_id) {
+      // Anchor PO approval scope on the *served hotel's actual
+      // hospitality_company* — NOT the ARC envelope's
+      // hospitality_company_id. Group ARCs can span hotels across
+      // multiple companies (cross-company hotels are allowed under the
+      // Hospitality Network admin's global hierarchy), so the
+      // envelope's company is just the tender's primary; the PO
+      // policy is configured against the company that owns the hotel
+      // actually being served by THIS release.
+      //
+      // Process-id is dropped intentionally for contracted PO approval:
+      // PO policies are typically configured without a process scope
+      // (PO is a non-tender entity type). Carrying the source
+      // tender's process_id would only filter the policy match.
+      // findBestMatchingPolicyTx accepts NULL process_id policies.
+      const arcCtx = await t.oneOrNone(
+        `SELECT
+            ar.hotel_id                  AS hotel_id,
+            ar.arc_id                    AS arc_id,
+            arc.hospitality_company_id   AS arc_company_id,
+            hotel.hospitality_company_id AS hotel_company_id,
+            arc.rfq_id                   AS source_rfq_id,
+            r.department_id              AS department_id,
+            r.rfq_no                     AS rfq_no,
+            r.is_tender                  AS is_tender
+           FROM tbl_arc_release ar
+           JOIN tbl_arc arc ON arc.id = ar.arc_id
+           LEFT JOIN tbl_hospitality_company_hotels hotel ON hotel.id = ar.hotel_id
+           LEFT JOIN tbl_rfq r ON r.id = arc.rfq_id
+          WHERE ar.id = $1`,
+        [arc_release_id]
+      );
+      if (!arcCtx) {
+        throw new Error('Contracted PO is not linked to a valid ARC release');
+      }
+      approvalScope = {
+        // Prefer the hotel's actual company; fall back to the ARC
+        // envelope's company if the hotel row is missing (legacy data).
+        hospitality_company_id: arcCtx.hotel_company_id || arcCtx.arc_company_id,
+        hotel_id: arcCtx.hotel_id,
+        department_id: arcCtx.department_id,
+        // process_id intentionally NULL for PO entity (see comment above).
+        process_id: null,
+        rfq_id: arcCtx.source_rfq_id,
+        rfq_no: arcCtx.rfq_no,
+        is_tender: arcCtx.is_tender,
+      };
+    } else {
+      // Get RFQ details to check if it's a hospitality RFQ
+      const rfq = await t.oneOrNone(`
+        SELECT id, hospitality_company_id, hotel_id, department_id, process_id, rfq_no, is_tender
+        FROM tbl_rfq WHERE id = $1
+      `, [rfq_id]);
+      approvalScope = rfq ? {
+        hospitality_company_id: rfq.hospitality_company_id,
+        hotel_id: rfq.hotel_id,
+        department_id: rfq.department_id,
+        process_id: rfq.process_id,
+        rfq_id: rfq.id,
+        rfq_no: rfq.rfq_no,
+        is_tender: rfq.is_tender,
+      } : null;
+    }
 
     let approvalResult;
     let useNewWorkflow = false;
 
-    // Use new approval workflow for hospitality POs
-    if (rfq && rfq.hospitality_company_id) {
+    // Use new approval workflow for hospitality POs (open-market via
+    // RFQ scope, contracted via ARC release scope).
+    if (approvalScope && approvalScope.hospitality_company_id) {
       useNewWorkflow = true;
 
       try {
         approvalResult = await createApprovalInstance({
           entity_type: 'PO',
           entity_id: purchaseOrder.id,
-          hospitality_company_id: rfq.hospitality_company_id,
-          hotel_id: rfq.hotel_id,
-          department_id: rfq.department_id,
-          process_id: rfq.process_id,
+          hospitality_company_id: approvalScope.hospitality_company_id,
+          hotel_id: approvalScope.hotel_id,
+          department_id: approvalScope.department_id,
+          process_id: approvalScope.process_id,
           initiated_by: initiator.id,
           metadata: {
             po_id: purchaseOrder.id,
             po_number: purchaseOrder.po_number,
-            rfq_id: rfq_id,
-            rfq_no: rfq.rfq_no,
+            rfq_id: approvalScope.rfq_id,
+            rfq_no: approvalScope.rfq_no,
             total_value: computedTotal,
             vendor_id: finalized_vendor_id,
-            is_tender: rfq.is_tender,
+            is_tender: approvalScope.is_tender,
+            is_contracted_po: !!arc_release_id,
+            arc_release_id: arc_release_id || null,
             project_id: project_id,
             rfq_product_ids: productIds
           },
@@ -549,8 +632,24 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         }
       } catch (approvalError) {
         logError("APPROVAL ERROR", approvalError);
-        // No policy found - throw error, do not auto-approve
-        throw new Error('No approval policy found for Purchase Order. Please configure an approval policy for PO entity type in the hospitality scope.');
+        // Surface the exact scope the engine looked under so the
+        // operator can verify the policy matches without reading
+        // server logs. Pass through structured tender errors as-is.
+        if (approvalError?.code === 'TENDER_POLICY_NOT_CONFIGURED') {
+          throw approvalError;
+        }
+        const scopeBits = [
+          `entity=PO`,
+          `hospitality_company_id=${approvalScope?.hospitality_company_id ?? 'NULL'}`,
+          `hotel_id=${approvalScope?.hotel_id ?? 'NULL'}`,
+          `department_id=${approvalScope?.department_id ?? 'NULL'}`,
+          `process_id=${approvalScope?.process_id ?? 'NULL'}`,
+        ].join(', ');
+        const detail = approvalError?.message ? ` (${approvalError.message})` : '';
+        throw new Error(
+          `No approval policy found for Purchase Order under [${scopeBits}]${detail}. ` +
+          `Configure a PO approval policy for this hospitality company / hotel.`
+        );
       }
     } else {
       // Use old approval workflow for non-hospitality POs
@@ -593,12 +692,15 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     const items = await getPOItemDetails(purchaseOrder, t)
 
-    // Generate PO PDF with dynamic template selection
+    // Generate PO PDF with dynamic template selection. Scope params
+    // come from approvalScope (works for both open-market and
+    // contracted POs — the latter has its scope sourced from the ARC
+    // release rather than the parent RFQ).
     const pdfSaveResult = await seoController.poPDF({
       po_id: purchaseOrder.id,
       company_id: purchaseOrder.company_id,
-      hospitality_company_id: rfq?.hospitality_company_id,
-      hotel_id: rfq?.hotel_id,
+      hospitality_company_id: approvalScope?.hospitality_company_id,
+      hotel_id: approvalScope?.hotel_id,
       // Legacy data for backward compatibility with default template
       ...purchaseOrder,
       ...items
@@ -948,6 +1050,25 @@ export const getPODetailsById = async (po_id, user_id) => {
               TU.mobile AS initiated_by_phone,
               RFQ.rfq_no,
               RFQ.title AS rfq_title,
+              -- Effective RFQ context: po.rfq_id is NULL for contracted
+              -- POs, but RFQ.* is resolved via the arc_release chain so
+              -- the FE always has a non-null rfq_id to drive permissions
+              -- and back-navigation.
+              RFQ.id AS effective_rfq_id,
+              RFQ.hospitality_company_id AS effective_hospitality_company_id,
+              COALESCE(AR.hotel_id, RFQ.hotel_id) AS effective_hotel_id,
+              RFQ.is_tender,
+              -- Contracted-PO markers — let the FE pivot UI (badges,
+              -- back-link, banners) without re-fetching.
+              CASE WHEN po.arc_release_id IS NOT NULL THEN 1 ELSE 0 END AS is_contracted_po,
+              po.arc_release_id,
+              ARC.id AS arc_id,
+              ARC.tender_scope AS arc_tender_scope,
+              ARC.period_from AS arc_period_from,
+              ARC.period_to AS arc_period_to,
+              ARC.status AS arc_status,
+              ARC.document_url AS arc_document_url,
+              ARC.document_generated_at AS arc_document_generated_at,
               JSON_BUILD_OBJECT(
                   'id', LOGGED_IN_USER.id,
                   'name', LOGGED_IN_USER.name,
@@ -1216,9 +1337,20 @@ export const getPODetailsById = async (po_id, user_id) => {
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id
-       JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
+       -- Contracted POs (drafted from an ARC release) carry rfq_id=NULL.
+       -- Resolve their parent tender via tbl_arc_release → tbl_arc.rfq_id
+       -- so the same RFQ-derived columns (rfq_no, title, hospitality
+       -- company / hotel) populate uniformly. Open-market POs continue
+       -- to use po.rfq_id directly.
+       LEFT JOIN tbl_arc_release AR ON AR.id = po.arc_release_id
+       LEFT JOIN tbl_arc ARC ON ARC.id = AR.arc_id
+       LEFT JOIN tbl_rfq RFQ ON RFQ.id = COALESCE(po.rfq_id, ARC.rfq_id)
        LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
-       LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
+       -- For contracted POs the hotel served by THIS release is on
+       -- tbl_arc_release.hotel_id (the lead hotel of a Group ARC isn't
+       -- necessarily the one served). Open-market POs fall back to the
+       -- RFQ's hotel_id.
+       LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = COALESCE(AR.hotel_id, RFQ.hotel_id)
        WHERE po.id = $1`,
       [po_id, user_id]
     );
