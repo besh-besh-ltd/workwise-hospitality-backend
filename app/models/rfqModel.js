@@ -4476,6 +4476,9 @@ LIMIT 2;
         poData,
         awaitingQuoteStats,
         evaluators,
+        // Tender-only Phase 4 inputs.
+        arcApprovalInstanceIds,
+        arcEnvelopesData,
       ] = await Promise.all([
         db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: RFQ approval instances query failed`); return []; }),
         db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech approval instances query failed`); return []; }),
@@ -4723,6 +4726,27 @@ LIMIT 2;
           GROUP BY u.id, u.name
           HAVING COUNT(DISTINCT p.action) = 2
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: evaluators query failed`); return []; }),
+
+        // ARC approval instances (tender-only). entity_id is arc_item.id
+        // post-Phase-2; metadata.rfq_id ties them back to the parent rfq.
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'ARC' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: ARC approval instances query failed`); return []; }),
+
+        // ARC envelope summary for tender Phase 4. Empty for non-tender RFQs.
+        db.any(`
+          SELECT a.id AS arc_id, a.vendor_id, a.status, a.tender_scope,
+                 a.period_from, a.period_to, a.document_url, a.document_generated_at,
+                 u.name AS vendor_name,
+                 COALESCE(uc.company_name, u.organization_name) AS vendor_company,
+                 (SELECT COUNT(*)::int FROM tbl_arc_item ai WHERE ai.arc_id = a.id) AS items_total,
+                 (SELECT COUNT(*)::int FROM tbl_arc_item ai WHERE ai.arc_id = a.id AND ai.status = 'APPROVED') AS items_approved,
+                 (SELECT COUNT(*)::int FROM tbl_arc_item ai WHERE ai.arc_id = a.id AND ai.status = 'REJECTED') AS items_rejected,
+                 (SELECT COUNT(*)::int FROM tbl_arc_item ai WHERE ai.arc_id = a.id AND ai.status = 'PENDING')  AS items_pending
+            FROM tbl_arc a
+            LEFT JOIN tbl_users u ON u.id = a.vendor_id
+            LEFT JOIN tbl_company uc ON uc.id = u.company_id
+           WHERE a.rfq_id = $1
+           ORDER BY a.id ASC
+        `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: ARC envelopes query failed`); return []; }),
       ]);
 
       // Override phase mapping: AWAITING_QUOTES defaults to 'commercial',
@@ -4741,11 +4765,12 @@ LIMIT 2;
         return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
       };
 
-      const [rfqApprovalDetails, techApprovalDetails, quoteApprovalDetails, poApprovalDetails] = await Promise.all([
+      const [rfqApprovalDetails, techApprovalDetails, quoteApprovalDetails, poApprovalDetails, arcApprovalDetails] = await Promise.all([
         fetchDetails(rfqApprovalInstanceIds),
         fetchDetails(techApprovalInstanceIds),
         fetchDetails(quoteApprovalInstanceIds),
         fetchDetails(poApprovalInstanceIds),
+        fetchDetails(arcApprovalInstanceIds),
       ]);
 
       // 3b. Enrich NEGOTIATION_QUOTE instances with product info (entity_id = rfq_product_id)
@@ -5036,7 +5061,12 @@ LIMIT 2;
         }
 
         phases.push({
-          key: 'rfq_approval', label: 'RFQ Approval', status, summary,
+          key: 'rfq_approval',
+          // Phase 1 label is tender-aware. The data shape stays identical
+          // (the entity_type filter at fetch time is already RFQ ∪ TENDER),
+          // only the user-facing string differs.
+          label: rfqBasic.is_tender === 1 ? 'Tender Approval' : 'RFQ Approval',
+          status, summary,
           is_cancelled: latestInstance?.status === 'CANCELLED',
           completed_at: latestInstance?.completed_at || null,
           approval_instances: hasData ? formatApprovalInstances(rfqApprovalDetails) : null,
@@ -5151,36 +5181,96 @@ LIMIT 2;
         });
       }
 
-      // Phase 4: Purchase Order (PO + Approval + Completion)
+      // Phase 4: Purchase Order (RFQs + Single ARC) OR ARC Approval (tenders).
+      //
+      // For RFQs the final phase is the PO sign-off — what gets dispatched
+      // to the vendor. For tenders the final phase is the ARC committee:
+      // the per-vendor envelopes that approve, generate the contract PDF,
+      // and reach ACTIVE. (The contracted POs that flow off an ARC release
+      // are operational call-offs, not part of the tender's lifecycle.)
       {
+        const isTender = rfqBasic.is_tender === 1;
         let status = getPhaseStatus('purchase_order');
         const hasData = hasPhaseData('purchase_order');
         if (!hasData && status === 'completed') status = 'skipped';
 
-        const purchaseOrders = buildPODetail();
-        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_value || 0), 0) : 0;
+        if (isTender) {
+          const envelopes = arcEnvelopesData || [];
+          const activeCount = envelopes.filter((e) => e.status === 'ACTIVE' || e.status === 'DOC_GENERATED').length;
+          const voidCount = envelopes.filter((e) => e.status === 'VOID').length;
 
-        let summary = null;
-        if (purchaseOrders?.length > 0) {
-          summary = `${purchaseOrders.length} PO${purchaseOrders.length === 1 ? '' : 's'}`;
-          if (totalAmount > 0) summary += ` · ₹${totalAmount.toLocaleString('en-IN')}`;
+          // Status carry: tender Phase 4 is "current" while any envelope
+          // is still PENDING_COMMITTEE/PARTIALLY_DECIDED; "completed" when
+          // every envelope is terminal (ACTIVE, DOC_GENERATED, VOID, or
+          // EXPIRED). Override the phase-map default with envelope reality.
+          if (envelopes.length > 0) {
+            const stillPending = envelopes.some((e) =>
+              e.status === 'PENDING_COMMITTEE' || e.status === 'PARTIALLY_DECIDED'
+            );
+            status = stillPending ? 'current' : 'completed';
+          }
+
+          let summary = null;
+          if (envelopes.length > 0) {
+            const parts = [`${envelopes.length} vendor${envelopes.length === 1 ? '' : 's'}`];
+            if (activeCount > 0) parts.push(`${activeCount} active`);
+            if (voidCount > 0) parts.push(`${voidCount} voided`);
+            summary = parts.join(' · ');
+          }
+
+          const latestArcInstance = arcApprovalDetails.length > 0 ? arcApprovalDetails[arcApprovalDetails.length - 1] : null;
+
+          phases.push({
+            key: 'arc_approval',
+            label: 'ARC Approval',
+            status,
+            summary,
+            is_cancelled: latestArcInstance?.status === 'CANCELLED',
+            arc_envelopes: envelopes.map((e) => ({
+              arc_id: e.arc_id,
+              vendor_id: e.vendor_id,
+              vendor_name: e.vendor_name || null,
+              vendor_company: e.vendor_company || null,
+              tender_scope: e.tender_scope,
+              status: e.status,
+              period_from: e.period_from,
+              period_to: e.period_to,
+              document_url: e.document_url,
+              document_generated_at: e.document_generated_at,
+              items_total: e.items_total,
+              items_approved: e.items_approved,
+              items_rejected: e.items_rejected,
+              items_pending: e.items_pending,
+            })),
+            approval_instances: arcApprovalDetails.length > 0 ? formatApprovalInstances(arcApprovalDetails) : null,
+            action_holders: status === 'current' ? currentActionHolders : null,
+          });
+        } else {
+          const purchaseOrders = buildPODetail();
+          const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_value || 0), 0) : 0;
+
+          let summary = null;
+          if (purchaseOrders?.length > 0) {
+            summary = `${purchaseOrders.length} PO${purchaseOrders.length === 1 ? '' : 's'}`;
+            if (totalAmount > 0) summary += ` · ₹${totalAmount.toLocaleString('en-IN')}`;
+          }
+
+          let subStatus = null;
+          if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
+          else if (currentStage === 'PO_VENDOR_REJECTED') subStatus = 'vendor_rejected';
+          else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
+          else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
+
+          const latestPOInstance = poApprovalDetails.length > 0 ? poApprovalDetails[poApprovalDetails.length - 1] : null;
+
+          phases.push({
+            key: 'purchase_order', label: 'Purchase Order', status, summary, sub_status: subStatus,
+            is_cancelled: latestPOInstance?.status === 'CANCELLED',
+            purchase_orders: purchaseOrders,
+            approval_instances: poApprovalDetails.length > 0 ? formatApprovalInstances(poApprovalDetails) : null,
+            action_holders: status === 'current' ? currentActionHolders : null,
+          });
         }
-
-        let subStatus = null;
-        if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
-        else if (currentStage === 'PO_VENDOR_REJECTED') subStatus = 'vendor_rejected';
-        else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
-        else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
-
-        const latestPOInstance = poApprovalDetails.length > 0 ? poApprovalDetails[poApprovalDetails.length - 1] : null;
-
-        phases.push({
-          key: 'purchase_order', label: 'Purchase Order', status, summary, sub_status: subStatus,
-          is_cancelled: latestPOInstance?.status === 'CANCELLED',
-          purchase_orders: purchaseOrders,
-          approval_instances: poApprovalDetails.length > 0 ? formatApprovalInstances(poApprovalDetails) : null,
-          action_holders: status === 'current' ? currentActionHolders : null,
-        });
       }
 
       // 11. Resolve upcoming actors (who will evaluate/approve in future phases)
