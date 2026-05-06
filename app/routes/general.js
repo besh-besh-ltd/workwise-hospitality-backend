@@ -5,7 +5,7 @@ import generalController from '../controllers/general/generalController.js';
 import { acl, noAcl } from '../helper/common.js';
 import { validateBody, validateParam } from '../validations/paramValidation/userValidation.js';
 import { hierarchySchema } from '../validations/hierarchyValidation.js';
-import { hospitalityApprovalController, processController } from '../controllers/general/generalController.js';
+import { hospitalityApprovalController, processController, globalArcApproverOptionsController } from '../controllers/general/generalController.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -142,6 +142,18 @@ GeneralRoutes.delete(
   passportSignIn,
   acl([7, 2]),
   hospitalityApprovalController.deleteApprovalPolicy
+);
+
+// Global ARC Hierarchy approver-options — per-stage filtered pickers for
+// the Global ARC wizard. Returns only roles/users holding <entity>.approve
+// (users additionally filtered to network-scope grants). One round-trip
+// per stage instead of fetching ALL roles + ALL users and filtering on
+// the client.
+GeneralRoutes.get(
+  '/hospitality/approval/global-arc/approver-options/:entity_type',
+  passportSignIn,
+  acl([7, 2]),
+  globalArcApproverOptionsController.getGlobalArcApproverOptions
 );
 
 // Approval Instance Management

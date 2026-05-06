@@ -39,6 +39,8 @@ import {
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
+import rbacModel from '../../models/rbacModel.js';
+import { ENTITY_APPROVE_RESOURCE_MAP } from '../../models/generalModel.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -1202,6 +1204,65 @@ const processController = {
   }
 };
 
-export { hospitalityApprovalController, processController };
+// ===========================================================================
+// Group ARC Global Hierarchy — approver-options endpoint
+// ===========================================================================
+//
+// The Global ARC Hierarchy admin wizard needs per-stage filtered pickers:
+//   - ROLE picker shows only roles holding <entity>.approve
+//   - USER picker shows only users with <entity>.approve at NETWORK scope
+//
+// Two existing endpoints (getRoles + getCompanyUsers) returned ALL roles
+// and ALL users, putting the wizard in the position of either showing
+// every option (and letting an admin pick a role with no approve perm —
+// which the engine would silently skip via roleHasReadAndApprovePermission)
+// or filtering client-side using a separate permissions API. Both options
+// were brittle. This endpoint returns only valid candidates so the wizard
+// can show a single relevant dropdown per stage.
+const globalArcApproverOptionsController = {
+  /**
+   * GET /hospitality/approval/global-arc/approver-options/:entity_type
+   *
+   * Returns:
+   *   { roles: [{id, title}], users: [{id, name, email}] }
+   *
+   * Both filtered to those holding `<entity>.approve` for the supplied
+   * tender-chain entity_type. Users are network-scope filtered (only users
+   * with at least one is_network_scope=1 grant matching the permission
+   * are returned). The wizard's USER picker shows these; the ROLE picker
+   * shows roles regardless of scope (a role just needs to hold the perm —
+   * scope binding to is_network_scope=1 happens later when the policy
+   * resolves).
+   */
+  async getGlobalArcApproverOptions(req, res) {
+    try {
+      const entity_type = (req.params.entity_type || '').toUpperCase();
+      // Whitelist tender-chain entity types only — the global hierarchy
+      // covers TENDER, TECHNICAL, NEGOTIATION, NEGOTIATION_QUOTE, ARC.
+      const allowed = ['TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'ARC'];
+      if (!allowed.includes(entity_type)) {
+        return res.status(400).json({
+          status: 3,
+          message: `Invalid entity_type. Must be one of: ${allowed.join(', ')}`,
+        });
+      }
+      const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type];
+      const permKey = `${resource}.approve`;
+      const [roles, users] = await Promise.all([
+        rbacModel.getRolesWithAllPermissions([permKey]),
+        rbacModel.getUsersWithAllNetworkPermissions([permKey]),
+      ]);
+      return res.json({
+        status: 1,
+        data: { entity_type, permission: permKey, roles, users },
+      });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+};
+
+export { hospitalityApprovalController, processController, globalArcApproverOptionsController };
 export default generalController;
 
