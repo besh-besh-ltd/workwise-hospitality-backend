@@ -546,6 +546,11 @@ const rbacModel = {
    *
    * Use this in controllers that gate a Group ARC list/detail endpoint:
    *   if (!await rbacModel.userHasAnyNetworkPermission(userId, ['te.read'])) return 403;
+   *
+   * Tenant scoping is implicit: the user's tbl_users.company_id is
+   * the tenant boundary. We don't filter by tenant here because this
+   * helper is asking "does THIS user hold the perm" — the user's own
+   * identity is the scope.
    */
   userHasAnyNetworkPermission: async (userId, permKeys = []) => {
     if (!userId || !Array.isArray(permKeys) || permKeys.length === 0) return false;
@@ -595,18 +600,31 @@ const rbacModel = {
   },
 
   /**
-   * Active users holding ALL the given permissions at NETWORK scope.
+   * Active users holding ALL the given permissions at NETWORK scope,
+   * scoped to a specific tenant (parent tbl_company.id) when supplied.
+   *
    * The Global ARC Hierarchy wizard's USER picker calls this so it
    * only shows valid candidates per stage. e.g. at the TENDER stage,
-   * only users with tender.approve via a network-scope grant.
+   * only users with tender.approve via a network-scope grant. The
+   * tenant filter prevents the wizard for tenant A from listing
+   * tenant B's network admins.
+   *
+   * @param {string[]} permKeys  e.g. ['tender.approve']
+   * @param {Object}   [opts]
+   * @param {number}   [opts.tenant_company_id]  Parent tbl_company.id.
+   *   When set, restricts the result to users belonging to that tenant.
+   *   When unset, returns network-scope holders across the network
+   *   (this should only be used for cross-tenant admin tooling).
    */
-  getUsersWithAllNetworkPermissions: async (permKeys = []) => {
+  getUsersWithAllNetworkPermissions: async (permKeys = [], opts = {}) => {
     if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
+    const tenantId = opts.tenant_company_id ?? null;
     return db.any(
       `
       SELECT u.id, u.name, u.email
       FROM tbl_users u
       WHERE u.status = 1
+        AND ($3::int IS NULL OR u.company_id = $3)
         AND EXISTS (
           SELECT 1
           FROM tbl_user_role_scopes urs
@@ -620,7 +638,7 @@ const rbacModel = {
         )
       ORDER BY u.name
       `,
-      [permKeys, permKeys.length]
+      [permKeys, permKeys.length, tenantId]
     );
   },
 

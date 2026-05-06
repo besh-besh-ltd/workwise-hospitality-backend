@@ -1248,9 +1248,15 @@ const globalArcApproverOptionsController = {
       }
       const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type];
       const permKey = `${resource}.approve`;
+      // Tenant boundary: pin to the calling user's parent tbl_company.id.
+      // Network-scope users are technically scoped to a single tenant
+      // (their tbl_users.company_id), so listing for the wizard must
+      // restrict to that tenant. Without this, tenant A's wizard would
+      // surface tenant B's network admins.
+      const tenantCompanyId = req.user?.company_id || null;
       const [roles, users] = await Promise.all([
         rbacModel.getRolesWithAllPermissions([permKey]),
-        rbacModel.getUsersWithAllNetworkPermissions([permKey]),
+        rbacModel.getUsersWithAllNetworkPermissions([permKey], { tenant_company_id: tenantCompanyId }),
       ]);
       return res.json({
         status: 1,

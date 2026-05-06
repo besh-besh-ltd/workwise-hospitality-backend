@@ -171,7 +171,12 @@ describe("Group ARC — schema-level CHECK on network-scope row shape", () => {
 });
 
 describe("Group ARC — ROLE-source resolution under is_global policy", () => {
-  it("resolves users who hold the role via a network-scope grant", async () => {
+  it("resolves only users from THIS tenant who hold the role via a network-scope grant (cross-tenant isolation)", async () => {
+    // Both admins hold network-scope COMM_APPROVER, but they belong to
+    // different tenants (companyA_admin → tbl_company.A, companyB_admin
+    // → tbl_company.B). The policy is for tenant A, so only A's admin
+    // should resolve. Tenant B leaking into tenant A's Group ARC
+    // committee would be a multi-tenant security failure.
     await grantNetworkRole(IDS.users.companyA_admin, ROLE_IDS.COMM_APPROVER);
     await grantNetworkRole(IDS.users.companyB_admin, ROLE_IDS.COMM_APPROVER);
 
@@ -179,7 +184,7 @@ describe("Group ARC — ROLE-source resolution under is_global policy", () => {
       entity_type: 'ARC',
       entity_id: nextEntityId(),
       tender_scope: 'GROUP',
-      company_id: IDS.companies.A,
+      company_id: IDS.companies.A, // tenant A
       initiated_by: IDS.users.a1_proc_buyer,
       approval_policy_id: POLICY_GLOBAL_ROLE_ARC,
       metadata: { test: 'role_global' },
@@ -193,8 +198,9 @@ describe("Group ARC — ROLE-source resolution under is_global policy", () => {
         ORDER BY sa.approver_user_id`,
       [res.instance.id]
     );
-    const ids = approvers.map((r) => r.approver_user_id).sort();
-    expect(ids).toEqual([IDS.users.companyA_admin, IDS.users.companyB_admin].sort());
+    const ids = approvers.map((r) => r.approver_user_id);
+    expect(ids).toContain(IDS.users.companyA_admin);
+    expect(ids).not.toContain(IDS.users.companyB_admin); // tenant boundary holds
 
     await cleanupInstance(res.instance);
   });
@@ -318,5 +324,53 @@ describe("Group ARC — USER-source resolution under is_global policy", () => {
     expect(approvers.map((r) => r.approver_user_id)).not.toContain(IDS.users.a1_proc_commApp);
 
     await cleanupInstance(res.instance);
+  });
+
+  it("REFUSES to resolve a USER-source pick from a different tenant — even with a valid network-scope grant", async () => {
+    // companyB_admin has a network-scope COMM_APPROVER grant. But they
+    // belong to tenant B, not the policy's tenant (A). The engine MUST
+    // reject this — otherwise an admin who knew the user_id of a
+    // network admin in another tenant could bypass tenant isolation by
+    // submitting that id directly.
+    //
+    // We need a USER-source policy whose source_id points at
+    // companyB_admin to exercise this. We change the policy's step
+    // for the duration of this test, then restore it.
+    const originalStep = await db.one(
+      `SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 LIMIT 1`,
+      [POLICY_GLOBAL_USER_ARC]
+    );
+    await db.none(
+      `UPDATE tbl_approval_policy_steps SET approver_source_id = $2 WHERE id = $1`,
+      [originalStep.id, IDS.users.companyB_admin]
+    );
+    await grantNetworkRole(IDS.users.companyB_admin, ROLE_IDS.COMM_APPROVER);
+
+    try {
+      const res = await createApprovalInstance({
+        entity_type: 'ARC',
+        entity_id: nextEntityId(),
+        tender_scope: 'GROUP',
+        company_id: IDS.companies.A, // policy's tenant — A, not B
+        initiated_by: IDS.users.a1_proc_buyer,
+        approval_policy_id: POLICY_GLOBAL_USER_ARC,
+        metadata: {},
+      });
+      const approvers = await db.any(
+        `SELECT sa.approver_user_id FROM tbl_approval_step_approvers sa
+           JOIN tbl_approval_instance_steps s ON s.id = sa.approval_instance_step_id
+          WHERE s.approval_instance_id = $1`,
+        [res.instance.id]
+      );
+      // companyB_admin holds a valid network-scope grant but is from
+      // the wrong tenant — must NOT be resolved.
+      expect(approvers.map((r) => r.approver_user_id)).not.toContain(IDS.users.companyB_admin);
+      await cleanupInstance(res.instance);
+    } finally {
+      await db.none(
+        `UPDATE tbl_approval_policy_steps SET approver_source_id = $2 WHERE id = $1`,
+        [originalStep.id, originalStep.approver_source_id]
+      );
+    }
   });
 });

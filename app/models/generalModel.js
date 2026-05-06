@@ -1888,22 +1888,30 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
 export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, options = {}) {
   const userIds = [];
   const isNetworkScope = options.is_global === true;
+  // Tenant boundary for the network-scope path (Group ARC). Without
+  // this filter, network-scope grants from any tenant would leak across
+  // tenant boundaries. Required when isNetworkScope is true.
+  const tenantCompanyId = options.tenant_company_id ?? null;
 
   if (step.approver_source_type === 'USER') {
     if (isNetworkScope) {
-      // Network scope: the picked user must be an active user holding
-      // at least one network-scope role grant. The Global ARC wizard
-      // restricts the USER picker to those users — but we re-verify
-      // server-side so a stale tampered approver_source_id can't slip
-      // through. BU mappings are NOT consulted here: Group ARC is
-      // explicitly BU-agnostic.
+      // Network scope: the picked user must be:
+      //   (a) active,
+      //   (b) belong to this tenant (tbl_users.company_id = tenant),
+      //   (c) hold at least one network-scope role grant.
+      // The Global ARC wizard restricts the USER picker to those
+      // users — but we re-verify server-side so a stale tampered
+      // approver_source_id can't slip through, AND so a user from a
+      // different tenant cannot be smuggled in. BU mappings are NOT
+      // consulted: Group ARC is explicitly BU-agnostic.
       const ok = await t.oneOrNone(`
         SELECT 1 FROM tbl_users u
          WHERE u.id = $1 AND u.status = 1
+           AND ($2::int IS NULL OR u.company_id = $2)
            AND EXISTS (SELECT 1 FROM tbl_user_role_scopes urs
                         WHERE urs.user_id = u.id AND urs.is_network_scope = 1)
         LIMIT 1
-      `, [step.approver_source_id]);
+      `, [step.approver_source_id, tenantCompanyId]);
       if (ok) userIds.push(step.approver_source_id);
     } else if (department_id) {
       // Validate company/hotel access + user has role scope covering this department
@@ -1931,10 +1939,12 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
   } else if (step.approver_source_type === 'ROLE') {
     if (isNetworkScope) {
       // Network scope: every active user holding this role via a
-      // network-scope grant is an approver. BU mappings are NOT
-      // consulted — Group ARC is BU-agnostic. Department scoping does
-      // not apply because network-scope grants are unscoped by design
-      // (CHECK constraint in tbl_user_role_scopes enforces this).
+      // network-scope grant within THIS TENANT is an approver. BU
+      // mappings are NOT consulted — Group ARC is BU-agnostic — but
+      // tenant scoping IS enforced via tbl_users.company_id. The
+      // alternative would leak network-scope holders across tenants.
+      // Department scoping doesn't apply because network-scope grants
+      // are unscoped by design (CHECK constraint in tbl_user_role_scopes).
       const users = await t.any(`
         SELECT DISTINCT u.id
         FROM tbl_users u
@@ -1943,7 +1953,8 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
          AND urs.role_id = $1
          AND urs.is_network_scope = 1
         WHERE u.status = 1
-      `, [step.approver_source_id]);
+          AND ($2::int IS NULL OR u.company_id = $2)
+      `, [step.approver_source_id, tenantCompanyId]);
       userIds.push(...users.map(u => u.id));
     } else {
       // BU-scoped resolution (RFQ + Single ARC path).
@@ -2250,9 +2261,18 @@ export async function createApprovalInstance({
       // ROLE/USER source resolution through tbl_user_role_scopes.is_network_scope=1
       // — BU mappings and dept scoping are NOT applied because Group ARC is
       // explicitly BU-agnostic (covers hotels possibly across companies).
+      //
+      // tenant_company_id (the parent tbl_company.id) is the tenant
+      // boundary for Group ARC. Without it the engine would resolve
+      // network-scope grants from ANY tenant, leaking tenant-B admins
+      // into tenant-A's Group ARC committee. We pass policy.company_id
+      // through so the network branch filters users by u.company_id.
       const approverUserIds = await resolveApprovers(
         policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by,
-        { is_global: policy.is_global === 1 }
+        {
+          is_global: policy.is_global === 1,
+          tenant_company_id: policy.company_id || null,
+        }
       );
 
       // Skip step if no approvers were resolved at all

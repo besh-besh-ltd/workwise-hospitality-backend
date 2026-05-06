@@ -820,13 +820,21 @@ create_buyer_company_users: async (req, res, next) => {
 
     /* -------------------- USER ↔ ROLE SCOPES -------------------- */
     if (Array.isArray(roles) && roles.length) {
-      const roleScopes = roles.map(r => ({
-        user_id: createdUser.id,
-        role_id: r.role_id,
-        company_id: r.company_id || companyID,
-        hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
-      }));
+      const roleScopes = roles.map(r => {
+        // Network-scope grant for Group ARC entities. See migration 004 +
+        // rbacModel.assignUserRoleScopes for the architectural rationale.
+        const isNetwork = r.is_network_scope === 1 || r.is_network_scope === true;
+        if (isNetwork) {
+          return { user_id: createdUser.id, role_id: r.role_id, is_network_scope: 1 };
+        }
+        return {
+          user_id: createdUser.id,
+          role_id: r.role_id,
+          company_id: r.company_id || companyID,
+          hotel_id: r.hotel_id || null,
+          department_id: r.department_id || null,
+        };
+      });
 
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
@@ -1982,7 +1990,8 @@ update_user_detail: async (req, res, next) => {
           `SELECT role_id,
                   COALESCE(company_id, 0)    AS company_id,
                   COALESCE(hotel_id, 0)      AS hotel_id,
-                  COALESCE(department_id, 0) AS department_id
+                  COALESCE(department_id, 0) AS department_id,
+                  is_network_scope
            FROM tbl_user_role_scopes WHERE user_id = $1`,
           [targetUserId]
         ),
@@ -2148,13 +2157,27 @@ update_user_detail: async (req, res, next) => {
 
     if (hasDeptUpdate || hasRoleUpdate) {
       const roleScopes = hasRoleUpdate
-        ? reqData.roles.map(r => ({
-            user_id: targetUserId,
-            role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id,
-            hotel_id: r.hotel_id || null,
-            department_id: r.department_id || null
-          }))
+        ? reqData.roles.map(r => {
+            // Network-scope grant: force-null all BU columns regardless of
+            // what the client sent. The rbacModel.assignUserRoleScopes
+            // also sanitises, but we strip here so the audit log records
+            // the canonical shape.
+            const isNetwork = r.is_network_scope === 1 || r.is_network_scope === true;
+            if (isNetwork) {
+              return {
+                user_id: targetUserId,
+                role_id: r.role_id,
+                is_network_scope: 1,
+              };
+            }
+            return {
+              user_id: targetUserId,
+              role_id: r.role_id,
+              company_id: r.company_id || loggedInUser.company_id,
+              hotel_id: r.hotel_id || null,
+              department_id: r.department_id || null,
+            };
+          })
         : null;
 
       if (hasRoleUpdate) {

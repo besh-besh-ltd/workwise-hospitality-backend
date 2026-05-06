@@ -410,6 +410,14 @@ const schemas = {
         company_id: Joi.number().optional().allow(null),
         hotel_id: Joi.number().optional().allow(null),
         department_id: Joi.number().optional().allow(null),
+        // Network-scope grant flag for Group ARC. When true the row is
+        // stored with all-null BU columns and is_network_scope=1 so the
+        // engine routes Group ARC entities through it. The model
+        // sanitises any leaked BU columns before INSERT.
+        is_network_scope: Joi.alternatives().try(
+          Joi.number().valid(0, 1),
+          Joi.boolean()
+        ).optional(),
         permissions: Joi.object().optional()
       })
     ).optional(),
