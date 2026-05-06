@@ -571,16 +571,27 @@ const rbacModel = {
   },
 
   /**
-   * Roles that have ALL the given (resource, action) permissions —
-   * not scoped to any user. Used by the Global ARC Hierarchy wizard
-   * to filter the role-source picker for each stage. e.g. for the
-   * TENDER stage, only show roles holding tender.approve. For the
-   * ARC stage, only roles holding arc.approve. The UI calls this
-   * with permKeys = ['tender.approve'] or similar.
+   * Roles that have ALL the given (resource, action) permissions.
+   * Used by the Global ARC Hierarchy wizard to filter the role-source
+   * picker per stage. e.g. for TENDER show only roles holding
+   * tender.approve; for ARC show only roles holding arc.approve.
+   *
+   * When opts.tenant_company_id is supplied, each role row is enriched
+   * with its `users` array — active users holding that role via a
+   * network-scope grant within the tenant. The wizard renders these
+   * users under the picked role so admins see "ARC Approver — 3 users
+   * eligible" rather than "No users available".
+   *
+   * @param {string[]} permKeys  e.g. ['arc.approve']
+   * @param {Object}   [opts]
+   * @param {number}   [opts.tenant_company_id]  Parent tbl_company.id.
+   *   When set, includes per-role network-scope users for that tenant.
+   *   When unset, returns roles only (legacy shape).
    */
-  getRolesWithAllPermissions: async (permKeys = []) => {
+  getRolesWithAllPermissions: async (permKeys = [], opts = {}) => {
     if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
-    return db.any(
+    const tenantId = opts.tenant_company_id ?? null;
+    const roles = await db.any(
       `
       SELECT r.id, r.title
       FROM tbl_roles r
@@ -597,6 +608,30 @@ const rbacModel = {
       `,
       [permKeys, permKeys.length]
     );
+    if (!tenantId || roles.length === 0) {
+      return roles.map((r) => ({ ...r, users: [] }));
+    }
+    // Per-role network-scope holders within the tenant.
+    const roleIds = roles.map((r) => r.id);
+    const usersByRole = await db.any(
+      `
+      SELECT urs.role_id, u.id, u.name, u.email
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_users u ON u.id = urs.user_id
+      WHERE urs.role_id = ANY($1::int[])
+        AND urs.is_network_scope = 1
+        AND u.status = 1
+        AND u.company_id = $2
+      ORDER BY u.name
+      `,
+      [roleIds, tenantId]
+    );
+    const grouped = new Map();
+    usersByRole.forEach((row) => {
+      if (!grouped.has(row.role_id)) grouped.set(row.role_id, []);
+      grouped.get(row.role_id).push({ id: row.id, name: row.name, email: row.email });
+    });
+    return roles.map((r) => ({ ...r, users: grouped.get(r.id) || [] }));
   },
 
   /**

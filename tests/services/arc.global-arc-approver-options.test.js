@@ -174,6 +174,30 @@ describe("GET /hospitality/approval/global-arc/approver-options — happy paths 
     expect(userIds).not.toContain(IDS.users.a1_proc_commApp); // BU-only — excluded
   });
 
+  it("each role row carries its per-role network-scope users[] for the wizard's ROLE-picker preview", async () => {
+    // Wizard contract: when admin picks a role, the live preview shows
+    // which users will resolve. Without per-role users[], the FE has no
+    // way to map roles → eligible users and falls back to "No users
+    // available". This test pins the enriched shape.
+    await grantPerm(ROLE_IDS.COMM_APPROVER, PERM_ARC_APPROVE_TEST);
+    await grantNetworkRole(IDS.users.companyA_admin, ROLE_IDS.COMM_APPROVER);
+
+    const m = mockExpress({
+      user: { id: IDS.users.companyA_admin, company_id: IDS.companies.A },
+      params: { entity_type: "ARC" },
+    });
+    await globalArcApproverOptionsController.getGlobalArcApproverOptions(m.req, m.res);
+
+    const commRole = m.calls.body.data.roles.find((r) => r.id === ROLE_IDS.COMM_APPROVER);
+    expect(commRole).toBeTruthy();
+    expect(Array.isArray(commRole.users)).toBe(true);
+    const commRoleUserIds = commRole.users.map((u) => u.id);
+    expect(commRoleUserIds).toContain(IDS.users.companyA_admin);
+    // The user has a BU-scoped COMM_APPROVER grant too (a1_proc_commApp) —
+    // must NOT leak into the role's network-scope users[].
+    expect(commRoleUserIds).not.toContain(IDS.users.a1_proc_commApp);
+  });
+
   it("for a stage with no network-scope grants, the user list is empty even if the perm has BU-only holders (proves the network filter)", async () => {
     // NEGOTIATION_QUOTE → quote-compare.approve. The seed reference may
     // grant this to one or more roles via BU scopes, so the role list

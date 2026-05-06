@@ -1254,8 +1254,12 @@ const globalArcApproverOptionsController = {
       // restrict to that tenant. Without this, tenant A's wizard would
       // surface tenant B's network admins.
       const tenantCompanyId = req.user?.company_id || null;
+      // Roles are enriched with per-role users[] so the wizard can show
+      // "Role X — N users eligible" when the admin picks a role. Without
+      // this, the picker fell back to "No users available" because the
+      // FE had no way to map roles to their network-scope holders.
       const [roles, users] = await Promise.all([
-        rbacModel.getRolesWithAllPermissions([permKey]),
+        rbacModel.getRolesWithAllPermissions([permKey], { tenant_company_id: tenantCompanyId }),
         rbacModel.getUsersWithAllNetworkPermissions([permKey], { tenant_company_id: tenantCompanyId }),
       ]);
       return res.json({
