@@ -198,6 +198,60 @@ describe("GET /hospitality/approval/global-arc/approver-options — happy paths 
     expect(commRoleUserIds).not.toContain(IDS.users.a1_proc_commApp);
   });
 
+  it("end-to-end: assignUserRoleScopes (network-scope) → endpoint returns the user under the role's users[]", async () => {
+    // Reproduces the buyer's exact bug report:
+    //   1. Grant a user a role at network scope (via the same model the
+    //      controller uses on save).
+    //   2. Hit the wizard endpoint.
+    //   3. Expect the user to surface under the role's users[] AND
+    //      under the top-level users[] (Specific User dropdown).
+    // If this test passes but the user still sees empty users[], the
+    // bug is in the persistence path, not in the read path.
+    await grantPerm(ROLE_IDS.COMM_APPROVER, PERM_ARC_APPROVE_TEST);
+
+    // Use the rbacModel write path that the controller actually calls
+    // on save. We pass the EXACT shape the controller forwards for a
+    // network-scope payload: only role_id + is_network_scope, no BU
+    // columns.
+    const rbacModel = (await import("../../app/models/rbacModel.js")).default;
+    await rbacModel.assignUserRoleScopes([
+      { user_id: IDS.users.companyA_admin, role_id: ROLE_IDS.COMM_APPROVER, is_network_scope: 1 },
+    ]);
+    // Track for cleanup.
+    const written = await db.any(
+      `SELECT id FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2 AND is_network_scope = 1`,
+      [IDS.users.companyA_admin, ROLE_IDS.COMM_APPROVER]
+    );
+    written.forEach((r) => inserted.scopeIds.push(r.id));
+
+    // Also confirm the row landed correctly — exposes a persistence
+    // bug if the row is BU-shaped instead of network.
+    expect(written.length).toBe(1);
+    const row = await db.one(
+      `SELECT * FROM tbl_user_role_scopes WHERE id = $1`,
+      [written[0].id]
+    );
+    expect(row.is_network_scope).toBe(1);
+    expect(row.company_id).toBeNull();
+    expect(row.hotel_id).toBeNull();
+    expect(row.department_id).toBeNull();
+
+    // Now hit the endpoint as the same admin would.
+    const m = mockExpress({
+      user: { id: IDS.users.companyA_admin, company_id: IDS.companies.A },
+      params: { entity_type: "ARC" },
+    });
+    await globalArcApproverOptionsController.getGlobalArcApproverOptions(m.req, m.res);
+
+    const data = m.calls.body.data;
+    // Top-level users[] (Specific User dropdown) — must include the user.
+    expect(data.users.map((u) => u.id)).toContain(IDS.users.companyA_admin);
+    // Role-scoped users[] (User Role picker preview) — must include them too.
+    const commRole = data.roles.find((r) => r.id === ROLE_IDS.COMM_APPROVER);
+    expect(commRole).toBeTruthy();
+    expect(commRole.users.map((u) => u.id)).toContain(IDS.users.companyA_admin);
+  });
+
   it("for a stage with no network-scope grants, the user list is empty even if the perm has BU-only holders (proves the network filter)", async () => {
     // NEGOTIATION_QUOTE → quote-compare.approve. The seed reference may
     // grant this to one or more roles via BU scopes, so the role list
