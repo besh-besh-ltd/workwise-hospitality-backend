@@ -4858,6 +4858,78 @@ const sendVendorEditNotifications = async (rfq_id, userId, diff) => {
   });
 };
 
+/**
+ * Phase 6: enrich a list of products (as returned by the product
+ * master search) with `arc_info` describing any active Single-/Group-
+ * ARC contracts that cover the (hotel, product) pair.
+ *
+ * Contract:
+ *   - Returns a NEW array — input is never mutated.
+ *   - Each product gets `arc_info: { is_under_arc, arcs }`.
+ *   - `is_under_arc` is true iff at least one envelope is ACTIVE or
+ *     DOC_GENERATED, period_to >= today, AND the matching arc_item is
+ *     APPROVED. Expired / VOID / rejected-cell ARCs DO NOT count.
+ *   - When the buyer has no hotel context (hotel_ids empty / non-array),
+ *     every product gets is_under_arc=false without hitting the DB.
+ *   - If the lookup throws, the buyer's search must still succeed —
+ *     enrichment failures are logged and every product gets is_under_arc=false.
+ *
+ * Exported so the contracted-item-detection test suite can exercise
+ * the enrichment without standing up the heavyweight searchProduct
+ * query infrastructure.
+ */
+export const enrichProductsWithArcInfo = async (products, hotel_ids) => {
+  const safeProducts = Array.isArray(products) ? products : [];
+  if (safeProducts.length === 0) return safeProducts;
+
+  const safeHotels = Array.isArray(hotel_ids)
+    ? hotel_ids.map(Number).filter(Number.isFinite)
+    : [];
+
+  let arcInfoByProduct = {};
+  if (safeHotels.length > 0) {
+    const variantIds = safeProducts
+      .map((p) => p.product_variant_id || p.variant_id || p.id)
+      .filter(Number.isFinite);
+    if (variantIds.length > 0) {
+      try {
+        const arcRows = await arcModel.findActiveArcsForProducts({
+          product_variant_ids: variantIds,
+          hotel_ids: safeHotels,
+        });
+        for (const row of arcRows) {
+          const key = row.product_variant_id;
+          if (!arcInfoByProduct[key]) arcInfoByProduct[key] = [];
+          arcInfoByProduct[key].push({
+            arc_id: row.arc_id,
+            arc_item_id: row.arc_item_id,
+            source_tender_id: row.source_tender_id,
+            source_rfq_no: row.source_rfq_no,
+            source_rfq_title: row.source_rfq_title,
+            vendor_id: row.vendor_id,
+            vendor_name: row.vendor_name,
+            hotel_id: row.hotel_id,
+            period_from: row.period_from,
+            period_to: row.period_to,
+            unit_price: row.unit_price,
+            envelope_status: row.envelope_status,
+            tender_scope: row.tender_scope,
+          });
+        }
+      } catch (arcEnrichErr) {
+        logError('Failed to enrich product search with ARC info', arcEnrichErr);
+        arcInfoByProduct = {};
+      }
+    }
+  }
+
+  return safeProducts.map((p) => {
+    const key = p.product_variant_id || p.variant_id || p.id;
+    const arcs = arcInfoByProduct[key] || [];
+    return { ...p, arc_info: { is_under_arc: arcs.length > 0, arcs } };
+  });
+};
+
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
     try {
@@ -9901,59 +9973,10 @@ const rfqController = {
 
       const dedupedProducts = removeDuplicates(productResult);
 
-      // Phase 6: enrich each product with `arc_info` describing any
-      // active Group-/Single-ARC contracts that cover the (hotel, product)
-      // pair. The FE renders a "CONTRACTED ITEM" badge and offers the
-      // release-PO flow when the user adds such a product to a draft.
-      // Skipped when no hotels are in scope (non-hospitality flow).
-      let arcInfoByProduct = {};
-      if (Array.isArray(hotel_ids) && hotel_ids.length > 0 && dedupedProducts.length > 0) {
-        const variantIds = dedupedProducts
-          .map((p) => p.product_variant_id || p.variant_id || p.id)
-          .filter(Number.isFinite);
-        if (variantIds.length > 0) {
-          try {
-            const arcRows = await arcModel.findActiveArcsForProducts({
-              product_variant_ids: variantIds,
-              hotel_ids: hotel_ids.map(Number).filter(Number.isFinite),
-            });
-            for (const row of arcRows) {
-              const key = row.product_variant_id;
-              if (!arcInfoByProduct[key]) arcInfoByProduct[key] = [];
-              arcInfoByProduct[key].push({
-                arc_id: row.arc_id,
-                arc_item_id: row.arc_item_id,
-                source_tender_id: row.source_tender_id,
-                source_rfq_no: row.source_rfq_no,
-                source_rfq_title: row.source_rfq_title,
-                vendor_id: row.vendor_id,
-                vendor_name: row.vendor_name,
-                hotel_id: row.hotel_id,
-                period_from: row.period_from,
-                period_to: row.period_to,
-                unit_price: row.unit_price,
-                envelope_status: row.envelope_status,
-                tender_scope: row.tender_scope,
-              });
-            }
-          } catch (arcEnrichErr) {
-            // Non-fatal — search must still succeed if ARC lookup fails.
-            logError('Failed to enrich product search with ARC info', arcEnrichErr);
-          }
-        }
-      }
-
-      const enriched = dedupedProducts.map((p) => {
-        const key = p.product_variant_id || p.variant_id || p.id;
-        const arcs = arcInfoByProduct[key] || [];
-        return {
-          ...p,
-          arc_info: {
-            is_under_arc: arcs.length > 0,
-            arcs,
-          },
-        };
-      });
+      // Phase 6 enrichment runs through the exported helper so the test
+      // suite can hit it without dragging the heavyweight searchProduct
+      // query.
+      const enriched = await enrichProductsWithArcInfo(dedupedProducts, hotel_ids);
 
       res.status(200).json({
         status: 1,
