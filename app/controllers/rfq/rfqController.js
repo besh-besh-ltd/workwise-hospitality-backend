@@ -9740,7 +9740,14 @@ const rfqController = {
           // committee then acts at the (product × vendor) cell granularity
           // (Phase 3 matrix UI). Tenders only.
           if (selectedRoute === 'ARC') {
-            try {
+            // Intentionally NO try/catch around this block. ARC envelope
+            // creation is the contract of finalize on the ARC route — a
+            // half-finalize ("vendor finalized but no committee inbox
+            // entry") would be a buyer dead-end. If anything inside fails,
+            // we let the error propagate so the outer db.tx rolls back the
+            // entire finalize call, including the tbl_quote_finalization
+            // insert above. The buyer sees the error and retries.
+            // Operations sees the failure in the application logs.
               const rfqData = await rfqModel.getRfqWithHospitalityDetails(rfq_id, t);
 
               if (!rfqData || rfqData.is_tender !== 1) {
@@ -9849,34 +9856,6 @@ const rfqController = {
               } else {
                 arcApprovalCreated = true;
               }
-            } catch (arcError) {
-              // Log error but don't fail the finalization
-              logError('Error creating ARC approval instance', arcError);
-              // Try to get rfq_product_id using model
-              let rfqProductIdForError = null;
-              try {
-                const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
-                rfqProductIdForError = rfqProduct?.id || null;
-              } catch (e) {
-                // Ignore error getting product ID
-              }
-              
-              await recordLifecycleEvent({
-                entity_type: 'TENDER',
-                entity_id: rfq_id,
-                stage: 'ARC_SUBMISSION_FAILED',
-                action: 'SUBMIT_ARC',
-                performed_by: req.user.id,
-                metadata: {
-                  error: arcError.message,
-                  rfq_product_id: rfqProductIdForError,
-                  product_variant_id: product_variant_id,
-                  variant: variant
-                },
-                remarks: arcError.message,
-                txContext: t
-              });
-            }
           }
 
           return {

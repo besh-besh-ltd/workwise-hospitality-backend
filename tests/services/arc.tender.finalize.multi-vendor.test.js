@@ -398,4 +398,96 @@ describe("Tender finalize — multi-vendor ARC route", () => {
     );
     expect(instances.length).toBe(1);
   });
+
+  it("all-or-nothing: when ARC envelope creation fails the WHOLE finalize tx rolls back (no orphaned quote_finalization row)", async () => {
+    // Production-grade contract: finalize on the ARC route is committed
+    // ATOMICALLY. Either both the buyer's vendor pick (tbl_quote_finalization)
+    // AND the committee work item (tbl_arc envelope/item + per-cell
+    // approval instance) land, or NEITHER does. A "vendor finalized but
+    // no committee inbox entry" half-state would be a buyer dead-end.
+    //
+    // We force ARC creation to fail by removing the ARC policy under the
+    // tender process at this scope — createApprovalInstance has nothing
+    // to resolve and throws TENDER_POLICY_NOT_CONFIGURED.
+
+    const { rfq_id, rfq_no, quotes, quoteItems } = await makeTenderReadyToFinalize();
+
+    // Snapshot baseline counts before the doomed call.
+    const beforeFinalization = await db.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_quote_finalization WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+    const beforeArc = await db.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_arc WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+
+    // Knock out the ARC policy + its steps so createApprovalInstance
+    // refuses. We restore it after the assertion.
+    const savedSteps = await db.any(
+      `SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order`,
+      [ARC_POLICY_ID]
+    );
+    await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [ARC_POLICY_ID]);
+    await db.none(`UPDATE tbl_approval_policies SET is_active = false WHERE id = $1`, [ARC_POLICY_ID]);
+
+    try {
+      const cell = { product: 1, vendor: IDS.users.vendor_alpha };
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+        body: {
+          rfq_id, rfq_no,
+          product_variant_id: cell.product,
+          vendor_id: cell.vendor,
+          quote_id: quotes[cell.vendor],
+          quote_item_id: quoteItems[cell.vendor][cell.product].id,
+          variant: 0,
+          route_type: "ARC",
+        },
+      });
+      await rfqController.finalize(m.req, m.res);
+
+      // Buyer sees a non-success status (the controller's outer error
+      // handler converts the propagated error). The exact code is 400
+      // today, but what matters is "NOT 200" — the buyer doesn't see
+      // a misleading success.
+      expect(m.calls.status).toBeGreaterThanOrEqual(400);
+
+      // The all-or-nothing contract: nothing persisted.
+      const afterFin = await db.one(
+        `SELECT COUNT(*)::int AS n FROM tbl_quote_finalization WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+      expect(afterFin.n).toBe(beforeFinalization.n); // no new finalization row
+      const afterArc = await db.one(
+        `SELECT COUNT(*)::int AS n FROM tbl_arc WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+      expect(afterArc.n).toBe(beforeArc.n); // no new envelope
+      const arcItems = await db.any(
+        `SELECT ai.id FROM tbl_arc_item ai
+           JOIN tbl_arc a ON a.id = ai.arc_id
+          WHERE a.rfq_id = $1`,
+        [rfq_id]
+      );
+      expect(arcItems.length).toBe(0);
+      const stalePending = await db.any(
+        `SELECT id FROM tbl_approval_instances WHERE entity_type = 'ARC' AND status = 'PENDING'
+            AND metadata->>'rfq_id' = $1::text`,
+        [rfq_id]
+      );
+      expect(stalePending.length).toBe(0);
+    } finally {
+      // Restore the ARC policy so subsequent tests see the clean fixture.
+      await db.none(`UPDATE tbl_approval_policies SET is_active = true WHERE id = $1`, [ARC_POLICY_ID]);
+      for (const s of savedSteps) {
+        await db.none(
+          `INSERT INTO tbl_approval_policy_steps
+            (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
+           VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+          [s.approval_policy_id, s.step_order, s.decision_rule, s.approver_source_type, s.approver_source_id]
+        );
+      }
+    }
+  });
 });
