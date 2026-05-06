@@ -53,14 +53,19 @@ export const buildArcTemplateData = async (arc_id, txContext = null) => {
   //    carries variant_name/value qualifiers). Schema-correct join chain:
   //    arc_item → product_variant → product.
   const items = await t.any(
+    // ai.product_variant_id FKs to tbl_product_variant (singular —
+    // carries the human-readable name as `name`). The
+    // tbl_product_variants (plural) table is unrelated — it holds
+    // optional size/colour-style attribute pairs (variant_name /
+    // variant_value) that the template doesn't consume here. Joining
+    // through the variant to its parent tbl_product gives a sensible
+    // fallback when the variant name is null.
     `SELECT ai.*,
-            COALESCE(p.name, pv.variant_name, 'Item') AS product_name,
-            pv.variant_name,
-            pv.variant_value,
+            COALESCE(pv.name, p.name, 'Item') AS product_name,
             pc.category_name AS product_category_name,
             ps_unit.value AS unit_value
        FROM tbl_arc_item ai
-       LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
        LEFT JOIN tbl_product p ON p.id = pv.product_id
        LEFT JOIN LATERAL (
          SELECT category_name FROM tbl_product_categories
@@ -256,7 +261,7 @@ export const sendAwardDocumentToVendor = async (arc_id, document_url, txContext 
     const items = await t.any(
       `SELECT ai.unit_price, pv.name AS product_name
        FROM tbl_arc_item ai
-       LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
        WHERE ai.arc_id = $1 AND ai.status = 'APPROVED'
        ORDER BY ai.id`,
       [arc_id]

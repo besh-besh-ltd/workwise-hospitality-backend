@@ -35,50 +35,281 @@ const formatErrorResponse = (res, error) => {
 };
 
 /**
- * Compute a per-line total using the same engine the regular RFQ→PO
- * path uses, so a contracted PO and an open-market PO arrive at the
- * same rupee total for identical line shapes.
+ * Pull the canonical engine inputs for a single arc_item. The
+ * tbl_arc_item.charges_meta column only carries the `other_charges`
+ * array (legacy snapshot shape) — feeding it to the engine alone gives
+ * a base-only total because tax/tax_mode/freight/packaging are dropped.
+ * The committee matrix already side-steps this by reading from
+ * tbl_quote_items; this helper does the same so the release path and
+ * the matrix agree on the rupee total.
+ *
+ * Returns the row with envelope state + quote_item engine fields, or
+ * null when the arc_item / quote_item join misses.
  */
-const lineTotalFromQuoteShape = ({ unit_price, quantity, charges_meta }) => {
-  const meta = pricingEngine.normalizeChargesMeta(charges_meta || {});
-  const docOut = pricingEngine.calculateDocumentTotals(
-    [{
-      unit_price,
-      quantity,
-      tax: meta.tax,
-      tax_mode: meta.tax_mode,
-      other_charges: meta.other_charges,
-    }],
-    [] // no document-level global_charges on a single-line release
+const loadArcItemEngineRow = async (arc_item_id, txContext = null) => {
+  const t = txContext || db;
+  return t.oneOrNone(
+    `SELECT ai.id AS arc_item_id,
+            ai.arc_id,
+            ai.rfq_product_id,
+            ai.product_variant_id,
+            ai.variant,
+            ai.quote_id,
+            ai.unit_price,
+            ai.status AS item_status,
+            a.status AS envelope_status,
+            a.period_from,
+            a.period_to,
+            a.vendor_id,
+            a.tender_scope,
+            r.rfq_no AS source_rfq_no,
+            r.title AS source_rfq_title,
+            COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+            COALESCE(pv.name, 'Item') AS product_name,
+            qi.tax            AS qi_tax,
+            qi.tax_mode       AS qi_tax_mode,
+            qi.freight_price  AS qi_freight_price,
+            qi.freight_mode   AS qi_freight_mode,
+            qi.package_price  AS qi_package_price,
+            qi.package_mode   AS qi_package_mode,
+            qi.other_charges  AS qi_other_charges
+       FROM tbl_arc_item ai
+       JOIN tbl_arc a ON a.id = ai.arc_id
+       JOIN tbl_rfq r ON r.id = a.rfq_id
+       LEFT JOIN tbl_users u ON u.id = a.vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_quote_items qi
+         ON qi.quote_id = ai.quote_id
+        AND qi.product_variant_id = ai.product_variant_id
+        AND COALESCE(qi.variant, 0) = COALESCE(NULLIF(ai.variant, '')::int, 0)
+      WHERE ai.id = $1`,
+    [arc_item_id]
   );
+};
+
+/**
+ * Compose other_charges for the engine from a quote_item snapshot:
+ * explicit other_charges array PLUS synthesised entries for legacy
+ * flat freight/packaging fields (when the explicit array doesn't
+ * already cover them). Mirrors the matrix's composeEngineCharges so
+ * release totals are byte-identical to the figure the buyer saw at
+ * finalization time.
+ */
+const composeEngineCharges = (row) => {
+  const explicit = Array.isArray(row.qi_other_charges) ? row.qi_other_charges : [];
+  const haveSlug = (slug) =>
+    explicit.some((c) => String(c?.slug || c?.name || '').toLowerCase() === slug);
+  const charges = [...explicit];
+  const freight = Number(row.qi_freight_price) || 0;
+  if (freight > 0 && !haveSlug('freight')) {
+    charges.push({
+      name: 'Freight',
+      slug: 'freight',
+      amount: freight,
+      amount_mode: row.qi_freight_mode || 'absolute',
+    });
+  }
+  const pkg = Number(row.qi_package_price) || 0;
+  if (pkg > 0 && !haveSlug('packaging')) {
+    charges.push({
+      name: 'Packaging',
+      slug: 'packaging',
+      amount: pkg,
+      amount_mode: row.qi_package_mode || 'absolute',
+    });
+  }
+  return charges;
+};
+
+/**
+ * Run pricingEngine.calculateLineTotal for a (row, qty) pair and
+ * return both the engine output and a FE-friendly breakdown shape
+ * matching what the matrix attaches as `engine_breakdown`. Single
+ * source of truth used by the live-pricing endpoint AND by the
+ * createRelease persistence path.
+ */
+const computeEngineForRow = (row, qty) => {
+  const taxMode = row.qi_tax_mode || 'percentage';
+  const engineOut = pricingEngine.calculateLineTotal({
+    unit_price: row.unit_price,
+    quantity: qty,
+    tax: row.qi_tax,
+    tax_mode: taxMode,
+    other_charges: composeEngineCharges(row),
+  });
   return {
-    line_total: docOut.lines[0]?.total ?? 0,
-    grand_total: docOut.grand_total,
+    engineOut,
+    breakdown: {
+      quantity: qty,
+      unit_price: Number(row.unit_price) || 0,
+      base: engineOut.base,
+      base_tax: engineOut.base_tax,
+      base_tax_rate: taxMode === 'percentage' ? Number(row.qi_tax) || 0 : null,
+      base_tax_mode: taxMode,
+      charges: engineOut.charges,
+      charges_total: engineOut.charges_total,
+      total: engineOut.total,
+    },
   };
 };
 
 const ArcReleaseController = {
   /**
    * GET /arc/release/eligible-vendors
-   * Returns every active ARC entry for (hotel_id, product_variant_id),
-   * one row per vendor, with the committed unit price. The FE wizard
-   * uses this to render the vendor-pick step.
+   *
+   * Two callers, two shapes:
+   *
+   *   (a) ?product_variant_id=&hotel_id=
+   *       Used during product search ("which active ARCs cover this
+   *       SKU at this hotel?"). Returns every (vendor × ARC) row.
+   *
+   *   (b) ?arc_id=&hotel_id=
+   *       Used by the ARC-release wizard once the buyer has already
+   *       picked an envelope. Returns every approved line item under
+   *       that envelope at that hotel. The hotel must be covered by
+   *       the envelope; otherwise [].
+   *
+   * Either pair is sufficient. Earlier the endpoint only accepted
+   * (a) and 400'd the (b) flow.
    */
   getEligibleVendors: async (req, res) => {
     try {
-      const product_variant_id = parseInt(req.query.product_variant_id);
-      const hotel_id = parseInt(req.query.hotel_id);
-      if (!product_variant_id || !hotel_id) {
+      const product_variant_id = req.query.product_variant_id ? parseInt(req.query.product_variant_id) : null;
+      const arc_id = req.query.arc_id ? parseInt(req.query.arc_id) : null;
+      const hotel_id = req.query.hotel_id ? parseInt(req.query.hotel_id) : null;
+
+      if (!hotel_id || (!product_variant_id && !arc_id)) {
         return res.status(400).json({
           status: 2,
-          message: 'product_variant_id and hotel_id are required',
+          message: 'hotel_id is required, plus either product_variant_id or arc_id',
         });
       }
+
+      // Branch (b): caller pinned to a specific envelope.
+      if (arc_id) {
+        const envelope = await arcModel.getEnvelopeForRelease({ arc_id });
+        if (!envelope) {
+          return res.status(404).json({ status: 2, message: `ARC envelope ${arc_id} not found` });
+        }
+        const covered = await arcModel.hotelCoveredByEnvelope({ arc_id, hotel_id });
+        if (!covered) {
+          return res.status(200).json({ status: 1, data: [] });
+        }
+        // Pull every approved line under the envelope, then re-shape
+        // to match the (a) branch's row shape so the FE can render
+        // either response uniformly.
+        const itemRows = await db.any(
+          `SELECT
+             a.id AS arc_id,
+             a.rfq_id AS source_tender_id,
+             a.vendor_id,
+             a.period_from,
+             a.period_to,
+             a.status AS envelope_status,
+             a.tender_scope,
+             ai.id AS arc_item_id,
+             ai.product_variant_id,
+             ai.unit_price,
+             ai.charges_meta,
+             $2::int AS hotel_id,
+             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+             u.email AS vendor_email,
+             r.rfq_no AS source_rfq_no,
+             r.title AS source_rfq_title,
+             pv.name AS product_name
+           FROM tbl_arc_item ai
+           JOIN tbl_arc a ON a.id = ai.arc_id
+           JOIN tbl_rfq r ON r.id = a.rfq_id
+           JOIN tbl_users u ON u.id = a.vendor_id
+           LEFT JOIN tbl_company c ON c.id = u.company_id
+           LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+           WHERE a.id = $1
+             AND ai.status = 'APPROVED'
+             AND a.status IN ('ACTIVE', 'DOC_GENERATED')
+             AND a.period_to >= CURRENT_DATE
+           ORDER BY ai.unit_price ASC`,
+          [arc_id, hotel_id]
+        );
+        return res.status(200).json({ status: 1, data: itemRows });
+      }
+
+      // Branch (a): caller pinned to a product, list all envelopes.
       const rows = await arcModel.findActiveArcsForProducts({
         product_variant_ids: [product_variant_id],
         hotel_ids: [hotel_id],
       });
       return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * GET /arc/release/quote?arc_item_id=&quantity=
+   *
+   * Live pricing for the release wizard. Given a contracted line and a
+   * quantity, returns the engine grand total + full breakdown using the
+   * same pricingEngine the QC page and the ARC matrix already use, so
+   * the buyer sees the exact figure the persisted PO will carry — no
+   * client-side math, no "indicative" caveat.
+   *
+   * Rejects when the envelope isn't ACTIVE/DOC_GENERATED, the period
+   * has lapsed, the line isn't APPROVED, or quantity is non-positive.
+   */
+  getReleasePricing: async (req, res) => {
+    try {
+      const arc_item_id = req.query.arc_item_id ? parseInt(req.query.arc_item_id) : null;
+      const quantity = Number(req.query.quantity);
+
+      if (!arc_item_id || !(quantity > 0)) {
+        return res.status(400).json({
+          status: 2,
+          message: 'arc_item_id and a positive quantity are required',
+        });
+      }
+
+      const row = await loadArcItemEngineRow(arc_item_id);
+      if (!row) {
+        return res.status(404).json({ status: 2, message: 'ARC item not found' });
+      }
+      if (row.item_status !== 'APPROVED') {
+        return res.status(400).json({ status: 0, message: 'ARC item is not approved' });
+      }
+      if (!['ACTIVE', 'DOC_GENERATED'].includes(row.envelope_status)) {
+        return res.status(400).json({
+          status: 0,
+          message: `ARC envelope is in status ${row.envelope_status}; release requires ACTIVE/DOC_GENERATED`,
+        });
+      }
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const from = new Date(row.period_from);
+      const to = new Date(row.period_to);
+      if (today < from) {
+        return res.status(400).json({ status: 0, message: 'ARC has not yet started' });
+      }
+      if (today > to) {
+        return res.status(400).json({ status: 0, message: 'ARC has expired' });
+      }
+
+      const { breakdown } = computeEngineForRow(row, quantity);
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          arc_item_id: row.arc_item_id,
+          arc_id: row.arc_id,
+          vendor_id: row.vendor_id,
+          vendor_name: row.vendor_name,
+          product_name: row.product_name,
+          period_from: row.period_from,
+          period_to: row.period_to,
+          source_rfq_no: row.source_rfq_no,
+          breakdown,
+        },
+      });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);
@@ -157,15 +388,39 @@ const ArcReleaseController = {
         }
         const itemById = new Map(validItems.map((i) => [i.id, i]));
 
-        // 5. Snapshot prices and compute line totals from the engine.
+        // 5. Snapshot prices and compute line totals from the engine
+        // using the canonical inputs (tax/tax_mode/freight/packaging
+        // /other_charges) read from tbl_quote_items — same path the
+        // pricing endpoint uses, so the persisted total matches what
+        // the buyer saw on the wizard's review step exactly.
+        const engineRows = await Promise.all(
+          arcItemIds.map((id) => loadArcItemEngineRow(id, t))
+        );
+        const engineRowById = new Map(engineRows.filter(Boolean).map((r) => [r.arc_item_id, r]));
+        // Reshape into the full canonical charges_meta object shape that
+        // the PO read paths (purchaseOrderModel.js:636-645) consume:
+        // { tax, tax_mode, freight_price, freight_mode, package_price,
+        //   package_mode, other_charges:[...] }. The arc_item only
+        // snapshots the `other_charges` array, so a downstream
+        // `pop.charges_meta->>'tax'` would otherwise return NULL.
+        const buildPoChargesMeta = (engineRow, fallbackOtherCharges) => ({
+          tax: engineRow?.qi_tax ?? null,
+          tax_mode: engineRow?.qi_tax_mode || 'percentage',
+          freight_price: engineRow?.qi_freight_price ?? null,
+          freight_mode: engineRow?.qi_freight_mode || 'absolute',
+          package_price: engineRow?.qi_package_price ?? null,
+          package_mode: engineRow?.qi_package_mode || 'absolute',
+          other_charges: Array.isArray(engineRow?.qi_other_charges)
+            ? engineRow.qi_other_charges
+            : Array.isArray(fallbackOtherCharges)
+              ? fallbackOtherCharges
+              : [],
+        });
         const releaseLines = items.map((it) => {
           const src = itemById.get(parseInt(it.arc_item_id));
+          const engineRow = engineRowById.get(parseInt(it.arc_item_id));
           const qty = Number(it.quantity);
-          const { line_total } = lineTotalFromQuoteShape({
-            unit_price: src.unit_price,
-            quantity: qty,
-            charges_meta: src.charges_meta,
-          });
+          const { engineOut } = computeEngineForRow(engineRow || { unit_price: src.unit_price }, qty);
           return {
             arc_item_id: src.id,
             rfq_product_id: src.rfq_product_id,
@@ -174,8 +429,8 @@ const ArcReleaseController = {
             quantity: qty,
             unit: 'NOS',
             unit_price: src.unit_price,
-            charges_meta: src.charges_meta,
-            total_price: line_total,
+            charges_meta: buildPoChargesMeta(engineRow, src.charges_meta),
+            total_price: engineOut.total,
           };
         });
         const totalValue = releaseLines.reduce((s, l) => s + Number(l.total_price || 0), 0);
@@ -189,11 +444,15 @@ const ArcReleaseController = {
           [arc_id, hotel_id, envelope.vendor_id, created_by, totalValue]
         );
         for (const ln of releaseLines) {
+          // pg-promise serialises JS objects/arrays as text[] when bound
+          // positionally — JSON.stringify + ::jsonb cast is the safe
+          // path for jsonb columns. Same fix as arcModel.upsertItem.
+          const chargesMetaJson = ln.charges_meta == null ? null : JSON.stringify(ln.charges_meta);
           await t.none(
             `INSERT INTO tbl_arc_release_items
               (arc_release_id, arc_item_id, product_variant_id, quantity, unit_price, total_price, charges_meta)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [releaseRow.id, ln.arc_item_id, ln.product_variant_id, ln.quantity, ln.unit_price, ln.total_price, ln.charges_meta]
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+            [releaseRow.id, ln.arc_item_id, ln.product_variant_id, ln.quantity, ln.unit_price, ln.total_price, chargesMetaJson]
           );
         }
 
@@ -272,13 +531,14 @@ const ArcReleaseController = {
       );
       if (!release) return res.status(404).json({ status: 2, message: 'Release not found' });
 
-      // Schema-correct join: product name on tbl_product (variant table
-      // has no `name` column).
+      // ri.product_variant_id FKs to tbl_product_variant (singular) —
+      // .name is the variant's display name. Fall back to the parent
+      // product name via tbl_product when the variant is unnamed.
       const items = await db.any(
         `SELECT ri.*,
-                COALESCE(p.name, pv.variant_name, 'Item') AS product_name
+                COALESCE(pv.name, p.name, 'Item') AS product_name
            FROM tbl_arc_release_items ri
-           LEFT JOIN tbl_product_variants pv ON pv.id = ri.product_variant_id
+           LEFT JOIN tbl_product_variant pv ON pv.id = ri.product_variant_id
            LEFT JOIN tbl_product p ON p.id = pv.product_id
           WHERE ri.arc_release_id = $1
           ORDER BY ri.id`,

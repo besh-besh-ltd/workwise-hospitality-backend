@@ -65,4 +65,5 @@ app/uploads/
 app/storage/internal/*
 app/storage/logs/*
 app/storage/invoices/*
+app/storage/arc-documents/*
 ecosystem.config.js

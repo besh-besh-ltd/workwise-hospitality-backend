@@ -8,6 +8,7 @@ import { getLifecycleHistory, getApprovalInstancesByEntity, cancelApprovalInstan
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { generateAwardDocument, sendAwardDocumentToVendor } from './arcDocumentController.js';
 import { sendBackTender, getTenderIterationHistory } from '../../services/tenderSendbackService.js';
+import pricingEngine from '../../services/pricingEngine.js';
 import db from '../../config/dbConn.js';
 
 /**
@@ -294,29 +295,192 @@ const ArcController = {
       // New path — load envelopes (per vendor) and items (per
       // product-vendor cell) for this rfq, plus the approval instance
       // attached to each item.
+      // Vendor display-name resolution: a vendor user (tbl_users)
+      // typically has organization_name NULL — the real org name lives
+      // in tbl_company keyed by tbl_users.company_id. Fall through:
+      //   tbl_company.company_name  →  tbl_users.organization_name
+      //     →  tbl_users.name. Without this fallback the matrix
+      // header showed "Vendor 429" instead of "Workwise IT Wale".
       const arcEnvelopes = await db.any(
-        `SELECT a.*, u.organization_name AS vendor_name
+        `SELECT a.*,
+                COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name
          FROM tbl_arc a
          LEFT JOIN tbl_users u ON u.id = a.vendor_id
+         LEFT JOIN tbl_company c ON c.id = u.company_id
          WHERE a.rfq_id = $1
          ORDER BY a.created_at`,
         [rfq_id]
       );
+      // Decision-grade enrichment: surface the fields a committee
+      // member needs to act without leaving the matrix — vendor's
+      // line comment, delivery period, payment terms, the
+      // last-purchase unit price for THIS product (so the savings
+      // delta is auditable), and prior PO performance for the
+      // vendor (volume + rejection count). All sourced server-side
+      // — the FE renders, never derives.
       const arcItems = await db.any(
         `SELECT ai.*, pv.name AS product_name,
-                a.vendor_id, u.organization_name AS vendor_name,
+                a.vendor_id,
+                COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+                qi.comment AS quote_comment,
+                qi.delivery_period AS lead_time_days,
+                -- Canonical engine inputs straight from the quote_item.
+                -- tbl_arc_item.charges_meta holds ONLY the other_charges
+                -- array (not the parent tax/tax_mode), so feeding it to
+                -- pricingEngine alone produced a base-only total. Pull
+                -- the tax/tax_mode/freight/packaging/other_charges from
+                -- the snapshotted quote_item directly.
+                qi.tax AS qi_tax,
+                qi.tax_mode AS qi_tax_mode,
+                qi.freight_price AS qi_freight_price,
+                qi.freight_mode AS qi_freight_mode,
+                qi.package_price AS qi_package_price,
+                qi.package_mode AS qi_package_mode,
+                qi.other_charges AS qi_other_charges,
+                vp.payment_terms AS vendor_payment_terms,
+                q.global_payment_term AS quote_global_payment_term,
+                q.global_comment AS quote_global_comment,
+                -- Last purchase for THIS product variant by THIS buyer
+                -- on any OTHER rfq. Mirrors getRfqById's last_purchase_rate
+                -- subquery shape — a recent finalized quote_item for the
+                -- same product variant outside this tender.
+                (
+                  SELECT lpqi.unit_price
+                    FROM tbl_quote_items lpqi
+                    JOIN tbl_quote_finalization lpqf
+                      ON lpqi.quote_id = lpqf.quote_id
+                     AND lpqi.product_variant_id = lpqf.product_variant_id
+                     AND COALESCE(lpqi.variant, 0) = COALESCE(lpqf.variant, 0)
+                   WHERE lpqi.product_variant_id = ai.product_variant_id
+                     AND lpqf.rfq_id != $1
+                   ORDER BY lpqf.timestamp DESC
+                   LIMIT 1
+                ) AS last_purchase_unit_price,
+                -- Vendor's prior PO volume + rejection count across all
+                -- RFQs in the tenant — gives the approver a one-glance
+                -- "do we trust this vendor?" signal.
+                (
+                  SELECT COUNT(*)::int
+                    FROM tbl_rfq_purchase_order po_v
+                   WHERE po_v.finalized_vendor_id = a.vendor_id
+                     AND po_v.status NOT IN ('cancelled')
+                ) AS vendor_prior_po_count,
+                (
+                  SELECT COUNT(*)::int
+                    FROM tbl_rfq_purchase_order po_r
+                   WHERE po_r.finalized_vendor_id = a.vendor_id
+                     AND po_r.status = 'rejected'
+                ) AS vendor_prior_po_rejections,
                 ainst.id AS approval_instance_id_full,
                 ainst.status AS approval_status,
                 ainst.metadata AS approval_metadata
          FROM tbl_arc_item ai
          JOIN tbl_arc a ON a.id = ai.arc_id
-         LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
          LEFT JOIN tbl_users u ON u.id = a.vendor_id
+         LEFT JOIN tbl_company c ON c.id = u.company_id
+         -- tbl_arc_item.variant is varchar (legacy column type) while
+         -- tbl_quote_items.variant is integer. Cast ai.variant to int
+         -- via NULLIF so empty strings collapse to NULL before the
+         -- COALESCE — otherwise the type union fails with
+         -- "COALESCE types character varying and integer cannot be matched".
+         LEFT JOIN tbl_quote_items qi
+           ON qi.quote_id = ai.quote_id
+          AND qi.product_variant_id = ai.product_variant_id
+          AND COALESCE(qi.variant, 0) = COALESCE(NULLIF(ai.variant, '')::int, 0)
+         LEFT JOIN tbl_quotes q ON q.id = ai.quote_id
+         LEFT JOIN tbl_vendor_profile vp ON vp.vendor_id = a.vendor_id
          LEFT JOIN tbl_approval_instances ainst ON ainst.id = ai.approval_instance_id
          WHERE a.rfq_id = $1
          ORDER BY ai.rfq_product_id, a.vendor_id`,
         [rfq_id]
       );
+
+      // Engine-compute each arc_item's grand total + charge breakdown
+      // using the same pricingEngine.calculateLineTotal that drives
+      // QC's `engine_total` / `engine_grand_total`. The FE matrix
+      // renders these verbatim (no client-side math), so the "Total"
+      // it shows = subtotal + base GST + every other_charge with its
+      // own tax — fully consistent with what the buyer saw on the QC
+      // page when they finalized the vendor.
+      //
+      // Single batched read of (rfq_product_id → quantity) so we can
+      // multiply unit_price by the right quantity per line. Quantity
+      // lives in tbl_rfq_products_specs as title='Quantity', value=N
+      // (the same shape the QC view-model already consumes).
+      const productIdsForEngine = [...new Set(arcItems.map((i) => i.rfq_product_id))];
+      let qtyByProductId = new Map();
+      if (productIdsForEngine.length > 0) {
+        const qtyRows = await db.any(
+          `SELECT rp.id AS rfq_product_id,
+                  (SELECT s.value FROM tbl_rfq_products_specs s
+                    WHERE s.rfq_id = rp.rfq_id
+                      AND s.product_variant_id = rp.product_variant_id
+                      AND s.variant = rp.variant
+                      AND LOWER(s.title) = 'quantity'
+                    LIMIT 1) AS quantity
+             FROM tbl_rfq_products rp
+            WHERE rp.id = ANY($1::int[])`,
+          [productIdsForEngine]
+        );
+        qtyByProductId = new Map(qtyRows.map((r) => [r.rfq_product_id, Number(r.quantity) || 0]));
+      }
+      // Compose other_charges from the snapshotted quote_item using
+      // the same shape pricingEngine expects: explicit other_charges
+      // PLUS synthesised entries for legacy flat freight/packaging
+      // fields (when the explicit array doesn't already cover them).
+      // Mirrors quoteCompareService.buildEngineCharges so the matrix
+      // total is byte-identical to QC's engine_grand_total.
+      const composeEngineCharges = (item) => {
+        const explicit = Array.isArray(item.qi_other_charges) ? item.qi_other_charges : [];
+        const haveSlug = (slug) =>
+          explicit.some((c) => String(c?.slug || c?.name || '').toLowerCase() === slug);
+        const charges = [...explicit];
+        const freight = Number(item.qi_freight_price) || 0;
+        if (freight > 0 && !haveSlug('freight')) {
+          charges.push({
+            name: 'Freight',
+            slug: 'freight',
+            amount: freight,
+            amount_mode: item.qi_freight_mode || 'absolute',
+          });
+        }
+        const pkg = Number(item.qi_package_price) || 0;
+        if (pkg > 0 && !haveSlug('packaging')) {
+          charges.push({
+            name: 'Packaging',
+            slug: 'packaging',
+            amount: pkg,
+            amount_mode: item.qi_package_mode || 'absolute',
+          });
+        }
+        return charges;
+      };
+      for (const item of arcItems) {
+        const engineOut = pricingEngine.calculateLineTotal({
+          unit_price: item.unit_price,
+          quantity: qtyByProductId.get(item.rfq_product_id) || 0,
+          tax: item.qi_tax,
+          tax_mode: item.qi_tax_mode || 'percentage',
+          other_charges: composeEngineCharges(item),
+        });
+        // Attach: engine_total = grand line total (base + base_tax +
+        // all other_charges incl. their own tax). engine_breakdown is
+        // the structured breakdown the FE tooltip renders.
+        item.engine_total = engineOut.total;
+        item.engine_breakdown = {
+          quantity: qtyByProductId.get(item.rfq_product_id) || 0,
+          base: engineOut.base,
+          base_tax: engineOut.base_tax,
+          base_tax_rate:
+            (item.qi_tax_mode || 'percentage') === 'percentage'
+              ? Number(item.qi_tax) || 0
+              : null,
+          charges: engineOut.charges,
+          charges_total: engineOut.charges_total,
+          total: engineOut.total,
+        };
+      }
 
       // Item-level approval instances — surface them alongside the
       // legacy product-level ones so a forwards-only client can prefer
@@ -378,6 +542,25 @@ const ArcController = {
 
       // Get sampling data using model
       const samplingData = await rfqModel.getSamplingData(rfq_id);
+
+      // Hotels covered by this tender. For Group ARC tenders this is
+      // the canonical N>1 list; the FE uses the count for the
+      // "X hotels covered" line + tender_scope sanity. Mirrors the
+      // shape rfqModel.saveDraft persists (delete-then-insert into
+      // tbl_rfq_hotel_mappings).
+      const hotelMappings = await db.any(
+        `SELECT rhm.hotel_id, h.name AS hotel_name
+           FROM tbl_rfq_hotel_mappings rhm
+           LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rhm.hotel_id
+          WHERE rhm.rfq_id = $1
+          ORDER BY rhm.hotel_id`,
+        [rfq_id]
+      );
+      // Attach onto the rfq object so consumers don't have to know
+      // about a separate sibling field. tender_scope is already on
+      // rfq from getRfqById; we only enrich with hotels here.
+      rfq.hotels = hotelMappings || [];
+      rfq.hotel_count = hotelMappings.length;
 
       return res.status(200).json({
         status: 1,

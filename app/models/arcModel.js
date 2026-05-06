@@ -100,12 +100,19 @@ const arcModel = {
       return existing;
     }
 
+    // tbl_quote_items.other_charges is jsonb (frequently an ARRAY of
+    // {name, amount, tax_mode, ...} objects). Passing the JS array
+    // directly makes pg-promise serialise it as Postgres text[] —
+    // which then fails the column's jsonb cast. Stringify explicitly
+    // and bind with ::jsonb so the array survives as a jsonb array
+    // (the schema-correct type for this column).
+    const chargesMetaJson = charges_meta == null ? null : JSON.stringify(charges_meta);
     return t.one(
       `INSERT INTO tbl_arc_item
          (arc_id, rfq_product_id, product_variant_id, variant, quote_id, unit_price, charges_meta, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'PENDING')
        RETURNING *`,
-      [arc_id, rfq_product_id, product_variant_id, variant ?? null, quote_id, unit_price, charges_meta]
+      [arc_id, rfq_product_id, product_variant_id, variant ?? null, quote_id, unit_price, chargesMetaJson]
     );
   },
 
@@ -154,7 +161,12 @@ const arcModel = {
          ai.unit_price,
          ai.charges_meta,
          ah.hotel_id,
-         u.organization_name AS vendor_name,
+         -- Vendor users typically have organization_name NULL — the
+         -- real org name lives on tbl_company keyed by tbl_users.company_id.
+         -- Fall through company → user.organization_name → user.name so the
+         -- contracted-item modal never reads "Vendor #429" when the
+         -- vendor's actual name (e.g. "Workwise IT Wale") is on file.
+         COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
          u.email AS vendor_email,
          r.rfq_no AS source_rfq_no,
          r.title AS source_rfq_title
@@ -163,6 +175,7 @@ const arcModel = {
        JOIN tbl_arc_item ai ON ai.arc_id = a.id
        JOIN tbl_rfq r ON r.id = a.rfq_id
        JOIN tbl_users u ON u.id = a.vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
        WHERE ai.product_variant_id = ANY($1::int[])
          AND ah.hotel_id = ANY($2::int[])
          AND ai.status = 'APPROVED'
@@ -210,14 +223,15 @@ const arcModel = {
   getApprovedItemsForRelease: async ({ arc_id, arc_item_ids = [], txContext = null }) => {
     if (!arc_item_ids.length) return [];
     const t = txContext || db;
-    // Schema-correct join: product name lives on tbl_product, not on
-    // tbl_product_variants (which only has variant_name/value).
+    // ai.product_variant_id FKs into tbl_product_variant (singular) —
+    // that table carries the human-readable product name directly. The
+    // similarly-named tbl_product_variants (plural) is a different
+    // table holding variant attributes (size/colour) and has no .name.
     return t.any(
       `SELECT ai.*,
-              COALESCE(p.name, pv.variant_name, 'Item') AS product_name
+              COALESCE(pv.name, 'Item') AS product_name
        FROM tbl_arc_item ai
-       LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
-       LEFT JOIN tbl_product p ON p.id = pv.product_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
        WHERE ai.arc_id = $1
          AND ai.id = ANY($2::int[])
          AND ai.status = 'APPROVED'`,

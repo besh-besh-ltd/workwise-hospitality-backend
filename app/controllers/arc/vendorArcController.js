@@ -107,7 +107,7 @@ const VendorArcController = {
                 ai.status, ai.charges_meta,
                 pv.name AS product_name
          FROM tbl_arc_item ai
-         LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
          WHERE ai.arc_id = $1
          ORDER BY ai.id`,
         [arcId]

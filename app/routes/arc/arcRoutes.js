@@ -68,6 +68,17 @@ ArcRoutes.get(
   arcReleaseController.getEligibleVendors
 );
 
+// Live engine-priced quote for a contracted line at a given quantity.
+// FE wizard hits this on quantity change so the buyer never sees a
+// "indicative" total — engine math stays on the server.
+ArcRoutes.get(
+  '/release/quote',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.checkHospitality(false),
+  arcReleaseController.getReleasePricing
+);
+
 // Create a release (call-off) and draft the Contracted PO.
 ArcRoutes.post(
   '/release',
