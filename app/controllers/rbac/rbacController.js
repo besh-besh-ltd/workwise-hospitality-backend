@@ -376,6 +376,98 @@ const rbacController = {
    * POST /rbac/me/permissions/bulk
    * Get permissions for multiple hotels, combining permissions from all relevant hospitality companies.
    */
+  /**
+   * POST /rbac/me/permissions/per-hotel
+   *
+   * Body: { hotel_ids: [number, ...], key?: string }
+   *
+   * Returns per-hotel permission breakdown so the caller can render a
+   * picker that filters out hotels the user can't read and disables
+   * ones where they can read but can't act. Differs from
+   * /permissions/bulk which returns the UNION across the set.
+   *
+   * Response:
+   *   {
+   *     status: true,
+   *     data: {
+   *       permissions_by_hotel: {
+   *         "<hotel_id>": { "<resource>": ["read","create",...] }
+   *       },
+   *       meta: { requested_hotel_ids, valid_hotel_ids, invalid_hotel_ids, module_filter }
+   *     }
+   *   }
+   */
+  getMyPermissionsPerHotel: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { hotel_ids, key } = req.body;
+
+      if (!hotel_ids || !Array.isArray(hotel_ids)) {
+        return res.status(400).json({
+          status: false,
+          message: "hotel_ids must be provided as an array",
+        });
+      }
+      const normalizedHotelIds = [...new Set(
+        hotel_ids.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id) && id > 0)
+      )];
+      if (normalizedHotelIds.length === 0) {
+        return res.status(400).json({
+          status: false,
+          message: "hotel_ids array must contain at least one valid hotel ID",
+        });
+      }
+
+      // Validate which hotels actually exist (so the response can flag
+      // invalid IDs back to the FE for diagnostics).
+      const hotelMappings = await rbacModel.getHotelCompanyMappings(normalizedHotelIds);
+      const validHotelIds = hotelMappings.map((m) => m.hotel_id);
+      const invalidHotelIds = normalizedHotelIds.filter((id) => !validHotelIds.includes(id));
+
+      // Per-hotel resolution. Network-scope grants are intentionally
+      // excluded inside the model query — Group ARC perms must not
+      // grant access to a per-hotel BU picker.
+      const rows = validHotelIds.length
+        ? await rbacModel.getUserPermissionsPerHotel(userId, validHotelIds, key || null)
+        : [];
+
+      // Group {hotel_id → resource → Set(actions)}.
+      const grouped = {};
+      validHotelIds.forEach((id) => { grouped[id] = {}; });
+      for (const r of rows) {
+        if (!grouped[r.hotel_id][r.resource]) grouped[r.hotel_id][r.resource] = new Set();
+        grouped[r.hotel_id][r.resource].add(r.action);
+      }
+      const result = {};
+      Object.keys(grouped).forEach((hotelId) => {
+        const resourceMap = {};
+        Object.keys(grouped[hotelId]).forEach((resource) => {
+          resourceMap[resource] = Array.from(grouped[hotelId][resource]);
+        });
+        result[hotelId] = resourceMap;
+      });
+
+      return res.json({
+        status: true,
+        data: {
+          permissions_by_hotel: result,
+          meta: {
+            requested_hotel_ids: normalizedHotelIds,
+            valid_hotel_ids: validHotelIds,
+            invalid_hotel_ids: invalidHotelIds,
+            module_filter: key || null,
+          },
+        },
+      });
+    } catch (err) {
+      logError("getMyPermissionsPerHotel error", err);
+      return res.status(500).json({
+        status: false,
+        message: "Failed to fetch per-hotel permissions",
+      });
+    }
+  },
+
   getMyPermissionsForHotels: async (req, res) => {
     try {
       const userId = req.user.id;

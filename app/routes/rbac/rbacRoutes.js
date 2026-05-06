@@ -50,6 +50,11 @@ router.post(
   passportSignIn,
   rbacController.getMyPermissionsForHotels
 );
+router.post(
+  "/me/permissions/per-hotel",
+  passportSignIn,
+  rbacController.getMyPermissionsPerHotel
+);
 router.get(
   '/users/batch-roles',
   passportSignIn,

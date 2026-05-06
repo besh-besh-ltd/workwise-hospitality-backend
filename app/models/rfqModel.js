@@ -1988,6 +1988,12 @@ WHERE NOT EXISTS (
           'process_id', RFQ.process_id,
           'title', RFQ.title,
           'created_by', RFQ.created_by,
+          -- Tender configuration. Persist + round-trip so a Save Changes
+          -- reload doesn't blank the ARC Period inputs (they get rehydrated
+          -- from these fields back into the redux store).
+          'tender_scope', RFQ.tender_scope,
+          'arc_period_from', RFQ.arc_period_from,
+          'arc_period_to', RFQ.arc_period_to,
 
           -- Selected Terms
           'terms', (
@@ -2425,6 +2431,14 @@ WHERE NOT EXISTS (
       RFQ.tender_fees,
       RFQ.reverse_auction,
       RFQ.is_tender,
+      -- Tender configuration. tender_scope distinguishes Single vs
+      -- Group ARC (drives modal copy + brief chips downstream); the
+      -- arc_period_* dates feed the contract validity range. Without
+      -- these the FE silently falls back to "Single ARC" and shows
+      -- a missing period — already reported as a bug.
+      RFQ.tender_scope,
+      RFQ.arc_period_from,
+      RFQ.arc_period_to,
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
@@ -3807,23 +3821,30 @@ LIMIT 2;
       -- Group ARC: visible via network-scope boq.read ONLY (BU path
       -- is gated off with IS DISTINCT FROM 'GROUP' so a BU grant at
       -- a covered hotel does not leak Group ARC visibility).
-      AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
-        SELECT 1 FROM tbl_user_role_scopes _urs2
-        JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-        JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-        WHERE _urs2.user_id = ${user_id}
-          AND _urs2.is_network_scope = 0
-          AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-          AND _p2.action = 'read'
-          AND _urs2.company_id = RFQ.hospitality_company_id
-          AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-          AND (
-            RFQ.department_id IS NULL
-            OR _urs2.department_id = RFQ.department_id
-            OR _urs2.department_id IS NULL
-          )
+      -- CREATOR EXEMPTION: an RFQ's creator must always see their own
+      -- creations in the management list, regardless of permission. A
+      -- Group-ARC creator may not hold network-scope boq.read (perms
+      -- are usually granted to evaluators/approvers, not creators), so
+      -- the permission filter would otherwise hide their own work.
+      AND (RFQ.created_by = ${user_id} OR (
+        (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = ${user_id}
+            AND _urs2.is_network_scope = 0
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs2.department_id = RFQ.department_id
+              OR _urs2.department_id IS NULL
+            )
+        ))
+        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })}
       ))
-      ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -4232,9 +4253,41 @@ LIMIT 2;
       if (APPROVAL_STAGES.includes(stage)) {
         approvalRfqs.push({ id: rfqId, is_tender: rfq.is_tender, stage });
       } else if (PERMISSION_STAGE_CONFIG[stage]) {
-        permissionRfqs.push({ id: rfqId, hotel_id: rfq.hotel_id, department_id: rfq.department_id, stage });
+        // Group ARC tenders carry tender_scope='GROUP'. Their action
+        // holders live at NETWORK scope (BU-agnostic) — the regular
+        // BU-keyed resolver returns nobody. We tag the row with the
+        // tender scope + hospitality_company_id; the parent tenant
+        // (tbl_company.id) is resolved in a single batch below.
+        permissionRfqs.push({
+          id: rfqId,
+          hotel_id: rfq.hotel_id,
+          department_id: rfq.department_id,
+          stage,
+          tender_scope: rfq.tender_scope || null,
+          hospitality_company_id: rfq.hospitality_company_id || null,
+        });
       } else {
         result[rfqId] = null; // NEGOTIATION_ONGOING, APPROVED_COMPLETED, etc.
+      }
+    }
+
+    // Resolve parent tenant (tbl_company.id) for any Group-ARC RFQs in
+    // a single batch — avoids N+1 lookups in the loop below.
+    const groupArcHospCompanyIds = [...new Set(
+      permissionRfqs
+        .filter((r) => r.tender_scope === 'GROUP' && r.hospitality_company_id)
+        .map((r) => r.hospitality_company_id)
+    )];
+    const tenantByHospCompany = new Map();
+    if (groupArcHospCompanyIds.length > 0) {
+      try {
+        const rows = await db.any(
+          `SELECT id, buyer_company_id FROM tbl_hospitality_companies WHERE id = ANY($1::int[])`,
+          [groupArcHospCompanyIds]
+        );
+        rows.forEach((r) => tenantByHospCompany.set(r.id, r.buyer_company_id));
+      } catch (err) {
+        logError('getActionHoldersForRFQs tenant lookup error', err);
       }
     }
 
@@ -4352,43 +4405,74 @@ LIMIT 2;
     // --- 2. Batch resolve permission-stage action holders ---
     if (permissionRfqs.length > 0) {
       try {
-        // Deduplicate by (hotel_id, department_id|null, resource)
-        const lookupMap = new Map();
-        for (const rfq of permissionRfqs) {
+        // Split: Group ARC RFQs resolve via network-scope helper
+        // (tenant-keyed); BU RFQs use the BU helper (hotel + dept-keyed).
+        const buPermRfqs = permissionRfqs.filter((r) => r.tender_scope !== 'GROUP');
+        const groupArcPermRfqs = permissionRfqs.filter((r) => r.tender_scope === 'GROUP');
+
+        // -- BU branch -------------------------------------------------
+        const buLookupMap = new Map();
+        for (const rfq of buPermRfqs) {
           const config = PERMISSION_STAGE_CONFIG[rfq.stage];
           const deptId = config.useDepartment && rfq.department_id ? parseInt(rfq.department_id) : null;
           const key = `${rfq.hotel_id}|${deptId}|${config.resource}`;
-
-          if (!lookupMap.has(key)) {
-            lookupMap.set(key, {
+          if (!buLookupMap.has(key)) {
+            buLookupMap.set(key, {
               hotelIds: [parseInt(rfq.hotel_id)],
               resource: config.resource,
               actions: config.actions,
               departmentId: deptId,
               label: config.label,
-              rfqIds: []
+              rfqIds: [],
             });
           }
-          lookupMap.get(key).rfqIds.push(rfq.id);
+          buLookupMap.get(key).rfqIds.push(rfq.id);
         }
 
-        // Execute all unique lookups in parallel
-        const lookupResults = await Promise.all(
-          [...lookupMap.values()].map(async (lookup) => {
+        // -- Group ARC branch -----------------------------------------
+        // Dedup by (resource, tenant) — for Group ARC the lookup is
+        // BU-agnostic, so dept/hotel don't enter the cache key.
+        const groupLookupMap = new Map();
+        for (const rfq of groupArcPermRfqs) {
+          const config = PERMISSION_STAGE_CONFIG[rfq.stage];
+          const tenantId = tenantByHospCompany.get(rfq.hospitality_company_id) || null;
+          const key = `${tenantId}|${config.resource}`;
+          if (!groupLookupMap.has(key)) {
+            groupLookupMap.set(key, {
+              tenantId,
+              resource: config.resource,
+              actions: config.actions,
+              label: config.label,
+              rfqIds: [],
+            });
+          }
+          groupLookupMap.get(key).rfqIds.push(rfq.id);
+        }
+
+        // Execute all unique lookups in parallel.
+        const buResults = await Promise.all(
+          [...buLookupMap.values()].map(async (lookup) => {
             const users = await rbacModel.getUsersWithModuleActionsForHotels(
               lookup.hotelIds, lookup.resource, lookup.actions, lookup.departmentId
             );
             return { rfqIds: lookup.rfqIds, label: lookup.label, users };
           })
         );
+        const groupResults = await Promise.all(
+          [...groupLookupMap.values()].map(async (lookup) => {
+            const users = await rbacModel.getUsersWithNetworkModuleActions(
+              lookup.resource, lookup.actions, lookup.tenantId
+            );
+            return { rfqIds: lookup.rfqIds, label: lookup.label, users };
+          })
+        );
 
-        // Map results back to RFQ IDs
-        for (const lr of lookupResults) {
+        for (const lr of [...buResults, ...groupResults]) {
           for (const rfqId of lr.rfqIds) {
             result[rfqId] = {
               type: 'permission',
               label: lr.label,
-              users: lr.users.map(u => ({ id: u.id, name: u.name, email: u.email }))
+              users: lr.users.map((u) => ({ id: u.id, name: u.name, email: u.email })),
             };
           }
         }
@@ -5450,23 +5534,27 @@ LIMIT 2;
         )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
         -- Permission filter: only RFQs the user has read access for.
         -- Group ARC: visible only via network-scope boq.read.
-        AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
-          SELECT 1 FROM tbl_user_role_scopes _urs2
-          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-          WHERE _urs2.user_id = ${user_id}
-            AND _urs2.is_network_scope = 0
-            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-            AND _p2.action = 'read'
-            AND _urs2.company_id = RFQ.hospitality_company_id
-            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-            AND (
-              RFQ.department_id IS NULL
-              OR _urs2.department_id = RFQ.department_id
-              OR _urs2.department_id IS NULL
-            )
+        -- CREATOR EXEMPTION: pagination count must mirror the list query —
+        -- creators always see their own RFQs in their count.
+        AND (RFQ.created_by = ${user_id} OR (
+          (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs2
+            JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+            JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+            WHERE _urs2.user_id = ${user_id}
+              AND _urs2.is_network_scope = 0
+              AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p2.action = 'read'
+              AND _urs2.company_id = RFQ.hospitality_company_id
+              AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs2.department_id = RFQ.department_id
+                OR _urs2.department_id IS NULL
+              )
+          ))
+          ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })}
         ))
-        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -5693,25 +5781,12 @@ LIMIT 2;
             OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
           )
       )
-      -- Permission filter: only RFQs the user has read access for.
-      -- Group ARC: visible only via network-scope boq.read.
-      AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
-        SELECT 1 FROM tbl_user_role_scopes _urs2
-        JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-        JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-        WHERE _urs2.user_id = ${user_id}
-          AND _urs2.is_network_scope = 0
-          AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-          AND _p2.action = 'read'
-          AND _urs2.company_id = RFQ.hospitality_company_id
-          AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-          AND (
-            RFQ.department_id IS NULL
-            OR _urs2.department_id = RFQ.department_id
-            OR _urs2.department_id IS NULL
-          )
-      ))
-      ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
+      -- NO inner permission filter here. The outer WHERE EXISTS above
+      -- already restricts to RFQs where this user has a PENDING
+      -- approver row. Being assigned as an approver IS the permission
+      -- to see the RFQ — adding a boq.read / rfq.read AND clause was
+      -- excluding legitimate approvers (e.g. a Group-ARC ARC-Approver
+      -- who holds arc.approve at network scope but no boq.read).
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -5760,25 +5835,8 @@ LIMIT 2;
               OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
             )
         )
-        -- Permission filter: only RFQs the user has read access for.
-        -- Group ARC: visible only via network-scope boq.read.
-        AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
-          SELECT 1 FROM tbl_user_role_scopes _urs2
-          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-          WHERE _urs2.user_id = ${user_id}
-            AND _urs2.is_network_scope = 0
-            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-            AND _p2.action = 'read'
-            AND _urs2.company_id = RFQ.hospitality_company_id
-            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-            AND (
-              RFQ.department_id IS NULL
-              OR _urs2.department_id = RFQ.department_id
-              OR _urs2.department_id IS NULL
-            )
-        ))
-        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
+        -- NO inner permission filter here. Approver-status outer
+        -- EXISTS is sufficient — see getPendingApprovalRfqList.
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)

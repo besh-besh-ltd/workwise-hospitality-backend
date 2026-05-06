@@ -3988,7 +3988,8 @@ publishProfileReviews: async (reviewObj) => {
             'role_title', r.title,
             'company_id', urs.company_id,
             'hotel_id', urs.hotel_id,
-            'department_id', urs.department_id
+            'department_id', urs.department_id,
+            'is_network_scope', urs.is_network_scope
           ) ORDER BY r.title)
            FROM tbl_user_role_scopes urs
            JOIN tbl_roles r ON r.id = urs.role_id

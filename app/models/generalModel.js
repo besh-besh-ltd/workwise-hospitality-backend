@@ -3,10 +3,20 @@ import { sendApprovalNotification, sendPONotificationToVendor } from '../control
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
-// Maps entity_type to the permission resource used in tbl_permissions
+// Maps entity_type to the permission resource used in tbl_permissions.
+//
+// NOTE: TENDER → 'boq' (NOT 'tender'). The seeded TENDER_APPROVER role
+// (and every other tender-touching role) binds to boq.read / boq.approve
+// in tbl_role_permissions. Mapping TENDER → 'tender' caused
+// roleHasReadAndApprovePermission to silently return false for every
+// tender-stage step, which dropped all approvers and auto-APPROVED the
+// instance with zero approvers. The FE useModulePermissions hook also
+// already keys tender flows on `boq` (CreateRFQ.js, EditRFQ.js,
+// rfq-management-details.js, vendor/search.js), so flipping the resource
+// here keeps BE and FE on the same module key.
 export const ENTITY_APPROVE_RESOURCE_MAP = {
   'RFQ': 'rfq',
-  'TENDER': 'tender',
+  'TENDER': 'boq',
   'TECHNICAL': 'te',
   'NEGOTIATION': 'negotiation',
   'NEGOTIATION_QUOTE': 'quote-compare',
@@ -1544,7 +1554,13 @@ export async function createApprovalPolicy({
 export async function updateApprovalPolicy(id, patch, t = db) {
   if (!id) throw new Error('Policy ID is required');
 
-  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master', 'is_global', 'company_id'];
+  // company_id is identity-defining and derived at create time
+  // (parent buyer-company id resolved from hospitality_company_id, or
+  // pinned to the actor's tenant for global policies). It MUST NOT be
+  // editable after create — letting it through caused
+  // chk_arc_policy_global_scope to fire when a stale {company_id:
+  // undefined} on the patch overwrote the saved value with NULL.
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master', 'is_global'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -2387,6 +2403,50 @@ export async function createApprovalInstance({
         SET status = 'APPROVED', current_step = 0, completed_at = NOW()
         WHERE id = $1
       `, [instance.id]);
+
+      // POST-APPROVAL DISPATCH on the auto-approve branch.
+      //
+      // Bug history: when an instance auto-approves at CREATION (the
+      // initiator is the only resolved approver under an ANY-rule
+      // step, common for Group ARC tenders where the buyer happens to
+      // hold the ARC Approver role at network scope), the normal
+      // executeApprovalAction → dispatcher path never runs. The
+      // entity-specific handler (handleArcPostApproval, etc.) was
+      // therefore skipped, and downstream rows like tbl_arc_item.status
+      // stayed 'PENDING' even though the approval was complete. The
+      // committee matrix then showed the cell as still actionable, and
+      // any subsequent click to "Approve" failed with "no pending
+      // instance found" — because the instance was already APPROVED.
+      //
+      // Dispatch the APPROVED handler in the SAME transaction so the
+      // rollup writes participate in the outer commit (or roll back
+      // together if anything errors).
+      try {
+        const dispatcher = {
+          ARC: () => import('../controllers/arc/arcController.js').then((m) => m.handleArcPostApproval),
+          TENDER: () => import('../controllers/rfq/rfqController.js').then((m) => m.handleRFQPostApproval),
+          RFQ: () => import('../controllers/rfq/rfqController.js').then((m) => m.handleRFQPostApproval),
+          TECHNICAL: () => import('../controllers/rfq/rfqController.js').then((m) => m.handleTechnicalPostApproval),
+          PO: () => import('../controllers/po/purchaseOrderController.js').then((m) => m.handlePOPostApproval),
+          NEGOTIATION: () => import('../controllers/negotiation/negotiationController.js').then((m) => m.handleNegotiationPostApproval),
+          NEGOTIATION_QUOTE: () => import('../controllers/general/negotiationQuotePostApproval.js').then((m) => m.handleNegotiationQuotePostApproval),
+        }[entity_type];
+        if (dispatcher) {
+          const handler = await dispatcher();
+          if (typeof handler === 'function') {
+            await handler(instance.id, initiated_by, {
+              comment: 'Auto approved by system',
+              instance: { ...instance, status: 'APPROVED', current_step: 0 },
+              txContext: t,
+            });
+          }
+        }
+      } catch (postErr) {
+        // Match the behaviour of executeApprovalAction's post-action
+        // try/catch: log and swallow so a handler bug never blocks the
+        // creation transaction.
+        logError(`Post-approval handler failed for auto-approved instance ${instance.id}`, postErr);
+      }
 
       return {
         instance: { ...instance, status: 'APPROVED', current_step: 0 },

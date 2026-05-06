@@ -510,6 +510,10 @@ const hospitalityApprovalController = {
           // the same policy will block here until this tx commits/rolls back.
           await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);
 
+          // company_id is identity-defining and set at create time — the
+          // model rejects it as a patch field. We deliberately do NOT
+          // forward it here; updates only mutate scope/flags/process,
+          // never the parent-tenant binding.
           const updatedPolicy = await updateApprovalPolicy(id, {
             entity_type,
             hospitality_company_id: isGlobalPayload ? null : hospitality_company_id,
@@ -519,11 +523,6 @@ const hospitalityApprovalController = {
             is_active,
             is_master,
             is_global: isGlobalPayload ? 1 : 0,
-            // SECURITY: company_id always comes from req.user, never from
-            // the client payload. For global policies it pins to the
-            // actor's tenant; for non-global the model resolves it from
-            // hospitality_company_id during creation, so leave undefined.
-            company_id: isGlobalPayload ? actorCompanyId : undefined,
           }, t);
 
           let newSteps = [];
@@ -1273,6 +1272,62 @@ const globalArcApproverOptionsController = {
   },
 };
 
-export { hospitalityApprovalController, processController, globalArcApproverOptionsController };
+const buApproverOptionsController = {
+  /**
+   * GET /hospitality/approval/bu-approver-options/:entity_type
+   *   ?hotel_id=<hospitality hotel id>
+   *
+   * Returns:
+   *   { entity_type, permission, roles: [{id, title, users:[...]}], users: [{id, name, email}] }
+   *
+   * BU-scoped sister of getGlobalArcApproverOptions. Filters:
+   *   - roles must hold <entity>.approve;
+   *   - users must hold <entity>.approve via a BU-scope grant
+   *     (is_network_scope = 0) matching the supplied hotel (or
+   *     company-wide / NULL hotel grants);
+   *   - network-scope grants are EXCLUDED so a Group-ARC tender
+   *     approver doesn't leak into the per-hotel picker.
+   */
+  async getBuApproverOptions(req, res) {
+    try {
+      const entity_type = (req.params.entity_type || '').toUpperCase();
+      // BU hierarchies cover the whole RFQ + Tender chain plus PO. The
+      // global hierarchy whitelist (TENDER..ARC) is a strict subset.
+      const allowed = ['RFQ', 'TENDER', 'TECHNICAL', 'NEGOTIATION', 'NEGOTIATION_QUOTE', 'PO', 'ARC'];
+      if (!allowed.includes(entity_type)) {
+        return res.status(400).json({
+          status: 3,
+          message: `Invalid entity_type. Must be one of: ${allowed.join(', ')}`,
+        });
+      }
+      const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type];
+      const permKey = `${resource}.approve`;
+      const tenantCompanyId = req.user?.company_id || null;
+      const hotelId = req.query.hotel_id ? parseInt(req.query.hotel_id, 10) : null;
+      if (req.query.hotel_id && Number.isNaN(hotelId)) {
+        return res.status(400).json({ status: 3, message: 'Invalid hotel_id' });
+      }
+      const [roles, users] = await Promise.all([
+        rbacModel.getRolesWithAllPermissionsForBu([permKey], {
+          tenant_company_id: tenantCompanyId,
+          hotel_id: hotelId,
+        }),
+        rbacModel.getUsersWithAllBuPermissions([permKey], {
+          tenant_company_id: tenantCompanyId,
+          hotel_id: hotelId,
+        }),
+      ]);
+      return res.json({
+        status: 1,
+        data: { entity_type, permission: permKey, roles, users },
+      });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+};
+
+export { hospitalityApprovalController, processController, globalArcApproverOptionsController, buApproverOptionsController };
 export default generalController;
 

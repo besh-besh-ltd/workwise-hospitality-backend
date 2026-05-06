@@ -230,6 +230,50 @@ const rbacModel = {
   },
 
   /**
+   * Per-hotel permission resolution.
+   *
+   * The existing getUserPermissionsForHotels returns the UNION of every
+   * permission the user holds across ALL the supplied hotels. That's
+   * the right shape for "can the user act on this set" decisions, but
+   * useless when you need to filter a hotel-picker dropdown — you have
+   * to know per-hotel what the user can do, NOT what they can do
+   * somewhere in the set.
+   *
+   * Returns a flat array of {hotel_id, resource, action} tuples so the
+   * caller can group as needed. Each row means: "for this hotel, the
+   * user has this resource.action". Unauthorised hotels yield no rows.
+   */
+  getUserPermissionsPerHotel: async (userId, hotelIds = [], key = null) => {
+    if (!hotelIds || hotelIds.length === 0) return [];
+    const params = [userId, hotelIds];
+    let moduleFilter = '';
+    if (key) {
+      params.push(key);
+      moduleFilter = `AND p.resource = $${params.length}`;
+    }
+    return db.any(
+      `
+      WITH requested_hotels AS (
+        SELECT h.id AS hotel_id, h.hospitality_company_id
+          FROM tbl_hospitality_company_hotels h
+         WHERE h.id IN ($2:csv) AND h.is_deleted = 0
+      )
+      SELECT DISTINCT rh.hotel_id, p.resource, p.action
+        FROM requested_hotels rh
+        JOIN tbl_user_role_scopes urs
+          ON urs.user_id = $1
+         AND urs.is_network_scope = 0
+         AND urs.company_id = rh.hospitality_company_id
+         AND (urs.hotel_id IS NULL OR urs.hotel_id = rh.hotel_id)
+        JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+       WHERE 1=1 ${moduleFilter}
+      `,
+      params
+    );
+  },
+
+  /**
    * Validate hotel IDs exist and return their company mappings.
    */
   getHotelCompanyMappings: async (hotelIds = []) => {
@@ -508,6 +552,44 @@ const rbacModel = {
     );
   },
 
+  /**
+   * Network-scope sister of getUsersWithModuleActionsForHotels.
+   *
+   * Returns active users who hold ALL of the requested
+   * (resource.action) permissions via NETWORK-scope role grants
+   * (is_network_scope = 1), restricted to the supplied tenant
+   * (parent tbl_company.id). Used by the Tender Lifecycle Journey
+   * to resolve "who can act on this stage?" for Group ARC tenders,
+   * where the BU-scope resolver returns nobody (Group ARC is
+   * BU-agnostic — its approvers/evaluators live at network scope).
+   *
+   * The tenant filter prevents tenant A's journey from listing
+   * tenant B's network admins.
+   */
+  getUsersWithNetworkModuleActions: async (resource = null, actions = [], tenantCompanyId = null) => {
+    if (!resource || !actions.length) return [];
+    const requiredPermissionKeys = actions.map((a) => `${resource}.${a}`);
+    return db.any(
+      `
+      SELECT DISTINCT u.id, u.name, u.email
+        FROM tbl_users u
+        JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+        JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+       WHERE u.is_deleted = 0
+         AND u.status = 1
+         AND urs.is_network_scope = 1
+         AND ($3::int IS NULL OR u.company_id = $3)
+       GROUP BY u.id, u.name, u.email
+      HAVING COUNT(DISTINCT CASE
+        WHEN (p.resource || '.' || p.action) IN ($1:csv) THEN (p.resource || '.' || p.action)
+      END) = $2
+       ORDER BY u.name ASC
+      `,
+      [requiredPermissionKeys, requiredPermissionKeys.length, tenantCompanyId]
+    );
+  },
+
   /* -------------------- NETWORK-SCOPE (Group ARC) -------------------- */
   //
   // Network-scope grants (tbl_user_role_scopes.is_network_scope = 1) are
@@ -651,6 +733,110 @@ const rbacModel = {
    *   When unset, returns network-scope holders across the network
    *   (this should only be used for cross-tenant admin tooling).
    */
+  /**
+   * Active users holding ALL the given permissions at BU scope, scoped
+   * to a specific hotel within a tenant. Network-scope grants are
+   * EXCLUDED — those govern Group ARC only and must not cross-pollinate
+   * into the BU-wide hierarchy wizard.
+   *
+   * @param {string[]} permKeys  e.g. ['tender.approve']
+   * @param {Object}   opts
+   * @param {number}   [opts.tenant_company_id]  Parent tbl_company.id.
+   * @param {number}   [opts.hotel_id]  Match urs.hotel_id (NULL = company-wide
+   *                                    grant, allowed; mismatched value rejected).
+   */
+  getUsersWithAllBuPermissions: async (permKeys = [], opts = {}) => {
+    if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
+    const tenantId = opts.tenant_company_id ?? null;
+    const hotelId = opts.hotel_id ?? null;
+    return db.any(
+      `
+      SELECT u.id, u.name, u.email
+      FROM tbl_users u
+      WHERE u.status = 1
+        AND ($3::int IS NULL OR u.company_id = $3)
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = u.id
+            AND urs.is_network_scope = 0
+            AND ($4::int IS NULL OR urs.hotel_id IS NULL OR urs.hotel_id = $4)
+            AND (p.resource || '.' || p.action) = ANY($1::text[])
+          GROUP BY urs.user_id
+          HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $2
+        )
+      ORDER BY u.name
+      `,
+      [permKeys, permKeys.length, tenantId, hotelId]
+    );
+  },
+
+  /**
+   * Roles holding ALL the given permissions, with each role enriched
+   * with its BU-scope holders matching the given (tenant, hotel). Used
+   * by the BU-wide hierarchy wizard's role picker preview ("Role X — N
+   * users eligible") so it shows accurate eligibility for the chosen
+   * business unit. Network-scope holders are EXCLUDED from users[].
+   *
+   * @param {string[]} permKeys
+   * @param {Object}   opts
+   * @param {number}   [opts.tenant_company_id]
+   * @param {number}   [opts.hotel_id]
+   */
+  getRolesWithAllPermissionsForBu: async (permKeys = [], opts = {}) => {
+    if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
+    const tenantId = opts.tenant_company_id ?? null;
+    const hotelId = opts.hotel_id ?? null;
+    const roles = await db.any(
+      `
+      SELECT r.id, r.title
+      FROM tbl_roles r
+      WHERE EXISTS (
+        SELECT 1
+        FROM tbl_role_permissions rp
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = r.id
+          AND (p.resource || '.' || p.action) = ANY($1::text[])
+        GROUP BY rp.role_id
+        HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $2
+      )
+      ORDER BY r.title
+      `,
+      [permKeys, permKeys.length]
+    );
+    if (roles.length === 0) {
+      return [];
+    }
+    const roleIds = roles.map((r) => r.id);
+    const usersByRole = await db.any(
+      `
+      SELECT urs.role_id, u.id, u.name, u.email
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_users u ON u.id = urs.user_id
+      WHERE urs.role_id = ANY($1::int[])
+        AND urs.is_network_scope = 0
+        AND u.status = 1
+        AND ($2::int IS NULL OR u.company_id = $2)
+        AND ($3::int IS NULL OR urs.hotel_id IS NULL OR urs.hotel_id = $3)
+      ORDER BY u.name
+      `,
+      [roleIds, tenantId, hotelId]
+    );
+    const grouped = new Map();
+    usersByRole.forEach((row) => {
+      if (!grouped.has(row.role_id)) grouped.set(row.role_id, []);
+      // De-dupe per role: a user may hold the role at company-wide AND
+      // hotel-specific scope; we still surface them once.
+      const existing = grouped.get(row.role_id);
+      if (!existing.find((u) => u.id === row.id)) {
+        existing.push({ id: row.id, name: row.name, email: row.email });
+      }
+    });
+    return roles.map((r) => ({ ...r, users: grouped.get(r.id) || [] }));
+  },
+
   getUsersWithAllNetworkPermissions: async (permKeys = [], opts = {}) => {
     if (!Array.isArray(permKeys) || permKeys.length === 0) return [];
     const tenantId = opts.tenant_company_id ?? null;

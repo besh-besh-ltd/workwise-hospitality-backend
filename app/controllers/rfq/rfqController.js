@@ -9419,11 +9419,34 @@ const rfqController = {
   finalize: async (req, res, next) => {
     const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type } =
       req.body;
-    
-    // Default to PO route for non-hospitality RFQs, route_type for hospitality
-    const selectedRoute = route_type || 'PO';
 
     try {
+      // SERVER-SIDE ROUTE OVERRIDE
+      // Tenders MUST go through ARC. Don't trust the client's route_type —
+      // a buggy FE (or a malicious one) sending 'PO' for a tender would
+      // silently produce a draft PO and bypass the ARC committee entirely
+      // (verified bug: 3 draft POs landed against RFQ 246 because the FE
+      // mis-derived isTender from a nested rfq[0] path). Read is_tender
+      // from the DB and override.
+      const tenderCheck = await db.oneOrNone(
+        `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+      const isTenderRfq = tenderCheck?.is_tender === 1;
+      let selectedRoute = route_type || 'PO';
+      if (isTenderRfq && selectedRoute !== 'ARC') {
+        // Coerce — finalize on a tender always means ARC envelope + ARC
+        // committee approval, never a PO. The FE-side toggle is now
+        // fixed, but this guard makes the contract enforceable.
+        selectedRoute = 'ARC';
+      } else if (!isTenderRfq && selectedRoute === 'ARC') {
+        // Inverse: a non-tender RFQ cannot route through ARC.
+        return res.status(400).json({
+          status: 3,
+          message: 'ARC route is only valid for tenders (is_tender=1). This is a regular RFQ.',
+        });
+      }
+
       // Check for active negotiation round blocking finalization
       const rfqProductForNego = await db.oneOrNone(
         `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
@@ -9757,6 +9780,25 @@ const rfqController = {
                 throw new Error('ARC approval is only available for hospitality RFQs/Tenders');
               }
 
+              // Group ARC tenders route through the network-wide global ARC
+              // hierarchy (no process / no BU). createApprovalInstance needs
+              // tender_scope='GROUP' + the parent tbl_company.id (resolved
+              // from tbl_hospitality_companies.buyer_company_id) to call
+              // findGlobalPolicyTx — without these it falls back to the
+              // BU-policy lookup and rejects with TENDER_POLICY_NOT_CONFIGURED.
+              const isGroupArcArc = rfqData.tender_scope === 'GROUP';
+              let arcGroupCompanyId = null;
+              if (isGroupArcArc) {
+                const tenant = await t.oneOrNone(
+                  `SELECT buyer_company_id FROM tbl_hospitality_companies WHERE id = $1`,
+                  [rfqData.hospitality_company_id]
+                );
+                arcGroupCompanyId = tenant?.buyer_company_id || null;
+                if (!arcGroupCompanyId) {
+                  throw new Error('Could not resolve parent buyer company for the Group ARC tender — hospitality company is missing buyer_company_id.');
+                }
+              }
+
               const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
               if (!rfqProduct) {
                 throw new Error('RFQ product not found');
@@ -9804,10 +9846,19 @@ const rfqController = {
                 const arcApprovalResult = await createApprovalInstance({
                   entity_type: 'ARC',
                   entity_id: arcItem.id, // ARC-item level (was product-level)
-                  hospitality_company_id: rfqData.hospitality_company_id,
-                  hotel_id: rfqData.hotel_id || null,
-                  department_id: rfqData.department_id || null,
-                  process_id: rfqData.process_id || null,
+                  // Single ARC: BU-scoped policy lookup (existing path).
+                  // Group ARC: pass tender_scope='GROUP' + parent
+                  // company_id; createApprovalInstance routes to
+                  // findGlobalPolicyTx instead of BU lookup. The
+                  // hospitality_company_id / hotel_id / department_id
+                  // fields are passed through for metadata only — the
+                  // global resolver ignores them.
+                  hospitality_company_id: isGroupArcArc ? null : rfqData.hospitality_company_id,
+                  hotel_id: isGroupArcArc ? null : (rfqData.hotel_id || null),
+                  department_id: isGroupArcArc ? null : (rfqData.department_id || null),
+                  process_id: isGroupArcArc ? null : (rfqData.process_id || null),
+                  tender_scope: isGroupArcArc ? 'GROUP' : null,
+                  company_id: isGroupArcArc ? arcGroupCompanyId : null,
                   initiated_by: req.user.id,
                   metadata: {
                     rfq_id,
@@ -9820,6 +9871,7 @@ const rfqController = {
                     vendor_id,
                     quote_id,
                     is_tender: rfqData.is_tender,
+                    tender_scope: rfqData.tender_scope || null,
                     company_name: rfqData.company_name,
                     triggered_by: 'product_finalization',
                   },

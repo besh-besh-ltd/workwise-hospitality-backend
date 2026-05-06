@@ -5,7 +5,7 @@ import generalController from '../controllers/general/generalController.js';
 import { acl, noAcl } from '../helper/common.js';
 import { validateBody, validateParam } from '../validations/paramValidation/userValidation.js';
 import { hierarchySchema } from '../validations/hierarchyValidation.js';
-import { hospitalityApprovalController, processController, globalArcApproverOptionsController } from '../controllers/general/generalController.js';
+import { hospitalityApprovalController, processController, globalArcApproverOptionsController, buApproverOptionsController } from '../controllers/general/generalController.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -154,6 +154,18 @@ GeneralRoutes.get(
   passportSignIn,
   acl([7, 2]),
   globalArcApproverOptionsController.getGlobalArcApproverOptions
+);
+
+// Sister of the global-arc endpoint, scoped to a single hotel. The BU
+// (per-hotel) hierarchy wizard calls this so the per-stage role/user
+// pickers list ONLY candidates holding <entity>.approve at BU scope —
+// network-scope grants are filtered out so a Group-ARC approver never
+// shows up in a hotel's BU committee picker.
+GeneralRoutes.get(
+  '/hospitality/approval/bu-approver-options/:entity_type',
+  passportSignIn,
+  acl([7, 2]),
+  buApproverOptionsController.getBuApproverOptions
 );
 
 // Approval Instance Management
