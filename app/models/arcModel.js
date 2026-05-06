@@ -210,10 +210,14 @@ const arcModel = {
   getApprovedItemsForRelease: async ({ arc_id, arc_item_ids = [], txContext = null }) => {
     if (!arc_item_ids.length) return [];
     const t = txContext || db;
+    // Schema-correct join: product name lives on tbl_product, not on
+    // tbl_product_variants (which only has variant_name/value).
     return t.any(
-      `SELECT ai.*, pv.name AS product_name
+      `SELECT ai.*,
+              COALESCE(p.name, pv.variant_name, 'Item') AS product_name
        FROM tbl_arc_item ai
        LEFT JOIN tbl_product_variants pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_product p ON p.id = pv.product_id
        WHERE ai.arc_id = $1
          AND ai.id = ANY($2::int[])
          AND ai.status = 'APPROVED'`,

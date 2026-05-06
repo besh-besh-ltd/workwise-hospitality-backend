@@ -272,12 +272,16 @@ const ArcReleaseController = {
       );
       if (!release) return res.status(404).json({ status: 2, message: 'Release not found' });
 
+      // Schema-correct join: product name on tbl_product (variant table
+      // has no `name` column).
       const items = await db.any(
-        `SELECT ri.*, pv.name AS product_name
-         FROM tbl_arc_release_items ri
-         LEFT JOIN tbl_product_variants pv ON pv.id = ri.product_variant_id
-         WHERE ri.arc_release_id = $1
-         ORDER BY ri.id`,
+        `SELECT ri.*,
+                COALESCE(p.name, pv.variant_name, 'Item') AS product_name
+           FROM tbl_arc_release_items ri
+           LEFT JOIN tbl_product_variants pv ON pv.id = ri.product_variant_id
+           LEFT JOIN tbl_product p ON p.id = pv.product_id
+          WHERE ri.arc_release_id = $1
+          ORDER BY ri.id`,
         [id]
       );
 
