@@ -3771,12 +3771,14 @@ LIMIT 2;
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
           ) AS "products",
-          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type
-          EXISTS (
+          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type.
+          -- Group ARC: editable only via network-scope boq.update (BU path gated off).
+          ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
             SELECT 1 FROM tbl_user_role_scopes _urs
             JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
             JOIN tbl_permissions _p ON _p.id = _rp.permission_id
             WHERE _urs.user_id = ${user_id}
+              AND _urs.is_network_scope = 0
               AND _p.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
               AND _p.action = 'update'
               AND _urs.company_id = RFQ.hospitality_company_id
@@ -3786,7 +3788,8 @@ LIMIT 2;
                 OR _urs.department_id = RFQ.department_id
                 OR _urs.department_id IS NULL
               )
-          ) AS can_edit
+          ))
+          ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'update' })}) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
@@ -5355,12 +5358,14 @@ LIMIT 2;
                 AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
           )
         )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
-        -- Permission filter: only RFQs the user has read access for
-        AND EXISTS (
+        -- Permission filter: only RFQs the user has read access for.
+        -- Group ARC: visible only via network-scope boq.read.
+        AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
           JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
           JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
           WHERE _urs2.user_id = ${user_id}
+            AND _urs2.is_network_scope = 0
             AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
             AND _p2.action = 'read'
             AND _urs2.company_id = RFQ.hospitality_company_id
@@ -5370,7 +5375,8 @@ LIMIT 2;
               OR _urs2.department_id = RFQ.department_id
               OR _urs2.department_id IS NULL
             )
-        )
+        ))
+        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -5562,12 +5568,14 @@ LIMIT 2;
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
           ) AS "products",
-          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type
-          EXISTS (
+          -- can_edit: user has 'update' permission for this RFQ's hotel + department + resource type.
+          -- Group ARC: editable only via network-scope boq.update.
+          ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
             SELECT 1 FROM tbl_user_role_scopes _urs
             JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
             JOIN tbl_permissions _p ON _p.id = _rp.permission_id
             WHERE _urs.user_id = ${user_id}
+              AND _urs.is_network_scope = 0
               AND _p.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
               AND _p.action = 'update'
               AND _urs.company_id = RFQ.hospitality_company_id
@@ -5577,7 +5585,8 @@ LIMIT 2;
                 OR _urs.department_id = RFQ.department_id
                 OR _urs.department_id IS NULL
               )
-          ) AS can_edit
+          ))
+          ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'update' })}) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       WHERE EXISTS (
@@ -5594,12 +5603,14 @@ LIMIT 2;
             OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
           )
       )
-      -- Permission filter: only RFQs the user has read access for
-      AND EXISTS (
+      -- Permission filter: only RFQs the user has read access for.
+      -- Group ARC: visible only via network-scope boq.read.
+      AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
         JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
         WHERE _urs2.user_id = ${user_id}
+          AND _urs2.is_network_scope = 0
           AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
           AND _p2.action = 'read'
           AND _urs2.company_id = RFQ.hospitality_company_id
@@ -5609,7 +5620,8 @@ LIMIT 2;
             OR _urs2.department_id = RFQ.department_id
             OR _urs2.department_id IS NULL
           )
-      )
+      ))
+      ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -5658,12 +5670,14 @@ LIMIT 2;
               OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
             )
         )
-        -- Permission filter: only RFQs the user has read access for
-        AND EXISTS (
+        -- Permission filter: only RFQs the user has read access for.
+        -- Group ARC: visible only via network-scope boq.read.
+        AND ((RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
           JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
           JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
           WHERE _urs2.user_id = ${user_id}
+            AND _urs2.is_network_scope = 0
             AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
             AND _p2.action = 'read'
             AND _urs2.company_id = RFQ.hospitality_company_id
@@ -5673,7 +5687,8 @@ LIMIT 2;
               OR _urs2.department_id = RFQ.department_id
               OR _urs2.department_id IS NULL
             )
-        )
+        ))
+        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })})
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -11993,39 +12008,44 @@ ORDER BY m.created_at;
       -- Passes if the user has rfq/boq read on the draft's scalar company (fallback)
       -- OR on any company derived from tbl_rfq_hotel_mappings (primary).
       AND (
-        EXISTS (
-          SELECT 1 FROM tbl_user_role_scopes _urs2
-          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-          WHERE _urs2.user_id = ${user_id}
-            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-            AND _p2.action = 'read'
-            AND _urs2.company_id = RFQ.hospitality_company_id
-            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-            AND (
-              RFQ.department_id IS NULL
-              OR _urs2.department_id = RFQ.department_id
-              OR _urs2.department_id IS NULL
-            )
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM tbl_rfq_hotel_mappings rhm
-          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
-          JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
-            AND _urs3.company_id = hch.hospitality_company_id
-            AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
-            AND (
-              RFQ.department_id IS NULL
-              OR _urs3.department_id = RFQ.department_id
-              OR _urs3.department_id IS NULL
-            )
-          JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
-          JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
-          WHERE rhm.rfq_id = RFQ.id
-            AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-            AND _p3.action = 'read'
-        )
+        (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND (
+          EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs2
+            JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+            JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+            WHERE _urs2.user_id = ${user_id}
+              AND _urs2.is_network_scope = 0
+              AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p2.action = 'read'
+              AND _urs2.company_id = RFQ.hospitality_company_id
+              AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs2.department_id = RFQ.department_id
+                OR _urs2.department_id IS NULL
+              )
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_hotel_mappings rhm
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+            JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+              AND _urs3.is_network_scope = 0
+              AND _urs3.company_id = hch.hospitality_company_id
+              AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+              AND (
+                RFQ.department_id IS NULL
+                OR _urs3.department_id = RFQ.department_id
+                OR _urs3.department_id IS NULL
+              )
+            JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+            JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+            WHERE rhm.rfq_id = RFQ.id
+              AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p3.action = 'read'
+          )
+        ))
+        ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })}
       )
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
@@ -12071,39 +12091,44 @@ ORDER BY m.created_at;
           )
         ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
         AND (
-          EXISTS (
-            SELECT 1 FROM tbl_user_role_scopes _urs2
-            JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
-            JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
-            WHERE _urs2.user_id = ${user_id}
-              AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-              AND _p2.action = 'read'
-              AND _urs2.company_id = RFQ.hospitality_company_id
-              AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
-              AND (
-                RFQ.department_id IS NULL
-                OR _urs2.department_id = RFQ.department_id
-                OR _urs2.department_id IS NULL
-              )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM tbl_rfq_hotel_mappings rhm
-            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
-            JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
-              AND _urs3.company_id = hch.hospitality_company_id
-              AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
-              AND (
-                RFQ.department_id IS NULL
-                OR _urs3.department_id = RFQ.department_id
-                OR _urs3.department_id IS NULL
-              )
-            JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
-            JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
-            WHERE rhm.rfq_id = RFQ.id
-              AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
-              AND _p3.action = 'read'
-          )
+          (RFQ.tender_scope IS DISTINCT FROM 'GROUP' AND (
+            EXISTS (
+              SELECT 1 FROM tbl_user_role_scopes _urs2
+              JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+              JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+              WHERE _urs2.user_id = ${user_id}
+                AND _urs2.is_network_scope = 0
+                AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+                AND _p2.action = 'read'
+                AND _urs2.company_id = RFQ.hospitality_company_id
+                AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+                AND (
+                  RFQ.department_id IS NULL
+                  OR _urs2.department_id = RFQ.department_id
+                  OR _urs2.department_id IS NULL
+                )
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM tbl_rfq_hotel_mappings rhm
+              JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+              JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+                AND _urs3.is_network_scope = 0
+                AND _urs3.company_id = hch.hospitality_company_id
+                AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+                AND (
+                  RFQ.department_id IS NULL
+                  OR _urs3.department_id = RFQ.department_id
+                  OR _urs3.department_id IS NULL
+                )
+              JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+              JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+              WHERE rhm.rfq_id = RFQ.id
+                AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+                AND _p3.action = 'read'
+            )
+          ))
+          ${groupArcNetworkScopeOr({ user_id, resource: 'boq', action: 'read' })}
         )
         ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
