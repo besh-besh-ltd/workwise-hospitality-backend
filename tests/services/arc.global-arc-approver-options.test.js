@@ -26,9 +26,13 @@ const PERM_TE_APPROVE = 9702;
 const PERM_ARC_APPROVE_TEST = 9703;
 
 beforeAll(async () => {
+  // TENDER entity_type maps to the 'boq' resource (single source of
+  // truth: ENTITY_APPROVE_RESOURCE_MAP). The TENDER_APPROVER role in
+  // production seed binds to boq.read / boq.approve, so the controller's
+  // permission lookup uses 'boq.approve' for entity_type='TENDER'.
   await db.none(
     `INSERT INTO tbl_permissions (id, resource, action) VALUES
-       ($1, 'tender', 'approve'),
+       ($1, 'boq', 'approve'),
        ($2, 'te', 'approve'),
        ($3, 'arc', 'approve')
      ON CONFLICT (id) DO NOTHING`,
@@ -116,7 +120,7 @@ describe("GET /hospitality/approval/global-arc/approver-options — input valida
 });
 
 describe("GET /hospitality/approval/global-arc/approver-options — happy paths per stage", () => {
-  it("TENDER → returns roles holding tender.approve and network-scope users with same perm", async () => {
+  it("TENDER → returns roles holding boq.approve and network-scope users with same perm", async () => {
     await grantPerm(ROLE_IDS.TENDER_APPROVER, PERM_TENDER_APPROVE);
     await grantNetworkRole(IDS.users.companyA_admin, ROLE_IDS.TENDER_APPROVER);
 
@@ -128,7 +132,7 @@ describe("GET /hospitality/approval/global-arc/approver-options — happy paths 
     expect([200, null]).toContain(m.calls.status);
     expect(m.calls.body.status).toBe(1);
     expect(m.calls.body.data.entity_type).toBe("TENDER");
-    expect(m.calls.body.data.permission).toBe("tender.approve");
+    expect(m.calls.body.data.permission).toBe("boq.approve");
 
     const roleIds = m.calls.body.data.roles.map((r) => r.id);
     expect(roleIds).toContain(ROLE_IDS.TENDER_APPROVER);
