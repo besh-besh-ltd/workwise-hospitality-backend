@@ -2346,17 +2346,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
     }
   
-    // Handle terms update
-    if (termsChanged && terms && terms.length > 0) {
-        // First delete existing terms only if terms have changed
+    // Handle terms update — when the user has touched the terms field
+    // (`termsChanged === true`), the full set of selections is replaced.
+    // An empty array is a legitimate state (user deselected every term)
+    // and must clear the join table; the previous combined guard skipped
+    // the delete in that case and left stale rows behind, which then
+    // resurfaced as "all terms selected" on the next reload.
+    if (termsChanged) {
         await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }, t);
-        
-        // Then insert new terms
-        const rfqTerms = terms.map(term => ({ 
-            rfq_id, 
-            terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
-        }));
-        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+
+        if (Array.isArray(terms) && terms.length > 0) {
+            const rfqTerms = terms.map(term => ({
+                rfq_id,
+                terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+            }));
+            await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+        }
     }
   
     if (termFilesChanged && term_and_condition_files) {
