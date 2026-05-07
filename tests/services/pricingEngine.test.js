@@ -283,10 +283,41 @@ describe("pricingEngine.calculateLineTotal", () => {
       tax: 5,
       tax_mode: "percentage",
     });
-    // base = 3.3, base_tax = 0.165, total = 3.465 → Math.round = 3
+    // base = 3.3, base_tax = 0.165, total = 3.465 → round2 = 3.47
     expect(out.base).toBeCloseTo(3.3, 10);
     expect(out.base_tax).toBeCloseTo(0.165, 10);
-    expect(out.total).toBe(3);
+    expect(out.total).toBe(3.47);
+  });
+
+  it("preserves vendor-supplied 2dp prices through the line total", () => {
+    // Vendor types 100.55, qty 1, GST 18% → base 100.55, tax 18.099,
+    // total 118.649 → round2 118.65. Integer rounding would have shown 119.
+    const out = calculateLineTotal({
+      unit_price: 100.55,
+      quantity: 1,
+      tax: 18,
+      tax_mode: "percentage",
+    });
+    expect(out.base).toBeCloseTo(100.55, 10);
+    expect(out.base_tax).toBeCloseTo(18.099, 10);
+    expect(out.total).toBe(118.65);
+  });
+
+  it("preserves paise across multi-line + global charges in document totals", () => {
+    const out = calculateDocumentTotals(
+      [
+        { unit_price: 100.55, quantity: 3, tax: 18, tax_mode: "percentage" },
+        { unit_price: 50.25,  quantity: 2, tax: 12, tax_mode: "percentage" },
+      ],
+      [{ name: "Insurance", amount: 1, amount_mode: "percentage" }]
+    );
+    // Line 1: base 301.65, tax 54.297 → 355.95 (round2 of 355.947)
+    // Line 2: base 100.50, tax 12.06  → 112.56
+    // grand_subtotal = 468.51, insurance 1% = 4.6851, grand_total = 473.20 (round2)
+    expect(out.lines[0].total).toBe(355.95);
+    expect(out.lines[1].total).toBe(112.56);
+    expect(out.grand_subtotal).toBeCloseTo(468.51, 10);
+    expect(out.grand_total).toBe(473.2);
   });
 
   it("defaults missing modes to 'percentage'", () => {
@@ -777,8 +808,8 @@ describe("pricingEngine.normalizeChargesMeta", () => {
     // base = 1000, base_tax = 180
     // freight = 50, freight_tax inherits 18% = 9 → 59
     // package = 20, package_tax inherits 18% = 3.6 → 23.6
-    // total = 1000 + 180 + 59 + 23.6 = 1262.6 → Math.round = 1263
-    expect(out.total).toBe(1263);
+    // total = 1000 + 180 + 59 + 23.6 = 1262.6 → round2 = 1262.6
+    expect(out.total).toBe(1262.6);
   });
 });
 
@@ -829,11 +860,11 @@ describe("pricingEngine — integration scenarios", () => {
     // Line 2: base 1000, base_tax 120 → 1120
     // subtotal = 2359
     // insurance = 23.59
-    // grand total = Math.round(2382.59) = 2383
+    // grand total = round2(2382.59) = 2382.59
     expect(out.lines[0].total).toBe(1239);
     expect(out.lines[1].total).toBe(1120);
     expect(out.grand_subtotal).toBe(2359);
     expect(out.global_charges_total).toBeCloseTo(23.59, 10);
-    expect(out.grand_total).toBe(2383);
+    expect(out.grand_total).toBe(2382.59);
   });
 });

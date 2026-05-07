@@ -18,9 +18,11 @@
 //     the charge inherits the base rate (applied to the charge amount).
 //   - else, no tax on the charge.
 //
-// Rounding: Math.round only at the line `total` and document `grand_total`
-// boundaries. Intermediates stay floating-point — this matches the legacy
-// quote engine and keeps cents from accumulating.
+// Rounding: 2-decimal (paise/cents) rounding only at the line `total` and
+// document `grand_total` boundaries via `round2`. Intermediates stay
+// floating-point so percentage chains don't accumulate rounding error; only
+// the persisted/displayed money values are quantised to 2dp. This matches
+// the PDF helper's `roundCurrency` so engine output and rendered output agree.
 
 const DEFAULT_MODE = "percentage";
 
@@ -29,6 +31,8 @@ const toNumber = (value) => {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
 };
+
+const round2 = (value) => Math.round(toNumber(value) * 100) / 100;
 
 const isPercentageMode = (mode) => (mode ?? DEFAULT_MODE) === "percentage";
 
@@ -115,7 +119,7 @@ export const calculateLineTotal = (line = {}) => {
     charges.push(chargeOut);
   }
 
-  const total = Math.round(base + baseTax + chargesTotal);
+  const total = round2(base + baseTax + chargesTotal);
 
   return {
     base,
@@ -192,7 +196,7 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
     0
   );
 
-  const grandTotal = Math.round(grandSubtotal + globalChargesTotal);
+  const grandTotal = round2(grandSubtotal + globalChargesTotal);
 
   return {
     lines,
