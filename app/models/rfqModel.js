@@ -1994,6 +1994,18 @@ WHERE NOT EXISTS (
           'tender_scope', RFQ.tender_scope,
           'arc_period_from', RFQ.arc_period_from,
           'arc_period_to', RFQ.arc_period_to,
+          -- Bypass-ARC rollup. Set to 1 whenever any product on this
+          -- draft was added with a documented bypass reason. Drives
+          -- the page-level ARC OVERRIDE banner in the Create RFQ
+          -- wizard (already wired in Edit RFQ via getRfqById).
+          'bypass_arc', RFQ.bypass_arc,
+          'bypass_arc_product_count', (
+              SELECT COUNT(*)::int
+                FROM tbl_rfq_products _bp
+               WHERE _bp.rfq_id = RFQ.id
+                 AND _bp.bypass_arc_reason IS NOT NULL
+                 AND char_length(_bp.bypass_arc_reason) > 0
+          ),
 
           -- Selected Terms
           'terms', (
@@ -2064,7 +2076,19 @@ WHERE NOT EXISTS (
               ),
               'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
               'user_selected_predefined_qap', (RFQ_P.qap = '1'),
-              'sheet_id', RFQ_P.sheet_id
+              'sheet_id', RFQ_P.sheet_id,
+              -- Per-product bypass-ARC trail (Phase 8). Drives the
+              -- compact ARC-OVERRIDE pill next to each product in the
+              -- create/edit wizard. recorded_by_name is joined so the
+              -- popover shows "Recorded by Sarah Shah · 12 May 2026"
+              -- without an extra round-trip.
+              'bypass_arc_reason', RFQ_P.bypass_arc_reason,
+              'bypass_arc_recorded_by', RFQ_P.bypass_arc_recorded_by,
+              'bypass_arc_recorded_at', RFQ_P.bypass_arc_recorded_at,
+              'bypass_arc_recorded_by_name', (
+                SELECT name FROM tbl_users
+                 WHERE id = RFQ_P.bypass_arc_recorded_by
+              )
           )
           FROM tbl_rfq_products RFQ_P
           LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
@@ -2439,6 +2463,20 @@ WHERE NOT EXISTS (
       RFQ.tender_scope,
       RFQ.arc_period_from,
       RFQ.arc_period_to,
+      -- Bypass-ARC rollup. tbl_rfq.bypass_arc is set whenever any
+      -- product on the RFQ has a documented bypass reason (see
+      -- migration 003). Surfacing it lets the FE render a top-level
+      -- banner without scanning every product. Counter + active-arc
+      -- summary live alongside so the banner can say "2 of 5 products
+      -- override active rate contracts".
+      RFQ.bypass_arc,
+      (
+        SELECT COUNT(*)::int
+          FROM tbl_rfq_products _bp
+         WHERE _bp.rfq_id = RFQ.id
+           AND _bp.bypass_arc_reason IS NOT NULL
+           AND char_length(_bp.bypass_arc_reason) > 0
+      ) AS bypass_arc_product_count,
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
@@ -2664,6 +2702,17 @@ LIMIT 1;`;
         _TPV.name,
         RFQ_P.variant,
         RFQ_P.comment,
+        -- Per-product bypass-ARC trail (Phase 8). When set, this
+        -- product was explicitly added to an open-market RFQ despite
+        -- an active rate contract covering it; the reason is captured
+        -- at add-to-draft time and stays attached for audit.
+        RFQ_P.bypass_arc_reason,
+        RFQ_P.bypass_arc_recorded_by,
+        RFQ_P.bypass_arc_recorded_at,
+        (
+          SELECT name FROM tbl_users
+           WHERE id = RFQ_P.bypass_arc_recorded_by
+        ) AS bypass_arc_recorded_by_name,
         (
             SELECT json_agg(RPF.file_url)
             FROM tbl_rfq_product_files RPF

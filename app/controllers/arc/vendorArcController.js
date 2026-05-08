@@ -113,8 +113,13 @@ const VendorArcController = {
         [arcId]
       );
 
+      // tbl_hospitality_company_hotels exposes the address as
+      // `full_address` (not `address`) — the latter doesn't exist on
+      // this table, which made the detail endpoint 500 with
+      // "column h.address does not exist". Alias to keep the FE shape
+      // stable.
       const hotels = await db.any(
-        `SELECT h.id, h.name, h.city, h.address, hc.name AS company_name
+        `SELECT h.id, h.name, h.city, h.full_address AS address, hc.name AS company_name
          FROM tbl_arc_hotels ah
          JOIN tbl_hospitality_company_hotels h ON h.id = ah.hotel_id
          LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
