@@ -536,6 +536,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         `SELECT
             ar.hotel_id                  AS hotel_id,
             ar.arc_id                    AS arc_id,
+            ar.process_id                AS release_process_id,
             arc.hospitality_company_id   AS arc_company_id,
             hotel.hospitality_company_id AS hotel_company_id,
             arc.rfq_id                   AS source_rfq_id,
@@ -558,8 +559,12 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         hospitality_company_id: arcCtx.hotel_company_id || arcCtx.arc_company_id,
         hotel_id: arcCtx.hotel_id,
         department_id: arcCtx.department_id,
-        // process_id intentionally NULL for PO entity (see comment above).
-        process_id: null,
+        // process_id is now picked at release-creation time by the
+        // buyer (admin always configures PO policies under a process,
+        // so we MUST forward it for the engine to find a match). The
+        // legacy NULL fallback would only match process-agnostic
+        // policies which don't exist in practice.
+        process_id: arcCtx.release_process_id || null,
         rfq_id: arcCtx.source_rfq_id,
         rfq_no: arcCtx.rfq_no,
         is_tender: arcCtx.is_tender,

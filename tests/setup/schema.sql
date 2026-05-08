@@ -11059,6 +11059,7 @@ CREATE TABLE public.tbl_arc_release (
     created_by integer NOT NULL,
     status character varying(20) DEFAULT 'DRAFT'::character varying,
     total_value numeric(14,2),
+    process_id integer REFERENCES public.tbl_approval_processes(id),
     created_at timestamp without time zone DEFAULT now(),
     CONSTRAINT chk_arc_release_status CHECK (status IN ('DRAFT','PO_DRAFTED','CANCELLED')),
     CONSTRAINT tbl_arc_release_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id),
@@ -11066,6 +11067,7 @@ CREATE TABLE public.tbl_arc_release (
 );
 CREATE INDEX idx_arc_release_arc ON public.tbl_arc_release(arc_id);
 CREATE INDEX idx_arc_release_vendor_hotel ON public.tbl_arc_release(vendor_id, hotel_id);
+CREATE INDEX idx_arc_release_process_id ON public.tbl_arc_release(process_id);
 
 --
 -- Name: tbl_arc_release_items; Type: TABLE; Schema: public; Owner: -

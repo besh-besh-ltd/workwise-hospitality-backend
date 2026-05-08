@@ -334,7 +334,7 @@ const ArcReleaseController = {
    */
   createRelease: async (req, res) => {
     try {
-      const { arc_id, hotel_id, items } = req.body;
+      const { arc_id, hotel_id, items, process_id } = req.body;
       const created_by = req.user?.id;
 
       if (!created_by) {
@@ -344,6 +344,16 @@ const ArcReleaseController = {
         return res.status(400).json({
           status: 2,
           message: 'arc_id, hotel_id, and at least one item are required',
+        });
+      }
+      // process_id is required — admin always configures PO approval
+      // policies under a specific process. The wizard now asks the
+      // buyer which process this contracted PO falls under so the
+      // engine can match a policy at initiation time.
+      if (!process_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'process_id is required — pick the approval process for this contracted PO',
         });
       }
 
@@ -435,13 +445,27 @@ const ArcReleaseController = {
         });
         const totalValue = releaseLines.reduce((s, l) => s + Number(l.total_price || 0), 0);
 
-        // 6. Insert release header + items.
+        // 6.a Validate process_id belongs to the actor's tenant and
+        // is active. Avoids a buyer pasting an arbitrary process_id
+        // for another company's process.
+        const processRow = await t.oneOrNone(
+          `SELECT p.id
+             FROM tbl_approval_processes p
+            WHERE p.id = $1 AND p.is_active = true
+              AND ($2::int IS NULL OR p.company_id = $2)`,
+          [process_id, req.user?.company_id || null]
+        );
+        if (!processRow) {
+          throw new Error('Selected approval process is invalid or not accessible');
+        }
+
+        // 6.b Insert release header + items.
         const releaseRow = await t.one(
           `INSERT INTO tbl_arc_release
-              (arc_id, hotel_id, vendor_id, created_by, status, total_value)
-           VALUES ($1, $2, $3, $4, 'DRAFT', $5)
+              (arc_id, hotel_id, vendor_id, created_by, status, total_value, process_id)
+           VALUES ($1, $2, $3, $4, 'DRAFT', $5, $6)
            RETURNING *`,
-          [arc_id, hotel_id, envelope.vendor_id, created_by, totalValue]
+          [arc_id, hotel_id, envelope.vendor_id, created_by, totalValue, process_id]
         );
         for (const ln of releaseLines) {
           // pg-promise serialises JS objects/arrays as text[] when bound
