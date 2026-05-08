@@ -18,11 +18,15 @@
 //     the charge inherits the base rate (applied to the charge amount).
 //   - else, no tax on the charge.
 //
-// Rounding: 2-decimal (paise/cents) rounding only at the line `total` and
-// document `grand_total` boundaries via `round2`. Intermediates stay
-// floating-point so percentage chains don't accumulate rounding error; only
-// the persisted/displayed money values are quantised to 2dp. This matches
-// the PDF helper's `roundCurrency` so engine output and rendered output agree.
+// Rounding strategy:
+//   - Intermediates inside the engine stay raw float so chained percentage
+//     calculations don't accumulate rounding error.
+//   - At the *return boundary* every money field (base, base_tax, each
+//     charge's amount/tax/subtotal, charges_total, total, grand_total) is
+//     quantised to 2 decimals via `q2`. This matches the DB column type
+//     (numeric(15,2)) so the buyer's recomputed engine output looks
+//     identical to the vendor's persisted total_price — no 14-digit float
+//     drift in the API response.
 
 const DEFAULT_MODE = "percentage";
 
@@ -32,7 +36,9 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-const round2 = (value) => Math.round(toNumber(value) * 100) / 100;
+// Quantise to 2 decimal places. Used only at the engine's return boundary;
+// internal arithmetic stays raw.
+const q2 = (value) => Math.round(toNumber(value) * 100) / 100;
 
 const isPercentageMode = (mode) => (mode ?? DEFAULT_MODE) === "percentage";
 
@@ -94,11 +100,13 @@ export const calculateLineTotal = (line = {}) => {
 
     const subtotal = amount + chargeTax;
     chargesTotal += subtotal;
+    // Per-charge fields are quantised to 2dp at the boundary so the response
+    // matches DB precision; raw values still drive the running totals above.
     const chargeOut = {
       name: charge.name ?? null,
-      amount,
-      tax: chargeTax,
-      subtotal,
+      amount: q2(amount),
+      tax: q2(chargeTax),
+      subtotal: q2(subtotal),
     };
     // Carry the canonical slug through when the input has one. Lets downstream
     // consumers (e.g. quote-compare freight-advantage matcher) key off slug
@@ -119,14 +127,14 @@ export const calculateLineTotal = (line = {}) => {
     charges.push(chargeOut);
   }
 
-  const total = round2(base + baseTax + chargesTotal);
+  const total = base + baseTax + chargesTotal;
 
   return {
-    base,
-    base_tax: baseTax,
+    base: q2(base),
+    base_tax: q2(baseTax),
     charges,
-    charges_total: chargesTotal,
-    total,
+    charges_total: q2(chargesTotal),
+    total: q2(total),
   };
 };
 
@@ -168,15 +176,20 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
 
   const grandSubtotal = lines.reduce((sum, l) => sum + l.total, 0);
 
+  // Track raw global-charge amounts separately from the q2'd values exposed
+  // on each resolved charge — the running grandTotal sums raw, the response
+  // shows quantised values.
+  const rawGlobalAmounts = [];
   const resolvedGlobalCharges = (globalCharges || [])
     .map(normalizeGlobalCharge)
     .filter(Boolean)
     .map((charge) => {
       const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
+      rawGlobalAmounts.push(amount);
       const out = {
         name: charge.name ?? null,
         slug: charge.slug ?? null,
-        amount,
+        amount: q2(amount),
       };
       // Preserve the vendor-supplied rate + mode so renderers can display
       // "TCS (5%)" alongside the resolved currency value, and the comment
@@ -191,19 +204,16 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
       return out;
     });
 
-  const globalChargesTotal = resolvedGlobalCharges.reduce(
-    (sum, c) => sum + c.amount,
-    0
-  );
+  const globalChargesTotal = rawGlobalAmounts.reduce((sum, a) => sum + a, 0);
 
-  const grandTotal = round2(grandSubtotal + globalChargesTotal);
+  const grandTotal = grandSubtotal + globalChargesTotal;
 
   return {
     lines,
-    grand_subtotal: grandSubtotal,
+    grand_subtotal: q2(grandSubtotal),
     global_charges: resolvedGlobalCharges,
-    global_charges_total: globalChargesTotal,
-    grand_total: grandTotal,
+    global_charges_total: q2(globalChargesTotal),
+    grand_total: q2(grandTotal),
   };
 };
 
