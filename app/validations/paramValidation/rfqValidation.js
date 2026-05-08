@@ -328,6 +328,13 @@ export const rfqSchemas = {
         // Terms is just an array of term ids
         terms: Joi.array().items(Joi.number()).default([]),
 
+        // T&C attachments — array of S3 URLs the user has uploaded against
+        // this RFQ. Diff-driven on the server (see applyTermFileChanges):
+        // any URL present here that wasn't on the row before is INSERTed
+        // into tbl_rfq_files; any URL the row previously had that's no
+        // longer in this list is DELETEd. Empty array = clear all files.
+        term_and_condition_files: Joi.array().items(Joi.string().allow('', null)).default([]),
+
         // Products array — id=null means newly added in this edit
         products: Joi.array().items(
           Joi.object({

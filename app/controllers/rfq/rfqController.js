@@ -35,6 +35,7 @@ import {
   applyRfqFieldChanges,
   applyProductChanges,
   applyTermsChanges,
+  applyTermFileChanges,
   httpError as updateHttpError
 } from './rfqUpdateHelpers.js';
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
@@ -2304,7 +2305,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       response_email,
       contact_name,
       contact_number,
-      bid_end_date: normalizeDate(bid_end_date),
+      // bid_end_date is `text NOT NULL` on tbl_rfq, so a draft with no
+      // deadline yet has to round-trip as an empty string. The GET handler
+      // (getDraftById) maps '' back to null when serialising the response.
+      bid_end_date: normalizeDate(bid_end_date) ?? '',
       location,
       rfq_type,
       reverse_auction: isReverseAuction ? 1 : 0,
@@ -5457,6 +5461,9 @@ const rfqController = {
           if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
             throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
           }
+          if (diff.termFiles && (diff.termFiles.added.length > 0 || diff.termFiles.removed.length > 0)) {
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.');
+          }
         }
 
         // 6. Apply changes — order matters because the field UPDATE on tbl_rfq
@@ -5471,8 +5478,11 @@ const rfqController = {
           current
         );
         const termsHistory = await applyTermsChanges(t, rfq_id, diff.terms);
+        const termFilesHistory = diff.termFiles
+          ? await applyTermFileChanges(t, rfq_id, diff.termFiles)
+          : [];
 
-        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory];
+        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
         // 7. Record history rows
         if (allHistory.length > 0) {
@@ -5946,6 +5956,14 @@ const rfqController = {
        const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${id}`);
        draftData[0].mappedHotels = mappedHotels || [];
 
+      // bid_end_date is text NOT NULL in the DB; the auto-create path stores
+      // an empty string when the user hasn't picked a date yet. Surface that
+      // as null to the client so the wizard's date input renders as unset
+      // rather than as the literal empty string.
+      if (draftData[0].rfq_form_data && draftData[0].rfq_form_data.bid_end_date === '') {
+        draftData[0].rfq_form_data.bid_end_date = null;
+      }
+
       // Return in the same format as getRFQDraftData
       res.status(200).json({
         status: 1,
@@ -6063,19 +6081,19 @@ const rfqController = {
         sheetData = sheetRes || null;
       } else {
         // Create a new RFQ
-
-        const currentDate = new Date();
-        let bidEndDate = new Date();
-        bidEndDate.setDate(currentDate.getDate() + 30);
-
+        // bid_end_date is text NOT NULL on tbl_rfq, but the user hasn't
+        // reached the timeline step yet — so we seed an empty string (which
+        // satisfies NOT NULL on a text column) and let the user fill the
+        // real value when they save. The GET handler normalises this empty
+        // string to null in the response so the frontend sees an unset
+        // field. The save-draft Joi schema then rejects empty values.
         rfqData = {
           company_name: user.organization_name || '',
           response_email: user.email,
           contact_name: user.name,
           contact_number: user.mobile || '',
           comment: req.body.comment || '',
-          bid_end_date:
-            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
+          bid_end_date: req.body.bid_end_date || '',
           location: req.body.location || '',
           is_published: 0,
           created_by: user_id,
