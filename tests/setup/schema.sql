@@ -11060,6 +11060,7 @@ CREATE TABLE public.tbl_arc_release (
     status character varying(20) DEFAULT 'DRAFT'::character varying,
     total_value numeric(14,2),
     process_id integer REFERENCES public.tbl_approval_processes(id),
+    vendor_selection_reason text,
     created_at timestamp without time zone DEFAULT now(),
     CONSTRAINT chk_arc_release_status CHECK (status IN ('DRAFT','PO_DRAFTED','CANCELLED')),
     CONSTRAINT tbl_arc_release_arc_id_fkey FOREIGN KEY (arc_id) REFERENCES public.tbl_arc(id),

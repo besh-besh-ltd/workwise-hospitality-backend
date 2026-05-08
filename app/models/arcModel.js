@@ -169,7 +169,16 @@ const arcModel = {
          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
          u.email AS vendor_email,
          r.rfq_no AS source_rfq_no,
-         r.title AS source_rfq_title
+         r.title AS source_rfq_title,
+         -- Unit of measure (UOM) — read off the source tender's
+         -- product spec rows (title='Unit'). Surfaced so the release
+         -- wizard can show "5 kg" instead of just "5".
+         (SELECT _us.value FROM tbl_rfq_products_specs _us
+            WHERE _us.rfq_id = a.rfq_id
+              AND _us.product_variant_id = ai.product_variant_id
+              AND COALESCE(_us.variant, 0) = COALESCE(NULLIF(ai.variant, '')::int, 0)
+              AND LOWER(_us.title) = 'unit'
+            LIMIT 1) AS unit
        FROM tbl_arc a
        JOIN tbl_arc_hotels ah ON ah.arc_id = a.id
        JOIN tbl_arc_item ai ON ai.arc_id = a.id

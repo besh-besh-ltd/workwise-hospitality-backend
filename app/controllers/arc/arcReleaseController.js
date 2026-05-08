@@ -217,7 +217,13 @@ const ArcReleaseController = {
              u.email AS vendor_email,
              r.rfq_no AS source_rfq_no,
              r.title AS source_rfq_title,
-             pv.name AS product_name
+             pv.name AS product_name,
+             (SELECT _us.value FROM tbl_rfq_products_specs _us
+                WHERE _us.rfq_id = a.rfq_id
+                  AND _us.product_variant_id = ai.product_variant_id
+                  AND COALESCE(_us.variant, 0) = COALESCE(NULLIF(ai.variant, '')::int, 0)
+                  AND LOWER(_us.title) = 'unit'
+                LIMIT 1) AS unit
            FROM tbl_arc_item ai
            JOIN tbl_arc a ON a.id = ai.arc_id
            JOIN tbl_rfq r ON r.id = a.rfq_id
@@ -334,7 +340,7 @@ const ArcReleaseController = {
    */
   createRelease: async (req, res) => {
     try {
-      const { arc_id, hotel_id, items, process_id } = req.body;
+      const { arc_id, hotel_id, items, process_id, vendor_selection_reason } = req.body;
       const created_by = req.user?.id;
 
       if (!created_by) {
@@ -459,13 +465,43 @@ const ArcReleaseController = {
           throw new Error('Selected approval process is invalid or not accessible');
         }
 
-        // 6.b Insert release header + items.
+        // 6.b If multiple vendors hold contracts for this (hotel,
+        // product), the buyer's reason for picking THIS vendor must
+        // be recorded for audit. When only one vendor is eligible the
+        // reason is optional (no choice was made). The wizard already
+        // gates this; we mirror it server-side.
+        const eligibleCount = await t.oneOrNone(
+          `SELECT COUNT(DISTINCT a.vendor_id)::int AS cnt
+             FROM tbl_arc a
+             JOIN tbl_arc_hotels ah ON ah.arc_id = a.id
+             JOIN tbl_arc_item ai ON ai.arc_id = a.id
+            WHERE ai.product_variant_id = (
+                    SELECT product_variant_id FROM tbl_arc_item WHERE id = $1
+                  )
+              AND ah.hotel_id = $2
+              AND ai.status = 'APPROVED'
+              AND a.status IN ('ACTIVE', 'DOC_GENERATED')
+              AND a.period_to >= CURRENT_DATE`,
+          [arcItemIds[0], hotel_id]
+        );
+        const choiceCount = eligibleCount?.cnt ?? 1;
+        const trimmedReason = typeof vendor_selection_reason === 'string'
+          ? vendor_selection_reason.trim()
+          : '';
+        if (choiceCount > 1 && trimmedReason.length < 30) {
+          throw new Error(
+            'Multiple contracted vendors are eligible — please record at least 30 characters explaining why this vendor was selected.'
+          );
+        }
+        const persistedReason = trimmedReason.length > 0 ? trimmedReason : null;
+
+        // 6.c Insert release header + items.
         const releaseRow = await t.one(
           `INSERT INTO tbl_arc_release
-              (arc_id, hotel_id, vendor_id, created_by, status, total_value, process_id)
-           VALUES ($1, $2, $3, $4, 'DRAFT', $5, $6)
+              (arc_id, hotel_id, vendor_id, created_by, status, total_value, process_id, vendor_selection_reason)
+           VALUES ($1, $2, $3, $4, 'DRAFT', $5, $6, $7)
            RETURNING *`,
-          [arc_id, hotel_id, envelope.vendor_id, created_by, totalValue, process_id]
+          [arc_id, hotel_id, envelope.vendor_id, created_by, totalValue, process_id, persistedReason]
         );
         for (const ln of releaseLines) {
           // pg-promise serialises JS objects/arrays as text[] when bound

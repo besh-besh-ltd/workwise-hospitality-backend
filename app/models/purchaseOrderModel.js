@@ -1067,6 +1067,7 @@ export const getPODetailsById = async (po_id, user_id) => {
               -- back-link, banners) without re-fetching.
               CASE WHEN po.arc_release_id IS NOT NULL THEN 1 ELSE 0 END AS is_contracted_po,
               po.arc_release_id,
+              AR.vendor_selection_reason AS arc_vendor_selection_reason,
               ARC.id AS arc_id,
               ARC.tender_scope AS arc_tender_scope,
               ARC.period_from AS arc_period_from,
