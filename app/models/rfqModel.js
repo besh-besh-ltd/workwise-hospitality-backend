@@ -1862,6 +1862,15 @@ WHERE NOT EXISTS (
           RFQ.timestamp,
           RFQ.rfq_type,
           RFQ.reverse_auction,
+          -- Tender / ARC distinction. Vendors quote tenders very
+          -- differently (consumption-quantity based, multi-hotel
+          -- logistics, longer commitment) — surface the flag here so
+          -- the inquiries-received list can show a Tender / Group ARC
+          -- pill on each row at a glance.
+          RFQ.is_tender,
+          RFQ.tender_scope,
+          RFQ.arc_period_from,
+          RFQ.arc_period_to,
 
           (
               SELECT COUNT(*)

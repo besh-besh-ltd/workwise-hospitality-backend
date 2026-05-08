@@ -7079,6 +7079,32 @@ const rfqController = {
         }
       }
 
+      // Tender-only enrichment: every hotel covered by this RFQ via
+      // tbl_rfq_hotel_mappings, with names. Single ARC = 1 row, Group
+      // ARC = ≥2 rows. Both buyer and vendor surfaces use this to show
+      // "Business Units: Burj Al Arab, Atlantis, Marina Bay Sands"
+      // instead of just the lead hotel from RFQ.hotel_id (which is
+      // misleading for Group ARCs that span multiple hotels).
+      if (rfqData?.id && rfqData.is_tender === 1) {
+        try {
+          rfqData.covered_hotels = await db.any(
+            `SELECT h.id AS hotel_id, h.name AS hotel_name, h.city, h.hospitality_company_id,
+                    hc.name AS hospitality_company_name
+               FROM tbl_rfq_hotel_mappings rhm
+               JOIN tbl_hospitality_company_hotels h ON h.id = rhm.hotel_id
+               LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+              WHERE rhm.rfq_id = $1
+              ORDER BY h.name`,
+            [rfqData.id]
+          );
+        } catch (err) {
+          logError('Error fetching covered hotels for tender', err);
+          rfqData.covered_hotels = [];
+        }
+      } else if (rfqData) {
+        rfqData.covered_hotels = [];
+      }
+
       if (rfqData?.hotel_id) {
         const hotelIds = [parseInt(rfqData.hotel_id)];
         const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
