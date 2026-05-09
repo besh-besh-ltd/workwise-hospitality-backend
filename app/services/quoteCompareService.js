@@ -10,6 +10,12 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// Quantise to 2 decimals. Used when this service rounds up engine output
+// across multiple quotes/products (engine_total, l1_total, vendor totals)
+// so the API response matches DB column precision (numeric(15,2)) and
+// doesn't leak float-add drift to the frontend.
+const q2 = (value) => Math.round(toNumber(value) * 100) / 100;
+
 const isQuoteRegret = (quote) => {
   if (!quote) return false;
   if (quote.is_regret == 1) return true;
@@ -117,7 +123,7 @@ const applyNormalization = (engineOut, vendor, detail) => {
     paymentTerms,
     deliveryDays
   );
-  return { ...engineOut, total: Math.round(normalised) };
+  return { ...engineOut, total: q2(normalised) };
 };
 
 const isFinalizedFor = (product, vendorId) => {
@@ -192,15 +198,15 @@ const enrichProduct = (product, opts) => {
       })
       .filter(Boolean);
     const globalChargesTotal = resolvedGlobalCharges.reduce((s, c) => s + c.amount, 0);
-    const grandTotal = Math.round(engineQuoteTotal + globalChargesTotal);
+    const grandTotal = engineQuoteTotal + globalChargesTotal;
 
     return {
       ...quote,
       quote_details: Array.isArray(quote.quote_details) ? annotatedDetails : annotatedDetails[0],
-      engine_total: engineQuoteTotal,
-      engine_global_charges: resolvedGlobalCharges,
-      engine_global_charges_total: globalChargesTotal,
-      engine_grand_total: grandTotal,
+      engine_total: q2(engineQuoteTotal),
+      engine_global_charges: resolvedGlobalCharges.map((c) => ({ ...c, amount: q2(c.amount) })),
+      engine_global_charges_total: q2(globalChargesTotal),
+      engine_grand_total: q2(grandTotal),
       is_regret_resolved: isRegret,
     };
   });
@@ -403,7 +409,11 @@ export const enrichQuoteCompareData = (products, opts = {}) => {
     });
   });
 
-  const savings = baseline_total > 0 ? baseline_total - l1_total : 0;
+  // Quantise rolled-up sums to 2dp at the API boundary.
+  l1_total = q2(l1_total);
+  finalized_total = q2(finalized_total);
+  baseline_total = q2(baseline_total);
+  const savings = baseline_total > 0 ? q2(baseline_total - l1_total) : 0;
 
   // Per-vendor totals across all products in this RFQ.
   const vendorAccumulator = new Map();
@@ -450,6 +460,13 @@ export const enrichQuoteCompareData = (products, opts = {}) => {
   });
 
   const vendor_totals = Array.from(vendorAccumulator.values())
+    .map((v) => ({
+      ...v,
+      total: q2(v.total),
+      base: q2(v.base),
+      base_tax: q2(v.base_tax),
+      charges_total: q2(v.charges_total),
+    }))
     .sort((a, b) => a.total - b.total);
 
   return {
