@@ -13,7 +13,8 @@ import {
   RFQ_EDITABLE_FIELDS,
   isFieldEditable,
   isFieldMaterial,
-  isEntityChangeMaterial
+  isEntityChangeMaterial,
+  isTimestampField
 } from './rfqEditableFields.js';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -212,13 +213,17 @@ function diffRfqFields(current, snapshot) {
   const out = [];
   for (const fieldName of Object.keys(RFQ_EDITABLE_FIELDS)) {
     if (!Object.prototype.hasOwnProperty.call(snapshot, fieldName)) continue;
-    const oldValue = normaliseValue(current[fieldName]);
-    const newValue = normaliseValue(snapshot[fieldName]);
+    const isTs = isTimestampField(fieldName);
+    const coerce = (v) => (isTs && normaliseValue(v) === '' ? null : v);
+    const rawOld = coerce(current[fieldName]);
+    const rawNew = coerce(snapshot[fieldName]);
+    const oldValue = normaliseValue(rawOld);
+    const newValue = normaliseValue(rawNew);
     if (!valuesEqual(oldValue, newValue)) {
       out.push({
         field_name: fieldName,
-        old_value: current[fieldName] ?? null,
-        new_value: snapshot[fieldName] ?? null,
+        old_value: rawOld ?? null,
+        new_value: rawNew ?? null,
         material: isFieldMaterial(fieldName)
       });
     }

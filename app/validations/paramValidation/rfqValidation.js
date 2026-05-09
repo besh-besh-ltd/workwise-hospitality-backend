@@ -310,7 +310,7 @@ export const rfqSchemas = {
         contact_number: Joi.string().trim().min(6).max(17).required(),
         response_email: Joi.string().required(),
         location: Joi.string().allow('', null),
-        bid_end_date: Joi.string().allow('', null),
+        bid_end_date: Joi.string().required(),
         tender_publish_date: Joi.string().allow('', null),
         tender_fees: Joi.number().integer().min(0).allow(null),
         vendor_clarification_date: Joi.string().allow('', null),
