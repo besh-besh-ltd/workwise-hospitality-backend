@@ -13,7 +13,8 @@ import {
   RFQ_EDITABLE_FIELDS,
   isFieldEditable,
   isFieldMaterial,
-  isEntityChangeMaterial
+  isEntityChangeMaterial,
+  isTimestampField
 } from './rfqEditableFields.js';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -188,6 +189,12 @@ export function diffRfqSnapshot(current, snapshot) {
   const rfqFields = diffRfqFields(current, snapshot);
   const products  = diffProducts(current.products || [], snapshot.products || []);
   const terms     = diffTerms(current.terms || [], snapshot.terms || []);
+  // T&C files diff — only produced when the snapshot explicitly carries
+  // term_and_condition_files. Older clients that omit the key won't have
+  // their files wiped on save.
+  const termFiles = Object.prototype.hasOwnProperty.call(snapshot, 'term_and_condition_files')
+    ? diffTermFiles(current.term_and_condition_files || [], snapshot.term_and_condition_files || [])
+    : { added: [], removed: [] };
 
   const isEmpty =
     rfqFields.length === 0 &&
@@ -195,22 +202,28 @@ export function diffRfqSnapshot(current, snapshot) {
     products.removed.length === 0 &&
     products.updated.length === 0 &&
     terms.added.length === 0 &&
-    terms.removed.length === 0;
+    terms.removed.length === 0 &&
+    termFiles.added.length === 0 &&
+    termFiles.removed.length === 0;
 
-  return { rfqFields, products, terms, isEmpty };
+  return { rfqFields, products, terms, termFiles, isEmpty };
 }
 
 function diffRfqFields(current, snapshot) {
   const out = [];
   for (const fieldName of Object.keys(RFQ_EDITABLE_FIELDS)) {
     if (!Object.prototype.hasOwnProperty.call(snapshot, fieldName)) continue;
-    const oldValue = normaliseValue(current[fieldName]);
-    const newValue = normaliseValue(snapshot[fieldName]);
+    const isTs = isTimestampField(fieldName);
+    const coerce = (v) => (isTs && normaliseValue(v) === '' ? null : v);
+    const rawOld = coerce(current[fieldName]);
+    const rawNew = coerce(snapshot[fieldName]);
+    const oldValue = normaliseValue(rawOld);
+    const newValue = normaliseValue(rawNew);
     if (!valuesEqual(oldValue, newValue)) {
       out.push({
         field_name: fieldName,
-        old_value: current[fieldName] ?? null,
-        new_value: snapshot[fieldName] ?? null,
+        old_value: rawOld ?? null,
+        new_value: rawNew ?? null,
         material: isFieldMaterial(fieldName)
       });
     }
@@ -332,6 +345,15 @@ function diffTerms(currentTerms, snapshotTerms) {
   const snap = new Set(snapshotTerms.map(Number));
   const added = [...snap].filter((id) => !cur.has(id));
   const removed = [...cur].filter((id) => !snap.has(id));
+  return { added, removed };
+}
+
+// T&C files identity is the URL string. Empty / null entries are dropped.
+function diffTermFiles(currentFiles, snapshotFiles) {
+  const cur = new Set((currentFiles || []).filter(Boolean));
+  const snap = new Set((snapshotFiles || []).filter(Boolean));
+  const added = [...snap].filter((u) => !cur.has(u));
+  const removed = [...cur].filter((u) => !snap.has(u));
   return { added, removed };
 }
 
@@ -744,6 +766,46 @@ export async function applyTermsChanges(t, rfqId, termsDiff) {
       entity_type: 'TERMS', entity_id: id, entity_label: null,
       field_name: null, change_type: 'DELETE',
       old_value: id, new_value: null, is_material: false
+    });
+  }
+  return history;
+}
+
+/**
+ * Apply T&C file changes — diffed against tbl_rfq_files where
+ * file_type = 'term_and_condition'. URL identity. Inserts the new ones
+ * and deletes the dropped ones; cosmetic, so is_material=false (matches
+ * applyTermsChanges policy).
+ *
+ * Note: this only updates the DB join. S3 object cleanup for orphaned
+ * URLs is handled separately (see /users/delete-file flow); we don't
+ * call deleteFileFromS3 here to keep the transaction's blast radius
+ * limited to the database.
+ */
+export async function applyTermFileChanges(t, rfqId, termFilesDiff) {
+  const history = [];
+  for (const url of termFilesDiff.added) {
+    await t.none(
+      `INSERT INTO tbl_rfq_files (rfq_id, file_type, file_url)
+       VALUES ($1, 'term_and_condition', $2)`,
+      [rfqId, url]
+    );
+    history.push({
+      entity_type: 'TERM_FILE', entity_id: null, entity_label: url,
+      field_name: null, change_type: 'CREATE',
+      old_value: null, new_value: url, is_material: false
+    });
+  }
+  for (const url of termFilesDiff.removed) {
+    await t.none(
+      `DELETE FROM tbl_rfq_files
+       WHERE rfq_id = $1 AND file_type = 'term_and_condition' AND file_url = $2`,
+      [rfqId, url]
+    );
+    history.push({
+      entity_type: 'TERM_FILE', entity_id: null, entity_label: url,
+      field_name: null, change_type: 'DELETE',
+      old_value: url, new_value: null, is_material: false
     });
   }
   return history;

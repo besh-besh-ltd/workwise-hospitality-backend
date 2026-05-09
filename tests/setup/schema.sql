@@ -10912,6 +10912,35 @@ ALTER TABLE ONLY public.tbl_vendor_payments
 
 
 --
+-- Name: tbl_units; Type: TABLE; Schema: public; Owner: -
+--
+-- Holds default units (created_by IS NULL) and per-user custom units
+-- (created_by = tbl_users.id). Mirrors the tbl_charge_names global+custom
+-- pattern. Read with: WHERE created_by IS NULL OR created_by = $1.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_units (
+    id SERIAL PRIMARY KEY,
+    name character varying(50) NOT NULL,
+    created_by integer,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS tbl_units_name_scope_idx
+    ON public.tbl_units (LOWER(name), COALESCE(created_by, 0));
+
+CREATE INDEX IF NOT EXISTS tbl_units_created_by_idx
+    ON public.tbl_units (created_by);
+
+INSERT INTO public.tbl_units (name, created_by) VALUES
+    ('pcs', NULL), ('kg', NULL), ('g', NULL), ('tonne', NULL),
+    ('L', NULL), ('mL', NULL), ('m', NULL), ('cm', NULL), ('mm', NULL),
+    ('m²', NULL), ('m³', NULL), ('pack', NULL), ('set', NULL),
+    ('box', NULL), ('roll', NULL), ('bottle', NULL), ('hr', NULL), ('day', NULL)
+ON CONFLICT DO NOTHING;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
