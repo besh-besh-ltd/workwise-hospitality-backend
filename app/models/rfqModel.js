@@ -872,7 +872,7 @@ WHERE NOT EXISTS (
     );
     if (!rfq) return null;
 
-    const [hotelRows, termRows, productRows] = await Promise.all([
+    const [hotelRows, termRows, productRows, termFileRows] = await Promise.all([
       db_con.any(
         `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1 ORDER BY hotel_id`,
         [rfq_id]
@@ -892,6 +892,14 @@ WHERE NOT EXISTS (
          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
          WHERE rp.rfq_id = $1
          ORDER BY rp.id`,
+        [rfq_id]
+      ),
+      // T&C attachments — needed by diffRfqSnapshot to compute the
+      // term_and_condition_files diff during edit.
+      db_con.any(
+        `SELECT file_url FROM tbl_rfq_files
+         WHERE rfq_id = $1 AND file_type = 'term_and_condition'
+         ORDER BY id`,
         [rfq_id]
       )
     ]);
@@ -1010,6 +1018,7 @@ WHERE NOT EXISTS (
       ...rfq,
       hotel_ids: hotelRows.map((h) => h.hotel_id),
       terms: termRows.map((t) => t.terms_id),
+      term_and_condition_files: termFileRows.map((r) => r.file_url),
       products
     };
   },
@@ -2389,6 +2398,8 @@ WHERE NOT EXISTS (
       RFQ.hotel_id,
       RFQ.department_id,
       D_DEPT.title AS department_name,
+      RFQ.process_id,
+      D_PROC.name AS process_name,
       RFQ.hospitality_company_id,
       (
         SELECT EXISTS (
@@ -2593,6 +2604,8 @@ LEFT JOIN tbl_hospitality_company_hotels H
  AND H.is_deleted = 0
 LEFT JOIN tbl_department D_DEPT
   ON D_DEPT.id = RFQ.department_id
+LEFT JOIN tbl_approval_processes D_PROC
+  ON D_PROC.id = RFQ.process_id
 WHERE RFQ.id = $1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;

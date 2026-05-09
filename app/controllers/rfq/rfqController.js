@@ -26,7 +26,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals, findBestMatchingPolicyTx } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -35,6 +35,7 @@ import {
   applyRfqFieldChanges,
   applyProductChanges,
   applyTermsChanges,
+  applyTermFileChanges,
   httpError as updateHttpError
 } from './rfqUpdateHelpers.js';
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
@@ -2304,7 +2305,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       response_email,
       contact_name,
       contact_number,
-      bid_end_date: normalizeDate(bid_end_date),
+      // bid_end_date is `text NOT NULL` on tbl_rfq, so a draft with no
+      // deadline yet has to round-trip as an empty string. The GET handler
+      // (getDraftById) maps '' back to null when serialising the response.
+      bid_end_date: normalizeDate(bid_end_date) ?? '',
       location,
       rfq_type,
       reverse_auction: isReverseAuction ? 1 : 0,
@@ -2346,17 +2350,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
     }
   
-    // Handle terms update
-    if (termsChanged && terms && terms.length > 0) {
-        // First delete existing terms only if terms have changed
+    // Handle terms update — when the user has touched the terms field
+    // (`termsChanged === true`), the full set of selections is replaced.
+    // An empty array is a legitimate state (user deselected every term)
+    // and must clear the join table; the previous combined guard skipped
+    // the delete in that case and left stale rows behind, which then
+    // resurfaced as "all terms selected" on the next reload.
+    if (termsChanged) {
         await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }, t);
-        
-        // Then insert new terms
-        const rfqTerms = terms.map(term => ({ 
-            rfq_id, 
-            terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
-        }));
-        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+
+        if (Array.isArray(terms) && terms.length > 0) {
+            const rfqTerms = terms.map(term => ({
+                rfq_id,
+                terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+            }));
+            await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+        }
     }
   
     if (termFilesChanged && term_and_condition_files) {
@@ -3404,116 +3413,13 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     logger.info(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
   }
 
-  // Check if the creator is the final approver
-  // If yes, auto-approve and set status to READY_TO_PUBLISH immediately
-  const isFinalApprover = await checkIfUserIsFinalApprover(
-    userId,
-    entityType,
-    rfq.hospitality_company_id,
-    rfq.hotel_id,
-    rfq.department_id,
-    txContext,
-    rfq.process_id
-  );
-
-  if (isFinalApprover) {
-    // Creator is the final approver - auto-approve immediately
-    logger.info(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
-
-    // Resolve the policy via the same process-scoped resolver the rest of the
-    // approval engine uses. Previously this site duplicated the lookup with
-    // an inline SQL that omitted process_id from the WHERE clause, allowing
-    // cross-process fall-through (F-APPROVAL-001).
-    const policy = await findBestMatchingPolicyTx({
-      entity_type: entityType,
-      hospitality_company_id: rfq.hospitality_company_id,
-      hotel_id: rfq.hotel_id,
-      department_id: rfq.department_id,
-      process_id: rfq.process_id,
-    }, dbContext);
-
-    if (!policy) {
-      throw new Error(`No approval policy found for ${entityType} in this scope`);
-    }
-
-    // Create approved instance for audit trail
-    const approvedInstance = await dbContext.one(`
-      INSERT INTO tbl_approval_instances
-      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata, completed_at)
-      VALUES ($1, $2, $3, 'APPROVED', 0, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *
-    `, [
-      entityType,
-      rfqId,
-      policy.id,
-      userId,
-      rfq.hospitality_company_id,
-      rfq.hotel_id,
-      rfq.department_id,
-      rfq.process_id,
-      JSON.stringify({
-        rfq_number: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        company_name: rfq.company_name,
-        auto_approved: true,
-        reason: 'Created by final approver'
-      })
-    ]);
-
-    // Log auto-approval action
-    await dbContext.none(
-      `INSERT INTO tbl_approval_actions
-       (approval_instance_id, approver_user_id, action, comment)
-       VALUES ($1, $2, 'APPROVE', $3)`,
-      [approvedInstance.id, userId, 'Auto-approved: Created by final approver']
-    );
-
-    // Record lifecycle event for auto-approval
-    await recordLifecycleEvent({
-      entity_type: entityType,
-      entity_id: rfqId,
-      stage: 'APPROVED',
-      action: 'AUTO_APPROVE',
-      performed_by: userId,
-      metadata: {
-        approval_instance_id: approvedInstance.id,
-        rfq_no: rfq.rfq_no,
-        reason: 'Created by final approver'
-      },
-      txContext: txContext
-    });
-
-    // Update RFQ status to READY_TO_PUBLISH (4) directly
-    await dbContext.none(`
-      UPDATE tbl_rfq
-      SET status = 4
-      WHERE id = $1
-    `, [rfqId]);
-
-    // Schedule the RFQ to be published at tender_publish_date
-    const rfqDetails = await dbContext.oneOrNone(`
-      SELECT tender_publish_date, created_by FROM tbl_rfq WHERE id = $1
-    `, [rfqId]);
-
-    if (rfqDetails) {
-      await scheduleRfqPublish({
-        id: rfqId,
-        rfq_no: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        tender_publish_date: rfqDetails.tender_publish_date,
-        created_by: rfqDetails.created_by
-      }, dbContext);
-    }
-
-    return {
-      instance: approvedInstance,
-      policy: { id: policy.id, entity_type: policy.entity_type },
-      steps: [],
-      totalSteps: 0,
-      autoApproved: true
-    };
-  }
-
-  // Create the approval instance for tracking (approval still proceeds in background)
+  // Create the approval instance for tracking. createApprovalInstance handles
+  // the "creator is final approver" auto-approval case end-to-end, including
+  // persisting per-step + per-approver rows so the lifecycle UI can render
+  // the audit trail. Previously this site short-circuited via
+  // checkIfUserIsFinalApprover and inserted only the parent instance row,
+  // leaving zero tbl_approval_instance_steps / tbl_approval_step_approvers
+  // rows and producing the "No approval steps configured" lifecycle bug.
   let result;
   try {
     result = await createApprovalInstance({
@@ -3536,29 +3442,48 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     result = null;
   }
 
-  // Regardless of approval status, proceed to publish (approval runs in background)
-  // Set status to READY_TO_PUBLISH (4) and schedule publish
+  // Set RFQ to READY_TO_PUBLISH (4). Publishing proceeds whether approval
+  // auto-completed (creator was the final approver in every resolved step)
+  // or is still pending — the scheduler honours the publish date either way.
   await dbContext.none(`
     UPDATE tbl_rfq
     SET status = 4
     WHERE id = $1
   `, [rfqId]);
 
-  // Record lifecycle event noting publish proceeded with pending approval
-  await recordLifecycleEvent({
-    entity_type: entityType,
-    entity_id: rfqId,
-    stage: 'READY_TO_PUBLISH',
-    action: 'PUBLISH_WITHOUT_APPROVAL',
-    performed_by: userId,
-    metadata: {
-      rfq_no: rfq.rfq_no,
-      approval_instance_id: result?.instance?.id || null,
-      approval_status: 'PENDING',
-      note: 'Publishing proceeded without waiting for approval completion'
-    },
-    txContext
-  });
+  const autoApproved = result?.autoApproved === true || result?.instance?.status === 'APPROVED';
+
+  // Lifecycle event: distinguish auto-approved from publish-with-pending-approval
+  if (autoApproved) {
+    await recordLifecycleEvent({
+      entity_type: entityType,
+      entity_id: rfqId,
+      stage: 'APPROVED',
+      action: 'AUTO_APPROVE',
+      performed_by: userId,
+      metadata: {
+        approval_instance_id: result?.instance?.id || null,
+        rfq_no: rfq.rfq_no,
+        reason: 'Created by final approver'
+      },
+      txContext
+    });
+  } else {
+    await recordLifecycleEvent({
+      entity_type: entityType,
+      entity_id: rfqId,
+      stage: 'READY_TO_PUBLISH',
+      action: 'PUBLISH_WITHOUT_APPROVAL',
+      performed_by: userId,
+      metadata: {
+        rfq_no: rfq.rfq_no,
+        approval_instance_id: result?.instance?.id || null,
+        approval_status: 'PENDING',
+        note: 'Publishing proceeded without waiting for approval completion'
+      },
+      txContext
+    });
+  }
 
   // Schedule the RFQ to be published
   const rfqDetails = await dbContext.oneOrNone(`
@@ -3575,11 +3500,11 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     }, dbContext);
   }
 
-  logger.info(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: PENDING)`);
+  logger.info(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: ${result?.instance?.status || 'NONE'})`);
 
   return {
     ...(result || {}),
-    publishedWithPendingApproval: true
+    publishedWithPendingApproval: !autoApproved
   };
 };
 
@@ -5452,6 +5377,9 @@ const rfqController = {
           if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
             throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
           }
+          if (diff.termFiles && (diff.termFiles.added.length > 0 || diff.termFiles.removed.length > 0)) {
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.');
+          }
         }
 
         // 6. Apply changes — order matters because the field UPDATE on tbl_rfq
@@ -5466,8 +5394,11 @@ const rfqController = {
           current
         );
         const termsHistory = await applyTermsChanges(t, rfq_id, diff.terms);
+        const termFilesHistory = diff.termFiles
+          ? await applyTermFileChanges(t, rfq_id, diff.termFiles)
+          : [];
 
-        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory];
+        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
         // 7. Record history rows
         if (allHistory.length > 0) {
@@ -5941,6 +5872,14 @@ const rfqController = {
        const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${id}`);
        draftData[0].mappedHotels = mappedHotels || [];
 
+      // bid_end_date is text NOT NULL in the DB; the auto-create path stores
+      // an empty string when the user hasn't picked a date yet. Surface that
+      // as null to the client so the wizard's date input renders as unset
+      // rather than as the literal empty string.
+      if (draftData[0].rfq_form_data && draftData[0].rfq_form_data.bid_end_date === '') {
+        draftData[0].rfq_form_data.bid_end_date = null;
+      }
+
       // Return in the same format as getRFQDraftData
       res.status(200).json({
         status: 1,
@@ -6058,19 +5997,19 @@ const rfqController = {
         sheetData = sheetRes || null;
       } else {
         // Create a new RFQ
-
-        const currentDate = new Date();
-        let bidEndDate = new Date();
-        bidEndDate.setDate(currentDate.getDate() + 30);
-
+        // bid_end_date is text NOT NULL on tbl_rfq, but the user hasn't
+        // reached the timeline step yet — so we seed an empty string (which
+        // satisfies NOT NULL on a text column) and let the user fill the
+        // real value when they save. The GET handler normalises this empty
+        // string to null in the response so the frontend sees an unset
+        // field. The save-draft Joi schema then rejects empty values.
         rfqData = {
           company_name: user.organization_name || '',
           response_email: user.email,
           contact_name: user.name,
           contact_number: user.mobile || '',
           comment: req.body.comment || '',
-          bid_end_date:
-            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
+          bid_end_date: req.body.bid_end_date || '',
           location: req.body.location || '',
           is_published: 0,
           created_by: user_id,

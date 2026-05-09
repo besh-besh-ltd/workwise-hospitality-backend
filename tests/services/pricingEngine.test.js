@@ -276,17 +276,72 @@ describe("pricingEngine.calculateLineTotal", () => {
     expect(out.total).toBe(1410);
   });
 
-  it("rounds only the final total — intermediates stay floating-point", () => {
+  it("quantises output fields to 2dp (intermediates stay raw)", () => {
     const out = calculateLineTotal({
       unit_price: 1.1,
       quantity: 3,
       tax: 5,
       tax_mode: "percentage",
     });
-    // base = 3.3, base_tax = 0.165, total = 3.465 → Math.round = 3
-    expect(out.base).toBeCloseTo(3.3, 10);
-    expect(out.base_tax).toBeCloseTo(0.165, 10);
-    expect(out.total).toBe(3);
+    // base = 3.3, base_tax = 0.165, total = 3.465 → q2 → 3.47
+    expect(out.base).toBe(3.3);
+    expect(out.base_tax).toBe(0.17);
+    expect(out.total).toBe(3.47);
+  });
+
+  it("quantises vendor-supplied 2dp prices to clean 2dp output", () => {
+    // Vendor types 100.55, qty 1, GST 18% → base 100.55, tax 18.099 → 18.10,
+    // total 118.649 → q2 118.65. No 14-digit float drift in response.
+    const out = calculateLineTotal({
+      unit_price: 100.55,
+      quantity: 1,
+      tax: 18,
+      tax_mode: "percentage",
+    });
+    expect(out.base).toBe(100.55);
+    expect(out.base_tax).toBe(18.10);
+    expect(out.total).toBe(118.65);
+  });
+
+  it("quantises charge breakdowns to 2dp (the freight 0.8% drift case)", () => {
+    // Replicates RFQ 234 vendor 419: 500.47 × 56, freight 5.2% with 0.8% tax.
+    // Without q2: charge.tax = 11.658949119999999. With q2: 11.66.
+    const out = calculateLineTotal({
+      unit_price: 500.47,
+      quantity: 56,
+      tax: 18,
+      tax_mode: "percentage",
+      other_charges: [
+        { name: "Freight", amount: 5.2, amount_mode: "percentage", tax: 0.8, tax_mode: "percentage", slug: "freight" },
+      ],
+    });
+    expect(out.base).toBe(28026.32);
+    expect(out.base_tax).toBe(5044.74);
+    expect(out.charges[0].amount).toBe(1457.37);
+    expect(out.charges[0].tax).toBe(11.66);
+    expect(out.charges[0].subtotal).toBe(1469.03);
+    expect(out.charges_total).toBe(1469.03);
+    expect(out.total).toBe(34540.09);
+  });
+
+  it("quantises multi-line + global charge totals to 2dp", () => {
+    const out = calculateDocumentTotals(
+      [
+        { unit_price: 100.55, quantity: 3, tax: 18, tax_mode: "percentage" },
+        { unit_price: 50.25,  quantity: 2, tax: 12, tax_mode: "percentage" },
+      ],
+      [{ name: "Insurance", amount: 1, amount_mode: "percentage" }]
+    );
+    // Line 1: 100.55 × 3 = 301.65, tax 54.297 → total 355.947 → q2 355.95
+    // Line 2: 50.25 × 2 = 100.50, tax 12.06 → total 112.56
+    // Lines feed q2'd totals into the document sum: 355.95 + 112.56 = 468.51.
+    // Insurance 1% of 468.51 = 4.6851 → q2 4.69. Grand total raw = 473.1951
+    // → q2 473.20 (banker-style 0.005 rounds up at scale 2).
+    expect(out.lines[0].total).toBe(355.95);
+    expect(out.lines[1].total).toBe(112.56);
+    expect(out.grand_subtotal).toBe(468.51);
+    expect(out.global_charges[0].amount).toBe(4.69);
+    expect(out.grand_total).toBe(473.20);
   });
 
   it("defaults missing modes to 'percentage'", () => {
@@ -777,8 +832,8 @@ describe("pricingEngine.normalizeChargesMeta", () => {
     // base = 1000, base_tax = 180
     // freight = 50, freight_tax inherits 18% = 9 → 59
     // package = 20, package_tax inherits 18% = 3.6 → 23.6
-    // total = 1000 + 180 + 59 + 23.6 = 1262.6 → Math.round = 1263
-    expect(out.total).toBe(1263);
+    // total = 1000 + 180 + 59 + 23.6 = 1262.6 → q2 → 1262.6
+    expect(out.total).toBe(1262.6);
   });
 });
 
@@ -829,11 +884,11 @@ describe("pricingEngine — integration scenarios", () => {
     // Line 2: base 1000, base_tax 120 → 1120
     // subtotal = 2359
     // insurance = 23.59
-    // grand total = Math.round(2382.59) = 2383
+    // grand total = 2382.59 → q2 → 2382.59
     expect(out.lines[0].total).toBe(1239);
     expect(out.lines[1].total).toBe(1120);
     expect(out.grand_subtotal).toBe(2359);
-    expect(out.global_charges_total).toBeCloseTo(23.59, 10);
-    expect(out.grand_total).toBe(2383);
+    expect(out.global_charges_total).toBe(23.59);
+    expect(out.grand_total).toBe(2382.59);
   });
 });

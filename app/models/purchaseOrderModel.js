@@ -252,12 +252,12 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
             norm.amount, norm.amount_mode, lineSubtotal
           );
         }
-        // Round to whole rupees, matching pricingEngine.calculateDocumentTotals
+        // Quantise to 2dp, matching pricingEngine.calculateDocumentTotals
         // (which is what the new-PO branch uses). Keeping rounding consistent
         // across the new-PO path and the merge path means the stored
-        // total_value never drifts by 50 paisa just because a PO was built in
+        // total_value never drifts by 1 paisa just because a PO was built in
         // two draftPO calls vs one.
-        const grandTotal = Math.round(lineSubtotal + gcTotal);
+        const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
         await t.none(
           `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
           [grandTotal, existing_po_id]
@@ -661,7 +661,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS quantity,
                 (
-                  SELECT COALESCE(SUM(TPOP.unit_price), 0)::bigint
+                  SELECT COALESCE(SUM(TPOP.unit_price), 0)::numeric(15,2)
                   FROM tbl_purchase_order_product TPOP
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS unit_price,
@@ -672,7 +672,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 -- as line_subtotal for the FE breakdown view.
                 po.total_value AS total_value,
                 (
-                  SELECT COALESCE(SUM(TPOP.total_price), 0)::bigint
+                  SELECT COALESCE(SUM(TPOP.total_price), 0)::numeric(15,2)
                   FROM tbl_purchase_order_product TPOP
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS line_subtotal,
@@ -820,7 +820,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                 WHERE TPOP.purchase_order_id = po.id
               ) AS quantity,
               (
-                SELECT COALESCE(SUM(TPOP.unit_price), 0)::bigint
+                SELECT COALESCE(SUM(TPOP.unit_price), 0)::numeric(15,2)
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
               ) AS unit_price,
@@ -832,7 +832,7 @@ export const getPODetailsById = async (po_id, user_id) => {
               -- charges entirely — kept here as line_subtotal for FE breakdown.
               po.total_value AS total_value,
               (
-                SELECT COALESCE(SUM(TPOP.total_price), 0)::bigint
+                SELECT COALESCE(SUM(TPOP.total_price), 0)::numeric(15,2)
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
               ) AS line_subtotal,
@@ -1379,7 +1379,7 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
           norm.amount, norm.amount_mode, lineSubtotal
         );
       }
-      const grandTotal = Math.round(lineSubtotal + globalChargesTotal);
+      const grandTotal = Math.round((lineSubtotal + globalChargesTotal) * 100) / 100;
 
       await t.none(
         `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
