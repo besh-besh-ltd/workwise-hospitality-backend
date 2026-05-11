@@ -4956,23 +4956,13 @@ const rfqController = {
         if (raStartParsed >= raEndParsed) {
           return res
             .status(400)
-            .json({
-              status: 3,
-              errors: {
-                ra_start_date: 'RA Start Date should be before RA End Date'
-              }
-            })
+            .json({ status: 3, message: 'RA Start Date should be before RA End Date' })
             .end();
         }
         if (bidEndParsed && raStartParsed <= bidEndParsed) {
           return res
             .status(400)
-            .json({
-              status: 3,
-              errors: {
-                ra_start_date: 'RA Start Date should be after Bid End Date'
-              }
-            })
+            .json({ status: 3, message: 'RA Start Date should be after Bid End Date' })
             .end();
         }
       }
@@ -4985,10 +4975,7 @@ const rfqController = {
           .status(400)
           .json({
             status: 2,
-            errors: {
-              rfq_specs:
-                'Some products are missing quantity or unit. Please fill them before proceeding.'
-            }
+            message: 'Some products are missing quantity or unit. Please fill them before proceeding.'
           })
           .end();
       }
@@ -5003,15 +4990,7 @@ const rfqController = {
         }));
         return res
           .status(400)
-          .json({
-            status: 2,
-            message,
-            errors: {
-              vendors: message,
-              details
-            },
-            details
-          })
+          .json({ status: 2, message, details })
           .end();
       }
 
