@@ -1098,6 +1098,78 @@ export const getPODetailsById = async (po_id, user_id) => {
               WHEN po.approval_instance_id IS NOT NULL AND tai.status = 'APPROVED' THEN tai.completed_at
               ELSE TAHH.created_at
             END AS po_approved_on,
+            -- Vendor quote-level T&C files: surfaces files attached by the finalized
+            -- vendor via rfq/quote/create and rfq/quote/update (which appends), so the
+            -- buyer can audit the full attachment trail from the PO page without
+            -- switching to the vendor-only RFQ view.
+            COALESCE(
+              (
+                SELECT JSON_AGG(TQF.file_url)
+                FROM tbl_quotes_files TQF
+                JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
+                WHERE TQ.rfq_id = po.rfq_id
+                  AND TQ.created_by = po.finalized_vendor_id
+                  AND TQF.file_type = 'term_and_condition'
+              ),
+              '[]'::json
+            ) AS vendor_quote_term_files,
+            -- Vendor per-product document files, scoped to RFQ products that are
+            -- actually on this PO. Joined via product_variant_id+variant since
+            -- tbl_quote_items doesn't carry rfq_product_id directly.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'file_url',       QIF.file_url,
+                    'file_type',      QIF.file_type
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_quote_items TQI     ON TQI.product_variant_id = TRP.product_variant_id
+                                            AND TQI.variant = TRP.variant
+                JOIN tbl_quotes TQ           ON TQ.id = TQI.quote_id
+                                            AND TQ.rfq_id = po.rfq_id
+                                            AND TQ.created_by = po.finalized_vendor_id
+                JOIN tbl_quote_item_files QIF ON QIF.quote_item_id = TQI.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS vendor_quote_product_files,
+            -- Vendor technical-evaluation evidence files: surfaces files the
+            -- finalized vendor uploaded against tech-eval clauses on the
+            -- /vendor/technical-evaluation page, scoped to RFQ products on this PO.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'clause_id',      TEC.id,
+                    'clause_text',    TEC.clause_text,
+                    'file_url',       VRF.file_url
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_rfq_product_tech_evaluation TE
+                  ON TE.rfq_id = po.rfq_id
+                 AND TE.tbl_rfq_product_id = TRP.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC
+                  ON TEC.tbl_rfq_product_tech_evaluation_id = TE.id
+                JOIN tbl_rfq_product_tech_evaluation_vendors_response VR
+                  ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                 AND VR.vendor_id = po.finalized_vendor_id
+                JOIN tbl_rfq_product_tech_evaluation_vendors_response_files VRF
+                  ON VRF.tbl_rfq_product_tech_evaluation_vendors_response_id = VR.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS vendor_tech_eval_files,
             (
               SELECT QI.delivery_period
               FROM tbl_purchase_order_product TPOP
