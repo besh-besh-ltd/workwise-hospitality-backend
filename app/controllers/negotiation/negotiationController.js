@@ -54,6 +54,101 @@ const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
 };
 
 /**
+ * Resolve company name, business unit (hotel) name, vendor approvals, and a vendorId->name map
+ * for use in negotiation email templates. Failures are logged but never thrown — email
+ * context is best-effort and should never break the parent flow.
+ */
+// Built-in non-charge field slugs — these are NOT in tbl_charge_names.
+const NON_CHARGE_SYSTEM_SLUGS = new Set([
+  'base_price', 'delivery_period', 'payment_terms', 'vendor_tc', 'comments', 'documents'
+]);
+
+const buildEmailContext = async (rfqData, round) => {
+  let companyName = '';
+  let businessUnitName = '';
+  const vendorApprovals = Array.isArray(round?.vendor_approvals) ? round.vendor_approvals : [];
+  const vendorsLookup = {};
+  const vendorQuotes = {};
+  const chargeLabels = {};
+
+  try {
+    const [companyRow, hotelRow] = await Promise.all([
+      rfqData?.hospitality_company_id
+        ? db.oneOrNone('SELECT name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
+        : Promise.resolve(null),
+      rfqData?.hotel_id
+        ? db.oneOrNone('SELECT name FROM tbl_hospitality_company_hotels WHERE id = $1', [rfqData.hotel_id])
+        : Promise.resolve(null),
+    ]);
+    companyName = companyRow?.name || '';
+    businessUnitName = hotelRow?.name || '';
+
+    const vendorIds = vendorApprovals.map(va => va.vendor_id).filter(Boolean);
+    if (vendorIds.length > 0) {
+      const vendorRows = await db.any(
+        `SELECT id, COALESCE(organization_name, name) AS name
+         FROM tbl_users
+         WHERE id IN ($1:csv)`,
+        [vendorIds]
+      );
+      for (const row of vendorRows) {
+        vendorsLookup[row.id] = row.name;
+      }
+
+      // Fetch each vendor's most recent quote_item for this rfq_product
+      // for the "Vendor Quoted → Target" comparison in the email.
+      if (round?.rfq_id && round?.rfq_product_id) {
+        const productVariantId = round.product_variant_id || null;
+        const quoteRows = await db.any(
+          `SELECT q.created_by AS vendor_id,
+                  qi.unit_price, qi.freight_price, qi.freight_mode,
+                  qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
+                  qi.delivery_period, qi.comment, qi.other_charges,
+                  q.global_payment_term, q.global_comment, q.global_charges,
+                  (SELECT json_agg(json_build_object(
+                      'value', qpt.value, 'type', qpt.type, 'days', qpt.days, 'comment', qpt.comment
+                    ) ORDER BY qpt.id)
+                   FROM tbl_quotes_payment_terms qpt WHERE qpt.quote_id = q.id
+                  ) AS payment_terms
+           FROM tbl_quotes q
+           JOIN tbl_quote_items qi ON qi.quote_id = q.id
+           WHERE q.rfq_id = $1
+             AND q.created_by IN ($2:csv)
+             AND ($3::int IS NULL OR qi.product_variant_id = $3)
+           ORDER BY q."timestamp" DESC`,
+          [round.rfq_id, vendorIds, productVariantId]
+        );
+        for (const row of quoteRows) {
+          if (!vendorQuotes[row.vendor_id]) vendorQuotes[row.vendor_id] = row;
+        }
+      }
+    }
+
+    // Resolve display labels for all charge slugs referenced by this round's
+    // negotiation_fields. tbl_charge_names maps slug -> human-readable name.
+    const chargeSlugs = new Set();
+    for (const va of vendorApprovals) {
+      for (const f of (va.negotiation_fields || [])) {
+        if (f?.name && !NON_CHARGE_SYSTEM_SLUGS.has(f.name) && !/_mode$/.test(f.name)) {
+          chargeSlugs.add(f.name);
+        }
+      }
+    }
+    if (chargeSlugs.size > 0) {
+      const labelRows = await db.any(
+        `SELECT slug, name FROM tbl_charge_names WHERE slug IN ($1:csv)`,
+        [[...chargeSlugs]]
+      );
+      for (const row of labelRows) chargeLabels[row.slug] = row.name;
+    }
+  } catch (err) {
+    logError('Failed to build negotiation email context', err);
+  }
+
+  return { companyName, businessUnitName, vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels };
+};
+
+/**
  * Handle NEGOTIATION post-approval actions (add quotes to finalization)
  * Called after NEGOTIATION approval instance is fully approved
  *
@@ -594,13 +689,23 @@ const NegotiationController = {
           const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
           const roundWithContext = await negotiationModel.getRoundWithContext(result.id);
           const productName = roundWithContext?.product_name || 'Product';
+
+          // Resolve company + business unit (hotel) names and vendor name lookup once
+          const emailContext = await buildEmailContext(rfqData, roundWithContext || result);
+
           if (initiator) {
             await sendNegotiationRoundCreatedNotification({
               round: { ...result, rfq_id },
               rfqNo: rfqData.rfq_no,
               productName,
               initiator,
-              autoApproved: isAutoApproved
+              autoApproved: isAutoApproved,
+              companyName: emailContext.companyName,
+              businessUnitName: emailContext.businessUnitName,
+              vendorApprovals: emailContext.vendorApprovals,
+              vendorsLookup: emailContext.vendorsLookup,
+                vendorQuotes: emailContext.vendorQuotes,
+                chargeLabels: emailContext.chargeLabels
             });
           }
 
@@ -622,28 +727,44 @@ const NegotiationController = {
                 rfqNo: rfqData.rfq_no,
                 productName,
                 initiator: evaluatorOnly[0],
-                commercialEvaluators: evaluatorOnly.slice(1)
+                commercialEvaluators: evaluatorOnly.slice(1),
+                companyName: emailContext.companyName,
+                businessUnitName: emailContext.businessUnitName,
+                vendorApprovals: emailContext.vendorApprovals,
+                vendorsLookup: emailContext.vendorsLookup,
+                vendorQuotes: emailContext.vendorQuotes,
+                chargeLabels: emailContext.chargeLabels
               });
             }
 
-            // Notify vendors
+            // Notify vendors — attach each vendor's own negotiation_fields slice
             const vendors = await negotiationModel.getVendorsForRound(result.id);
             if (vendors.length > 0) {
+              const vaByVendorId = Object.fromEntries(
+                (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
+              );
               const vendorsWithTokens = await Promise.all(
                 vendors.map(async (v) => {
                   const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
-                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                  return {
+                    id: v.id,
+                    name: v.name || v.organization_name || v.company_name,
+                    email: v.email,
+                    token: tokenRows?.[0]?.token || null,
+                    negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
+                    quote: emailContext.vendorQuotes?.[v.id] || null
+                  };
                 })
               );
-              const buyerCompanyRow = rfqData.hospitality_company_id
-                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
-                : null;
               await sendNegotiationRoundVendorNotification({
                 round: roundWithContext || { ...result, rfq_id },
                 rfqNo: rfqData.rfq_no,
                 productName,
-                buyerCompanyName: buyerCompanyRow?.company_name || '',
-                vendors: vendorsWithTokens
+                buyerCompanyName: emailContext.companyName,
+                vendors: vendorsWithTokens,
+                companyName: emailContext.companyName,
+                businessUnitName: emailContext.businessUnitName,
+                chargeLabels: emailContext.chargeLabels
               });
             }
           }
@@ -895,34 +1016,52 @@ const NegotiationController = {
               ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
               : [];
 
+            const emailContext = await buildEmailContext(rfqData, roundWithContext || round);
+
             if (initiator) {
               await sendNegotiationRoundApprovedNotification({
                 round: roundWithContext || round,
                 rfqNo: rfqData.rfq_no,
                 productName: roundWithContext?.product_name || 'Product',
                 initiator,
-                commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+                commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
+                companyName: emailContext.companyName,
+                businessUnitName: emailContext.businessUnitName,
+                vendorApprovals: emailContext.vendorApprovals,
+                vendorsLookup: emailContext.vendorsLookup,
+                vendorQuotes: emailContext.vendorQuotes,
+                chargeLabels: emailContext.chargeLabels
               });
             }
 
             // Send vendor notification emails
             const vendors = await negotiationModel.getVendorsForRound(round_id);
             if (vendors.length > 0) {
+              const vaByVendorId = Object.fromEntries(
+                (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
+              );
               const vendorsWithTokens = await Promise.all(
                 vendors.map(async (v) => {
                   const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
-                  return { id: v.id, name: v.name || v.organization_name || v.company_name, email: v.email, token: tokenRows?.[0]?.token || null };
+                  return {
+                    id: v.id,
+                    name: v.name || v.organization_name || v.company_name,
+                    email: v.email,
+                    token: tokenRows?.[0]?.token || null,
+                    negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
+                    quote: emailContext.vendorQuotes?.[v.id] || null
+                  };
                 })
               );
-              const buyerCompanyRow = rfqData.hospitality_company_id
-                ? await db.oneOrNone('SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1', [rfqData.hospitality_company_id])
-                : null;
               await sendNegotiationRoundVendorNotification({
                 round: roundWithContext || round,
                 rfqNo: rfqData.rfq_no,
                 productName: roundWithContext?.product_name || 'Product',
-                buyerCompanyName: buyerCompanyRow?.company_name || '',
-                vendors: vendorsWithTokens
+                buyerCompanyName: emailContext.companyName,
+                vendors: vendorsWithTokens,
+                companyName: emailContext.companyName,
+                businessUnitName: emailContext.businessUnitName,
+                chargeLabels: emailContext.chargeLabels
               });
             }
           } catch (emailErr) {
@@ -1056,13 +1195,21 @@ const NegotiationController = {
                   ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
                   : [];
 
+                const emailContext = await buildEmailContext(rfqData, roundWithContext || round);
+
                 if (initiator) {
                   await sendNegotiationRoundApprovedNotification({
                     round: roundWithContext || round,
                     rfqNo: rfqData.rfq_no,
                     productName: roundWithContext?.product_name || 'Product',
                     initiator,
-                    commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+                    commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
+                    companyName: emailContext.companyName,
+                    businessUnitName: emailContext.businessUnitName,
+                    vendorApprovals: emailContext.vendorApprovals,
+                    vendorsLookup: emailContext.vendorsLookup,
+                vendorQuotes: emailContext.vendorQuotes,
+                chargeLabels: emailContext.chargeLabels
                   });
                 }
               } catch (emailErr) {
