@@ -1170,6 +1170,34 @@ export const getPODetailsById = async (po_id, user_id) => {
               ),
               '[]'::json
             ) AS vendor_tech_eval_files,
+            -- Buyer technical-evaluation clause files: surfaces files the
+            -- buyer uploaded against tech-eval clauses (clause-modal attachments),
+            -- scoped to RFQ products on this PO.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'clause_id',      TEC.id,
+                    'clause_text',    TEC.clause_text,
+                    'file_url',       TECF.file_url
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_rfq_product_tech_evaluation TE
+                  ON TE.rfq_id = po.rfq_id
+                 AND TE.tbl_rfq_product_id = TRP.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC
+                  ON TEC.tbl_rfq_product_tech_evaluation_id = TE.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses_files TECF
+                  ON TECF.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS buyer_tech_eval_files,
             (
               SELECT QI.delivery_period
               FROM tbl_purchase_order_product TPOP
