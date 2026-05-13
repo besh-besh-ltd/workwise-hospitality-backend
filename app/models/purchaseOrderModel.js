@@ -1148,8 +1148,6 @@ export const getPODetailsById = async (po_id, user_id) => {
                   JSON_BUILD_OBJECT(
                     'rfq_product_id', TPOP.rfq_product_id,
                     'product_name',   TPV.name,
-                    'clause_id',      TEC.id,
-                    'clause_text',    TEC.clause_text,
                     'file_url',       VRF.file_url
                   )
                 )
@@ -1179,8 +1177,6 @@ export const getPODetailsById = async (po_id, user_id) => {
                   JSON_BUILD_OBJECT(
                     'rfq_product_id', TPOP.rfq_product_id,
                     'product_name',   TPV.name,
-                    'clause_id',      TEC.id,
-                    'clause_text',    TEC.clause_text,
                     'file_url',       TECF.file_url
                   )
                 )
