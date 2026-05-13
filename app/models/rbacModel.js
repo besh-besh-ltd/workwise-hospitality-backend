@@ -115,6 +115,69 @@ const rbacModel = {
 
     return t ? run(t) : db.tx(run);
   },
+
+  // Widen role-scope rows so any scope whose company_id is covered by a
+  // mapping_type=0 mapping is forced to hotel_id=NULL. Prevents the data state
+  // that produced 403s on getRfqById for company-wide hospitality users.
+  normalizeRoleScopesAgainstMappings: (scopes = [], mappings = []) => {
+    const companyWide = new Set(
+      mappings
+        .filter((m) => Number(m.mapping_type) === 0)
+        .map((m) => Number(m.hospitality_company_id))
+        .filter((n) => Number.isFinite(n))
+    );
+    const seen = new Set();
+    const out = [];
+    for (const s of scopes) {
+      const hotelId = companyWide.has(Number(s.company_id)) ? null : (s.hotel_id || null);
+      const key = `${s.user_id}|${s.role_id}|${s.company_id}|${hotelId ?? ''}|${s.department_id ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...s, hotel_id: hotelId });
+    }
+    return out;
+  },
+
+  // Collapse hotel-pinned role-scope rows for the given (users, company) into
+  // company-wide rows. Destructive: hotel-pinned rows for that company are
+  // deleted and replaced by one company-wide row per distinct (user, role,
+  // department). Called after a mapping_type=0 mapping is asserted so the
+  // mapping's "all hotels" semantics match the role-scope rows.
+  widenRoleScopesToCompany: (userIds = [], companyId, t = null) => {
+    if (!userIds?.length || !companyId) return Promise.resolve();
+
+    const run = async (tx) => {
+      const deleted = await tx.any(
+        `DELETE FROM tbl_user_role_scopes
+          WHERE user_id IN ($1:csv)
+            AND company_id = $2
+            AND hotel_id IS NOT NULL
+          RETURNING user_id, role_id, department_id`,
+        [userIds, companyId]
+      );
+      if (!deleted.length) return;
+
+      const seen = new Set();
+      for (const d of deleted) {
+        const key = `${d.user_id}|${d.role_id}|${d.department_id ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        await tx.none(
+          `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+           SELECT $1, $2, $3, NULL, $4
+           WHERE NOT EXISTS (
+             SELECT 1 FROM tbl_user_role_scopes
+              WHERE user_id = $1 AND role_id = $2 AND company_id = $3
+                AND hotel_id IS NULL
+                AND department_id IS NOT DISTINCT FROM $4
+           )`,
+          [d.user_id, d.role_id, companyId, d.department_id || null]
+        );
+      }
+    };
+
+    return t ? run(t) : db.tx(run);
+  },
   getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(
       `

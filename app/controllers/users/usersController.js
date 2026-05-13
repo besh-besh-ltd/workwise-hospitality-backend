@@ -820,13 +820,24 @@ create_buyer_company_users: async (req, res, next) => {
 
     /* -------------------- USER ↔ ROLE SCOPES -------------------- */
     if (Array.isArray(roles) && roles.length) {
-      const roleScopes = roles.map(r => ({
-        user_id: createdUser.id,
-        role_id: r.role_id,
-        company_id: r.company_id || companyID,
-        hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
+      // Mirror the payload's mappings into a normalizer-ready shape so any
+      // company-wide mapping forces matching role scopes to hotel_id=NULL.
+      const effectiveMappings = (Array.isArray(mappings) ? mappings : []).map((m) => ({
+        hospitality_company_id: parseInt(m.company_id || m.companyId, 10),
+        mapping_type:
+          (m.mapping_level || m.mappingLevel || 'company') === 'company' ? 0 : 1
       }));
+
+      const roleScopes = rbacModel.normalizeRoleScopesAgainstMappings(
+        roles.map(r => ({
+          user_id: createdUser.id,
+          role_id: r.role_id,
+          company_id: r.company_id || companyID,
+          hotel_id: r.hotel_id || null,
+          department_id: r.department_id || null
+        })),
+        effectiveMappings
+      );
 
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
@@ -2147,14 +2158,23 @@ update_user_detail: async (req, res, next) => {
     const hasRoleUpdate = isAdmin && Array.isArray(reqData.roles);
 
     if (hasDeptUpdate || hasRoleUpdate) {
+      // Read existing hospitality mappings so we can widen any role scope
+      // whose company has a mapping_type=0 (company-wide) mapping.
+      const existingMappings = hasRoleUpdate
+        ? await hospitalityModel.getUserMappings(targetUserId)
+        : [];
+
       const roleScopes = hasRoleUpdate
-        ? reqData.roles.map(r => ({
-            user_id: targetUserId,
-            role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id,
-            hotel_id: r.hotel_id || null,
-            department_id: r.department_id || null
-          }))
+        ? rbacModel.normalizeRoleScopesAgainstMappings(
+            reqData.roles.map(r => ({
+              user_id: targetUserId,
+              role_id: r.role_id,
+              company_id: r.company_id || loggedInUser.company_id,
+              hotel_id: r.hotel_id || null,
+              department_id: r.department_id || null
+            })),
+            existingMappings
+          )
         : null;
 
       if (hasRoleUpdate) {

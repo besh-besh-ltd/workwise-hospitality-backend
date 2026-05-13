@@ -876,6 +876,13 @@ const HospitalityController = {
 
       await hospitalityModel.insertUserMappings(rows);
 
+      // When mapping users at company level, widen any hotel-pinned role
+      // scopes for that company into company-wide scopes — keeps RBAC state
+      // consistent with the new mapping_type=0 and avoids 403s in getRfqById.
+      if (mappingType === 0) {
+        await rbacModel.widenRoleScopesToCompany(sanitizedUserIds, record.id);
+      }
+
       if (autoMapProjects) {
         const projectMappings =
           await hospitalityModel.getProjectMappingsForContext(
