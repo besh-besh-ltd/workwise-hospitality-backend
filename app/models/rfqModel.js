@@ -3033,6 +3033,34 @@ LIMIT 1;`;
       db.query(productQuery, [id, user_id, user_type]),
     ]);
     if (data && data[0] && products) {
+      // Attach tech-eval clauses per product so the Edit RFQ page can echo
+      // them back unchanged in the update snapshot. Without this the diff in
+      // rfqUpdateHelpers flags techEvalChanged whenever clauses exist in DB
+      // but the snapshot sends [], blocking restricted edits.
+      const techRows = await db.query(
+        `SELECT te.tbl_rfq_product_id AS rfq_product_id,
+                json_agg(
+                  json_build_object(
+                    'id', tec.id,
+                    'clause_text', tec.clause_text,
+                    'clause_type', tec.clause_type,
+                    'weightage', tec.weightage
+                  ) ORDER BY tec.id
+                ) FILTER (WHERE tec.id IS NOT NULL) AS clauses
+         FROM tbl_rfq_product_tech_evaluation te
+         LEFT JOIN tbl_rfq_product_tech_evaluation_clauses tec
+           ON tec.tbl_rfq_product_tech_evaluation_id = te.id
+         WHERE te.rfq_id = $1
+         GROUP BY te.tbl_rfq_product_id`,
+        [id]
+      );
+      const techEvalByProduct = {};
+      for (const r of techRows) {
+        techEvalByProduct[r.rfq_product_id] = r.clauses || [];
+      }
+      for (const p of products) {
+        p.tech_eval_clauses = techEvalByProduct[p.id] || [];
+      }
       data[0].products = products;
     }
     return data;
