@@ -647,6 +647,99 @@ export const startVendorAcceptanceReminderCron = () => {
 // ============= NEGOTIATION ROUND EXPIRATION =============
 
 /**
+ * Resolve company name, business unit (hotel) name, vendor approvals, and a vendorId->name
+ * lookup for negotiation email templates. Best-effort: errors are logged, not thrown.
+ */
+const NON_CHARGE_SYSTEM_SLUGS = new Set([
+  'base_price', 'delivery_period', 'payment_terms', 'vendor_tc', 'comments', 'documents'
+]);
+
+const buildNegotiationEmailContext = async (round) => {
+  let companyName = '';
+  let businessUnitName = '';
+  let rfqTitle = '';
+  const vendorApprovals = Array.isArray(round?.vendor_approvals) ? round.vendor_approvals : [];
+  const vendorsLookup = {};
+  const vendorQuotes = {};
+  const chargeLabels = {};
+
+  try {
+    const ctx = round?.rfq_id
+      ? await db.oneOrNone(
+          `SELECT hc.name AS company_name, hch.name AS hotel_name, r.title AS rfq_title
+           FROM tbl_rfq r
+           LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
+           LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = r.hotel_id
+           WHERE r.id = $1`,
+          [round.rfq_id]
+        )
+      : null;
+    companyName = ctx?.company_name || '';
+    businessUnitName = ctx?.hotel_name || '';
+    rfqTitle = ctx?.rfq_title || '';
+
+    const vendorIds = vendorApprovals.map(va => va.vendor_id).filter(Boolean);
+    if (vendorIds.length > 0) {
+      const vendorRows = await db.any(
+        `SELECT id, COALESCE(organization_name, name) AS name
+         FROM tbl_users
+         WHERE id IN ($1:csv)`,
+        [vendorIds]
+      );
+      for (const row of vendorRows) {
+        vendorsLookup[row.id] = row.name;
+      }
+
+      if (round?.rfq_id && round?.rfq_product_id) {
+        const productVariantId = round.product_variant_id || null;
+        const quoteRows = await db.any(
+          `SELECT q.created_by AS vendor_id,
+                  qi.unit_price, qi.freight_price, qi.freight_mode,
+                  qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
+                  qi.delivery_period, qi.comment, qi.other_charges,
+                  q.global_payment_term, q.global_comment, q.global_charges,
+                  (SELECT json_agg(json_build_object(
+                      'value', qpt.value, 'type', qpt.type, 'days', qpt.days, 'comment', qpt.comment
+                    ) ORDER BY qpt.id)
+                   FROM tbl_quotes_payment_terms qpt WHERE qpt.quote_id = q.id
+                  ) AS payment_terms
+           FROM tbl_quotes q
+           JOIN tbl_quote_items qi ON qi.quote_id = q.id
+           WHERE q.rfq_id = $1
+             AND q.created_by IN ($2:csv)
+             AND ($3::int IS NULL OR qi.product_variant_id = $3)
+           ORDER BY q."timestamp" DESC`,
+          [round.rfq_id, vendorIds, productVariantId]
+        );
+        for (const row of quoteRows) {
+          if (!vendorQuotes[row.vendor_id]) vendorQuotes[row.vendor_id] = row;
+        }
+      }
+    }
+
+    const chargeSlugs = new Set();
+    for (const va of vendorApprovals) {
+      for (const f of (va.negotiation_fields || [])) {
+        if (f?.name && !NON_CHARGE_SYSTEM_SLUGS.has(f.name) && !/_mode$/.test(f.name)) {
+          chargeSlugs.add(f.name);
+        }
+      }
+    }
+    if (chargeSlugs.size > 0) {
+      const labelRows = await db.any(
+        `SELECT slug, name FROM tbl_charge_names WHERE slug IN ($1:csv)`,
+        [[...chargeSlugs]]
+      );
+      for (const row of labelRows) chargeLabels[row.slug] = row.name;
+    }
+  } catch (err) {
+    logError('Failed to build negotiation email context (cron)', err);
+  }
+
+  return { companyName, businessUnitName, rfqTitle, vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels };
+};
+
+/**
  * Core handler: processes a negotiation round when its end_date is reached.
  * Re-fetches the round from DB to handle concurrent status changes.
  */
@@ -716,13 +809,22 @@ const handleNegotiationRoundExpiration = async (roundId) => {
           ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
           : [];
 
+        const emailContext = await buildNegotiationEmailContext(round);
+
         if (initiator) {
           await sendNegotiationExpiredNotification({
             round,
             rfqNo: round.rfq_no,
+            rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
             initiator,
-            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
+            companyName: emailContext.companyName,
+            businessUnitName: emailContext.businessUnitName,
+            vendorApprovals: emailContext.vendorApprovals,
+            vendorsLookup: emailContext.vendorsLookup,
+            vendorQuotes: emailContext.vendorQuotes,
+            chargeLabels: emailContext.chargeLabels
           });
         }
       } catch (emailErr) {
@@ -759,12 +861,20 @@ const handleNegotiationRoundExpiration = async (roundId) => {
           : [];
 
         if (commercialEvaluators.length > 0) {
+          const emailContext = await buildNegotiationEmailContext(round);
           await sendNegotiationRoundEndedNotification({
             round,
             rfqNo: round.rfq_no,
+            rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
             quoteCount,
-            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email }))
+            commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
+            companyName: emailContext.companyName,
+            businessUnitName: emailContext.businessUnitName,
+            vendorApprovals: emailContext.vendorApprovals,
+            vendorsLookup: emailContext.vendorsLookup,
+            vendorQuotes: emailContext.vendorQuotes,
+            chargeLabels: emailContext.chargeLabels
           });
         }
       } catch (emailErr) {

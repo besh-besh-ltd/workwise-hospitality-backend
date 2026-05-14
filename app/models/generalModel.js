@@ -2248,7 +2248,7 @@ export async function createApprovalInstance({
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
           approvers: pendingApprovers,
-          extraContext: { rfq_id: metadata?.rfq_id || entity_id, rfq_title: metadata?.rfq_title || '' }
+          extraContext: { rfq_id: metadata?.rfq_id || entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null }
         });
       }
     } catch (emailError) {
@@ -2910,7 +2910,7 @@ export async function submitApprovalAction({
           totalSteps: parseInt(totalSteps.count),
           initiatorName: initiator?.name || 'Unknown',
           approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '' }
+          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null }
         });
       }
     } catch (emailError) {
