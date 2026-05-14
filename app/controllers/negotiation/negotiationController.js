@@ -101,7 +101,7 @@ const buildEmailContext = async (rfqData, round) => {
         const productVariantId = round.product_variant_id || null;
         const quoteRows = await db.any(
           `SELECT q.created_by AS vendor_id,
-                  qi.unit_price, qi.freight_price, qi.freight_mode,
+                  qi.unit_price, qi.quantity, qi.freight_price, qi.freight_mode,
                   qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
                   qi.delivery_period, qi.comment, qi.other_charges,
                   q.global_payment_term, q.global_comment, q.global_charges,
@@ -305,7 +305,7 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  * Creates an approval instance for a negotiation round using the centralized approval engine.
  * Uses entity_type: 'NEGOTIATION' and entity_id: roundId (the negotiation round's own ID).
  */
-const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext) => {
+const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
   try {
     const result = await createApprovalInstance({
       entity_type: 'NEGOTIATION',
@@ -322,7 +322,8 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
         rfq_number: rfqData.rfq_no,
         rfq_title: rfqData.title || '',
         is_tender: rfqData.is_tender,
-        rfq_product_id: rfqProductId
+        rfq_product_id: rfqProductId,
+        end_date: endDate || null
       },
       txContext
     });
@@ -635,7 +636,8 @@ const NegotiationController = {
           rfq_id,
           rfqData,
           user_id,
-          t
+          t,
+          round.end_date
         );
 
         // If auto-approved (initiator is the only approver), activate immediately
@@ -697,6 +699,7 @@ const NegotiationController = {
             await sendNegotiationRoundCreatedNotification({
               round: { ...result, rfq_id },
               rfqNo: rfqData.rfq_no,
+              rfqTitle: rfqData?.title || '',
               productName,
               initiator,
               autoApproved: isAutoApproved,
@@ -725,6 +728,7 @@ const NegotiationController = {
               await sendNegotiationRoundApprovedNotification({
                 round: roundWithContext || { ...result, rfq_id },
                 rfqNo: rfqData.rfq_no,
+                rfqTitle: rfqData?.title || '',
                 productName,
                 initiator: evaluatorOnly[0],
                 commercialEvaluators: evaluatorOnly.slice(1),
@@ -759,6 +763,7 @@ const NegotiationController = {
               await sendNegotiationRoundVendorNotification({
                 round: roundWithContext || { ...result, rfq_id },
                 rfqNo: rfqData.rfq_no,
+                rfqTitle: rfqData?.title || '',
                 productName,
                 buyerCompanyName: emailContext.companyName,
                 vendors: vendorsWithTokens,
@@ -1022,6 +1027,7 @@ const NegotiationController = {
               await sendNegotiationRoundApprovedNotification({
                 round: roundWithContext || round,
                 rfqNo: rfqData.rfq_no,
+                rfqTitle: rfqData?.title || '',
                 productName: roundWithContext?.product_name || 'Product',
                 initiator,
                 commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
@@ -1056,6 +1062,7 @@ const NegotiationController = {
               await sendNegotiationRoundVendorNotification({
                 round: roundWithContext || round,
                 rfqNo: rfqData.rfq_no,
+                rfqTitle: rfqData?.title || '',
                 productName: roundWithContext?.product_name || 'Product',
                 buyerCompanyName: emailContext.companyName,
                 vendors: vendorsWithTokens,
@@ -1201,6 +1208,7 @@ const NegotiationController = {
                   await sendNegotiationRoundApprovedNotification({
                     round: roundWithContext || round,
                     rfqNo: rfqData.rfq_no,
+                    rfqTitle: rfqData?.title || '',
                     productName: roundWithContext?.product_name || 'Product',
                     initiator,
                     commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),

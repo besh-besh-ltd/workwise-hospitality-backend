@@ -146,11 +146,50 @@ export const sendApprovalStepNotification = async ({
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
+    const isNegotiationRound = entityType === 'NEGOTIATION';
     const rfqTitle = extraContext?.rfq_title || '';
+
+    // Negotiation round end_date (timestamp without timezone in DB) — render in IST.
+    let negotiationEndDateStr = '';
+    if (isNegotiationRound && extraContext?.end_date) {
+      let raw = String(extraContext.end_date);
+      if (!raw.includes('+') && !raw.includes('Z')) raw = raw.replace(' ', 'T') + 'Z';
+      const d = new Date(raw);
+      if (!isNaN(d.getTime())) {
+        negotiationEndDateStr = d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+      }
+    }
 
     const subject = isNegotiationType
       ? `Action Required: Approve ${label} — RFQ #${entityIdentifier}${rfqTitle ? ` ${rfqTitle}` : ''} (Step ${stepOrder}/${totalSteps})`
       : `Action Required: Approve ${label} #${entityIdentifier}${rfqTitle ? ` ${rfqTitle}` : ''} (Step ${stepOrder}/${totalSteps})`;
+
+    // CTA label: vendors actually land on Quote Compare for negotiation rounds,
+    // so name the button to match the approval guide steps below.
+    const ctaLabel = isNegotiationRound ? 'View Quote Compare' : 'Review & Approve';
+
+    // Highlighted nudge for committee members (negotiation round only).
+    const committeeNudgeHtml = isNegotiationRound
+      ? `<div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; padding:12px 16px; margin:16px 0; border-radius:4px;">
+           <span style="color:#92400E; font-weight:600;">
+             Approval committee members are requested to approve the negotiation round well in advance to ensure vendors have sufficient time to submit revised quotations.
+           </span>
+         </div>`
+      : '';
+
+    // Step-by-step approval guide (negotiation round only).
+    const approvalGuideHtml = isNegotiationRound
+      ? `<div style="margin-top:24px; padding:14px 16px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px;">
+           <p style="margin:0 0 8px; font-weight:600; color:#1E293B;">How to approve this negotiation round:</p>
+           <ol style="margin:0; padding-left:20px; color:#334155;">
+             <li style="padding:3px 0;">Click the <strong>"${ctaLabel}"</strong> button below.</li>
+             <li style="padding:3px 0;">You will be redirected to the Quote Compare page of RFQ #${entityIdentifier}.</li>
+             <li style="padding:3px 0;">On the <strong>"Negotiation Workspace"</strong>, click on the <strong>"Approve"</strong> button next to the latest round.</li>
+             <li style="padding:3px 0;">Review the Quoted price and the Target price.</li>
+             <li style="padding:3px 0;">Click <strong>Approve</strong> (or <strong>Reject</strong> with a comment) in the approval row.</li>
+           </ol>
+         </div>`
+      : '';
 
     for (const approver of approvers) {
       const headerContent = `<h2>Hello ${approver.user_name || 'Approver'},</h2>`;
@@ -159,7 +198,10 @@ export const sendApprovalStepNotification = async ({
         ? `<ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${entityIdentifier}</li>
-            ${rfqTitle ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle}</li>` : ''}
+            <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
+            ${isNegotiationRound && negotiationEndDateStr
+              ? `<li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${negotiationEndDateStr} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>`
+              : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`
         : `<ul style="list-style:none; padding-left:0; margin-top:16px;">
@@ -185,12 +227,16 @@ export const sendApprovalStepNotification = async ({
 
           ${detailsList}
 
+          ${committeeNudgeHtml}
+
           <div style="text-align:center; margin-top:24px;">
             <a href="${actionUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              Review & Approve
+              ${ctaLabel}
             </a>
           </div>
+
+          ${approvalGuideHtml}
 
           <p style="text-align:center; margin-top:30px;">
             <strong>— Phileein Hospitality Team</strong>
