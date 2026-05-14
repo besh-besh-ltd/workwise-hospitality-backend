@@ -101,7 +101,7 @@ const buildEmailContext = async (rfqData, round) => {
         const productVariantId = round.product_variant_id || null;
         const quoteRows = await db.any(
           `SELECT q.created_by AS vendor_id,
-                  qi.unit_price, qi.freight_price, qi.freight_mode,
+                  qi.unit_price, qi.quantity, qi.freight_price, qi.freight_mode,
                   qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
                   qi.delivery_period, qi.comment, qi.other_charges,
                   q.global_payment_term, q.global_comment, q.global_charges,
