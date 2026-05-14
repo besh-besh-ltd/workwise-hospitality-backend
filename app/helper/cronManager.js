@@ -657,6 +657,7 @@ const NON_CHARGE_SYSTEM_SLUGS = new Set([
 const buildNegotiationEmailContext = async (round) => {
   let companyName = '';
   let businessUnitName = '';
+  let rfqTitle = '';
   const vendorApprovals = Array.isArray(round?.vendor_approvals) ? round.vendor_approvals : [];
   const vendorsLookup = {};
   const vendorQuotes = {};
@@ -665,7 +666,7 @@ const buildNegotiationEmailContext = async (round) => {
   try {
     const ctx = round?.rfq_id
       ? await db.oneOrNone(
-          `SELECT hc.name AS company_name, hch.name AS hotel_name
+          `SELECT hc.name AS company_name, hch.name AS hotel_name, r.title AS rfq_title
            FROM tbl_rfq r
            LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
            LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = r.hotel_id
@@ -675,6 +676,7 @@ const buildNegotiationEmailContext = async (round) => {
       : null;
     companyName = ctx?.company_name || '';
     businessUnitName = ctx?.hotel_name || '';
+    rfqTitle = ctx?.rfq_title || '';
 
     const vendorIds = vendorApprovals.map(va => va.vendor_id).filter(Boolean);
     if (vendorIds.length > 0) {
@@ -734,7 +736,7 @@ const buildNegotiationEmailContext = async (round) => {
     logError('Failed to build negotiation email context (cron)', err);
   }
 
-  return { companyName, businessUnitName, vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels };
+  return { companyName, businessUnitName, rfqTitle, vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels };
 };
 
 /**
@@ -813,6 +815,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
           await sendNegotiationExpiredNotification({
             round,
             rfqNo: round.rfq_no,
+            rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
             initiator,
             commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
@@ -862,6 +865,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
           await sendNegotiationRoundEndedNotification({
             round,
             rfqNo: round.rfq_no,
+            rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
             quoteCount,
             commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),

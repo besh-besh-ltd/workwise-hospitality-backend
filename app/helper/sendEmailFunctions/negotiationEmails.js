@@ -330,6 +330,7 @@ const buildSingleVendorTargetsHtml = (fields = [], vendorQuote = null, chargeLab
 export const sendNegotiationExpiredNotification = async ({
   round,
   rfqNo,
+  rfqTitle = '',
   productName,
   initiator,
   commercialEvaluators = [],
@@ -363,6 +364,7 @@ export const sendNegotiationExpiredNotification = async ({
 
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+          <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
           <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
@@ -421,6 +423,7 @@ export const sendNegotiationExpiredNotification = async ({
 export const sendNegotiationRoundEndedNotification = async ({
   round,
   rfqNo,
+  rfqTitle = '',
   productName,
   quoteCount = 0,
   commercialEvaluators = [],
@@ -464,6 +467,7 @@ export const sendNegotiationRoundEndedNotification = async ({
 
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+            <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
             <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
             <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
             <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
@@ -519,6 +523,7 @@ export const sendNegotiationRoundEndedNotification = async ({
 export const sendNegotiationRoundCreatedNotification = async ({
   round,
   rfqNo,
+  rfqTitle = '',
   productName,
   initiator,
   autoApproved = false,
@@ -562,10 +567,11 @@ export const sendNegotiationRoundCreatedNotification = async ({
 
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+          <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
           <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
-          <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
+          <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>
         </ul>
 
         ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels)}
@@ -612,6 +618,7 @@ export const sendNegotiationRoundCreatedNotification = async ({
 export const sendNegotiationRoundVendorNotification = async ({
   round,
   rfqNo,
+  rfqTitle = '',
   productName,
   buyerCompanyName,
   vendors = [],
@@ -647,6 +654,7 @@ export const sendNegotiationRoundVendorNotification = async ({
 
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+            <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
             <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
             <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || buyerCompanyName || '—'}</li>
             <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
@@ -702,6 +710,7 @@ export const sendNegotiationRoundVendorNotification = async ({
 export const sendNegotiationRoundApprovedNotification = async ({
   round,
   rfqNo,
+  rfqTitle = '',
   productName,
   initiator,
   commercialEvaluators = [],
@@ -735,6 +744,7 @@ export const sendNegotiationRoundApprovedNotification = async ({
 
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
+          <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
           <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
