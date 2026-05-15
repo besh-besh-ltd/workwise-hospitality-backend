@@ -1811,8 +1811,37 @@ WHERE NOT EXISTS (
         });
     });
   },
-  getRfqByUser: async (limit, offset, user_id) => {
+  getRfqByUser: async (limit, offset, user_id, negotiationFilter = null) => {
     return new Promise(function (resolve, reject) {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND nr.status = 'ACTIVE'
+              AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND (
+                nr.status = 'ENDED'
+                OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr2
+            WHERE nr2.rfq_id = RFQ.id
+              AND $3 = ANY(nr2.vendor_ids)
+              AND nr2.status = 'ACTIVE'
+              AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      }
       db.any(
         `SELECT
           RFQ.id,
@@ -1901,6 +1930,7 @@ WHERE NOT EXISTS (
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
+        ${negotiationClause}
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
         [offset, limit, user_id]
@@ -8926,13 +8956,43 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-  getVendorRfqCount: async (user_id) => {
+  getVendorRfqCount: async (user_id, negotiationFilter = null) => {
     return new Promise((resolve, reject) => {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND nr.status = 'ACTIVE'
+             AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND (
+               nr.status = 'ENDED'
+               OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr2
+           WHERE nr2.rfq_id = r.id
+             AND $1 = ANY(nr2.vendor_ids)
+             AND nr2.status = 'ACTIVE'
+             AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      }
       db.one(
         `SELECT COUNT(DISTINCT v.rfq_id)
          FROM tbl_rfq_product_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
+         WHERE v.user_id = $1 AND r.is_published = 1
+         ${negotiationClause}`, // Matching user_id in tbl_rfq_product_vendors
         [user_id]
       )
         .then(function (data) {

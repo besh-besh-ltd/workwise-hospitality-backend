@@ -6610,8 +6610,13 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
-      const totalRFQ = await rfqModel.getVendorRfqCount(user_id);
+      const allowedNegotiationFilters = ['active', 'ended'];
+      const negotiation_filter = allowedNegotiationFilters.includes(req.body.negotiation_filter)
+        ? req.body.negotiation_filter
+        : null;
+
+      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, negotiation_filter);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, negotiation_filter);
 
       res
         .status(200)
