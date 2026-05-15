@@ -148,6 +148,9 @@ export const sendApprovalStepNotification = async ({
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
     const isNegotiationRound = entityType === 'NEGOTIATION';
     const rfqTitle = extraContext?.rfq_title || '';
+    const productName = extraContext?.product_name || '';
+    const companyName = extraContext?.company_name || '';
+    const hotelName = extraContext?.hotel_name || '';
 
     // Negotiation round end_date (timestamp without timezone in DB) — render in IST.
     let negotiationEndDateStr = '';
@@ -182,7 +185,7 @@ export const sendApprovalStepNotification = async ({
       ? `<div style="margin-top:24px; padding:14px 16px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px;">
            <p style="margin:0 0 8px; font-weight:600; color:#1E293B;">How to approve this negotiation round:</p>
            <ol style="margin:0; padding-left:20px; color:#334155;">
-             <li style="padding:3px 0;">Click the <strong>"${ctaLabel}"</strong> button below.</li>
+             <li style="padding:3px 0;">Click the above <strong>"${ctaLabel}"</strong> button.</li>
              <li style="padding:3px 0;">You will be redirected to the Quote Compare page of RFQ #${entityIdentifier}.</li>
              <li style="padding:3px 0;">On the <strong>"Negotiation Workspace"</strong>, click on the <strong>"Approve"</strong> button next to the latest round.</li>
              <li style="padding:3px 0;">Review the Quoted price and the Target price.</li>
@@ -199,6 +202,11 @@ export const sendApprovalStepNotification = async ({
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${entityIdentifier}</li>
             <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
+            ${isNegotiationRound
+              ? `<li style="padding:4px 0;"><strong>Product:</strong> ${productName || '—'}</li>
+                 <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
+                 <li style="padding:4px 0;"><strong>Business Unit:</strong> ${hotelName || '—'}</li>`
+              : ''}
             ${isNegotiationRound && negotiationEndDateStr
               ? `<li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${negotiationEndDateStr} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>`
               : ''}
@@ -211,9 +219,11 @@ export const sendApprovalStepNotification = async ({
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`;
 
-      const approvalDescription = isNegotiationType
-        ? `<strong>${label}</strong> for <strong>RFQ #${entityIdentifier}${rfqTitle ? ` — ${rfqTitle}` : ''}</strong>`
-        : `<strong>${label} #${entityIdentifier}</strong>`;
+      const approvalDescription = isNegotiationRound
+        ? `<strong>${label}</strong>`
+        : isNegotiationType
+          ? `<strong>${label}</strong> for <strong>RFQ #${entityIdentifier}${rfqTitle ? ` — ${rfqTitle}` : ''}</strong>`
+          : `<strong>${label} #${entityIdentifier}</strong>`;
 
       const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
