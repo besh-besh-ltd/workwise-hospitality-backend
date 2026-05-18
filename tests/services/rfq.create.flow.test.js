@@ -262,7 +262,7 @@ describe("rfqController.create — reverse-auction date validation", () => {
     });
     await rfqController.create(m.req, m.res);
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.errors.ra_start_date).toMatch(/before RA End Date/i);
+    expect(m.calls.body.message).toMatch(/before RA End Date/i);
   });
 
   it("rejects when ra_start_date <= bid_end_date", async () => {
@@ -278,7 +278,7 @@ describe("rfqController.create — reverse-auction date validation", () => {
     });
     await rfqController.create(m.req, m.res);
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.errors.ra_start_date).toMatch(/after Bid End Date/i);
+    expect(m.calls.body.message).toMatch(/after Bid End Date/i);
   });
 
   it("ALLOWS when reverse_auction is OFF, regardless of ra_* values (gate skipped)", async () => {
@@ -319,7 +319,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
     expect(m.calls.body.status).toBe(2);
-    expect(m.calls.body.errors.rfq_specs).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
   });
 
   it("rejects when Quantity spec is empty/whitespace", async () => {
@@ -337,7 +337,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     });
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.errors.rfq_specs).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
   });
 
   it("rejects when Quantity spec is non-numeric", async () => {
@@ -354,7 +354,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     });
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.errors.rfq_specs).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
   });
 });
 
