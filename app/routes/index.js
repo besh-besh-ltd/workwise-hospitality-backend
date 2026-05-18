@@ -19,6 +19,8 @@ import RbacRoutes from './rbac/rbacRoutes.js';
 import ArcRoutes from './arc/arcRoutes.js';
 import DashboardV2Routes from './dashboard/dashboardV2Routes.js';
 import VendorDashboardRoutes from './dashboard/vendorDashboardRoutes.js';
+import PricingRoutes from './pricing/pricingRoutes.js';
+import UnitsRoutes from './units/unitsRoutes.js';
 
 const v1 = Router();
 
@@ -40,5 +42,7 @@ v1.use('/rbac', RbacRoutes);
 v1.use('/arc', ArcRoutes);
 v1.use('/dashboard-v2', DashboardV2Routes);
 v1.use('/vendor-dashboard', VendorDashboardRoutes);
+v1.use('/pricing', PricingRoutes);
+v1.use('/units', UnitsRoutes);
 
 export default v1;

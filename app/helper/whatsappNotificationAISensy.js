@@ -8,11 +8,23 @@ const aisensy_bearer_token =  process.env.AISENSY_API_KEY
 
 
 const formatPhoneNumber = (input) => {
+  // F-CREATE-WHATSAPP-001: null-guard. Returns null when no phone number
+  // is supplied (or the input collapses to empty after stripping); call
+  // sites must noop on null instead of attempting to send.
+  if (input === null || input === undefined) {
+    return null;
+  }
+  const raw = String(input);
+
   // Remove all spaces and special characters
-  let cleanedInput = input.replace(/[^\d]/g, '');
+  let cleanedInput = raw.replace(/[^\d]/g, '');
 
   // Remove leading zeros
   cleanedInput = cleanedInput.replace(/^0+/, '');
+
+  if (cleanedInput.length === 0) {
+    return null;
+  }
 
   // Check the length and format the number
   if (cleanedInput.length === 10) {
@@ -26,11 +38,20 @@ const formatPhoneNumber = (input) => {
 const whatsappNotificationAISensy = {
   // Function to send a notification when a buyer creates an RFQ
   buyerCreatesRFQNotification: async (payload) => {
+    // F-CREATE-WHATSAPP-001: noop when the user has no phone number on
+    // file. Without this guard, formatPhoneNumber crashes on undefined
+    // and the controller's success path is interrupted.
+    const destination = formatPhoneNumber(payload?.mobile);
+    if (!destination) {
+      logger.info('Skipping buyerCreatesRFQNotification — no phone number on file');
+      return;
+    }
+
     // Construct the data payload for the WhatsApp message
     const data = {
       apiKey: aisensy_bearer_token,
       campaignName: 'buyerCreatesRFQNotification',
-      destination: formatPhoneNumber(payload.mobile),
+      destination,
       userName: 'letsworkwise',
       templateParams: [
         `${payload.rfq_no}`,

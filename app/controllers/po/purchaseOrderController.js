@@ -11,6 +11,20 @@ import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../.
 import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
 import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
+import pricingEngine from "../../services/pricingEngine.js";
+
+// Tiny tagged-error class for controllers that need to map a thrown
+// failure mode to a specific HTTP status code (instead of the historic
+// "everything is 400/500" pattern). Used by acceptPO/rejectPO to
+// distinguish 404 (not-found) / 403 (wrong vendor) / 409 (wrong state)
+// per F-PO-IDEM-001.
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.name = 'HttpError';
+    this.statusCode = statusCode;
+  }
+}
 
 export const getPOByRFQ = async (req, res) => {
     try {
@@ -126,12 +140,53 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
 
 export const draftPO = async (poInfo, user, txn) => {
   try {
-    const { rfq_id, project_id, total_value, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
+    const { rfq_id, project_id, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
 
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
+
+    // Server-authoritative recompute: ignore the client's total_value and
+    // derive it from the engine using the charges_meta that will actually
+    // persist (which buildAuthoritativePOPayload may already have replaced
+    // with values from tbl_quote_items). Document-level global_charges live
+    // on tbl_quotes (one row per vendor's quote) — fetch them and roll them
+    // into total_value via calculateDocumentTotals so the stored grand total
+    // matches what the printed PO renders.
+    const dbCtx = txn || db;
+    const meta = pricingEngine.normalizeChargesMeta(product_info.charges_meta || {});
+    let globalCharges = [];
+    if (quote_item_id) {
+      const quoteRow = await dbCtx.oneOrNone(
+        `SELECT TQ.global_charges
+           FROM tbl_quote_items TQI
+           JOIN tbl_quotes TQ ON TQ.id = TQI.quote_id
+          WHERE TQI.id = $1`,
+        [quote_item_id]
+      );
+      const raw = quoteRow?.global_charges;
+      if (Array.isArray(raw)) globalCharges = raw;
+      else if (typeof raw === 'string' && raw.trim()) {
+        try { globalCharges = JSON.parse(raw); } catch (_e) { globalCharges = []; }
+      }
+    }
+    const docOut = pricingEngine.calculateDocumentTotals(
+      [{
+        unit_price: product_info.unit_price,
+        quantity: product_info.quantity,
+        tax: meta.tax,
+        tax_mode: meta.tax_mode,
+        other_charges: meta.other_charges,
+      }],
+      globalCharges
+    );
+    // Line total = engine's per-line total (basic + base_tax + per-line charges)
+    // — written to tbl_purchase_order_product.total_price.
+    // Grand total = line total + document-level global charges — written to
+    // tbl_rfq_purchase_order.total_value (the PO header).
+    const line_total = docOut.lines[0]?.total ?? 0;
+    const total_value = docOut.grand_total;
 
     const result = await draftPurchaseOrder(
       rfq_id,
@@ -144,7 +199,9 @@ export const draftPO = async (poInfo, user, txn) => {
       user,
       existing_po_id,
       selected_hierarchy,
-      txn
+      txn,
+      globalCharges,
+      line_total
     );
 
     return result;
@@ -397,12 +454,19 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
       WHERE pop.purchase_order_id = $1
     `, [purchaseOrder.id]);
 
+    // F-PO-CASCADE-001: scope the de-finalization cascade by the PO's
+    // finalized_vendor_id so a multi-vendor PO rejection only wipes the
+    // rejecting vendor's finalization rows. Without this guard, every
+    // finalization row matching (rfq_id, product_variant_id, variant) is
+    // moved to history — including other vendors' rows that happen to be
+    // finalized on the same product.
     for (const product of poProducts) {
       const finalization = await t.oneOrNone(`
         SELECT * FROM tbl_quote_finalization
         WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+          AND vendor_id = $4
         LIMIT 1
-      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant]);
+      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant, purchaseOrder.finalized_vendor_id]);
 
       if (!finalization) continue;
 
@@ -773,13 +837,25 @@ export const acceptPO = async (req, res) => {
     const vendorUserId = req.user.id;
 
     const result = await db.tx(async t => {
-      const po = await t.oneOrNone(`
-        SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
-      `, [po_id, vendorUserId]);
-
+      // F-PO-IDEM-001: split the lookup into its three failure modes so the
+      // caller can distinguish (404 not-found / 403 wrong-vendor / 409
+      // wrong-state) instead of receiving an ambiguous lump.
+      const po = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        [po_id]
+      );
       if (!po) {
-        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+        throw new HttpError(404, 'PO not found.');
+      }
+      if (po.finalized_vendor_id !== vendorUserId) {
+        throw new HttpError(403, 'You are not the assigned vendor for this PO.');
+      }
+      if (po.status !== 'acceptance_pending') {
+        const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
+        const message = alreadyActioned
+          ? `PO has already been actioned (status: ${po.status}).`
+          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+        throw new HttpError(409, message);
       }
 
       await t.none(`
@@ -825,7 +901,8 @@ export const acceptPO = async (req, res) => {
     });
   } catch (error) {
     logError(error);
-    return res.status(400).json({
+    const statusCode = error instanceof HttpError ? error.statusCode : 400;
+    return res.status(statusCode).json({
       status: 0,
       message: error.message || 'Failed to accept PO.',
     });
@@ -846,13 +923,23 @@ export const rejectPO = async (req, res) => {
     const vendorUserId = req.user.id;
 
     const result = await db.tx(async t => {
-      const po = await t.oneOrNone(`
-        SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1 AND status = 'acceptance_pending' AND finalized_vendor_id = $2
-      `, [po_id, vendorUserId]);
-
+      // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
+      const po = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        [po_id]
+      );
       if (!po) {
-        throw new Error('PO not found, already actioned, or you are not the assigned vendor.');
+        throw new HttpError(404, 'PO not found.');
+      }
+      if (po.finalized_vendor_id !== vendorUserId) {
+        throw new HttpError(403, 'You are not the assigned vendor for this PO.');
+      }
+      if (po.status !== 'acceptance_pending') {
+        const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
+        const message = alreadyActioned
+          ? `PO has already been actioned (status: ${po.status}).`
+          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+        throw new HttpError(409, message);
       }
 
       await t.none(`
@@ -895,7 +982,8 @@ export const rejectPO = async (req, res) => {
     });
   } catch (error) {
     logError(error);
-    return res.status(400).json({
+    const statusCode = error instanceof HttpError ? error.statusCode : 400;
+    return res.status(statusCode).json({
       status: 0,
       message: error.message || 'Failed to reject PO.',
     });

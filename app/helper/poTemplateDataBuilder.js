@@ -68,6 +68,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       POQ.id AS source_quote_id,
       POQ.gstin AS quote_gstin,
       POQ.global_comment,
+      POQ.global_charges AS legacy_global_charges,
       TC.company_name,
       TC.cin AS buyer_cin,
       TC.gstin AS buyer_gstin,
@@ -87,7 +88,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     LEFT JOIN tbl_users INITIATOR ON INITIATOR.id = PO.initiated_by
     LEFT JOIN tbl_projects PROJ ON PROJ.id = RFQ.project_id
     LEFT JOIN LATERAL (
-      SELECT TQ.id, TQ.gstin, TQ.global_comment
+      SELECT TQ.id, TQ.gstin, TQ.global_comment, TQ.global_charges
       FROM tbl_purchase_order_product POP_Q
       JOIN tbl_quote_items TQI ON TQI.id = POP_Q.quote_id
       JOIN tbl_quotes TQ ON TQ.id = TQI.quote_id
@@ -168,7 +169,25 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
   `, [po_id]);
 
   const taxMode = resolvePOTaxMode(buyerLocation, supplierLocation);
-  const pricing = buildPOTemplatePricing(items, taxMode);
+  // Document-level global charges — primary source is the snapshot column on
+  // tbl_rfq_purchase_order (populated by draftPO at PO creation time, so the
+  // PDF renders the same numbers regardless of later edits/deletes to the
+  // source quote). Legacy POs drafted before snapshotting have an empty
+  // PO.global_charges array; fall back to a live read from
+  // tbl_quotes.global_charges via the LATERAL join (POQ.legacy_global_charges)
+  // so already-issued PDFs keep the totals they had before.
+  const parseJsonbArray = (raw) => {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === 'string' && raw.trim()) {
+      try { return JSON.parse(raw); } catch (_e) { return []; }
+    }
+    return [];
+  };
+  const snapshotGlobalCharges = parseJsonbArray(poData.global_charges);
+  const parsedGlobalCharges = snapshotGlobalCharges.length > 0
+    ? snapshotGlobalCharges
+    : parseJsonbArray(poData.legacy_global_charges);
+  const pricing = buildPOTemplatePricing(items, taxMode, parsedGlobalCharges);
   const buyerAddress = formatCompanyLocationDisplay(buyerLocation, poData.buyer_legacy_location);
   const supplierAddress = formatCompanyLocationDisplay(supplierLocation, supplier?.legacy_address);
 

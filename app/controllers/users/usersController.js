@@ -12,8 +12,10 @@ import {
   notificationMail,
   convertSixDigit,
   addDefaultNotifications,
-  getDateRange
+  getDateRange,
+  deleteFileFromS3
 } from '../../helper/common.js';
+import s3Client from '../../config/s3config.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
@@ -2814,6 +2816,46 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
+  delete_files: async (req, res) => {
+    try {
+      const { file_urls } = req.body;
+
+      if (!file_urls || !Array.isArray(file_urls) || file_urls.length === 0) {
+        return res.status(400).json({
+          status: 0,
+          message: 'file_urls is required and must be a non-empty array'
+        });
+      }
+
+      // Delete DB records from all file tables
+      const fileTables = [
+        'tbl_quote_item_files',
+        'tbl_quotes_files',
+        'tbl_rfq_files',
+        'tbl_rfq_product_files'
+      ];
+      for (const table of fileTables) {
+        await db.none(`DELETE FROM ${table} WHERE file_url IN ($1:csv)`, [file_urls]);
+      }
+
+      // Delete from S3
+      await Promise.allSettled(
+        file_urls.map(url => deleteFileFromS3(s3Client, url))
+      );
+
+      return res.status(200).json({
+        status: 1,
+        message: `${file_urls.length} file(s) deleted successfully`
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
   registration_upload: async (req, res) => {
     try {
       if (!req.files || !req.files.file || req.files.file.length === 0) {
@@ -3114,10 +3156,15 @@ publish_profile_reviews: async (req, res, next) => {
     try {
       // let user_id = req.user.id;
       let subscription = false;
-      if (!req.is_verified || !req.user.subscription_plan_id) {
+      // showContact=true comes from the Quote Compare vendor card dropdown.
+      // Hospitality buyers are authenticated but lack a user-level subscription_plan_id
+      // (they're under hotel-level access), so the subscription gate would otherwise
+      // hide mobile/email. Bypass it for that entry point.
+      const showContact = req.query.showContact === 'true' && req.is_verified;
+      if (!req.is_verified || (!req.user.subscription_plan_id && !showContact)) {
         user = await userModel.vendorinfo(user_id);
       } else {
-        subscription = true;
+        subscription = !!req.user.subscription_plan_id;
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
 

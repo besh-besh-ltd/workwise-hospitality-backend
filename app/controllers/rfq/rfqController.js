@@ -26,7 +26,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -35,6 +35,7 @@ import {
   applyRfqFieldChanges,
   applyProductChanges,
   applyTermsChanges,
+  applyTermFileChanges,
   httpError as updateHttpError
 } from './rfqUpdateHelpers.js';
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
@@ -59,6 +60,8 @@ import {
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
 } from '../../helper/quoteVisibility.js';
+import pricingEngine from '../../services/pricingEngine.js';
+import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -2302,7 +2305,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       response_email,
       contact_name,
       contact_number,
-      bid_end_date: normalizeDate(bid_end_date),
+      // bid_end_date is `text NOT NULL` on tbl_rfq, so a draft with no
+      // deadline yet has to round-trip as an empty string. The GET handler
+      // (getDraftById) maps '' back to null when serialising the response.
+      bid_end_date: normalizeDate(bid_end_date) ?? '',
       location,
       rfq_type,
       reverse_auction: isReverseAuction ? 1 : 0,
@@ -2344,17 +2350,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
     }
   
-    // Handle terms update
-    if (termsChanged && terms && terms.length > 0) {
-        // First delete existing terms only if terms have changed
+    // Handle terms update — when the user has touched the terms field
+    // (`termsChanged === true`), the full set of selections is replaced.
+    // An empty array is a legitimate state (user deselected every term)
+    // and must clear the join table; the previous combined guard skipped
+    // the delete in that case and left stale rows behind, which then
+    // resurfaced as "all terms selected" on the next reload.
+    if (termsChanged) {
         await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }, t);
-        
-        // Then insert new terms
-        const rfqTerms = terms.map(term => ({ 
-            rfq_id, 
-            terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
-        }));
-        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+
+        if (Array.isArray(terms) && terms.length > 0) {
+            const rfqTerms = terms.map(term => ({
+                rfq_id,
+                terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+            }));
+            await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+        }
     }
   
     if (termFilesChanged && term_and_condition_files) {
@@ -2972,7 +2983,9 @@ INSERT INTO tbl_rfq (
   vendor_clarification_date,
   hospitality_company_id,
   tender_fees,
-  hotel_id
+  hotel_id,
+  process_id,
+  department_id
 )
 SELECT
   (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
@@ -3001,7 +3014,9 @@ SELECT
   vendor_clarification_date,
   (SELECT hch.hospitality_company_id FROM tbl_hospitality_company_hotels hch WHERE hch.id = $2),
   tender_fees,
-  $2
+  $2,
+  process_id,
+  department_id
 FROM tbl_rfq
 WHERE id = $1
 RETURNING id;
@@ -3398,124 +3413,13 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     logger.info(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
   }
 
-  // Check if the creator is the final approver
-  // If yes, auto-approve and set status to READY_TO_PUBLISH immediately
-  const isFinalApprover = await checkIfUserIsFinalApprover(
-    userId,
-    entityType,
-    rfq.hospitality_company_id,
-    rfq.hotel_id,
-    rfq.department_id,
-    txContext
-  );
-
-  if (isFinalApprover) {
-    // Creator is the final approver - auto-approve immediately
-    logger.info(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
-
-    // Create an approved approval instance for audit trail
-    const policy = await dbContext.oneOrNone(`
-      SELECT p.*,
-             CASE
-               WHEN $4 IS NOT NULL AND $3 IS NOT NULL THEN 3
-               WHEN $3 IS NOT NULL THEN 2
-               ELSE 1
-             END as specificity_score
-      FROM tbl_approval_policies p
-      WHERE entity_type = $1
-        AND hospitality_company_id = $2
-        AND is_active = true
-        AND (
-          ($4 = department_id AND $3 = hotel_id)
-          OR (department_id IS NULL AND $3 = hotel_id)
-          OR (department_id IS NULL AND hotel_id IS NULL)
-        )
-      ORDER BY specificity_score DESC
-      LIMIT 1
-    `, [entityType, rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id]);
-
-    if (!policy) {
-      throw new Error(`No approval policy found for ${entityType} in this scope`);
-    }
-
-    // Create approved instance for audit trail
-    const approvedInstance = await dbContext.one(`
-      INSERT INTO tbl_approval_instances
-      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata, completed_at)
-      VALUES ($1, $2, $3, 'APPROVED', 0, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *
-    `, [
-      entityType,
-      rfqId,
-      policy.id,
-      userId,
-      rfq.hospitality_company_id,
-      rfq.hotel_id,
-      rfq.department_id,
-      rfq.process_id,
-      JSON.stringify({
-        rfq_number: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        company_name: rfq.company_name,
-        auto_approved: true,
-        reason: 'Created by final approver'
-      })
-    ]);
-
-    // Log auto-approval action
-    await dbContext.none(
-      `INSERT INTO tbl_approval_actions
-       (approval_instance_id, approver_user_id, action, comment)
-       VALUES ($1, $2, 'APPROVE', $3)`,
-      [approvedInstance.id, userId, 'Auto-approved: Created by final approver']
-    );
-
-    // Record lifecycle event for auto-approval
-    await recordLifecycleEvent({
-      entity_type: entityType,
-      entity_id: rfqId,
-      stage: 'APPROVED',
-      action: 'AUTO_APPROVE',
-      performed_by: userId,
-      metadata: {
-        approval_instance_id: approvedInstance.id,
-        rfq_no: rfq.rfq_no,
-        reason: 'Created by final approver'
-      },
-      txContext: txContext
-    });
-
-    // Update RFQ status to READY_TO_PUBLISH (4) directly
-    await dbContext.none(`
-      UPDATE tbl_rfq
-      SET status = 4
-      WHERE id = $1
-    `, [rfqId]);
-
-    // Schedule the RFQ to be published at tender_publish_date
-    const rfqDetails = await dbContext.oneOrNone(`
-      SELECT tender_publish_date, created_by FROM tbl_rfq WHERE id = $1
-    `, [rfqId]);
-
-    if (rfqDetails) {
-      await scheduleRfqPublish({
-        id: rfqId,
-        rfq_no: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        tender_publish_date: rfqDetails.tender_publish_date,
-        created_by: rfqDetails.created_by
-      }, dbContext);
-    }
-
-    return {
-      instance: approvedInstance,
-      policy: { id: policy.id, entity_type: policy.entity_type },
-      steps: [],
-      totalSteps: 0,
-      autoApproved: true
-    };
-  }
-
-  // Create the approval instance for tracking (approval still proceeds in background)
+  // Create the approval instance for tracking. createApprovalInstance handles
+  // the "creator is final approver" auto-approval case end-to-end, including
+  // persisting per-step + per-approver rows so the lifecycle UI can render
+  // the audit trail. Previously this site short-circuited via
+  // checkIfUserIsFinalApprover and inserted only the parent instance row,
+  // leaving zero tbl_approval_instance_steps / tbl_approval_step_approvers
+  // rows and producing the "No approval steps configured" lifecycle bug.
   let result;
   try {
     result = await createApprovalInstance({
@@ -3538,29 +3442,48 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     result = null;
   }
 
-  // Regardless of approval status, proceed to publish (approval runs in background)
-  // Set status to READY_TO_PUBLISH (4) and schedule publish
+  // Set RFQ to READY_TO_PUBLISH (4). Publishing proceeds whether approval
+  // auto-completed (creator was the final approver in every resolved step)
+  // or is still pending — the scheduler honours the publish date either way.
   await dbContext.none(`
     UPDATE tbl_rfq
     SET status = 4
     WHERE id = $1
   `, [rfqId]);
 
-  // Record lifecycle event noting publish proceeded with pending approval
-  await recordLifecycleEvent({
-    entity_type: entityType,
-    entity_id: rfqId,
-    stage: 'READY_TO_PUBLISH',
-    action: 'PUBLISH_WITHOUT_APPROVAL',
-    performed_by: userId,
-    metadata: {
-      rfq_no: rfq.rfq_no,
-      approval_instance_id: result?.instance?.id || null,
-      approval_status: 'PENDING',
-      note: 'Publishing proceeded without waiting for approval completion'
-    },
-    txContext
-  });
+  const autoApproved = result?.autoApproved === true || result?.instance?.status === 'APPROVED';
+
+  // Lifecycle event: distinguish auto-approved from publish-with-pending-approval
+  if (autoApproved) {
+    await recordLifecycleEvent({
+      entity_type: entityType,
+      entity_id: rfqId,
+      stage: 'APPROVED',
+      action: 'AUTO_APPROVE',
+      performed_by: userId,
+      metadata: {
+        approval_instance_id: result?.instance?.id || null,
+        rfq_no: rfq.rfq_no,
+        reason: 'Created by final approver'
+      },
+      txContext
+    });
+  } else {
+    await recordLifecycleEvent({
+      entity_type: entityType,
+      entity_id: rfqId,
+      stage: 'READY_TO_PUBLISH',
+      action: 'PUBLISH_WITHOUT_APPROVAL',
+      performed_by: userId,
+      metadata: {
+        rfq_no: rfq.rfq_no,
+        approval_instance_id: result?.instance?.id || null,
+        approval_status: 'PENDING',
+        note: 'Publishing proceeded without waiting for approval completion'
+      },
+      txContext
+    });
+  }
 
   // Schedule the RFQ to be published
   const rfqDetails = await dbContext.oneOrNone(`
@@ -3577,11 +3500,11 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     }, dbContext);
   }
 
-  logger.info(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: PENDING)`);
+  logger.info(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: ${result?.instance?.status || 'NONE'})`);
 
   return {
     ...(result || {}),
-    publishedWithPendingApproval: true
+    publishedWithPendingApproval: !autoApproved
   };
 };
 
@@ -5033,23 +4956,13 @@ const rfqController = {
         if (raStartParsed >= raEndParsed) {
           return res
             .status(400)
-            .json({
-              status: 3,
-              errors: {
-                ra_start_date: 'RA Start Date should be before RA End Date'
-              }
-            })
+            .json({ status: 3, message: 'RA Start Date should be before RA End Date' })
             .end();
         }
         if (bidEndParsed && raStartParsed <= bidEndParsed) {
           return res
             .status(400)
-            .json({
-              status: 3,
-              errors: {
-                ra_start_date: 'RA Start Date should be after Bid End Date'
-              }
-            })
+            .json({ status: 3, message: 'RA Start Date should be after Bid End Date' })
             .end();
         }
       }
@@ -5062,10 +4975,7 @@ const rfqController = {
           .status(400)
           .json({
             status: 2,
-            errors: {
-              rfq_specs:
-                'Some products are missing quantity or unit. Please fill them before proceeding.'
-            }
+            message: 'Some products are missing quantity or unit. Please fill them before proceeding.'
           })
           .end();
       }
@@ -5080,15 +4990,7 @@ const rfqController = {
         }));
         return res
           .status(400)
-          .json({
-            status: 2,
-            message,
-            errors: {
-              vendors: message,
-              details
-            },
-            details
-          })
+          .json({ status: 2, message, details })
           .end();
       }
 
@@ -5286,8 +5188,19 @@ const rfqController = {
 
         // 1b. Check for existing quotes early — needed by assertEditAllowed
         //     to allow editing when bid window closed but no vendors participated.
+        //     hasQuotes is regret-inclusive and feeds the post-deadline block message.
+        //     hasReceivedQuotes filters out regrets and triggers restricted-edit mode
+        //     for fairness once a vendor has actually started bidding in good faith
+        //     (even while bid window is still open).
         const hasQuotes = !!(await t.oneOrNone(
           'SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1',
+          [rfq_id]
+        ));
+        const hasReceivedQuotes = !!(await t.oneOrNone(
+          `SELECT 1 FROM tbl_quotes
+            WHERE rfq_id = $1
+              AND (is_regret IS NULL OR is_regret != 1)
+            LIMIT 1`,
           [rfq_id]
         ));
 
@@ -5359,10 +5272,11 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck or PO dead-end (only bid_end_date + vendor refresh)
-        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct;
+        // Restricted edit = tech-stuck OR dead-end OR a real (non-regret) quote has
+        // already been received. Only bid_end_date + vendor refresh are allowed.
+        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct || hasReceivedQuotes;
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct });
+        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct, hasReceivedQuotes });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5415,7 +5329,7 @@ const rfqController = {
           const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
           if (disallowedFields.length > 0) {
             throw updateHttpError(400,
-              `Restricted edit: only bid submission end date can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
             );
           }
           if (diff.products.added.length > 0) {
@@ -5442,6 +5356,9 @@ const rfqController = {
           if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
             throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
           }
+          if (diff.termFiles && (diff.termFiles.added.length > 0 || diff.termFiles.removed.length > 0)) {
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.');
+          }
         }
 
         // 6. Apply changes — order matters because the field UPDATE on tbl_rfq
@@ -5456,8 +5373,11 @@ const rfqController = {
           current
         );
         const termsHistory = await applyTermsChanges(t, rfq_id, diff.terms);
+        const termFilesHistory = diff.termFiles
+          ? await applyTermFileChanges(t, rfq_id, diff.termFiles)
+          : [];
 
-        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory];
+        const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
         // 7. Record history rows
         if (allHistory.length > 0) {
@@ -5567,15 +5487,38 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
-       
-     let parsedError = {};
-       parsedError = JSON.parse(error?.message);
 
-      res.status(500).json({
+      // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
+      // throwing `new Error(JSON.stringify({message, status, ...}))`.
+      // Translate the structured-error shape to a sensible HTTP code so
+      // access-denied / validation failures don't surface as 500.
+      let parsedError = {};
+      let isStructured = false;
+      try {
+        parsedError = JSON.parse(error?.message);
+        isStructured = parsedError && typeof parsedError === 'object';
+      } catch {
+        // Plain string error — keep historical 500.
+      }
+
+      const innerMessage = isStructured ? (parsedError.message || error.message) : error.message;
+      let httpCode = 500;
+      if (isStructured) {
+        // saveRfqDraft uses status:2 for access-denied + status:3 for validation.
+        if (parsedError.status === 2) {
+          httpCode = /access|permission|forbidden|unauthor/i.test(innerMessage || '') ? 403 : 404;
+        } else if (parsedError.status === 3) {
+          httpCode = 400;
+        }
+      }
+
+      res.status(httpCode).json({
         status: 3,
-        message: 'An error occurred while saving the draft',
+        message: httpCode === 500
+          ? 'An error occurred while saving the draft'
+          : (innerMessage || 'An error occurred while saving the draft'),
         errors: {
-          rfq:error?.message || 'An error occurred while saving the draft',
+          rfq: innerMessage || 'An error occurred while saving the draft',
           details: parsedError?.details || [],
         }
       });
@@ -5908,6 +5851,14 @@ const rfqController = {
        const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${id}`);
        draftData[0].mappedHotels = mappedHotels || [];
 
+      // bid_end_date is text NOT NULL in the DB; the auto-create path stores
+      // an empty string when the user hasn't picked a date yet. Surface that
+      // as null to the client so the wizard's date input renders as unset
+      // rather than as the literal empty string.
+      if (draftData[0].rfq_form_data && draftData[0].rfq_form_data.bid_end_date === '') {
+        draftData[0].rfq_form_data.bid_end_date = null;
+      }
+
       // Return in the same format as getRFQDraftData
       res.status(200).json({
         status: 1,
@@ -6025,19 +5976,19 @@ const rfqController = {
         sheetData = sheetRes || null;
       } else {
         // Create a new RFQ
-
-        const currentDate = new Date();
-        let bidEndDate = new Date();
-        bidEndDate.setDate(currentDate.getDate() + 30);
-
+        // bid_end_date is text NOT NULL on tbl_rfq, but the user hasn't
+        // reached the timeline step yet — so we seed an empty string (which
+        // satisfies NOT NULL on a text column) and let the user fill the
+        // real value when they save. The GET handler normalises this empty
+        // string to null in the response so the frontend sees an unset
+        // field. The save-draft Joi schema then rejects empty values.
         rfqData = {
           company_name: user.organization_name || '',
           response_email: user.email,
           contact_name: user.name,
           contact_number: user.mobile || '',
           comment: req.body.comment || '',
-          bid_end_date:
-            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
+          bid_end_date: req.body.bid_end_date || '',
           location: req.body.location || '',
           is_published: 0,
           created_by: user_id,
@@ -7031,34 +6982,94 @@ const rfqController = {
         rfqData.po_initiators = [];
       }
 
-      // Fetch vendor PO rejections for this RFQ (used by Quote Compare to show rejection info)
+      // Fetch PO rejections (vendor-rejected AND approver-rejected) for this
+      // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
+      // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
+      //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
+      // - rejection_type='approver': PO row status='rejected'. Reason and
+      //   rejecter pulled from the matching tbl_approval_actions REJECT row,
+      //   joined via the PO's approval_instance_id.
       try {
         rfqData.vendor_rejections = await db.any(`
           SELECT
             rp.product_variant_id,
             rp.variant,
             po.finalized_vendor_id AS vendor_id,
-            u.name AS vendor_name,
-            u.organization_name AS vendor_organization,
+            vu.name AS vendor_name,
+            vu.organization_name AS vendor_organization,
             po.po_number,
-            po.vendor_rejection_reason,
-            po.vendor_action_at AS rejected_at
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
+              ELSE 'approver'
+            END AS rejection_type,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
+              ELSE aa.comment
+            END AS rejection_reason,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
+              ELSE aa.created_at
+            END AS rejected_at,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN vu.name
+              ELSE au.name
+            END AS rejected_by_name,
+            CASE
+              WHEN po.status = 'rejected_by_vendor' THEN NULL
+              ELSE au.email
+            END AS rejected_by_email
           FROM tbl_rfq_purchase_order po
-          JOIN tbl_users u ON u.id = po.finalized_vendor_id
+          JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
           JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+          LEFT JOIN LATERAL (
+            SELECT a.approver_user_id, a.comment, a.created_at
+            FROM tbl_approval_actions a
+            WHERE a.approval_instance_id = po.approval_instance_id
+              AND a.action = 'REJECT'
+            ORDER BY a.created_at DESC
+            LIMIT 1
+          ) aa ON TRUE
+          LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
           WHERE po.rfq_id = $1
-            AND po.status = 'rejected_by_vendor'
+            AND po.status IN ('rejected_by_vendor', 'rejected')
             AND NOT EXISTS (
               SELECT 1 FROM tbl_quote_finalization qf
               WHERE qf.rfq_id = po.rfq_id
                 AND qf.product_variant_id = rp.product_variant_id
                 AND qf.variant = rp.variant
             )
+          ORDER BY rejected_at DESC NULLS LAST
         `, [rfqData.id]);
       } catch (err) {
-        logError('Error fetching vendor rejections for RFQ', err);
+        logError('Error fetching PO rejections for RFQ', err);
         rfqData.vendor_rejections = [];
+      }
+
+      // Attach close reason when RFQ is closed
+      if (rfqData && String(rfqData.status) === '2') {
+        try {
+          const closeEvent = await db.oneOrNone(
+            `SELECT lh.remarks
+               FROM tbl_lifecycle_history lh
+              WHERE lh.entity_id = $1
+                AND lh.entity_type IN ('RFQ', 'TENDER')
+                AND lh.action = 'RFQ_CLOSED'
+              ORDER BY lh.id DESC
+              LIMIT 1`,
+            [rfqData.id]
+          );
+          let rawComment = closeEvent?.remarks || null;
+          if (rawComment) {
+            rawComment = rawComment.replace(/^(RFQ|TENDER) closed by creator:\s*/i, '');
+            rfqData.close_comment = `Reason: ${rawComment}`;
+          } else {
+            rfqData.close_comment = null;
+          }
+        } catch (closeErr) {
+          logError('Error fetching close info for RFQ', closeErr);
+          rfqData.close_comment = null;
+        }
       }
 
       // Add tender payment status for vendor viewers (sourced from main query)
@@ -7819,6 +7830,31 @@ const rfqController = {
           slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
         }));
 
+        // Per-product other_charges: comment is mandatory and capped at 30
+        // chars (matches the send-quote modal UI). Skip when regretting the
+        // quote — there are no real charges to comment on in that case.
+        const PRODUCT_CHARGE_COMMENT_MAX = 30;
+        const validateProductChargeComments = (charges, label) => {
+          for (const c of charges || []) {
+            const comment = c?.comment != null ? String(c.comment) : '';
+            if (!comment.trim()) {
+              return `${label}: "${c.name || 'Unnamed charge'}" requires a comment.`;
+            }
+            if (comment.length > PRODUCT_CHARGE_COMMENT_MAX) {
+              return `${label}: "${c.name || 'Unnamed charge'}" comment cannot exceed ${PRODUCT_CHARGE_COMMENT_MAX} characters.`;
+            }
+          }
+          return null;
+        };
+        if (!req.body.is_regret) {
+          for (const product of products) {
+            const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+            if (err) {
+              return res.status(400).json({ status: 0, message: err }).end();
+            }
+          }
+        }
+
         // Enrich other_charges with slugs for each product
         for (const product of products) {
           if (product.other_charges) {
@@ -7933,6 +7969,26 @@ const rfqController = {
               }
             }
           );
+
+          // Server-authoritative recompute: discard the client-supplied
+          // total_price and derive it from the pricing engine. Prevents a
+          // buggy/malicious client from persisting incorrect totals.
+          quote_items_data.forEach((item) => {
+            let parsedOtherCharges = [];
+            try {
+              parsedOtherCharges = JSON.parse(item.other_charges || '[]');
+            } catch (_e) {
+              parsedOtherCharges = [];
+            }
+            const engineOut = pricingEngine.calculateLineTotal({
+              unit_price: item.unit_price,
+              quantity: item.quantity,
+              tax: item.tax,
+              tax_mode: item.tax_mode,
+              other_charges: parsedOtherCharges,
+            });
+            item.total_price = engineOut.total;
+          });
 
           if (is_regret) {
             let quote_rsp = await rfqModel.insert(
@@ -8316,6 +8372,80 @@ const rfqController = {
         .end();
     }
   },
+
+  // Server-computed quote-compare view model. Same data as getQuotesByRfqById,
+  // but every line carries engine output (base, base_tax, charges[], total),
+  // every product carries comparison stats (bands, freight advantage,
+  // tie-broken lowest), and the response includes overall metrics (L1,
+  // baseline, savings, finalized total). The frontend never multiplies
+  // prices — it just renders these values.
+  getQuoteComparison: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { no_freight, rfq_product_id, normalize, freightFilter, pageSource, include_negotiation } = req.query;
+    const { id, company_id, user_type, vendor_id } = req.user;
+
+    try {
+      const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
+      let products;
+
+      if (quoteVisibility.locked) {
+        const lockedProducts = await rfqModel.getQuoteVisibilityLockedProductsByRfqId(rfq_id, rfq_product_id);
+        products = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
+      } else {
+        const vendor_filter_id = user_type == 3 ? (vendor_id || id) : null;
+        // Quote Compare is a buyer view for awarding business; technically-rejected
+        // vendors must never appear here. Force tech-eval gating on the model
+        // regardless of what the FE sends — the model's gating still falls through
+        // for products / RFQs that don't have any technical clauses.
+        products = await rfqModel.getQuotesByRfqById2(
+          rfq_id, id, company_id,
+          'TA', no_freight, rfq_product_id,
+          include_negotiation === 'true',
+          vendor_filter_id
+        );
+      }
+
+      const normalizeApplied = normalize === '1' || normalize === 'true';
+      const enriched = enrichQuoteCompareData(products, {
+        normalizeApplied,
+        freightFilter: freightFilter === '1' || freightFilter === 'true',
+      });
+
+      // Mirror getQuotesByRfqById's quote-activity insert when this is the
+      // user's quote-compare visit, so analytics stays consistent.
+      if (pageSource === 'quote_compare') {
+        try {
+          const existing = await rfqModel.checkIfExists(
+            'tbl_quote_activity',
+            `rfq_id = ${rfq_id} AND created_by = ${id} AND current_status = 'QC'`
+          );
+          if (existing.length === 0) {
+            await rfqModel.insertIntoQuoteActivity({
+              rfq_id, current_status: 'QC', created_by: id,
+            });
+          }
+        } catch (activityErr) {
+          logError('quote-activity insert failed', activityErr);
+        }
+      }
+
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: enriched,
+          meta: { quoteVisibility, normalize_applied: normalizeApplied },
+        })
+        .end();
+    } catch (error) {
+      logError('getQuoteComparison failed', error);
+      return res
+        .status(400)
+        .json({ status: 3, message: Config.errorText.value })
+        .end();
+    }
+  },
+
   downloadQuoteResults: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
@@ -8350,7 +8480,7 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id, normalize } = req.query;
 
     const { id, company_id } = req.user;
 
@@ -8402,6 +8532,12 @@ const rfqController = {
 
         product.quotations = updatedQuotations;
       });
+
+      // Layer engine output on top so the Excel export sums match what the
+      // quote-compare page shows.
+      const normalizeApplied = normalize === '1' || normalize === 'true';
+      const enriched = enrichQuoteCompareData(rfQItem, { normalizeApplied });
+
        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
                                                           rfq_id: rfq_id,
                                                           current_status: "QC",
@@ -8413,7 +8549,8 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: rfQItem
+          data: enriched.products,
+          meta: { normalize_applied: normalizeApplied }
         })
         .end();
     } catch (error) {
@@ -8499,7 +8636,10 @@ const rfqController = {
       }
 
       const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
-      const cancelReason = `${entityType} closed by creator`;
+      const comment = req.body.comment || '';
+      const cancelReason = comment
+        ? `${entityType} closed by creator: ${comment}`
+        : `${entityType} closed by creator`;
 
       // Captured inside the transaction, used outside the tx for emails.
       let cancelledInstances = [];
@@ -8647,7 +8787,7 @@ const rfqController = {
           company_name: rfqDetails.company_name || null,
         },
         closedByName: req.user.name,
-        users: buMembers,
+        users: buMembers.filter(u => String(u.id) !== String(id)),
       });
 
       // Notify each instance's current approvers that their approval is no longer needed.
@@ -8675,7 +8815,7 @@ const rfqController = {
             cancelled_approval_count: cancelledInstances.length,
             cancelled_negotiation_round_count: cancelledRoundCount,
           },
-          remarks: 'RFQ closed by creator'
+          remarks: comment || null
         });
       } catch (lifecycleErr) {
         logError('Failed to record lifecycle event for closed RFQ ${rfq_id}', lifecycleErr);
@@ -12610,13 +12750,17 @@ sendFollowUpEmails: async (req, res) => {
     }
 
     try {
-      // Check if the quote exists
+      // Check if the quote exists. F-QUOTE-NOTFOUND-001:
+      // rfqModel.checkIfExists returns an empty array (truthy) when no row
+      // matches, so the bare `if (!quoteExists)` guard never fires and the
+      // next line crashes on quoteExists[0]. Treat array-length zero as
+      // not-found and respond with 404.
       const quoteExists = await rfqModel.checkIfExists(
         'tbl_quotes',
         `id = '${quoteId}'`
       );
-      if (!quoteExists) {
-        return res.status(404).json({ message: 'Quote not found.' });
+      if (!quoteExists || quoteExists.length === 0) {
+        return res.status(404).json({ status: 0, message: 'Quote not found.' });
       }
 
       // Get RFQ details to check dates
@@ -12773,6 +12917,44 @@ sendFollowUpEmails: async (req, res) => {
         slug: slugMap.get(c.name?.toLowerCase()) || rfqController._generateChargeSlug(c.name || '')
       }));
 
+      // Per-product other_charges: comment is mandatory and capped at 30
+      // chars (matches the send-quote modal UI). Stricter than the global
+      // charges rule below.
+      const PRODUCT_CHARGE_COMMENT_MAX = 30;
+      const validateProductChargeComments = (charges, label) => {
+        for (const c of charges || []) {
+          const comment = c?.comment != null ? String(c.comment) : '';
+          if (!comment.trim()) {
+            return `${label}: "${c.name || 'Unnamed charge'}" requires a comment.`;
+          }
+          if (comment.length > PRODUCT_CHARGE_COMMENT_MAX) {
+            return `${label}: "${c.name || 'Unnamed charge'}" comment cannot exceed ${PRODUCT_CHARGE_COMMENT_MAX} characters.`;
+          }
+        }
+        return null;
+      };
+      // Global charges keep the original "tax > 0 ⇒ comment required" rule —
+      // its UI hasn't been migrated to mandatory-everywhere yet.
+      const validateGlobalChargeComments = (charges, label) => {
+        for (const c of charges || []) {
+          if (Number(c.tax) > 0 && (!c.comment || !String(c.comment).trim())) {
+            return `${label}: "${c.name}" has tax greater than 0 but no comment/reason provided.`;
+          }
+        }
+        return null;
+      };
+
+      for (const product of products) {
+        const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+        if (err) {
+          return res.status(400).json({ status: 0, message: err });
+        }
+      }
+      const globalChargeErr = validateGlobalChargeComments(global_charges, 'Global charges');
+      if (globalChargeErr) {
+        return res.status(400).json({ status: 0, message: globalChargeErr });
+      }
+
       // Enrich other_charges with slugs for each product
       for (const product of products) {
         if (product.other_charges) {
@@ -12781,6 +12963,23 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       const enrichedGlobalCharges = enrichCharges(global_charges);
+
+      // Server-authoritative recompute: discard the client-supplied
+      // total_price on each product and derive it from the pricing engine.
+      // The engine uses the same enriched other_charges that will be
+      // persisted, so the stored total cannot drift from the inputs.
+      for (const product of products) {
+        const engineOut = pricingEngine.calculateLineTotal({
+          unit_price: product.unit_price,
+          quantity: product.quantity,
+          tax: product.tax,
+          tax_mode: product.tax_mode,
+          other_charges: Array.isArray(product.other_charges)
+            ? product.other_charges
+            : [],
+        });
+        product.total_price = engineOut.total;
+      }
 
       let paymentTermAndCommentChanges = false;
 
@@ -13684,6 +13883,15 @@ processBoqAndDownload : async (req, res) => {
         clause_type,
         weightage
       );
+
+      // F-CLAUSE-NOTFOUND-001: the model returns {status:0, message} for
+      // not-found cases (RFQ id missing, rfq_product_id missing). Forwarding
+      // that as HTTP 200 misrepresents the outcome to any HTTP-level client.
+      // Map "does not exist" to 404, other status:0 results to 400.
+      if (result?.status === 0) {
+        const isNotFound = /does not exist|not found/i.test(result.message || '');
+        return res.status(isNotFound ? 404 : 400).json(result).end();
+      }
 
       res.status(200).json(result).end();
     } catch (error) {
@@ -15038,6 +15246,18 @@ getClauses: async (req, res) => {
         return res.status(403).json({
           status: 0,
           message: 'Only the RFQ creator can close clarifications'
+        });
+      }
+
+      // F-CLAR-002: require a non-empty response (or at least one file).
+      // Closing without answering used to silently leave the vendor's
+      // question unanswered + send no notification.
+      const responseText = typeof response === 'string' ? response.trim() : '';
+      const hasFiles = Array.isArray(response_files) && response_files.length > 0;
+      if (!responseText && !hasFiles) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Response is required to close a clarification.'
         });
       }
 

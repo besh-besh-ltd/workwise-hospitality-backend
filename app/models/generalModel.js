@@ -2248,7 +2248,7 @@ export async function createApprovalInstance({
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
           approvers: pendingApprovers,
-          extraContext: { rfq_id: metadata?.rfq_id || entity_id, rfq_title: metadata?.rfq_title || '' }
+          extraContext: { rfq_id: metadata?.rfq_id || entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null }
         });
       }
     } catch (emailError) {
@@ -2273,7 +2273,7 @@ export async function createApprovalInstance({
 }
 
 // Transaction-safe version of findBestMatchingPolicy
-async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id = null }, t) {
+export async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id = null }, t) {
   const policies = await t.any(`
     SELECT p.*,
            CASE
@@ -2297,12 +2297,18 @@ async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, h
   return policies.length > 0 ? policies[0] : null;
 }
 
-// Export helper function to check if user is final approver
-export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null) {
+// Export helper function to check if user is final approver.
+//
+// process_id is load-bearing: a user who is the final approver of policy
+// chain (X, P1) must NOT be treated as the final approver of (X, P2).
+// findBestMatchingPolicyTx already filters by process_id; we forward it.
+// Passing `null` matches process-agnostic policies only (no cross-process
+// fall-through).
+export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null) {
   const t = txContext || db;
 
-  // Find the best matching master policy
-  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+  // Find the best matching master policy — process-scoped.
+  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
 
   if (!policy) {
     return false;
@@ -2686,6 +2692,19 @@ export async function submitApprovalAction({
       throw new Error('User is not an approver for this step');
     }
     if (approverRecord.status !== 'PENDING') {
+      // Idempotency: if the user already submitted the SAME action, treat the
+      // retry as a silent success. This protects against double-clicks and
+      // refreshes that race with backend completion. Only the genuinely
+      // conflicting case (user previously REJECTED and now sends APPROVE, or
+      // vice versa) still throws.
+      if (approverRecord.status === normalizedAction) {
+        return {
+          status: instance.status,
+          instance_status: instance.status,
+          message: `Already submitted ${normalizedAction.toLowerCase()}, no action taken`,
+          already_completed: true
+        };
+      }
       throw new Error(`User has already acted on this step with status: ${approverRecord.status}`);
     }
 
@@ -2891,7 +2910,7 @@ export async function submitApprovalAction({
           totalSteps: parseInt(totalSteps.count),
           initiatorName: initiator?.name || 'Unknown',
           approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '' }
+          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null }
         });
       }
     } catch (emailError) {

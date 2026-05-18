@@ -7,6 +7,7 @@ import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, 
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
+import pricingEngine from "../services/pricingEngine.js";
 import fs from 'fs';
 
 const getNextPONumber = async () => {
@@ -164,10 +165,15 @@ function calculatePricing(items) {
   };
 }
 
-export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t) => {
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null) => {
     try {
       const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
         product_info;
+      // Per-line total goes onto tbl_purchase_order_product.total_price.
+      // Grand total (line + document-level global charges) goes onto
+      // tbl_rfq_purchase_order.total_value. When the caller didn't separate
+      // the two, fall back to total_value to preserve legacy behaviour.
+      const linePrice = line_total ?? total_value;
 
       // 1. Check if a pending PO already exists for this RFQ Product
       const existing = await t.oneOrNone(
@@ -189,11 +195,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       let po = null;
 
       if(existing_po_id) {
-        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id]))) 
+        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
 
         po = await t.one(
-          `UPDATE tbl_rfq_purchase_order 
+          `UPDATE tbl_rfq_purchase_order
             SET
               selected_hierarchy = $1
 
@@ -209,8 +215,53 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           `INSERT INTO tbl_purchase_order_product
           (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, total_value]
+          [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
+
+        // Re-aggregate the header grand total over ALL lines now on this PO
+        // plus the existing snapshot of document-level global_charges. Without
+        // this, total_value would still reflect just the FIRST line's grand
+        // total even though we just appended a second product.
+        //
+        // Reuses pricingEngine.normalizeGlobalCharge so legacy {tax, tax_mode}
+        // and newer {amount, amount_mode} global-charge shapes both apply
+        // correctly. Globals stay at one occurrence on the snapshot — they're
+        // a document-level charge, applied once to the combined subtotal.
+        const summed = await t.oneOrNone(
+          `SELECT COALESCE(SUM(total_price), 0) AS sub
+             FROM tbl_purchase_order_product
+            WHERE purchase_order_id = $1`,
+          [existing_po_id]
+        );
+        const lineSubtotal = Number(summed?.sub) || 0;
+        const headerRow = await t.oneOrNone(
+          `SELECT global_charges FROM tbl_rfq_purchase_order WHERE id = $1`,
+          [existing_po_id]
+        );
+        const rawGc = headerRow?.global_charges;
+        let snapshotGlobals = [];
+        if (Array.isArray(rawGc)) snapshotGlobals = rawGc;
+        else if (typeof rawGc === 'string' && rawGc.trim()) {
+          try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
+        }
+        let gcTotal = 0;
+        for (const gc of snapshotGlobals) {
+          const norm = pricingEngine.normalizeGlobalCharge(gc);
+          if (!norm) continue;
+          gcTotal += pricingEngine.applyChargeMode(
+            norm.amount, norm.amount_mode, lineSubtotal
+          );
+        }
+        // Quantise to 2dp, matching pricingEngine.calculateDocumentTotals
+        // (which is what the new-PO branch uses). Keeping rounding consistent
+        // across the new-PO path and the merge path means the stored
+        // total_value never drifts by 1 paisa just because a PO was built in
+        // two draftPO calls vs one.
+        const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
+        await t.none(
+          `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
+          [grandTotal, existing_po_id]
+        );
       } else {
         // 2. Insert new PO record
         const poNumber = await getNextPONumber();
@@ -225,9 +276,9 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         po = await t.one(
           `INSERT INTO tbl_rfq_purchase_order (
             rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy, terms_and_conditions, company_id
+            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy, terms_and_conditions, company_id, global_charges
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
           RETURNING id`,
           [
             rfq_id,
@@ -243,8 +294,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
             PO_STATUSES.DRAFT,
             selected_hierarchy,
             concated_terms.terms_text,
-
-            company_id
+            company_id,
+            JSON.stringify(global_charges || [])
           ]
         );
 
@@ -252,7 +303,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           `INSERT INTO tbl_purchase_order_product
           (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [po.id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, total_value]
+          [po.id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
       }
 
@@ -610,15 +661,21 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS quantity,
                 (
-                  SELECT COALESCE(SUM(TPOP.unit_price), 0)::bigint
+                  SELECT COALESCE(SUM(TPOP.unit_price), 0)::numeric(15,2)
                   FROM tbl_purchase_order_product TPOP
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS unit_price,
+                -- po.total_value is the authoritative grand total (line subtotal
+                -- + document-level global_charges, populated by draftPO via
+                -- pricingEngine.calculateDocumentTotals). The legacy SUM(line.
+                -- total_price) subquery dropped global charges entirely; kept
+                -- as line_subtotal for the FE breakdown view.
+                po.total_value AS total_value,
                 (
-                  SELECT COALESCE(SUM(TPOP.total_price), 0)::bigint
+                  SELECT COALESCE(SUM(TPOP.total_price), 0)::numeric(15,2)
                   FROM tbl_purchase_order_product TPOP
                   WHERE TPOP.purchase_order_id = po.id
-                ) AS total_value,
+                ) AS line_subtotal,
                 COALESCE(VENDOR_COMPANY.company_name, VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
@@ -763,15 +820,22 @@ export const getPODetailsById = async (po_id, user_id) => {
                 WHERE TPOP.purchase_order_id = po.id
               ) AS quantity,
               (
-                SELECT COALESCE(SUM(TPOP.unit_price), 0)::bigint
+                SELECT COALESCE(SUM(TPOP.unit_price), 0)::numeric(15,2)
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
               ) AS unit_price,
+              -- po.total_value is the authoritative grand total, populated by
+              -- draftPO via pricingEngine.calculateDocumentTotals. It already
+              -- includes document-level global_charges (snapshotted onto
+              -- po.global_charges at draft). The legacy SUM(line.total_price)
+              -- subquery was only the per-line aggregate and lost global
+              -- charges entirely — kept here as line_subtotal for FE breakdown.
+              po.total_value AS total_value,
               (
-                SELECT COALESCE(SUM(TPOP.total_price), 0)::bigint
+                SELECT COALESCE(SUM(TPOP.total_price), 0)::numeric(15,2)
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
-              ) AS total_value,
+              ) AS line_subtotal,
               CASE
                 WHEN PD.id IS NOT NULL THEN
                   JSON_BUILD_OBJECT(
@@ -1034,6 +1098,102 @@ export const getPODetailsById = async (po_id, user_id) => {
               WHEN po.approval_instance_id IS NOT NULL AND tai.status = 'APPROVED' THEN tai.completed_at
               ELSE TAHH.created_at
             END AS po_approved_on,
+            -- Vendor quote-level T&C files: surfaces files attached by the finalized
+            -- vendor via rfq/quote/create and rfq/quote/update (which appends), so the
+            -- buyer can audit the full attachment trail from the PO page without
+            -- switching to the vendor-only RFQ view.
+            COALESCE(
+              (
+                SELECT JSON_AGG(TQF.file_url)
+                FROM tbl_quotes_files TQF
+                JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
+                WHERE TQ.rfq_id = po.rfq_id
+                  AND TQ.created_by = po.finalized_vendor_id
+                  AND TQF.file_type = 'term_and_condition'
+              ),
+              '[]'::json
+            ) AS vendor_quote_term_files,
+            -- Vendor per-product document files, scoped to RFQ products that are
+            -- actually on this PO. Joined via product_variant_id+variant since
+            -- tbl_quote_items doesn't carry rfq_product_id directly.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'file_url',       QIF.file_url,
+                    'file_type',      QIF.file_type
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_quote_items TQI     ON TQI.product_variant_id = TRP.product_variant_id
+                                            AND TQI.variant = TRP.variant
+                JOIN tbl_quotes TQ           ON TQ.id = TQI.quote_id
+                                            AND TQ.rfq_id = po.rfq_id
+                                            AND TQ.created_by = po.finalized_vendor_id
+                JOIN tbl_quote_item_files QIF ON QIF.quote_item_id = TQI.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS vendor_quote_product_files,
+            -- Vendor technical-evaluation evidence files: surfaces files the
+            -- finalized vendor uploaded against tech-eval clauses on the
+            -- /vendor/technical-evaluation page, scoped to RFQ products on this PO.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'file_url',       VRF.file_url
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_rfq_product_tech_evaluation TE
+                  ON TE.rfq_id = po.rfq_id
+                 AND TE.tbl_rfq_product_id = TRP.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC
+                  ON TEC.tbl_rfq_product_tech_evaluation_id = TE.id
+                JOIN tbl_rfq_product_tech_evaluation_vendors_response VR
+                  ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                 AND VR.vendor_id = po.finalized_vendor_id
+                JOIN tbl_rfq_product_tech_evaluation_vendors_response_files VRF
+                  ON VRF.tbl_rfq_product_tech_evaluation_vendors_response_id = VR.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS vendor_tech_eval_files,
+            -- Buyer technical-evaluation clause files: surfaces files the
+            -- buyer uploaded against tech-eval clauses (clause-modal attachments),
+            -- scoped to RFQ products on this PO.
+            COALESCE(
+              (
+                SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'rfq_product_id', TPOP.rfq_product_id,
+                    'product_name',   TPV.name,
+                    'file_url',       TECF.file_url
+                  )
+                )
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_rfq_products TRP    ON TRP.id = TPOP.rfq_product_id
+                JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+                JOIN tbl_rfq_product_tech_evaluation TE
+                  ON TE.rfq_id = po.rfq_id
+                 AND TE.tbl_rfq_product_id = TRP.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC
+                  ON TEC.tbl_rfq_product_tech_evaluation_id = TE.id
+                JOIN tbl_rfq_product_tech_evaluation_clauses_files TECF
+                  ON TECF.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                WHERE TPOP.purchase_order_id = po.id
+              ),
+              '[]'::json
+            ) AS buyer_tech_eval_files,
             (
               SELECT QI.delivery_period
               FROM tbl_purchase_order_product TPOP
@@ -1246,6 +1406,81 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       `;
 
       await t.none(productUpdateQuery, values);
+    }
+
+    // --- 2b) Server-authoritative recompute of total_price per touched
+    // product, then re-aggregate the PO's total_value. The engine consumes
+    // the row state AFTER the patches above were applied, so any client-
+    // supplied `total_price` in the changes is silently overwritten.
+    const touchedRfqItemIds = Object.entries(productUpdates)
+      .filter(([, info]) => !info.remove)
+      .map(([id]) => Number(id));
+
+    for (const rfqItemId of touchedRfqItemIds) {
+      const row = await t.oneOrNone(
+        `SELECT quantity, unit_price, charges_meta
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1 AND rfq_product_id = $2`,
+        [poId, rfqItemId]
+      );
+      if (!row) continue;
+
+      const meta = pricingEngine.normalizeChargesMeta(row.charges_meta || {});
+      const lineOut = pricingEngine.calculateLineTotal({
+        unit_price: row.unit_price,
+        quantity: row.quantity,
+        tax: meta.tax,
+        tax_mode: meta.tax_mode,
+        other_charges: meta.other_charges,
+      });
+
+      await t.none(
+        `UPDATE tbl_purchase_order_product
+         SET total_price = $1
+         WHERE purchase_order_id = $2 AND rfq_product_id = $3`,
+        [lineOut.total, poId, rfqItemId]
+      );
+    }
+
+    // Refresh PO grand total whenever any product was touched (fields,
+    // charges, or removal — covers all paths that could shift the total).
+    // Grand total = sum of per-line totals + document-level global charges
+    // (snapshotted onto tbl_rfq_purchase_order.global_charges at draft time).
+    // Without re-applying global charges here, every PO edit would silently
+    // drop them from total_value.
+    if (Object.keys(productUpdates).length > 0) {
+      const summed = await t.oneOrNone(
+        `SELECT COALESCE(SUM(total_price), 0) AS total
+         FROM tbl_purchase_order_product
+         WHERE purchase_order_id = $1`,
+        [poId]
+      );
+      const lineSubtotal = Number(summed?.total) || 0;
+
+      const poRow = await t.oneOrNone(
+        `SELECT global_charges FROM tbl_rfq_purchase_order WHERE id = $1`,
+        [poId]
+      );
+      const rawGc = poRow?.global_charges;
+      let globalCharges = [];
+      if (Array.isArray(rawGc)) globalCharges = rawGc;
+      else if (typeof rawGc === 'string' && rawGc.trim()) {
+        try { globalCharges = JSON.parse(rawGc); } catch (_e) { globalCharges = []; }
+      }
+      let globalChargesTotal = 0;
+      for (const gc of globalCharges) {
+        const norm = pricingEngine.normalizeGlobalCharge(gc);
+        if (!norm) continue;
+        globalChargesTotal += pricingEngine.applyChargeMode(
+          norm.amount, norm.amount_mode, lineSubtotal
+        );
+      }
+      const grandTotal = Math.round((lineSubtotal + globalChargesTotal) * 100) / 100;
+
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order SET total_value = $1 WHERE id = $2`,
+        [grandTotal, poId]
+      );
     }
 
     // --- 3) Apply HSN updates (tbl_purchase_order_hsn_mapping) ---

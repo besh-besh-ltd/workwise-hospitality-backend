@@ -1,22 +1,8 @@
+import pricingEngine from '../services/pricingEngine.js';
+
 const roundCurrency = (value) => Number((Number(value) || 0).toFixed(2));
 const formatAmount = (value) => roundCurrency(value).toFixed(2);
 const formatRate = (value) => (Number(value) || 0).toFixed(2);
-
-const calculateChargeAmount = (baseAmount, value, mode) => {
-  const normalizedValue = Number(value) || 0;
-  if (mode === 'percentage') {
-    return roundCurrency((baseAmount * normalizedValue) / 100);
-  }
-  return roundCurrency(normalizedValue);
-};
-
-const calculateTaxAmount = (taxableAmount, value, mode) => {
-  const normalizedValue = Number(value) || 0;
-  if (!mode || mode === 'percentage') {
-    return roundCurrency((taxableAmount * normalizedValue) / 100);
-  }
-  return roundCurrency(normalizedValue);
-};
 
 export const resolvePOTaxMode = (buyerLocation, supplierLocation) => {
   const buyerStateId = Number.parseInt(buyerLocation?.state_id, 10);
@@ -87,110 +73,119 @@ const buildItemTaxDetailLines = (taxMode, effectiveTaxRate, taxAmount) => {
   return [`${label} ${formatRate(effectiveTaxRate)}% Amt: ${formatAmount(taxAmount)}`];
 };
 
-const calculateOtherCharges = (baseAmount, otherCharges = []) => {
-  let totalChargeAmount = 0;
-  let totalChargeTax = 0;
-  const chargeDetails = [];
-
-  for (const charge of otherCharges) {
-    const chargeAmount = calculateChargeAmount(baseAmount, charge.amount, charge.amount_mode);
-    const chargeTax = calculateTaxAmount(chargeAmount, charge.tax, charge.tax_mode);
-    totalChargeAmount += chargeAmount;
-    totalChargeTax += chargeTax;
-    chargeDetails.push({
-      name: charge.name,
-      amount: roundCurrency(chargeAmount),
-      tax: roundCurrency(chargeTax)
-    });
-  }
-
+// Build engine input from a PO line. Routes both the new other_charges[] and
+// legacy flat freight/package shapes through the same canonical adapter the
+// rest of the codebase uses (pricingEngine.normalizeChargesMeta).
+const buildEngineInput = (item) => {
+  const meta = pricingEngine.normalizeChargesMeta({
+    tax: item.tax,
+    tax_mode: item.tax_mode,
+    other_charges: Array.isArray(item.other_charges) && item.other_charges.length > 0
+      ? item.other_charges
+      : undefined,
+    freight_price: item.freight_price,
+    freight_mode: item.freight_mode,
+    package_price: item.package_price,
+    package_mode: item.package_mode
+  });
   return {
-    totalChargeAmount: roundCurrency(totalChargeAmount),
-    totalChargeTax: roundCurrency(totalChargeTax),
-    chargeDetails
+    unit_price: item.unit_price,
+    quantity: item.quantity,
+    tax: meta.tax,
+    tax_mode: meta.tax_mode,
+    other_charges: meta.other_charges
   };
 };
 
-export const buildPOTemplatePricing = (items = [], taxMode = 'gst') => {
-  let basicAmount = 0;
-  let totalFreight = 0;
-  let totalPackage = 0;
-  let totalTax = 0;
-  let totalTaxableAmount = 0;
-  let totalOtherCharges = 0;
-  let totalOtherChargesTax = 0;
-  const otherChargesByName = {};
+// PDF totals are sourced from the same pricing engine that recomputes on save
+// (handleUpdatePO) and that the quote-compare page renders. Per-line "Subtotal"
+// (basic + charges + tax) is shown in its own column so each row is
+// self-contained; the bottom cost-breakup carries only aggregate amounts and,
+// when present, PO-level global charges.
+export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalChargesInput = []) => {
+  let totalBasic = 0;
+  let totalChargesAmount = 0; // sum of per-line charge AMOUNTS (excl. their tax)
+  let totalChargesTax = 0;    // sum of per-line charge taxes
+  let totalBaseTax = 0;       // sum of base tax across lines
+  let totalSubtotal = 0;      // sum of per-line engine totals
 
   const enrichedItems = items.map((item) => {
-    const quantity = Number(item.quantity) || 0;
-    const unitPrice = Number(item.unit_price) || 0;
-    const baseAmount = roundCurrency(quantity * unitPrice);
+    const engineOut = pricingEngine.calculateLineTotal(buildEngineInput(item));
     const comment = item.comment ? String(item.comment).trim() : null;
 
-    const otherCharges = Array.isArray(item.other_charges) && item.other_charges.length > 0
-      ? item.other_charges
-      : null;
+    const baseAmount = roundCurrency(engineOut.base);
+    const baseTaxAmount = roundCurrency(engineOut.base_tax);
+    const lineSubtotal = roundCurrency(engineOut.total);
 
-    let freightAmount, packageAmount, itemOtherChargesTotal, itemOtherChargesTax, chargeDetails;
-
-    if (otherCharges) {
-      // New path: use other_charges array
-      const chargeResult = calculateOtherCharges(baseAmount, otherCharges);
-      freightAmount = 0;
-      packageAmount = 0;
-      itemOtherChargesTotal = chargeResult.totalChargeAmount;
-      itemOtherChargesTax = chargeResult.totalChargeTax;
-      chargeDetails = chargeResult.chargeDetails;
-
-      // Aggregate by charge name for summary
-      for (const cd of chargeDetails) {
-        if (!otherChargesByName[cd.name]) {
-          otherChargesByName[cd.name] = { amount: 0, tax: 0 };
-        }
-        otherChargesByName[cd.name].amount += cd.amount;
-        otherChargesByName[cd.name].tax += cd.tax;
+    // Per-charge breakdown for the row's description column. `has_tax` lets
+    // the template render "Charge: ₹X + ₹Y tax" only when a tax actually
+    // applies (matches the engine's inheritance rule via the tax field
+    // already being populated).
+    // Format the vendor's input rate so the PDF can show "Freight 4%
+    // (Transport surcharge)" instead of just an opaque ₹274.79. The engine
+    // output keeps the resolved currency value; the original input rate +
+    // mode live on `item.other_charges`. Match by index — the engine
+    // preserves the order of charges through calculateLineTotal.
+    const inputCharges = Array.isArray(item.other_charges) ? item.other_charges : [];
+    const chargeDetails = (engineOut.charges || []).map((c, chargeIdx) => {
+      const amount = roundCurrency(c.amount);
+      const tax = roundCurrency(c.tax);
+      const inputCharge = inputCharges[chargeIdx] || {};
+      const rateInput = inputCharge.amount;
+      const rateMode = inputCharge.amount_mode;
+      let rateDisplay = null;
+      if (rateInput !== undefined && rateInput !== null && rateInput !== '') {
+        rateDisplay = rateMode === 'percentage'
+          ? `${rateInput}%`
+          : `₹${formatAmount(Number(rateInput) || 0)}`;
       }
-    } else {
-      // Legacy path: use freight_price / package_price
-      freightAmount = calculateChargeAmount(baseAmount, item.freight_price, item.freight_mode);
-      packageAmount = calculateChargeAmount(baseAmount, item.package_price, item.package_mode);
-      itemOtherChargesTotal = 0;
-      itemOtherChargesTax = 0;
-      chargeDetails = [];
+      return {
+        name: c.name || 'Other',
+        amount: formatAmount(amount),
+        tax: formatAmount(tax),
+        has_tax: tax > 0,
+        amount_raw: amount,
+        tax_raw: tax,
+        rate_display: rateDisplay,
+        comment: c.comment || null,
+        has_comment: !!c.comment,
+      };
+    });
+
+    let lineChargesAmount = 0;
+    let lineChargesTax = 0;
+    for (const cd of chargeDetails) {
+      lineChargesAmount += cd.amount_raw;
+      lineChargesTax += cd.tax_raw;
     }
 
-    const taxableAmount = roundCurrency(baseAmount + freightAmount + packageAmount + itemOtherChargesTotal);
-    const taxAmount = calculateTaxAmount(taxableAmount, item.tax, item.tax_mode);
-    const effectiveTaxRate = taxableAmount > 0 ? (taxAmount / taxableAmount) * 100 : 0;
+    const lineTaxAmount = roundCurrency(baseTaxAmount + lineChargesTax);
+    const effectiveTaxRate = baseAmount > 0 ? (baseTaxAmount / baseAmount) * 100 : 0;
 
-    basicAmount += baseAmount;
-    totalFreight += freightAmount;
-    totalPackage += packageAmount;
-    totalOtherCharges += itemOtherChargesTotal;
-    totalOtherChargesTax += itemOtherChargesTax;
-    totalTax += taxAmount + itemOtherChargesTax;
-    totalTaxableAmount += taxableAmount;
+    totalBasic += baseAmount;
+    totalChargesAmount += lineChargesAmount;
+    totalChargesTax += lineChargesTax;
+    totalBaseTax += baseTaxAmount;
+    totalSubtotal += lineSubtotal;
 
     const payload = {
       ...item,
       comment,
+      total_price: lineSubtotal,
+      subtotal: formatAmount(lineSubtotal),
       delivery_period_display: formatDeliveryPeriodLabel(item.delivery_period),
       basic_amount: formatAmount(baseAmount),
-      freight_amount: formatAmount(freightAmount),
-      package_amount: formatAmount(packageAmount),
-      other_charges_total: formatAmount(itemOtherChargesTotal),
-      other_charges_tax: formatAmount(itemOtherChargesTax),
       charge_details: chargeDetails,
-      taxable_amount: formatAmount(taxableAmount),
+      taxable_amount: formatAmount(baseAmount),
       effective_tax_rate: formatRate(effectiveTaxRate),
       tax_rate_display: formatRate(effectiveTaxRate),
-      tax_amount: formatAmount(taxAmount),
-      tax_detail_lines: buildItemTaxDetailLines(taxMode, effectiveTaxRate, taxAmount)
+      tax_amount: formatAmount(lineTaxAmount),
+      tax_detail_lines: buildItemTaxDetailLines(taxMode, effectiveTaxRate, lineTaxAmount),
     };
 
     if (taxMode === 'split') {
-      const cgstAmount = roundCurrency(taxAmount / 2);
-      const sgstAmount = roundCurrency(taxAmount - cgstAmount);
+      const cgstAmount = roundCurrency(lineTaxAmount / 2);
+      const sgstAmount = roundCurrency(lineTaxAmount - cgstAmount);
       const splitRate = effectiveTaxRate / 2;
 
       payload.cgst_rate = formatRate(splitRate);
@@ -199,38 +194,69 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst') => {
       payload.sgst_amount = formatAmount(sgstAmount);
     } else if (taxMode === 'igst') {
       payload.igst_rate = formatRate(effectiveTaxRate);
-      payload.igst_amount = formatAmount(taxAmount);
+      payload.igst_amount = formatAmount(lineTaxAmount);
     } else {
       payload.gst_rate = formatRate(effectiveTaxRate);
-      payload.gst_amount = formatAmount(taxAmount);
+      payload.gst_amount = formatAmount(lineTaxAmount);
     }
 
     return payload;
   });
 
-  const roundedBasicAmount = roundCurrency(basicAmount);
-  const roundedFreight = roundCurrency(totalFreight);
-  const roundedPackage = roundCurrency(totalPackage);
-  const roundedTax = roundCurrency(totalTax);
-  const roundedOtherCharges = roundCurrency(totalOtherCharges);
-  const totalPrice = roundCurrency(roundedBasicAmount + roundedFreight + roundedPackage + roundedOtherCharges + roundedTax);
+  const roundedBasic = roundCurrency(totalBasic);
+  const roundedChargesAmount = roundCurrency(totalChargesAmount);
+  const roundedTotalTax = roundCurrency(totalBaseTax + totalChargesTax);
+  const roundedSubtotal = roundCurrency(totalSubtotal);
 
-  // Build other charges totals array for template rendering
-  const otherChargeTotals = Object.entries(otherChargesByName).map(([name, vals]) => ({
-    name,
-    amount: formatAmount(roundCurrency(vals.amount)),
-    tax: formatAmount(roundCurrency(vals.tax))
-  }));
+  // Resolve PO-level global charges (Insurance, Handling, Discount applied
+  // to the whole PO) as percentage/absolute against the items subtotal.
+  // Global charges sit at the bottom — never per-row — so they're clearly
+  // separated from the product-level charges already rendered inline.
+  // Normalise both shapes ({amount, amount_mode} and legacy {tax, tax_mode})
+  // before applying — the engine's normalizeGlobalCharge maps either to the
+  // canonical {amount, amount_mode} pair so TCS/TDS-style document taxes
+  // render correctly alongside user-defined global charges. Carries the
+  // vendor's rate (e.g. "5%") and comment through so the printed PO shows
+  // the original input alongside the resolved currency value.
+  const resolvedGlobalCharges = (globalChargesInput || [])
+    .map((gc) => {
+      const norm = pricingEngine.normalizeGlobalCharge(gc);
+      if (!norm) return null;
+      const amount = roundCurrency(
+        pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, roundedSubtotal)
+      );
+      if (amount <= 0) return null;
+      const rateInput = norm.amount;
+      const rateMode = norm.amount_mode;
+      let rateDisplay = null;
+      if (rateInput !== undefined && rateInput !== null && rateInput !== '') {
+        rateDisplay = rateMode === 'percentage'
+          ? `${rateInput}%`
+          : `₹${formatAmount(Number(rateInput) || 0)}`;
+      }
+      return {
+        name: norm.name || 'Global Charge',
+        amount: formatAmount(amount),
+        amount_raw: amount,
+        rate_display: rateDisplay,
+        comment: norm.comment || null,
+        has_comment: !!norm.comment,
+      };
+    })
+    .filter(Boolean);
+
+  const globalChargesTotal = resolvedGlobalCharges.reduce((s, gc) => s + gc.amount_raw, 0);
+  const totalPOValue = roundCurrency(roundedSubtotal + globalChargesTotal);
 
   return {
     items: enrichedItems,
     taxMode,
-    basicAmount: formatAmount(roundedBasicAmount),
-    totalFreight: roundedFreight > 0 ? formatAmount(roundedFreight) : null,
-    totalPackage: roundedPackage > 0 ? formatAmount(roundedPackage) : null,
-    otherChargeTotals: otherChargeTotals.length > 0 ? otherChargeTotals : null,
-    gstAmount: formatAmount(roundedTax),
-    totalPrice: formatAmount(totalPrice),
-    summaryTaxRows: buildTaxSummaryRows(taxMode, roundedTax, roundCurrency(totalTaxableAmount))
+    basicAmount: formatAmount(roundedBasic),
+    totalCharges: roundedChargesAmount > 0 ? formatAmount(roundedChargesAmount) : null,
+    gstAmount: formatAmount(roundedTotalTax),
+    totalSubtotal: formatAmount(roundedSubtotal),
+    globalCharges: resolvedGlobalCharges.length > 0 ? resolvedGlobalCharges : null,
+    totalPrice: formatAmount(totalPOValue),
+    summaryTaxRows: buildTaxSummaryRows(taxMode, roundedTotalTax, roundedBasic),
   };
 };

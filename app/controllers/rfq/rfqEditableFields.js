@@ -24,16 +24,23 @@ export const RFQ_EDITABLE_FIELDS = {
   location:        { material: false },
 
   // ── Material (re-trigger approval) ─────────────────────────────────────
-  bid_end_date:              { material: true },
-  tender_publish_date:       { material: true },
+  // `type: 'timestamp'` marks columns that are PostgreSQL `timestamp` — the
+  // diff layer coerces "" to null for these so cleared optional dates write
+  // NULL instead of failing with "invalid input syntax for type timestamp".
+  bid_end_date:              { material: true, type: 'timestamp' },
+  tender_publish_date:       { material: true, type: 'timestamp' },
   tender_fees:               { material: true },
-  vendor_clarification_date: { material: true },
+  vendor_clarification_date: { material: true, type: 'timestamp' },
   rfq_type:                  { material: true },
   reverse_auction:           { material: true },
-  ra_start_date:             { material: true },
-  ra_end_date:               { material: true },
+  ra_start_date:             { material: true, type: 'timestamp' },
+  ra_end_date:               { material: true, type: 'timestamp' },
   project_id:                { material: true }
 };
+
+export function isTimestampField(fieldName) {
+  return RFQ_EDITABLE_FIELDS[fieldName]?.type === 'timestamp';
+}
 
 /**
  * Material rules for non-RFQ entities. Anything not listed here is cosmetic.

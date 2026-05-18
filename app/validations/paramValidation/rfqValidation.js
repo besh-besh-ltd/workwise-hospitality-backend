@@ -14,9 +14,24 @@ const vendorItems = Joi.object({
   user_id: Joi.number().required(),
   name: Joi.string().optional()
 });
+// Per-spec character caps mirror the frontend soft caps. Quantity/Unit are
+// gated by other validators (numeric / short string) — only Size and Spec
+// need explicit maxes here.
+const SPEC_VALUE_LIMITS = { Size: 200, Spec: 2000 };
 const specItems = Joi.object({
   title: Joi.string().valid('Size', 'Spec', 'Quantity', 'Unit').required(),
-  value: Joi.string().allow('').optional()
+  value: Joi.string()
+    .allow('')
+    .optional()
+    .custom((val, helpers) => {
+      if (typeof val !== 'string' || val.length === 0) return val;
+      const { title } = helpers.state.ancestors[0] || {};
+      const max = SPEC_VALUE_LIMITS[title];
+      if (max && val.length > max) {
+        return helpers.message(`Product ${title} must be at most ${max} characters (currently ${val.length}).`);
+      }
+      return val;
+    })
 });
 const termsItems = Joi.object({
   id: Joi.number().required(),
@@ -30,7 +45,7 @@ const productItems = Joi.object({
   product_name: Joi.string().optional().allow(null).allow(''),
   variant: Joi.number().optional().allow('').allow(null),
   product_id: Joi.number().required(),
-  comment: Joi.string().optional().allow(null).allow(''),
+  comment: Joi.string().max(1000).optional().allow(null).allow(''),
   datasheet: Joi.string().optional().allow(null).allow(''),
   datasheet_file: Joi.array().items(Joi.string()).optional(),
   spec_file: Joi.array().items(Joi.string()).optional(),
@@ -161,15 +176,20 @@ export const rfqSchemas = {
           'Contact number must be in the format +<country_code>-<mobile_number> or just <mobile_number>.'
       }),
     bid_end_date: Joi.string()
-      .optional()
-      .allow(null)
-      .allow('')
+      .required()
       .custom((value, helpers) => {
-        if (value) {
-          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
-          if (new Date(value) < minAllowed) {
+        const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Quote Submission End Date must be at least 2 hours from now'
+          );
+        }
+        const { vendor_clarification_date } = helpers.state.ancestors[0];
+        if (vendor_clarification_date) {
+          const diffMs = new Date(value) - new Date(vendor_clarification_date);
+          if (diffMs < 24 * 60 * 60 * 1000) {
             return helpers.message(
-              'Quote Submission End Date must be at least 2 hours from now'
+              'Quote Submission End Date must be at least 24 hours after the Vendor Clarification End Date'
             );
           }
         }
@@ -227,7 +247,7 @@ export const rfqSchemas = {
         }
         return value;
       }),
-    location: Joi.string().optional().allow('').allow(null),
+    location: Joi.string().max(300).optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
     rfq_added_from: Joi.string().valid('magic', 'manual').allow('').allow(null),
@@ -243,13 +263,36 @@ export const rfqSchemas = {
     term_and_condition_files: Joi.array().items(Joi.string()).optional(),
     is_tender: Joi.number().integer().valid(0, 1).optional().allow(null),
     tender_fees: Joi.number().integer().min(0).optional().allow(null),
-    tender_publish_date: Joi.string().optional().allow(null).allow(''),
-    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    tender_publish_date: Joi.string()
+      .required()
+      .custom((value, helpers) => {
+        const minAllowed = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
+        if (new Date(value) < minAllowed) {
+          return helpers.message(
+            'Publish Date & Time must be at least 5 minutes from now'
+          );
+        }
+        return value;
+      }),
+    vendor_clarification_date: Joi.string()
+      .required()
+      .custom((value, helpers) => {
+        const { tender_publish_date } = helpers.state.ancestors[0];
+        if (tender_publish_date) {
+          const diffMs = new Date(value) - new Date(tender_publish_date);
+          if (diffMs < 5 * 60 * 1000) {
+            return helpers.message(
+              'Vendor Clarification End Date must be at least 5 minutes after the Publish Date & Time'
+            );
+          }
+        }
+        return value;
+      }),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
-    process_id: Joi.number().integer().optional().allow(null),
+    process_id: Joi.number().integer().required(),
     title: Joi.string().required(),
   }),
   // WH-69: snapshot-based update. Frontend sends the full intended state of
@@ -262,12 +305,12 @@ export const rfqSchemas = {
         // RFQ-level scalar fields (mirrors RFQ_EDITABLE_FIELDS in
         // app/controllers/rfq/rfqEditableFields.js — keep both in sync)
         title: Joi.string().required(),
-        comment: Joi.string().trim().max(1000).allow('', null),
+        comment: Joi.string().trim().allow('', null),
         contact_name: Joi.string().required(),
         contact_number: Joi.string().trim().min(6).max(17).required(),
         response_email: Joi.string().required(),
         location: Joi.string().allow('', null),
-        bid_end_date: Joi.string().allow('', null),
+        bid_end_date: Joi.string().required(),
         tender_publish_date: Joi.string().allow('', null),
         tender_fees: Joi.number().integer().min(0).allow(null),
         vendor_clarification_date: Joi.string().allow('', null),
@@ -285,6 +328,13 @@ export const rfqSchemas = {
         // Terms is just an array of term ids
         terms: Joi.array().items(Joi.number()).default([]),
 
+        // T&C attachments — array of S3 URLs the user has uploaded against
+        // this RFQ. Diff-driven on the server (see applyTermFileChanges):
+        // any URL present here that wasn't on the row before is INSERTed
+        // into tbl_rfq_files; any URL the row previously had that's no
+        // longer in this list is DELETEd. Empty array = clear all files.
+        term_and_condition_files: Joi.array().items(Joi.string().allow('', null)).default([]),
+
         // Products array — id=null means newly added in this edit
         products: Joi.array().items(
           Joi.object({
@@ -293,8 +343,21 @@ export const rfqSchemas = {
             product_variant_id: Joi.number().required(),
             variant: Joi.number().default(0),
             product_name: Joi.string().allow('', null).optional(),
-            comment: Joi.string().allow('', null),
-            specs: Joi.object().pattern(Joi.string(), Joi.any()).default({}),
+            comment: Joi.string().max(1000).allow('', null),
+            specs: Joi.object().pattern(Joi.string(), Joi.any()).default({})
+              .custom((value, helpers) => {
+                if (!value || typeof value !== 'object') return value;
+                for (const key of Object.keys(value)) {
+                  const v = value[key];
+                  if (typeof v !== 'string' || v.length === 0) continue;
+                  const normalized = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+                  const max = SPEC_VALUE_LIMITS[normalized];
+                  if (max && v.length > max) {
+                    return helpers.message(`Product ${normalized} must be at most ${max} characters (currently ${v.length}).`);
+                  }
+                }
+                return value;
+              }),
             files: Joi.object({
               qap_file: Joi.array().items(Joi.string().allow('', null)).default([]),
               spec_file: Joi.array().items(Joi.string().allow('', null)).default([]),
@@ -417,7 +480,9 @@ export const rfqSchemas = {
   addClause: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
-    clause_text: Joi.string().required(),
+    clause_text: Joi.string().max(2000).required().messages({
+      'string.max': 'Clause text must be at most {#limit} characters'
+    }),
     file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
     clause_type: Joi.string().valid('clause', 'sampling').default('clause'),
     weightage: Joi.number().integer().min(0).optional().allow(null)
@@ -443,7 +508,9 @@ export const rfqSchemas = {
   }),
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
-    clause_text: Joi.string().required(),
+    clause_text: Joi.string().max(2000).required().messages({
+      'string.max': 'Clause text must be at most {#limit} characters'
+    }),
     file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
     clause_type: Joi.string().valid('clause', 'sampling').optional(),
     weightage: Joi.number().integer().min(0).optional().allow(null)

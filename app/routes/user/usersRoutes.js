@@ -298,6 +298,12 @@ UsersRoutes.post(
   UsersController.upload_documents
 );
 
+UsersRoutes.post(
+  '/delete-file',
+  noLogin.vendorTokenOrJwt,
+  UsersController.delete_files
+);
+
 
 UsersRoutes.post
 (
