@@ -61,10 +61,14 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndPr
   }
 }
 
-export function httpError(status, message) {
+export function httpError(status, message, field = null) {
   const err = new Error(message);
   err.isHttpError = true;
   err.statusCode = status;
+  // Optional snapshot-field tag so the frontend can jump to the step that
+  // owns this field on /rfq/update failure. Null for errors that don't
+  // belong to a specific field (e.g. authorisation, bid window closed).
+  if (field) err.field = field;
   return err;
 }
 
@@ -124,13 +128,14 @@ export function assertEditDateConstraints({ snapshot, current }) {
   if (snapshot && snapshot.bid_end_date !== undefined && snapshot.bid_end_date !== null && snapshot.bid_end_date !== '') {
     const bidMs = parseIstWallTimeToEpoch(bidEndRaw);
     if (bidMs == null) {
-      throw httpError(400, 'Invalid Quote Submission Deadline.');
+      throw httpError(400, 'Invalid Quote Submission Deadline.', 'bid_end_date');
     }
     const minMs = Date.now() + 2 * 60 * 60 * 1000;
     if (bidMs < minMs) {
       throw httpError(
         400,
-        'Quote Submission Deadline must be at least 2 hours from now (IST).'
+        'Quote Submission Deadline must be at least 2 hours from now (IST).',
+        'bid_end_date'
       );
     }
   }
@@ -146,14 +151,15 @@ export function assertEditDateConstraints({ snapshot, current }) {
   if (touchesClarOrBid && clarRaw) {
     const clarMs = parseIstWallTimeToEpoch(clarRaw);
     if (clarMs == null) {
-      throw httpError(400, 'Invalid Vendor Clarification Deadline.');
+      throw httpError(400, 'Invalid Vendor Clarification Deadline.', 'vendor_clarification_date');
     }
     if (bidEndRaw) {
       const bidMs = parseIstWallTimeToEpoch(bidEndRaw);
       if (bidMs != null && bidMs - clarMs < 60 * 60 * 1000) {
         throw httpError(
           400,
-          'Vendor Clarification Deadline must be at least 1 hour before the Quote Submission Deadline.'
+          'Vendor Clarification Deadline must be at least 1 hour before the Quote Submission Deadline.',
+          'vendor_clarification_date'
         );
       }
     }
@@ -162,9 +168,55 @@ export function assertEditDateConstraints({ snapshot, current }) {
       if (pubMs != null && clarMs <= pubMs) {
         throw httpError(
           400,
-          'Vendor Clarification Deadline must be after the Tender Publish Date.'
+          'Vendor Clarification Deadline must be after the Tender Publish Date.',
+          'vendor_clarification_date'
         );
       }
+    }
+  }
+}
+
+/**
+ * Per-product validation: every product in the snapshot must carry a
+ * positive Quantity (>= 0.1) and a non-empty Unit spec. Spec titles are
+ * matched case-insensitively to mirror the frontend's getSpecFieldValue
+ * lookup (Quantity/quantity/Qty all map to the same field).
+ *
+ * Runs against the full snapshot — not just the diff — because the
+ * snapshot is the intended final state. A save that would leave a
+ * product without a valid Qty/Unit is rejected even if the user didn't
+ * touch that product in this edit session.
+ */
+export function assertProductQuantityAndUnit(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.products)) return;
+  for (const p of snapshot.products) {
+    const label =
+      (p && (p.product_name || (p.id != null ? `product ${p.id}` : ''))) ||
+      'a product';
+    const specs = (p && p.specs) || {};
+
+    let qtyRaw;
+    let unitRaw;
+    for (const [title, value] of Object.entries(specs)) {
+      const k = String(title).toLowerCase();
+      if (k === 'quantity' || k === 'qty') qtyRaw = value;
+      else if (k === 'unit') unitRaw = value;
+    }
+
+    if (qtyRaw == null || String(qtyRaw).trim() === '') {
+      throw httpError(400, `Quantity is required for "${label}".`, 'products');
+    }
+    const qtyNum = Number(qtyRaw);
+    if (!Number.isFinite(qtyNum) || qtyNum < 0.1) {
+      throw httpError(
+        400,
+        `Quantity for "${label}" must be a positive number (minimum 0.1).`,
+        'products'
+      );
+    }
+
+    if (unitRaw == null || String(unitRaw).trim() === '') {
+      throw httpError(400, `Unit is required for "${label}".`, 'products');
     }
   }
 }
@@ -183,7 +235,7 @@ export function diffRfqSnapshot(current, snapshot) {
     Array.isArray(snapshot.hotel_ids) &&
     !sameNumberArrays(snapshot.hotel_ids, current.hotel_ids || [])
   ) {
-    throw httpError(400, 'Hotel mappings cannot be changed after RFQ creation.');
+    throw httpError(400, 'Hotel mappings cannot be changed after RFQ creation.', 'hotel_ids');
   }
 
   const rfqFields = diffRfqFields(current, snapshot);
@@ -252,7 +304,8 @@ function diffProducts(currentProducts, snapshotProducts) {
       // shouldn't happen — frontend sent an id we no longer have
       throw httpError(
         400,
-        `Product id ${sp.id} no longer exists on this RFQ. Refresh and try again.`
+        `Product id ${sp.id} no longer exists on this RFQ. Refresh and try again.`,
+        'products'
       );
     }
     const productDiff = diffSingleProduct(cur, sp);
@@ -410,7 +463,8 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
     if (poLockedIds.has(u.id)) {
       throw httpError(
         400,
-        `Cannot edit product "${u.current.product_name || u.id}" — it has an approved Purchase Order.`
+        `Cannot edit product "${u.current.product_name || u.id}" — it has an approved Purchase Order.`,
+        'products'
       );
     }
   }
@@ -418,7 +472,8 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
     if (poLockedIds.has(r.id)) {
       throw httpError(
         400,
-        `Cannot remove product "${r.current.product_name || r.id}" — it has an approved Purchase Order.`
+        `Cannot remove product "${r.current.product_name || r.id}" — it has an approved Purchase Order.`,
+        'products'
       );
     }
   }
