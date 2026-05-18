@@ -1777,9 +1777,16 @@ get_company_users: async (req, res, next) => {
     try {
       const now = currentDateTime();
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
-      const email = req.body.email?.toLowerCase() || '';
-      if (email) {
-        const user_detail = await userModel.getUserAuthEmail(email);
+      const employee_code = req.body.employee_code || '';
+      let email = req.body.email?.toLowerCase() || '';
+      let user_detail = [];
+      if (employee_code) {
+        user_detail = await userModel.getUserAuthByEmployeeCode(employee_code);
+        email = user_detail[0]?.email?.toLowerCase() || '';
+      } else if (email) {
+        user_detail = await userModel.getUserAuthEmail(email);
+      }
+      if (email && user_detail.length > 0) {
         // console.log('user_detail--', user_detail[0].name);
         // return false;
         // let user_detail = Object.assign({}, ...userEmailExists);

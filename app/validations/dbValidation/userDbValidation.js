@@ -148,15 +148,23 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email } = req.body;
+      let { email, employee_code } = req.body;
 
-      if (email) {
-        // const userEmailExists = await userModel.user_email_exist(email);
+      if (employee_code) {
+        const userByCode = await userModel.getUserAuthByEmployeeCode(employee_code);
+        if (userByCode.length < 1) {
+          err++;
+          errors.user_name = 'Employee code not found';
+        }
+      } else if (email) {
         const userEmailExists = await userModel.getUserAuthEmail(email?.toLowerCase());
         if (userEmailExists.length < 1) {
           err++;
           errors.user_name = 'User email not exists';
         }
+      } else {
+        err++;
+        errors.user_name = 'Email or employee code is required';
       }
 
       if (err > 0) {
