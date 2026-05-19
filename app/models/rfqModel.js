@@ -1811,8 +1811,37 @@ WHERE NOT EXISTS (
         });
     });
   },
-  getRfqByUser: async (limit, offset, user_id) => {
+  getRfqByUser: async (limit, offset, user_id, negotiationFilter = null) => {
     return new Promise(function (resolve, reject) {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND nr.status = 'ACTIVE'
+              AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND (
+                nr.status = 'ENDED'
+                OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr2
+            WHERE nr2.rfq_id = RFQ.id
+              AND $3 = ANY(nr2.vendor_ids)
+              AND nr2.status = 'ACTIVE'
+              AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      }
       db.any(
         `SELECT
           RFQ.id,
@@ -1901,6 +1930,7 @@ WHERE NOT EXISTS (
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
+        ${negotiationClause}
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
         [offset, limit, user_id]
@@ -8926,13 +8956,43 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-  getVendorRfqCount: async (user_id) => {
+  getVendorRfqCount: async (user_id, negotiationFilter = null) => {
     return new Promise((resolve, reject) => {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND nr.status = 'ACTIVE'
+             AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND (
+               nr.status = 'ENDED'
+               OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr2
+           WHERE nr2.rfq_id = r.id
+             AND $1 = ANY(nr2.vendor_ids)
+             AND nr2.status = 'ACTIVE'
+             AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      }
       db.one(
         `SELECT COUNT(DISTINCT v.rfq_id)
          FROM tbl_rfq_product_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
+         WHERE v.user_id = $1 AND r.is_published = 1
+         ${negotiationClause}`, // Matching user_id in tbl_rfq_product_vendors
         [user_id]
       )
         .then(function (data) {
@@ -12884,6 +12944,21 @@ ORDER BY tq.timestamp DESC;
           FROM tbl_quote_finalization _tqf_any
           WHERE _tqf_any.rfq_id = RFQ.id
         ) AS has_finalization,
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_act
+            WHERE _nr_act.rfq_id = RFQ.id
+              AND _nr_act.status = 'ACTIVE'
+              AND _nr_act.end_date > NOW()
+          )
+        ) AS has_active_negotiation_round,
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_pend
+            WHERE _nr_pend.rfq_id = RFQ.id
+              AND _nr_pend.status = 'PENDING_APPROVAL'
+          )
+        ) AS has_pending_negotiation_approval,
         P.name AS project_name,
         RFQ.company_name,
         RFQ.contact_name,
@@ -12957,6 +13032,57 @@ ORDER BY tq.timestamp DESC;
             )
           END
         ) AS finalization_approval_completed,
+        -- finalization_approval_rejected: latest NEGOTIATION_QUOTE approval on any product is REJECTED with no newer PENDING/APPROVED
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_qrej
+            WHERE _ai_qrej.entity_type = 'NEGOTIATION_QUOTE'
+              AND _ai_qrej.entity_id IN (
+                SELECT _rp_qrej.id FROM tbl_rfq_products _rp_qrej
+                WHERE _rp_qrej.rfq_id = RFQ.id
+              )
+              AND _ai_qrej.status = 'REJECTED'
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_approval_instances _ai_qnew
+                WHERE _ai_qnew.entity_type = 'NEGOTIATION_QUOTE'
+                  AND _ai_qnew.entity_id = _ai_qrej.entity_id
+                  AND _ai_qnew.status IN ('PENDING', 'APPROVED')
+                  AND _ai_qnew.created_at > _ai_qrej.created_at
+              )
+          )
+        ) AS finalization_approval_rejected,
+        -- has_pending_finalization_approval: any product has a PENDING NEGOTIATION_QUOTE approval instance
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_fpend
+            WHERE _ai_fpend.entity_type = 'NEGOTIATION_QUOTE'
+              AND _ai_fpend.entity_id IN (
+                SELECT _rp_fpend.id FROM tbl_rfq_products _rp_fpend
+                WHERE _rp_fpend.rfq_id = RFQ.id
+              )
+              AND _ai_fpend.status = 'PENDING'
+          )
+        ) AS has_pending_finalization_approval,
+        -- negotiation_terminated: a NEGOTIATION approval was REJECTED, or a round has ended/expired (precedence handled in UI)
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_nrej
+            WHERE _ai_nrej.entity_type = 'NEGOTIATION'
+              AND _ai_nrej.entity_id IN (
+                SELECT _nr_nrej.id FROM tbl_negotiation_rounds _nr_nrej
+                WHERE _nr_nrej.rfq_id = RFQ.id
+              )
+              AND _ai_nrej.status = 'REJECTED'
+          )
+          OR EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_exp
+            WHERE _nr_exp.rfq_id = RFQ.id
+              AND (
+                _nr_exp.status IN ('ENDED', 'CLOSED')
+                OR (_nr_exp.status = 'ACTIVE' AND _nr_exp.end_date <= NOW())
+              )
+          )
+        ) AS negotiation_terminated,
         -- finalization_partially_approved: some products approved, some not
         (
           SELECT CASE
