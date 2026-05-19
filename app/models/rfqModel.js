@@ -13004,31 +13004,37 @@ ORDER BY tq.timestamp DESC;
               )
             )
             ELSE (
-              -- RFQ: per-product NEGOTIATION_QUOTE approval check
-              SELECT BOOL_AND(
-                NOT EXISTS (
-                  SELECT 1 FROM tbl_approval_instances _ai
-                  WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
-                    AND _ai.entity_id = _rp_fin.id
-                    AND _ai.status = 'PENDING'
-                )
-                AND (
-                  NOT EXISTS (
-                    SELECT 1 FROM tbl_approval_instances _ai2
-                    WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin.id
-                  )
-                  OR EXISTS (
-                    SELECT 1 FROM tbl_approval_instances _ai3
-                    WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
-                      AND _ai3.entity_id = _rp_fin.id AND _ai3.status = 'APPROVED'
-                  )
-                )
+              -- RFQ: every product must be finalized AND every product's NEGOTIATION_QUOTE approval done
+              (
+                (SELECT COUNT(*) FROM tbl_rfq_products _rpv_fac WHERE _rpv_fac.rfq_id = RFQ.id)
+                = (SELECT COUNT(*) FROM tbl_quote_finalization _tqf_fac WHERE _tqf_fac.rfq_id = RFQ.id)
               )
-              FROM tbl_rfq_products _rp_fin
-              JOIN tbl_quote_finalization _qf_fin ON _qf_fin.rfq_id = RFQ.id
-                AND _qf_fin.product_variant_id = _rp_fin.product_variant_id
-                AND _qf_fin.variant = _rp_fin.variant
-              WHERE _rp_fin.rfq_id = RFQ.id
+              AND (
+                SELECT BOOL_AND(
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_instances _ai
+                    WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
+                      AND _ai.entity_id = _rp_fin.id
+                      AND _ai.status = 'PENDING'
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai2
+                      WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai3
+                      WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
+                        AND _ai3.entity_id = _rp_fin.id AND _ai3.status = 'APPROVED'
+                    )
+                  )
+                )
+                FROM tbl_rfq_products _rp_fin
+                JOIN tbl_quote_finalization _qf_fin ON _qf_fin.rfq_id = RFQ.id
+                  AND _qf_fin.product_variant_id = _rp_fin.product_variant_id
+                  AND _qf_fin.variant = _rp_fin.variant
+                WHERE _rp_fin.rfq_id = RFQ.id
+              )
             )
           END
         ) AS finalization_approval_completed,
