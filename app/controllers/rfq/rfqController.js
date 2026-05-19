@@ -6610,8 +6610,13 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
-      const totalRFQ = await rfqModel.getVendorRfqCount(user_id);
+      const allowedNegotiationFilters = ['active', 'ended'];
+      const negotiation_filter = allowedNegotiationFilters.includes(req.body.negotiation_filter)
+        ? req.body.negotiation_filter
+        : null;
+
+      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, negotiation_filter);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, negotiation_filter);
 
       res
         .status(200)
@@ -9078,8 +9083,9 @@ const rfqController = {
   },
 
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type } =
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type, comment } =
       req.body;
+    const trimmedComment = typeof comment === 'string' ? comment.trim() : '';
     
     // Default to PO route for non-hospitality RFQs, route_type for hospitality
     const selectedRoute = route_type || 'PO';
@@ -9201,7 +9207,8 @@ const rfqController = {
               created_by: existingFinalization.created_by,
               timestamp: existingFinalization.timestamp,
               variant: existingFinalization.variant,
-              changed_by: req.user.id
+              changed_by: req.user.id,
+              comment: existingFinalization.comment || null
             };
 
             await rfqModel.insert(
@@ -9226,7 +9233,8 @@ const rfqController = {
             vendor_id,
             quote_id,
             created_by: req.user.id,
-            variant
+            variant,
+            comment: trimmedComment
           };
 
           const response = await rfqModel.insert(
@@ -9299,6 +9307,7 @@ const rfqController = {
                         vendor_id,
                         quote_id,
                         quote_item_id,
+                        finalization_comment: trimmedComment || null,
                         po_payload: { ...req.body, quote_id: quote_item_id },
                         po_user: { id: req.user.id, company_id: req.user.company_id }
                       },
@@ -9449,7 +9458,8 @@ const rfqController = {
                     quote_id: quote_id,
                     is_tender: rfqData.is_tender,
                     company_name: rfqData.company_name,
-                    triggered_by: 'product_finalization'
+                    triggered_by: 'product_finalization',
+                    finalization_comment: trimmedComment || null
                   },
                   txContext: t
                 });

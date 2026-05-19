@@ -1,0 +1,137 @@
+name: Backend CI - Integration Tests
+
+# Runs the Jest integration suite on every PR targeting main / qa.
+# A green check here is the merge gate — no need to run tests locally before review.
+#
+# Required repo secret:
+#   ENV_TEST  - full contents of .env.test, with CI-appropriate Postgres creds.
+#               Example minimum (matches the service container below):
+#                   NODE_ENV=test
+#                   PORT=8002
+#                   HOST=localhost
+#                   DATABASE_USERNAME=postgres
+#                   DATABASE_PASSWORD=postgres
+#                   DATABASE_PORT=5432
+#                   DATABASE_DIALECT=postgres
+#                   TEST_DB_NO_SSL=1
+#                   TEST_MAINTENANCE_DB=postgres
+#                   TEST_DB_PREFIX=hospitality_test
+#                   ... (plus the JWT / SMTP / AWS / Razorpay placeholders
+#                        from the committed .env.test — required to boot
+#                        the app under test)
+#
+# The DB name is computed automatically as hospitality_test_ci_<run_id>
+# via envguard.js (GITHUB_RUN_ID is set by Actions), so concurrent runs
+# do not collide and the safety regex still matches.
+
+on:
+  pull_request:
+    branches: [main, qa]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per PR/branch. New pushes cancel in-flight runs to save minutes.
+  group: ci-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Integration tests (Jest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        # Schema dump in tests/setup/schema.sql was produced by pg_dump 17.x;
+        # the server must be >= 17 to apply it cleanly.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      # Skip Chromium download — no test exercises the puppeteer code paths
+      # (ARC PDF generation, etc. are not covered by the integration suite).
+      # Both var names set to cover puppeteer pre-22 / 22+.
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
+      # Belt-and-suspenders. jestEnv.js / envguard.js also force this.
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Verify ENV_TEST secret is present
+        env:
+          ENV_TEST: ${{ secrets.ENV_TEST }}
+        run: |
+          if [ -z "${ENV_TEST:-}" ]; then
+            echo "::error::Repo secret ENV_TEST is not set. Add the full .env.test contents (with CI Postgres credentials) under Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - name: Write .env.test from secret
+        env:
+          ENV_TEST: ${{ secrets.ENV_TEST }}
+        run: |
+          # Overwrites the committed .env.test (which targets local brew Postgres)
+          # so envguard.js / jestEnv.js pick up CI credentials.
+          printf '%s\n' "$ENV_TEST" > .env.test
+          # Sanity: required keys are present. Don't print the file (secrets).
+          for key in NODE_ENV HOST DATABASE_USERNAME DATABASE_PORT TEST_DB_NO_SSL TEST_MAINTENANCE_DB TEST_DB_PREFIX JWT_SECRET CRYPT_SECRET; do
+            if ! grep -q "^${key}=" .env.test; then
+              echo "::error::ENV_TEST is missing required key: ${key}"
+              exit 1
+            fi
+          done
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Install Postgres client (for readiness probe)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null
+
+      - name: Wait for Postgres
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U postgres -d postgres >/dev/null 2>&1; then
+              echo "Postgres is ready (attempt $i)"
+              psql -h localhost -U postgres -d postgres -c 'SELECT version();'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Postgres did not become ready in time"
+          exit 1
+
+      - name: Run integration tests
+        run: npm test -- --ci --colors
+        # Jest config pins maxWorkers=1, so --runInBand is redundant.
+        # `npm test` already exports NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test.
+
+      - name: Drop orphan test databases (cleanup)
+        if: always()
+        run: npm run test:cleanup
+        continue-on-error: true

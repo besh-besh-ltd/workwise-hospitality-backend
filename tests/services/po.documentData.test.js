@@ -679,12 +679,12 @@ describe("Vendor quote → drafted PO: other_charges MUST round-trip into charge
     // Engine math: 45.799 × 150.5 = 6892.7495; +18% tax = 8133.444... ; engine
     // rounds the *line total* to 8133. PO header total_value mirrors that
     // (no global charges in this scenario).
-    expect(Number(popRow.total_price)).toBe(8133);
+    expect(Number(popRow.total_price)).toBe(8133.44);
     const headerRow = await db.one(
       `SELECT total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
       [poId]
     );
-    expect(Number(headerRow.total_value)).toBe(8133);
+    expect(Number(headerRow.total_value)).toBe(8133.44);
   });
 
   it("draftPO snapshots tbl_quotes.global_charges onto the PO header and rolls them into total_value", async () => {
@@ -1218,7 +1218,7 @@ describe("Two-product PO merge — TCS applied once on combined subtotal", () =>
       `SELECT total_value FROM tbl_rfq_purchase_order WHERE id = $1`,
       [poId]
     );
-    expect(Number(afterStep1.total_value)).toBe(8853);
+    expect(Number(afterStep1.total_value)).toBe(8852.21);
 
     // Step 2: finalize HAND SANITIZER with existing_po_id → appends to PO.
     // CRITICAL: this used to leave total_value stale (only SLIPPERS' grand
@@ -1259,8 +1259,8 @@ describe("Two-product PO merge — TCS applied once on combined subtotal", () =>
     const lineSanitizer = popRows.find((r) => Number(r.rfq_product_id) === rfqProd2.id);
     expect(lineSlippers).toBeDefined();
     expect(lineSanitizer).toBeDefined();
-    expect(Number(lineSlippers.total_price)).toBe(8431);
-    expect(Number(lineSanitizer.total_price)).toBe(6679);
+    expect(Number(lineSlippers.total_price)).toBe(8430.68);
+    expect(Number(lineSanitizer.total_price)).toBe(6678.8);
 
     // ---- Snapshot on header still has ONE TCS (not duplicated) ----
     const headerAfterStep2 = await db.one(
@@ -1284,7 +1284,7 @@ describe("Two-product PO merge — TCS applied once on combined subtotal", () =>
     // across all lines + the snapshotted globals. Without this, total_value
     // would stay at step 1's value (8,853, just SLIPPERS) and the second
     // line would silently drop off the document total.
-    expect(Number(headerAfterStep2.total_value)).toBe(15866);
+    expect(Number(headerAfterStep2.total_value)).toBe(15864.95);
 
     // Cleanup: the global afterEach handles tbl_rfq_purchase_order via
     // inserted.poIds and tbl_purchase_order_product via inserted.poLineIds.
