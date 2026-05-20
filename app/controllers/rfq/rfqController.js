@@ -31,6 +31,7 @@ import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
   assertEditDateConstraints,
+  assertProductQuantityAndUnit,
   diffRfqSnapshot,
   applyRfqFieldChanges,
   applyProductChanges,
@@ -5290,7 +5291,8 @@ const rfqController = {
             ) {
               throw updateHttpError(
                 400,
-                `Cannot modify '${f}' after the RFQ has been published.`
+                `Cannot modify '${f}' after the RFQ has been published.`,
+                f
               );
             }
           }
@@ -5303,6 +5305,13 @@ const rfqController = {
         // Computed in IST epoch-ms so server timezone drift can't shift
         // the windows around. See assertEditDateConstraints.
         assertEditDateConstraints({ snapshot, current });
+
+        // 3b. Quantity & Unit are mandatory per product. Quantity must be a
+        //     positive number >= 0.1; Unit must be non-empty. Validated
+        //     against the full snapshot, not just the diff, so a save can't
+        //     leave a product in an invalid state regardless of which
+        //     section the user edited.
+        assertProductQuantityAndUnit(snapshot);
 
         // 4. PO-locked products — load once for use during apply
         const poLocked = await t.any(
@@ -5329,35 +5338,36 @@ const rfqController = {
           const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
           if (disallowedFields.length > 0) {
             throw updateHttpError(400,
-              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`,
+              disallowedFields[0].field_name
             );
           }
           if (diff.products.added.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot add new products.');
+            throw updateHttpError(400, 'Restricted edit: cannot add new products.', 'products');
           }
           if (diff.products.removed.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot remove products.');
+            throw updateHttpError(400, 'Restricted edit: cannot remove products.', 'products');
           }
           for (const update of diff.products.updated) {
             if (update.commentChanged) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.', 'products');
             }
             if (update.specs.added.length > 0 || update.specs.removed.length > 0 || update.specs.updated.length > 0) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.', 'products');
             }
             if (update.files.added.length > 0 || update.files.removed.length > 0) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product files.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product files.', 'products');
             }
             if (update.techEvalChanged) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.', 'products');
             }
             // vendors.added IS allowed (from Refresh Vendors)
           }
           if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms.', 'terms');
           }
           if (diff.termFiles && (diff.termFiles.added.length > 0 || diff.termFiles.removed.length > 0)) {
-            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.');
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.', 'term_and_condition_files');
           }
         }
 
@@ -5465,7 +5475,8 @@ const rfqController = {
       if (error.isHttpError) {
         return res.status(error.statusCode || 400).json({
           status: 0,
-          message: error.message
+          message: error.message,
+          ...(error.field ? { field: error.field } : {})
         });
       }
       return res.status(400).json({
