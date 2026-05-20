@@ -319,12 +319,16 @@ export const rfqSchemas = {
         return value;
       }),
     // Bypass-ARC override is captured per-product on add-product-to-draft
-    // (column lives on tbl_rfq_products, not tbl_rfq). These two fields
-    // remain accepted-and-ignored at the parent-create payload level so
-    // any in-flight drafts that were saved with the older shape don't
-    // 400 here. Server only writes per-product values.
+    // (column lives on tbl_rfq_products, not tbl_rfq). These fields are
+    // accepted-and-ignored at the parent-create payload level so any
+    // in-flight drafts that were saved with the older shape don't 400
+    // here, and so the FE can round-trip the derived rollup
+    // (bypass_arc_product_count) that getRfqDraftById returns under
+    // rfq_form_data without stripping it on send. Server never writes
+    // these on create — they're computed from tbl_rfq_products on read.
     bypass_arc: Joi.number().integer().valid(0, 1).optional().allow(null),
     bypass_arc_reason: Joi.string().max(2000).optional().allow(null, ''),
+    bypass_arc_product_count: Joi.number().integer().min(0).optional().allow(null).strip(),
     title: Joi.string().required(),
   }),
   // WH-69: snapshot-based update. Frontend sends the full intended state of
