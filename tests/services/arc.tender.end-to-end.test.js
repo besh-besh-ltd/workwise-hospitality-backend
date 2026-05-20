@@ -306,6 +306,10 @@ describe("Tender → ARC → Contracted PO — full happy path", () => {
       body: {
         arc_id: alphaEnvelope.id,
         hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
+        // Two vendors hold contracts on this (hotel, product); BE
+        // requires a ≥30-char rationale for picking one over the other.
+        vendor_selection_reason: 'Vendor alpha quoted a sharper unit price and has cleared the last three POs without rejection.',
         items: [
           { arc_item_id: alphaItems.find((i) => i.product_variant_id === 1).id, quantity: 10 },
           { arc_item_id: alphaItems.find((i) => i.product_variant_id === 2).id, quantity: 5 },

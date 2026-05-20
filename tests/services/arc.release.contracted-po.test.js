@@ -55,6 +55,8 @@ afterEach(async () => {
     await db.none(`DELETE FROM tbl_arc_hotels WHERE arc_id IN (SELECT id FROM tbl_arc WHERE rfq_id = ANY($1::int[]))`, [ids]);
     await db.none(`DELETE FROM tbl_arc WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type = 'TENDER' AND entity_id = ANY($1::int[])`, [ids]);
+    await db.none(`DELETE FROM tbl_quote_items WHERE rfq_id = ANY($1::int[])`, [ids]);
+    await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [ids]);
@@ -129,15 +131,42 @@ async function makeReleasableEnvelope({
     [env.id, envelope_status, period_from, period_to]
   );
 
-  // Two approved items: one at ₹100, one at ₹200, with distinct charges.
+  // Two approved items: one at ₹100, one at ₹200, with distinct
+  // charges. The release path now reads engine inputs (tax/tax_mode
+  // /freight/packaging/other_charges) from tbl_quote_items, NOT from
+  // tbl_arc_item.charges_meta — so we seed a quote + per-line quote
+  // items so the 18% GST actually flows through the engine.
+  const quote = await db.one(
+    `INSERT INTO tbl_quotes (rfq_id, rfq_no, status, created_by, updated_by, global_charges)
+     VALUES ($1, $2, 1, $3, $3, '[]'::jsonb) RETURNING id`,
+    [rfq.id, rfq.rfq_no, vendor_id]
+  );
   const items = [];
   for (const [i, p] of products.entries()) {
+    const qi = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
+          comment, delivery_period, quantity, variant,
+          tax, tax_mode, freight_price, freight_mode, package_price, package_mode, other_charges)
+       VALUES ($1, $2, $3, $4, $5, $6, '', '7 days', $7, 0,
+               18, 'percentage', 0, 'absolute', 0, 'absolute', '[]'::jsonb)
+       RETURNING id`,
+      [rfq.id, rfq.rfq_no, quote.id, p.product_variant_id,
+       i === 0 ? 100.50 : 200.00,
+       (i === 0 ? 100.50 : 200.00) * (i === 0 ? 1 : 1),
+       '1']
+    );
     const it = await arcModel.upsertItem({
       arc_id: env.id, rfq_product_id: p.id, product_variant_id: p.product_variant_id,
-      variant: 0, quote_id: 0,
+      // tbl_arc_item.quote_id stores the parent quote id (matches the
+      // join in arcReleaseController.loadArcItemEngineRow which does
+      // qi.quote_id = ai.quote_id). Pass the parent quote id, not the
+      // quote_item.id.
+      variant: 0, quote_id: quote.id,
       unit_price: i === 0 ? 100.50 : 200.00,
-      // Realistic charges_meta shape — pricing engine consumes these.
-      charges_meta: { tax: 18, tax_mode: "percentage", other_charges: [] },
+      // charges_meta on the arc_item is just the other_charges snapshot
+      // (legacy shape); the canonical tax/charges live on tbl_quote_items.
+      charges_meta: [],
     });
     await db.none(
       `UPDATE tbl_arc_item SET status = 'APPROVED', approved_at = NOW(), approved_by = $2 WHERE id = $1`,
@@ -164,6 +193,7 @@ describe("ARC Release → Contracted PO", () => {
       body: {
         arc_id: env.id,
         hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [
           { arc_item_id: items[0].id, quantity: 10 },
           { arc_item_id: items[1].id, quantity: 5 },
@@ -241,6 +271,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env.id, hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: items[0].id, quantity: 1 }],
       },
     });
@@ -257,6 +288,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env.id, hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: items[0].id, quantity: 1 }],
       },
     });
@@ -271,6 +303,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env.id, hotel_id: IDS.hotels.A2, // not in tbl_arc_hotels
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: items[0].id, quantity: 1 }],
       },
     });
@@ -286,6 +319,7 @@ describe("ARC Release → Contracted PO", () => {
         user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
         body: {
           arc_id: env.id, hotel_id: IDS.hotels.A1,
+          process_id: IDS.processes.A_P1,
           items: [{ arc_item_id: items[0].id, quantity: badQty }],
         },
       });
@@ -304,6 +338,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env1.env.id, hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: env2.items[0].id, quantity: 1 }],
       },
     });
@@ -317,6 +352,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env1.env.id, hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: env1.items[0].id, quantity: 1 }],
       },
     });
@@ -349,6 +385,7 @@ describe("ARC Release → Contracted PO", () => {
       user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
       body: {
         arc_id: env.id, hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
         items: [{ arc_item_id: items[0].id, quantity: 3 }],
       },
     });
