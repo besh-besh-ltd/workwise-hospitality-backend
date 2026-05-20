@@ -3146,6 +3146,17 @@ ALTER SEQUENCE public.tbl_query_messages_id_seq OWNED BY public.tbl_query_messag
 
 
 --
+-- Name: tbl_query_message_reads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tbl_query_message_reads (
+    message_id integer NOT NULL,
+    user_id integer NOT NULL,
+    read_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: tbl_quote_activity; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7286,6 +7297,14 @@ ALTER TABLE ONLY public.tbl_query_message_files
 
 
 --
+-- Name: tbl_query_message_reads tbl_query_message_reads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_pkey PRIMARY KEY (message_id, user_id);
+
+
+--
 -- Name: tbl_query_messages tbl_query_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10533,6 +10552,22 @@ ALTER TABLE ONLY public.tbl_projects
 
 ALTER TABLE ONLY public.tbl_query_message_files
     ADD CONSTRAINT tbl_query_message_files_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.tbl_query_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tbl_query_message_reads tbl_query_message_reads_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.tbl_query_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tbl_query_message_reads tbl_query_message_reads_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.tbl_users(id) ON DELETE CASCADE;
 
 
 --
