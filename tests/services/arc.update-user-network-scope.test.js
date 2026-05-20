@@ -54,6 +54,27 @@ afterEach(async () => {
     `DELETE FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2`,
     [IDS.users.a1_proc_techApp, ROLE_IDS.COMM_APPROVER]
   );
+  // update_user_detail wipes ALL of the target user's scopes before
+  // inserting the new set, so the fixtures-seeded TECH_APPROVER row
+  // for a1_proc_techApp is gone after every test in this file.
+  // Restore it (delete-then-insert; no unique constraint to use ON
+  // CONFLICT against) so downstream suites — fixtures.smoke,
+  // rfq.group-arc-visibility — see the seeded state they assume.
+  await db.none(
+    `DELETE FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2`,
+    [IDS.users.a1_proc_techApp, ROLE_IDS.TECH_APPROVER]
+  );
+  await db.none(
+    `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, is_network_scope)
+     VALUES ($1, $2, $3, $4, $5, 0)`,
+    [
+      IDS.users.a1_proc_techApp,
+      ROLE_IDS.TECH_APPROVER,
+      IDS.hospitality.A,
+      IDS.hotels.A1,
+      IDS.departments.proc,
+    ]
+  );
 });
 
 afterAll(async () => {
