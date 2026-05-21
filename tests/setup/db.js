@@ -218,6 +218,7 @@ const DYNAMIC_TABLES = [
   "tbl_notifications",
   "tbl_login_log",
   "tbl_token_login_data",
+  "tbl_query_message_reads",
   "tbl_query_message_files",
   "tbl_query_messages",
 ];
