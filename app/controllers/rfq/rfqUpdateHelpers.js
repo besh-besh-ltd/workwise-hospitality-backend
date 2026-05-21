@@ -9,6 +9,7 @@
  * Hotels are intentionally NOT diffed here — they are immutable post-create.
  */
 
+import { decode } from 'html-entities';
 import {
   RFQ_EDITABLE_FIELDS,
   isFieldEditable,
@@ -269,8 +270,11 @@ function diffRfqFields(current, snapshot) {
     const coerce = (v) => (isTs && normaliseValue(v) === '' ? null : v);
     const rawOld = coerce(current[fieldName]);
     const rawNew = coerce(snapshot[fieldName]);
-    const oldValue = normaliseValue(rawOld);
-    const newValue = normaliseValue(rawNew);
+    // Strings compare via canonicalForCompare (HTML entities + whitespace +
+    // tag-boundary tolerant) so editor-driven re-normalization doesn't show
+    // as a diff. Non-strings keep normaliseValue/valuesEqual semantics.
+    const oldValue = typeof rawOld === 'string' ? canonicalForCompare(rawOld) : normaliseValue(rawOld);
+    const newValue = typeof rawNew === 'string' ? canonicalForCompare(rawNew) : normaliseValue(rawNew);
     if (!valuesEqual(oldValue, newValue)) {
       out.push({
         field_name: fieldName,
@@ -335,7 +339,7 @@ function diffSingleProduct(cur, snap) {
   };
 
   // comment
-  if (normaliseValue(cur.comment) !== normaliseValue(snap.comment)) {
+  if (canonicalForCompare(cur.comment) !== canonicalForCompare(snap.comment)) {
     diff.commentChanged = true;
   }
 
@@ -345,7 +349,7 @@ function diffSingleProduct(cur, snap) {
   for (const key of Object.keys(newSpecs)) {
     if (!(key in curSpecs)) {
       diff.specs.added.push({ title: key, value: newSpecs[key] });
-    } else if (normaliseValue(curSpecs[key]) !== normaliseValue(newSpecs[key])) {
+    } else if (canonicalForCompare(curSpecs[key]) !== canonicalForCompare(newSpecs[key])) {
       diff.specs.updated.push({
         title: key,
         old_value: curSpecs[key],
@@ -875,6 +879,30 @@ function normaliseValue(v) {
   if (typeof v === 'string') return v.trim();
   if (v instanceof Date) return v.toISOString();
   return v;
+}
+
+// Canonical form used ONLY for diff comparison — never stored. Makes the
+// equality check tolerant of editor-driven re-normalization that doesn't
+// change visible content:
+//   - decode HTML entities (`&amp;` ↔ `&`, `&nbsp;` → space, …)
+//   - collapse whitespace runs (incl. NBSP) to a single space
+//   - drop whitespace immediately inside/around angle brackets so
+//     `INCLUDED. </p> ` and `INCLUDED.</p>` compare equal
+//   - trim
+//
+// Why: rich-text editors collapse whitespace and trim around tag boundaries
+// on render. Without this, an untouched `comment` round-trips as "changed"
+// and the restricted-edit guard (rfqController.js: isRestrictedEdit branch)
+// blocks otherwise-valid deadline extensions with `Cannot change: comment`.
+// Tag-structure changes (e.g. wrapping a word in <b>) ARE still detected.
+function canonicalForCompare(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'string') return v;
+  let s = v;
+  try { s = decode(s); } catch { /* fall through with raw */ }
+  s = s.replace(/\s+/g, ' ');
+  s = s.replace(/\s*<\s*/g, '<').replace(/\s*>\s*/g, '>');
+  return s.trim();
 }
 
 function valuesEqual(a, b) {
