@@ -2967,6 +2967,15 @@ LIMIT 1;`;
               AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
         ) AS vendors_count
+        ,(
+            SELECT COUNT(DISTINCT TQ.created_by)
+            FROM tbl_quotes TQ
+            JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id
+            WHERE TQ.rfq_id = RFQ_P.rfq_id
+              AND TQI.product_variant_id = RFQ_P.product_variant_id
+              AND TQI.variant = RFQ_P.variant
+              AND (TQ.is_regret IS NULL OR TQ.is_regret != 1)
+        ) AS participated_vendors_count
         `
             : ''
         }
