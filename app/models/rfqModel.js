@@ -4711,7 +4711,9 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
 
         // Evaluator names: users who have both te.read and te.create permissions
-        // scoped to this RFQ's business unit (hotel) and department
+        // scoped to this RFQ's business unit (hotel) and department.
+        // Only active, non-deleted users — the lifecycle is the single source of truth
+        // for who can act on the RFQ, so deactivated users must not appear here.
         db.any(`
           SELECT DISTINCT u.id, u.name
           FROM tbl_users u
@@ -4720,7 +4722,9 @@ LIMIT 2;
           JOIN tbl_permissions p ON p.id = rp.permission_id
           JOIN tbl_rfq rfq ON rfq.id = $1
           JOIN tbl_hospitality_company_hotels hch ON hch.id = rfq.hotel_id AND hch.is_deleted = 0
-          WHERE urs.company_id = hch.hospitality_company_id
+          WHERE u.status = 1
+            AND u.is_deleted = 0
+            AND urs.company_id = hch.hospitality_company_id
             AND p.resource = 'te'
             AND p.action IN ('read', 'create')
             AND (
