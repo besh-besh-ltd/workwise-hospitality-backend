@@ -3634,8 +3634,22 @@ CREATE TABLE public.tbl_rfq (
     department_id integer,
     title character varying(500),
     technical_evaluation_by integer,
-    process_id integer
+    process_id integer,
+    publish_attempts integer DEFAULT 0 NOT NULL,
+    last_publish_attempt_at timestamp without time zone,
+    publish_failure_reason text,
+    publish_failure_notified_at timestamp without time zone
 );
+
+
+--
+-- Name: idx_rfq_stuck_publish; Type: INDEX; Schema: public; Owner: -
+-- Partial index for the auto-publish watchdog scan
+--
+
+CREATE INDEX idx_rfq_stuck_publish
+    ON public.tbl_rfq (tender_publish_date)
+    WHERE status = 4 AND is_published = 0;
 
 
 --
