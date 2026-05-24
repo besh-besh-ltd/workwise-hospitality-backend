@@ -5213,7 +5213,8 @@ CREATE TABLE public.tbl_user_role_scopes (
     role_id integer NOT NULL,
     company_id integer NOT NULL,
     hotel_id integer,
-    department_id integer
+    department_id integer,
+    process_id integer
 );
 
 
@@ -9519,7 +9520,21 @@ CREATE INDEX idx_urs_user ON public.tbl_user_role_scopes USING btree (user_id);
 -- Name: idx_urs_user_covering; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_urs_user_covering ON public.tbl_user_role_scopes USING btree (user_id) INCLUDE (id, role_id, company_id, hotel_id, department_id);
+CREATE INDEX idx_urs_user_covering ON public.tbl_user_role_scopes USING btree (user_id) INCLUDE (id, role_id, company_id, hotel_id, department_id, process_id);
+
+
+--
+-- Name: idx_urs_process; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_urs_process ON public.tbl_user_role_scopes USING btree (process_id);
+
+
+--
+-- Name: uq_user_role_scope_tuple; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_user_role_scope_tuple ON public.tbl_user_role_scopes USING btree (user_id, role_id, company_id, COALESCE(hotel_id, 0), COALESCE(department_id, 0), COALESCE(process_id, 0));
 
 
 --

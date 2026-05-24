@@ -347,6 +347,12 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
 
     return result;
   } catch (error) {
+    // NoApprovalPolicyError already carries the right code/status/data —
+    // propagate it as-is so the controller can render a structured 4xx with
+    // NO_APPROVAL_POLICY_FOR_PROCESS instead of a generic 500.
+    if (error?.code === 'NO_APPROVAL_POLICY_FOR_PROCESS') {
+      throw error;
+    }
     if (error.message && error.message.includes('No approval policy found')) {
       throw new Error('No approval workflow found for NEGOTIATION. Please configure an approval policy before creating negotiation rounds.');
     }

@@ -2,6 +2,63 @@ import rbacModel from "../../models/rbacModel.js";
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 
+/**
+ * Aggregate rows of {resource, action, hotel_id, department_id, process_id}
+ * into the Shape A response: per-resource actions + scope summary.
+ *
+ *   {
+ *     rfq: {
+ *       actions: ['read', 'create'],
+ *       scope: {
+ *         hotels:      { all: false, ids: [12, 17] },
+ *         departments: { all: true,  ids: [] },
+ *         processes:   { all: false, ids: [3, 5] }
+ *       }
+ *     }
+ *   }
+ *
+ * NULL on a scope column = "all" on that axis (wildcard). Non-null values are
+ * collected as the explicit subset.
+ */
+const buildPermissionsShape = (rows) => {
+  const byResource = {};
+  for (const r of rows) {
+    const resource = r.resource;
+    if (!byResource[resource]) {
+      byResource[resource] = {
+        actions: new Set(),
+        hotels: { all: false, ids: new Set() },
+        departments: { all: false, ids: new Set() },
+        processes: { all: false, ids: new Set() },
+      };
+    }
+    const entry = byResource[resource];
+    entry.actions.add(r.action);
+
+    if (r.hotel_id == null) entry.hotels.all = true;
+    else entry.hotels.ids.add(r.hotel_id);
+
+    if (r.department_id == null) entry.departments.all = true;
+    else entry.departments.ids.add(r.department_id);
+
+    if (r.process_id == null) entry.processes.all = true;
+    else entry.processes.ids.add(r.process_id);
+  }
+
+  const shaped = {};
+  for (const [resource, e] of Object.entries(byResource)) {
+    shaped[resource] = {
+      actions: Array.from(e.actions),
+      scope: {
+        hotels:      { all: e.hotels.all,      ids: e.hotels.all      ? [] : Array.from(e.hotels.ids) },
+        departments: { all: e.departments.all, ids: e.departments.all ? [] : Array.from(e.departments.ids) },
+        processes:   { all: e.processes.all,   ids: e.processes.all   ? [] : Array.from(e.processes.ids) },
+      },
+    };
+  }
+  return shaped;
+};
+
 const rbacController = {
 
   /* -------------------- DEPARTMENTS -------------------- */
@@ -338,29 +395,12 @@ const rbacController = {
             departmentId
         );
 
-        /**
-         * Combine + deduplicate
-         * {
-         *   tender: ['read','create']
-         * }
-         */
-        const grouped = {};
-
-        for (const p of permissions) {
-        if (!grouped[p.resource]) {
-            grouped[p.resource] = new Set();
-        }
-        grouped[p.resource].add(p.action);
-        }
-
-        // Convert Set → Array
-        Object.keys(grouped).forEach(resource => {
-        grouped[resource] = Array.from(grouped[resource]);
-        });
+        // Shape A: per-resource actions + scope (hotels / departments / processes).
+        const shaped = buildPermissionsShape(permissions);
 
         return res.json({
         status: true,
-        data: grouped
+        data: shaped
         });
 
     } catch (err) {
@@ -434,24 +474,13 @@ const rbacController = {
         effectiveDeptId
       );
 
-      // Step 3: Group permissions by resource
-      const grouped = {};
-      for (const p of permissions) {
-        if (!grouped[p.resource]) {
-          grouped[p.resource] = new Set();
-        }
-        grouped[p.resource].add(p.action);
-      }
-
-      // Convert Sets to Arrays
-      Object.keys(grouped).forEach(resource => {
-        grouped[resource] = Array.from(grouped[resource]);
-      });
+      // Shape A: per-resource actions + scope (hotels / departments / processes).
+      const shaped = buildPermissionsShape(permissions);
 
       return res.json({
         status: true,
         data: {
-          permissions: grouped,
+          permissions: shaped,
           meta: {
             requested_hotel_ids: normalizedHotelIds,
             valid_hotel_ids: validHotelIds,

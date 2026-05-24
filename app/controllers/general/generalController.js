@@ -1067,11 +1067,18 @@ const processController = {
    */
   async getProcesses(req, res) {
     try {
-      const { include_inactive, process_type } = req.query;
-      const { company_id } = req.user;
+      const { include_inactive, process_type, company_id: queryCompanyId } = req.query;
+      const { company_id, user_type } = req.user;
+
+      // Hospitality admins (user_type=7) configuring scope for users in OTHER
+      // companies need to pass company_id explicitly. For everyone else, default
+      // to their own parent company (current self-service behavior).
+      const effectiveCompanyId = (queryCompanyId && Number(user_type) === 7)
+        ? parseInt(queryCompanyId, 10)
+        : (company_id ? parseInt(company_id) : undefined);
 
       const data = await getApprovalProcesses({
-        company_id: company_id ? parseInt(company_id) : undefined,
+        company_id: effectiveCompanyId,
         include_inactive: include_inactive === 'true',
         process_type: process_type || null
       });

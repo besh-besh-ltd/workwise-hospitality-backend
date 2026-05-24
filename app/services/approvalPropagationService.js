@@ -947,7 +947,7 @@ export async function revalidateApproverMembership({
   let removeQuery = `
     SELECT DISTINCT
       ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
-      ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.initiated_by,
+      ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id, ai.initiated_by,
       ai.approval_policy_id, ai.metadata,
       ais.id as step_id, ais.step_order, ais.policy_step_id,
       ps.approver_source_type, ps.approver_source_id
@@ -1002,11 +1002,14 @@ export async function revalidateApproverMembership({
     // All entities are department-scoped
     const resolveDeptId = row.department_id;
 
-    // Re-resolve approvers for this step
+    // Re-resolve approvers for this step. Pass process_id so a user whose
+    // process scope was narrowed away from this instance's process is
+    // correctly excluded from the resolved set (and therefore marked REMOVED
+    // below).
     const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
     const resolvedIds = await resolveApprovers(
       policyStep, row.hospitality_company_id, row.hotel_id,
-      resolveDeptId, t
+      resolveDeptId, t, null, row.process_id || null
     );
 
     if (!resolvedIds.includes(userId)) {
@@ -1052,7 +1055,7 @@ export async function revalidateApproverMembership({
     let addQuery = `
       SELECT DISTINCT
         ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
-        ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.initiated_by,
+        ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id, ai.initiated_by,
         ai.approval_policy_id, ai.metadata,
         ais.id as step_id, ais.step_order,
         ps.approver_source_type, ps.approver_source_id, ps.id as policy_step_id
@@ -1112,11 +1115,12 @@ export async function revalidateApproverMembership({
       // All entities are department-scoped
       const resolveDeptId = row.department_id;
 
-      // Re-resolve all approvers for this step to confirm user should be included
+      // Re-resolve all approvers for this step to confirm user should be
+      // included (process-scope-aware via row.process_id).
       const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
       const resolvedIds = await resolveApprovers(
         policyStep, row.hospitality_company_id, row.hotel_id,
-        resolveDeptId, t
+        resolveDeptId, t, null, row.process_id || null
       );
 
       if (resolvedIds.includes(userId)) {
