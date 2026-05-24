@@ -381,6 +381,7 @@ export const rfqSchemas = {
     existing_po_id: Joi.number().optional().allow(null),
     variant: Joi.number().required(),
     route_type: Joi.string().valid('ARC', 'PO').optional().allow(null), // ARC or PO route selection
+    comment: Joi.string().trim().min(10).max(2000).required(),
 
     // PO Related Validations (only required for PO route)
     project_id: Joi.number().optional().allow(null),

@@ -156,13 +156,23 @@ async function makeEditableRfq(overrides = {}) {
   return rfq_id;
 }
 
-async function attachOneProduct(rfq_id, productVariantId = 1) {
+async function attachOneProduct(rfq_id, productVariantId = 1, opts = {}) {
   const { id } = await db.one(
     `INSERT INTO tbl_rfq_products
        (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
      VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
     [rfq_id, productVariantId]
   );
+  // Quantity + Unit are mandatory per product (assertProductQuantityAndUnit).
+  // Spec-management tests that seed their own specs should opt out via
+  // { withSpecs: false } to avoid duplicate-row conflicts.
+  if (opts.withSpecs !== false) {
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, $2, 'Quantity', '10', 0), ($1, $2, 'Unit', 'NOS', 0)`,
+      [rfq_id, productVariantId]
+    );
+  }
   return id;
 }
 
@@ -595,7 +605,7 @@ describe("rfqController.update — product changes (add / remove / update)", () 
 describe("rfqController.update — product specs (add / remove / update)", () => {
   it("specs.added → tbl_rfq_products_specs INSERT + PRODUCT_SPEC CREATE history row", async () => {
     const rfq_id = await makeEditableRfq();
-    await attachOneProduct(rfq_id, 1);
+    await attachOneProduct(rfq_id, 1, { withSpecs: false });
     const snap = await fetchSnapshot(rfq_id);
 
     const tampered = JSON.parse(JSON.stringify(snap));
@@ -627,11 +637,12 @@ describe("rfqController.update — product specs (add / remove / update)", () =>
 
   it("specs.updated → existing tbl_rfq_products_specs row UPDATEd + PRODUCT_SPEC UPDATE history", async () => {
     const rfq_id = await makeEditableRfq();
-    await attachOneProduct(rfq_id, 1);
-    // Seed a spec.
+    await attachOneProduct(rfq_id, 1, { withSpecs: false });
+    // Seed Quantity + Unit explicitly. Unit is required by
+    // assertProductQuantityAndUnit; Quantity is the spec under test.
     await db.none(
       `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
-       VALUES ($1, 1, 'Quantity', '10', 0)`,
+       VALUES ($1, 1, 'Quantity', '10', 0), ($1, 1, 'Unit', 'NOS', 0)`,
       [rfq_id]
     );
     const snap = await fetchSnapshot(rfq_id);
@@ -662,17 +673,21 @@ describe("rfqController.update — product specs (add / remove / update)", () =>
 
   it("specs.removed → tbl_rfq_products_specs row deleted + PRODUCT_SPEC DELETE history", async () => {
     const rfq_id = await makeEditableRfq();
-    await attachOneProduct(rfq_id, 1);
+    await attachOneProduct(rfq_id, 1, { withSpecs: false });
     await db.none(
       `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
-       VALUES ($1, 1, 'Quantity', '10', 0), ($1, 1, 'Unit', 'KG', 0)`,
+       VALUES ($1, 1, 'Quantity', '10', 0), ($1, 1, 'Unit', 'KG', 0), ($1, 1, 'Size', 'M', 0)`,
       [rfq_id]
     );
     const snap = await fetchSnapshot(rfq_id);
 
-    // Snapshot drops Unit.
+    // Snapshot drops Size. (Quantity + Unit are mandatory and must remain;
+    // any test that dropped Unit would be blocked by assertProductQuantityAndUnit.)
     const tampered = JSON.parse(JSON.stringify(snap));
-    tampered.products[0].specs = { Quantity: snap.products[0].specs.Quantity };
+    tampered.products[0].specs = {
+      Quantity: snap.products[0].specs.Quantity,
+      Unit: snap.products[0].specs.Unit,
+    };
 
     const m = mockExpress({
       user: { id: IDS.users.a1_proc_buyer },
@@ -682,13 +697,13 @@ describe("rfqController.update — product specs (add / remove / update)", () =>
     expect(m.calls.status).toBe(200);
 
     const remaining = await db.any(
-      `SELECT title FROM tbl_rfq_products_specs WHERE rfq_id=$1`, [rfq_id]
+      `SELECT title FROM tbl_rfq_products_specs WHERE rfq_id=$1 ORDER BY title`, [rfq_id]
     );
-    expect(remaining.map((r) => r.title)).toEqual(["Quantity"]);
+    expect(remaining.map((r) => r.title)).toEqual(["Quantity", "Unit"]);
 
     const deleted = await db.oneOrNone(
       `SELECT field_name FROM tbl_rfq_change_history
-       WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC' AND field_name='Unit' AND change_type='DELETE'`,
+       WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC' AND field_name='Size' AND change_type='DELETE'`,
       [rfq_id]
     );
     expect(deleted).not.toBeNull();
@@ -941,6 +956,219 @@ describe("rfqController.update — restricted edit mode", () => {
     await rfqController.update(m.req, m.res);
     expect(m.calls.status).toBe(200);
     expect(m.calls.body.change_count).toBe(1);
+  });
+
+  // Regression for RFQ-402-style false positive: rich-text editors collapse
+  // double spaces and trim whitespace adjacent to tag boundaries on render.
+  // The diff used to strict-compare raw strings, so an untouched `comment`
+  // round-tripped as "changed" and the restricted-edit guard fired with
+  // `Cannot change: comment`. canonicalForCompare in rfqUpdateHelpers now
+  // makes the comparison HTML-entity / whitespace / tag-boundary tolerant.
+  it("restricted edit: editor-normalized whitespace in RFQ comment is treated as no-op (bid_end_date extension succeeds)", async () => {
+    // Mirrors the actual RFQ 402 bug: stored has '  ' (double space) and
+    // ' </p> ' (space before & after closing tag); incoming has collapsed
+    // single space and tight '.</p>'.
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      comment: "<p>SUPPLY AND FIXING.  FRIGHT CHARGES INCLUDED. </p> ",
+    });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const normalizedComment = "<p>SUPPLY AND FIXING. FRIGHT CHARGES INCLUDED.</p>";
+    const newBidEnd = istString(10 * 86400_000);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, comment: normalizedComment, bid_end_date: newBidEnd },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(1);
+
+    // Only bid_end_date is in history; comment was not flagged.
+    const hist = await db.any(
+      `SELECT field_name FROM tbl_rfq_change_history
+        WHERE rfq_id=$1 AND entity_type='RFQ'`,
+      [rfq_id]
+    );
+    expect(hist.map((r) => r.field_name)).toEqual(["bid_end_date"]);
+
+    // Stored comment is unchanged — comparator tolerance must not alter writes.
+    const after = await db.one(`SELECT comment FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    expect(after.comment).toBe("<p>SUPPLY AND FIXING.  FRIGHT CHARGES INCLUDED. </p> ");
+  });
+
+  it("restricted edit: HTML entity delta (& ↔ &amp;) in RFQ comment is treated as no-op", async () => {
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      comment: "<p>ELECTRICAL SUPPLY & CONNECTION</p>",
+    });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: {
+          ...snap,
+          comment: "<p>ELECTRICAL SUPPLY &amp; CONNECTION</p>",
+          bid_end_date: istString(10 * 86400_000),
+        },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(1);
+
+    const hist = await db.any(
+      `SELECT field_name FROM tbl_rfq_change_history
+        WHERE rfq_id=$1 AND entity_type='RFQ'`,
+      [rfq_id]
+    );
+    expect(hist.map((r) => r.field_name)).toEqual(["bid_end_date"]);
+  });
+
+  it("restricted edit: substantive RFQ comment change is still rejected", async () => {
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      comment: "<p>Original scope of work.</p>",
+    });
+    await attachOneProduct(rfq_id);
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, comment: "<p>Completely different scope.</p>" },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit.*comment/i);
+  });
+
+  it("restricted edit: editor-normalized whitespace in product comment is treated as no-op", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    const productId = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, $2, '', '', '', '', 1, 0) RETURNING id`,
+      [rfq_id, "<p>FOR  VENTILATION  PURPOSE. </p> "]
+    ).then((r) => r.id);
+    // Quantity + Unit are mandatory per product (assertProductQuantityAndUnit).
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, 1, 'Quantity', '10', 0), ($1, 1, 'Unit', 'NOS', 0)`,
+      [rfq_id]
+    );
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products = tampered.products.map((p) =>
+      p.id === productId ? { ...p, comment: "<p>FOR VENTILATION PURPOSE.</p>" } : p
+    );
+    tampered.bid_end_date = istString(10 * 86400_000);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(1);
+
+    const after = await db.one(
+      `SELECT comment FROM tbl_rfq_products WHERE id=$1`, [productId]
+    );
+    expect(after.comment).toBe("<p>FOR  VENTILATION  PURPOSE. </p> ");
+  });
+
+  it("restricted edit: trailing whitespace in product spec value (e.g. Size) is treated as no-op", async () => {
+    // Seed a product with a Size spec that has trailing whitespace, same
+    // shape as the RFQ-402 GSS Duct product ("24 GUAGE GI SHEET ").
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    await attachOneProduct(rfq_id, 1);
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, 1, 'Size', '1X1 FT ', 0),
+              ($1, 1, 'Spec', '24 GUAGE GI SHEET ', 0)`,
+      [rfq_id]
+    );
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const tampered = JSON.parse(JSON.stringify(snap));
+    // Editor-normalized: trimmed trailing spaces.
+    tampered.products[0].specs = {
+      ...tampered.products[0].specs,
+      Size: "1X1 FT",
+      Spec: "24 GUAGE GI SHEET",
+    };
+    tampered.bid_end_date = istString(10 * 86400_000);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+    expect(m.calls.body.change_count).toBe(1);
+
+    // No PRODUCT_SPEC history rows — only bid_end_date moved.
+    const specHist = await db.any(
+      `SELECT field_name FROM tbl_rfq_change_history
+        WHERE rfq_id=$1 AND entity_type='PRODUCT_SPEC'`,
+      [rfq_id]
+    );
+    expect(specHist).toEqual([]);
+
+    // Stored values for Size/Spec unchanged (Quantity/Unit added by helper
+    // are unrelated to the whitespace-normalization assertion).
+    const stored = await db.any(
+      `SELECT title, value FROM tbl_rfq_products_specs
+        WHERE rfq_id=$1 AND title IN ('Size','Spec') ORDER BY title`,
+      [rfq_id]
+    );
+    expect(stored).toEqual([
+      { title: "Size", value: "1X1 FT " },
+      { title: "Spec", value: "24 GUAGE GI SHEET " },
+    ]);
+  });
+
+  it("restricted edit: substantive product spec value change is still rejected", async () => {
+    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    await attachOneProduct(rfq_id, 1);
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, 1, 'Quantity', '15', 0)`,
+      [rfq_id]
+    );
+    await insertQuote(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products[0].specs = { ...tampered.products[0].specs, Quantity: "50" };
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit.*product specifications/i);
   });
 
   it("Case 5 — regret-only quote does NOT trigger restricted (full edit allowed)", async () => {

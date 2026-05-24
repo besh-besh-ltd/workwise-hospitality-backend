@@ -452,7 +452,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
         // Auto-approve if user is the initiator
         const isInitiator = userId === instance.initiated_by;
         const approverStatus = isInitiator ? 'APPROVED' : 'PENDING';
-        const approverComment = isInitiator ? 'Auto approved by system (added mid-flight)' : null;
+        const approverComment = null;
 
         if (existing) {
           // Re-activate previously removed approver
@@ -476,7 +476,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-             VALUES ($1, $2, $3, 'APPROVE', 'Auto approved by system (added mid-flight)')`,
+             VALUES ($1, $2, $3, 'APPROVE', NULL)`,
             [instance.id, instStep.id, userId]
           );
         }
@@ -580,7 +580,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
         for (const userId of newResolvedIds) {
           const isInitiator = userId === instance.initiated_by;
           const status = isInitiator ? 'APPROVED' : 'PENDING';
-          const comment = isInitiator ? 'Auto approved by system (added mid-flight)' : null;
+          const comment = null;
 
           await t.none(
             `INSERT INTO tbl_approval_step_approvers
@@ -593,7 +593,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
             await t.none(
               `INSERT INTO tbl_approval_actions
                (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-               VALUES ($1, $2, $3, 'APPROVE', 'Auto approved by system (added mid-flight)')`,
+               VALUES ($1, $2, $3, 'APPROVE', NULL)`,
               [instance.id, newInstStep.id, userId]
             );
           }
@@ -1122,7 +1122,7 @@ export async function revalidateApproverMembership({
       if (resolvedIds.includes(userId)) {
         const isInitiator = userId === row.initiated_by;
         const approverStatus = isInitiator ? 'APPROVED' : 'PENDING';
-        const approverComment = isInitiator ? 'Auto approved by system (added mid-flight)' : null;
+        const approverComment = null;
 
         // Check if there's a previously REMOVED entry to reactivate
         const removedEntry = await t.oneOrNone(
@@ -1152,7 +1152,7 @@ export async function revalidateApproverMembership({
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-             VALUES ($1, $2, $3, 'APPROVE', 'Auto approved by system (added mid-flight)')`,
+             VALUES ($1, $2, $3, 'APPROVE', NULL)`,
             [row.instance_id, row.step_id, userId]
           );
         }

@@ -3146,6 +3146,17 @@ ALTER SEQUENCE public.tbl_query_messages_id_seq OWNED BY public.tbl_query_messag
 
 
 --
+-- Name: tbl_query_message_reads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tbl_query_message_reads (
+    message_id integer NOT NULL,
+    user_id integer NOT NULL,
+    read_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: tbl_quote_activity; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3623,8 +3634,22 @@ CREATE TABLE public.tbl_rfq (
     department_id integer,
     title character varying(500),
     technical_evaluation_by integer,
-    process_id integer
+    process_id integer,
+    publish_attempts integer DEFAULT 0 NOT NULL,
+    last_publish_attempt_at timestamp without time zone,
+    publish_failure_reason text,
+    publish_failure_notified_at timestamp without time zone
 );
+
+
+--
+-- Name: idx_rfq_stuck_publish; Type: INDEX; Schema: public; Owner: -
+-- Partial index for the auto-publish watchdog scan
+--
+
+CREATE INDEX idx_rfq_stuck_publish
+    ON public.tbl_rfq (tender_publish_date)
+    WHERE status = 4 AND is_published = 0;
 
 
 --
@@ -7286,6 +7311,14 @@ ALTER TABLE ONLY public.tbl_query_message_files
 
 
 --
+-- Name: tbl_query_message_reads tbl_query_message_reads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_pkey PRIMARY KEY (message_id, user_id);
+
+
+--
 -- Name: tbl_query_messages tbl_query_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10533,6 +10566,22 @@ ALTER TABLE ONLY public.tbl_projects
 
 ALTER TABLE ONLY public.tbl_query_message_files
     ADD CONSTRAINT tbl_query_message_files_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.tbl_query_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tbl_query_message_reads tbl_query_message_reads_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.tbl_query_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tbl_query_message_reads tbl_query_message_reads_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tbl_query_message_reads
+    ADD CONSTRAINT tbl_query_message_reads_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.tbl_users(id) ON DELETE CASCADE;
 
 
 --

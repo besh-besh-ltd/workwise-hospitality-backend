@@ -6,6 +6,7 @@ import { sendNegotiationExpiredNotification, sendNegotiationRoundEndedNotificati
 import { recordLifecycleEvent, getApprovalWorkflowUsers } from '../models/generalModel.js';
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
 import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
+import { sendRfqPublishFailureToCreator } from './sendEmailFunctions/rfqPublishFailureEmail.js';
 import rfqModel from '../models/rfqModel.js';
 import userModel from '../models/userModel.js';
 import negotiationModel from '../models/negotiationModel.js';
@@ -255,7 +256,7 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, created_by
  * @param {Object} txContext - Optional transaction context to use same connection
  */
-const publishRfq = async (rfq, txContext = null) => {
+const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
   const dbConn = txContext || db;
   const { id, rfq_no, is_tender, created_by } = rfq;
 
@@ -273,7 +274,7 @@ const publishRfq = async (rfq, txContext = null) => {
     stage: 'PUBLISHED',
     action: 'AUTO_PUBLISH',
     performed_by: created_by,
-    metadata: { rfq_no, published_by: 'scheduler' },
+    metadata: { rfq_no, published_by: source },
     txContext: txContext
   });
 
@@ -381,120 +382,147 @@ const publishRfq = async (rfq, txContext = null) => {
 /**
  * publishRfqById
  *
- * Publish RFQ by ID - called by the scheduler endpoint.
+ * Publish RFQ by ID - called by the scheduler endpoint, the stuck-RFQ watchdog,
+ * the Force Publish controller, and the one-time backfill script.
  * Re-validates the RFQ state before publishing.
  * Auto-approves RFQs that are still pending approval at publish time.
  *
+ * Tracks every real publish attempt (i.e. an attempt that reached the
+ * publishRfq() call, success or failure) so the watchdog can decide when to
+ * email the creator. Skipped outcomes (not_found / already_published /
+ * withdrawn / invalid_status) are NOT attempts.
+ *
  * @param {number} rfqId - RFQ ID to publish
  * @param {string} rfq_no - RFQ number for logging
+ * @param {string} [source='scheduler'] - 'scheduler' | 'watchdog' | 'force' | 'backfill'
  */
-export const publishRfqById = async (rfqId, rfq_no) => {
-  return await db.tx(async t => {
-    // Re-validate before publishing
-    const rfq = await t.oneOrNone(`
-      SELECT id, rfq_no, is_tender, created_by, status, is_published
-      FROM tbl_rfq WHERE id = $1
-    `, [rfqId]);
+export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler') => {
+  try {
+    return await db.tx(async t => {
+      const rfq = await t.oneOrNone(`
+        SELECT id, rfq_no, is_tender, created_by, status, is_published
+        FROM tbl_rfq WHERE id = $1
+      `, [rfqId]);
 
-    if (!rfq) {
-      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ not found');
-      return { skipped: true, reason: 'not_found' };
-    }
+      if (!rfq) {
+        logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ not found');
+        return { skipped: true, reason: 'not_found' };
+      }
 
-    if (rfq.is_published === 1) {
-      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ already published');
-      return { skipped: true, reason: 'already_published' };
-    }
+      if (rfq.is_published === 1) {
+        logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ already published');
+        return { skipped: true, reason: 'already_published' };
+      }
 
-    if (rfq.status === 5) {
-      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ publish request was withdrawn');
-      return { skipped: true, reason: 'withdrawn' };
-    }
+      if (rfq.status === 5) {
+        logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Skipping - RFQ publish request was withdrawn');
+        return { skipped: true, reason: 'withdrawn' };
+      }
 
-    // Track if we auto-approved
-    let wasAutoApproved = false;
+      let wasAutoApproved = false;
 
-    // If still pending approval (status = 3), auto-approve it since publish date has arrived
-    if (rfq.status === 3) {
-      wasAutoApproved = true;
-      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Auto-approving RFQ - publish date arrived, no approver action taken');
+      if (rfq.status === 3) {
+        wasAutoApproved = true;
+        logger.info({ rfq_no, rfqId, source }, '[RFQ Publisher] Auto-approving RFQ - publish date arrived, no approver action taken');
 
-      // Mark all pending approval instances as auto-approved
-      await t.none(`
-        UPDATE tbl_approval_instances
-        SET status = 'APPROVED',
-            completed_at = NOW(),
-            metadata = jsonb_set(
-              COALESCE(metadata, '{}'::jsonb),
-              '{auto_approved_reason}',
-              '"Publish date arrived - no approver action"'::jsonb
-            )
-        WHERE entity_type = $1
-          AND entity_id = $2
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET status = 'APPROVED',
+              completed_at = NOW(),
+              metadata = jsonb_set(
+                COALESCE(metadata, '{}'::jsonb),
+                '{auto_approved_reason}',
+                '"Publish date arrived - no approver action"'::jsonb
+              )
+          WHERE entity_type = $1
+            AND entity_id = $2
+            AND status = 'PENDING'
+        `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+
+        await t.none(`
+          UPDATE tbl_approval_instance_steps
+          SET status = 'APPROVED', completed_at = NOW()
+          WHERE approval_instance_id IN (
+            SELECT id FROM tbl_approval_instances
+            WHERE entity_type = $1 AND entity_id = $2
+          )
           AND status = 'PENDING'
-      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+        `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
 
-      // Mark all pending approval steps as auto-approved
-      await t.none(`
-        UPDATE tbl_approval_instance_steps
-        SET status = 'APPROVED', completed_at = NOW()
-        WHERE approval_instance_id IN (
-          SELECT id FROM tbl_approval_instances
-          WHERE entity_type = $1 AND entity_id = $2
-        )
-        AND status = 'PENDING'
-      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+        await t.none(`
+          UPDATE tbl_approval_step_approvers
+          SET status = 'APPROVED', acted_at = NOW()
+          WHERE approval_instance_step_id IN (
+            SELECT ais.id FROM tbl_approval_instance_steps ais
+            JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
+            WHERE ai.entity_type = $1 AND ai.entity_id = $2
+          )
+          AND status = 'PENDING'
+        `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
 
-      // Mark all pending step approvers as auto-approved
-      await t.none(`
-        UPDATE tbl_approval_step_approvers
-        SET status = 'APPROVED', acted_at = NOW()
-        WHERE approval_instance_step_id IN (
-          SELECT ais.id FROM tbl_approval_instance_steps ais
-          JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
-          WHERE ai.entity_type = $1 AND ai.entity_id = $2
-        )
-        AND status = 'PENDING'
-      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+        await t.none(`UPDATE tbl_rfq SET status = 4 WHERE id = $1`, [rfqId]);
 
-      // Update RFQ status to ready to publish (4)
+        await recordLifecycleEvent({
+          entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+          entity_id: rfqId,
+          stage: 'APPROVED',
+          action: 'AUTO_APPROVED',
+          performed_by: rfq.created_by,
+          metadata: {
+            rfq_no: rfq.rfq_no,
+            reason: 'Publish date arrived - no approver action taken',
+            auto_approved_by: source
+          },
+          txContext: t
+        });
+
+        logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Auto-approval completed');
+        rfq.status = 4;
+      }
+
+      if (rfq.status !== 4 && rfq.status !== 1) {
+        logger.info({ rfq_no, rfqId, status: rfq.status }, '[RFQ Publisher] Skipping - RFQ not in publishable state');
+        return { skipped: true, reason: 'invalid_status' };
+      }
+
+      // Record the attempt only when we actually try to publish.
       await t.none(`
         UPDATE tbl_rfq
-        SET status = 4
+        SET publish_attempts = publish_attempts + 1,
+            last_publish_attempt_at = NOW()
         WHERE id = $1
       `, [rfqId]);
 
-      // Record lifecycle event for auto-approval
-      await recordLifecycleEvent({
-        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
-        entity_id: rfqId,
-        stage: 'APPROVED',
-        action: 'AUTO_APPROVED',
-        performed_by: rfq.created_by,
-        metadata: {
-          rfq_no: rfq.rfq_no,
-          reason: 'Publish date arrived - no approver action taken',
-          auto_approved_by: 'scheduler'
-        },
-        txContext: t
-      });
+      await publishRfq(rfq, t, source);
 
-      logger.info({ rfq_no, rfqId }, '[RFQ Publisher] Auto-approval completed');
+      // Clear failure tracking after a successful publish so any future failure
+      // starts fresh (and the watchdog won't re-email about an old error).
+      await t.none(`
+        UPDATE tbl_rfq
+        SET publish_failure_reason = NULL,
+            publish_failure_notified_at = NULL
+        WHERE id = $1
+      `, [rfqId]);
 
-      // Refresh rfq object with new status
-      rfq.status = 4;
+      return { published: true, autoApproved: wasAutoApproved };
+    });
+  } catch (err) {
+    // Record the failure outside the (rolled-back) transaction so the watchdog
+    // can see why we failed and the creator email can describe it.
+    try {
+      await db.none(
+        `UPDATE tbl_rfq
+         SET publish_attempts = publish_attempts + 1,
+             last_publish_attempt_at = NOW(),
+             publish_failure_reason = $2
+         WHERE id = $1`,
+        [rfqId, String(err?.message || err).slice(0, 500)]
+      );
+    } catch (writeErr) {
+      logError(`[RFQ Publisher] Failed to record publish failure for RFQ ${rfqId}`, writeErr);
     }
-
-    // Now validate status is ready to publish
-    if (rfq.status !== 4 && rfq.status !== 1) {
-      logger.info({ rfq_no, rfqId, status: rfq.status }, '[RFQ Publisher] Skipping - RFQ not in publishable state');
-      return { skipped: true, reason: 'invalid_status' };
-    }
-
-    // Publish the RFQ
-    await publishRfq(rfq, t);
-    return { published: true, autoApproved: wasAutoApproved };
-  });
+    throw err;
+  }
 };
 
 /**
@@ -579,6 +607,117 @@ export const removeRfqPublishJob = async (rfqId) => {
  */
 export const rescheduleAllRfqPublishJobs = async () => {
   logger.info('[RFQ Publisher] Using EventBridge - no rescheduling needed on startup');
+};
+
+// ============= RFQ STUCK-PUBLISH WATCHDOG =============
+
+/**
+ * Safety net for the EventBridge-driven RFQ auto-publish.
+ *
+ * EventBridge has its own RetryPolicy (configured in createScheduleForRfqPublish),
+ * but a schedule that was never created in the first place, or one whose retries
+ * were all consumed, would otherwise leave an RFQ stuck at status=4 forever.
+ *
+ * This cron scans every 5 minutes for RFQs that are past their tender_publish_date
+ * by at least GRACE_MINUTES and still unpublished, retries publishing them, and
+ * after MAX_WATCHDOG_ATTEMPTS failed attempts emails the creator with a link to
+ * the Force Publish button.
+ *
+ * Idempotency: publish_failure_notified_at gates the email so we send exactly
+ * one per stuck RFQ until it is successfully published (which clears the flag).
+ */
+const RFQ_PUBLISH_WATCHDOG = {
+  GRACE_MINUTES: 2,
+  MAX_WATCHDOG_ATTEMPTS: 3,
+  BATCH_LIMIT: 50,
+};
+
+/**
+ * One tick of the watchdog. Exported separately so tests can drive it
+ * deterministically without waiting on cron.schedule.
+ */
+export const runRfqStuckPublishWatchdogTick = async () => {
+  try {
+    const stuck = await db.any(`
+      SELECT id, rfq_no, is_tender, created_by, tender_publish_date,
+             publish_attempts, publish_failure_reason, publish_failure_notified_at
+      FROM tbl_rfq
+      WHERE status = 4
+        AND is_published = 0
+        AND tender_publish_date IS NOT NULL
+        AND tender_publish_date < NOW() - ($1::text || ' minutes')::interval
+      ORDER BY tender_publish_date ASC
+      LIMIT $2
+    `, [String(RFQ_PUBLISH_WATCHDOG.GRACE_MINUTES), RFQ_PUBLISH_WATCHDOG.BATCH_LIMIT]);
+
+    if (stuck.length === 0) return { processed: 0, recovered: 0, notified: 0 };
+
+    logger.info({ count: stuck.length }, '[RFQ Watchdog] Found stuck RFQs to retry');
+
+    let recoveredCount = 0;
+    let notifiedCount = 0;
+
+    for (const rfq of stuck) {
+      let recovered = false;
+      try {
+        const result = await publishRfqById(rfq.id, rfq.rfq_no, 'watchdog');
+        if (result?.published) {
+          recovered = true;
+          recoveredCount++;
+          logger.info({ rfqId: rfq.id, rfq_no: rfq.rfq_no }, '[RFQ Watchdog] Recovered stuck RFQ');
+        } else if (result?.skipped) {
+          logger.info({ rfqId: rfq.id, rfq_no: rfq.rfq_no, reason: result.reason }, '[RFQ Watchdog] Skipped during retry');
+        }
+      } catch (err) {
+        logError(`[RFQ Watchdog] Publish attempt failed for RFQ ${rfq.rfq_no}`, err);
+      }
+
+      if (recovered) continue;
+
+      // Re-read state — publishRfqById either incremented attempts (real try) or returned a skip.
+      const post = await db.oneOrNone(
+        `SELECT publish_attempts, publish_failure_notified_at, publish_failure_reason,
+                is_published, status
+         FROM tbl_rfq WHERE id = $1`,
+        [rfq.id]
+      );
+      if (!post || post.is_published === 1 || post.status !== 4) continue;
+
+      if (
+        post.publish_attempts >= RFQ_PUBLISH_WATCHDOG.MAX_WATCHDOG_ATTEMPTS &&
+        !post.publish_failure_notified_at
+      ) {
+        const emailed = await sendRfqPublishFailureToCreator({
+          rfq: {
+            id: rfq.id,
+            rfq_no: rfq.rfq_no,
+            is_tender: rfq.is_tender,
+            created_by: rfq.created_by,
+            tender_publish_date: rfq.tender_publish_date,
+          },
+          failureReason: post.publish_failure_reason,
+        });
+        if (emailed) {
+          await db.none(
+            `UPDATE tbl_rfq SET publish_failure_notified_at = NOW() WHERE id = $1`,
+            [rfq.id]
+          );
+          notifiedCount++;
+          logger.info({ rfqId: rfq.id, rfq_no: rfq.rfq_no }, '[RFQ Watchdog] Creator notified about publish failure');
+        }
+      }
+    }
+
+    return { processed: stuck.length, recovered: recoveredCount, notified: notifiedCount };
+  } catch (err) {
+    logError('[RFQ Watchdog] Cron tick failed', err);
+    return { processed: 0, recovered: 0, notified: 0, error: err.message };
+  }
+};
+
+export const startRfqStuckPublishWatchdog = () => {
+  cron.schedule('*/5 * * * *', () => { runRfqStuckPublishWatchdogTick(); });
+  logger.info('[RFQ Watchdog] Cron scheduled: every 5 minutes (grace=2m, max-attempts-before-email=3)');
 };
 
 // ============= VENDOR PO ACCEPTANCE REMINDERS =============

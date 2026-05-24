@@ -137,18 +137,26 @@ var validatingImage = (schema) => {
   };
 };
 
+const humanizeJoiDetail = (detail) => {
+  const path = Array.isArray(detail.path) ? detail.path.filter((p) => p !== undefined && p !== null && p !== '') : [];
+  const fieldKey = path.length ? path[path.length - 1] : (detail.context && detail.context.key);
+  const label = String(fieldKey || 'Field')
+    .replace(/[_\-.]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const fullPath = path.length ? path.join('.') : (detail.context && detail.context.key) || '';
+  return detail.message
+    .replace(`"${fullPath}"`, label)
+    .replace(/^"[^"]+"/, label);
+};
+
 const validateBody = (schema) => {
   return (req, res, next) => {
     const result = schema.validate(req.body, { abortEarly: false });
     if (result.error) {
-      let err_msg = {};
-      for (let counter in result.error.details) {
-        let k = result.error.details[counter].context.key;
-        let val = result.error.details[counter].message;
-        err_msg[k] = val;
-      }
-      let return_err = { status: 2, errors: err_msg };
-      return res.status(400).json(return_err);
+      const message = (result.error.details || [])
+        .map(humanizeJoiDetail)
+        .join('; ');
+      return res.status(400).json({ status: 2, message });
     }
 
     if (!req.value) {

@@ -307,6 +307,20 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  */
 const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
   try {
+    // Resolve display names for the committee approval email in one round-trip.
+    const t = txContext || db;
+    const names = await t.oneOrNone(
+      `SELECT
+         (SELECT COALESCE(PV.name, P.name)
+            FROM tbl_rfq_products rp
+            LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+            LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.id = $1) AS product_name,
+         (SELECT name FROM tbl_hospitality_companies WHERE id = $2) AS company_name,
+         (SELECT name FROM tbl_hospitality_company_hotels WHERE id = $3) AS hotel_name`,
+      [rfqProductId, rfqData.hospitality_company_id, rfqData.hotel_id || null]
+    );
+
     const result = await createApprovalInstance({
       entity_type: 'NEGOTIATION',
       entity_id: roundId,
@@ -323,7 +337,10 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
         rfq_title: rfqData.title || '',
         is_tender: rfqData.is_tender,
         rfq_product_id: rfqProductId,
-        end_date: endDate || null
+        end_date: endDate || null,
+        product_name: names?.product_name || '',
+        company_name: names?.company_name || '',
+        hotel_name: names?.hotel_name || ''
       },
       txContext
     });
