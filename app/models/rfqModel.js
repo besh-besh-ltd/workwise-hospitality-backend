@@ -1846,6 +1846,7 @@ WHERE NOT EXISTS (
         `SELECT
           RFQ.id,
           RFQ.rfq_no,
+          RFQ.title,
           RFQ.company_name,
           RFQ.response_email,
           RFQ.is_published,
