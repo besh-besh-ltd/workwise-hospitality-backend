@@ -139,7 +139,7 @@ const bandEntriesFor = (columns, valueResolver) =>
     .filter((c) => !c.isRegret)
     .map((c) => ({ key: c.vendor_id, value: valueResolver(c) }));
 
-const enrichProduct = (product, opts) => {
+const enrichProduct = (product, opts, vendorDocSubtotals = new Map()) => {
   const productCopy = { ...product };
 
   // Find the vendor's payment-terms record (used by normalization).
@@ -185,15 +185,29 @@ const enrichProduct = (product, opts) => {
     // for TCS-style document taxes and the newer `{amount, amount_mode}` for
     // user-defined globals. `pricingEngine.normalizeGlobalCharge` collapses
     // both into the canonical `{amount, amount_mode}` pair before applying.
+    //
+    // Globals are document-level (one set per quote, duplicated across the
+    // vendor's per-product quote rows in the model response). Percentage
+    // charges are applied against this line's engineQuoteTotal and naturally
+    // distribute (Σ pct × Lᵢ = pct × ΣLᵢ). Absolute charges are split
+    // proportionally by the line's share of the vendor's document subtotal
+    // (vendorDocSubtotal = ΣLᵢ across all products in this vendor's quote)
+    // so the per-product shares sum back to the original charge — without
+    // this split, each product would carry the full absolute amount and the
+    // vendor's totals would be inflated by N × charge.
+    const vendorDocSubtotal = vendorDocSubtotals.get(String(vendorId)) || 0;
     const savedGlobalCharges = Array.isArray(quote.global_charges) ? quote.global_charges : [];
     const resolvedGlobalCharges = savedGlobalCharges
       .map((c) => {
         const norm = pricingEngine.normalizeGlobalCharge(c);
         if (!norm) return null;
+        const amount = norm.amount_mode === "percentage"
+          ? pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal)
+          : pricingEngine.proportionalShare(norm.amount, engineQuoteTotal, vendorDocSubtotal);
         return {
           name: norm.name,
           slug: norm.slug,
-          amount: pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal),
+          amount,
         };
       })
       .filter(Boolean);
@@ -388,7 +402,49 @@ export const enrichQuoteCompareData = (products, opts = {}) => {
     workingProducts = pricingEngine.fillMissingChargesFromPeers(products);
   }
 
-  const enrichedProducts = workingProducts.map((p) => enrichProduct(p, opts));
+  // Pre-pass: sum each vendor's per-line engine totals across ALL products
+  // they quoted on. Used by enrichProduct to split absolute global charges
+  // (which are stored once per quote-document but duplicated across the
+  // vendor's per-product rows by the model query) proportionally — so each
+  // product carries its weighted share and the per-product shares sum back
+  // to the original charge instead of multiplying it by N. Mirrors the
+  // line-total math enrichProduct does, including the optional payment-term
+  // normalization, so the split denominator matches each product's enriched
+  // engineQuoteTotal exactly.
+  const vendorDocSubtotals = new Map();
+  workingProducts.forEach((product) => {
+    const vendorTermsByIdForProduct = new Map(
+      (product?.all_vendors || []).map((v) => [v.id, v.payment_terms || []])
+    );
+    (product?.quotations || []).forEach((quote) => {
+      const detailForVendor = getDetail(quote) || {};
+      const vendorId = mergedQuoteRow(quote, detailForVendor).created_by;
+      if (!vendorId) return;
+      const detailsArray = Array.isArray(quote.quote_details)
+        ? quote.quote_details
+        : quote.quote_details
+        ? [quote.quote_details]
+        : [];
+      const vendor = (product.all_vendors || []).find(
+        (v) => String(v.id) === String(vendorId)
+      ) || (vendorTermsByIdForProduct.has(vendorId)
+        ? { id: vendorId, payment_terms: vendorTermsByIdForProduct.get(vendorId) || [] }
+        : null);
+      let lineSum = 0;
+      detailsArray.forEach((detail) => {
+        const input = buildEngineLineInput(product, quote, detail);
+        let engineOut = pricingEngine.calculateLineTotal(input);
+        if (opts.normalizeApplied) {
+          engineOut = applyNormalization(engineOut, vendor, detail);
+        }
+        lineSum += engineOut.total;
+      });
+      const key = String(vendorId);
+      vendorDocSubtotals.set(key, (vendorDocSubtotals.get(key) || 0) + lineSum);
+    });
+  });
+
+  const enrichedProducts = workingProducts.map((p) => enrichProduct(p, opts, vendorDocSubtotals));
 
   // Roll-ups across the whole RFQ.
   let l1_total = 0;

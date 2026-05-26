@@ -281,4 +281,148 @@ describe("enrichQuoteCompareData", () => {
     const v1 = out.vendor_totals.find((v) => String(v.vendor_id) === "v1");
     expect(v1.total).toBe(2000); // 1000 + 1000
   });
+
+  // A vendor's `global_charges` is stored once on tbl_quotes and the model
+  // query duplicates the same array onto each product's quotation row. The
+  // enricher must NOT apply absolute amounts in full per product — that would
+  // inflate the vendor's leaderboard total by N × charge. Absolute charges
+  // are split proportionally by each product's line subtotal; percentage
+  // charges already distribute naturally and are unaffected.
+  it("splits absolute global_charges proportionally across a vendor's products (does not duplicate per product)", () => {
+    // Per-product engine totals for vendor v1:
+    //   product 1: 100 × 20 = 2000
+    //   product 2: 100 × 30 = 3000
+    //   product 3: 100 × 50 = 5000
+    //   doc subtotal = 10,000
+    const globals = [
+      { name: "Document Fee", slug: "doc_fee", amount: 1000, amount_mode: "absolute" },
+      { name: "TCS", slug: "tcs", amount: 5, amount_mode: "percentage" },
+    ];
+    const mk = (id, qty) => productFixture({
+      id,
+      product_specs: [{ title: "Quantity", value: qty }, { title: "Unit", value: "pcs" }],
+      all_vendors: [{ id: "v1", organization_name: "Vendor One", payment_terms: [] }],
+      quotations: [
+        quoteFixture({
+          id,
+          created_by: "v1",
+          global_charges: globals,
+          quote_details: [{ unit_price: 100, quantity: qty, tax: 0, tax_mode: "percentage" }],
+        }),
+      ],
+    });
+    const out = enrichQuoteCompareData([mk(1, 20), mk(2, 30), mk(3, 50)]);
+
+    const q1 = out.products[0].quotations[0];
+    const q2_ = out.products[1].quotations[0];
+    const q3 = out.products[2].quotations[0];
+
+    // Per-product engine_total (line only, no globals) is unchanged.
+    expect(q1.engine_total).toBe(2000);
+    expect(q2_.engine_total).toBe(3000);
+    expect(q3.engine_total).toBe(5000);
+
+    // Absolute share by line ratio (2000/10000, 3000/10000, 5000/10000) of 1000.
+    // Percentage share is 5% of each product's line total — naturally proportional.
+    // Per product: absolute_share + pct_share.
+    //   product 1: 200 +  100 =  300
+    //   product 2: 300 +  150 =  450
+    //   product 3: 500 +  250 =  750
+    //   total globals across the vendor's doc = 1500 (1000 absolute + 500 from TCS 5% of 10k)
+    expect(q1.engine_global_charges_total).toBeCloseTo(300, 2);
+    expect(q2_.engine_global_charges_total).toBeCloseTo(450, 2);
+    expect(q3.engine_global_charges_total).toBeCloseTo(750, 2);
+
+    // Per-charge breakdown — absolute is split, percentage is naturally proportional.
+    const docFeeOf = (q) => q.engine_global_charges.find((c) => c.slug === "doc_fee").amount;
+    const tcsOf = (q) => q.engine_global_charges.find((c) => c.slug === "tcs").amount;
+    expect(docFeeOf(q1)).toBeCloseTo(200, 2);
+    expect(docFeeOf(q2_)).toBeCloseTo(300, 2);
+    expect(docFeeOf(q3)).toBeCloseTo(500, 2);
+    expect(docFeeOf(q1) + docFeeOf(q2_) + docFeeOf(q3)).toBeCloseTo(1000, 2);
+    expect(tcsOf(q1)).toBeCloseTo(100, 2);
+    expect(tcsOf(q2_)).toBeCloseTo(150, 2);
+    expect(tcsOf(q3)).toBeCloseTo(250, 2);
+
+    // Per-product engine_grand_total = line + its share of globals.
+    expect(q1.engine_grand_total).toBeCloseTo(2300, 2);
+    expect(q2_.engine_grand_total).toBeCloseTo(3450, 2);
+    expect(q3.engine_grand_total).toBeCloseTo(5750, 2);
+
+    // The vendor's leaderboard total = lines (10,000) + globals once (1500),
+    // NOT lines + 3×1000 (= 13,000) which is what the duplication bug produced.
+    const v1 = out.vendor_totals.find((v) => String(v.vendor_id) === "v1");
+    expect(v1.total).toBeCloseTo(11500, 2);
+  });
+
+  it("falls back to zero share when the vendor's document subtotal is zero", () => {
+    // A vendor with no priced quotes (everything zero) has no basis to
+    // allocate against — absolute globals contribute 0 per product, which
+    // also keeps the vendor's grand total at 0 instead of N × charge.
+    const products = [
+      productFixture({
+        id: 1,
+        all_vendors: [{ id: "v1", organization_name: "Vendor One", payment_terms: [] }],
+        quotations: [
+          quoteFixture({
+            created_by: "v1",
+            global_charges: [{ name: "Document Fee", amount: 500, amount_mode: "absolute" }],
+            quote_details: [{ unit_price: 0, quantity: 10, tax: 0, tax_mode: "percentage" }],
+          }),
+        ],
+      }),
+    ];
+    const out = enrichQuoteCompareData(products);
+    const q = out.products[0].quotations[0];
+    expect(q.engine_total).toBe(0);
+    expect(q.engine_global_charges_total).toBe(0);
+    expect(q.engine_grand_total).toBe(0);
+  });
+
+  it("uses per-vendor doc subtotals (vendor A's absolute charge does not bleed into vendor B's products)", () => {
+    // Two vendors, two products. Vendor A has an absolute global charge,
+    // vendor B does not. The split denominator for A must be A's own doc
+    // subtotal, not the combined RFQ subtotal.
+    const mk = (id, qty) => productFixture({
+      id,
+      product_specs: [{ title: "Quantity", value: qty }, { title: "Unit", value: "pcs" }],
+      all_vendors: [
+        { id: "vA", organization_name: "Vendor A", payment_terms: [] },
+        { id: "vB", organization_name: "Vendor B", payment_terms: [] },
+      ],
+      quotations: [
+        quoteFixture({
+          id: `A${id}`,
+          created_by: "vA",
+          global_charges: [{ name: "Document Fee", slug: "doc_fee", amount: 600, amount_mode: "absolute" }],
+          quote_details: [{ unit_price: 100, quantity: qty, tax: 0, tax_mode: "percentage" }],
+        }),
+        quoteFixture({
+          id: `B${id}`,
+          created_by: "vB",
+          global_charges: [],
+          quote_details: [{ unit_price: 80, quantity: qty, tax: 0, tax_mode: "percentage" }],
+        }),
+      ],
+    });
+    const out = enrichQuoteCompareData([mk(1, 10), mk(2, 20)]);
+
+    // Vendor A's doc subtotal = 1000 + 2000 = 3000.
+    // Shares of 600: product 1 → 200, product 2 → 400.
+    const aQuotes = out.products.map((p) => p.quotations.find((q) => q.created_by === "vA"));
+    expect(aQuotes[0].engine_global_charges_total).toBeCloseTo(200, 2);
+    expect(aQuotes[1].engine_global_charges_total).toBeCloseTo(400, 2);
+    expect(aQuotes[0].engine_grand_total).toBeCloseTo(1200, 2);
+    expect(aQuotes[1].engine_grand_total).toBeCloseTo(2400, 2);
+
+    // Vendor B has no globals, so per-product grand total = line total.
+    const bQuotes = out.products.map((p) => p.quotations.find((q) => q.created_by === "vB"));
+    expect(bQuotes[0].engine_grand_total).toBe(800);
+    expect(bQuotes[1].engine_grand_total).toBe(1600);
+
+    const vA = out.vendor_totals.find((v) => v.vendor_id === "vA");
+    const vB = out.vendor_totals.find((v) => v.vendor_id === "vB");
+    expect(vA.total).toBeCloseTo(3600, 2); // 3000 lines + 600 globals once
+    expect(vB.total).toBe(2400);           // 800 + 1600
+  });
 });
