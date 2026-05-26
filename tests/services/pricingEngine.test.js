@@ -7,6 +7,7 @@
 import { describe, it, expect } from "@jest/globals";
 import {
   applyChargeMode,
+  proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
   applyPaymentTermNormalization,
@@ -42,6 +43,39 @@ describe("pricingEngine.applyChargeMode", () => {
     expect(applyChargeMode("", "percentage", 1000)).toBe(0);
     expect(applyChargeMode(undefined, "percentage", 1000)).toBe(0);
     expect(applyChargeMode("not-a-number", "absolute", 1000)).toBe(0);
+  });
+});
+
+describe("pricingEngine.proportionalShare", () => {
+  it("returns the line's weighted share of the absolute amount", () => {
+    expect(proportionalShare(1000, 2000, 10000)).toBe(200);
+    expect(proportionalShare(1000, 3000, 10000)).toBe(300);
+    expect(proportionalShare(1000, 5000, 10000)).toBe(500);
+  });
+
+  it("returns the full amount when the line equals the document subtotal", () => {
+    expect(proportionalShare(900, 4500, 4500)).toBe(900);
+  });
+
+  it("returns 0 when docSubtotal is zero or negative (no basis to allocate)", () => {
+    expect(proportionalShare(1000, 100, 0)).toBe(0);
+    expect(proportionalShare(1000, 100, -50)).toBe(0);
+  });
+
+  it("returns 0 for a zero-value line even when docSubtotal is positive", () => {
+    expect(proportionalShare(1000, 0, 5000)).toBe(0);
+  });
+
+  it("preserves the sum: shares across all lines add back to the original amount", () => {
+    const C = 1000;
+    const lines = [2000, 3000, 5000];
+    const doc = lines.reduce((s, l) => s + l, 0);
+    const sum = lines.reduce((s, l) => s + proportionalShare(C, l, doc), 0);
+    expect(sum).toBeCloseTo(C, 8);
+  });
+
+  it("coerces string numerics", () => {
+    expect(proportionalShare("1000", "2000", "10000")).toBe(200);
   });
 });
 
