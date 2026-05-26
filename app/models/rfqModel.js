@@ -1846,6 +1846,7 @@ WHERE NOT EXISTS (
         `SELECT
           RFQ.id,
           RFQ.rfq_no,
+          RFQ.title,
           RFQ.company_name,
           RFQ.response_email,
           RFQ.is_published,
@@ -2967,6 +2968,15 @@ LIMIT 1;`;
               AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
         ) AS vendors_count
+        ,(
+            SELECT COUNT(DISTINCT TQ.created_by)
+            FROM tbl_quotes TQ
+            JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id
+            WHERE TQ.rfq_id = RFQ_P.rfq_id
+              AND TQI.product_variant_id = RFQ_P.product_variant_id
+              AND TQI.variant = RFQ_P.variant
+              AND (TQ.is_regret IS NULL OR TQ.is_regret != 1)
+        ) AS participated_vendors_count
         `
             : ''
         }
@@ -3532,9 +3542,12 @@ LIMIT 2;
           P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
-          WHERE TQM.receiver_id = ${user_id}
-          AND TQM.rfq_id = RFQ.id
-          AND TQM.is_seen = false
+          WHERE TQM.rfq_id = RFQ.id
+            AND TQM.sender_type = 3
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_query_message_reads TQMR
+              WHERE TQMR.message_id = TQM.id AND TQMR.user_id = ${user_id}
+            )
           ) AS "unseen_query_count",
           (
             SELECT
@@ -4699,7 +4712,9 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
 
         // Evaluator names: users who have both te.read and te.create permissions
-        // scoped to this RFQ's business unit (hotel) and department
+        // scoped to this RFQ's business unit (hotel) and department.
+        // Only active, non-deleted users — the lifecycle is the single source of truth
+        // for who can act on the RFQ, so deactivated users must not appear here.
         db.any(`
           SELECT DISTINCT u.id, u.name
           FROM tbl_users u
@@ -4708,7 +4723,9 @@ LIMIT 2;
           JOIN tbl_permissions p ON p.id = rp.permission_id
           JOIN tbl_rfq rfq ON rfq.id = $1
           JOIN tbl_hospitality_company_hotels hch ON hch.id = rfq.hotel_id AND hch.is_deleted = 0
-          WHERE urs.company_id = hch.hospitality_company_id
+          WHERE u.status = 1
+            AND u.is_deleted = 0
+            AND urs.company_id = hch.hospitality_company_id
             AND p.resource = 'te'
             AND p.action IN ('read', 'create')
             AND (
@@ -5467,9 +5484,12 @@ LIMIT 2;
           ) AS pending_approval_type,
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
-          WHERE TQM.receiver_id = ${user_id}
-          AND TQM.rfq_id = RFQ.id
-          AND TQM.is_seen = false
+          WHERE TQM.rfq_id = RFQ.id
+            AND TQM.sender_type = 3
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_query_message_reads TQMR
+              WHERE TQMR.message_id = TQM.id AND TQMR.user_id = ${user_id}
+            )
           ) AS "unseen_query_count",
           (
             SELECT
@@ -9535,17 +9555,30 @@ GROUP BY
 ORDER BY m.created_at;
 `;
 
-    const updateQuery = `
-        UPDATE tbl_query_messages
-        SET is_seen = TRUE
-        WHERE rfq_id = $1 AND receiver_id = $2 AND sender_id = $3 AND is_seen = FALSE;
+    // Per-user mark-as-read. The conversation is scoped by company pair
+    // (viewer's company ⟷ target's company), matching the SELECT above, so
+    // any user on the viewer's company side who opens this thread records
+    // their own read receipt without affecting other users on either side.
+    const markReadQuery = `
+      INSERT INTO tbl_query_message_reads (message_id, user_id, read_at)
+      SELECT m.id, $2, NOW()
+      FROM tbl_query_messages m
+      JOIN tbl_users s ON s.id = m.sender_id
+      JOIN tbl_users v ON v.id = $2
+      JOIN tbl_users t ON t.id = $3
+      WHERE m.rfq_id = $1
+        AND s.company_id = t.company_id
+        AND EXISTS (
+          SELECT 1 FROM tbl_users r
+          WHERE r.id = m.receiver_id AND r.company_id = v.company_id
+        )
+      ON CONFLICT (message_id, user_id) DO NOTHING;
     `;
 
     return new Promise((resolve, reject) => {
       db.query(query, [rfq_id, sender_id, receiver_id])
         .then((data) => {
-          // Mark the received messages as seen
-          db.query(updateQuery, [rfq_id, sender_id, receiver_id])
+          db.query(markReadQuery, [rfq_id, sender_id, receiver_id])
             .then(() => resolve(data))
             .catch((err) => reject(new Error(err)));
         })
@@ -9566,8 +9599,14 @@ ORDER BY m.created_at;
           (SELECT tu.id AS user_id, tu.name AS user_name, tc.company_name FROM tbl_users tu JOIN tbl_company tc ON tc.id = tu.company_id WHERE tu.id = $3) AS user_data
       LEFT JOIN
           (SELECT COUNT(*) AS unseen_count
-           FROM tbl_query_messages
-           WHERE rfq_id = $1 AND sender_id = $3 AND receiver_id = $2 AND is_seen = false) AS unseen_data
+           FROM tbl_query_messages qm
+           WHERE qm.rfq_id = $1
+             AND qm.sender_id = $3
+             AND qm.receiver_id = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM tbl_query_message_reads r
+               WHERE r.message_id = qm.id AND r.user_id = $2
+             )) AS unseen_data
       ON true
       LEFT JOIN
           (SELECT message_text AS last_message, created_at AS last_message_timestamp
@@ -9649,30 +9688,47 @@ ORDER BY m.created_at;
         ${searchFilter}
       `;
 
+    // "Other party" expression: for a buyer-side viewer, the other party is
+    // the vendor user on the message (sender if vendor sent, receiver if buyer
+    // sent). This way every buyer-side user on the RFQ — not just the one in
+    // receiver_id — sees the last-message preview and sort key for each vendor
+    // conversation, matching the per-user unseen_counts asymmetry.
+    const otherPartyExpr = buyerTypes.includes(viewer_type)
+      ? `CASE WHEN m.sender_type = 3 THEN m.sender_id ELSE m.receiver_id END`
+      : `CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END`;
+    const latestMessagesFilter = buyerTypes.includes(viewer_type)
+      ? ``
+      : `AND (m.sender_id = $2 OR m.receiver_id = $2)`;
+
     const query = `
       WITH candidates AS (
         ${candidateQuery}
       ),
       latest_messages AS (
         SELECT
-          CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END AS other_user_id,
+          ${otherPartyExpr} AS other_user_id,
           m.message_text,
           m.created_at,
           ROW_NUMBER() OVER (
-            PARTITION BY CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END
+            PARTITION BY ${otherPartyExpr}
             ORDER BY m.created_at DESC
           ) AS rn
         FROM tbl_query_messages m
         WHERE m.rfq_id = $1
-          AND (m.sender_id = $2 OR m.receiver_id = $2)
+          ${latestMessagesFilter}
       ),
       unseen_counts AS (
-        SELECT sender_id AS other_user_id, COUNT(*) AS unseen_count
-        FROM tbl_query_messages
-        WHERE rfq_id = $1
-          AND receiver_id = $2
-          AND is_seen = false
-        GROUP BY sender_id
+        SELECT qm.sender_id AS other_user_id, COUNT(*) AS unseen_count
+        FROM tbl_query_messages qm
+        WHERE qm.rfq_id = $1
+          AND ${buyerTypes.includes(viewer_type)
+              ? `qm.sender_type = 3`
+              : `qm.receiver_id = $2`}
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_query_message_reads r
+            WHERE r.message_id = qm.id AND r.user_id = $2
+          )
+        GROUP BY qm.sender_id
       )
       SELECT
         c.user_id,

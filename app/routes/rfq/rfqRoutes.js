@@ -288,6 +288,13 @@ RfqRoutes.post(
   acl([2, 8]),
   rfqController.terminateRFQ
 );
+RfqRoutes.post(
+  '/force-publish/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.forcePublishRfq
+);
 RfqRoutes.get(
   '/send-reminder/:id',
   passportSignIn,

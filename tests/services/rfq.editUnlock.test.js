@@ -126,6 +126,12 @@ async function attachProduct(rfq_id, productVariantId = 1) {
      VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
     [rfq_id, productVariantId]
   );
+  // Quantity + Unit are mandatory per product (assertProductQuantityAndUnit).
+  await db.none(
+    `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+     VALUES ($1, $2, 'Quantity', '10', 0), ($1, $2, 'Unit', 'NOS', 0)`,
+    [rfq_id, productVariantId]
+  );
   return id;
 }
 
@@ -318,7 +324,10 @@ describe("rfqController.update — Step 9: tech-eval-all-failed unlock (restrict
       variant: 0,
       product_name: "trying-to-add",
       comment: "",
-      specs: {},
+      // Provide valid Quantity/Unit so assertProductQuantityAndUnit (which
+      // runs against the snapshot before diff) passes and we reach the
+      // restricted-mode product-add guard the test is actually asserting.
+      specs: { Quantity: "10", Unit: "NOS" },
       files: { qap_file: [], spec_file: [], datasheet_file: [] },
       vendors: [],
       tech_eval_clauses: [],

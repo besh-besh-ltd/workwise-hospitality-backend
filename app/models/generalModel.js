@@ -2150,18 +2150,18 @@ export async function createApprovalInstance({
       // Insert approvers for this step
       for (const userId of approverUserIds) {
         if (userId === initiated_by) {
-          // Initiator: insert as already APPROVED with system remark
+          // Initiator: insert as already APPROVED with no comment
           await t.none(`
             INSERT INTO tbl_approval_step_approvers
             (approval_instance_step_id, approver_user_id, status, acted_at, comment)
-            VALUES ($1, $2, 'APPROVED', NOW(), 'Auto approved by system')
+            VALUES ($1, $2, 'APPROVED', NOW(), NULL)
           `, [instanceStep.id, userId]);
 
           // Record in audit trail
           await t.none(`
             INSERT INTO tbl_approval_actions
             (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-            VALUES ($1, $2, $3, 'APPROVE', 'Auto approved by system')
+            VALUES ($1, $2, $3, 'APPROVE', NULL)
           `, [instance.id, instanceStep.id, userId]);
         } else {
           // Normal approver: insert as PENDING
