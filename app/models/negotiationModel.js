@@ -657,6 +657,33 @@ const negotiationModel = {
       return { negotiation_instances: {}, negotiation_quote_instances: {}, rounds_history: [] };
     }
 
+    // Lazy-heal stale APPROVED NEGOTIATION_QUOTE rows. handlePORejection
+    // cancels these when the last vendor on a product is de-finalized, but
+    // rejections that pre-date that fix left orphaned APPROVED rows behind,
+    // causing the negotiation modal to keep showing products as "Approved"
+    // after the PO that consumed the approval was rejected. Source of truth
+    // for "is this approval still in force?" is whether ANY vendor still has
+    // a finalization row for the product — if none do, the approval has been
+    // rolled back. Heal in-place before assembling the bundle so the modal
+    // sees the corrected status.
+    await db.none(
+      `UPDATE tbl_approval_instances
+          SET status = 'CANCELLED', completed_at = NOW()
+        WHERE entity_type = 'NEGOTIATION_QUOTE'
+          AND status = 'APPROVED'
+          AND entity_id IN (
+            SELECT rp.id FROM tbl_rfq_products rp
+            WHERE rp.rfq_id = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization qf
+                WHERE qf.rfq_id = rp.rfq_id
+                  AND qf.product_variant_id = rp.product_variant_id
+                  AND qf.variant = rp.variant
+              )
+          )`,
+      [rfqId]
+    );
+
     // Combine both ID sets for querying (NEGOTIATION uses roundIds, NEGOTIATION_QUOTE uses productIds)
     const allEntityIds = [...new Set([...productIds, ...roundIds])];
 
