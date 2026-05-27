@@ -227,6 +227,48 @@ const rbacModel = {
     );
   },
 
+  /**
+   * Return every hotel id the given user can access.
+   *
+   *  - Hotel-level mappings (mapping_type = 1) contribute their specific
+   *    hospitality_hotel_id directly.
+   *  - Company-level mappings (mapping_type = 0, hospitality_hotel_id NULL)
+   *    contribute ALL hotels under those hospitality companies.
+   *
+   * Used by the dashboard's "All Business Units" view — when the FE passes
+   * hotel_ids: [] we expand it to this full set so the permission lookup
+   * returns the union of grants across everything the user can reach.
+   */
+  getAllAccessibleHotelIds: async (userId) => {
+    const rows = await db.any(
+      `
+      WITH user_hotel_scope AS (
+        -- Direct hotel-level mappings
+        SELECT DISTINCT hum.hospitality_hotel_id AS hotel_id
+        FROM tbl_hospitality_user_mappings hum
+        WHERE hum.user_id = $1
+          AND hum.mapping_type = 1
+          AND hum.hospitality_hotel_id IS NOT NULL
+
+        UNION
+
+        -- Expand company-level mappings to every hotel under those companies
+        SELECT DISTINCT h.id AS hotel_id
+        FROM tbl_hospitality_user_mappings hum
+        JOIN tbl_hospitality_company_hotels h
+          ON h.hospitality_company_id = hum.hospitality_company_id
+        WHERE hum.user_id = $1
+          AND hum.mapping_type = 0
+          AND hum.hospitality_hotel_id IS NULL
+          AND h.is_deleted = 0
+      )
+      SELECT hotel_id FROM user_hotel_scope
+      `,
+      [userId]
+    );
+    return rows.map((r) => r.hotel_id);
+  },
+
   deleteUserRoleScopes: (userId, t = db) => {
     return t.none(
       `DELETE FROM tbl_user_role_scopes WHERE user_id = $1`,

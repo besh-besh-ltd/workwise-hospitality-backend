@@ -136,6 +136,262 @@ const dashboardController = {
       res.status(400).json({ status: 3, message: Config.errorText.value }).end();
     }
   },
+
+  /* ──────────────────────────────────────────────────────────────────
+     Role-aware buyer dashboard — persona widget handlers.
+
+     These are STUBS today: each returns the safe-default shape the FE
+     component expects so the dashboard renders in its empty state
+     instead of erroring with 405. Replace each handler with real
+     aggregation logic against the model layer as the feature lands.
+
+     Contract: every handler must
+       1. Resolve scope (so unauthorised requests still 403).
+       2. Return `{ status: 1, data: <shape FE expects> }` on success.
+       3. Catch errors and respond with 400 + Config.errorText.value
+          (matches the existing v2 handlers).
+     ────────────────────────────────────────────────────────────────── */
+
+  // ── RFQ Creator ──────────────────────────────────────────────────
+  getMyDrafts: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const { start_date, end_date } = req.query;
+      const data = await dashboardModel.getMyDraftsData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids,
+        start_date, end_date
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getMyActiveRfqs: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const { start_date, end_date } = req.query;
+      const data = await dashboardModel.getMyActiveRfqsData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids,
+        start_date, end_date
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getMyNoResponseRfqs: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const { start_date, end_date } = req.query;
+      const data = await dashboardModel.getMyNoResponseRfqsData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids,
+        start_date, end_date
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getMyRfqsBidClosedNoQuotes: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyRfqsBidClosedNoQuotesData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  // ── Technical Evaluator ──────────────────────────────────────────
+  getMyTechEvalsPending: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyTechEvalsPendingData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getTechEvalsWithDisagreements: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getTechEvalsWithDisagreementsData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getTechEvalThroughput: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getTechEvalThroughputData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  // ── Technical Approver ───────────────────────────────────────────
+  getMyTechApprovalsPending: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyTechApprovalsPendingData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getTechApprovalOldestPending: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getTechApprovalOldestPendingData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getTechApprovalThroughput: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getTechApprovalThroughputData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  // ── Commercial Evaluator / N1 Negotiator ─────────────────────────
+  getMyQuoteCompares: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyQuoteComparesData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getMyActiveNegotiations: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyActiveNegotiationsData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getSavingsPipeline: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getSavingsPipelineData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  // ── Commercial Approver ──────────────────────────────────────────
+  getMyCommercialApprovalsPending: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyCommercialApprovalsPendingData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getDealsWithPriceAnomalies: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getDealsWithPriceAnomaliesData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getCommercialApprovalThroughput: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getCommercialApprovalThroughputData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  // ── Awarding P1 / P2 ─────────────────────────────────────────────
+  getMyAwardApprovalsPending: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getMyAwardApprovalsPendingData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getRecentAwards: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getRecentAwardsData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
+
+  getAwardValuePipeline: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const data = await dashboardModel.getAwardValuePipelineData(
+        scope.buyer_company_id, req.user.id, scope.hotel_ids
+      );
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) { logError(error); res.status(400).json({ status: 3, message: Config.errorText.value }).end(); }
+  },
 };
 
 export default dashboardController;

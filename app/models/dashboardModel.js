@@ -827,6 +827,1038 @@ async function getRejectedPOsDetail(buyer_company_id, hotel_ids = []) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Role-aware dashboard — persona widget queries
+//
+// Each query scopes data by buyer_company_id (via tbl_hospitality_companies)
+// + hotel_ids array (via tbl_rfq_hotel_mappings for RFQ-rooted data, or
+// tbl_approval_instances.hotel_id for approval-rooted data) + user_id
+// (always req.user.id — backend never trusts client-supplied user id).
+// ═══════════════════════════════════════════════════════════════════
+
+// ── RFQ Creator: my_drafts ─────────────────────────────────────────
+async function getMyDraftsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, oldest_updated_at: null, items: [] };
+  }
+  // Drafts: is_published=0 AND status NOT IN (5 withdrawn, 2 closed).
+  // Date filter applies on r.timestamp (creation/touch time).
+  const dateClause = start_date && end_date
+    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+    : "";
+  const params = start_date && end_date
+    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
+    : [buyer_company_id, user_id, hotel_ids];
+  const rows = await db.any(
+    `SELECT r.id, r.rfq_no, r.title,
+            r."timestamp" AS updated_at,
+            (SELECT COUNT(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id) AS product_count
+     FROM tbl_rfq r
+     WHERE ${companyScope()}
+       AND r.is_published = 0
+       AND r.status NOT IN (5, 2)
+       AND r.created_by = $2
+       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+       ${dateClause}
+     ORDER BY updated_at DESC NULLS LAST
+     LIMIT 50`,
+    params
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    product_count: r.product_count,
+    updated_at: r.updated_at,
+  }));
+  const count = items.length;
+  // Oldest is the LAST item after DESC sort.
+  const oldest = items.length ? items[items.length - 1].updated_at : null;
+  return { count, oldest_updated_at: oldest, items };
+}
+
+// ── RFQ Creator: my_active_rfqs ────────────────────────────────────
+async function getMyActiveRfqsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { total: 0, stages: [] };
+  }
+  const dateClause = start_date && end_date
+    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+    : "";
+  const params = start_date && end_date
+    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
+    : [buyer_company_id, user_id, hotel_ids];
+  // "Live" = is_published=1 AND status=1 (Open).
+  // Derive stage from joined sub-state:
+  //   awaiting_vendor_quotes — no quotes yet
+  //   quote_compare          — has quotes, no live negotiation round
+  //   negotiation            — has live negotiation round (status != CLOSED)
+  //   awaiting_approval      — has PENDING approval instance for the RFQ
+  //   awarded                — has at least one PO
+  const rows = await db.any(
+    `WITH live_rfqs AS (
+       SELECT r.id, r."timestamp" AS created_ts
+       FROM tbl_rfq r
+       WHERE ${companyScope()}
+         AND r.is_published = 1
+         AND r.status = 1
+         AND r.created_by = $2
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+         ${dateClause}
+     ),
+     stage_assignment AS (
+       SELECT
+         lr.id AS rfq_id,
+         lr.created_ts,
+         CASE
+           WHEN EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = lr.id)
+             THEN 'awarded'
+           WHEN EXISTS (
+             SELECT 1 FROM tbl_approval_instances i
+             WHERE i.entity_id = lr.id
+               AND i.entity_type IN ('RFQ', 'TENDER')
+               AND i.status = 'PENDING'
+           )
+             THEN 'awaiting_approval'
+           WHEN EXISTS (
+             SELECT 1 FROM tbl_negotiation_rounds nr
+             WHERE nr.rfq_id = lr.id
+               AND nr.status NOT IN ('CLOSED')
+           )
+             THEN 'negotiation'
+           WHEN EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = lr.id)
+             THEN 'quote_compare'
+           ELSE 'awaiting_vendor_quotes'
+         END AS stage
+       FROM live_rfqs lr
+     )
+     SELECT stage,
+            COUNT(*)::int AS count,
+            EXTRACT(EPOCH FROM (NOW() - MIN(created_ts)))::int AS oldest_age_seconds
+     FROM stage_assignment
+     GROUP BY stage`,
+    params
+  );
+  const stages = rows.map((r) => ({
+    stage: r.stage,
+    count: r.count,
+    oldest_age_days: Math.floor((r.oldest_age_seconds || 0) / 86400),
+  }));
+  const total = stages.reduce((s, r) => s + r.count, 0);
+  return { total, stages };
+}
+
+// ── RFQ Creator: my_no_response_rfqs ───────────────────────────────
+async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, silent_vendor_count: 0, items: [] };
+  }
+  // Live RFQs of this user whose bid_end_date is still in the future.
+  // RFQs whose bid window has already closed move to the urgent-attention
+  // widget (getMyRfqsBidClosedNoQuotesData) — not surfaced here so
+  // creators can focus on RFQs they can still salvage.
+  const dateClause = start_date && end_date
+    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+    : "";
+  const params = start_date && end_date
+    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
+    : [buyer_company_id, user_id, hotel_ids];
+  const rows = await db.any(
+    `WITH my_live_rfqs AS (
+       SELECT r.id, r.rfq_no, r.title, r.bid_end_date
+       FROM tbl_rfq r
+       WHERE ${companyScope()}
+         AND r.is_published = 1
+         AND r.status = 1
+         AND r.created_by = $2
+         AND r.bid_end_date IS NOT NULL
+         AND r.bid_end_date != ''
+         AND DATE(r.bid_end_date) >= CURRENT_DATE
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+         ${dateClause}
+     ),
+     vendor_status AS (
+       SELECT
+         rpv.rfq_id,
+         rpv.user_id AS vendor_id,
+         EXISTS (
+           SELECT 1 FROM tbl_quotes q
+           WHERE q.rfq_id = rpv.rfq_id AND q.created_by = rpv.user_id
+         ) AS has_responded
+       FROM tbl_rfq_product_vendors rpv
+       WHERE rpv.rfq_id IN (SELECT id FROM my_live_rfqs)
+       GROUP BY rpv.rfq_id, rpv.user_id
+     ),
+     rfq_silent_counts AS (
+       SELECT
+         vs.rfq_id,
+         COUNT(*) FILTER (WHERE has_responded = false)::int AS silent_count,
+         COUNT(*)::int AS total_count
+       FROM vendor_status vs
+       GROUP BY vs.rfq_id
+     )
+     SELECT mlr.id, mlr.rfq_no, mlr.title, mlr.bid_end_date,
+            rsc.silent_count AS silent_vendor_count,
+            rsc.total_count AS total_vendor_count
+     FROM my_live_rfqs mlr
+     JOIN rfq_silent_counts rsc ON rsc.rfq_id = mlr.id
+     WHERE rsc.silent_count > 0
+     ORDER BY rsc.silent_count DESC, mlr.bid_end_date ASC
+     LIMIT 50`,
+    params
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    bid_end_date: r.bid_end_date,
+    silent_vendor_count: r.silent_vendor_count,
+    total_vendor_count: r.total_vendor_count,
+  }));
+  const silent_vendor_count = items.reduce(
+    (s, r) => s + r.silent_vendor_count,
+    0
+  );
+  return { count: items.length, silent_vendor_count, items };
+}
+
+// ── RFQ Creator: my_rfqs_bid_closed_no_quotes ─────────────────────
+// RFQs whose bid_end_date has passed but no vendor responded.
+// High-urgency: the creator may need to re-publish, extend the bid
+// window, or escalate to procurement.
+async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, items: [] };
+  }
+  const rows = await db.any(
+    `SELECT r.id, r.rfq_no, r.title, r.bid_end_date,
+            (DATE(NOW()) - DATE(r.bid_end_date))::int AS days_overdue
+     FROM tbl_rfq r
+     WHERE ${companyScope()}
+       AND r.is_published = 1
+       AND r.created_by = $2
+       AND r.bid_end_date IS NOT NULL
+       AND r.bid_end_date != ''
+       AND DATE(r.bid_end_date) < CURRENT_DATE
+       AND r.status IN (1, 2)
+       AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
+       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+     ORDER BY r.bid_end_date ASC
+     LIMIT 50`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  return {
+    count: rows.length,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_no: r.rfq_no,
+      title: r.title,
+      bid_end_date: r.bid_end_date,
+      days_overdue: r.days_overdue,
+    })),
+  };
+}
+
+// ── Tech Evaluator: my_tech_evals_pending ─────────────────────────
+async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, oldest_opened_at: null, items: [] };
+  }
+  // Tech evals share a queue per BU+role — there's no per-user assignment
+  // column. The widget shows every incomplete tech-eval at the hotels the
+  // user is scoped to (the dashboard permission gate has already filtered
+  // out users who shouldn't see this widget).
+  const rows = await db.any(
+    `SELECT te.id,
+            te.rfq_id,
+            te.tbl_rfq_product_id AS product_id,
+            te."timestamp" AS opened_at,
+            r.rfq_no,
+            pv.name AS product_name
+     FROM tbl_rfq_product_tech_evaluation te
+     JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+     JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+     WHERE te.is_complete = false
+       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+     ORDER BY te."timestamp" ASC
+     LIMIT 50`,
+    [buyer_company_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_id: r.rfq_id,
+    product_id: r.product_id,
+    rfq_no: r.rfq_no,
+    product_name: r.product_name,
+    opened_at: r.opened_at,
+  }));
+  return {
+    count: items.length,
+    oldest_opened_at: items.length ? items[0].opened_at : null,
+    items,
+  };
+}
+
+// ── Tech Evaluator: tech_evals_with_vendor_disagreements ──────────
+async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, total_disagreement_clauses: 0, items: [] };
+  }
+  const rows = await db.any(
+    `WITH disagreements AS (
+       SELECT te.id            AS tech_eval_id,
+              te.rfq_id        AS rfq_id,
+              te.tbl_rfq_product_id AS rfq_product_id,
+              c.id             AS clause_id,
+              vr.vendor_id     AS vendor_id
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq_product_tech_evaluation_clauses c
+         ON c.tbl_rfq_product_tech_evaluation_id = te.id
+       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+       WHERE te.is_complete = false
+         AND LOWER(TRIM(vr.vendor_response)) = 'disagree'
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+     ),
+     per_eval AS (
+       SELECT
+         tech_eval_id,
+         rfq_id,
+         rfq_product_id,
+         COUNT(DISTINCT vendor_id)::int AS disagreeing_vendor_count,
+         COUNT(DISTINCT clause_id)::int AS disagreeing_clause_count
+       FROM disagreements
+       GROUP BY tech_eval_id, rfq_id, rfq_product_id
+     )
+     SELECT pe.tech_eval_id AS id,
+            pe.rfq_id,
+            pe.rfq_product_id AS product_id,
+            pe.disagreeing_vendor_count,
+            pe.disagreeing_clause_count,
+            r.rfq_no,
+            pv.name AS product_name
+     FROM per_eval pe
+     JOIN tbl_rfq r ON r.id = pe.rfq_id
+     JOIN tbl_rfq_products rp ON rp.id = pe.rfq_product_id
+     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+     ORDER BY pe.disagreeing_vendor_count DESC, pe.disagreeing_clause_count DESC
+     LIMIT 50`,
+    [buyer_company_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_id: r.rfq_id,
+    product_id: r.product_id,
+    rfq_no: r.rfq_no,
+    product_name: r.product_name,
+    disagreeing_vendor_count: r.disagreeing_vendor_count,
+    disagreeing_clause_count: r.disagreeing_clause_count,
+  }));
+  const total_disagreement_clauses = items.reduce(
+    (s, r) => s + r.disagreeing_clause_count,
+    0
+  );
+  return { count: items.length, total_disagreement_clauses, items };
+}
+
+// ── Tech Evaluator: tech_eval_throughput ──────────────────────────
+async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return {
+      current_period_avg_hours: null,
+      prior_period_avg_hours: null,
+      delta_pct: null,
+      unit: "hrs",
+      sparkline: [],
+    };
+  }
+  // Throughput = avg(completed_at - opened_at). We approximate
+  // "completed_at" as the latest vendor-response score_timestamp on any
+  // clause under a complete tech-eval — that's when scoring closed.
+  // Current vs prior period: last 30 days vs previous 30 days.
+  const row = await db.oneOrNone(
+    `WITH completed_evals AS (
+       SELECT te.id,
+              te."timestamp" AS opened_at,
+              MAX(vr.score_timestamp) AS completed_at
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq_product_tech_evaluation_clauses c
+         ON c.tbl_rfq_product_tech_evaluation_id = te.id
+       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+       WHERE te.is_complete = true
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+       GROUP BY te.id, te."timestamp"
+     )
+     SELECT
+       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0)
+         FILTER (WHERE completed_at >= NOW() - INTERVAL '30 days') AS current_avg,
+       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0)
+         FILTER (WHERE completed_at >= NOW() - INTERVAL '60 days'
+                  AND completed_at <  NOW() - INTERVAL '30 days') AS prior_avg
+     FROM completed_evals`,
+    [buyer_company_id, hotel_ids]
+  );
+  const sparkRows = await db.any(
+    `WITH completed_evals AS (
+       SELECT te."timestamp" AS opened_at,
+              MAX(vr.score_timestamp) AS completed_at
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq_product_tech_evaluation_clauses c
+         ON c.tbl_rfq_product_tech_evaluation_id = te.id
+       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+       WHERE te.is_complete = true
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+       GROUP BY te.id, te."timestamp"
+     )
+     SELECT
+       FLOOR(EXTRACT(EPOCH FROM (NOW() - completed_at)) / (86400 * 7))::int AS weeks_ago,
+       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0) AS avg_hours
+     FROM completed_evals
+     WHERE completed_at >= NOW() - INTERVAL '28 days'
+     GROUP BY weeks_ago
+     ORDER BY weeks_ago DESC`,
+    [buyer_company_id, hotel_ids]
+  );
+  const rawSparkline = [0, 0, 0, 0];
+  for (const r of sparkRows) {
+    const idx = 3 - r.weeks_ago;
+    if (idx >= 0 && idx <= 3) rawSparkline[idx] = Number(r.avg_hours) || 0;
+  }
+  const curHours = row?.current_avg != null ? Number(row.current_avg) : null;
+  const priorHours = row?.prior_avg != null ? Number(row.prior_avg) : null;
+  let delta_pct = null;
+  if (curHours != null && priorHours != null && priorHours > 0) {
+    delta_pct = ((curHours - priorHours) / priorHours) * 100;
+  }
+  return scaleThroughput(curHours, priorHours, delta_pct, rawSparkline);
+}
+
+/** Helper: pick the most readable unit (hrs vs days) based on the current
+ *  period's magnitude. When current_avg is >= 48h we switch to days so the
+ *  number is human-friendly (e.g. 234h → 9.8 days). */
+function scaleThroughput(currentHours, priorHours, deltaPct, sparklineHours) {
+  const useDays = currentHours != null && currentHours >= 48;
+  if (!useDays) {
+    return {
+      current_period_avg_hours: currentHours,
+      prior_period_avg_hours: priorHours,
+      // Mirror FE expectation: also expose current_period_avg (unit-agnostic).
+      current_period_avg: currentHours,
+      prior_period_avg: priorHours,
+      delta_pct: deltaPct,
+      unit: "hrs",
+      sparkline: sparklineHours,
+    };
+  }
+  const div = 24;
+  return {
+    current_period_avg_hours: currentHours,
+    prior_period_avg_hours: priorHours,
+    current_period_avg: currentHours / div,
+    prior_period_avg: priorHours != null ? priorHours / div : null,
+    delta_pct: deltaPct,
+    unit: "days",
+    sparkline: sparklineHours.map((h) => (h ? h / div : 0)),
+  };
+}
+
+// ── Tech Approver: my_tech_approvals_pending ──────────────────────
+async function getMyTechApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
+  const rows = await db.any(
+    `SELECT i.id,
+            i.entity_id AS rfq_id,
+            i.created_at AS submitted_at
+     FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+     WHERE i.status = 'PENDING'
+       AND i.entity_type = 'TECHNICAL'
+       AND sa.approver_user_id = $2
+       AND sa.status = 'PENDING'
+       AND s.step_order = i.current_step
+       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+       AND i.hotel_id = ANY($3)
+     ORDER BY i.created_at DESC
+     LIMIT 50`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  return {
+    count: rows.length,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_id: r.rfq_id,
+      submitted_at: r.submitted_at,
+    })),
+  };
+}
+
+// ── Tech Approver: tech_approval_oldest_pending ───────────────────
+async function getTechApprovalOldestPendingData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { items: [] };
+  const rows = await db.any(
+    `SELECT i.id,
+            i.entity_id AS rfq_id,
+            i.initiated_by,
+            u.name AS submitted_by_name,
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 86400)::int AS age_days
+     FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+     LEFT JOIN tbl_users u ON u.id = i.initiated_by
+     WHERE i.status = 'PENDING'
+       AND i.entity_type = 'TECHNICAL'
+       AND sa.approver_user_id = $2
+       AND sa.status = 'PENDING'
+       AND s.step_order = i.current_step
+       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+       AND i.hotel_id = ANY($3)
+     ORDER BY i.created_at ASC
+     LIMIT 5`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  return {
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_id: r.rfq_id,
+      submitted_by_name: r.submitted_by_name,
+      age_days: r.age_days,
+    })),
+  };
+}
+
+// Shared helper: approval throughput for a given entity_type and user.
+// Computes current-30d avg, prior-30d avg, delta %, and a 4-week sparkline.
+async function approvalThroughput(buyer_company_id, user_id, hotel_ids, entity_type) {
+  const row = await db.oneOrNone(
+    `WITH my_acted AS (
+       SELECT i.id,
+              i.created_at,
+              sa.acted_at
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+       WHERE sa.approver_user_id = $2
+         AND sa.status = 'APPROVED'
+         AND sa.acted_at IS NOT NULL
+         AND i.entity_type = $4
+         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+         AND i.hotel_id = ANY($3)
+     )
+     SELECT
+       AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0)
+         FILTER (WHERE acted_at >= NOW() - INTERVAL '30 days') AS current_avg,
+       AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0)
+         FILTER (WHERE acted_at >= NOW() - INTERVAL '60 days'
+                  AND acted_at <  NOW() - INTERVAL '30 days') AS prior_avg
+     FROM my_acted`,
+    [buyer_company_id, user_id, hotel_ids, entity_type]
+  );
+  const sparkRows = await db.any(
+    `WITH my_acted AS (
+       SELECT i.created_at, sa.acted_at
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+       WHERE sa.approver_user_id = $2
+         AND sa.status = 'APPROVED'
+         AND sa.acted_at IS NOT NULL
+         AND i.entity_type = $4
+         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+         AND i.hotel_id = ANY($3)
+     )
+     SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - acted_at)) / (86400 * 7))::int AS weeks_ago,
+            AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0) AS avg_hours
+     FROM my_acted
+     WHERE acted_at >= NOW() - INTERVAL '28 days'
+     GROUP BY weeks_ago
+     ORDER BY weeks_ago DESC`,
+    [buyer_company_id, user_id, hotel_ids, entity_type]
+  );
+  const rawSparkline = [0, 0, 0, 0];
+  for (const r of sparkRows) {
+    const idx = 3 - r.weeks_ago;
+    if (idx >= 0 && idx <= 3) rawSparkline[idx] = Number(r.avg_hours) || 0;
+  }
+  const curHours = row?.current_avg != null ? Number(row.current_avg) : null;
+  const priorHours = row?.prior_avg != null ? Number(row.prior_avg) : null;
+  let delta_pct = null;
+  if (curHours != null && priorHours != null && priorHours > 0) {
+    delta_pct = ((curHours - priorHours) / priorHours) * 100;
+  }
+  return scaleThroughput(curHours, priorHours, delta_pct, rawSparkline);
+}
+
+async function getTechApprovalThroughputData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return {
+      current_period_avg_hours: null,
+      prior_period_avg_hours: null,
+      delta_pct: null,
+      unit: "hrs",
+      sparkline: [],
+    };
+  }
+  return approvalThroughput(buyer_company_id, user_id, hotel_ids, "TECHNICAL");
+}
+
+// ── Commercial Evaluator: my_quote_compares ───────────────────────
+async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
+  // Quote-compare stage = live RFQ with quotes, no negotiation round, no PO.
+  // Shared queue per BU (no per-user assignment column in schema). The
+  // dashboard permission gate is what restricts which users see this widget.
+  const rows = await db.any(
+    `WITH qc_rfqs AS (
+       SELECT r.id, r.rfq_no, r.title, r."timestamp" AS entered_qc_at,
+              (SELECT COUNT(DISTINCT q.created_by) FROM tbl_quotes q WHERE q.rfq_id = r.id) AS vendor_count
+       FROM tbl_rfq r
+       WHERE ${companyScope()}
+         AND r.is_published = 1 AND r.status = 1
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+         AND EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
+         )
+         AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
+     )
+     SELECT * FROM qc_rfqs
+     ORDER BY entered_qc_at ASC
+     LIMIT 50`,
+    [buyer_company_id, hotel_ids]
+  );
+  return {
+    count: rows.length,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_no: r.rfq_no,
+      title: r.title,
+      vendor_count: Number(r.vendor_count) || 0,
+      entered_qc_at: r.entered_qc_at,
+    })),
+  };
+}
+
+// ── Commercial Evaluator: my_active_negotiations ──────────────────
+async function getMyActiveNegotiationsData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, total_silent_vendors: 0, items: [] };
+  }
+  // Active rounds led by user. Silent vendors = invited (vendor_ids[])
+  // minus those with quote rows for this round.
+  const rows = await db.any(
+    `WITH my_rounds AS (
+       SELECT nr.id, nr.rfq_id, nr.round_number, nr.end_date, nr.vendor_ids,
+              r.rfq_no, r.title AS rfq_title
+       FROM tbl_negotiation_rounds nr
+       JOIN tbl_rfq r ON r.id = nr.rfq_id AND ${companyScope()}
+       WHERE nr.created_by = $2
+         AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
+         AND nr.end_date IS NOT NULL
+         AND nr.end_date > NOW()
+         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+     ),
+     responded AS (
+       SELECT mr.id AS round_id,
+              COUNT(DISTINCT nrq.vendor_id)::int AS responded_count
+       FROM my_rounds mr
+       LEFT JOIN tbl_negotiation_round_quotes nrq
+         ON nrq.negotiation_round_id = mr.id
+       GROUP BY mr.id
+     )
+     SELECT mr.id, mr.rfq_id, mr.round_number, mr.end_date,
+            mr.rfq_no, mr.rfq_title,
+            COALESCE(array_length(mr.vendor_ids, 1), 0)::int AS invited_count,
+            COALESCE(r.responded_count, 0) AS responded_count,
+            GREATEST(
+              COALESCE(array_length(mr.vendor_ids, 1), 0) - COALESCE(r.responded_count, 0),
+              0
+            )::int AS silent_vendor_count
+     FROM my_rounds mr
+     LEFT JOIN responded r ON r.round_id = mr.id
+     ORDER BY mr.end_date ASC NULLS LAST`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_id: r.rfq_id,
+    rfq_no: r.rfq_no,
+    rfq_title: r.rfq_title,
+    round_number: r.round_number,
+    round_end_date: r.end_date,
+    silent_vendor_count: r.silent_vendor_count,
+  }));
+  const total_silent_vendors = items.reduce(
+    (s, r) => s + r.silent_vendor_count,
+    0
+  );
+  return { count: items.length, total_silent_vendors, items };
+}
+
+// ── Commercial Evaluator: savings_pipeline ────────────────────────
+async function getSavingsPipelineData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return {
+      total_savings: 0,
+      prior_period_savings: 0,
+      negotiation_count: 0,
+      avg_savings_pct: 0,
+    };
+  }
+  // For negotiations led by user (round 1 created_by = user), compute
+  // SUM(round1 prices) − SUM(last round prices). Two windows: current 30d
+  // vs prior 30d, by the closed_at / final-round date.
+  const computePeriod = async (intervalStart, intervalEnd) => {
+    const row = await db.oneOrNone(
+      `WITH my_rfqs AS (
+         SELECT DISTINCT nr.rfq_id, nr.closed_at
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_rfq r ON r.id = nr.rfq_id AND ${companyScope()}
+         WHERE nr.round_number = 1
+           AND nr.created_by = $2
+           AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                       WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+       ),
+       round1 AS (
+         SELECT mr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
+         FROM my_rfqs mr
+         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = mr.rfq_id AND nr.round_number = 1
+         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
+         WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
+           AND ${intervalStart === null
+             ? "TRUE"
+             : `(mr.closed_at IS NULL OR (mr.closed_at >= NOW() - INTERVAL '${intervalEnd}' AND mr.closed_at < NOW() - INTERVAL '${intervalStart}'))`}
+       ),
+       last_round AS (
+         SELECT DISTINCT ON (nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id)
+                nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
+         FROM my_rfqs mr
+         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = mr.rfq_id
+         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
+         WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
+         ORDER BY nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nr.round_number DESC
+       )
+       SELECT
+         COALESCE(SUM(r1.quoted_price), 0) AS baseline_total,
+         COALESCE(SUM(lr.quoted_price), 0) AS final_total,
+         COUNT(DISTINCT r1.rfq_id)::int AS negotiation_count
+       FROM round1 r1
+       JOIN last_round lr ON lr.rfq_id = r1.rfq_id
+         AND lr.vendor_id = r1.vendor_id
+         AND lr.rfq_product_id = r1.rfq_product_id`,
+      [buyer_company_id, user_id, hotel_ids]
+    );
+    const baseline = Number(row?.baseline_total) || 0;
+    const final = Number(row?.final_total) || 0;
+    return {
+      // Signed value: positive = saved, negative = lost (negotiated above
+      // baseline). FE renders losses in red.
+      savings: baseline - final,
+      baseline,
+      final,
+      negotiation_count: row?.negotiation_count || 0,
+    };
+  };
+
+  const current = await computePeriod("0 days", "30 days");
+  const prior = await computePeriod("30 days", "60 days");
+  const avg_savings_pct = current.baseline > 0
+    ? (current.savings / current.baseline) * 100
+    : 0;
+  return {
+    total_savings: current.savings,
+    prior_period_savings: prior.savings,
+    negotiation_count: current.negotiation_count,
+    avg_savings_pct,
+  };
+}
+
+// ── Commercial Approver: my_commercial_approvals_pending ─────────
+async function getMyCommercialApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, total_value: 0, top_by_value: [] };
+  }
+  const rows = await db.any(
+    `SELECT i.id,
+            i.entity_id AS po_id,
+            i.created_at,
+            po.po_number,
+            po.total_value,
+            po.rfq_id,
+            r.rfq_no,
+            r.title,
+            u.name AS vendor_name,
+            c.company_name AS vendor_company
+     FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+     JOIN tbl_rfq_purchase_order po ON po.id = i.entity_id
+     JOIN tbl_rfq r ON r.id = po.rfq_id
+     LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
+     LEFT JOIN tbl_company c ON c.id = u.company_id
+     WHERE i.status = 'PENDING'
+       AND i.entity_type = 'PO'
+       AND sa.approver_user_id = $2
+       AND sa.status = 'PENDING'
+       AND s.step_order = i.current_step
+       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+       AND i.hotel_id = ANY($3)
+     ORDER BY po.total_value DESC NULLS LAST, i.created_at DESC`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    po_id: r.po_id,
+    rfq_id: r.rfq_id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    vendor_name: r.vendor_company || r.vendor_name,
+    value: Number(r.total_value) || 0,
+  }));
+  const total_value = items.reduce((s, r) => s + r.value, 0);
+  return {
+    count: items.length,
+    total_value,
+    top_by_value: items.slice(0, 3),
+  };
+}
+
+// ── Commercial Approver: deals_with_price_anomalies ──────────────
+async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
+  // For each pending PO approval on this user, compare unit_price on the
+  // line item against the most recent COMPLETED PO for the same product
+  // variant. If the awarded price is materially higher (≥10%), flag it.
+  const rows = await db.any(
+    `WITH my_pending AS (
+       SELECT i.id AS instance_id, po.id AS po_id, po.rfq_id, pop.id AS pop_id,
+              pop.rfq_product_id, rp.product_variant_id,
+              pop.unit_price AS awarded_unit_price,
+              po.total_value
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+       JOIN tbl_rfq_purchase_order po ON po.id = i.entity_id
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       WHERE i.status = 'PENDING'
+         AND i.entity_type = 'PO'
+         AND sa.approver_user_id = $2
+         AND sa.status = 'PENDING'
+         AND s.step_order = i.current_step
+         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+         AND i.hotel_id = ANY($3)
+     ),
+     last_paid AS (
+       -- Most recent completed PO unit_price per product_variant (per
+       -- this buyer-company scope). DISTINCT ON gives the latest.
+       SELECT DISTINCT ON (rp.product_variant_id)
+         rp.product_variant_id,
+         pop.unit_price AS last_paid_unit_price,
+         po.created_at
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
+       WHERE po.status = 'completed'
+       ORDER BY rp.product_variant_id, po.created_at DESC
+     )
+     SELECT mp.po_id, mp.rfq_id, mp.product_variant_id,
+            mp.awarded_unit_price,
+            lp.last_paid_unit_price,
+            ((mp.awarded_unit_price - lp.last_paid_unit_price) / lp.last_paid_unit_price * 100) AS drift_pct,
+            pv.name AS product_name
+     FROM my_pending mp
+     JOIN last_paid lp ON lp.product_variant_id = mp.product_variant_id
+     JOIN tbl_product_variant pv ON pv.id = mp.product_variant_id
+     WHERE lp.last_paid_unit_price > 0
+       AND mp.awarded_unit_price > lp.last_paid_unit_price
+       AND ((mp.awarded_unit_price - lp.last_paid_unit_price) / lp.last_paid_unit_price * 100) >= 10
+     ORDER BY drift_pct DESC
+     LIMIT 50`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.po_id,
+    rfq_id: r.rfq_id,
+    product_name: r.product_name,
+    awarded_unit_price: Number(r.awarded_unit_price) || 0,
+    last_paid_unit_price: Number(r.last_paid_unit_price) || 0,
+    drift_pct: Number(r.drift_pct) || 0,
+  }));
+  return { count: items.length, items };
+}
+
+async function getCommercialApprovalThroughputData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return {
+      current_period_avg_hours: null,
+      prior_period_avg_hours: null,
+      delta_pct: null,
+      unit: "hrs",
+      sparkline: [],
+    };
+  }
+  return approvalThroughput(buyer_company_id, user_id, hotel_ids, "PO");
+}
+
+// ── Awarding P1/P2: my_award_approvals_pending ───────────────────
+async function getMyAwardApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, total_value: 0, items: [] };
+  }
+  // Award approvals = NEGOTIATION_QUOTE entity_type (per backend convention).
+  // Value derives from the underlying PO created/linked to the negotiation
+  // quote (or 0 if no PO yet). We surface RFQ + vendor for context.
+  const rows = await db.any(
+    `SELECT i.id,
+            i.entity_id AS negotiation_quote_id,
+            i.created_at AS submitted_at,
+            nrq.rfq_product_id,
+            nrq.vendor_id,
+            COALESCE(nrq.quoted_price, 0) AS quoted_price,
+            r.id AS rfq_id,
+            r.rfq_no,
+            r.title,
+            u.name AS vendor_name,
+            c.company_name AS vendor_company
+     FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+     LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.id = i.entity_id
+     LEFT JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+     LEFT JOIN tbl_rfq r ON r.id = nr.rfq_id
+     LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
+     LEFT JOIN tbl_company c ON c.id = u.company_id
+     WHERE i.status = 'PENDING'
+       AND i.entity_type = 'NEGOTIATION_QUOTE'
+       AND sa.approver_user_id = $2
+       AND sa.status = 'PENDING'
+       AND s.step_order = i.current_step
+       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+       AND i.hotel_id = ANY($3)
+     ORDER BY i.created_at DESC
+     LIMIT 50`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_id: r.rfq_id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    vendor_name: r.vendor_company || r.vendor_name,
+    value: Number(r.quoted_price) || 0,
+    submitted_at: r.submitted_at,
+  }));
+  const total_value = items.reduce((s, r) => s + r.value, 0);
+  return { count: items.length, total_value, items };
+}
+
+// ── Awarding P1/P2: recent_awards ─────────────────────────────────
+async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { items: [], total_value: 0 };
+  }
+  // Recently cleared award approvals by this user, joined to any
+  // resulting PO so the FE can link out.
+  const rows = await db.any(
+    `SELECT i.id,
+            sa.acted_at AS awarded_at,
+            nrq.quoted_price AS value,
+            r.id AS rfq_id,
+            r.rfq_no,
+            r.title,
+            u.name AS vendor_name,
+            c.company_name AS vendor_company,
+            (SELECT po.id FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id
+              ORDER BY po.created_at DESC LIMIT 1) AS po_id
+     FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+     LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.id = i.entity_id
+     LEFT JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+     LEFT JOIN tbl_rfq r ON r.id = nr.rfq_id
+     LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
+     LEFT JOIN tbl_company c ON c.id = u.company_id
+     WHERE sa.approver_user_id = $2
+       AND sa.status = 'APPROVED'
+       AND sa.acted_at IS NOT NULL
+       AND i.entity_type = 'NEGOTIATION_QUOTE'
+       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+       AND i.hotel_id = ANY($3)
+       AND sa.acted_at >= NOW() - INTERVAL '30 days'
+     ORDER BY sa.acted_at DESC
+     LIMIT 10`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const items = rows.map((r) => ({
+    id: r.id,
+    rfq_id: r.rfq_id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    vendor_name: r.vendor_company || r.vendor_name,
+    value: Number(r.value) || 0,
+    awarded_at: r.awarded_at,
+    po_id: r.po_id,
+  }));
+  const total_value = items.reduce((s, r) => s + r.value, 0);
+  return { items, total_value };
+}
+
+// ── Awarding P1/P2: award_value_pipeline ──────────────────────────
+async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return {
+      completed_value: 0,
+      completed_po_count: 0,
+      ongoing_value: 0,
+      ongoing_po_count: 0,
+    };
+  }
+  // BU-level rollup of PO ₹ across the user's hotels.
+  //   Completed = PO approved or further downstream (vendor accepted /
+  //               sent / GRN / completed).
+  //   Ongoing   = pending_approval OR acceptance_pending.
+  const row = await db.one(
+    `SELECT
+        COALESCE(SUM(CASE WHEN po.status IN ('approved','sent','GRN','completed','invoice_raised','dispatched')
+                          THEN po.total_value ELSE 0 END), 0) AS completed_value,
+        COUNT(*) FILTER (WHERE po.status IN ('approved','sent','GRN','completed','invoice_raised','dispatched'))::int AS completed_po_count,
+        COALESCE(SUM(CASE WHEN po.status IN ('pending_approval','acceptance_pending')
+                          THEN po.total_value ELSE 0 END), 0) AS ongoing_value,
+        COUNT(*) FILTER (WHERE po.status IN ('pending_approval','acceptance_pending'))::int AS ongoing_po_count
+     FROM tbl_rfq_purchase_order po
+     JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
+     WHERE EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))`,
+    [buyer_company_id, hotel_ids]
+  );
+  return {
+    completed_value: Number(row.completed_value) || 0,
+    completed_po_count: row.completed_po_count,
+    ongoing_value: Number(row.ongoing_value) || 0,
+    ongoing_po_count: row.ongoing_po_count,
+  };
+}
+
 export default {
   resolveUserScope,
   getActionCenterData,
@@ -838,4 +1870,37 @@ export default {
   getSmartInsightsData,
   getPendingApprovalsDetail,
   getRejectedPOsDetail,
+
+  // Role-aware widgets — RFQ Creator
+  getMyDraftsData,
+  getMyActiveRfqsData,
+  getMyNoResponseRfqsData,
+  getMyRfqsBidClosedNoQuotesData,
+
+  // Role-aware widgets — Technical Evaluator
+  getMyTechEvalsPendingData,
+  getTechEvalsWithDisagreementsData,
+  getTechEvalThroughputData,
+
+  // Role-aware widgets — Technical Approver
+  getMyTechApprovalsPendingData,
+  getTechApprovalOldestPendingData,
+  getTechApprovalThroughputData,
+  // Shared approval-throughput helper (Commercial Approver reuses)
+  approvalThroughput,
+
+  // Role-aware widgets — Commercial Evaluator / N1
+  getMyQuoteComparesData,
+  getMyActiveNegotiationsData,
+  getSavingsPipelineData: getSavingsPipelineData,
+
+  // Role-aware widgets — Commercial Approver
+  getMyCommercialApprovalsPendingData,
+  getDealsWithPriceAnomaliesData,
+  getCommercialApprovalThroughputData,
+
+  // Role-aware widgets — Awarding P1/P2
+  getMyAwardApprovalsPendingData,
+  getRecentAwardsData,
+  getAwardValuePipelineData,
 };
