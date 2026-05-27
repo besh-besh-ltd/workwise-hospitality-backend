@@ -2077,16 +2077,50 @@ const NegotiationController = {
         });
       }
 
+      // Lazy-heal stale APPROVED rows. handlePORejection now cancels the
+      // matching NEGOTIATION_QUOTE instance whenever the last vendor on a
+      // product is de-finalized, but rejections that happened before that
+      // fix shipped left orphaned APPROVED rows behind. The source of truth
+      // for "is this approval still in force?" is whether any vendor still
+      // has a finalization row for the product — if none do, the approval
+      // has been rolled back and this endpoint must not report APPROVED.
+      let effectiveStatus = latestInstance.status;
+      let effectiveCompletedAt = latestInstance.completed_at;
+      if (effectiveStatus === 'APPROVED') {
+        const rfqProduct = await db.oneOrNone(
+          `SELECT rfq_id, product_variant_id, variant FROM tbl_rfq_products WHERE id = $1`,
+          [rfq_product_id]
+        );
+        if (rfqProduct) {
+          const stillFinalized = await db.oneOrNone(
+            `SELECT 1 FROM tbl_quote_finalization
+              WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+              LIMIT 1`,
+            [rfqProduct.rfq_id, rfqProduct.product_variant_id, rfqProduct.variant]
+          );
+          if (!stillFinalized) {
+            await db.none(
+              `UPDATE tbl_approval_instances
+                SET status = 'CANCELLED', completed_at = NOW()
+                WHERE id = $1 AND status = 'APPROVED'`,
+              [latestInstance.id]
+            );
+            effectiveStatus = 'CANCELLED';
+            effectiveCompletedAt = new Date();
+          }
+        }
+      }
+
       return res.status(200).json({
         status: 1,
         data: {
-          has_pending_approval: latestInstance.status === 'PENDING',
+          has_pending_approval: effectiveStatus === 'PENDING',
           approval_instance: {
             id: latestInstance.id,
-            status: latestInstance.status,
+            status: effectiveStatus,
             metadata: latestInstance.metadata,
             created_at: latestInstance.created_at,
-            completed_at: latestInstance.completed_at
+            completed_at: effectiveCompletedAt
           }
         }
       });
