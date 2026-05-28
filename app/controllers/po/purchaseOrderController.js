@@ -510,6 +510,38 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
       await t.none(`
         DELETE FROM tbl_quote_finalization WHERE id = $1
       `, [finalization.id]);
+
+      // After de-finalizing this vendor, check whether ANY vendor still has
+      // an active finalization for the product. If none remain, the prior
+      // NEGOTIATION_QUOTE approval that produced this PO is no longer in
+      // force, and GET /negotiation/quotes/:rfq_product_id/approval-status
+      // would otherwise keep returning APPROVED — leaving the negotiation
+      // modal disabled. Mark the latest APPROVED instance as CANCELLED so
+      // the endpoint reflects the rollback. Path A (single-vendor finalize
+      // from Quote Compare) cancels on first rejection; Path B (multi-vendor
+      // batched approval) cancels only after every vendor in the batch is
+      // de-finalized, preserving the approval while it still backs other
+      // vendors' POs.
+      const remainingFinalization = await t.oneOrNone(`
+        SELECT 1 FROM tbl_quote_finalization
+        WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+        LIMIT 1
+      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant]);
+
+      if (!remainingFinalization) {
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET status = 'CANCELLED', completed_at = NOW()
+          WHERE id = (
+            SELECT id FROM tbl_approval_instances
+            WHERE entity_type = 'NEGOTIATION_QUOTE'
+              AND entity_id = $1
+              AND status = 'APPROVED'
+            ORDER BY created_at DESC
+            LIMIT 1
+          )
+        `, [product.rfq_product_id]);
+      }
     }
   } catch (error) {
     logError(error);
