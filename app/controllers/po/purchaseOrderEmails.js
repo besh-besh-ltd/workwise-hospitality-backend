@@ -7,6 +7,15 @@ import userModel from "../../models/userModel.js";
 import vendorModel from "../../models/vendorModel.js";
 import rbacModel from "../../models/rbacModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
+import { dispatch as dispatchNotification } from "../../services/notificationService.js";
+
+const poActionUrl = (purchaseOrder, role = 'buyer') => {
+  const base = process.env.FRONT_END_WEBSITE || '';
+  const path = role === 'vendor'
+    ? `/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`
+    : `/dashboard/buyer/purchase-order?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+  return `${base}${path}`;
+};
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
   return new Promise(async (resolve, reject) => {
@@ -77,6 +86,17 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
     };
 
     sendMail(mailRecipients);
+
+    dispatchNotification({
+      userIds: [user.id],
+      category: 'po',
+      type: 'po_approval_needed',
+      title: `PO #${purchaseOrder.po_number || purchaseOrder.id} needs your approval`,
+      body: `A purchase order is awaiting your approval.`,
+      data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
+      actionUrl: poActionUrl(purchaseOrder, 'buyer')
+    }).catch((err) => logError('dispatch po_approval_needed failed', err));
+
     resolve(true);
   });
 };
@@ -175,6 +195,16 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         sendMail(mailRecipients);
 
+        dispatchNotification({
+          userIds: [vendor.id],
+          category: 'po',
+          type: 'po_sent_to_vendor',
+          title: `New PO #${purchaseOrder.po_number} for your acceptance`,
+          body: `${company?.company_name || 'A buyer'} has raised a Purchase Order.`,
+          data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
+          actionUrl: poActionUrl(purchaseOrder, 'vendor')
+        }).catch((err) => logError('dispatch po_sent_to_vendor failed', err));
+
         logger.info("PO TEST -> EMAIL HAS BEEN SENT!")
     } catch (error) {
         logError('sendPONotificationToVendor error', error);
@@ -254,6 +284,16 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
       subject: `Action Required: PO #${purchaseOrder.po_number} for RFQ #${rfqDetails?.rfq_no || ''} — Accept or Reject`,
       html: dynamicHTML
     });
+
+    dispatchNotification({
+      userIds: [vendor.id],
+      category: 'po',
+      type: 'po_acceptance_request',
+      title: `Action required: PO #${purchaseOrder.po_number}`,
+      body: `Please accept or reject this Purchase Order.`,
+      data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
+      actionUrl: poActionUrl(purchaseOrder, 'vendor')
+    }).catch((err) => logError('dispatch po_acceptance_request failed', err));
 
     logger.info(`Sent PO acceptance request email to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
   } catch (error) {
@@ -349,6 +389,16 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
         html: dynamicHTML
       });
     }
+
+    dispatchNotification({
+      userIds: evaluators.map((u) => u.id).filter(Boolean),
+      category: 'po',
+      type: 'po_vendor_rejected',
+      title: `Vendor rejected PO #${purchaseOrder.po_number} — action needed`,
+      body: `${vendorName} has rejected PO #${purchaseOrder.po_number}. Please finalize an alternative vendor.`,
+      data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reason: reason || null },
+      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq_id=${purchaseOrder.rfq_id}`
+    }).catch((err) => logError('dispatch po_vendor_rejected failed', err));
 
     logger.info(`Sent vendor rejection notifications to ${evaluators.length} commercial evaluators for PO ${purchaseOrder.po_number}`);
   } catch (error) {
@@ -450,6 +500,16 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
       subject: subjects[reminderNumber] || subjects[1],
       html: dynamicHTML
     });
+
+    dispatchNotification({
+      userIds: [vendor.id],
+      category: 'po',
+      type: `po_acceptance_reminder_${reminderNumber}`,
+      title: subjects[reminderNumber] || subjects[1],
+      body: `PO #${purchaseOrder.po_number} still requires your action.`,
+      data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reminder: reminderNumber },
+      actionUrl: poActionUrl(purchaseOrder, 'vendor')
+    }).catch((err) => logError(`dispatch po_acceptance_reminder_${reminderNumber} failed`, err));
 
     logger.info(`Sent PO acceptance reminder #${reminderNumber} to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
   } catch (error) {
@@ -568,6 +628,16 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
         html: dynamicHTML
       });
     }
+
+    dispatchNotification({
+      userIds: usersToNotify.map((u) => u.id).filter(Boolean),
+      category: 'po',
+      type: 'po_vendor_accepted',
+      title: `Vendor accepted PO #${purchaseOrder.po_number}`,
+      body: `${vendorName} has accepted the Purchase Order.`,
+      data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
+      actionUrl: poActionUrl(purchaseOrder, 'buyer')
+    }).catch((err) => logError('dispatch po_vendor_accepted failed', err));
 
     logger.info(`Sent PO accepted notifications to ${usersToNotify.length} users for PO ${purchaseOrder.po_number}`);
   } catch (error) {

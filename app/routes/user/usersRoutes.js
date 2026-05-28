@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import UsersController from '../../controllers/users/usersController.js';
+import userNotificationController from '../../controllers/users/userNotificationController.js';
 import vendorController from '../../controllers/admin/vendorController.js';
 import noLogin from '../../middleware/noLogin.js';
 import {
@@ -86,6 +87,43 @@ UsersRoutes.post(
 
   UsersController.subscribe
 );
+
+// New push + bell endpoints (multi-device, recipient-based)
+UsersRoutes.get(
+  '/notifications/vapid-public-key',
+  userNotificationController.vapidPublicKey
+);
+UsersRoutes.post(
+  '/notifications/push-subscribe',
+  passportSignIn,
+  userNotificationController.pushSubscribe
+);
+UsersRoutes.delete(
+  '/notifications/push-subscribe',
+  passportSignIn,
+  userNotificationController.pushUnsubscribe
+);
+UsersRoutes.get(
+  '/notifications/list',
+  passportSignIn,
+  userNotificationController.list
+);
+UsersRoutes.get(
+  '/notifications/unread-count',
+  passportSignIn,
+  userNotificationController.unreadCount
+);
+UsersRoutes.post(
+  '/notifications/mark-read/:id',
+  passportSignIn,
+  userNotificationController.markRead
+);
+UsersRoutes.post(
+  '/notifications/mark-all-read',
+  passportSignIn,
+  userNotificationController.markAllRead
+);
+
 UsersRoutes.get(
   '/notifications/notification-list',
   passportSignIn,

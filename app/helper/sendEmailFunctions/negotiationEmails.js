@@ -2,6 +2,10 @@ import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+
+const buildQuoteCompareUrl = (rfq_id) =>
+  `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`;
 
 /**
  * Format a DB timestamp as IST display string.
@@ -404,6 +408,22 @@ export const sendNegotiationExpiredNotification = async ({
     });
 
     logger.info(`Sent negotiation round expired notification for RFQ #${rfqNo}, Round ${round.round_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([initiator, ...commercialEvaluators]);
+      await dispatchNotification({
+        userIds,
+        category: 'negotiation',
+        type: 'negotiation_round_expired',
+        title: `Negotiation Round Expired — RFQ #${rfqNo}`,
+        body: `Round ${round.round_number || ''} expired before approval. A new round will be needed.`,
+        data: { rfq_id: round.rfq_id, round_number: round.round_number, product_name: productName },
+        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+      });
+    } catch (notifyErr) {
+      logError('dispatch negotiation_round_expired failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending negotiation round expired notification:", err);
@@ -503,6 +523,24 @@ export const sendNegotiationRoundEndedNotification = async ({
     }
 
     logger.info(`Sent negotiation round ended notification to ${commercialEvaluators.length} evaluators for RFQ #${rfqNo}, Round ${round.round_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(commercialEvaluators);
+      await dispatchNotification({
+        userIds,
+        category: 'negotiation',
+        type: 'negotiation_round_ended',
+        title: `Negotiation Round Ended — RFQ #${rfqNo}`,
+        body: quoteCount > 0
+          ? `${quoteCount} quote(s) received in Round ${round.round_number || ''}. Review now.`
+          : `No quotes received in Round ${round.round_number || ''}. Consider another round.`,
+        data: { rfq_id: round.rfq_id, round_number: round.round_number, quote_count: quoteCount },
+        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+      });
+    } catch (notifyErr) {
+      logError('dispatch negotiation_round_ended failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending negotiation round ended notification:", err);
@@ -598,6 +636,26 @@ export const sendNegotiationRoundCreatedNotification = async ({
     });
 
     logger.info(`Sent negotiation round created notification (autoApproved=${autoApproved}) for RFQ #${rfqNo}, Round ${round.round_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([initiator]);
+      await dispatchNotification({
+        userIds,
+        category: 'negotiation',
+        type: autoApproved ? 'negotiation_round_live' : 'negotiation_round_submitted',
+        title: autoApproved
+          ? `Negotiation Round Live — RFQ #${rfqNo}`
+          : `Negotiation Round Submitted — RFQ #${rfqNo}`,
+        body: autoApproved
+          ? `Round ${round.round_number || ''} auto-approved and live. Vendors can submit.`
+          : `Round ${round.round_number || ''} awaiting approval from the committee.`,
+        data: { rfq_id: round.rfq_id, round_number: round.round_number, auto_approved: autoApproved },
+        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+      });
+    } catch (notifyErr) {
+      logError('dispatch negotiation_round_created failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending negotiation round created notification:", err);
@@ -691,6 +749,22 @@ export const sendNegotiationRoundVendorNotification = async ({
     }
 
     logger.info(`Sent negotiation round vendor notifications to ${vendors.length} vendors for RFQ #${rfqNo}, Round ${round.round_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(vendors);
+      await dispatchNotification({
+        userIds,
+        category: 'negotiation',
+        type: 'negotiation_round_active_vendor',
+        title: `Negotiation Round — RFQ #${rfqNo}`,
+        body: `You've been added to Round ${round.round_number || ''}. Submit your revised quote before the deadline.`,
+        data: { rfq_id: round.rfq_id, round_number: round.round_number, product_name: productName },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?rfq=${round.rfq_id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch negotiation_round_active_vendor failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending negotiation round vendor notification:", err);
@@ -780,6 +854,22 @@ export const sendNegotiationRoundApprovedNotification = async ({
     });
 
     logger.info(`Sent negotiation round approved notification for RFQ #${rfqNo}, Round ${round.round_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([initiator, ...commercialEvaluators]);
+      await dispatchNotification({
+        userIds,
+        category: 'negotiation',
+        type: 'negotiation_round_approved',
+        title: `Negotiation Round Approved & Live — RFQ #${rfqNo}`,
+        body: `Round ${round.round_number || ''} is approved. Vendors can submit quotes.`,
+        data: { rfq_id: round.rfq_id, round_number: round.round_number },
+        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+      });
+    } catch (notifyErr) {
+      logError('dispatch negotiation_round_approved failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending negotiation round approved notification:", err);
