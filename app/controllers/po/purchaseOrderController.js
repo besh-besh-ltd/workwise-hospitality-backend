@@ -12,6 +12,8 @@ import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceR
 import rbacModel from "../../models/rbacModel.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 import pricingEngine from "../../services/pricingEngine.js";
+import { getPODetailFull } from "../../models/poDashboardModel.js";
+import { deriveScope } from "./poDashboardController.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -53,8 +55,27 @@ export const getPODetails = async (req, res) => {
 
         const result = await getPODetailsById(po_id, id);
 
+        // Additively merge the new contract-shaped detail-full object under a
+        // `detail` key so the new PO Detail page can consume the structured
+        // shape WITHOUT breaking any existing consumer of the legacy `data`
+        // payload. Scope is derived from req.user + headers; for GRN
+        // token-users (id = -1, no company scope) we skip the augmentation.
+        let detail = null;
+        if (!req.user.is_token_user && req.user.id > 0) {
+          try {
+            const scope = deriveScope(req);
+            if (scope.hospitalityCompanyId || scope.companyId) {
+              detail = await getPODetailFull(po_id, scope);
+            }
+          } catch (augErr) {
+            // Never fail the legacy response because of the augmentation.
+            logError('getPODetails detail-full augmentation failed', augErr);
+          }
+        }
+
         return res.json({
           data: result,
+          detail,
         });
 
     } catch (error) {
