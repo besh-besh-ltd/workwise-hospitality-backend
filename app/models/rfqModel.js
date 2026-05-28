@@ -2712,7 +2712,34 @@ LIMIT 1;`;
             LIMIT 1
           ),
           'No vendor finalized yet'
-        ) AS finalization_status
+        ) AS finalization_status,
+        -- finalized_vendor: additive buyer-facing object naming the WINNING vendor
+        -- for this product/variant (display name + id + finalized ₹ amount), or
+        -- NULL when no finalization exists. Does NOT replace finalization_status
+        -- (a vendor-perspective string other code depends on). Name source mirrors
+        -- the canonical all_vendors pattern: COALESCE(company.company_name,
+        -- user.organization_name, user.name).
+        (
+          SELECT json_build_object(
+            'vendor_id', TQF_FV.vendor_id,
+            'vendor_name', COALESCE(TCC_FV.company_name, TU_FV.organization_name, TU_FV.name),
+            'finalized_amount', (
+              SELECT TQI_FV.total_price
+              FROM tbl_quote_items TQI_FV
+              WHERE TQI_FV.quote_id = TQF_FV.quote_id
+                AND TQI_FV.product_variant_id = RFQ_P.product_variant_id
+                AND TQI_FV.variant = RFQ_P.variant
+              LIMIT 1
+            )
+          )
+          FROM tbl_quote_finalization TQF_FV
+          JOIN tbl_users TU_FV ON TU_FV.id = TQF_FV.vendor_id
+          LEFT JOIN tbl_company TCC_FV ON TCC_FV.id = TU_FV.company_id
+          WHERE TQF_FV.rfq_id = RFQ_P.rfq_id
+            AND TQF_FV.product_variant_id = RFQ_P.product_variant_id
+            AND TQF_FV.variant = RFQ_P.variant
+          LIMIT 1
+        ) AS finalized_vendor
         ${
           // Changes by Agnij 2025-05-05 [Modified to include user_type 2, 3, 8, 9, 10]
           user_type == 2 ||
