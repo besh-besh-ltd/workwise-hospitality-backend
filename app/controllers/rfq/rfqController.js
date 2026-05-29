@@ -63,6 +63,8 @@ import {
 } from '../../helper/quoteVisibility.js';
 import pricingEngine from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
+import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
+import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -8463,6 +8465,45 @@ const rfqController = {
     }
   },
 
+  // GET /rfq/quote-comparison-view/:id
+  // Single, flat, frontend-friendly "QC contract" for the buyer Quote
+  // Comparison UI. Reuses the existing comparison pipeline
+  // (rfqModel.getQuotesByRfqById2 + quoteCompareService.enrichQuoteCompareData)
+  // and reshapes it, layering on per-product state / finalized vendor /
+  // reject_info, vendor tech status, categories and the quote approval chain.
+  // Scope is derived from req.user + headers ONLY; out-of-scope/not-found -> 404.
+  // Query param freight=1 (default) returns landed totals incl. freight;
+  // freight=0 recomputes base totals (no_freight passthrough).
+  getQuoteComparisonView: async (req, res, next) => {
+    try {
+      const scope = deriveQcScope(req);
+      // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
+      const freightParam = req.query.freight;
+      const noFreight =
+        freightParam === '0' || freightParam === 0 || freightParam === 'false' ? '1' : undefined;
+
+      const view = await quoteCompareViewModel.getQuoteComparisonView(
+        req.params.id,
+        scope,
+        { noFreight }
+      );
+
+      if (!view) {
+        return res
+          .status(404)
+          .json({ status: 2, message: 'Quote comparison not found.' })
+          .end();
+      }
+      return res.status(200).json(view).end();
+    } catch (error) {
+      logError('getQuoteComparisonView failed', error);
+      return res
+        .status(500)
+        .json({ status: 0, message: error.message || Config.errorText.value })
+        .end();
+    }
+  },
+
   downloadQuoteResults: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
@@ -14892,7 +14933,8 @@ getClauses: async (req, res) => {
         sort = 'DESC',
         is_tender,
         module_keys,
-        hotel_id
+        hotel_id,
+        search
       } = req.query;
 
       // Convert string query parameters to proper types
@@ -14906,6 +14948,9 @@ getClauses: async (req, res) => {
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
       rfq_id = rfq_id ? parseInt(rfq_id) : null;
       hotel_id = hotel_id ? parseInt(hotel_id) : null;
+      // Free-text search (case-insensitive) over rfq_no / title / project name.
+      // Trimmed to null when blank so it's a no-op for existing callers.
+      search = typeof search === 'string' && search.trim() !== '' ? search.trim() : null;
       is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
 
       // Parse module_keys into array of uppercase entity types
@@ -14936,7 +14981,8 @@ getClauses: async (req, res) => {
         is_tender,
         rfq_id,
         hotel_id,
-        quote_compare
+        quote_compare,
+        search
       );
 
       // Enrich each RFQ with approval_required flag

@@ -12984,7 +12984,8 @@ ORDER BY tq.timestamp DESC;
     is_tender,
     rfq_id,
     hotel_id = null,
-    quote_compare = false
+    quote_compare = false,
+    search = null
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -13642,12 +13643,21 @@ ORDER BY tq.timestamp DESC;
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       AND (RFQ.id = $5 OR $5 IS NULL)
       AND (RFQ.hotel_id = $6 OR $6 IS NULL)
+      -- Free-text search: case-insensitive match on rfq_no / title / project
+      -- name. Parameterized ($7) so it's injection-safe; no-op when null. Does
+      -- NOT relax the tenant/ownership WHERE clause above.
+      AND (
+        $7::text IS NULL
+        OR RFQ.rfq_no::text ILIKE '%' || $7 || '%'
+        OR RFQ.title ILIKE '%' || $7 || '%'
+        OR P.name ILIKE '%' || $7 || '%'
+      )
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id, search])
         .then(function (data) {
           resolve(data);
         })

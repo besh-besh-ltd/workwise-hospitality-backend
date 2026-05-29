@@ -1290,3 +1290,120 @@ describe("Two-product PO merge — TCS applied once on combined subtotal", () =>
     // inserted.poIds and tbl_purchase_order_product via inserted.poLineIds.
   });
 });
+
+// ===========================================================================
+// One PO per (RFQ, vendor): draftPurchaseOrder auto-merges same-vendor products
+// into a single PO when no existing_po_id is pinned; different vendors get
+// separate POs.
+// ===========================================================================
+describe("draftPurchaseOrder — one PO per (RFQ, vendor) auto-merge", () => {
+  const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+
+  async function seedRfqProduct(rfqId, variantId, vendorId, { unitPrice = 100, qty = "10" } = {}) {
+    const prod = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
+      [rfqId, variantId]
+    );
+    inserted.rfqProductIds.push(prod.id);
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp", global_charges)
+       VALUES ((SELECT id FROM tbl_rfq WHERE id=$1), (SELECT rfq_no FROM tbl_rfq WHERE id=$1), $2, $2, 1, NOW(), '[]'::jsonb)
+       RETURNING id`,
+      [rfqId, vendorId]
+    );
+    inserted.quoteIds.push(quote.id);
+    const qi = await db.one(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price,
+          tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, (SELECT rfq_no FROM tbl_rfq WHERE id=$1), $2, $3, $4, 0, 0, 18, 0, 0, 'x', '15', $5, 'percentage', '[]'::jsonb)
+       RETURNING id`,
+      [rfqId, quote.id, variantId, unitPrice, qty]
+    );
+    return { rfqProductId: prod.id, quoteItemId: qi.id, vendorId, qty, unitPrice };
+  }
+
+  async function draftFor(rfqId, p, t) {
+    const { buildAuthoritativePOPayload, draftPO } = await import(
+      "../../app/controllers/po/purchaseOrderController.js"
+    );
+    const auth = await buildAuthoritativePOPayload(
+      {
+        rfq_id: rfqId, project_id: null, total_value: 0,
+        quote_id: p.quoteItemId, quote_item_id: p.quoteItemId,
+        product_info: {
+          rfq_product_id: p.rfqProductId, quantity: String(p.qty), unit: "nos",
+          unit_price: p.unitPrice, finalized_vendor_id: p.vendorId,
+        },
+      },
+      t
+    );
+    const r = await draftPO(auth, { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A }, t);
+    return r.po_id;
+  }
+
+  async function makeRfqRow(title) {
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, process_id, is_tender, title)
+       VALUES ($1, '', '', 'b@a', 'A1', '+91', $2, 'Mumbai', 1, 1, $3, $3, NOW(), $4, $5, $6, 0, $7)
+       RETURNING id`,
+      [nextRfqNo(), oneDayAgo, IDS.users.a1_proc_buyer, IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1, title]
+    );
+    inserted.rfqIds.push(rfq.id);
+    return rfq.id;
+  }
+
+  it("two products for the SAME vendor land in ONE PO (no existing_po_id passed)", async () => {
+    const rfqId = await makeRfqRow("same-vendor one-PO");
+    const p1 = await seedRfqProduct(rfqId, 1, IDS.users.vendor_alpha);
+    const p2 = await seedRfqProduct(rfqId, 2, IDS.users.vendor_alpha);
+
+    const po1 = await db.tx((t) => draftFor(rfqId, p1, t));
+    inserted.poIds.push(po1);
+    const po2 = await db.tx((t) => draftFor(rfqId, p2, t));
+    if (po2 && po2 !== po1) inserted.poIds.push(po2);
+
+    // Same PO reused for both products.
+    expect(po2).toBe(po1);
+    const pos = await db.any(
+      `SELECT id FROM tbl_rfq_purchase_order
+        WHERE rfq_id = $1 AND finalized_vendor_id = $2 AND status <> 'cancelled'`,
+      [rfqId, IDS.users.vendor_alpha]
+    );
+    expect(pos.length).toBe(1);
+    const lines = await db.any(
+      `SELECT id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`,
+      [po1]
+    );
+    inserted.poLineIds.push(...lines.map((l) => l.id));
+    expect(lines.length).toBe(2);
+  });
+
+  it("two products for DIFFERENT vendors create TWO separate POs", async () => {
+    const rfqId = await makeRfqRow("multi-vendor split");
+    const pa = await seedRfqProduct(rfqId, 1, IDS.users.vendor_alpha);
+    const pb = await seedRfqProduct(rfqId, 2, IDS.users.vendor_beta);
+
+    const poA = await db.tx((t) => draftFor(rfqId, pa, t));
+    inserted.poIds.push(poA);
+    const poB = await db.tx((t) => draftFor(rfqId, pb, t));
+    inserted.poIds.push(poB);
+
+    expect(poB).not.toBe(poA);
+    const pos = await db.any(
+      `SELECT DISTINCT id FROM tbl_rfq_purchase_order
+        WHERE rfq_id = $1 AND status <> 'cancelled'`,
+      [rfqId]
+    );
+    expect(pos.length).toBe(2);
+    for (const po of [poA, poB]) {
+      const lines = await db.any(`SELECT id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po]);
+      inserted.poLineIds.push(...lines.map((l) => l.id));
+    }
+  });
+});

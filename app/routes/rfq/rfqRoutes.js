@@ -7,7 +7,7 @@ import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
 import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
-import { acl, verifyAIWebhookBody } from '../../helper/common.js';
+import { acl, noAcl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { can } from '../../middleware/auth.js';
@@ -258,6 +258,14 @@ RfqRoutes.get(
   validateDbBody.user_id_profileexists,
   acl([2, 8, 10]),
   rfqController.getQuoteComparison
+);
+// Buyer Quote Comparison UI: single flat "QC contract" reshape of the
+// comparison data (see quoteCompareViewModel). Read-only, buyer-facing.
+RfqRoutes.get(
+  '/quote-comparison-view/:id',
+  passportSignIn,
+  noAcl([3]),
+  rfqController.getQuoteComparisonView
 );
 RfqRoutes.get(
   '/download-quote-results/:id',

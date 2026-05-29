@@ -192,6 +192,23 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         );
       }
 
+      // Standard: ONE Purchase Order per (RFQ, vendor). When the caller didn't
+      // pin a specific PO, reuse this vendor's existing OPEN PO for this RFQ
+      // (draft or pending-approval) and append the line to it — instead of
+      // spawning a separate PO per finalized product. Different vendors still
+      // get separate POs. Cancelled/sent/etc. POs are excluded so re-drafting
+      // after a cancel correctly starts a fresh PO.
+      if (!existing_po_id && finalized_vendor_id) {
+        const vendorPo = await t.oneOrNone(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1 AND finalized_vendor_id = $2
+              AND status = ANY($3::po_status[])
+            ORDER BY id DESC LIMIT 1`,
+          [rfq_id, finalized_vendor_id, [PO_STATUSES.DRAFT, PO_STATUSES.PENDING_APPROVAL]]
+        );
+        if (vendorPo) existing_po_id = vendorPo.id;
+      }
+
       let po = null;
 
       if(existing_po_id) {
