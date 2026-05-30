@@ -1838,9 +1838,7 @@ get_company_users: async (req, res, next) => {
           .status(200)
           .json({
             status: true,
-            otp: otpseq,
-            user_id: user_detail.id,
-            message: 'Forgot password OTP success'
+            message: 'OTP is sent to your Email Id'
           })
           .end();
       } else {
@@ -1848,7 +1846,7 @@ get_company_users: async (req, res, next) => {
           .status(400)
           .json({
             status: 3,
-            message: Config.errorText.value
+            message: 'Please enter a valid email id or employee code'
           })
           .end();
       }
@@ -1858,7 +1856,7 @@ get_company_users: async (req, res, next) => {
         .status(400)
         .json({
           status: false,
-          message: Config.errorText.value
+          message: 'Please enter a valid email id or employee code'
         })
         .end();
     }
