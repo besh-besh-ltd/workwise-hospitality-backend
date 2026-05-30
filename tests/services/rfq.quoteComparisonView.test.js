@@ -100,6 +100,11 @@ afterEach(async () => {
     await db.none(`DELETE FROM tbl_quote_finalization WHERE id = ANY($1::int[])`, [inserted.finalizationIds]);
   }
   if (inserted.quoteIds.length) {
+    await db.none(
+      `DELETE FROM tbl_quote_item_history
+        WHERE quote_item_id IN (SELECT id FROM tbl_quote_items WHERE quote_id = ANY($1::int[]))`,
+      [inserted.quoteIds]
+    );
     await db.none(`DELETE FROM tbl_quote_items WHERE quote_id = ANY($1::int[])`, [inserted.quoteIds]);
     await db.none(`DELETE FROM tbl_quotes WHERE id = ANY($1::int[])`, [inserted.quoteIds]);
   }
@@ -196,6 +201,26 @@ async function plantQuote(
 const FREIGHT_CHARGE = [
   { name: "Freight", slug: "freight", amount: 10, amount_mode: "percentage", tax: 0, tax_mode: "percentage", comment: "" },
 ];
+
+// Seed prior negotiation rounds (tbl_quote_item_history) for a planted quote.
+// rows: [{ unit_price, total_price, comment, timestamp }]. The model returns
+// these newest-first; the view model reverses them oldest-first for history.
+async function seedQuoteHistory(quote_id, productVariantId, rows) {
+  const qi = await db.oneOrNone(
+    `SELECT id, rfq_id, variant FROM tbl_quote_items
+      WHERE quote_id = $1 AND product_variant_id = $2 LIMIT 1`,
+    [quote_id, productVariantId]
+  );
+  if (!qi) return;
+  for (const r of rows) {
+    await db.none(
+      `INSERT INTO tbl_quote_item_history
+         (quote_item_id, rfq_id, product_variant_id, unit_price, total_price, comment, variant, "timestamp")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [qi.id, qi.rfq_id, productVariantId, r.unit_price, r.total_price, r.comment, qi.variant, r.timestamp]
+    );
+  }
+}
 
 // Mark a product finalized to `vendorId` (keyed by rfq_id, product_variant_id,
 // variant per the model's fetchFinalizations).
@@ -392,6 +417,30 @@ describe("GET /rfq/quote-comparison-view/:id — contract shape", () => {
     expect(Array.isArray(cell.other_charges)).toBe(true);
     expect(Array.isArray(cell.global_charges)).toBe(true);
 
+    // CONSOLIDATION: the cell carries everything the FE needs to finalize +
+    // show history (so it no longer hits the legacy quote-compare endpoint).
+    expect(cell.finalize).toBeDefined();
+    for (const k of ["quote_id", "quote_item_id", "vendor_id", "unit_price", "total_value", "charges_meta"]) {
+      expect(cell.finalize).toHaveProperty(k);
+    }
+    expect(typeof cell.finalize.quote_id).toBe("number");
+    expect(typeof cell.finalize.quote_item_id).toBe("number");
+    expect(cell.finalize.vendor_id).toBe(IDS.users.vendor_alpha);
+    expect(cell.finalize.charges_meta).toHaveProperty("other_charges");
+    expect(Array.isArray(cell.history)).toBe(true);
+    // Single submission => one history row, flagged final.
+    expect(cell.history.length).toBe(1);
+    expect(cell.history[0].final).toBe(true);
+
+    // Product identity for the finalize payload.
+    expect(typeof product.product_variant_id).toBe("number");
+    expect(typeof product.variant).toBe("number");
+
+    // RFQ block carries the finalize-level identifiers.
+    expect(typeof body.rfq.id).toBe("number");
+    expect(typeof body.rfq.rfq_no).toBe("number");
+    expect(body.rfq).toHaveProperty("project_id");
+
     // product.tech block: configured flag + scores object (empty when no tech eval).
     expect(product.tech).toBeDefined();
     expect(typeof product.tech.configured).toBe("boolean");
@@ -523,6 +572,71 @@ describe("GET /rfq/quote-comparison-view/:id — pre-deadline lock", () => {
 });
 
 // ===========================================================================
+// 1d) Consolidation — per-cell round history (replaces the legacy 2nd call).
+// ===========================================================================
+describe("GET /rfq/quote-comparison-view/:id — per-cell round history", () => {
+  it("ships previous_quotes oldest→newest + current with round numbers and deltas", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const quoteId = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+    // Two prior rounds (R1 older, R2 newer); the model returns them newest-first.
+    await seedQuoteHistory(quoteId, product_variant_id, [
+      { unit_price: 600, total_price: 6000, comment: "Round 1", timestamp: tsString(-3 * 86400_000) },
+      { unit_price: 550, total_price: 5500, comment: "Round 2", timestamp: tsString(-2 * 86400_000) },
+    ]);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    const cell = res.body.products[0].quotes[String(IDS.users.vendor_alpha)];
+    const h = cell.history;
+    expect(h.length).toBe(3); // 2 prior rounds + current submission
+    expect(h.map((r) => r.round)).toEqual([1, 2, 3]); // oldest → newest
+    expect(h[0].price).toBe(600);
+    expect(h[1].price).toBe(550);
+    expect(h[2].price).toBe(500);
+    expect(h[2].final).toBe(true);
+    expect(h[0].delta).toBeNull(); // first round has no prior
+    expect(h[1].delta).toBe(50); // 600 → 550 (positive = price dropped)
+    expect(h[2].delta).toBe(50); // 550 → 500
+
+    // Each non-first round lists WHAT changed (not just the base price).
+    expect(Array.isArray(h[0].changes)).toBe(true);
+    expect(h[0].changes.length).toBe(0); // first round: nothing to diff
+    const up = h[1].changes.find((c) => c.label === "Unit price");
+    expect(up).toBeDefined();
+    expect(up.from).toBe(600);
+    expect(up.to).toBe(550);
+    expect(up.dir).toBe("down"); // price decreased
+  });
+
+  it("flags a price INCREASE round-over-round with dir 'up'", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    // Current submission is 500; the only prior round was cheaper (450) → it rose.
+    const quoteId = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+    await seedQuoteHistory(quoteId, product_variant_id, [
+      { unit_price: 450, total_price: 4500, comment: "Round 1", timestamp: tsString(-2 * 86400_000) },
+    ]);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const h = res.body.products[0].quotes[String(IDS.users.vendor_alpha)].history;
+    expect(h.length).toBe(2);
+    expect(h[1].delta).toBe(-50); // 450 → 500, negative = price increased
+    const up = h[1].changes.find((c) => c.label === "Unit price");
+    expect(up.dir).toBe("up");
+    expect(up.from).toBe(450);
+    expect(up.to).toBe(500);
+  });
+});
+
+// ===========================================================================
 // 2) Cells — quoted vendor -> non-null numeric cell; un-quoted vendor -> null.
 // ===========================================================================
 describe("GET /rfq/quote-comparison-view/:id — per-cell quotes map", () => {
@@ -627,6 +741,26 @@ describe("GET /rfq/quote-comparison-view/:id — state 'pending'", () => {
     expect(res.body.approval_chain.length).toBeGreaterThanOrEqual(1);
     expect(res.body.approval_chain[0]).toHaveProperty("num");
     expect(res.body.approval_chain[0]).toHaveProperty("you");
+
+    // Per-product approval drawer payload: current approvers + audit trail.
+    expect(product.approval).toBeDefined();
+    expect(Array.isArray(product.approval.current_approvers)).toBe(true);
+    expect(product.approval.current_approvers.length).toBe(1);
+    expect(product.approval.current_approvers[0]).toHaveProperty("name");
+    expect(product.approval.current_approvers[0]).toHaveProperty("initials");
+    // Trail: leading "Sent for approval" (done) + the current pending L1 step.
+    const trail = product.approval.trail;
+    expect(Array.isArray(trail)).toBe(true);
+    expect(trail[0].title).toBe("Sent for approval");
+    expect(trail[0].status).toBe("done");
+    const l1 = trail.find((n) => n.title === "L1 approval");
+    expect(l1).toBeDefined();
+    expect(l1.status).toBe("current");
+    // Terminal node makes the chain end explicit while still pending.
+    const last = trail[trail.length - 1];
+    expect(last.kind).toBe("terminal");
+    expect(last.status).toBe("pending");
+    expect(last.title).toBe("Forwarded to the next stage");
   });
 });
 
@@ -657,6 +791,14 @@ describe("GET /rfq/quote-comparison-view/:id — state 'rejected' / 'approved'",
     expect(product.reject_info).not.toBeNull();
     expect(product.reject_info.by).toBe(approverName);
     expect(product.reject_info.reason).toBe("price exceeds target");
+
+    // The approval trail surfaces the rejected node with the actor + reason.
+    const rej = product.approval.trail.find((n) => n.status === "rejected");
+    expect(rej).toBeDefined();
+    expect(rej.by).toBe(approverName);
+    expect(rej.reason).toBe("price exceeds target");
+    // No "forwarded / complete" terminal node on a rejection.
+    expect(product.approval.trail.some((n) => n.kind === "terminal")).toBe(false);
   });
 
   it("finalized product + APPROVED approval -> 'approved' with reject_info null", async () => {
@@ -676,6 +818,11 @@ describe("GET /rfq/quote-comparison-view/:id — state 'rejected' / 'approved'",
     expect(product.state).toBe("approved");
     expect(product.finalized_vendor).toBe(IDS.users.vendor_alpha);
     expect(product.reject_info).toBeNull();
+    // Terminal "Approval complete → forwarded" node once fully approved.
+    const last = product.approval.trail[product.approval.trail.length - 1];
+    expect(last.kind).toBe("terminal");
+    expect(last.status).toBe("done");
+    expect(last.title).toBe("Approval complete");
   });
 });
 

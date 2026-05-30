@@ -33,6 +33,7 @@ import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
 import rfqModel from "./rfqModel.js";
 import { enrichQuoteCompareData } from "../services/quoteCompareService.js";
+import { buildQuoteVisibilityMeta } from "../helper/quoteVisibility.js";
 
 const toNum = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -67,6 +68,117 @@ const getDetail = (quote) => {
 // whenever those values sit on the parent quote — which is exactly the real-data
 // bug. Merge first, then read.
 const mergedRow = (quote, detail) => ({ ...(quote || {}), ...(detail || {}) });
+
+// Normalise a raw quote row (previous_quote or current merged) to the fields we
+// diff across rounds. other_charges is jsonb (pg returns it parsed).
+function normHistoryRow(row) {
+  let oc = row?.other_charges;
+  if (typeof oc === "string") {
+    try { oc = JSON.parse(oc); } catch { oc = []; }
+  }
+  return {
+    unit_price: toNum(row?.unit_price),
+    total_price: toNum(row?.total_price),
+    tax: toNum(row?.tax),
+    tax_mode: row?.tax_mode || null,
+    delivery_period: row?.delivery_period != null ? String(row.delivery_period) : null,
+    quantity: toNum(row?.quantity),
+    other_charges: Array.isArray(oc) ? oc : [],
+    comment: row?.comment || null,
+    timestamp: row?.timestamp || null,
+  };
+}
+
+// label -> amount map for a row's other_charges (label | name | slug).
+function chargeMap(arr) {
+  const m = {};
+  (arr || []).forEach((c) => {
+    const label = c?.label || c?.name || c?.slug;
+    if (label) m[label] = toNum(c?.amount ?? c?.value);
+  });
+  return m;
+}
+
+// What changed from round `a` to round `b` — every editable field, not just the
+// base price. dir 'up' = increased (bad, red), 'down' = decreased (good, green).
+function diffHistoryRows(a, b) {
+  const ch = [];
+  const pushNum = (label, from, to, kind = "money") => {
+    if (from == null && to == null) return;
+    if (from !== to) ch.push({ label, from, to, dir: (to ?? 0) > (from ?? 0) ? "up" : "down", kind });
+  };
+  pushNum("Unit price", a.unit_price, b.unit_price, "money");
+  pushNum("Line total", a.total_price, b.total_price, "money");
+  if (a.tax !== b.tax && (a.tax != null || b.tax != null)) {
+    ch.push({
+      label: "Tax",
+      from: a.tax,
+      to: b.tax,
+      dir: (b.tax ?? 0) > (a.tax ?? 0) ? "up" : "down",
+      kind: (b.tax_mode || a.tax_mode) === "percentage" ? "pct" : "money",
+    });
+  }
+  if ((a.delivery_period || "") !== (b.delivery_period || "")) {
+    ch.push({ label: "Delivery", from: a.delivery_period, to: b.delivery_period, kind: "text" });
+  }
+  pushNum("Quantity", a.quantity, b.quantity, "num");
+  const am = chargeMap(a.other_charges);
+  const bm = chargeMap(b.other_charges);
+  for (const label of new Set([...Object.keys(am), ...Object.keys(bm)])) {
+    const from = am[label];
+    const to = bm[label];
+    if (from === to) continue;
+    ch.push({
+      label,
+      from: from ?? null,
+      to: to ?? null,
+      dir: (to ?? 0) > (from ?? 0) ? "up" : "down",
+      kind: "money",
+      added: from == null,
+      removed: to == null,
+    });
+  }
+  return ch;
+}
+
+// Build the negotiation round history for one cell from the quotation's
+// previous_quotes (newest-first from the model) + the current submission.
+// Oldest→newest with a SIGNED price delta (+ = cheaper/savings, − = pricier) and
+// a per-round `changes` breakdown (every edited field, with up/down direction).
+function buildCellHistory(quote, merged) {
+  const prev = Array.isArray(quote?.previous_quotes) ? [...quote.previous_quotes] : [];
+  prev.reverse(); // previous_quotes is ORDER BY timestamp DESC -> oldest-first
+  const norms = prev.map(normHistoryRow);
+  const cur = normHistoryRow(merged);
+  if (cur.timestamp == null) cur.timestamp = quote?.timestamp || null;
+  norms.push(cur);
+
+  return norms.map((n, i) => {
+    const prior = i > 0 ? norms[i - 1] : null;
+    // signed: prior - current. positive => price dropped (savings), negative => rose.
+    const delta =
+      prior && n.unit_price != null && prior.unit_price != null ? prior.unit_price - n.unit_price : null;
+    const final = i === norms.length - 1;
+    return {
+      round: i + 1,
+      price: n.unit_price ?? n.total_price,
+      total_price: n.total_price,
+      date: iso(n.timestamp),
+      note: n.comment || (final ? "Best & final" : "Revised submission"),
+      delta,
+      final,
+      breakdown: {
+        unit_price: n.unit_price,
+        total_price: n.total_price,
+        tax: n.tax,
+        tax_mode: n.tax_mode,
+        delivery_period: n.delivery_period,
+        quantity: n.quantity,
+      },
+      changes: prior ? diffHistoryRows(prior, n) : [],
+    };
+  });
+}
 
 // Extract the engine charge subtotal for a given canonical slug from a detail's
 // engine breakdown (engine.charges[] carries { slug, name, subtotal }).
@@ -173,7 +285,7 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
     `SELECT r.id, r.rfq_no, r.title, r.status, r.company_name, r.response_email,
             r.contact_name, r.contact_number, r.location, r.bid_end_date,
             r.reverse_auction, r.hospitality_company_id, r.hotel_id, r.department_id,
-            r.created_by,
+            r.created_by, r.project_id,
             hc.name AS company_label, hh.name AS hotel_label, dep.title AS department_label
        FROM tbl_rfq r
        LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
@@ -231,6 +343,14 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   const awaitingInstanceIds = scope && scope.userId
     ? await fetchAwaitingInstanceIds(pendingInstanceIds, scope.userId)
     : new Set();
+
+  // Full approval trail + current approvers per instance (for the QC approval
+  // drawer + the "Awaiting approval from …" badge).
+  const allQuoteInstanceIds = [];
+  for (const v of approvalByRfqProduct.values()) {
+    if (v && v.instance_id) allQuoteInstanceIds.push(v.instance_id);
+  }
+  const approvalDataByInstance = await buildQuoteApprovalData(allQuoteInstanceIds);
 
   // ---- 4) Assemble vendors[] (union of all vendors that quoted any product). ----
   const vendorMap = new Map();
@@ -373,6 +493,28 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
         // Per-vendor quote-level global_charges (same across that vendor's
         // products); carried on each cell so the breakdown can render them.
         global_charges: parseGlobalCharges(q),
+        // Everything the FE needs to FINALIZE this cell, so it no longer has to
+        // make a second (legacy) round-trip. Mirrors the old buildFinalizePayload
+        // sources exactly (raw quote line, not the engine-landed values).
+        finalize: {
+          quote_id: toNum(merged.quote_id ?? q.quote_id),
+          quote_item_id: toNum(merged.quote_item_id ?? q.quote_item_id),
+          vendor_id: toNum(detail.created_by ?? merged.created_by ?? vId),
+          unit_price: toNum(merged.unit_price),
+          total_value: toNum(merged.total_price ?? q.total_price),
+          charges_meta: {
+            freight_price: merged.freight_price ?? null,
+            freight_mode: merged.freight_mode ?? null,
+            package_price: merged.package_price ?? null,
+            package_mode: merged.package_mode ?? null,
+            tax: merged.tax ?? null,
+            tax_mode: merged.tax_mode ?? null,
+            other_charges: merged.other_charges || detail.other_charges || [],
+          },
+        },
+        // Negotiation round history (previous_quotes + current submission),
+        // oldest→newest with per-round savings delta — powers the history modal.
+        history: buildCellHistory(q, merged),
       };
     }
     // Every vendor in vendors[] gets an explicit null when they didn't quote.
@@ -426,6 +568,13 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       awaitingInstanceIds.has(Number(appr.instance_id))
     );
 
+    // Approval drawer payload: current approvers (badge/tooltip) + full trail.
+    const approval =
+      (appr && appr.instance_id && approvalDataByInstance.get(appr.instance_id)) || {
+        current_approvers: [],
+        trail: [],
+      };
+
     // Category.
     let category;
     if (useSyntheticCategory) category = SYNTHETIC_CATEGORY.id;
@@ -445,6 +594,9 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
 
     return {
       id: rfqProductId,
+      // Identity needed to build the finalize payload (no legacy call).
+      product_variant_id: toNum(p.product_variant_id),
+      variant: toNum(p.variant) ?? 0,
       name,
       category,
       qty: num0(qtySpec ? qtySpec.value : qtyFromQuote),
@@ -461,6 +613,7 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       finalized_vendor,
       reject_info,
       awaiting_me,
+      approval,
       quotes: quotesByVendor,
     };
   });
@@ -472,6 +625,9 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   const rounds = await countRounds(id);
 
   const rfqBlock = {
+    id: rfq.id,
+    rfq_no: rfq.rfq_no,
+    project_id: rfq.project_id ?? null,
     number: String(rfq.rfq_no),
     title: rfq.title || null,
     status: mapRfqStatus(rfq.status),
@@ -494,8 +650,9 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   // we still reveal HOW MANY vendors quoted each product (quoted_count) and keep
   // the column/row structure, but never leak any number or vendor identity. The
   // FE blurs the placeholders and shows a "locked until deadline" banner.
-  const bidEnd = rfq.bid_end_date ? new Date(rfq.bid_end_date) : null;
-  const quotesLocked = !!(bidEnd && !Number.isNaN(bidEnd.getTime()) && bidEnd.getTime() > Date.now());
+  // Use the SHARED visibility rule (IST, inclusive boundary) so the lock matches
+  // the legacy quote-compare page exactly.
+  const quotesLocked = buildQuoteVisibilityMeta(rfq).locked;
 
   for (const p of contractProducts) {
     const n = Object.values(p.quotes).filter((c) => c != null).length;
@@ -511,6 +668,7 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       p.state = "open";
       p.target = null;
       p.tech = { configured: !!p.tech?.configured, scores: {} };
+      p.approval = { current_approvers: [], trail: [] };
     }
   }
   if (quotesLocked) {
@@ -665,6 +823,178 @@ async function fetchQuoteApprovals(rfqProductIds) {
     logError("quoteCompareView fetchQuoteApprovals failed", e);
   }
   return map;
+}
+
+// Batched per-instance approval data for the QC approval drawer. Returns
+// Map(instanceId -> { current_approvers:[{name,initials,role}], trail:[node] }).
+// Each trail node mirrors poDashboardModel.buildAuditTrail:
+//   { key, status:'done'|'rejected'|'current'|'pending', title, by, initials,
+//     role, when, reason, approvers:[{name,initials,role,status}] }
+// A leading "Sent for approval" node uses the instance initiator + created_at.
+async function buildQuoteApprovalData(instanceIds) {
+  const out = new Map();
+  const ids = (instanceIds || []).map(Number).filter((x) => Number.isInteger(x) && x > 0);
+  if (!ids.length) return out;
+  try {
+    const instances = await db.any(
+      `SELECT ai.id, ai.status, ai.current_step, ai.created_at, ai.initiated_by,
+              u.name AS initiator_name
+         FROM tbl_approval_instances ai
+         LEFT JOIN tbl_users u ON u.id = ai.initiated_by
+        WHERE ai.id = ANY($1::int[])`,
+      [ids]
+    );
+    const steps = await db.any(
+      `SELECT st.approval_instance_id, st.id, st.step_order, st.status, st.completed_at,
+              COALESCE(
+                JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'user_id', sa.approver_user_id, 'name', u.name,
+                    'status', sa.status, 'acted_at', sa.acted_at,
+                    'role', (SELECT rl.title FROM tbl_user_role_scopes urs
+                               JOIN tbl_roles rl ON rl.id = urs.role_id
+                              WHERE urs.user_id = sa.approver_user_id
+                              ORDER BY urs.id ASC LIMIT 1)
+                  ) ORDER BY sa.id
+                ) FILTER (WHERE sa.id IS NOT NULL),
+                '[]'
+              ) AS approvers
+         FROM tbl_approval_instance_steps st
+         LEFT JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = st.id
+         LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
+        WHERE st.approval_instance_id = ANY($1::int[])
+        GROUP BY st.id
+        ORDER BY st.approval_instance_id, st.step_order ASC`,
+      [ids]
+    );
+    const actions = await db.any(
+      `SELECT a.approval_instance_id, a.action, a.comment, a.created_at, a.approver_user_id
+         FROM tbl_approval_actions a
+        WHERE a.approval_instance_id = ANY($1::int[]) AND a.action IN ('APPROVE', 'REJECT')
+        ORDER BY a.created_at ASC`,
+      [ids]
+    );
+
+    const instById = new Map(instances.map((i) => [i.id, i]));
+    const stepsByInst = new Map();
+    for (const s of steps) {
+      if (!stepsByInst.has(s.approval_instance_id)) stepsByInst.set(s.approval_instance_id, []);
+      stepsByInst.get(s.approval_instance_id).push(s);
+    }
+    const rejectByUserByInst = new Map();
+    const firstRejectByInst = new Map();
+    for (const a of actions) {
+      if (a.action !== "REJECT") continue;
+      if (!firstRejectByInst.has(a.approval_instance_id) && a.comment) {
+        firstRejectByInst.set(a.approval_instance_id, a.comment);
+      }
+      if (a.approver_user_id != null && a.comment) {
+        if (!rejectByUserByInst.has(a.approval_instance_id)) rejectByUserByInst.set(a.approval_instance_id, new Map());
+        rejectByUserByInst.get(a.approval_instance_id).set(a.approver_user_id, a.comment);
+      }
+    }
+
+    const personOf = (a) => ({ name: a?.name || null, initials: initialsOf(a?.name), role: a?.role || null });
+
+    for (const instId of ids) {
+      const inst = instById.get(instId);
+      if (!inst) continue;
+      const istatus = (inst.status || "").toUpperCase();
+      const trail = [
+        {
+          key: "sent",
+          status: "done",
+          title: "Sent for approval",
+          by: inst.initiator_name || null,
+          initials: initialsOf(inst.initiator_name),
+          role: null,
+          when: iso(inst.created_at),
+          reason: null,
+          approvers: [],
+        },
+      ];
+      let current_approvers = [];
+      for (const st of stepsByInst.get(instId) || []) {
+        const approvers = Array.isArray(st.approvers) ? st.approvers : [];
+        const acted = approvers.find((a) => a.acted_at);
+        const pendingApprover = approvers.find((a) => a.status === "PENDING");
+        const rejecter = approvers.find((a) => (a.status || "").toUpperCase() === "REJECTED");
+        const sStatus = (st.status || "").toUpperCase();
+
+        let nodeStatus;
+        if (sStatus === "REJECTED") nodeStatus = "rejected";
+        else if (sStatus === "APPROVED") nodeStatus = "done";
+        else if (sStatus === "PENDING" && st.step_order === inst.current_step && istatus === "PENDING")
+          nodeStatus = "current";
+        else nodeStatus = "pending";
+
+        const actor = rejecter || acted || pendingApprover || approvers[0] || null;
+        let reason = null;
+        if (nodeStatus === "rejected") {
+          const rc = rejectByUserByInst.get(instId);
+          reason =
+            (rejecter && rc && rc.get(rejecter.user_id)) ||
+            (acted && rc && rc.get(acted.user_id)) ||
+            firstRejectByInst.get(instId) ||
+            null;
+        }
+        if (nodeStatus === "current") {
+          const pend = approvers.filter((a) => (a.status || "").toUpperCase() === "PENDING");
+          current_approvers = (pend.length ? pend : approvers).map(personOf);
+        }
+
+        trail.push({
+          key: `step-${st.step_order}`,
+          status: nodeStatus,
+          title: `L${st.step_order} approval`,
+          by: actor ? actor.name : null,
+          initials: initialsOf(actor ? actor.name : null),
+          role: actor ? actor.role || null : null,
+          when: iso(st.completed_at),
+          reason,
+          approvers: approvers.map((a) => ({ ...personOf(a), status: a.status })),
+        });
+      }
+
+      // Terminal outcome node so the chain end is explicit (it's not just "the
+      // next approver" — once every step clears, the quote is forwarded onward).
+      // Skip on rejection: the rejected step already terminates the trail.
+      if (istatus === "APPROVED") {
+        trail.push({
+          key: "completed",
+          kind: "terminal",
+          status: "done",
+          title: "Approval complete",
+          note: "Forwarded to the next stage",
+          by: null,
+          initials: "",
+          role: null,
+          when: null,
+          reason: null,
+          approvers: [],
+        });
+      } else if (istatus !== "REJECTED") {
+        trail.push({
+          key: "forward",
+          kind: "terminal",
+          status: "pending",
+          title: "Forwarded to the next stage",
+          note: "Once all approvals are complete",
+          by: null,
+          initials: "",
+          role: null,
+          when: null,
+          reason: null,
+          approvers: [],
+        });
+      }
+
+      out.set(instId, { current_approvers, trail });
+    }
+  } catch (e) {
+    logError("quoteCompareView buildQuoteApprovalData failed", e);
+  }
+  return out;
 }
 
 // Set of approval_instance ids (from the given list) where `userId` is a PENDING
