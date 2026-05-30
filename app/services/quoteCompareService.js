@@ -190,21 +190,29 @@ const enrichProduct = (product, opts) => {
       .map((c) => {
         const norm = pricingEngine.normalizeGlobalCharge(c);
         if (!norm) return null;
+        const amount = pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal);
+        const additionalTax = pricingEngine.applyChargeMode(norm.additional_tax, norm.additional_tax_mode, amount);
         return {
           name: norm.name,
           slug: norm.slug,
-          amount: pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal),
+          amount,
+          additional_tax: additionalTax,
         };
       })
       .filter(Boolean);
-    const globalChargesTotal = resolvedGlobalCharges.reduce((s, c) => s + c.amount, 0);
+    const globalChargesTotal = resolvedGlobalCharges.reduce((s, c) => s + c.amount + c.additional_tax, 0);
     const grandTotal = engineQuoteTotal + globalChargesTotal;
 
     return {
       ...quote,
       quote_details: Array.isArray(quote.quote_details) ? annotatedDetails : annotatedDetails[0],
       engine_total: q2(engineQuoteTotal),
-      engine_global_charges: resolvedGlobalCharges.map((c) => ({ ...c, amount: q2(c.amount) })),
+      engine_global_charges: resolvedGlobalCharges.map((c) => ({
+        ...c,
+        amount: q2(c.amount),
+        additional_tax: q2(c.additional_tax),
+        subtotal: q2(c.amount + c.additional_tax),
+      })),
       engine_global_charges_total: q2(globalChargesTotal),
       engine_grand_total: q2(grandTotal),
       is_regret_resolved: isRegret,
