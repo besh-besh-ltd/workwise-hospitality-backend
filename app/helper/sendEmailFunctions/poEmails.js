@@ -2,6 +2,7 @@ import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
 /**
  * Send notification to all company members when PO is fully approved
@@ -144,6 +145,22 @@ export const sendPOApprovalCompletionNotification = async ({
     }
 
     logger.info(`Sent PO approval completion notifications to ${users.length} users for PO ${po_number}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'po',
+        type: 'po_approval_completed',
+        title: `PO #${po_number} approved — awaiting vendor acceptance`,
+        body: `PO sent to ${vendorName}. Vendor must accept or reject before it can proceed.`,
+        data: { po_id: poDetails?.id, rfq_id: rfqDetails?.id, vendor_id: vendorDetails?.id },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-details?id=${rfqDetails?.id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch po_approval_completed failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending PO approval completion emails:", err);

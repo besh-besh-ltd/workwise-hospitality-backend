@@ -9,6 +9,7 @@ import { logger } from '../../util/logger.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { sendVendorBulkRfqJoinNotification, sendVendorAutoAddedToRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
+import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import productModel from '../../models/productModel.js';
@@ -328,6 +329,28 @@ const _sendSubscriptionConfirmationEmail = async ({
   if (attachments.length) emailOptions.attachments = attachments;
 
   await sendMail(emailOptions);
+
+  try {
+    const titleMap = {
+      registration: 'Subscription activated — welcome',
+      renewal: 'Subscription renewed',
+      modification: 'Subscription modified',
+      modification_free: 'Subscription modified',
+    };
+    await dispatchNotification({
+      userIds: [userId],
+      category: 'subscription',
+      type: `subscription_${kind}`,
+      title: titleMap[kind] || 'Subscription updated',
+      body: totalAmount > 0
+        ? `Payment of Rs. ${Number(totalAmount).toLocaleString('en-IN')} confirmed.`
+        : 'Your subscription change is now active.',
+      data: { kind, total_amount: totalAmount, razorpay_order_id: razorpayOrderId },
+      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/subscription`
+    });
+  } catch (notifyErr) {
+    logError('dispatch subscription confirmation failed', notifyErr);
+  }
 };
 
 const HospitalityController = {
@@ -2382,6 +2405,18 @@ const HospitalityController = {
           subject: `Your Account is Active — ${hotel.name}`,
           html: htmlContent
         });
+
+        dispatchNotification({
+          userIds: [user.id],
+          category: 'account',
+          type: 'bu_account_active',
+          title: `Your account is active — ${hotel.name}`,
+          body: isDefaultPassword
+            ? 'Use the credentials emailed to you. Change your password after first login.'
+            : 'Log in with your existing password.',
+          data: { hotel_id: hotel.id, hotel_name: hotel.name },
+          actionUrl: 'https://hospitality.letsworkwise.com'
+        }).catch((err) => logError('dispatch bu_account_active failed', err));
 
         emailsSent++;
       }

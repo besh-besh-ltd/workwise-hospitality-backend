@@ -4,6 +4,7 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from "../paymentDocuments.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
 /**
  * Send tender fee payment confirmation email with invoice to vendor
@@ -181,6 +182,22 @@ export const sendTenderFeePaymentConfirmation = async ({
     await sendMail(mailOpts);
 
     logger.info(`Sent tender fee payment confirmation to ${vendorDetails.email} for RFQ ${rfqDetails?.rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([{ id: vendorDetails.id, email: vendorDetails.email }]);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'tender_fee_paid',
+        title: `Payment confirmed — Tender #${rfqDetails?.rfq_no || ''}`,
+        body: `Your tender participation fee of Rs. ${amountInRupees.toLocaleString('en-IN')} has been received. You can now submit your quote.`,
+        data: { rfq_id: rfqDetails?.id, payment_id: paymentDetails?.payment_id },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?rfq=${rfqDetails?.id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch tender_fee_paid failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending tender fee payment confirmation email:", err);

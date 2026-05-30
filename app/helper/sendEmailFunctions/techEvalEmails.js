@@ -2,6 +2,7 @@ import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
 /**
  * Send notification emails when technical evaluation completes
@@ -74,6 +75,22 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
     }
 
     logger.info(`Sent tech eval completion notifications to ${users.length} users for RFQ ${rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'tech_eval_completed',
+        title: `Technical Evaluation complete — RFQ #${rfq_no}`,
+        body: `${total_passed_verified}/${required_passed_vendors} vendors qualified. Ready for quote comparison.`,
+        data: { rfq_id, tech_eval_id: techEvalDetails?.id },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch tech_eval_completed failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending tech evaluation completion emails:", err);
@@ -139,6 +156,23 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
     }
 
     logger.info(`Sent tech acceptance notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const recipients = vendors.map((v) => ({ id: v.vendor_id, email: v.vendor_email }));
+      const userIds = await resolveRecipientUserIds(recipients);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'vendor_tech_accepted',
+        title: `Technical Evaluation passed — ${entityLabel} #${rfq_no}`,
+        body: `Your submission for ${product_name || 'the product'} has been technically accepted.`,
+        data: { rfq_id, is_tender },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfq_id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch vendor_tech_accepted failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending vendor tech acceptance emails:", err);

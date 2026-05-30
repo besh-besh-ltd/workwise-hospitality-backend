@@ -13106,20 +13106,13 @@ ORDER BY tq.timestamp DESC;
           dynamicJoins +=
             'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
         }
-        // po_completed is now always included in the main SELECT
+        // po_completed and has_pending_po_approval are now always included in the main SELECT
         dynamicSelectColumns += `,
           -- has_draft_po: any PO in draft status
           EXISTS (
             SELECT 1 FROM tbl_rfq_purchase_order po_draft
             WHERE po_draft.rfq_id = RFQ.id AND po_draft.status = 'draft'
-          ) AS has_draft_po,
-          -- has_pending_po_approval: any PO approval is PENDING
-          EXISTS (
-            SELECT 1 FROM tbl_approval_instances ai_po
-            WHERE ai_po.entity_type = 'PO'
-              AND (ai_po.metadata->>'rfq_id')::INTEGER = RFQ.id
-              AND ai_po.status = 'PENDING'
-          ) AS has_pending_po_approval`;
+          ) AS has_draft_po`;
 
         // Only show RFQs where user has awarding.read permission for the RFQ's business unit
         if (user_type != 3) {
@@ -13580,6 +13573,15 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_po_rejection,
+        -- has_pending_po_approval: any PO approval is PENDING for this RFQ
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_po_p
+            WHERE _ai_po_p.entity_type = 'PO'
+              AND (_ai_po_p.metadata->>'rfq_id')::INTEGER = RFQ.id
+              AND _ai_po_p.status = 'PENDING'
+          )
+        ) AS has_pending_po_approval,
         -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
         (
           SELECT EXISTS (
