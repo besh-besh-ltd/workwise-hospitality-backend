@@ -47,6 +47,19 @@ export const applyChargeMode = (value, mode, base) => {
   return isPercentageMode(mode) ? (toNumber(base) * v) / 100 : v;
 };
 
+// Proportional share of a document-level absolute amount for one line.
+// Quote-compare uses this to split a vendor's absolute global charge across
+// the products in that vendor's quote, so each product carries its weighted
+// share (lineSubtotal / docSubtotal) and the per-product shares sum back to
+// the original charge. Percentage charges already distribute naturally via
+// applyChargeMode and don't need this helper. docSubtotal <= 0 → 0 (no basis
+// to allocate against).
+export const proportionalShare = (absoluteAmount, lineSubtotal, docSubtotal) => {
+  const doc = toNumber(docSubtotal);
+  if (doc <= 0) return 0;
+  return toNumber(absoluteAmount) * (toNumber(lineSubtotal) / doc);
+};
+
 // Tri-state semantics for charge.tax:
 //   null / undefined / ""  → inherit base rate (when base tax_mode is %)
 //   0 (number)             → explicit no tax (never inherits)
@@ -544,6 +557,7 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
 
 export default {
   applyChargeMode,
+  proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
   applyPaymentTermNormalization,
