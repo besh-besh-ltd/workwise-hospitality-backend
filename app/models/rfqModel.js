@@ -2571,7 +2571,13 @@ WHERE NOT EXISTS (
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
     ${user_type == 3 ? `ARRAY(
-    SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    SELECT json_build_object('id', TQ.id, 'timestamp', COALESCE(
+      GREATEST(
+        TQ.timestamp,
+        (SELECT MAX(TQI_LU.updated_at) FROM tbl_quote_items TQI_LU WHERE TQI_LU.quote_id = TQ.id)
+      ),
+      TQ.timestamp
+    ), 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
     'global_comment', TQ.global_comment,
     'global_charges', TQ.global_charges,
 
@@ -15542,6 +15548,15 @@ ORDER BY tq.timestamp DESC;
          evaluation_round, approval_instance_id, calculated_score, created_by]
       );
     }
+  },
+
+  getRfqTermsForPdf: async (rfq_id) => {
+    return await db.oneOrNone(
+      `SELECT id, rfq_no, title, comment, is_tender
+       FROM tbl_rfq
+       WHERE id = $1`,
+      [rfq_id]
+    );
   },
 };
 
