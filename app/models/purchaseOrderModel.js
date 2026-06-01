@@ -889,16 +889,29 @@ export const getPODetailsById = async (po_id, user_id) => {
                           'unit', TPOP.unit,
                           'unit_price', TPOP.unit_price,
                           'charges_meta', TPOP.charges_meta,
-                          'total_price', TPOP.total_price
+                          'total_price', TPOP.total_price,
+                          'vendor_comment', TQI.comment
                       )
                   )
                   FROM tbl_purchase_order_product TPOP
                   JOIN tbl_rfq_products TRP ON TPOP.rfq_product_id = TRP.id
                   JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
+                  LEFT JOIN tbl_quote_items TQI ON TQI.id = TPOP.quote_id
                   WHERE TPOP.purchase_order_id = po.id
                 ),
                 '[]'::json
               ) AS product_details,
+              -- Vendor's overall/global comment from the finalized quote. Walks
+              -- back from any PO line → quote_item → parent quote. All lines on
+              -- a PO share the same finalized quote, so LIMIT 1 is exact.
+              (
+                SELECT TQ.global_comment
+                FROM tbl_purchase_order_product TPOP
+                JOIN tbl_quote_items TQI ON TQI.id = TPOP.quote_id
+                JOIN tbl_quotes TQ ON TQ.id = TQI.quote_id
+                WHERE TPOP.purchase_order_id = po.id
+                LIMIT 1
+              ) AS vendor_global_comment,
               COALESCE(
                 (
                   SELECT JSON_AGG(

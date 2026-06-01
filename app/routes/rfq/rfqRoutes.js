@@ -188,6 +188,8 @@ RfqRoutes.post(
 
 RfqRoutes.get('/get-terms', rfqController.getTerms);
 
+RfqRoutes.get('/terms-pdf', passportSignIn, rfqController.downloadRfqTermsPdf);
+
 RfqRoutes.post(
   '/get-vendors',
   passportSignIn,
