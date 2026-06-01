@@ -13311,13 +13311,18 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_po_rejection,
-        -- has_pending_po_approval: any PO approval is PENDING for this RFQ
+        -- has_pending_po_approval: any PO approval is PENDING for this RFQ AND its
+        -- underlying PO row is still alive (not rejected/cancelled). Without the JOIN
+        -- check, a stale PENDING instance left behind by a rejected PO would falsely
+        -- mark the RFQ as awaiting approval on the PO sidebar.
         (
           EXISTS (
             SELECT 1 FROM tbl_approval_instances _ai_po_p
+            JOIN tbl_rfq_purchase_order _po_link ON _po_link.id = _ai_po_p.entity_id
             WHERE _ai_po_p.entity_type = 'PO'
               AND (_ai_po_p.metadata->>'rfq_id')::INTEGER = RFQ.id
               AND _ai_po_p.status = 'PENDING'
+              AND _po_link.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
           )
         ) AS has_pending_po_approval,
         -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
