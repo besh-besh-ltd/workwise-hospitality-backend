@@ -1,0 +1,77 @@
+Unused files (7)
+_deprecated/userLogin30DaysInactive.js   
+app/helper/pushNotification.js           
+app/util/sum.js                          
+subscriptionNotificationandEexpireCron.js
+tests/helpers/auth.js                    
+tests/helpers/http.js                    
+tests/setup/app.js                       
+Unused dependencies (2)
+@aws-sdk/client-lambda  package.json:35:6
+morgan                  package.json:66:6
+Unused devDependencies (2)
+cross-env  package.json:88:6
+supertest  package.json:94:6
+Unlisted dependencies (29)
+form-data                app/controllers/cms/cmsController.js:20:22           
+form-data                app/controllers/products/productsController.js:21:22 
+jsonwebtoken             app/controllers/products/productsController.js:27:17 
+form-data                app/controllers/users/usersController.js:23:22       
+jsonwebtoken             app/controllers/users/usersController.js:30:17       
+jsonwebtoken             app/helper/handleAuth.js:1:17                        
+jsonwebtoken             app/helper/jwtHelper.js:1:17                         
+form-data                app/helper/processBOQWithAI.js:10:22                 
+jsonwebtoken             app/middleware/auth.js:9:17                          
+@opentelemetry/api-logs  app/util/logger.js:4:38                              
+@jest/globals            tests/services/approvalHelper.smoke.test.js:5:48     
+@jest/globals            tests/services/approvalPolicyResolution.test.js:20:60
+@jest/globals            tests/services/fixtures.smoke.test.js:5:48           
+@jest/globals            tests/services/harness.smoke.test.js:9:48            
+@jest/globals            tests/services/negotiation.flow.test.js:21:8         
+@jest/globals            tests/services/po.acceptReject.test.js:18:8          
+@jest/globals            tests/services/quote.submission.test.js:29:8         
+@jest/globals            tests/services/rfq.clarification.test.js:11:8        
+@jest/globals            tests/services/rfq.create.flow.test.js:20:88         
+@jest/globals            tests/services/rfq.draft.test.js:16:77               
+@jest/globals            tests/services/rfq.editUnlock.test.js:21:77          
+@jest/globals            tests/services/rfq.publish.email.test.js:21:77       
+@jest/globals            tests/services/rfq.quoteCompare.test.js:19:77        
+@jest/globals            tests/services/rfq.update.flow.test.js:23:77         
+@jest/globals            tests/services/rfq.withdrawTerminate.test.js:19:77   
+@jest/globals            tests/services/techEval.flow.test.js:15:8            
+@jest/globals            tests/services/vendorEligibility.test.js:21:71       
+pg                       tests/setup/dropTestDb.js:9:16                       
+pg                       tests/setup/prepareTestDb.js:13:16                   
+Unlisted binaries (1)
+prettier  package.json
+Unresolved imports (2)
+eslint-config-prettier  .eslintrc
+eslint-plugin-prettier  .eslintrc
+Unused exports (25)
+ENTITY_MATERIAL_RULES                          app/controllers/rfq/rfqEditableFields.js:41:14             
+parseIstWallTimeToEpoch              function  app/controllers/rfq/rfqUpdateHelpers.js:78:17              
+calcTime                                       app/helper/common.js:514:3                                 
+getErrorText                                   app/helper/common.js:516:3                                 
+normalizeNullableId                            app/helper/companyLocation.js:51:10                        
+normalizeNullableString                        app/helper/companyLocation.js:51:31                        
+formatDeliveryPeriodLabel                      app/helper/poTemplatePricing.js:32:14                      
+QUOTE_VISIBILITY_TIMEZONE                      app/helper/quoteVisibility.js:3:14                         
+getBidEndMomentIst                             app/helper/quoteVisibility.js:13:14                        
+ensureQuoteVisibilityUnlocked                  app/helper/quoteVisibility.js:85:14                        
+scheduleEmailsForAuctionEventBridge  function  app/helper/sendEmailFunctions/raEmailScheduler.js:232:23   
+getPOItemDetails                               app/models/purchaseOrderModel.js:485:14                    
+reEvaluateInstanceStep               function  app/services/approvalPropagationService.js:118:23          
+advanceInstanceToNextStep            function  app/services/approvalPropagationService.js:166:23          
+applyDiffToInstance                  function  app/services/approvalPropagationService.js:266:23          
+RFQ_STATUSES                                   app/util/constants.js:32:14                                
+validateBodyController                         app/validations/paramValidation/productValidation.js:1010:3
+store_vendor_document                          app/validations/paramValidation/userValidation.js:1131:3   
+attachVendorToRfqProduct             function  tests/factories/techEval.js:16:23                          
+seedTechEvalWithClauses              function  tests/factories/techEval.js:28:23                          
+recordVendorScores                   function  tests/factories/techEval.js:55:23                          
+default                              variable  tests/fixtures/ids.js:140:16                               
+IDS                                            tests/fixtures/index.js:67:10                              
+loadTestEnv                          function  tests/setup/envguard.js:33:17                              
+computeRunId                         function  tests/setup/envguard.js:51:17                              
+Duplicate exports (1)
+IDS|default  tests/fixtures/ids.js

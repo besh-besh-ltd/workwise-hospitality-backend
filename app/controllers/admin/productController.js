@@ -23,7 +23,6 @@ import bcrypt from 'bcryptjs';
 import rolesModel from '../../models/rolesModel.js';
 import userModel from '../../models/userModel.js';
 import path from 'path';
-import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import db from '../../config/dbConn.js';
 import rfqModel from '../../models/rfqModel.js';
