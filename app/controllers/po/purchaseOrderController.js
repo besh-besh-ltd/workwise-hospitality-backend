@@ -3,7 +3,7 @@ import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -265,6 +265,60 @@ export const initiatePO = async (req, res) => {
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
       error
+    });
+  }
+};
+
+/**
+ * Merge multiple draft POs of the same vendor on the same RFQ into one.
+ *
+ * Body: { keep_po_id: number, po_ids: number[] }
+ *   - po_ids: array of all PO IDs participating in the merge, MUST include
+ *     keep_po_id (the model is forgiving and re-adds it if missing, but the
+ *     contract is "send the full set").
+ *   - keep_po_id: which PO retains its number/header; all others get folded
+ *     into it and deleted.
+ *
+ * Authorisation:
+ *   - Route-level: authenticated buyer (acl([2, 8]) on the route).
+ *   - Tenant scope: model verifies req.user.company_id matches the POs'
+ *     company_id, so a cross-company buyer can't merge another tenant's POs.
+ *   - The frontend gates the button on awarding.create. The route exists
+ *     under a buyer-only acl, mirroring the existing initiate/approve pattern;
+ *     we don't add a can() check because the existing repo convention is to
+ *     branch on acl() + scope in the controller, not on can().
+ */
+export const mergePODrafts = async (req, res) => {
+  try {
+    const { keep_po_id, po_ids } = req.body || {};
+    const keepId = Number(keep_po_id);
+    const idArray = Array.isArray(po_ids) ? po_ids : [];
+    if (!Number.isFinite(keepId) || keepId <= 0) {
+      return res.status(400).json({ status: 0, message: 'keep_po_id is required' });
+    }
+    const cleanedIds = idArray.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    const uniqueIds = new Set(cleanedIds);
+    uniqueIds.add(keepId);
+    if (uniqueIds.size < 2) {
+      return res.status(400).json({ status: 0, message: 'At least 2 distinct POs are required to merge' });
+    }
+
+    const result = await mergeDraftPOs({
+      keep_po_id: keepId,
+      po_ids: Array.from(uniqueIds),
+      user: req.user,
+    });
+
+    return res.status(200).json({
+      status: 1,
+      message: `Merged ${result.merged_po_ids.length} purchase order${result.merged_po_ids.length === 1 ? '' : 's'} into #${result.keep_po_id}`,
+      data: result,
+    });
+  } catch (error) {
+    logError('mergePODrafts failed', error);
+    return res.status(400).json({
+      status: 0,
+      message: error?.message || 'Failed to merge purchase orders',
     });
   }
 };
