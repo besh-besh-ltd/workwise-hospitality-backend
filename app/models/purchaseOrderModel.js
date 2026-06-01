@@ -10,6 +10,25 @@ import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } 
 import pricingEngine from "../services/pricingEngine.js";
 import fs from 'fs';
 
+// Statuses at which the rendered PO PDF must stay sealed. The PDF is generated
+// at draft time so the buyer can preview, but it is intended for the vendor —
+// surfacing it to anyone (including approvers reviewing the structured data)
+// before approval completes risks leakage. Once approval finishes the PO
+// transitions to ACCEPTANCE_PENDING (vendor email goes out at the same moment)
+// and the PDF becomes appropriate to share. Rejected/cancelled POs never
+// surface the PDF.
+const PO_PDF_SEALED_STATUSES = new Set([
+  PO_STATUSES.DRAFT,
+  PO_STATUSES.PENDING_APPROVAL,
+  PO_STATUSES.REJECTED,
+  PO_STATUSES.CANCELLED,
+]);
+
+const resolvePoPdfVisibility = (status, url) => {
+  if (!url) return null;
+  return PO_PDF_SEALED_STATUSES.has(status) ? null : url;
+};
+
 const getNextPONumber = async () => {
   return new Promise(async function (resolve, reject) {
     const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
@@ -315,6 +334,230 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
     } catch (error) {
       throw error;
     }
+};
+
+/**
+ * Merge N draft POs of the SAME vendor on the SAME RFQ into a single kept PO.
+ *
+ * Use-case: a buyer (or the post-merge approver) realises that during
+ * commercial finalization the new draft wasn't merged into the vendor's
+ * existing draft (or that two finalize actions independently produced two
+ * drafts for the same vendor). Rather than discard work and restart, this
+ * call moves all line items, documents, milestones, tasks, and HSN mappings
+ * from the SOURCE drafts onto the KEPT draft, then deletes the now-empty
+ * source headers. Total is recomputed using the kept PO's global_charges
+ * snapshot — globals are NOT additively combined; they're already a
+ * document-level header concept and the kept PO's snapshot wins.
+ *
+ * Guarantees (all enforced inside one tx; the whole merge rolls back on any
+ * failed pre-condition):
+ *   - All IDs exist and are reachable
+ *   - All are status='draft' (never touches a PO in flight)
+ *   - All share finalized_vendor_id (same vendor)
+ *   - All share rfq_id (same RFQ)
+ *   - All share company_id (no cross-tenant merge)
+ *   - keep_po_id is present in the merged set
+ *   - At least two distinct POs (a 1-PO "merge" is a no-op error)
+ *
+ * Post-state:
+ *   - Source POs deleted; kept PO carries all child rows
+ *   - HSN mappings: kept PO's wins on conflict (same rfq_item_id), source's
+ *     dropped to avoid duplicate rows that would confuse the read paths
+ *   - total_value recomputed via pricingEngine (same logic the draft-merge
+ *     path uses), keeping the merge-vs-fresh-draft total parity invariant
+ *   - po_pdf_url nulled (the existing PDF is now stale; the sealed-status
+ *     visibility gate keeps it hidden until approval anyway, but a stale URL
+ *     would still surface in some places — null is the safe state)
+ *   - rfq_product_id / quote_id / quantity rebuilt from the new line set
+ */
+export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null } = {}) => {
+  const executor = async (t) => {
+    const keepIdNum = Number(keep_po_id);
+    const idArray = Array.isArray(po_ids) ? po_ids.map(Number).filter(Number.isFinite) : [];
+    // Deduplicate + ensure keep is in the set.
+    const allIds = Array.from(new Set([...idArray, keepIdNum]));
+    if (!Number.isFinite(keepIdNum) || keepIdNum <= 0) {
+      throw new Error('keep_po_id is required');
+    }
+    if (allIds.length < 2) {
+      throw new Error('At least 2 distinct POs are required to merge');
+    }
+    if (!allIds.includes(keepIdNum)) {
+      throw new Error('keep_po_id must be one of the selected POs');
+    }
+    const sourceIds = allIds.filter((id) => id !== keepIdNum);
+
+    // SELECT … FOR UPDATE locks the rows for the duration of the tx, so a
+    // concurrent initiate/approve/edit on any of these drafts can't race
+    // past us mid-merge.
+    const rows = await t.any(
+      `SELECT id, status, finalized_vendor_id, rfq_id, company_id
+         FROM tbl_rfq_purchase_order
+        WHERE id = ANY($1::int[])
+        FOR UPDATE`,
+      [allIds]
+    );
+    if (rows.length !== allIds.length) {
+      const found = new Set(rows.map((r) => r.id));
+      const missing = allIds.filter((id) => !found.has(id));
+      throw new Error(`Purchase order(s) not found: ${missing.join(', ')}`);
+    }
+
+    const keepRow = rows.find((r) => r.id === keepIdNum);
+    for (const r of rows) {
+      if (r.status !== PO_STATUSES.DRAFT) {
+        throw new Error(`PO ${r.id} is not a draft (status: ${r.status}) — only drafts can be merged`);
+      }
+      if (r.finalized_vendor_id !== keepRow.finalized_vendor_id) {
+        throw new Error('All selected POs must be for the same vendor');
+      }
+      if (r.rfq_id !== keepRow.rfq_id) {
+        throw new Error('All selected POs must belong to the same RFQ');
+      }
+      if (r.company_id !== keepRow.company_id) {
+        throw new Error('All selected POs must belong to the same company');
+      }
+    }
+
+    // Tenant scope safety: caller must be acting within the same company as
+    // the POs. Controller layer also enforces this; double-checking inside
+    // the tx makes the model safe for direct internal callers (tests, jobs).
+    if (user && user.company_id && Number(user.company_id) !== Number(keepRow.company_id)) {
+      throw new Error('You do not have access to these purchase orders');
+    }
+
+    // Re-parent ALL child rows from source POs to the kept PO. Order doesn't
+    // matter since they're sibling tables, but we keep it deterministic for
+    // readability (and for the test to assert state at each step if needed).
+    await t.none(
+      `UPDATE tbl_purchase_order_product
+          SET purchase_order_id = $1
+        WHERE purchase_order_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+    await t.none(
+      `UPDATE tbl_purchase_order_document
+          SET purchase_order_id = $1
+        WHERE purchase_order_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+    await t.none(
+      `UPDATE tbl_payment_milestone
+          SET po_id = $1
+        WHERE po_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+    await t.none(
+      `UPDATE tbl_purchase_order_tasks
+          SET po_id = $1
+        WHERE po_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+
+    // HSN: drop source rows whose rfq_item_id already has a mapping on the
+    // kept PO (kept-PO's wins), then re-parent the remainder. There's no
+    // (po_id, rfq_item_id) unique constraint at the schema level today, but
+    // a duplicate row would just inflate read responses without breaking
+    // anything — best to dedupe pre-emptively.
+    await t.none(
+      `DELETE FROM tbl_purchase_order_hsn_mapping
+        WHERE po_id = ANY($1::int[])
+          AND rfq_item_id IN (
+            SELECT rfq_item_id FROM tbl_purchase_order_hsn_mapping
+             WHERE po_id = $2
+          )`,
+      [sourceIds, keepIdNum]
+    );
+    await t.none(
+      `UPDATE tbl_purchase_order_hsn_mapping
+          SET po_id = $1
+        WHERE po_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+
+    // Source headers are now childless. Delete.
+    await t.none(
+      `DELETE FROM tbl_rfq_purchase_order
+        WHERE id = ANY($1::int[])`,
+      [sourceIds]
+    );
+
+    // Recompute kept-PO totals over the merged line set. Reuse the exact
+    // pricing-engine pattern from the draft-merge branch in
+    // draftPurchaseOrder so the stored total matches a hypothetical
+    // "single-shot fresh draft" of the same lines.
+    const summed = await t.oneOrNone(
+      `SELECT COALESCE(SUM(total_price), 0) AS sub
+         FROM tbl_purchase_order_product
+        WHERE purchase_order_id = $1`,
+      [keepIdNum]
+    );
+    const lineSubtotal = Number(summed?.sub) || 0;
+
+    const headerRow = await t.oneOrNone(
+      `SELECT global_charges FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [keepIdNum]
+    );
+    const rawGc = headerRow?.global_charges;
+    let snapshotGlobals = [];
+    if (Array.isArray(rawGc)) snapshotGlobals = rawGc;
+    else if (typeof rawGc === 'string' && rawGc.trim()) {
+      try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
+    }
+    let gcTotal = 0;
+    for (const gc of snapshotGlobals) {
+      const norm = pricingEngine.normalizeGlobalCharge(gc);
+      if (!norm) continue;
+      gcTotal += pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, lineSubtotal);
+    }
+    const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
+
+    // Refresh derived header columns from the current line set. quote_id /
+    // rfq_product_id on the header are denormalised arrays — without this
+    // refresh they'd still reflect the source-PO contribution and would
+    // mislead downstream callers that read the header directly.
+    const linesAgg = await t.oneOrNone(
+      `SELECT
+          COALESCE(array_remove(array_agg(DISTINCT rfq_product_id), NULL), '{}'::int[]) AS rfq_products,
+          COALESCE(array_remove(array_agg(DISTINCT quote_id),       NULL), '{}'::int[]) AS quotes,
+          COALESCE(SUM(quantity), 0)::float8 AS qty,
+          COUNT(*)::int AS line_count
+         FROM tbl_purchase_order_product
+        WHERE purchase_order_id = $1`,
+      [keepIdNum]
+    );
+
+    // Casts on $2/$3: pg-promise serialises JS arrays as PG literal '{...}'
+    // which Postgres types as text[] by default. Without ::int[] the UPDATE
+    // is rejected because the target columns are integer[].
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+          SET total_value    = $1,
+              rfq_product_id = $2::int[],
+              quote_id       = $3::int[],
+              quantity       = $4,
+              po_pdf_url     = NULL,
+              updated_at     = NOW()
+        WHERE id = $5`,
+      [
+        grandTotal,
+        linesAgg?.rfq_products || [],
+        linesAgg?.quotes || [],
+        Number(linesAgg?.qty) || 0,
+        keepIdNum,
+      ]
+    );
+
+    return {
+      keep_po_id: keepIdNum,
+      merged_po_ids: sourceIds,
+      new_line_count: Number(linesAgg?.line_count) || 0,
+      new_total_value: grandTotal,
+      new_line_subtotal: Math.round(lineSubtotal * 100) / 100,
+    };
+  };
+
+  return txContext ? executor(txContext) : db.tx(executor);
 };
 
 export const initiatePurchaseOrder = async (po_id, initiator, t) => {
@@ -713,7 +956,11 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 ),
                 '[]'::json
               ) AS product_details,
-                -- Approval status supports both old and new workflows
+                -- Approval status supports both old and new workflows.
+                -- Includes pending_approvers (new flow) and
+                -- current_approver_name (legacy flow) so the listing can
+                -- show "Pending at: names" under the status badge without
+                -- the user opening each PO.
                 CASE
                   WHEN po.approval_instance_id IS NOT NULL THEN json_build_object(
                     'type', 'new',
@@ -724,6 +971,21 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                       SELECT COUNT(AIS.id)
                       FROM tbl_approval_instance_steps AIS
                       WHERE AIS.approval_instance_id = tai.id
+                    ),
+                    'pending_approvers', (
+                      SELECT COALESCE(JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                          'user_id', tasa.approver_user_id,
+                          'name', approver_user.name
+                        )
+                      ), '[]'::json)
+                      FROM tbl_approval_step_approvers tasa
+                      JOIN tbl_approval_instance_steps tais ON tais.id = tasa.approval_instance_step_id
+                      JOIN tbl_users approver_user ON approver_user.id = tasa.approver_user_id
+                      WHERE tais.approval_instance_id = tai.id
+                        AND tais.step_order = tai.current_step
+                        AND tais.status = 'PENDING'
+                        AND tasa.status = 'PENDING'
                     )
                   )
                   WHEN trx.id IS NOT NULL THEN json_build_object(
@@ -732,6 +994,10 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                     'status', trx.status,
                     'initiated_by', trx.initiated_by,
                     'current_approver_id', trx.current_approver_id,
+                    'current_approver_name', (
+                      SELECT TRX_U.name FROM tbl_users TRX_U
+                      WHERE TRX_U.id = trx.current_approver_id
+                    ),
                     'final_decision_by', trx.final_decision_by
                   )
                   ELSE NULL
@@ -776,10 +1042,14 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
         [...values, limit, offset]
       );
 
-      data = data.map(d => ({
-        ...d,
-        poPdfUrl: d.po_pdf_url
-      }))
+      data = data.map(d => {
+        const sealedPdfUrl = resolvePoPdfVisibility(d.status, d.po_pdf_url);
+        return {
+          ...d,
+          po_pdf_url: sealedPdfUrl,
+          poPdfUrl: sealedPdfUrl,
+        };
+      })
 
       const count = await t.one(
         `SELECT COUNT(*) AS total
@@ -1238,7 +1508,8 @@ export const getPODetailsById = async (po_id, user_id) => {
       [po_id, user_id]
     );
 
-    return { ...result, poPdfUrl: result?.po_pdf_url };
+    const sealedPdfUrl = resolvePoPdfVisibility(result?.status, result?.po_pdf_url);
+    return { ...result, po_pdf_url: sealedPdfUrl, poPdfUrl: sealedPdfUrl };
   } catch (error) {
     logError('Error in getPODetails', error);
     throw error;
