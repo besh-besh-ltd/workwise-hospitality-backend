@@ -201,7 +201,20 @@ const enrichProduct = (product, opts, vendorDocSubtotals = new Map()) => {
       .map((c) => {
         const norm = pricingEngine.normalizeGlobalCharge(c);
         if (!norm) return null;
-        const amount = pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, engineQuoteTotal);
+        // Percentage charges distribute naturally (pct × lineSubtotal).
+        // Absolute charges are stored once on the quote and duplicated onto
+        // every product row by the model query — split them proportionally
+        // by this line's share of the vendor's doc subtotal so per-product
+        // shares sum back to the original. Fall back to 0 when the vendor's
+        // doc subtotal is 0 (no basis to allocate against).
+        let amount;
+        if (norm.amount_mode === "percentage") {
+          amount = pricingEngine.applyChargeMode(norm.amount, "percentage", engineQuoteTotal);
+        } else {
+          amount = vendorDocSubtotal > 0
+            ? (Number(norm.amount) || 0) * (engineQuoteTotal / vendorDocSubtotal)
+            : 0;
+        }
         const additionalTax = pricingEngine.applyChargeMode(norm.additional_tax, norm.additional_tax_mode, amount);
         return {
           name: norm.name,
