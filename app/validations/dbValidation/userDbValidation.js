@@ -82,7 +82,7 @@ const validateDbBody = {
         .status(400)
         .json({
           status: 3,
-          message: Config.errorText.value
+          message: 'Please enter a valid email id or employee code'
         })
         .end();
     }
