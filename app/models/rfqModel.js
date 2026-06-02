@@ -2,7 +2,6 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
-import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
@@ -1811,12 +1810,42 @@ WHERE NOT EXISTS (
         });
     });
   },
-  getRfqByUser: async (limit, offset, user_id) => {
+  getRfqByUser: async (limit, offset, user_id, negotiationFilter = null) => {
     return new Promise(function (resolve, reject) {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND nr.status = 'ACTIVE'
+              AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+          AND EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = RFQ.id
+              AND $3 = ANY(nr.vendor_ids)
+              AND (
+                nr.status = 'ENDED'
+                OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds nr2
+            WHERE nr2.rfq_id = RFQ.id
+              AND $3 = ANY(nr2.vendor_ids)
+              AND nr2.status = 'ACTIVE'
+              AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+          )`;
+      }
       db.any(
         `SELECT
           RFQ.id,
           RFQ.rfq_no,
+          RFQ.title,
           RFQ.company_name,
           RFQ.response_email,
           RFQ.is_published,
@@ -1901,6 +1930,7 @@ WHERE NOT EXISTS (
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
+        ${negotiationClause}
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
         [offset, limit, user_id]
@@ -2540,7 +2570,13 @@ WHERE NOT EXISTS (
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
     ${user_type == 3 ? `ARRAY(
-    SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    SELECT json_build_object('id', TQ.id, 'timestamp', COALESCE(
+      GREATEST(
+        TQ.timestamp,
+        (SELECT MAX(TQI_LU.updated_at) FROM tbl_quote_items TQI_LU WHERE TQI_LU.quote_id = TQ.id)
+      ),
+      TQ.timestamp
+    ), 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
     'global_comment', TQ.global_comment,
     'global_charges', TQ.global_charges,
 
@@ -2937,6 +2973,15 @@ LIMIT 1;`;
               AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
         ) AS vendors_count
+        ,(
+            SELECT COUNT(DISTINCT TQ.created_by)
+            FROM tbl_quotes TQ
+            JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id
+            WHERE TQ.rfq_id = RFQ_P.rfq_id
+              AND TQI.product_variant_id = RFQ_P.product_variant_id
+              AND TQI.variant = RFQ_P.variant
+              AND (TQ.is_regret IS NULL OR TQ.is_regret != 1)
+        ) AS participated_vendors_count
         `
             : ''
         }
@@ -3502,9 +3547,12 @@ LIMIT 2;
           P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
-          WHERE TQM.receiver_id = ${user_id}
-          AND TQM.rfq_id = RFQ.id
-          AND TQM.is_seen = false
+          WHERE TQM.rfq_id = RFQ.id
+            AND TQM.sender_type = 3
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_query_message_reads TQMR
+              WHERE TQMR.message_id = TQM.id AND TQMR.user_id = ${user_id}
+            )
           ) AS "unseen_query_count",
           (
             SELECT
@@ -4669,7 +4717,9 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: awaiting quote stats query failed`); return { total_invited: 0, participated: 0, sent_quotes: 0, technical_only: 0, regrets: 0, remaining: 0 }; }),
 
         // Evaluator names: users who have both te.read and te.create permissions
-        // scoped to this RFQ's business unit (hotel) and department
+        // scoped to this RFQ's business unit (hotel) and department.
+        // Only active, non-deleted users — the lifecycle is the single source of truth
+        // for who can act on the RFQ, so deactivated users must not appear here.
         db.any(`
           SELECT DISTINCT u.id, u.name
           FROM tbl_users u
@@ -4678,7 +4728,9 @@ LIMIT 2;
           JOIN tbl_permissions p ON p.id = rp.permission_id
           JOIN tbl_rfq rfq ON rfq.id = $1
           JOIN tbl_hospitality_company_hotels hch ON hch.id = rfq.hotel_id AND hch.is_deleted = 0
-          WHERE urs.company_id = hch.hospitality_company_id
+          WHERE u.status = 1
+            AND u.is_deleted = 0
+            AND urs.company_id = hch.hospitality_company_id
             AND p.resource = 'te'
             AND p.action IN ('read', 'create')
             AND (
@@ -5437,9 +5489,12 @@ LIMIT 2;
           ) AS pending_approval_type,
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
-          WHERE TQM.receiver_id = ${user_id}
-          AND TQM.rfq_id = RFQ.id
-          AND TQM.is_seen = false
+          WHERE TQM.rfq_id = RFQ.id
+            AND TQM.sender_type = 3
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_query_message_reads TQMR
+              WHERE TQMR.message_id = TQM.id AND TQMR.user_id = ${user_id}
+            )
           ) AS "unseen_query_count",
           (
             SELECT
@@ -7193,7 +7248,6 @@ LIMIT 2;
         });
     });
   },
-  // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   getCategoryList: async (search_key) => {
     //   let q = `
@@ -8926,13 +8980,43 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-  getVendorRfqCount: async (user_id) => {
+  getVendorRfqCount: async (user_id, negotiationFilter = null) => {
     return new Promise((resolve, reject) => {
+      let negotiationClause = '';
+      if (negotiationFilter === 'active') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND nr.status = 'ACTIVE'
+             AND nr.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      } else if (negotiationFilter === 'ended') {
+        negotiationClause = `
+         AND EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id
+             AND $1 = ANY(nr.vendor_ids)
+             AND (
+               nr.status = 'ENDED'
+               OR (nr.status = 'ACTIVE' AND nr.end_date <= (NOW() AT TIME ZONE 'UTC'))
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_negotiation_rounds nr2
+           WHERE nr2.rfq_id = r.id
+             AND $1 = ANY(nr2.vendor_ids)
+             AND nr2.status = 'ACTIVE'
+             AND nr2.end_date > (NOW() AT TIME ZONE 'UTC')
+         )`;
+      }
       db.one(
         `SELECT COUNT(DISTINCT v.rfq_id)
          FROM tbl_rfq_product_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
+         WHERE v.user_id = $1 AND r.is_published = 1
+         ${negotiationClause}`, // Matching user_id in tbl_rfq_product_vendors
         [user_id]
       )
         .then(function (data) {
@@ -9475,17 +9559,30 @@ GROUP BY
 ORDER BY m.created_at;
 `;
 
-    const updateQuery = `
-        UPDATE tbl_query_messages
-        SET is_seen = TRUE
-        WHERE rfq_id = $1 AND receiver_id = $2 AND sender_id = $3 AND is_seen = FALSE;
+    // Per-user mark-as-read. The conversation is scoped by company pair
+    // (viewer's company ⟷ target's company), matching the SELECT above, so
+    // any user on the viewer's company side who opens this thread records
+    // their own read receipt without affecting other users on either side.
+    const markReadQuery = `
+      INSERT INTO tbl_query_message_reads (message_id, user_id, read_at)
+      SELECT m.id, $2, NOW()
+      FROM tbl_query_messages m
+      JOIN tbl_users s ON s.id = m.sender_id
+      JOIN tbl_users v ON v.id = $2
+      JOIN tbl_users t ON t.id = $3
+      WHERE m.rfq_id = $1
+        AND s.company_id = t.company_id
+        AND EXISTS (
+          SELECT 1 FROM tbl_users r
+          WHERE r.id = m.receiver_id AND r.company_id = v.company_id
+        )
+      ON CONFLICT (message_id, user_id) DO NOTHING;
     `;
 
     return new Promise((resolve, reject) => {
       db.query(query, [rfq_id, sender_id, receiver_id])
         .then((data) => {
-          // Mark the received messages as seen
-          db.query(updateQuery, [rfq_id, sender_id, receiver_id])
+          db.query(markReadQuery, [rfq_id, sender_id, receiver_id])
             .then(() => resolve(data))
             .catch((err) => reject(new Error(err)));
         })
@@ -9506,8 +9603,14 @@ ORDER BY m.created_at;
           (SELECT tu.id AS user_id, tu.name AS user_name, tc.company_name FROM tbl_users tu JOIN tbl_company tc ON tc.id = tu.company_id WHERE tu.id = $3) AS user_data
       LEFT JOIN
           (SELECT COUNT(*) AS unseen_count
-           FROM tbl_query_messages
-           WHERE rfq_id = $1 AND sender_id = $3 AND receiver_id = $2 AND is_seen = false) AS unseen_data
+           FROM tbl_query_messages qm
+           WHERE qm.rfq_id = $1
+             AND qm.sender_id = $3
+             AND qm.receiver_id = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM tbl_query_message_reads r
+               WHERE r.message_id = qm.id AND r.user_id = $2
+             )) AS unseen_data
       ON true
       LEFT JOIN
           (SELECT message_text AS last_message, created_at AS last_message_timestamp
@@ -9589,30 +9692,47 @@ ORDER BY m.created_at;
         ${searchFilter}
       `;
 
+    // "Other party" expression: for a buyer-side viewer, the other party is
+    // the vendor user on the message (sender if vendor sent, receiver if buyer
+    // sent). This way every buyer-side user on the RFQ — not just the one in
+    // receiver_id — sees the last-message preview and sort key for each vendor
+    // conversation, matching the per-user unseen_counts asymmetry.
+    const otherPartyExpr = buyerTypes.includes(viewer_type)
+      ? `CASE WHEN m.sender_type = 3 THEN m.sender_id ELSE m.receiver_id END`
+      : `CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END`;
+    const latestMessagesFilter = buyerTypes.includes(viewer_type)
+      ? ``
+      : `AND (m.sender_id = $2 OR m.receiver_id = $2)`;
+
     const query = `
       WITH candidates AS (
         ${candidateQuery}
       ),
       latest_messages AS (
         SELECT
-          CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END AS other_user_id,
+          ${otherPartyExpr} AS other_user_id,
           m.message_text,
           m.created_at,
           ROW_NUMBER() OVER (
-            PARTITION BY CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END
+            PARTITION BY ${otherPartyExpr}
             ORDER BY m.created_at DESC
           ) AS rn
         FROM tbl_query_messages m
         WHERE m.rfq_id = $1
-          AND (m.sender_id = $2 OR m.receiver_id = $2)
+          ${latestMessagesFilter}
       ),
       unseen_counts AS (
-        SELECT sender_id AS other_user_id, COUNT(*) AS unseen_count
-        FROM tbl_query_messages
-        WHERE rfq_id = $1
-          AND receiver_id = $2
-          AND is_seen = false
-        GROUP BY sender_id
+        SELECT qm.sender_id AS other_user_id, COUNT(*) AS unseen_count
+        FROM tbl_query_messages qm
+        WHERE qm.rfq_id = $1
+          AND ${buyerTypes.includes(viewer_type)
+              ? `qm.sender_type = 3`
+              : `qm.receiver_id = $2`}
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_query_message_reads r
+            WHERE r.message_id = qm.id AND r.user_id = $2
+          )
+        GROUP BY qm.sender_id
       )
       SELECT
         c.user_id,
@@ -12728,20 +12848,13 @@ ORDER BY tq.timestamp DESC;
           dynamicJoins +=
             'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
         }
-        // po_completed is now always included in the main SELECT
+        // po_completed and has_pending_po_approval are now always included in the main SELECT
         dynamicSelectColumns += `,
           -- has_draft_po: any PO in draft status
           EXISTS (
             SELECT 1 FROM tbl_rfq_purchase_order po_draft
             WHERE po_draft.rfq_id = RFQ.id AND po_draft.status = 'draft'
-          ) AS has_draft_po,
-          -- has_pending_po_approval: any PO approval is PENDING
-          EXISTS (
-            SELECT 1 FROM tbl_approval_instances ai_po
-            WHERE ai_po.entity_type = 'PO'
-              AND (ai_po.metadata->>'rfq_id')::INTEGER = RFQ.id
-              AND ai_po.status = 'PENDING'
-          ) AS has_pending_po_approval`;
+          ) AS has_draft_po`;
 
         // Only show RFQs where user has awarding.read permission for the RFQ's business unit
         if (user_type != 3) {
@@ -12884,6 +12997,21 @@ ORDER BY tq.timestamp DESC;
           FROM tbl_quote_finalization _tqf_any
           WHERE _tqf_any.rfq_id = RFQ.id
         ) AS has_finalization,
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_act
+            WHERE _nr_act.rfq_id = RFQ.id
+              AND _nr_act.status = 'ACTIVE'
+              AND _nr_act.end_date > NOW()
+          )
+        ) AS has_active_negotiation_round,
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_pend
+            WHERE _nr_pend.rfq_id = RFQ.id
+              AND _nr_pend.status = 'PENDING_APPROVAL'
+          )
+        ) AS has_pending_negotiation_approval,
         P.name AS project_name,
         RFQ.company_name,
         RFQ.contact_name,
@@ -12929,34 +13057,91 @@ ORDER BY tq.timestamp DESC;
               )
             )
             ELSE (
-              -- RFQ: per-product NEGOTIATION_QUOTE approval check
-              SELECT BOOL_AND(
-                NOT EXISTS (
-                  SELECT 1 FROM tbl_approval_instances _ai
-                  WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
-                    AND _ai.entity_id = _rp_fin.id
-                    AND _ai.status = 'PENDING'
-                )
-                AND (
-                  NOT EXISTS (
-                    SELECT 1 FROM tbl_approval_instances _ai2
-                    WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin.id
-                  )
-                  OR EXISTS (
-                    SELECT 1 FROM tbl_approval_instances _ai3
-                    WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
-                      AND _ai3.entity_id = _rp_fin.id AND _ai3.status = 'APPROVED'
-                  )
-                )
+              -- RFQ: every product must be finalized AND every product's NEGOTIATION_QUOTE approval done
+              (
+                (SELECT COUNT(*) FROM tbl_rfq_products _rpv_fac WHERE _rpv_fac.rfq_id = RFQ.id)
+                = (SELECT COUNT(*) FROM tbl_quote_finalization _tqf_fac WHERE _tqf_fac.rfq_id = RFQ.id)
               )
-              FROM tbl_rfq_products _rp_fin
-              JOIN tbl_quote_finalization _qf_fin ON _qf_fin.rfq_id = RFQ.id
-                AND _qf_fin.product_variant_id = _rp_fin.product_variant_id
-                AND _qf_fin.variant = _rp_fin.variant
-              WHERE _rp_fin.rfq_id = RFQ.id
+              AND (
+                SELECT BOOL_AND(
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_instances _ai
+                    WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
+                      AND _ai.entity_id = _rp_fin.id
+                      AND _ai.status = 'PENDING'
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai2
+                      WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai3
+                      WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
+                        AND _ai3.entity_id = _rp_fin.id AND _ai3.status = 'APPROVED'
+                    )
+                  )
+                )
+                FROM tbl_rfq_products _rp_fin
+                JOIN tbl_quote_finalization _qf_fin ON _qf_fin.rfq_id = RFQ.id
+                  AND _qf_fin.product_variant_id = _rp_fin.product_variant_id
+                  AND _qf_fin.variant = _rp_fin.variant
+                WHERE _rp_fin.rfq_id = RFQ.id
+              )
             )
           END
         ) AS finalization_approval_completed,
+        -- finalization_approval_rejected: latest NEGOTIATION_QUOTE approval on any product is REJECTED with no newer PENDING/APPROVED
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_qrej
+            WHERE _ai_qrej.entity_type = 'NEGOTIATION_QUOTE'
+              AND _ai_qrej.entity_id IN (
+                SELECT _rp_qrej.id FROM tbl_rfq_products _rp_qrej
+                WHERE _rp_qrej.rfq_id = RFQ.id
+              )
+              AND _ai_qrej.status = 'REJECTED'
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_approval_instances _ai_qnew
+                WHERE _ai_qnew.entity_type = 'NEGOTIATION_QUOTE'
+                  AND _ai_qnew.entity_id = _ai_qrej.entity_id
+                  AND _ai_qnew.status IN ('PENDING', 'APPROVED')
+                  AND _ai_qnew.created_at > _ai_qrej.created_at
+              )
+          )
+        ) AS finalization_approval_rejected,
+        -- has_pending_finalization_approval: any product has a PENDING NEGOTIATION_QUOTE approval instance
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_fpend
+            WHERE _ai_fpend.entity_type = 'NEGOTIATION_QUOTE'
+              AND _ai_fpend.entity_id IN (
+                SELECT _rp_fpend.id FROM tbl_rfq_products _rp_fpend
+                WHERE _rp_fpend.rfq_id = RFQ.id
+              )
+              AND _ai_fpend.status = 'PENDING'
+          )
+        ) AS has_pending_finalization_approval,
+        -- negotiation_terminated: a NEGOTIATION approval was REJECTED, or a round has ended/expired (precedence handled in UI)
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_nrej
+            WHERE _ai_nrej.entity_type = 'NEGOTIATION'
+              AND _ai_nrej.entity_id IN (
+                SELECT _nr_nrej.id FROM tbl_negotiation_rounds _nr_nrej
+                WHERE _nr_nrej.rfq_id = RFQ.id
+              )
+              AND _ai_nrej.status = 'REJECTED'
+          )
+          OR EXISTS (
+            SELECT 1 FROM tbl_negotiation_rounds _nr_exp
+            WHERE _nr_exp.rfq_id = RFQ.id
+              AND (
+                _nr_exp.status IN ('ENDED', 'CLOSED')
+                OR (_nr_exp.status = 'ACTIVE' AND _nr_exp.end_date <= NOW())
+              )
+          )
+        ) AS negotiation_terminated,
         -- finalization_partially_approved: some products approved, some not
         (
           SELECT CASE
@@ -13130,6 +13315,20 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_po_rejection,
+        -- has_pending_po_approval: any PO approval is PENDING for this RFQ AND its
+        -- underlying PO row is still alive (not rejected/cancelled). Without the JOIN
+        -- check, a stale PENDING instance left behind by a rejected PO would falsely
+        -- mark the RFQ as awaiting approval on the PO sidebar.
+        (
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances _ai_po_p
+            JOIN tbl_rfq_purchase_order _po_link ON _po_link.id = _ai_po_p.entity_id
+            WHERE _ai_po_p.entity_type = 'PO'
+              AND (_ai_po_p.metadata->>'rfq_id')::INTEGER = RFQ.id
+              AND _ai_po_p.status = 'PENDING'
+              AND _po_link.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+        ) AS has_pending_po_approval,
         -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
         (
           SELECT EXISTS (
@@ -15352,6 +15551,15 @@ ORDER BY tq.timestamp DESC;
          evaluation_round, approval_instance_id, calculated_score, created_by]
       );
     }
+  },
+
+  getRfqTermsForPdf: async (rfq_id) => {
+    return await db.oneOrNone(
+      `SELECT id, rfq_no, title, comment, is_tender
+       FROM tbl_rfq
+       WHERE id = $1`,
+      [rfq_id]
+    );
   },
 };
 

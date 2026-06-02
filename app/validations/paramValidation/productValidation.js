@@ -182,46 +182,6 @@ const validateBodyController = (schema, req, res) => {
   // next();
 };
 
-const academicItems = Joi.object({
-  id: Joi.number().optional(),
-  highest_education: Joi.string().required(),
-  institute_name: Joi.string().required(),
-  country: Joi.string().required(),
-  state: Joi.string().required(),
-  city: Joi.string().required(),
-  degree: Joi.string().required(),
-  backlogs: Joi.string().required(),
-  grade: Joi.string().required(),
-  score: Joi.string().required(),
-  primary_language: Joi.string().required(),
-  start_date: Joi.string().required(),
-  end_date: Joi.string().required(),
-  is_highest: Joi.string().optional()
-});
-const workExpItems = Joi.object({
-  id: Joi.number().optional(),
-  organization: Joi.string().required(),
-  position: Joi.string().required(),
-  job_profile: Joi.string().required(),
-  working_from: Joi.string().required(),
-  working_upto: Joi.string().required(),
-  mode_of_salary: Joi.string().required(),
-  current_status: Joi.string().required()
-});
-const englishTests = Joi.object({
-  id: Joi.number().optional(),
-  test_id: Joi.number().required(),
-  overall_score: Joi.string().required(),
-  doe: Joi.string().required(),
-  quantitative: Joi.string().required(),
-  verbal: Joi.string().required(),
-  analytical_writing: Joi.string().required()
-});
-
-const documents = Joi.object({
-  document_id: Joi.number().required()
-});
-
 const schemas = {
   create_category: Joi.object().keys({
     title: Joi.string().required(),

@@ -25,12 +25,14 @@ import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
+import puppeteer from 'puppeteer';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
   assertEditDateConstraints,
+  assertProductQuantityAndUnit,
   diffRfqSnapshot,
   applyRfqFieldChanges,
   applyProductChanges,
@@ -1088,7 +1090,6 @@ const formattedProducts = countedProducts.length > 0
       </p>
 
       <p><strong>RFQ:</strong> #${rfq_no}</p>
-      <p><strong>Vendor:</strong> ${vendorName}</p>
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
@@ -1107,8 +1108,9 @@ const formattedProducts = countedProducts.length > 0
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
   // Preparing the email details
+  // NOTE: `from` intentionally omits the vendor name — keeps the buyer email consistent with the new-quote notification, no vendor identity in the sender display.
   let mailRecipients = {
-    from: `${vendorName} ${Config.masterEmail}`,
+    from: Config.masterEmail,
     to: buyerDetails[0]?.email,
     subject: `New Quotation Received for Your RFQ`,
     html: dynamicHTML
@@ -1421,7 +1423,6 @@ const hydrateReminderTokens = async (vendors, rfq_id) => {
 
 
 const sendQuoteNotificationEmail = async (req) => {
-  let { name,  organization_name, company_name } = req.user;
   let { rfq_id, rfq_no, products } = req.body;
 
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
@@ -1444,8 +1445,6 @@ const sendQuoteNotificationEmail = async (req) => {
         productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
-      const vendorCompanyName = company_name || organization_name || name;
-
       // Email header content
       const headerContent = `<h2>Hello ${buyer.company_name || buyer.organization_name || ''},</h2>`;
 
@@ -1455,7 +1454,6 @@ const sendQuoteNotificationEmail = async (req) => {
         <p>
           You've received a new quotation! Check out the details below:
         </p>
-        <p><strong>Vendor:</strong> ${vendorCompanyName}</p>
         <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
@@ -1472,10 +1470,9 @@ const sendQuoteNotificationEmail = async (req) => {
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
       // Preparing the email details
+      // NOTE: `from` intentionally omits the vendor name — quotes stay sealed until the submission deadline.
       let mailRecipients = {
-        from: `${vendorCompanyName} ${Config.masterEmail}`, // sender address
-        //  organization_name : Config.webmasterMail,
-        // to: buyer.email,
+        from: Config.masterEmail,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
       };
@@ -5290,7 +5287,8 @@ const rfqController = {
             ) {
               throw updateHttpError(
                 400,
-                `Cannot modify '${f}' after the RFQ has been published.`
+                `Cannot modify '${f}' after the RFQ has been published.`,
+                f
               );
             }
           }
@@ -5303,6 +5301,13 @@ const rfqController = {
         // Computed in IST epoch-ms so server timezone drift can't shift
         // the windows around. See assertEditDateConstraints.
         assertEditDateConstraints({ snapshot, current });
+
+        // 3b. Quantity & Unit are mandatory per product. Quantity must be a
+        //     positive number >= 0.1; Unit must be non-empty. Validated
+        //     against the full snapshot, not just the diff, so a save can't
+        //     leave a product in an invalid state regardless of which
+        //     section the user edited.
+        assertProductQuantityAndUnit(snapshot);
 
         // 4. PO-locked products — load once for use during apply
         const poLocked = await t.any(
@@ -5329,35 +5334,36 @@ const rfqController = {
           const disallowedFields = diff.rfqFields.filter(f => f.field_name !== 'bid_end_date');
           if (disallowedFields.length > 0) {
             throw updateHttpError(400,
-              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`
+              `Restricted edit: only the Quote Submission Deadline can be modified. Cannot change: ${disallowedFields.map(f => f.field_name).join(', ')}`,
+              disallowedFields[0].field_name
             );
           }
           if (diff.products.added.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot add new products.');
+            throw updateHttpError(400, 'Restricted edit: cannot add new products.', 'products');
           }
           if (diff.products.removed.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot remove products.');
+            throw updateHttpError(400, 'Restricted edit: cannot remove products.', 'products');
           }
           for (const update of diff.products.updated) {
             if (update.commentChanged) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product comments.', 'products');
             }
             if (update.specs.added.length > 0 || update.specs.removed.length > 0 || update.specs.updated.length > 0) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product specifications.', 'products');
             }
             if (update.files.added.length > 0 || update.files.removed.length > 0) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify product files.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify product files.', 'products');
             }
             if (update.techEvalChanged) {
-              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.');
+              throw updateHttpError(400, 'Restricted edit: cannot modify technical evaluation clauses.', 'products');
             }
             // vendors.added IS allowed (from Refresh Vendors)
           }
           if (diff.terms.added.length > 0 || diff.terms.removed.length > 0) {
-            throw updateHttpError(400, 'Restricted edit: cannot modify terms.');
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms.', 'terms');
           }
           if (diff.termFiles && (diff.termFiles.added.length > 0 || diff.termFiles.removed.length > 0)) {
-            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.');
+            throw updateHttpError(400, 'Restricted edit: cannot modify terms & conditions files.', 'term_and_condition_files');
           }
         }
 
@@ -5465,7 +5471,8 @@ const rfqController = {
       if (error.isHttpError) {
         return res.status(error.statusCode || 400).json({
           status: 0,
-          message: error.message
+          message: error.message,
+          ...(error.field ? { field: error.field } : {})
         });
       }
       return res.status(400).json({
@@ -6473,6 +6480,97 @@ const rfqController = {
     }
   },
 
+  // Render the RFQ's custom Terms & Conditions (rich HTML stored on tbl_rfq.comment)
+  // as a downloadable PDF. Uses Puppeteer — same engine the ARC PDF flow uses — so
+  // output matches what users see in the on-screen WYSIWYG preview.
+  downloadRfqTermsPdf: async (req, res, next) => {
+    let browser = null;
+    try {
+      const rfq_id = parseInt(req.query.rfq_id, 10);
+      if (!Number.isFinite(rfq_id) || rfq_id <= 0) {
+        return res.status(400).json({ status: 0, message: 'rfq_id is required' });
+      }
+
+      const rfq = await rfqModel.getRfqTermsForPdf(rfq_id);
+      if (!rfq) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+
+      const commentHtml = (rfq.comment || '').toString();
+      const plainText = commentHtml.replace(/<[^>]*>/g, '').trim();
+      if (!plainText) {
+        return res.status(404).json({ status: 2, message: 'No Terms & Conditions to download for this RFQ' });
+      }
+
+      const entityLabel = Number(rfq.is_tender) === 1 ? 'Tender' : 'RFQ';
+      const escapeHtml = (str) => String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Terms &amp; Conditions - ${escapeHtml(rfq.rfq_no)}</title>
+  <style>
+    @page { margin: 18mm 16mm; }
+    body { font-family: 'Helvetica', 'Arial', sans-serif; color: #1a2730; font-size: 12pt; line-height: 1.55; margin: 0; }
+    .doc-header { border-bottom: 2px solid #1a2730; padding-bottom: 10px; margin-bottom: 18px; }
+    .doc-title { font-size: 18pt; font-weight: 700; margin: 0 0 4px 0; }
+    .doc-meta { font-size: 10pt; color: #54616e; }
+    .doc-meta span { margin-right: 14px; }
+    .doc-body { font-size: 12pt; }
+    .doc-body p { margin: 0 0 10px 0; }
+    .doc-body ul, .doc-body ol { margin: 0 0 10px 22px; padding: 0; }
+    .doc-body li { margin-bottom: 4px; }
+    .doc-body table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    .doc-body th, .doc-body td { border: 1px solid #cdd3da; padding: 6px 8px; text-align: left; }
+    .doc-body img { max-width: 100%; height: auto; }
+    .doc-body h1, .doc-body h2, .doc-body h3, .doc-body h4 { margin: 14px 0 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="doc-header">
+    <div class="doc-title">Terms &amp; Conditions</div>
+    <div class="doc-meta">
+      <span><strong>${escapeHtml(entityLabel)} No:</strong> ${escapeHtml(rfq.rfq_no)}</span>
+      ${rfq.title ? `<span><strong>Title:</strong> ${escapeHtml(rfq.title)}</span>` : ''}
+    </div>
+  </div>
+  <div class="doc-body">${commentHtml}</div>
+</body>
+</html>`;
+
+      browser = await puppeteer.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        headless: true,
+      });
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' },
+      });
+      await browser.close();
+      browser = null;
+
+      const safeRfqNo = String(rfq.rfq_no || rfq_id).replace(/[^A-Za-z0-9_-]/g, '_');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="terms-and-conditions-${safeRfqNo}.pdf"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      return res.status(200).end(pdfBuffer);
+    } catch (error) {
+      logError(error);
+      if (browser) {
+        try { await browser.close(); } catch (_) { /* swallow */ }
+      }
+      return res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
   getUnits: async (req, res, next) => {
     try {
       const result = await rfqModel.getAvailableUnits();
@@ -6610,8 +6708,13 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
-      const totalRFQ = await rfqModel.getVendorRfqCount(user_id);
+      const allowedNegotiationFilters = ['active', 'ended'];
+      const negotiation_filter = allowedNegotiationFilters.includes(req.body.negotiation_filter)
+        ? req.body.negotiation_filter
+        : null;
+
+      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, negotiation_filter);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, negotiation_filter);
 
       res
         .status(200)
@@ -8575,6 +8678,7 @@ const rfqController = {
         },
         closedByName: req.user.name,
         users: buMembers.filter(u => String(u.id) !== String(id)),
+        closeReason: comment || null,
       });
 
       // Notify each instance's current approvers that their approval is no longer needed.
@@ -9078,8 +9182,9 @@ const rfqController = {
   },
 
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type } =
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type, comment } =
       req.body;
+    const trimmedComment = typeof comment === 'string' ? comment.trim() : '';
     
     // Default to PO route for non-hospitality RFQs, route_type for hospitality
     const selectedRoute = route_type || 'PO';
@@ -9201,7 +9306,8 @@ const rfqController = {
               created_by: existingFinalization.created_by,
               timestamp: existingFinalization.timestamp,
               variant: existingFinalization.variant,
-              changed_by: req.user.id
+              changed_by: req.user.id,
+              comment: existingFinalization.comment || null
             };
 
             await rfqModel.insert(
@@ -9226,7 +9332,8 @@ const rfqController = {
             vendor_id,
             quote_id,
             created_by: req.user.id,
-            variant
+            variant,
+            comment: trimmedComment
           };
 
           const response = await rfqModel.insert(
@@ -9299,6 +9406,7 @@ const rfqController = {
                         vendor_id,
                         quote_id,
                         quote_item_id,
+                        finalization_comment: trimmedComment || null,
                         po_payload: { ...req.body, quote_id: quote_item_id },
                         po_user: { id: req.user.id, company_id: req.user.company_id }
                       },
@@ -9449,7 +9557,8 @@ const rfqController = {
                     quote_id: quote_id,
                     is_tender: rfqData.is_tender,
                     company_name: rfqData.company_name,
-                    triggered_by: 'product_finalization'
+                    triggered_by: 'product_finalization',
+                    finalization_comment: trimmedComment || null
                   },
                   txContext: t
                 });
@@ -12949,6 +13058,22 @@ sendFollowUpEmails: async (req, res) => {
         status = false;
       }
 
+      // Bump the quote-level timestamp on any real change so the vendor's
+      // "last updated" date reflects the latest revision. The conditional
+      // global-fields update above only fires for global changes; per-item
+      // edits (price/comment/files) would otherwise leave TQ.timestamp
+      // frozen at first submission.
+      if (status) {
+        try {
+          await db.none(
+            `UPDATE tbl_quotes SET timestamp = NOW() WHERE id = $1`,
+            [quoteId]
+          );
+        } catch (timestampError) {
+          logError('Failed to bump tbl_quotes.timestamp on update', timestampError);
+        }
+      }
+
       if (status) {
         try {
           const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
@@ -15755,7 +15880,7 @@ getClauses: async (req, res) => {
       logger.debug('📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})');
 
       const { publishRfqById } = await import('../../helper/cronManager.js');
-      const result = await publishRfqById(rfqId, rfq_no);
+      const result = await publishRfqById(rfqId, rfq_no, 'scheduler');
 
       const skippedMessages = {
         not_found: 'RFQ not found',
@@ -15779,6 +15904,93 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });
+    }
+  },
+
+  /**
+   * Force Publish — creator-triggered manual publish for an RFQ whose scheduled
+   * publish time has passed but auto-publish did not complete (Lambda failed,
+   * schedule was never created, etc.). Reuses the same publish path the
+   * scheduler endpoint uses so vendors are notified identically.
+   *
+   * Auth: JWT (passportSignIn) + acl([2,8]). Ownership is re-checked here
+   * against req.user.id after reloading the RFQ — the client never names the
+   * creator.
+   */
+  forcePublishRfq: async (req, res) => {
+    const rfqId = Number(req.params.id);
+    const userId = req.user?.id;
+    try {
+      if (!Number.isFinite(rfqId)) {
+        return res.status(400).json({ status: 0, message: 'Invalid RFQ id' });
+      }
+
+      // Compare publish time in SQL so the timezone handling matches what the
+      // watchdog uses — relying on `new Date(timestampWithoutTimeZone)` in JS
+      // would re-interpret the value in the Node process's local TZ.
+      const rfq = await db.oneOrNone(
+        `SELECT id, rfq_no, is_tender, status, is_published, created_by, tender_publish_date,
+                (tender_publish_date IS NULL OR tender_publish_date >= NOW()) AS publish_time_not_passed
+         FROM tbl_rfq WHERE id = $1`,
+        [rfqId]
+      );
+      if (!rfq) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (Number(rfq.created_by) !== Number(userId)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can force publish' });
+      }
+      if (rfq.is_published === 1) {
+        return res.status(400).json({ status: 0, message: 'RFQ is already published' });
+      }
+      if (Number(rfq.status) !== 4) {
+        return res.status(400).json({ status: 0, message: 'RFQ is not in Ready to Publish state' });
+      }
+      if (rfq.publish_time_not_passed) {
+        return res.status(400).json({ status: 0, message: 'Scheduled publish time has not yet passed' });
+      }
+
+      const { publishRfqById } = await import('../../helper/cronManager.js');
+      const result = await publishRfqById(rfqId, rfq.rfq_no, 'force');
+
+      if (result?.skipped) {
+        return res.status(400).json({
+          status: 0,
+          message: 'RFQ could not be force-published',
+          reason: result.reason,
+        });
+      }
+
+      // Best-effort: clean up any orphaned EventBridge schedule. The schedule
+      // may already be gone (auto-delete after the failed firing) — that's fine.
+      try {
+        const { deleteRfqPublishSchedule } = await import('../../helper/createSchedule.js');
+        await deleteRfqPublishSchedule(rfqId);
+      } catch (cleanupErr) {
+        logError(`Force publish: failed to delete orphaned schedule for RFQ ${rfqId}`, cleanupErr);
+      }
+
+      await recordLifecycleEvent({
+        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+        entity_id: rfqId,
+        stage: 'PUBLISHED',
+        action: 'FORCE_PUBLISH',
+        performed_by: userId,
+        metadata: {
+          rfq_no: rfq.rfq_no,
+          reason: 'Manual force publish after auto-publish failure',
+          scheduled_publish_date: rfq.tender_publish_date,
+        },
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ force published successfully',
+        data: result,
+      });
+    } catch (error) {
+      logError('Force publish failed', error);
+      return res.status(500).json({ status: 3, message: error.message || 'Force publish failed' });
     }
   },
 

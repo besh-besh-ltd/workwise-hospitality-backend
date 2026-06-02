@@ -155,6 +155,12 @@ export const createScheduleForRfqPublish = async ({ rfqId, scheduledTimeIST, pay
     Target: {
       Arn: process.env.LAMBDA_ARN,
       RoleArn: process.env.EVENTBRIDGE_ROLE_ARN,
+      // Retry transient failures so a single Lambda/network blip doesn't leave an RFQ stuck.
+      // Backend watchdog cron is the safety net if all AWS retries fail.
+      RetryPolicy: {
+        MaximumRetryAttempts: 5,
+        MaximumEventAgeInSeconds: 3600,
+      },
       Input: JSON.stringify({
         type: 'genericTask',
         payload: {

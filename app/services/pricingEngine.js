@@ -47,6 +47,19 @@ export const applyChargeMode = (value, mode, base) => {
   return isPercentageMode(mode) ? (toNumber(base) * v) / 100 : v;
 };
 
+// Proportional share of a document-level absolute amount for one line.
+// Quote-compare uses this to split a vendor's absolute global charge across
+// the products in that vendor's quote, so each product carries its weighted
+// share (lineSubtotal / docSubtotal) and the per-product shares sum back to
+// the original charge. Percentage charges already distribute naturally via
+// applyChargeMode and don't need this helper. docSubtotal <= 0 → 0 (no basis
+// to allocate against).
+export const proportionalShare = (absoluteAmount, lineSubtotal, docSubtotal) => {
+  const doc = toNumber(docSubtotal);
+  if (doc <= 0) return 0;
+  return toNumber(absoluteAmount) * (toNumber(lineSubtotal) / doc);
+};
+
 // Tri-state semantics for charge.tax:
 //   null / undefined / ""  → inherit base rate (when base tax_mode is %)
 //   0 (number)             → explicit no tax (never inherits)
@@ -160,6 +173,8 @@ export const normalizeGlobalCharge = (charge) => {
     slug: charge.slug ?? null,
     amount: toNumber(amount),
     amount_mode: amount_mode ?? DEFAULT_MODE,
+    additional_tax: toNumber(charge.additional_tax),
+    additional_tax_mode: charge.additional_tax_mode ?? DEFAULT_MODE,
     is_global: charge.is_global === true ? true : undefined,
     comment: charge.comment ?? undefined,
   };
@@ -185,11 +200,17 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
     .filter(Boolean)
     .map((charge) => {
       const amount = applyChargeMode(charge.amount, charge.amount_mode, grandSubtotal);
-      rawGlobalAmounts.push(amount);
+      // additional_tax is a vendor-supplied tax on the charge amount itself
+      // (e.g. 18% GST on a freight charge). Computed against the resolved
+      // charge value, not the document subtotal.
+      const additionalTax = applyChargeMode(charge.additional_tax, charge.additional_tax_mode, amount);
+      rawGlobalAmounts.push(amount + additionalTax);
       const out = {
         name: charge.name ?? null,
         slug: charge.slug ?? null,
         amount: q2(amount),
+        additional_tax: q2(additionalTax),
+        subtotal: q2(amount + additionalTax),
       };
       // Preserve the vendor-supplied rate + mode so renderers can display
       // "TCS (5%)" alongside the resolved currency value, and the comment
@@ -197,6 +218,10 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
       if (charge.amount !== undefined && charge.amount !== null) {
         out.rate = charge.amount;
         out.mode = charge.amount_mode;
+      }
+      if (charge.additional_tax !== undefined && charge.additional_tax !== null) {
+        out.additional_tax_rate = charge.additional_tax;
+        out.additional_tax_mode = charge.additional_tax_mode;
       }
       if (charge.comment !== undefined && charge.comment !== null && charge.comment !== '') {
         out.comment = charge.comment;
@@ -532,6 +557,7 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
 
 export default {
   applyChargeMode,
+  proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
   applyPaymentTermNormalization,

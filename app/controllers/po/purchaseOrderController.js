@@ -3,7 +3,7 @@ import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -269,6 +269,60 @@ export const initiatePO = async (req, res) => {
   }
 };
 
+/**
+ * Merge multiple draft POs of the same vendor on the same RFQ into one.
+ *
+ * Body: { keep_po_id: number, po_ids: number[] }
+ *   - po_ids: array of all PO IDs participating in the merge, MUST include
+ *     keep_po_id (the model is forgiving and re-adds it if missing, but the
+ *     contract is "send the full set").
+ *   - keep_po_id: which PO retains its number/header; all others get folded
+ *     into it and deleted.
+ *
+ * Authorisation:
+ *   - Route-level: authenticated buyer (acl([2, 8]) on the route).
+ *   - Tenant scope: model verifies req.user.company_id matches the POs'
+ *     company_id, so a cross-company buyer can't merge another tenant's POs.
+ *   - The frontend gates the button on awarding.create. The route exists
+ *     under a buyer-only acl, mirroring the existing initiate/approve pattern;
+ *     we don't add a can() check because the existing repo convention is to
+ *     branch on acl() + scope in the controller, not on can().
+ */
+export const mergePODrafts = async (req, res) => {
+  try {
+    const { keep_po_id, po_ids } = req.body || {};
+    const keepId = Number(keep_po_id);
+    const idArray = Array.isArray(po_ids) ? po_ids : [];
+    if (!Number.isFinite(keepId) || keepId <= 0) {
+      return res.status(400).json({ status: 0, message: 'keep_po_id is required' });
+    }
+    const cleanedIds = idArray.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    const uniqueIds = new Set(cleanedIds);
+    uniqueIds.add(keepId);
+    if (uniqueIds.size < 2) {
+      return res.status(400).json({ status: 0, message: 'At least 2 distinct POs are required to merge' });
+    }
+
+    const result = await mergeDraftPOs({
+      keep_po_id: keepId,
+      po_ids: Array.from(uniqueIds),
+      user: req.user,
+    });
+
+    return res.status(200).json({
+      status: 1,
+      message: `Merged ${result.merged_po_ids.length} purchase order${result.merged_po_ids.length === 1 ? '' : 's'} into #${result.keep_po_id}`,
+      data: result,
+    });
+  } catch (error) {
+    logError('mergePODrafts failed', error);
+    return res.status(400).json({
+      status: 0,
+      message: error?.message || 'Failed to merge purchase orders',
+    });
+  }
+};
+
 export const approvePO = async (req, res) => {
   try {
     const { po_id } = req.params;
@@ -489,6 +543,38 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
       await t.none(`
         DELETE FROM tbl_quote_finalization WHERE id = $1
       `, [finalization.id]);
+
+      // After de-finalizing this vendor, check whether ANY vendor still has
+      // an active finalization for the product. If none remain, the prior
+      // NEGOTIATION_QUOTE approval that produced this PO is no longer in
+      // force, and GET /negotiation/quotes/:rfq_product_id/approval-status
+      // would otherwise keep returning APPROVED — leaving the negotiation
+      // modal disabled. Mark the latest APPROVED instance as CANCELLED so
+      // the endpoint reflects the rollback. Path A (single-vendor finalize
+      // from Quote Compare) cancels on first rejection; Path B (multi-vendor
+      // batched approval) cancels only after every vendor in the batch is
+      // de-finalized, preserving the approval while it still backs other
+      // vendors' POs.
+      const remainingFinalization = await t.oneOrNone(`
+        SELECT 1 FROM tbl_quote_finalization
+        WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+        LIMIT 1
+      `, [purchaseOrder.rfq_id, product.product_variant_id, product.variant]);
+
+      if (!remainingFinalization) {
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET status = 'CANCELLED', completed_at = NOW()
+          WHERE id = (
+            SELECT id FROM tbl_approval_instances
+            WHERE entity_type = 'NEGOTIATION_QUOTE'
+              AND entity_id = $1
+              AND status = 'APPROVED'
+            ORDER BY created_at DESC
+            LIMIT 1
+          )
+        `, [product.rfq_product_id]);
+      }
     }
   } catch (error) {
     logError(error);

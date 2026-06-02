@@ -188,6 +188,8 @@ RfqRoutes.post(
 
 RfqRoutes.get('/get-terms', rfqController.getTerms);
 
+RfqRoutes.get('/terms-pdf', passportSignIn, rfqController.downloadRfqTermsPdf);
+
 RfqRoutes.post(
   '/get-vendors',
   passportSignIn,
@@ -287,6 +289,13 @@ RfqRoutes.post(
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
   rfqController.terminateRFQ
+);
+RfqRoutes.post(
+  '/force-publish/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.forcePublishRfq
 );
 RfqRoutes.get(
   '/send-reminder/:id',

@@ -1,8 +1,19 @@
-import db from './app/config/dbConn.js';
-import Config from './app/config/app.config.js';
-import { logError, sendMail, notificationMail } from './app/helper/common.js';
-import { sendNotification } from './app/services/notificationService.js';
-import notificationModel from './app/models/notificationModel.js';
+// =============================================================================
+// DEPRECATED — moved to _deprecated/ on 2026-05-01.
+// Reason: standalone CLI script with no callers in repo. Last modified
+// 2024-10-28. The HAVING clause uses `MAX(tll.date) >= '<30 days from now>'`,
+// which selects users with logins in the FUTURE — always empty. Effectively a
+// no-op for 1.5+ years.
+// Imports below have been left intact and PATHS adjusted (./app → ../app) so a
+// forgotten external scheduler that hits this file fails LOUDLY rather than
+// silently — preserving rollback via `git mv` if a hidden invoker is found.
+// If no error log surfaces in production for a full release cycle, delete.
+// =============================================================================
+import db from '../app/config/dbConn.js';
+import Config from '../app/config/app.config.js';
+import { logError, sendMail, notificationMail } from '../app/helper/common.js';
+import { sendNotification } from '../app/services/notificationService.js';
+import notificationModel from '../app/models/notificationModel.js';
 
 import Moment from 'moment';
 

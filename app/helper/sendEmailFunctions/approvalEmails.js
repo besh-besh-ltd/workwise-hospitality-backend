@@ -148,6 +148,9 @@ export const sendApprovalStepNotification = async ({
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
     const isNegotiationRound = entityType === 'NEGOTIATION';
     const rfqTitle = extraContext?.rfq_title || '';
+    const productName = extraContext?.product_name || '';
+    const companyName = extraContext?.company_name || '';
+    const hotelName = extraContext?.hotel_name || '';
 
     // Negotiation round end_date (timestamp without timezone in DB) — render in IST.
     let negotiationEndDateStr = '';
@@ -182,7 +185,7 @@ export const sendApprovalStepNotification = async ({
       ? `<div style="margin-top:24px; padding:14px 16px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px;">
            <p style="margin:0 0 8px; font-weight:600; color:#1E293B;">How to approve this negotiation round:</p>
            <ol style="margin:0; padding-left:20px; color:#334155;">
-             <li style="padding:3px 0;">Click the <strong>"${ctaLabel}"</strong> button below.</li>
+             <li style="padding:3px 0;">Click the above <strong>"${ctaLabel}"</strong> button.</li>
              <li style="padding:3px 0;">You will be redirected to the Quote Compare page of RFQ #${entityIdentifier}.</li>
              <li style="padding:3px 0;">On the <strong>"Negotiation Workspace"</strong>, click on the <strong>"Approve"</strong> button next to the latest round.</li>
              <li style="padding:3px 0;">Review the Quoted price and the Target price.</li>
@@ -199,6 +202,11 @@ export const sendApprovalStepNotification = async ({
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${entityIdentifier}</li>
             <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
+            ${isNegotiationRound
+              ? `<li style="padding:4px 0;"><strong>Product:</strong> ${productName || '—'}</li>
+                 <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
+                 <li style="padding:4px 0;"><strong>Business Unit:</strong> ${hotelName || '—'}</li>`
+              : ''}
             ${isNegotiationRound && negotiationEndDateStr
               ? `<li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${negotiationEndDateStr} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>`
               : ''}
@@ -211,9 +219,11 @@ export const sendApprovalStepNotification = async ({
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`;
 
-      const approvalDescription = isNegotiationType
-        ? `<strong>${label}</strong> for <strong>RFQ #${entityIdentifier}${rfqTitle ? ` — ${rfqTitle}` : ''}</strong>`
-        : `<strong>${label} #${entityIdentifier}</strong>`;
+      const approvalDescription = isNegotiationRound
+        ? `<strong>${label}</strong>`
+        : isNegotiationType
+          ? `<strong>${label}</strong> for <strong>RFQ #${entityIdentifier}${rfqTitle ? ` — ${rfqTitle}` : ''}</strong>`
+          : `<strong>${label} #${entityIdentifier}</strong>`;
 
       const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -686,6 +696,7 @@ export const sendRfqClosedHeadsUpNotification = async ({
   rfqDetails,
   closedByName,
   users,
+  closeReason = null,
 }) => {
   try {
     if (!users || users.length === 0) {
@@ -699,6 +710,17 @@ export const sendRfqClosedHeadsUpNotification = async ({
 
     const subject = `Heads up: ${entityLabel} #${rfq_no} has been CLOSED — all actions are now restricted`;
 
+    // Escape user-supplied closure reason; preserve newlines as <br>.
+    const escapeHtml = (str) => String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    const closeReasonTrimmed = closeReason ? String(closeReason).trim() : '';
+    const closeReasonHtml = closeReasonTrimmed
+      ? escapeHtml(closeReasonTrimmed).replace(/\n/g, '<br>')
+      : '';
+
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'Team Member'},</h2>`;
 
@@ -708,6 +730,8 @@ export const sendRfqClosedHeadsUpNotification = async ({
             <strong>Heads up</strong> — ${entityLabel} <strong>#${rfq_no}</strong>
             has been <strong style="color:#991B1B;">CLOSED</strong> by ${closedByName || 'the creator'}.
           </p>
+
+          ${closeReasonHtml ? `<div style="background-color:#FFFBEB; border-left:4px solid #F59E0B; padding:14px 18px; margin:18px 0; border-radius:6px;"><div style="color:#92400E; font-weight:700; font-size:13px; letter-spacing:0.4px; text-transform:uppercase; margin-bottom:8px;">Reason for closure</div><div style="color:#78350F; font-size:15px; line-height:1.6;">${closeReasonHtml}</div></div>` : ''}
 
           <div style="background-color:#FEF2F2; border-left:4px solid #DC2626; padding:14px 18px; margin:18px 0; border-radius:6px;">
             <div style="color:#7F1D1D; font-weight:700; font-size:14px; margin-bottom:6px;">

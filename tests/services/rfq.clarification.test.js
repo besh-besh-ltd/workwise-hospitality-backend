@@ -35,6 +35,12 @@ function mockExpress(opts = {}) {
   };
 }
 
+// Unique rfq_no range for this suite to avoid collisions with other suites
+// that share the factory's module-level counter (jest.config.js maxWorkers=1).
+// Same shape used by rfq.publish.email.test.js and rfq.quoteCompare.test.js.
+const nextClarificationRfqNo = () =>
+  8500000 + Math.floor(Math.random() * 100000);
+
 // Tracks rows inserted by tests for targeted cleanup after each test.
 const inserted = { rfqIds: [] };
 
@@ -94,6 +100,7 @@ async function makePublishedRfqInClarificationWindow(opts = {}) {
     tender_publish_date: twoHoursAgo,
     vendor_clarification_date: twoDaysHence,
     bid_end_date: fiveDaysHence,
+    rfq_no: nextClarificationRfqNo(),
     ...opts,
   });
   inserted.rfqIds.push(rfq_id);

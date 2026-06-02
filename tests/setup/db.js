@@ -10,7 +10,6 @@
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import Promise from "bluebird";
 import pgp from "pg-promise";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,7 +46,6 @@ if (!/^hospitality_test(_[a-zA-Z0-9_-]+)?$/.test(dbName)) {
 // event fires from the pool BEFORE the awaiting query's promise rejects, so
 // we use it for diagnostics; actual retry is wrapped via a query proxy below.
 const initOptions = {
-  promiseLib: Promise,
   error(err, e) {
     // Suppress noisy stack on transient disconnects — they're retried below.
     if (isTransientDisconnect(err)) {
@@ -218,6 +216,7 @@ const DYNAMIC_TABLES = [
   "tbl_notifications",
   "tbl_login_log",
   "tbl_token_login_data",
+  "tbl_query_message_reads",
   "tbl_query_message_files",
   "tbl_query_messages",
 ];

@@ -307,6 +307,20 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  */
 const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
   try {
+    // Resolve display names for the committee approval email in one round-trip.
+    const t = txContext || db;
+    const names = await t.oneOrNone(
+      `SELECT
+         (SELECT COALESCE(PV.name, P.name)
+            FROM tbl_rfq_products rp
+            LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+            LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.id = $1) AS product_name,
+         (SELECT name FROM tbl_hospitality_companies WHERE id = $2) AS company_name,
+         (SELECT name FROM tbl_hospitality_company_hotels WHERE id = $3) AS hotel_name`,
+      [rfqProductId, rfqData.hospitality_company_id, rfqData.hotel_id || null]
+    );
+
     const result = await createApprovalInstance({
       entity_type: 'NEGOTIATION',
       entity_id: roundId,
@@ -323,7 +337,10 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
         rfq_title: rfqData.title || '',
         is_tender: rfqData.is_tender,
         rfq_product_id: rfqProductId,
-        end_date: endDate || null
+        end_date: endDate || null,
+        product_name: names?.product_name || '',
+        company_name: names?.company_name || '',
+        hotel_name: names?.hotel_name || ''
       },
       txContext
     });
@@ -2060,16 +2077,50 @@ const NegotiationController = {
         });
       }
 
+      // Lazy-heal stale APPROVED rows. handlePORejection now cancels the
+      // matching NEGOTIATION_QUOTE instance whenever the last vendor on a
+      // product is de-finalized, but rejections that happened before that
+      // fix shipped left orphaned APPROVED rows behind. The source of truth
+      // for "is this approval still in force?" is whether any vendor still
+      // has a finalization row for the product — if none do, the approval
+      // has been rolled back and this endpoint must not report APPROVED.
+      let effectiveStatus = latestInstance.status;
+      let effectiveCompletedAt = latestInstance.completed_at;
+      if (effectiveStatus === 'APPROVED') {
+        const rfqProduct = await db.oneOrNone(
+          `SELECT rfq_id, product_variant_id, variant FROM tbl_rfq_products WHERE id = $1`,
+          [rfq_product_id]
+        );
+        if (rfqProduct) {
+          const stillFinalized = await db.oneOrNone(
+            `SELECT 1 FROM tbl_quote_finalization
+              WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+              LIMIT 1`,
+            [rfqProduct.rfq_id, rfqProduct.product_variant_id, rfqProduct.variant]
+          );
+          if (!stillFinalized) {
+            await db.none(
+              `UPDATE tbl_approval_instances
+                SET status = 'CANCELLED', completed_at = NOW()
+                WHERE id = $1 AND status = 'APPROVED'`,
+              [latestInstance.id]
+            );
+            effectiveStatus = 'CANCELLED';
+            effectiveCompletedAt = new Date();
+          }
+        }
+      }
+
       return res.status(200).json({
         status: 1,
         data: {
-          has_pending_approval: latestInstance.status === 'PENDING',
+          has_pending_approval: effectiveStatus === 'PENDING',
           approval_instance: {
             id: latestInstance.id,
-            status: latestInstance.status,
+            status: effectiveStatus,
             metadata: latestInstance.metadata,
             created_at: latestInstance.created_at,
-            completed_at: latestInstance.completed_at
+            completed_at: effectiveCompletedAt
           }
         }
       });

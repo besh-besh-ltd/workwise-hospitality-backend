@@ -45,17 +45,6 @@ var store_profile_images = multerS3({
 //     callback(null, new_file_name);
 //   }
 // });
-var store_agent_profile_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.agent_user_image);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
-  }
-});
-
 const store_document = multerS3({
   s3: s3Client,
   bucket: process.env.AWS_S3_BUCKET,
@@ -137,18 +126,26 @@ var validatingImage = (schema) => {
   };
 };
 
+const humanizeJoiDetail = (detail) => {
+  const path = Array.isArray(detail.path) ? detail.path.filter((p) => p !== undefined && p !== null && p !== '') : [];
+  const fieldKey = path.length ? path[path.length - 1] : (detail.context && detail.context.key);
+  const label = String(fieldKey || 'Field')
+    .replace(/[_\-.]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const fullPath = path.length ? path.join('.') : (detail.context && detail.context.key) || '';
+  return detail.message
+    .replace(`"${fullPath}"`, label)
+    .replace(/^"[^"]+"/, label);
+};
+
 const validateBody = (schema) => {
   return (req, res, next) => {
     const result = schema.validate(req.body, { abortEarly: false });
     if (result.error) {
-      let err_msg = {};
-      for (let counter in result.error.details) {
-        let k = result.error.details[counter].context.key;
-        let val = result.error.details[counter].message;
-        err_msg[k] = val;
-      }
-      let return_err = { status: 2, errors: err_msg };
-      return res.status(400).json(return_err);
+      const message = (result.error.details || [])
+        .map(humanizeJoiDetail)
+        .join('; ');
+      return res.status(400).json({ status: 2, message });
     }
 
     if (!req.value) {
@@ -197,46 +194,6 @@ const validateBodyController = (schema, req, res) => {
 
   // next();
 };
-
-const academicItems = Joi.object({
-  id: Joi.number().optional(),
-  highest_education: Joi.string().required(),
-  institute_name: Joi.string().required(),
-  country: Joi.string().required(),
-  state: Joi.string().required(),
-  city: Joi.string().required(),
-  degree: Joi.string().required(),
-  backlogs: Joi.string().required(),
-  grade: Joi.string().required(),
-  score: Joi.string().required(),
-  primary_language: Joi.string().required(),
-  start_date: Joi.string().required(),
-  end_date: Joi.string().required(),
-  is_highest: Joi.string().optional()
-});
-const workExpItems = Joi.object({
-  id: Joi.number().optional(),
-  organization: Joi.string().required(),
-  position: Joi.string().required(),
-  job_profile: Joi.string().required(),
-  working_from: Joi.string().required(),
-  working_upto: Joi.string().required(),
-  mode_of_salary: Joi.string().required(),
-  current_status: Joi.string().required()
-});
-const englishTests = Joi.object({
-  id: Joi.number().optional(),
-  test_id: Joi.number().required(),
-  overall_score: Joi.string().required(),
-  doe: Joi.string().required(),
-  quantitative: Joi.string().required(),
-  verbal: Joi.string().required(),
-  analytical_writing: Joi.string().required()
-});
-
-const documents = Joi.object({
-  document_id: Joi.number().required()
-});
 
 const schemas = {
   create_category: Joi.object().keys({
@@ -517,67 +474,6 @@ const schemas = {
     file: Joi.required()
   }),
 
-  agent_profile_image: Joi.object().keys({
-    file: Joi.optional().allow(null)
-  }),
-  submit_application_step_6: Joi.object().keys({
-    step: Joi.number().required(),
-    application_id: Joi.number().required(),
-    // items: Joi.array().items(documents).min(1).required(),
-    items: Joi.array().items(documents)
-  }),
-  create_student: Joi.object().keys({
-    step: Joi.number().required(),
-    name: Joi.string().required(),
-    email: Joi.string().trim().email().required(),
-    phone: Joi.string()
-      .trim()
-      .min(10)
-      .max(10)
-      .required()
-      .regex(/^[0-9]*$/),
-    student_url: Joi.string().optional(),
-    dob: Joi.string().required(),
-    gender: Joi.string().optional(),
-    marital_status: Joi.string().required(),
-    c_address_1: Joi.string().required(),
-    c_address_2: Joi.string().allow('').required(),
-    c_courntry: Joi.string().required(),
-    c_state: Joi.string().required(),
-    c_city: Joi.string().required(),
-    c_pincode: Joi.string().required(),
-    p_address_1: Joi.string().required(),
-    p_address_2: Joi.string().allow('').required(),
-    p_courntry: Joi.string().required(),
-    p_state: Joi.string().required(),
-    p_city: Joi.string().required(),
-    p_pincode: Joi.string().required(),
-    passport_no: Joi.string().required(),
-    issue_date: Joi.string().required(),
-    exp_date: Joi.string().required(),
-    issue_country: Joi.string().required(),
-    issue_place: Joi.string().required(),
-    birth_country: Joi.string().required(),
-    nationality: Joi.string().required(),
-    citizen: Joi.string().required(),
-    citizen_other_country: Joi.number().required(),
-    living_studying_other_country: Joi.number().required(),
-    applied_immigration: Joi.number().required(),
-    medical_condition: Joi.number().required(),
-    visa_refusal: Joi.number().required(),
-    criminal_record: Joi.number().required(),
-    gurdian_name: Joi.string().required(),
-    gurdian_relation: Joi.string().required(),
-    gurdian_email: Joi.string().trim().email().required()
-  }),
-  subscription_payment: Joi.object().keys({
-    sub_id: Joi.number().required(),
-    coupon_code: Joi.string().trim().optional().allow(null, '')
-  }),
-  coupon_check: Joi.object().keys({
-    coupon_code: Joi.string().trim().required(),
-    sub_id: Joi.number().required()
-  }),
   buyer_private_vendor: Joi.object().keys({
     vendorName: Joi.string().required().trim().max(60), // Required, trimmed, and max length of 60 characters
     email: Joi.string().required().email().trim().max(50), // Required, valid email, trimmed, and max length of 50 characters
@@ -695,191 +591,6 @@ const schema_posts = {
       });
     }
   },
-  add_user_agent_profile_image: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_agent_profile_images,
-        limits: {
-          fileSize: 90000000 // Compliant: 8MB
-        },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
-
-          if (ext == '.png' || ext == '.jpg' || ext == '.jpeg') {
-            var validateImage = validatingImage(schemas.agent_profile_image);
-            if (validateImage) {
-              // console.log('Case 1');
-
-              cb(null, true);
-            }
-          } else {
-            // console.log('Case 2');
-            cb(null, false);
-            return cb('Only .png, .jpg, .jpeg format allowed!', null);
-          }
-        }
-      }).single('file');
-      upload(req, res, async function (err) {
-        if (err) {
-          let data = {};
-          data.file = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: data
-            })
-            .end();
-        } else {
-          next();
-        }
-      });
-    } catch (err) {
-      logError('userValidation error', err);
-      res.status(400).json({
-        status: 3,
-        message: 'server error'
-      });
-    }
-  },
-  /*  add_user_agent_signature: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_agent_profile_images,
-        limits: {
-          fileSize: 90000000 // Compliant: 8MB
-        },
-        fileFilter: (req, signature, cb) => {
-          var ext = path.extname(signature.originalname).toLowerCase();
-
-          if (ext == '.png' || ext == '.jpg' || ext == '.jpeg') {
-            var validateImage = validatingImage(schemas.agent_profile_image);
-            if (validateImage) {
-              logger.debug('agent_profile_image: valid image extension');
-
-              cb(null, true);
-            }
-          } else {
-            logger.debug('agent_profile_image: invalid image extension');
-            cb(null, false);
-            return cb('Only .png, .jpg, .jpeg format allowed!', null);
-          }
-        }
-      }).single('file');
-      upload(req, res, async function (err) {
-        if (err) {
-          let data = {};
-          data.file = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: data
-            })
-            .end();
-        } else {
-          next();
-        }
-      });
-    } catch (err) {
-      logError('userValidation error', err);
-      res.status(400).json({
-        status: 3,
-        message: 'server error'
-      });
-    }
-  }, */
-  add_user_agent_signature: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_agent_profile_images,
-        limits: {
-          fileSize: 2000000 // Compliant: 8MB
-        },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
-
-          if (ext == '.png' || ext == '.jpg' || ext == '.jpeg') {
-            var validateImage = validatingImage(schemas.agent_profile_image);
-            if (validateImage) {
-              cb(null, true);
-            }
-          } else {
-            cb(null, false);
-            return cb('Only .png, .jpg, .jpeg format allowed!', null);
-          }
-        }
-      }).fields([
-        { name: 'file', maxCount: 1 },
-        { name: 'signature', maxCount: 1 }
-      ]);
-      upload(req, res, async function (err) {
-        if (err) {
-          let data = {};
-          data.file = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: data
-            })
-            .end();
-        } else {
-          next();
-        }
-      });
-    } catch (err) {
-      logError('userValidation error', err);
-      res.status(400).json({
-        status: 3,
-        message: 'server error'
-      });
-    }
-  },
-  add_user_agent_final_signature: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_agent_profile_images,
-        limits: {
-          fileSize: 2000000 // Compliant: 8MB
-        },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
-
-          if (ext == '.png' || ext == '.jpg' || ext == '.jpeg') {
-            var validateImage = validatingImage(schemas.agent_profile_image);
-            if (validateImage) {
-              cb(null, true);
-            }
-          } else {
-            cb(null, false);
-            return cb('Only .png, .jpg, .jpeg format allowed!', null);
-          }
-        }
-      }).single('file');
-      upload(req, res, async function (err) {
-        if (err) {
-          let data = {};
-          data.file = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: data
-            })
-            .end();
-        } else {
-          next();
-        }
-      });
-    } catch (err) {
-      logError('userValidation error', err);
-      res.status(400).json({
-        status: 3,
-        message: 'server error'
-      });
-    }
-  },
   upload_user_document: async (req, res, next) => {
     try {
       var upload = multer({
@@ -991,74 +702,6 @@ const schema_posts = {
         status: 3,
         message: 'server error'
       });
-    }
-  },
-  upload_application_documents: async (req, res, next) => {
-    try {
-      var upload = multer({
-        storage: store_document,
-        limits: {
-          fileSize: 1024 * 1024 * 500
-        },
-        fileFilter: function (_req, files, callback) {
-          var ext = path.extname(files.originalname).toLowerCase();
-          if (
-            ext !== '.pdf' &&
-            ext !== '.png' &&
-            ext !== '.jpg' &&
-            ext !== '.gif' &&
-            ext !== '.doc' &&
-            ext !== '.docx' &&
-            ext !== '.xlsx' &&
-            ext !== '.jpeg'
-          ) {
-            callback(
-              'Only files with the following extensions are allowed: pdf, png, jpg, jpeg',
-              null
-            );
-          } else {
-            const req = validateBody(schemas.user_document);
-            callback(null, true);
-          }
-        }
-      }).array('file', 10);
-
-      upload(req, res, async function (err) {
-        if (err) {
-          if (err.code == 'LIMIT_FILE_SIZE') {
-            //console.log('Please upload file of 8MB');
-          }
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: { file: err }
-            })
-            .end();
-        } else {
-          logger.debug({ files: req.files }, 'uploaded application documents');
-          if (req.files && req.files.length > 0) {
-            next();
-          } else {
-            res
-              .status(400)
-              .json({
-                status: 2,
-                errors: { message: 'File is Required.' }
-              })
-              .end();
-          }
-        }
-      });
-    } catch (err) {
-      logError('userValidation upload_application_documents error', err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'Error uploading files! Please try again later'
-        })
-        .end();
     }
   },
   buyerExcelUploadVendorFileHandler: async (req, res, next) => {
