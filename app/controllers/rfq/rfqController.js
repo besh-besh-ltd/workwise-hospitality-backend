@@ -5164,6 +5164,384 @@ const rfqController = {
     }
   },
 
+  /**
+   * POST /rfq/copy
+   *
+   * Creates a DRAFT RFQ pre-populated from a source RFQ. Copies header,
+   * products, specs, files, terms, and tech-eval clauses; re-resolves
+   * vendors fresh against the TARGET hotel's current eligible pool so
+   * newly-onboarded vendors are included and de-listed ones drop. Dates
+   * are blanked; status forced to DRAFT; rfq_no is fresh.
+   *
+   * Notifications, approval instances, and lifecycle events are NOT
+   * triggered — those fire when the buyer submits the draft from the
+   * CreateRFQ wizard.
+   *
+   * Body: { source_rfq_id, target_hotel_id }
+   * Auth: req.user.id must have hospitality_mappings access to both
+   *       source.hotel_id and target_hotel_id.
+   */
+  copyRfq: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { source_rfq_id, target_hotel_id } = req.body;
+
+      // 1. Build the caller's accessible hotel set from their mappings.
+      const mappings = await hospitalityModel.getUserMappings(userId, { includeHotelRows: true });
+      const accessibleHotelIds = new Set(
+        (mappings || [])
+          .map((m) => m.hospitality_hotel_id)
+          .filter((id) => id != null)
+      );
+
+      if (!accessibleHotelIds.has(target_hotel_id)) {
+        return res.status(403).json({
+          status: 3,
+          message: 'You do not have access to the selected business unit.'
+        });
+      }
+
+      // 2. Load source RFQ row. We use the raw row (not the heavy details
+      // payload from rfqModel.getRfqById) — we need the bare columns to
+      // copy, and the access check above plus the hotel check below cover
+      // tenant isolation.
+      const sourceRfq = await db.oneOrNone(
+        `SELECT * FROM tbl_rfq WHERE id = $1`,
+        [source_rfq_id]
+      );
+      if (!sourceRfq) {
+        return res.status(404).json({ status: 2, message: 'Source RFQ not found.' });
+      }
+      if (sourceRfq.hotel_id && !accessibleHotelIds.has(sourceRfq.hotel_id)) {
+        // Treat as not-found to avoid leaking existence across tenants.
+        return res.status(404).json({ status: 2, message: 'Source RFQ not found.' });
+      }
+
+      // 3. Derive the target hospitality_company_id from the target hotel.
+      const targetHotel = await db.oneOrNone(
+        `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels WHERE id = $1 AND is_deleted = 0`,
+        [target_hotel_id]
+      );
+      if (!targetHotel) {
+        return res.status(400).json({ status: 0, message: 'Invalid business unit.' });
+      }
+
+      // 4. Clone everything atomically.
+      const newRfq = await db.tx(async (t) => {
+        const inserted = await t.one(
+          `INSERT INTO tbl_rfq (
+             rfq_no,
+             comment,
+             company_name,
+             response_email,
+             contact_name,
+             contact_number,
+             bid_end_date,
+             location,
+             is_published,
+             created_by,
+             updated_by,
+             status,
+             rfq_type,
+             reverse_auction,
+             project_id,
+             ra_start_date,
+             ra_end_date,
+             rfq_added_from,
+             processed_url,
+             is_tender,
+             tender_publish_date,
+             vendor_clarification_date,
+             hospitality_company_id,
+             tender_fees,
+             hotel_id,
+             process_id,
+             department_id,
+             title,
+             technical_evaluation_by,
+             copied_from_rfq_id,
+             copied_from_rfq_no
+           )
+           SELECT
+             (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
+             comment,
+             (SELECT hc.name FROM tbl_hospitality_company_hotels hch
+              JOIN tbl_hospitality_companies hc ON hc.id = hch.hospitality_company_id
+              WHERE hch.id = $2),
+             response_email,
+             contact_name,
+             contact_number,
+             '',                    -- bid_end_date blanked (NOT NULL text column)
+             location,
+             0,                     -- is_published
+             $3,                    -- created_by
+             $3,                    -- updated_by
+             1,                     -- status = DRAFT
+             rfq_type,
+             reverse_auction,
+             project_id,
+             NULL,                  -- ra_start_date blanked
+             NULL,                  -- ra_end_date blanked
+             rfq_added_from,
+             processed_url,
+             is_tender,
+             NULL,                  -- tender_publish_date blanked
+             NULL,                  -- vendor_clarification_date blanked
+             $4,                    -- hospitality_company_id from target hotel
+             NULL,                  -- tender_fees blanked
+             $2,                    -- hotel_id = target
+             process_id,
+             department_id,
+             title,
+             technical_evaluation_by,
+             $1,                    -- copied_from_rfq_id
+             rfq_no                 -- copied_from_rfq_no (denormalized for list views)
+           FROM tbl_rfq
+           WHERE id = $1
+           RETURNING id, rfq_no`,
+          [source_rfq_id, target_hotel_id, userId, targetHotel.hospitality_company_id]
+        );
+        const newRfqId = inserted.id;
+
+        // Hotel mapping for the new RFQ (single target).
+        await t.none(
+          `INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [newRfqId, target_hotel_id, userId]
+        );
+
+        // Products — re-resolve vendors per product against the target hotel.
+        const sourceProducts = await t.any(
+          `SELECT * FROM tbl_rfq_products WHERE rfq_id = $1`,
+          [source_rfq_id]
+        );
+        const productIdMap = {};
+        for (const product of sourceProducts) {
+          const newProduct = await t.one(
+            `INSERT INTO tbl_rfq_products (
+               rfq_id, comment, datasheet, spec_file, qap_file,
+               product_variant_id, qap, datasheet_file, variant, sheet_id
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id`,
+            [
+              newRfqId,
+              product.comment,
+              product.datasheet,
+              product.spec_file,
+              product.qap_file,
+              product.product_variant_id,
+              product.qap,
+              product.datasheet_file,
+              product.variant,
+              product.sheet_id
+            ]
+          );
+          productIdMap[product.id] = newProduct.id;
+
+          // Re-resolve eligible vendors for THIS variant against the TARGET
+          // hotel's current subscription state. May return empty — that's a
+          // legitimate DRAFT state and the buyer fills it in the editor.
+          const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(
+            product.product_variant_id,
+            [target_hotel_id]
+          );
+          for (const vendor of eligibleVendors) {
+            await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (
+                 rfq_id, product_variant_id, user_id, variant, sheet_id, is_rfq_viewed
+               )
+               VALUES ($1, $2, $3, $4, $5, 0)`,
+              [
+                newRfqId,
+                product.product_variant_id,
+                vendor.vendor_id,
+                product.variant,
+                product.sheet_id
+              ]
+            );
+          }
+        }
+
+        // Specs (leaf).
+        await t.none(
+          `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant, sheet_id)
+           SELECT $2, product_variant_id, title, value, variant, sheet_id
+           FROM tbl_rfq_products_specs
+           WHERE rfq_id = $1`,
+          [source_rfq_id, newRfqId]
+        );
+
+        // Product files — remap via productIdMap.
+        const productFiles = await t.any(
+          `SELECT pf.*
+           FROM tbl_rfq_product_files pf
+           JOIN tbl_rfq_products p ON p.id = pf.rfq_product_id
+           WHERE p.rfq_id = $1`,
+          [source_rfq_id]
+        );
+        for (const file of productFiles) {
+          const mappedProductId = productIdMap[file.rfq_product_id];
+          if (!mappedProductId) continue;
+          await t.none(
+            `INSERT INTO tbl_rfq_product_files (rfq_product_id, file_type, file_url, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [mappedProductId, file.file_type, file.file_url, file.created_at, file.updated_at]
+          );
+        }
+
+        // RFQ-level files (T&C, scope, etc.) — leaf.
+        await t.none(
+          `INSERT INTO tbl_rfq_files (rfq_id, file_type, file_url)
+           SELECT $2, file_type, file_url
+           FROM tbl_rfq_files
+           WHERE rfq_id = $1`,
+          [source_rfq_id, newRfqId]
+        );
+
+        // Terms map — leaf.
+        await t.none(
+          `INSERT INTO tbl_rfq_terms_map (rfq_id, terms_id)
+           SELECT $2, terms_id
+           FROM tbl_rfq_terms_map
+           WHERE rfq_id = $1`,
+          [source_rfq_id, newRfqId]
+        );
+
+        // Tech evaluation parent rows.
+        const techEvals = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1`,
+          [source_rfq_id]
+        );
+        const techEvalIdMap = {};
+        for (const te of techEvals) {
+          const newProductId = productIdMap[te.tbl_rfq_product_id];
+          if (!newProductId) continue;
+          const newTechEval = await t.one(
+            `INSERT INTO tbl_rfq_product_tech_evaluation (
+               rfq_id, tbl_rfq_product_id, minimum_passing_score
+             )
+             VALUES ($1, $2, $3)
+             RETURNING id`,
+            [newRfqId, newProductId, te.minimum_passing_score]
+          );
+          techEvalIdMap[te.id] = newTechEval.id;
+        }
+
+        // Clauses + capture new clause IDs for the leaf file table.
+        const clauses = await t.any(
+          `SELECT * FROM tbl_rfq_product_tech_evaluation_clauses
+           WHERE tbl_rfq_product_tech_evaluation_id IN (
+             SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1
+           )`,
+          [source_rfq_id]
+        );
+        const clauseIdMap = {};
+        for (const clause of clauses) {
+          const newTechEvalId = techEvalIdMap[clause.tbl_rfq_product_tech_evaluation_id];
+          if (!newTechEvalId) continue;
+          const newClause = await t.one(
+            `INSERT INTO tbl_rfq_product_tech_evaluation_clauses (
+               tbl_rfq_product_tech_evaluation_id, clause_text, weightage, clause_type
+             )
+             VALUES ($1, $2, $3, $4)
+             RETURNING id`,
+            [newTechEvalId, clause.clause_text, clause.weightage, clause.clause_type]
+          );
+          clauseIdMap[clause.id] = newClause.id;
+        }
+
+        // Clause files — use the explicit clauseIdMap rather than text match.
+        const clauseFiles = await t.any(
+          `SELECT f.*
+           FROM tbl_rfq_product_tech_evaluation_clauses_files f
+           JOIN tbl_rfq_product_tech_evaluation_clauses c
+             ON c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+           JOIN tbl_rfq_product_tech_evaluation te
+             ON te.id = c.tbl_rfq_product_tech_evaluation_id
+           WHERE te.rfq_id = $1`,
+          [source_rfq_id]
+        );
+        for (const file of clauseFiles) {
+          const newClauseId = clauseIdMap[file.tbl_rfq_product_tech_evaluation_clauses_id];
+          if (!newClauseId) continue;
+          await t.none(
+            `INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files (
+               tbl_rfq_product_tech_evaluation_clauses_id, file_url
+             )
+             VALUES ($1, $2)`,
+            [newClauseId, file.file_url]
+          );
+        }
+
+        return inserted;
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ copied to a new draft.',
+        data: {
+          new_rfq_id: newRfq.id,
+          new_rfq_no: newRfq.rfq_no,
+          copied_from: source_rfq_id
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || 'Failed to copy RFQ.'
+      });
+    }
+  },
+
+  /**
+   * GET /rfq/:id/lineage
+   * Returns the back-link (copied_from) and forward-links (copies) for an
+   * RFQ, filtered by the caller's accessible hotels so we don't leak
+   * cross-tenant existence.
+   */
+  getRfqLineage: async (req, res) => {
+    try {
+      const rfqId = parseInt(req.params.id, 10);
+      if (!rfqId) {
+        return res.status(400).json({ status: 0, message: 'Invalid RFQ id.' });
+      }
+      const userId = req.user.id;
+
+      // Build accessible hotel set first, so the inner queries filter on it.
+      const mappings = await hospitalityModel.getUserMappings(userId, { includeHotelRows: true });
+      const accessibleHotelIds = [
+        ...new Set(
+          (mappings || [])
+            .map((m) => m.hospitality_hotel_id)
+            .filter((id) => id != null)
+        )
+      ];
+
+      const rfq = await db.oneOrNone(
+        `SELECT id, hotel_id FROM tbl_rfq WHERE id = $1`,
+        [rfqId]
+      );
+      if (!rfq) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found.' });
+      }
+      if (rfq.hotel_id && !accessibleHotelIds.includes(rfq.hotel_id)) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found.' });
+      }
+
+      const lineage = await rfqModel.getCopyLineage(rfqId, accessibleHotelIds);
+      return res.status(200).json({ status: 1, data: lineage });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || 'Failed to fetch lineage.'
+      });
+    }
+  },
+
   // WH-69 snapshot-diff update flow — see app/controllers/rfq/rfqUpdateHelpers.js
   update: async (req, res, next) => {
     try {

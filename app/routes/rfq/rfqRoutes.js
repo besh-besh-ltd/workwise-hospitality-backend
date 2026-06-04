@@ -108,6 +108,29 @@ RfqRoutes.get(
   rfqController.getEditHistory
 );
 
+// RFQ Copy — creates a DRAFT clone of an existing RFQ for the chosen
+// business unit (hotel), re-resolving vendors against the target's current
+// eligible pool. Returns the new draft ID for the wizard to load.
+RfqRoutes.post(
+  '/copy',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateBody(rfqSchemas.copy),
+  rfqController.copyRfq
+);
+
+// Copy lineage: back-link (copied_from) and forward-links (copies) for
+// rendering the "Copied from RFQ #N" pill and "Copies of this RFQ" list
+// on the RFQ details page. Filtered by the caller's accessible hotels.
+RfqRoutes.get(
+  '/:id/lineage',
+  passportSignIn,
+  acl([2, 8]),
+  validateParam(rfqSchemas.id),
+  rfqController.getRfqLineage
+);
+
 
 RfqRoutes.post(
   '/get-details',

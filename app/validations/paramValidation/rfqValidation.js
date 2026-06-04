@@ -521,6 +521,13 @@ export const rfqSchemas = {
     id: Joi.number().integer().required()
   }),
 
+  copy: Joi.object()
+    .keys({
+      source_rfq_id: Joi.number().integer().positive().required(),
+      target_hotel_id: Joi.number().integer().positive().required()
+    })
+    .unknown(false),
+
   getClauses: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().optional()

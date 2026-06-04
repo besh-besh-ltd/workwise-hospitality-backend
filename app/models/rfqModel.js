@@ -12052,7 +12052,7 @@ ORDER BY m.created_at;
         P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
         ARRAY(
             SELECT json_build_object(
-                'id', RFQ_P.id, 
+                'id', RFQ_P.id,
                 'product_id', RFQ_P.product_variant_id,
                   'product_details', (
                       SELECT json_agg(json_build_object(
@@ -12959,6 +12959,8 @@ ORDER BY tq.timestamp DESC;
         RFQ.created_by,
         RFQ.tender_publish_date,
         RFQ.vendor_clarification_date,
+        RFQ.copied_from_rfq_id,
+        RFQ.copied_from_rfq_no,
         (
           SELECT EXISTS (
             SELECT 1 FROM tbl_quotes _tq_exists
@@ -15560,6 +15562,36 @@ ORDER BY tq.timestamp DESC;
        WHERE id = $1`,
       [rfq_id]
     );
+  },
+
+  // RFQ Copy lineage. accessibleHotelIds is the caller's set of accessible
+  // hotels; rows outside that set are filtered so a buyer can't enumerate
+  // copies they wouldn't otherwise be able to see.
+  getCopyLineage: async (rfqId, accessibleHotelIds) => {
+    const hotelArray = Array.isArray(accessibleHotelIds) ? accessibleHotelIds : [];
+
+    const parent = await db.oneOrNone(
+      `SELECT r.id, r.rfq_no, r.title, r.hotel_id, r.status, r.timestamp,
+              hh.name AS hotel_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+       WHERE r.id = (SELECT copied_from_rfq_id FROM tbl_rfq WHERE id = $1)
+         AND (r.hotel_id IS NULL OR r.hotel_id = ANY($2::int[]))`,
+      [rfqId, hotelArray]
+    );
+
+    const children = await db.any(
+      `SELECT r.id, r.rfq_no, r.title, r.hotel_id, r.status, r.timestamp,
+              hh.name AS hotel_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+       WHERE r.copied_from_rfq_id = $1
+         AND (r.hotel_id IS NULL OR r.hotel_id = ANY($2::int[]))
+       ORDER BY r.id DESC`,
+      [rfqId, hotelArray]
+    );
+
+    return { copied_from: parent, copies: children };
   },
 };
 
