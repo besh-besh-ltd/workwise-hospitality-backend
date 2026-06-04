@@ -213,6 +213,33 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
       let po = null;
 
+      // Auto-merge: if the caller did not nominate a merge target, look for an
+      // existing draft PO on this RFQ for the same vendor that shares the same
+      // project + selected_hierarchy. If found, treat the new line as an
+      // append onto that PO. SELECT ... FOR UPDATE serializes concurrent
+      // finalize transactions targeting the same (rfq, vendor, project,
+      // hierarchy), so the "at most one draft PO per tuple" invariant holds
+      // even under parallel awards. selected_hierarchy is compared via ::text
+      // to be agnostic to json/jsonb/text storage; IS NOT DISTINCT FROM keeps
+      // NULL == NULL so legacy rows without a hierarchy can still merge.
+      if (!existing_po_id) {
+        const mergeTarget = await t.oneOrNone(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1
+              AND finalized_vendor_id = $2
+              AND project_id IS NOT DISTINCT FROM $3
+              AND selected_hierarchy::text IS NOT DISTINCT FROM $4::text
+              AND status = $5
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE`,
+          [rfq_id, finalized_vendor_id, project_id, selected_hierarchy, PO_STATUSES.DRAFT]
+        );
+        if (mergeTarget) {
+          existing_po_id = mergeTarget.id;
+        }
+      }
+
       if(existing_po_id) {
         if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
