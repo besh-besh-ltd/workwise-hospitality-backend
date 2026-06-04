@@ -352,6 +352,7 @@
               <td>
                 {{name}}{{#if rate_display}} <small style="color:#888; font-weight:normal;">({{rate_display}})</small>{{/if}}
                 <small style="color:#888; font-weight:normal;">(PO-level)</small>
+                {{#if additional_tax}}<br/><small style="color:#888; font-weight:normal;">incl. ₹{{additional_tax}} tax{{#if additional_tax_display}} ({{additional_tax_display}}){{/if}}</small>{{/if}}
                 {{#if has_comment}}<br/><small style="color:#888; font-style:italic; font-weight:normal;">- {{comment}}</small>{{/if}}
               </td>
               <td class="right">{{amount}}</td>

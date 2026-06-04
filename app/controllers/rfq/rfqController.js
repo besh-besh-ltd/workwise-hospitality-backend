@@ -25,6 +25,7 @@ import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
+import puppeteer from 'puppeteer';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
@@ -1101,7 +1102,6 @@ const formattedProducts = countedProducts.length > 0
       </p>
 
       <p><strong>RFQ:</strong> #${rfq_no}</p>
-      <p><strong>Vendor:</strong> ${vendorName}</p>
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
@@ -1120,8 +1120,9 @@ const formattedProducts = countedProducts.length > 0
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
   // Preparing the email details
+  // NOTE: `from` intentionally omits the vendor name — keeps the buyer email consistent with the new-quote notification, no vendor identity in the sender display.
   let mailRecipients = {
-    from: `${vendorName} ${Config.masterEmail}`,
+    from: Config.masterEmail,
     to: buyerDetails[0]?.email,
     subject: `New Quotation Received for Your RFQ`,
     html: dynamicHTML
@@ -1444,7 +1445,6 @@ const hydrateReminderTokens = async (vendors, rfq_id) => {
 
 
 const sendQuoteNotificationEmail = async (req) => {
-  let { name,  organization_name, company_name } = req.user;
   let { rfq_id, rfq_no, products } = req.body;
 
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
@@ -1467,8 +1467,6 @@ const sendQuoteNotificationEmail = async (req) => {
         productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
-      const vendorCompanyName = company_name || organization_name || name;
-
       // Email header content
       const headerContent = `<h2>Hello ${buyer.company_name || buyer.organization_name || ''},</h2>`;
 
@@ -1478,7 +1476,6 @@ const sendQuoteNotificationEmail = async (req) => {
         <p>
           You've received a new quotation! Check out the details below:
         </p>
-        <p><strong>Vendor:</strong> ${vendorCompanyName}</p>
         <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
@@ -1495,10 +1492,9 @@ const sendQuoteNotificationEmail = async (req) => {
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
       // Preparing the email details
+      // NOTE: `from` intentionally omits the vendor name — quotes stay sealed until the submission deadline.
       let mailRecipients = {
-        from: `${vendorCompanyName} ${Config.masterEmail}`, // sender address
-        //  organization_name : Config.webmasterMail,
-        // to: buyer.email,
+        from: Config.masterEmail,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
       };
@@ -6729,6 +6725,97 @@ const rfqController = {
     }
   },
 
+  // Render the RFQ's custom Terms & Conditions (rich HTML stored on tbl_rfq.comment)
+  // as a downloadable PDF. Uses Puppeteer — same engine the ARC PDF flow uses — so
+  // output matches what users see in the on-screen WYSIWYG preview.
+  downloadRfqTermsPdf: async (req, res, next) => {
+    let browser = null;
+    try {
+      const rfq_id = parseInt(req.query.rfq_id, 10);
+      if (!Number.isFinite(rfq_id) || rfq_id <= 0) {
+        return res.status(400).json({ status: 0, message: 'rfq_id is required' });
+      }
+
+      const rfq = await rfqModel.getRfqTermsForPdf(rfq_id);
+      if (!rfq) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+
+      const commentHtml = (rfq.comment || '').toString();
+      const plainText = commentHtml.replace(/<[^>]*>/g, '').trim();
+      if (!plainText) {
+        return res.status(404).json({ status: 2, message: 'No Terms & Conditions to download for this RFQ' });
+      }
+
+      const entityLabel = Number(rfq.is_tender) === 1 ? 'Tender' : 'RFQ';
+      const escapeHtml = (str) => String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Terms &amp; Conditions - ${escapeHtml(rfq.rfq_no)}</title>
+  <style>
+    @page { margin: 18mm 16mm; }
+    body { font-family: 'Helvetica', 'Arial', sans-serif; color: #1a2730; font-size: 12pt; line-height: 1.55; margin: 0; }
+    .doc-header { border-bottom: 2px solid #1a2730; padding-bottom: 10px; margin-bottom: 18px; }
+    .doc-title { font-size: 18pt; font-weight: 700; margin: 0 0 4px 0; }
+    .doc-meta { font-size: 10pt; color: #54616e; }
+    .doc-meta span { margin-right: 14px; }
+    .doc-body { font-size: 12pt; }
+    .doc-body p { margin: 0 0 10px 0; }
+    .doc-body ul, .doc-body ol { margin: 0 0 10px 22px; padding: 0; }
+    .doc-body li { margin-bottom: 4px; }
+    .doc-body table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    .doc-body th, .doc-body td { border: 1px solid #cdd3da; padding: 6px 8px; text-align: left; }
+    .doc-body img { max-width: 100%; height: auto; }
+    .doc-body h1, .doc-body h2, .doc-body h3, .doc-body h4 { margin: 14px 0 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="doc-header">
+    <div class="doc-title">Terms &amp; Conditions</div>
+    <div class="doc-meta">
+      <span><strong>${escapeHtml(entityLabel)} No:</strong> ${escapeHtml(rfq.rfq_no)}</span>
+      ${rfq.title ? `<span><strong>Title:</strong> ${escapeHtml(rfq.title)}</span>` : ''}
+    </div>
+  </div>
+  <div class="doc-body">${commentHtml}</div>
+</body>
+</html>`;
+
+      browser = await puppeteer.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        headless: true,
+      });
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' },
+      });
+      await browser.close();
+      browser = null;
+
+      const safeRfqNo = String(rfq.rfq_no || rfq_id).replace(/[^A-Za-z0-9_-]/g, '_');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="terms-and-conditions-${safeRfqNo}.pdf"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      return res.status(200).end(pdfBuffer);
+    } catch (error) {
+      logError(error);
+      if (browser) {
+        try { await browser.close(); } catch (_) { /* swallow */ }
+      }
+      return res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
   getUnits: async (req, res, next) => {
     try {
       const result = await rfqModel.getAvailableUnits();
@@ -8896,6 +8983,7 @@ const rfqController = {
         },
         closedByName: req.user.name,
         users: buMembers.filter(u => String(u.id) !== String(id)),
+        closeReason: comment || null,
       });
 
       // Notify each instance's current approvers that their approval is no longer needed.
@@ -13273,6 +13361,22 @@ sendFollowUpEmails: async (req, res) => {
       let status = true;
       if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
         status = false;
+      }
+
+      // Bump the quote-level timestamp on any real change so the vendor's
+      // "last updated" date reflects the latest revision. The conditional
+      // global-fields update above only fires for global changes; per-item
+      // edits (price/comment/files) would otherwise leave TQ.timestamp
+      // frozen at first submission.
+      if (status) {
+        try {
+          await db.none(
+            `UPDATE tbl_quotes SET timestamp = NOW() WHERE id = $1`,
+            [quoteId]
+          );
+        } catch (timestampError) {
+          logError('Failed to bump tbl_quotes.timestamp on update', timestampError);
+        }
       }
 
       if (status) {

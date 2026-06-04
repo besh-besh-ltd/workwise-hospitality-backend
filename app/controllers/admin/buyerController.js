@@ -1,6 +1,5 @@
 import buyerModel from '../../models/buyerModel.js';
 import rfqModel from '../../models/rfqModel.js';
-import subscriptionModel from '../../models/subscriptionModel.js';
 import Config from '../../config/app.config.js';
 import { logError, sendMail } from '../../helper/common.js';
 import dateFormat from 'dateformat';
@@ -142,30 +141,6 @@ const buyerController = {
         .end();
     }
   },
-  buyer_subscription_details: async (req, res, next) => {
-    try {
-      let buyerId = req.params.id;
-      const subscriberDetails = await subscriptionModel.getSubscriberDetails(
-        buyerId
-      );
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: subscriberDetails
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   blockBuyer: async (req, res, next) => {
     try {
       let buyerId = req.params.id;
@@ -237,7 +212,6 @@ const buyerController = {
         mobile,
         organization_name,
         address,
-        subscription,
         is_hospitality
       } = req.body;
 
@@ -266,58 +240,6 @@ const buyerController = {
 
       if (resolvedHospitality !== null) {
         await buyerModel.updateBuyerHospitalityFlag(buyerId, resolvedHospitality);
-      }
-
-      if (subscription) {
-        const condition = `user_id = ${parseInt(
-          buyerId
-        )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
-        let activeSubscripton = await rfqModel.checkIfExists(
-          'tbl_user_subscriptions',
-          condition
-        );
-
-        if (activeSubscripton && activeSubscripton.length > 0) {
-          activeSubscripton = activeSubscripton[0];
-
-          const subscriptionObj = {
-            status: 3
-          };
-          await subscriptionModel.updateBuyerSubscription(
-            subscriptionObj,
-            activeSubscripton.id
-          );
-          
-          await userModel.updateUserAccount(buyerId, {
-            subscription_plan_id: null
-          });
-
-        }
-
-        if (subscription != '-1') {
-          const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, buyerDetails[0].user_type);
-          if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
-            const x = doesSubscriptionExist[0].duration;
-
-            let today = dateFormat(new Date(), 'yyyy-mm-dd');
-            const todayInMoment = moment(today);
-            const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
-            const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
-
-            let UserSubscriptionObj = {
-              user_id: buyerId,
-              plan_id: doesSubscriptionExist[0].id,
-              status: 1, // payment pending
-              start_date: today,
-              end_date: endDate,
-              renew_date: renewDate
-            };
-
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-            
-            await userModel.updateUserAccount(buyerId, { subscription_plan_id: doesSubscriptionExist[0].id })
-          }
-        }
       }
 
       res

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics } from "../../controllers/po/poDashboardController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
@@ -32,6 +32,10 @@ PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 PORoutes.put('/:po_id', passportSignIn, noAcl([3]), updatePO)
 PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
 PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
+// Bulk-merge multiple draft POs of the same vendor on the same RFQ into one.
+// Same buyer-only acl as the other write routes; tenant scope is verified
+// inside the model against the kept PO's company_id.
+PORoutes.post('/merge-drafts', passportSignIn, noAcl([3]), mergePODrafts);
 PORoutes.post('/approve/:po_id', passportSignIn, approvePO);
 PORoutes.post('/accept/:po_id', passportSignIn, acl([3]), acceptPO);
 PORoutes.post('/reject/:po_id', passportSignIn, acl([3]), rejectPO);

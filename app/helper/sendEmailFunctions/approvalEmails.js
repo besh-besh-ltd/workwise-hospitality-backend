@@ -824,6 +824,7 @@ export const sendRfqClosedHeadsUpNotification = async ({
   rfqDetails,
   closedByName,
   users,
+  closeReason = null,
 }) => {
   try {
     if (!users || users.length === 0) {
@@ -837,6 +838,17 @@ export const sendRfqClosedHeadsUpNotification = async ({
 
     const subject = `Heads up: ${entityLabel} #${rfq_no} has been CLOSED — all actions are now restricted`;
 
+    // Escape user-supplied closure reason; preserve newlines as <br>.
+    const escapeHtml = (str) => String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    const closeReasonTrimmed = closeReason ? String(closeReason).trim() : '';
+    const closeReasonHtml = closeReasonTrimmed
+      ? escapeHtml(closeReasonTrimmed).replace(/\n/g, '<br>')
+      : '';
+
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'Team Member'},</h2>`;
 
@@ -846,6 +858,8 @@ export const sendRfqClosedHeadsUpNotification = async ({
             <strong>Heads up</strong> — ${entityLabel} <strong>#${rfq_no}</strong>
             has been <strong style="color:#991B1B;">CLOSED</strong> by ${closedByName || 'the creator'}.
           </p>
+
+          ${closeReasonHtml ? `<div style="background-color:#FFFBEB; border-left:4px solid #F59E0B; padding:14px 18px; margin:18px 0; border-radius:6px;"><div style="color:#92400E; font-weight:700; font-size:13px; letter-spacing:0.4px; text-transform:uppercase; margin-bottom:8px;">Reason for closure</div><div style="color:#78350F; font-size:15px; line-height:1.6;">${closeReasonHtml}</div></div>` : ''}
 
           <div style="background-color:#FEF2F2; border-left:4px solid #DC2626; padding:14px 18px; margin:18px 0; border-radius:6px;">
             <div style="color:#7F1D1D; font-weight:700; font-size:14px; margin-bottom:6px;">

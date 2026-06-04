@@ -18,7 +18,6 @@ import {
 } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 // import jwtHelper from '../../helper/jwtHelper.js';
-import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import userModel from '../../models/userModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
@@ -330,32 +329,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await productModel.addFile(filesObj);
       }
       
-      if(subscription && subscription != '-1') {
-        const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, '3');
-        if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
-          const x = doesSubscriptionExist[0].duration;
-
-          let today = dateFormat(new Date(), 'yyyy-mm-dd');
-          const todayInMoment = moment(today);
-          const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
-          const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
-
-          let UserSubscriptionObj = {
-            user_id: vendorId,
-            plan_id: doesSubscriptionExist[0].id,
-            status: 1, // payment pending
-            start_date: today,
-            end_date: endDate,
-            renew_date: renewDate
-          };
-
-          let createUserSubscription =
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-          
-          await userModel.updateUserAccount(vendorId, { subscription_plan_id: doesSubscriptionExist[0].id })
-        }
-      }
-
       addDefaultNotifications(vendorId);
 
       if (buyerCompanyIds && buyerCompanyIds.length > 0) {
@@ -925,57 +898,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           ifsc_code: ifsc_code || null,
           account_holder_name: account_holder_name || null
         });
-      }
-
-      if (subscription) {
-        const condition = `user_id = ${parseInt(
-          vendorId
-        )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
-        let activeSubscripton = await rfqModel.checkIfExists(
-          'tbl_user_subscriptions',
-          condition
-        );
-
-        if (activeSubscripton && activeSubscripton.length > 0) {
-          activeSubscripton = activeSubscripton[0];
-
-          const subscriptionObj = {
-            status: 3
-          };
-          await subscriptionModel.updateBuyerSubscription(
-            subscriptionObj,
-            activeSubscripton.id
-          );
-
-          await userModel.updateUserAccount(vendorId, {
-            subscription_plan_id: null
-          });
-        }
-        
-        if (subscription != '-1') {
-          const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, '3');
-          if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
-            const x = doesSubscriptionExist[0].duration;
-
-            let today = dateFormat(new Date(), 'yyyy-mm-dd');
-            const todayInMoment = moment(today);
-            const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
-            const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
-
-            let UserSubscriptionObj = {
-              user_id: vendorId,
-              plan_id: doesSubscriptionExist[0].id,
-              status: 1, // payment pending
-              start_date: today,
-              end_date: endDate,
-              renew_date: renewDate
-            };
-
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-            
-            await userModel.updateUserAccount(vendorId, { subscription_plan_id: doesSubscriptionExist[0].id })
-          }
-        }
       }
 
       await vendorModel.replaceVendorCompanyMappings(

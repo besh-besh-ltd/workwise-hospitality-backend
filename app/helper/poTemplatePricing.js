@@ -226,6 +226,9 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
         pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, roundedSubtotal)
       );
       if (amount <= 0) return null;
+      const additionalTax = roundCurrency(
+        pricingEngine.applyChargeMode(norm.additional_tax, norm.additional_tax_mode, amount)
+      );
       const rateInput = norm.amount;
       const rateMode = norm.amount_mode;
       let rateDisplay = null;
@@ -234,11 +237,21 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
           ? `${rateInput}%`
           : `₹${formatAmount(Number(rateInput) || 0)}`;
       }
+      const additionalTaxRate = norm.additional_tax;
+      const additionalTaxMode = norm.additional_tax_mode;
+      let additionalTaxDisplay = null;
+      if (additionalTaxRate > 0) {
+        additionalTaxDisplay = additionalTaxMode === 'percentage'
+          ? `${additionalTaxRate}%`
+          : `₹${formatAmount(Number(additionalTaxRate) || 0)}`;
+      }
       return {
         name: norm.name || 'Global Charge',
-        amount: formatAmount(amount),
-        amount_raw: amount,
+        amount: formatAmount(amount + additionalTax),
+        amount_raw: amount + additionalTax,
         rate_display: rateDisplay,
+        additional_tax: additionalTax > 0 ? formatAmount(additionalTax) : null,
+        additional_tax_display: additionalTaxDisplay,
         comment: norm.comment || null,
         has_comment: !!norm.comment,
       };

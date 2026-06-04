@@ -2,7 +2,6 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
-import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
@@ -2583,7 +2582,13 @@ WHERE NOT EXISTS (
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
     ${user_type == 3 ? `ARRAY(
-    SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    SELECT json_build_object('id', TQ.id, 'timestamp', COALESCE(
+      GREATEST(
+        TQ.timestamp,
+        (SELECT MAX(TQI_LU.updated_at) FROM tbl_quote_items TQI_LU WHERE TQI_LU.quote_id = TQ.id)
+      ),
+      TQ.timestamp
+    ), 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
     'global_comment', TQ.global_comment,
     'global_charges', TQ.global_charges,
 
@@ -7290,7 +7295,6 @@ LIMIT 2;
         });
     });
   },
-  // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   /**
    * Recommends product variants for the Start RFQ wizard.
@@ -13573,13 +13577,18 @@ ORDER BY tq.timestamp DESC;
               )
           )
         ) AS has_po_rejection,
-        -- has_pending_po_approval: any PO approval is PENDING for this RFQ
+        -- has_pending_po_approval: any PO approval is PENDING for this RFQ AND its
+        -- underlying PO row is still alive (not rejected/cancelled). Without the JOIN
+        -- check, a stale PENDING instance left behind by a rejected PO would falsely
+        -- mark the RFQ as awaiting approval on the PO sidebar.
         (
           EXISTS (
             SELECT 1 FROM tbl_approval_instances _ai_po_p
+            JOIN tbl_rfq_purchase_order _po_link ON _po_link.id = _ai_po_p.entity_id
             WHERE _ai_po_p.entity_type = 'PO'
               AND (_ai_po_p.metadata->>'rfq_id')::INTEGER = RFQ.id
               AND _ai_po_p.status = 'PENDING'
+              AND _po_link.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
           )
         ) AS has_pending_po_approval,
         -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
@@ -15813,6 +15822,15 @@ ORDER BY tq.timestamp DESC;
          evaluation_round, approval_instance_id, calculated_score, created_by]
       );
     }
+  },
+
+  getRfqTermsForPdf: async (rfq_id) => {
+    return await db.oneOrNone(
+      `SELECT id, rfq_no, title, comment, is_tender
+       FROM tbl_rfq
+       WHERE id = $1`,
+      [rfq_id]
+    );
   },
 };
 
