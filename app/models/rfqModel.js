@@ -12311,9 +12311,24 @@ ORDER BY m.created_at;
       SELECT
         RFQ.*,
         P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+        -- Real items count (not bounded by the LIMIT 3 in "products"). Used by the
+        -- Create-RFQ landing list so we can show "12 items" without paying for
+        -- the full payload.
+        (SELECT COUNT(*)::int FROM tbl_rfq_products _RPC WHERE _RPC.rfq_id = RFQ.id) AS items_count,
+        -- Business units attached to this draft (id + name) — the landing
+        -- replaces the Project column with this.
+        ARRAY(
+          SELECT json_build_object('id', _HCH.id, 'name', _HCH.name)
+          FROM tbl_rfq_hotel_mappings _RHM
+          JOIN tbl_hospitality_company_hotels _HCH ON _HCH.id = _RHM.hotel_id
+          WHERE _RHM.rfq_id = RFQ.id
+        ) AS hotels,
+        -- Creator's display name so the FE can show "Created by …" and a
+        -- "View only" pill when current user isn't the owner.
+        (SELECT _U.name FROM tbl_users _U WHERE _U.id = RFQ.created_by) AS creator_name,
         ARRAY(
             SELECT json_build_object(
-                'id', RFQ_P.id, 
+                'id', RFQ_P.id,
                 'product_id', RFQ_P.product_variant_id,
                   'product_details', (
                       SELECT json_agg(json_build_object(
