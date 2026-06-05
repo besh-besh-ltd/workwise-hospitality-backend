@@ -1056,48 +1056,32 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
 
 
 const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, user, rfq_id, rfq_no) => {
-  
-
   // Extract vendor details from user object
   const vendorName = user.company_name || user.organization_name || user?.name;
 
-// Group product names and count occurrences (variants)
-const productCountMap = quoteItemChanges
-  .filter(item => item.quote && item.quote.product_name)
-  .reduce((acc, item) => {
-    const name = item.quote.product_name;
-    acc[name] = (acc[name] || 0) + 1;
-    return acc;
-  }, {});
-
-// Build a list like ["Product A (x3)", "Product B (x2)", ...] max 3
-const countedProducts = Object.entries(productCountMap)
-  .slice(0, 3)
-  .map(([name, count]) => `${name} (x${count})`);
-
-// Append a simple "view more" indicator when there are more than 3
-const formattedProducts = countedProducts.length > 0
-  ? countedProducts.join(', ') + (Object.keys(productCountMap).length > 3 ? ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>` : '')
-  : '[Products]';
-  
+  const rfqDetails = await rfqModel.getRfqWithHospitalityDetails(rfq_id);
+  const rfqTitle = rfqDetails?.title || '-';
+  const buName = rfqDetails?.hotel_name || '-';
+  const companyName = rfqDetails?.hospitality_company_name || '-';
 
   // Email content
   const headerContent = `<h2>Hello ${buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || ''},</h2>`;
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-        You've received a new quotation! Check out the details below:
+        A vendor has updated their quotation. Check out the details below:
       </p>
 
-      <p><strong>RFQ:</strong> #${rfq_no}</p>
-      <p><strong>Products:</strong> ${formattedProducts}</p>
+      <p><strong>RFQ:</strong> #${rfq_no} — ${rfqTitle}</p>
+      <p><strong>Company:</strong> ${companyName}</p>
+      <p><strong>BU:</strong> ${buName}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
-         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
-         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif;
+         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px;
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
          Compare Quote
-      </a>      
+      </a>
 
       <p style="margin-top:20px;">
         Stay updated with Phileein Hospitality for more opportunities.
@@ -1112,7 +1096,7 @@ const formattedProducts = countedProducts.length > 0
   let mailRecipients = {
     from: Config.masterEmail,
     to: buyerDetails[0]?.email,
-    subject: `New Quotation Received for Your RFQ`,
+    subject: `Updated Quotation Received for Your RFQ ${rfq_no}`,
     html: dynamicHTML
   };
 
@@ -1423,27 +1407,16 @@ const hydrateReminderTokens = async (vendors, rfq_id) => {
 
 
 const sendQuoteNotificationEmail = async (req) => {
-  let { rfq_id, rfq_no, products } = req.body;
+  let { rfq_id, rfq_no } = req.body;
 
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
     if (u.length > 0) {
       let buyer = u[0];
 
-      // Prepare product list with grouping and variant counts, max 3 entries
-      const productCountMap = (products || []).reduce((acc, item) => {
-        const name = item?.product_name || item?.name;
-        if (name) acc[name] = (acc[name] || 0) + 1;
-        return acc;
-      }, {});
-
-      let productEntries = Object.entries(productCountMap)
-        .slice(0, 3)
-        .map(([name, count]) => `${name} (x${count})`)
-        .join(', ');
-
-      if (Object.keys(productCountMap).length > 3) {
-        productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
-      }
+      const rfqDetails = await rfqModel.getRfqWithHospitalityDetails(rfq_id);
+      const rfqTitle = rfqDetails?.title || '-';
+      const buName = rfqDetails?.hotel_name || '-';
+      const companyName = rfqDetails?.hospitality_company_name || '-';
 
       // Email header content
       const headerContent = `<h2>Hello ${buyer.company_name || buyer.organization_name || ''},</h2>`;
@@ -1454,12 +1427,14 @@ const sendQuoteNotificationEmail = async (req) => {
         <p>
           You've received a new quotation! Check out the details below:
         </p>
-        <p><strong>Products:</strong> ${productEntries || '-'}</p>
+        <p><strong>RFQ:</strong> #${rfq_no} — ${rfqTitle}</p>
+        <p><strong>Company:</strong> ${companyName}</p>
+        <p><strong>BU:</strong> ${buName}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Review the Quotation
-        </a>      
+        </a>
 
         <p style="margin-top:20px; text-align:center; ">
           We're here to help you get the best deal.
