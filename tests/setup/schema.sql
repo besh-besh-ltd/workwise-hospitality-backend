@@ -3638,7 +3638,9 @@ CREATE TABLE public.tbl_rfq (
     publish_attempts integer DEFAULT 0 NOT NULL,
     last_publish_attempt_at timestamp without time zone,
     publish_failure_reason text,
-    publish_failure_notified_at timestamp without time zone
+    publish_failure_notified_at timestamp without time zone,
+    copied_from_rfq_id integer,
+    copied_from_rfq_no integer
 );
 
 
@@ -3650,6 +3652,16 @@ CREATE TABLE public.tbl_rfq (
 CREATE INDEX idx_rfq_stuck_publish
     ON public.tbl_rfq (tender_publish_date)
     WHERE status = 4 AND is_published = 0;
+
+
+--
+-- Name: idx_tbl_rfq_copied_from_rfq_id; Type: INDEX; Schema: public; Owner: -
+-- Lineage forward-link lookups for RFQ Copy feature
+--
+
+CREATE INDEX idx_tbl_rfq_copied_from_rfq_id
+    ON public.tbl_rfq (copied_from_rfq_id)
+    WHERE copied_from_rfq_id IS NOT NULL;
 
 
 --
@@ -10862,6 +10874,15 @@ ALTER TABLE ONLY public.tbl_rfq_purchase_order
 
 ALTER TABLE ONLY public.tbl_rfq
     ADD CONSTRAINT tbl_rfq_technical_evaluation_by_fkey FOREIGN KEY (technical_evaluation_by) REFERENCES public.tbl_users(id);
+
+
+--
+-- Name: tbl_rfq tbl_rfq_copied_from_rfq_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Self-referencing FK for the RFQ Copy feature lineage
+--
+
+ALTER TABLE ONLY public.tbl_rfq
+    ADD CONSTRAINT tbl_rfq_copied_from_rfq_id_fkey FOREIGN KEY (copied_from_rfq_id) REFERENCES public.tbl_rfq(id) ON DELETE SET NULL;
 
 
 --
