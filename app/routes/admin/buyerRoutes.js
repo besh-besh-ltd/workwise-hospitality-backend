@@ -35,13 +35,6 @@ buyerRoutes.get(
   validateDbBody.buyer_id_exists,
   buyerController.buyer_rfq_list
 );
-buyerRoutes.get(
-  '/buyer-subscription-details/:id',
-  passportSignIn,
-  validateParam(schemas.id),
-  validateDbBody.buyer_id_exists,
-  buyerController.buyer_subscription_details
-);
 buyerRoutes.put(
   '/block-buyer/:id',
   passportSignIn,

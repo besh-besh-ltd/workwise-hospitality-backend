@@ -10,7 +10,6 @@ import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import fs from 'fs';
 import Moment from 'moment';
-import subscriptionModel from '../../models/subscriptionModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -176,73 +175,6 @@ const otherUserController = {
 
       sendMail(mailRecipients);
 
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: email, // list of receivers
-        //   subject: `Work wise | Registration`, // Subject line
-        //   // html: dynamic_html // plain text body
-        //   html: `Dear ${name}, Your login credential Userid :${email} and password ${password}`
-        // });
-
-        let checkFreeSubscription =
-          await subscriptionModel.checkFreeSubscription();
-        if (checkFreeSubscription.length > 0) {
-          const startDate = Moment(); // Replace with the actual start date
-
-          const billingCycleMonths = checkFreeSubscription[0].duration;
-
-          // Calculate the end date by adding the billing cycle and subtracting one day
-          const endDate = startDate
-            .clone()
-            .add(billingCycleMonths, 'months')
-            .subtract(1, 'day');
-          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
-
-          // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-          // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-          // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
-
-          let UserSubscriptionObj = {
-            user_id: otherUserId[0].id,
-            plan_id: checkFreeSubscription[0].id,
-            status: 1, //By default payment done
-            start_date: startDate.format('YYYY-MM-DD'),
-            end_date: endDate.format('YYYY-MM-DD'),
-            renew_date: renewDate.format('YYYY-MM-DD')
-          };
-
-          let createUserSubscription =
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-
-          await subscriptionModel.updateUserSubscriptionId(
-            checkFreeSubscription[0].id,
-            otherUserId[0].id
-          );
-          let subscriptionMappingDetails =
-            await subscriptionModel.getSubscriptionMappingDetails(
-              checkFreeSubscription[0].id
-            );
-          // console.log(
-          //   'subscriptionMappingDetails==>>>>',
-          //   subscriptionMappingDetails
-          // );
-          for await (const {
-            allocated_feature,
-            feature_id
-          } of subscriptionMappingDetails) {
-            let userSubscriptionFeatureObj = {
-              user_subscriptions_id: createUserSubscription.id,
-              feature_id: feature_id,
-              plan_id: checkFreeSubscription[0].id,
-              used_feature_count: 0,
-              allocated_feature: allocated_feature,
-              user_id: otherUserId[0].id
-            };
-            await subscriptionModel.createUserSubscriptionFeature(
-              userSubscriptionFeatureObj
-            );
-          }
-        }
         res
           .status(200)
           .json({

@@ -68,6 +68,15 @@ passport.use(
         let user_dtls = Object.assign({}, ...user);
         // console.log('user_dtls_passport--', user_dtls);
         if (Object.keys(user_dtls).length > 0) {
+          // Restrict buyer login to Employee Code only. Vendors (user_type === '3') unchanged.
+          const usedEmployeeCode = !!req.body.employee_code;
+          const isBuyer = String(user_dtls.user_type) === '2';
+          if (isBuyer && !usedEmployeeCode) {
+            return done(null, {
+              id: 0,
+              err_msg: 'Please use your Employee Code to login. Email login is only for vendors.'
+            });
+          }
           let isMatch = '';
           if (user_dtls.password == null) {
             logger.debug('Case 1');
