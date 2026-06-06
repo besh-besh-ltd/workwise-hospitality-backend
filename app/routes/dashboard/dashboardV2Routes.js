@@ -6,6 +6,9 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 const DashboardRoutes = Router();
 
 DashboardRoutes.get('/action-center', passportSignIn, dashboardController.getActionCenter);
+// Single-call status banner shown at the top of /dashboard/buyer. Returns
+// derived mode + counts + soonest closing RFQ + weekly stats.
+DashboardRoutes.get('/buyer-status-banner', passportSignIn, dashboardController.getBuyerStatusBanner);
 DashboardRoutes.get('/procurement-snapshot', passportSignIn, dashboardController.getProcurementSnapshot);
 DashboardRoutes.get('/negotiation-savings', passportSignIn, dashboardController.getNegotiationSavings);
 DashboardRoutes.get('/cost-intelligence', passportSignIn, dashboardController.getCostIntelligence);

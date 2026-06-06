@@ -1859,6 +1859,266 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────
+//  Status Banner — single BFF aggregator that powers the dashboard hero.
+//
+//  Collapses six dimensions into one parallel-fetched payload:
+//    1. pending_approvals        (user is the next approver, any entity)
+//    2. closing_soon             (user's RFQs whose bid window ends in <24h)
+//    3. closed_no_quotes         (user's RFQs past bid window with 0 real quotes)
+//    4. quote_compare_ready      (user's RFQs sitting in quote-compare gate)
+//    5. po_pending_approval      (POs awaiting an internal approval, scoped)
+//    6. weekly_published         (user's RFQs published this calendar week)
+//    + weekly_savings_pct        (negotiation savings % this week)
+//
+//  The FE derives mode (clear / steady / action_needed / critical) from the
+//  numbers — we do the same here so two clients can't disagree on tone.
+// ─────────────────────────────────────────────────────────────────────
+async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = []) {
+  const params = [buyer_company_id, user_id, hotel_ids];
+
+  // 1. Approvals where I'm the current-step approver, still pending.
+  //    Mirrors the action-center query but without date-window filtering —
+  //    the banner shows the live queue, not a windowed slice.
+  const pendingApprovalsP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+      WHERE i.status = 'PENDING'
+        AND sa.approver_user_id = $2
+        AND sa.status = 'PENDING'
+        AND s.step_order = i.current_step
+        AND i.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND NOT (
+          i.entity_type IN ('RFQ', 'TENDER')
+          AND EXISTS (SELECT 1 FROM tbl_rfq r WHERE r.id = i.entity_id AND r.is_published = 1)
+        )
+        AND i.hotel_id = ANY($3)`,
+    params
+  );
+
+  // 2. Closing soon — *my* published RFQs whose bid window ends in <24h
+  //    and still has not received any quotes (the most urgent variant).
+  //    Also returns the soonest one for the subline copy.
+  const closingSoonP = db.oneOrNone(
+    `SELECT COUNT(*)::INTEGER AS count,
+            MIN(r.bid_end_date::timestamp) AS soonest_bid_end,
+            (SELECT json_build_object('id', _r.id, 'title', _r.title, 'rfq_no', _r.rfq_no)
+               FROM tbl_rfq _r
+              WHERE _r.created_by = $2
+                AND _r.is_published = 1
+                AND _r.status = 1
+                AND _r.bid_end_date IS NOT NULL AND _r.bid_end_date != ''
+                AND _r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+                AND _r.hospitality_company_id IN (
+                  SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_hotel_mappings _rhm
+                   WHERE _rhm.rfq_id = _r.id AND _rhm.hotel_id = ANY($3)
+                )
+              ORDER BY _r.bid_end_date::timestamp ASC
+              LIMIT 1) AS soonest
+       FROM tbl_rfq r
+      WHERE r.created_by = $2
+        AND r.is_published = 1
+        AND r.status = 1
+        AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
+        AND r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )`,
+    params
+  );
+
+  // 3. Bid passed, zero real quotes — *the* signal that vendors aren't biting.
+  //    Drives critical mode; surfaced even when only 1 hits.
+  const closedNoQuotesP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq r
+      WHERE r.created_by = $2
+        AND r.is_published = 1
+        AND r.status IN (1, 2)
+        AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
+        AND r.bid_end_date::timestamp < NOW()
+        AND r.bid_end_date::timestamp > NOW() - INTERVAL '14 days'
+        AND r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id AND (q.is_regret IS NULL OR q.is_regret != 1)
+        )`,
+    params
+  );
+
+  // 4. My RFQs sitting in quote-compare gate (quotes in, no live negotiation,
+  //    no PO yet). Buyer's window to act on vendor selection.
+  const quoteCompareReadyP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq r
+      WHERE r.created_by = $2
+        AND r.is_published = 1
+        AND r.status = 1
+        AND r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id
+            AND (q.is_regret IS NULL OR q.is_regret != 1)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_negotiation_rounds nr
+           WHERE nr.rfq_id = r.id AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
+        )
+        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)`,
+    params
+  );
+
+  // 5. POs in acceptance_pending — vendor hasn't acknowledged yet. Surfaced
+  //    so the buyer knows they may need to nudge.
+  const poAcceptancePendingP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+      WHERE po.status = 'acceptance_pending'
+        AND r.created_by = $2
+        AND r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )`,
+    params
+  );
+
+  // 6. Weekly wins — RFQs the user published in the last 7 days (used for
+  //    appreciation copy). Bounded to 7 calendar days regardless of NOW().
+  const weeklyPublishedP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq r
+      WHERE r.created_by = $2
+        AND r.is_published = 1
+        AND r.timestamp >= NOW() - INTERVAL '7 days'
+        AND r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )`,
+    params
+  );
+
+  // 7. Weekly savings — negotiation delta on rounds *started* this week.
+  //    Same shape as getNegotiationSavingsData but date-bounded inline.
+  const weeklySavingsP = db.oneOrNone(
+    `WITH scoped_rfqs AS (
+       SELECT DISTINCT nr.rfq_id
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_rfq r ON r.id = nr.rfq_id
+        WHERE r.hospitality_company_id IN (
+          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+        )
+          AND r.created_by = $2
+          AND nr.created_at >= NOW() - INTERVAL '7 days'
+          AND EXISTS (
+            SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+             WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+          )
+     ),
+     round1 AS (
+       SELECT sr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
+         FROM scoped_rfqs sr
+         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id AND nr.round_number = 1
+         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
+        WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
+     ),
+     last_round AS (
+       SELECT DISTINCT ON (nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id)
+              nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
+         FROM scoped_rfqs sr
+         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id
+         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
+        WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
+        ORDER BY nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nr.round_number DESC
+     )
+     SELECT
+       COALESCE(SUM(r1.quoted_price), 0) AS market_baseline,
+       COALESCE(SUM(lr.quoted_price), 0) AS negotiated_total
+       FROM round1 r1
+       JOIN last_round lr ON lr.rfq_id = r1.rfq_id
+         AND lr.vendor_id = r1.vendor_id
+         AND lr.rfq_product_id = r1.rfq_product_id`,
+    params
+  );
+
+  const [
+    pendingApprovals,
+    closingSoon,
+    closedNoQuotes,
+    quoteCompareReady,
+    poAcceptancePending,
+    weeklyPublished,
+    weeklySavings,
+  ] = await Promise.all([
+    pendingApprovalsP,
+    closingSoonP,
+    closedNoQuotesP,
+    quoteCompareReadyP,
+    poAcceptancePendingP,
+    weeklyPublishedP,
+    weeklySavingsP,
+  ]);
+
+  const baseline = weeklySavings ? Number(weeklySavings.market_baseline) || 0 : 0;
+  const negotiated = weeklySavings ? Number(weeklySavings.negotiated_total) || 0 : 0;
+  const savings_pct = baseline > 0 ? Math.round(((baseline - negotiated) / baseline) * 1000) / 10 : 0;
+
+  // Mode is derived here so server and client agree on tone.
+  const counts = {
+    pending_approvals: pendingApprovals.count,
+    closing_soon: closingSoon?.count || 0,
+    closed_no_quotes: closedNoQuotes.count,
+    quote_compare_ready: quoteCompareReady.count,
+    po_acceptance_pending: poAcceptancePending.count,
+  };
+  const totalPending =
+    counts.pending_approvals +
+    counts.closing_soon +
+    counts.quote_compare_ready +
+    counts.po_acceptance_pending;
+
+  let mode = 'clear';
+  if (counts.closed_no_quotes >= 1 || counts.pending_approvals >= 5) {
+    mode = 'critical';
+  } else if (counts.closing_soon >= 1 || counts.pending_approvals >= 3) {
+    mode = 'action_needed';
+  } else if (totalPending > 0) {
+    mode = 'steady';
+  }
+
+  return {
+    mode,
+    counts,
+    soonest_closing: closingSoon?.soonest || null,
+    weekly: {
+      rfqs_published: weeklyPublished.count,
+      savings_pct,
+    },
+  };
+}
+
 export default {
   resolveUserScope,
   getActionCenterData,
@@ -1903,4 +2163,7 @@ export default {
   getMyAwardApprovalsPendingData,
   getRecentAwardsData,
   getAwardValuePipelineData,
+
+  // Single-call hero banner aggregator (powers /dashboard/buyer-status-banner).
+  getBuyerStatusBannerData,
 };

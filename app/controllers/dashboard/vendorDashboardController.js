@@ -1,6 +1,7 @@
 import vendorDashboardModel from '../../models/vendorDashboardModel.js';
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import db from '../../config/dbConn.js';
 
 const vendorDashboardController = {
   getOpportunities: async (req, res) => {
@@ -29,6 +30,27 @@ const vendorDashboardController = {
         end_date || new Date().toISOString().split('T')[0]
       );
       res.status(200).json({ status: 1, data }).end();
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
+  // Vendor-side status banner — single aggregator. No date params; the
+  // counts are live and the weekly window is fixed at 7 days.
+  getStatusBanner: async (req, res) => {
+    try {
+      const vendor_id = req.user.id;
+      const userRow = await db.oneOrNone(
+        `SELECT name FROM tbl_users WHERE id = $1`,
+        [vendor_id]
+      );
+      const data = await vendorDashboardModel.getStatusBannerData(vendor_id);
+      const firstName = (userRow?.name || '').trim().split(/\s+/)[0] || null;
+      res.status(200).json({
+        status: 1,
+        data: { ...data, greeting: { first_name: firstName } },
+      }).end();
     } catch (error) {
       logError(error);
       res.status(400).json({ status: 3, message: Config.errorText.value }).end();

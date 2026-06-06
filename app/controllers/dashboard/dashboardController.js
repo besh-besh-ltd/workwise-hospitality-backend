@@ -1,6 +1,7 @@
 import dashboardModel from '../../models/dashboardModel.js';
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import db from '../../config/dbConn.js';
 
 /**
  * Resolves scope from tbl_hospitality_user_mappings.
@@ -27,6 +28,34 @@ const dashboardController = {
       const { start_date, end_date } = req.query;
       const data = await dashboardModel.getActionCenterData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
+  // Status banner — single aggregator that drives the dashboard hero strip.
+  // Returns { mode, counts, soonest_closing, weekly, greeting }. The mode is
+  // derived server-side so the FE never recomputes severity from raw counts.
+  getBuyerStatusBanner: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const userRow = await db.oneOrNone(
+        `SELECT name FROM tbl_users WHERE id = $1`,
+        [req.user.id]
+      );
+      const data = await dashboardModel.getBuyerStatusBannerData(
+        scope.buyer_company_id,
+        req.user.id,
+        scope.hotel_ids
+      );
+      // Strip trailing/extra whitespace; first token only so headlines stay tight.
+      const firstName = (userRow?.name || '').trim().split(/\s+/)[0] || null;
+      res.status(200).json({
+        status: 1,
+        data: { ...data, greeting: { first_name: firstName } },
+      }).end();
     } catch (error) {
       logError(error);
       res.status(400).json({ status: 3, message: Config.errorText.value }).end();

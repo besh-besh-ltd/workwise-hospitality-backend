@@ -8849,11 +8849,15 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           existingProductWithNoChange = true;
         }
 
-        // Fetch existing quote item only if there are differences in specified fields
+        // Fetch existing quote item only if there are differences in specified fields.
+        // `delivery_period` is stored as TEXT (legacy schema), but the FE sends it as
+        // a JS number — pg-promise infers integer for the wire param and Postgres
+        // throws "operator does not exist: text <> integer". Cast the param to text
+        // so the comparison stays type-safe regardless of how the FE serializes it.
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
       WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8 OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
+       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8::text OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,

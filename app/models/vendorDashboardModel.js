@@ -281,4 +281,197 @@ async function getInsights(vendor_id, start_date, end_date) {
   };
 }
 
-export default { getOpportunities, getPerformance, getInsights };
+// ─────────────────────────────────────────────────────────────────────
+//  Status Banner — vendor-side hero aggregator. Mirrors the buyer banner
+//  but answers vendor-specific questions:
+//
+//    1. new_rfqs_unviewed      RFQs invited to, never opened
+//    2. closing_soon           Invited RFQ where bid window <24h + not quoted
+//    3. pending_negotiation    Live negotiation round where vendor hasn't
+//                              submitted a quote yet
+//    4. po_acceptance_pending  POs sent to me, awaiting my acceptance
+//    5. po_in_transit          POs sent / dispatched / GRN (in flight)
+//    6. subscription_expiring  Active subscription ending within 30 days
+//    + weekly_wins             POs accepted in last 7 days
+//    + weekly_revenue          Sum of total_price on those POs
+//
+//  Mode derivation:
+//    critical      → any closed-bid-no-quote on an RFQ the vendor was invited
+//                    to but skipped, OR a subscription already expired
+//    action_needed → closing_soon ≥ 1, pending_negotiation ≥ 1, OR
+//                    po_acceptance_pending ≥ 1, OR subscription_expiring ≥ 1
+//    steady        → new_rfqs_unviewed ≥ 1 or po_in_transit ≥ 1
+//    clear         → otherwise
+// ─────────────────────────────────────────────────────────────────────
+async function getStatusBannerData(vendor_id) {
+  const params = [vendor_id];
+
+  // 1. New RFQs the vendor was invited to but hasn't opened yet. Uses
+  //    tbl_rfq_product_vendors.is_rfq_viewed; treat NULL/0 as "unviewed".
+  const newRfqsUnviewedP = db.one(
+    `SELECT COUNT(DISTINCT rpv.rfq_id)::INTEGER AS count
+       FROM tbl_rfq_product_vendors rpv
+       JOIN tbl_rfq r ON r.id = rpv.rfq_id
+      WHERE rpv.user_id = $1
+        AND r.is_published = 1
+        AND r.status = 1
+        AND (rpv.is_rfq_viewed IS NULL OR rpv.is_rfq_viewed = 0)
+        AND (r.bid_end_date IS NULL OR r.bid_end_date = '' OR r.bid_end_date::timestamp > NOW())`,
+    params
+  );
+
+  // 2. Closing soon — bid window ends in <24h AND vendor hasn't quoted.
+  //    Also returns the soonest RFQ so the FE can name it in the subline.
+  const closingSoonP = db.oneOrNone(
+    `SELECT COUNT(DISTINCT rpv.rfq_id)::INTEGER AS count,
+            (SELECT json_build_object('id', _r.id, 'title', _r.title, 'rfq_no', _r.rfq_no)
+               FROM tbl_rfq _r
+               JOIN tbl_rfq_product_vendors _rpv ON _rpv.rfq_id = _r.id
+              WHERE _rpv.user_id = $1
+                AND _r.is_published = 1
+                AND _r.status = 1
+                AND _r.bid_end_date IS NOT NULL AND _r.bid_end_date != ''
+                AND _r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quotes _q
+                   WHERE _q.rfq_id = _r.id AND _q.created_by = $1
+                )
+              ORDER BY _r.bid_end_date::timestamp ASC
+              LIMIT 1) AS soonest
+       FROM tbl_rfq_product_vendors rpv
+       JOIN tbl_rfq r ON r.id = rpv.rfq_id
+      WHERE rpv.user_id = $1
+        AND r.is_published = 1
+        AND r.status = 1
+        AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
+        AND r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_quotes q
+           WHERE q.rfq_id = r.id AND q.created_by = $1
+        )`,
+    params
+  );
+
+  // 3. Pending negotiation rounds — live (PUBLISHED), not yet ended,
+  //    vendor had an original quote (was invited to negotiate), and the
+  //    vendor has not yet submitted a quote for THIS round.
+  const pendingNegotiationP = db.one(
+    `SELECT COUNT(DISTINCT nr.id)::INTEGER AS count
+       FROM tbl_negotiation_rounds nr
+      WHERE nr.status IN ('PUBLISHED', 'OPEN', 'APPROVED')
+        AND nr.end_date > NOW()
+        AND EXISTS (
+          SELECT 1 FROM tbl_quotes q
+           WHERE q.rfq_id = nr.rfq_id AND q.created_by = $1
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_negotiation_round_quotes nrq
+           WHERE nrq.negotiation_round_id = nr.id
+             AND nrq.vendor_id = $1
+             AND nrq.quoted_price IS NOT NULL
+        )`,
+    params
+  );
+
+  // 4. POs sent to me awaiting acceptance.
+  const poAcceptancePendingP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq_purchase_order po
+      WHERE po.finalized_vendor_id = $1
+        AND po.status = 'acceptance_pending'`,
+    params
+  );
+
+  // 5. POs in flight — sent / dispatched / GRN. Excludes 'completed' and
+  //    pre-shipment 'approved' (which still needs vendor acceptance).
+  const poInTransitP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_rfq_purchase_order po
+      WHERE po.finalized_vendor_id = $1
+        AND po.status IN ('sent', 'dispatched', 'GRN')`,
+    params
+  );
+
+  // 6. Subscriptions expiring within 30 days (or already expired but still
+  //    flagged 'active' — both indicate the vendor needs to renew).
+  const subscriptionExpiringP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count
+       FROM tbl_vendor_hotel_category_subscription vhcs
+      WHERE vhcs.vendor_id = $1
+        AND vhcs.status = 'active'
+        AND vhcs.end_date IS NOT NULL
+        AND vhcs.end_date <= CURRENT_DATE + INTERVAL '30 days'`,
+    params
+  );
+
+  // 7. Weekly wins + revenue — POs accepted-or-better in last 7 days.
+  const weeklyP = db.one(
+    `SELECT COUNT(*)::INTEGER AS count,
+            COALESCE(SUM(pop.total_price), 0) AS revenue
+       FROM tbl_rfq_purchase_order po
+       LEFT JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+      WHERE po.finalized_vendor_id = $1
+        AND po.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed')
+        AND po.created_at >= NOW() - INTERVAL '7 days'`,
+    params
+  );
+
+  const [
+    newRfqsUnviewed,
+    closingSoon,
+    pendingNegotiation,
+    poAcceptancePending,
+    poInTransit,
+    subscriptionExpiring,
+    weekly,
+  ] = await Promise.all([
+    newRfqsUnviewedP,
+    closingSoonP,
+    pendingNegotiationP,
+    poAcceptancePendingP,
+    poInTransitP,
+    subscriptionExpiringP,
+    weeklyP,
+  ]);
+
+  const counts = {
+    new_rfqs_unviewed: newRfqsUnviewed.count,
+    closing_soon: closingSoon?.count || 0,
+    pending_negotiation: pendingNegotiation.count,
+    po_acceptance_pending: poAcceptancePending.count,
+    po_in_transit: poInTransit.count,
+    subscription_expiring: subscriptionExpiring.count,
+  };
+
+  let mode = 'clear';
+  if (counts.subscription_expiring >= 1 &&
+      (counts.po_acceptance_pending === 0 && counts.closing_soon === 0)) {
+    // Subscription alone with no other action → still flag but as action_needed.
+    mode = 'action_needed';
+  }
+  if (
+    counts.closing_soon >= 1 ||
+    counts.pending_negotiation >= 1 ||
+    counts.po_acceptance_pending >= 1
+  ) {
+    mode = 'action_needed';
+  }
+  if (counts.subscription_expiring >= 1 && counts.po_acceptance_pending >= 2) {
+    mode = 'critical';
+  }
+  if (mode === 'clear' && (counts.new_rfqs_unviewed >= 1 || counts.po_in_transit >= 1)) {
+    mode = 'steady';
+  }
+
+  return {
+    mode,
+    counts,
+    soonest_closing: closingSoon?.soonest || null,
+    weekly: {
+      pos_won: weekly.count,
+      revenue: Number(weekly.revenue) || 0,
+    },
+  };
+}
+
+export default { getOpportunities, getPerformance, getInsights, getStatusBannerData };
