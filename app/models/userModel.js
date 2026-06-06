@@ -921,8 +921,40 @@ user_book_demo: async (mobile) => {
        tbl_company.turnover,
        tbl_company.no_of_employess,
        tbl_company.import_export_code,
+       tbl_company.established_year,
        tbl_company.company_name,
        tbl_company.profile,
+
+       (
+         SELECT json_agg(row_to_json(s) ORDER BY s.parent_title NULLS FIRST, s.title)
+         FROM (
+           SELECT DISTINCT ON (vhcs.item_type, vhcs.item_id)
+             vhcs.id              AS subscription_id,
+             vhcs.item_type,
+             vhcs.item_id,
+             c.title,
+             c.parent_id,
+             parent.title         AS parent_title,
+             vhcs.start_date,
+             vhcs.end_date,
+             CASE
+               WHEN vhcs.status = 'active' AND vhcs.end_date >= CURRENT_DATE THEN 'active'
+               ELSE 'expired'
+             END                  AS display_status
+           FROM tbl_vendor_hotel_category_subscription vhcs
+           JOIN tbl_category c ON c.id = vhcs.item_id
+           LEFT JOIN tbl_category parent ON parent.id = c.parent_id
+           WHERE vhcs.vendor_id = tbl_users.id
+             AND vhcs.item_type IN ('category','subcategory')
+             AND vhcs.status IN ('active','expired')
+             AND c.is_deleted = 0
+           ORDER BY
+             vhcs.item_type,
+             vhcs.item_id,
+             CASE WHEN vhcs.status = 'active' AND vhcs.end_date >= CURRENT_DATE THEN 0 ELSE 1 END,
+             vhcs.end_date DESC
+         ) s
+       ) AS subscribed_categories,
 
        ARRAY(
          SELECT json_build_object(
@@ -1012,7 +1044,39 @@ user_book_demo: async (mobile) => {
     SELECT json_agg(tvp)
     FROM tbl_vendor_profile tvp
     WHERE tvp.vendor_id = tbl_users.id and tvp.is_approved = true
-) AS vendor_info
+) AS vendor_info,
+
+        (
+          SELECT json_agg(
+            json_build_object(
+              'document_type', vd.document_type,
+              'document_number', vd.document_number,
+              'document_url', vd.document_url,
+              'uploaded_at', vd.created_at
+            )
+            ORDER BY vd.document_type
+          )
+          FROM tbl_vendor_documents vd
+          WHERE vd.vendor_id = tbl_users.id
+            AND vd.document_type IN ('pan','gst','msme','fssai','cancelled_cheque')
+        ) AS compliance_docs,
+
+        (
+          SELECT json_build_object(
+            'account_holder_name', vd.account_holder_name,
+            'bank_name', vd.bank_name,
+            'ifsc_code', vd.ifsc_code,
+            'account_number_masked',
+              CASE
+                WHEN vd.bank_account_number IS NULL OR length(vd.bank_account_number) < 4 THEN NULL
+                ELSE repeat('X', length(vd.bank_account_number) - 4) || right(vd.bank_account_number, 4)
+              END
+          )
+          FROM tbl_vendor_documents vd
+          WHERE vd.vendor_id = tbl_users.id
+            AND vd.document_type = 'bank_account'
+          LIMIT 1
+        ) AS bank_details
 
     `;
       }
