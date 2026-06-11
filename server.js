@@ -19,6 +19,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, startRfqStuckPublishWatchdog } from './app/helper/cronManager.js';
+import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
 import { logger } from './app/util/logger.js';
 
 
@@ -49,6 +50,7 @@ rescheduleAllRfqPublishJobs();
 startVendorAcceptanceReminderCron();
 rescheduleAllNegotiationRoundExpirations();
 startRfqStuckPublishWatchdog();
+startArcAmendmentLifecycleCron();
 
 
 // Clean error handler

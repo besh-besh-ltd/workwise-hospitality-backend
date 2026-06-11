@@ -1491,13 +1491,17 @@ const sendQuoteNotificationEmail = async (req) => {
       // Sending the email to the buyer
       sendMail(mailRecipients);
 
+      const vendorCompanyName =
+        req.user?.company_name || req.user?.organization_name || req.user?.name || 'A vendor';
+      const productCount = Array.isArray(req.body?.products) ? req.body.products.length : 0;
+
       dispatchNotification({
         userIds: [buyer.id],
         category: 'rfq',
         type: 'vendor_quote_submitted',
         title: `New quotation for RFQ #${rfq_no}`,
         body: `${vendorCompanyName} submitted a quote. Review and compare.`,
-        data: { rfq_id, vendor_id: req.user?.id, product_count: Object.keys(productCountMap).length },
+        data: { rfq_id, vendor_id: req.user?.id, product_count: productCount },
         actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
       }).catch((err) => logError('dispatch vendor_quote_submitted failed', err));
 

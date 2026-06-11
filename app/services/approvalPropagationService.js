@@ -217,7 +217,11 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
       TENDER:            { APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleRFQPostApproval) },
       TECHNICAL:         { APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalPostApproval) },
       PO:                { APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval) },
-      ARC:               { APPROVED: () => import('../controllers/arc/arcController.js').then(m => m.handleArcPostApproval) },
+      // ARC v2 entity types — separate from v1's catch-all 'ARC'. See plan §5.5.
+      ARC_TECH:          { APPROVED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechPostApproval) },
+      ARC_COMMITTEE:     { APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval) },
+      ARC_AMENDMENT:     { APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval) },
+      MR:                { APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval) },
       NEGOTIATION:       { APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval) },
       NEGOTIATION_QUOTE: { APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval) },
     };

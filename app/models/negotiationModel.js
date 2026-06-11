@@ -15,11 +15,16 @@ const negotiationModel = {
   // ============= NEGOTIATION ROUNDS =============
 
   /**
-   * Create a new negotiation round (product-specific)
+   * Create a new negotiation round (product-specific).
+   *
+   * Polymorphic via (source_type, source_id) — defaults to 'RFQ'+rfq_id when
+   * source_type/source_id aren't supplied, so existing RFQ callers don't need
+   * to change. ARC commercial-eval callers pass source_type='ARC' + source_id
+   * (the arc id) and leave rfq_id null.
    */
   createRound: async (roundData, txContext = null) => {
     const {
-      rfq_id,
+      rfq_id = null,
       rfq_product_id,
       round_number,
       target_price,
@@ -28,19 +33,28 @@ const negotiationModel = {
       created_by,
       remarks = null,
       vendor_ids = null,
-      vendor_approvals = null
+      vendor_approvals = null,
+      source_type,
+      source_id
     } = roundData;
 
     if (!rfq_product_id) {
       throw new Error('rfq_product_id is required for product-specific negotiation rounds');
     }
 
+    const resolvedSourceType = source_type || (rfq_id ? 'RFQ' : null);
+    const resolvedSourceId   = source_id   ?? rfq_id;
+
+    if (!resolvedSourceType || !resolvedSourceId) {
+      throw new Error('source_type + source_id (or rfq_id for RFQ flow) is required');
+    }
+
     return (txContext || db).one(
       `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals, source_type, source_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
        RETURNING *`,
-      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || [])]
+      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || []), resolvedSourceType, resolvedSourceId]
     );
   },
 

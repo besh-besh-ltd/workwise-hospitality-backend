@@ -64,8 +64,24 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval),
     REJECTED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePORejectionByInstance),
   },
-  ARC: {
-    APPROVED: () => import('../controllers/arc/arcController.js').then(m => m.handleArcPostApproval),
+  // ARC v2 — separate entity types per plan §5.5. The legacy single 'ARC'
+  // entity type is intentionally NOT registered here; any leftover v1 ARC
+  // approval instances no-op and are expected to be cleaned up post-migration.
+  ARC_TECH: {
+    APPROVED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechPostApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechRejection),
+  },
+  ARC_COMMITTEE: {
+    APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeRejection),
+  },
+  ARC_AMENDMENT: {
+    APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentRejection),
+  },
+  MR: {
+    APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval),
+    REJECTED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrRejection),
   },
   NEGOTIATION: {
     APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval),

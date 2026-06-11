@@ -25,6 +25,54 @@ const inserted = { rfqIds: [] };
 const seeded = {};
 
 beforeAll(async () => {
+  // Sanity cleanup: any earlier suite in the same Jest worker that left
+  // behind RFQs for a1_proc_buyer in hospitality A would poison the exact-
+  // count assertions below (e.g. expect(count).toBe(3)). Wipe anything
+  // matching the test's signature before seeding. Scoped narrowly so we
+  // never touch reference fixtures.
+  await db.none(
+    `DELETE FROM tbl_rfq_hotel_mappings
+     WHERE rfq_id IN (
+       SELECT id FROM tbl_rfq
+       WHERE created_by IN ($1, $2)
+         AND hospitality_company_id = $3
+     )`,
+    [IDS.users.a1_proc_buyer, IDS.users.a1_eng_buyer, IDS.hospitality.A]
+  );
+  await db.none(
+    `DELETE FROM tbl_rfq_product_vendors
+     WHERE rfq_id IN (
+       SELECT id FROM tbl_rfq
+       WHERE created_by IN ($1, $2)
+         AND hospitality_company_id = $3
+     )`,
+    [IDS.users.a1_proc_buyer, IDS.users.a1_eng_buyer, IDS.hospitality.A]
+  );
+  await db.none(
+    `DELETE FROM tbl_rfq_products
+     WHERE rfq_id IN (
+       SELECT id FROM tbl_rfq
+       WHERE created_by IN ($1, $2)
+         AND hospitality_company_id = $3
+     )`,
+    [IDS.users.a1_proc_buyer, IDS.users.a1_eng_buyer, IDS.hospitality.A]
+  );
+  await db.none(
+    `UPDATE tbl_rfq SET copied_from_rfq_id = NULL
+     WHERE copied_from_rfq_id IN (
+       SELECT id FROM tbl_rfq
+       WHERE created_by IN ($1, $2)
+         AND hospitality_company_id = $3
+     )`,
+    [IDS.users.a1_proc_buyer, IDS.users.a1_eng_buyer, IDS.hospitality.A]
+  );
+  await db.none(
+    `DELETE FROM tbl_rfq
+     WHERE created_by IN ($1, $2)
+       AND hospitality_company_id = $3`,
+    [IDS.users.a1_proc_buyer, IDS.users.a1_eng_buyer, IDS.hospitality.A]
+  );
+
   await db.tx(async (t) => {
     // ── My Drafts: 3 drafts for a1_proc_buyer in Hotel A1 ─────────────
     const draftA = await makeRfqVisibleToDashboard(t, {

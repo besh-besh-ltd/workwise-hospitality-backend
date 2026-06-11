@@ -534,10 +534,13 @@ describe("rfqController.create — multi-hotel duplication", () => {
     });
     await rfqController.create(m.req, m.res, () => {});
 
-    // Track committed dupes so afterEach cleans them.
+    // Track committed dupes so afterEach cleans them. Scope to this test's
+    // RFQs only (id >= parent rfq_id); when the full suite runs, earlier
+    // files leave behind a1_proc_buyer-created rows that would otherwise
+    // pollute this assertion.
     const allRfqs = await db.any(
-      `SELECT id, hotel_id FROM tbl_rfq WHERE created_by=$1`,
-      [IDS.users.a1_proc_buyer]
+      `SELECT id, hotel_id FROM tbl_rfq WHERE created_by=$1 AND id >= $2`,
+      [IDS.users.a1_proc_buyer, rfq_id]
     );
     inserted.rfqIds.push(
       ...allRfqs.map((r) => r.id).filter((id) => id !== rfq_id && !inserted.rfqIds.includes(id))
