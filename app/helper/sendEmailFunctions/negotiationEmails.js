@@ -260,22 +260,43 @@ const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, opt
   return fields
     .filter(f => f && f.name && !isModeFlagEntry(f.name))
     .map(f => {
+      const hasTarget = f.target != null && f.target !== '';
+      const taxDemand = typeof f.tax_demand === 'string' && f.tax_demand.trim() !== ''
+        ? f.tax_demand.trim()
+        : null;
       const targetMode = resolveMode(f, fields, vendorQuote);
       const vendorMode = resolveVendorMode(f.name, vendorQuote) || targetMode;
       const quoted = resolveQuotedValue(f.name, vendorQuote);
-      if (hideWorseTargets && isTargetWorseThanQuoted(quoted, f.target, vendorMode, targetMode, vendorQuote)) {
+      if (hideWorseTargets && !taxDemand
+          && isTargetWorseThanQuoted(quoted, f.target, vendorMode, targetMode, vendorQuote)) {
         return null;
       }
-      const targetStr = formatFieldValue(f.name, f.target, targetMode);
+      const targetStr = hasTarget ? formatFieldValue(f.name, f.target, targetMode) : '—';
       const hasQuoted = quoted != null && quoted !== '' && !(typeof quoted === 'string' && quoted.trim() === '');
       const quotedStr = hasQuoted ? formatFieldValue(f.name, quoted, vendorMode) : null;
-      const valueHtml = quotedStr
+      let valueHtml = quotedStr
         ? `<span style="color:#475569;">${quotedStr}</span> <span style="color:#64748B;">→</span> <span style="color:#0F172A; font-weight:600;">${targetStr}</span>`
         : targetStr;
+      // Buyer's free-text tax demand/negotiation note on this field.
+      if (taxDemand) {
+        valueHtml += `<br/><span style="font-size:12px; color:#15803D;">Tax: &ldquo;${taxDemand}&rdquo;</span>`;
+      }
+      // Skip rows that carry neither a target nor a tax demand.
+      if (!hasTarget && !taxDemand) return null;
       return `<li style="padding:3px 0;"><strong>${getFieldLabel(f.name, chargeLabels)}:</strong> ${valueHtml}</li>`;
     })
     .filter(Boolean)
     .join('');
+};
+
+// Map rfq_product_id → product name from a round's product_names json
+// ([{rfq_product_id, product_name}]) produced by the model laterals.
+const productNamesById = (round) => {
+  const map = {};
+  for (const p of (Array.isArray(round?.product_names) ? round.product_names : [])) {
+    if (p?.rfq_product_id != null) map[p.rfq_product_id] = p.product_name;
+  }
+  return map;
 };
 
 /**
@@ -286,18 +307,46 @@ const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, opt
  * @param {Object} vendorsLookup  - { [vendorId]: vendorName }
  * @param {Object} vendorQuotes   - { [vendorId]: quoteItemRow } from tbl_quote_items
  */
-const buildVendorTargetsHtml = (vendorApprovals = [], vendorsLookup = {}, vendorQuotes = {}, chargeLabels = {}) => {
+const buildVendorTargetsHtml = (vendorApprovals = [], vendorsLookup = {}, vendorQuotes = {}, chargeLabels = {}, round = null) => {
   if (!Array.isArray(vendorApprovals) || vendorApprovals.length === 0) return '';
+
+  // Multi-product rounds: fields live in round.products[].vendor_targets —
+  // render one sub-block per covered product (plus "RFQ-level terms").
+  const isMulti = Array.isArray(round?.products) && round.products.length > 0;
+  const nameById = isMulti ? productNamesById(round) : {};
+
   const sections = vendorApprovals.map(va => {
     const vendorName = vendorsLookup[va.vendor_id] || `Vendor #${va.vendor_id}`;
-    const vendorQuote = vendorQuotes[va.vendor_id] || null;
-    const rows = renderFieldRows(va.negotiation_fields || [], vendorQuote, chargeLabels);
-    if (!rows) return '';
+
+    let body = '';
+    if (isMulti) {
+      body = round.products.map(p => {
+        const vt = (p?.vendor_targets || []).find(v => Number(v?.vendor_id) === Number(va.vendor_id));
+        if (!vt || !(vt.fields || []).length) return '';
+        const label = p?.is_rfq_level === true
+          ? 'RFQ-level terms'
+          : (nameById[p?.rfq_product_id] || `Product #${p?.rfq_product_id}`);
+        const vendorQuote = vendorQuotes[`${va.vendor_id}:${p?.rfq_product_id}`]
+          || vendorQuotes[va.vendor_id]
+          || null;
+        const rows = renderFieldRows(vt.fields || [], p?.is_rfq_level ? null : vendorQuote, chargeLabels);
+        if (!rows) return '';
+        return `
+          <p style="margin:8px 0 4px; font-size:12px; font-weight:600; color:#334155;">${label}</p>
+          <ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>`;
+      }).filter(Boolean).join('');
+    } else {
+      const vendorQuote = vendorQuotes[va.vendor_id] || null;
+      const rows = renderFieldRows(va.negotiation_fields || [], vendorQuote, chargeLabels);
+      body = rows ? `<ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>` : '';
+    }
+
+    if (!body) return '';
     return `
       <div style="margin-top:10px; padding:10px 12px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px;">
         <p style="margin:0 0 6px; font-weight:600; color:#1E293B;">${vendorName}</p>
         <p style="margin:0 0 6px; font-size:12px; color:#64748B;">Vendor Quoted → Target</p>
-        <ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>
+        ${body}
       </div>`;
   }).filter(Boolean).join('');
   return sections
@@ -323,6 +372,34 @@ const buildSingleVendorTargetsHtml = (fields = [], vendorQuote = null, chargeLab
 };
 
 /**
+ * Vendor-side targets block for a MULTI-product round — one section per
+ * covered product (plus RFQ-level terms), using the vendor's `products`
+ * slice attached by the controller ([{rfq_product_id, is_rfq_level, fields}]).
+ */
+const buildVendorMultiProductTargetsHtml = (vendor, chargeLabels = {}, round = null) => {
+  const products = Array.isArray(vendor?.products) ? vendor.products : [];
+  if (products.length === 0) return '';
+  const nameById = productNamesById(round);
+  const sections = products.map(p => {
+    const label = p?.is_rfq_level === true
+      ? 'RFQ-level terms'
+      : (nameById[p?.rfq_product_id] || `Product #${p?.rfq_product_id}`);
+    const rows = renderFieldRows(p?.fields || [], p?.is_rfq_level ? null : (vendor?.quote || null), chargeLabels, { hideWorseTargets: true });
+    if (!rows) return '';
+    return `
+      <p style="margin:8px 0 4px; font-size:12px; font-weight:600; color:#1E40AF;">${label}</p>
+      <ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>`;
+  }).filter(Boolean).join('');
+  if (!sections) return '';
+  return `
+    <div style="margin-top:16px; padding:12px 14px; background:#EFF6FF; border-left:4px solid #3B82F6; border-radius:4px;">
+      <p style="margin:0 0 6px; font-weight:600; color:#1E40AF;">Negotiation Fields & Targets:</p>
+      <p style="margin:0 0 6px; font-size:12px; color:#3B5BA8;">Your Quoted → Target</p>
+      ${sections}
+    </div>`;
+};
+
+/**
  * Send notification when a negotiation round expires while still pending approval.
  * @param {Object} params
  * @param {Object} params.round - The negotiation round record
@@ -336,6 +413,7 @@ export const sendNegotiationExpiredNotification = async ({
   rfqNo,
   rfqTitle = '',
   productName,
+  productNames = [],
   initiator,
   commercialEvaluators = [],
   companyName = '',
@@ -369,13 +447,13 @@ export const sendNegotiationExpiredNotification = async ({
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
           <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
-          <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+          <li style="padding:4px 0;"><strong>${(productNames && productNames.length > 1) ? 'Products' : 'Product'}:</strong> ${(productNames && productNames.length > 1) ? productNames.join(', ') : productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels)}
+        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <p style="margin-top:16px;">
           A new negotiation round will be needed if you wish to negotiate again on this product.
@@ -445,6 +523,7 @@ export const sendNegotiationRoundEndedNotification = async ({
   rfqNo,
   rfqTitle = '',
   productName,
+  productNames = [],
   quoteCount = 0,
   commercialEvaluators = [],
   companyName = '',
@@ -488,13 +567,13 @@ export const sendNegotiationRoundEndedNotification = async ({
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
             <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
-            <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+            <li style="padding:4px 0;"><strong>${(productNames && productNames.length > 1) ? 'Products' : 'Product'}:</strong> ${(productNames && productNames.length > 1) ? productNames.join(', ') : productName}</li>
             <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
             <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
             <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
           </ul>
 
-          ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels)}
+          ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
           <p style="margin-top:16px;">
             ${quotesMessage}
@@ -563,6 +642,7 @@ export const sendNegotiationRoundCreatedNotification = async ({
   rfqNo,
   rfqTitle = '',
   productName,
+  productNames = [],
   initiator,
   autoApproved = false,
   companyName = '',
@@ -606,13 +686,13 @@ export const sendNegotiationRoundCreatedNotification = async ({
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
           <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
-          <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+          <li style="padding:4px 0;"><strong>${(productNames && productNames.length > 1) ? 'Products' : 'Product'}:</strong> ${(productNames && productNames.length > 1) ? productNames.join(', ') : productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels)}
+        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <div style="text-align:center; margin-top:24px;">
           <a href="${quoteCompareUrl}"
@@ -678,6 +758,7 @@ export const sendNegotiationRoundVendorNotification = async ({
   rfqNo,
   rfqTitle = '',
   productName,
+  productNames = [],
   buyerCompanyName,
   vendors = [],
   companyName = '',
@@ -713,13 +794,13 @@ export const sendNegotiationRoundVendorNotification = async ({
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
             <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
-            <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+            <li style="padding:4px 0;"><strong>${(productNames && productNames.length > 1) ? 'Products' : 'Product'}:</strong> ${(productNames && productNames.length > 1) ? productNames.join(', ') : productName}</li>
             <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || buyerCompanyName || '—'}</li>
             <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
             <li style="padding:4px 0;"><strong>Deadline:</strong> ${formatDateIST(round.end_date)}</li>
           </ul>
 
-          ${buildSingleVendorTargetsHtml(vendor.negotiation_fields || [], vendor.quote || null, chargeLabels)}
+          ${(vendor.products && vendor.products.length > 0) ? buildVendorMultiProductTargetsHtml(vendor, chargeLabels, round) : buildSingleVendorTargetsHtml(vendor.negotiation_fields || [], vendor.quote || null, chargeLabels)}
 
           <p style="margin-top:16px;">
             Please submit your best offer before <strong>${formatDateIST(round.end_date)}</strong>.
@@ -786,6 +867,7 @@ export const sendNegotiationRoundApprovedNotification = async ({
   rfqNo,
   rfqTitle = '',
   productName,
+  productNames = [],
   initiator,
   commercialEvaluators = [],
   companyName = '',
@@ -819,13 +901,13 @@ export const sendNegotiationRoundApprovedNotification = async ({
         <ul style="list-style:none; padding-left:0; margin-top:16px;">
           <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${rfqNo}</li>
           <li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle || '—'}</li>
-          <li style="padding:4px 0;"><strong>Product:</strong> ${productName}</li>
+          <li style="padding:4px 0;"><strong>${(productNames && productNames.length > 1) ? 'Products' : 'Product'}:</strong> ${(productNames && productNames.length > 1) ? productNames.join(', ') : productName}</li>
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels)}
+        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <div style="text-align:center; margin-top:24px;">
           <a href="${quoteCompareUrl}"

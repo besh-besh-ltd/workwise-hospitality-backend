@@ -3353,15 +3353,30 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       removedFinalizations++;
     }
 
-    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id)
+    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id).
+    // Covered-product predicate: multi-product rounds (products JSONB) are
+    // matched too. NOTE: cancelling a multi-product round's approval affects
+    // EVERY product it covers — round-scoped approvals can't be partially
+    // cancelled. Logged loudly below so support can trace it.
     const negInstances = await t.any(`
       SELECT id, status FROM tbl_approval_instances
       WHERE entity_type = 'NEGOTIATION'
         AND entity_id IN (
-          SELECT id FROM tbl_negotiation_rounds WHERE rfq_product_id = $1
+          SELECT nr.id FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_product_id = $1 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $1
+          )
         )
         AND status IN ('PENDING', 'APPROVED')
     `, [rfq_product_id]);
+
+    if (negInstances.length > 0) {
+      console.warn(
+        `[sendback] Cancelling ${negInstances.length} NEGOTIATION approval instance(s) for product ${rfq_product_id}. ` +
+        `Multi-product rounds covering this product are cancelled for ALL their products.`
+      );
+    }
 
     for (const instance of negInstances) {
       if (instance.status === 'PENDING') {
@@ -3376,22 +3391,33 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       cancelledInstances++;
     }
 
-    // 4. Handle rounds based on target stage
+    // 4. Handle rounds based on target stage (covered-product predicate —
+    // multi-product rounds covering this product are affected as a whole).
     if (isEarlyStage) {
       // Early stage: Cancel ALL rounds (complete reset to before negotiation)
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'CANCELLED', closed_at = NOW()
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status != 'CANCELLED'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status != 'CANCELLED'
       `, [rfq_id, rfq_product_id]);
       cancelledRounds = result.rowCount;
     } else {
       // Mid stage (NEGOTIATION, QUOTE_FINALIZED, etc.): Keep rounds intact
       // Just make sure any ACTIVE rounds are marked as COMPLETED so new ones can be created
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'COMPLETED', closed_at = COALESCE(closed_at, NOW())
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status = 'ACTIVE'
       `, [rfq_id, rfq_product_id]);
       // Don't count these as "cancelled" - they're completed
     }
