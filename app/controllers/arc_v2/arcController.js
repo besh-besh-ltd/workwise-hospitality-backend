@@ -1,5 +1,7 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
+import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
+import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
@@ -222,6 +224,52 @@ export async function getById(req, res) {
     return ok(res, { arc, items, invitations });
   } catch (err) {
     logger.error({ err }, '[arcController.getById]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// GET /v1/arc-v2/:id/lifecycle — the single authoritative page's spine.
+// Returns the computed stage states + the caller's ARC permissions, both
+// derived from the ARC row's own scope (hotel/department) — never from
+// client headers. Lazily flips floated→submission_closed once the window
+// has passed (idempotent, event-logged).
+// ============================================================
+const ARC_PERMISSION_RESOURCES = ['arc', 'arc-tech', 'arc-comm', 'arc-committee'];
+const ARC_ALL_ACTIONS = {
+  'arc':           ['read', 'create', 'admin'],
+  'arc-tech':      ['read', 'evaluate'],
+  'arc-comm':      ['read', 'evaluate'],
+  'arc-committee': ['read', 'approve'],
+};
+
+export async function getLifecycle(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    const lifecycle = await arcLifecycleModel.computeLifecycle(id, { userId, lazyFlip: true });
+    if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
+
+    // Caller's ARC permissions in THIS ARC's scope. Super admin sees all.
+    let permissions;
+    if (Number(req.user?.user_type) === 8) {
+      permissions = { ...ARC_ALL_ACTIONS };
+    } else {
+      permissions = Object.fromEntries(ARC_PERMISSION_RESOURCES.map((r) => [r, []]));
+      if (lifecycle.arc.hotel_id != null) {
+        const rows = await rbacModel.getUserPermissionsForHotels(
+          userId, [lifecycle.arc.hotel_id], null, lifecycle.arc.department_id || null
+        );
+        for (const row of rows) {
+          const resource = String(row.resource);
+          if (permissions[resource]) permissions[resource].push(String(row.action));
+        }
+      }
+    }
+
+    return ok(res, { ...lifecycle, permissions });
+  } catch (err) {
+    logger.error({ err }, '[arcController.getLifecycle]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }

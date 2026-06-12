@@ -25,8 +25,9 @@ r.get('/hotels',           passportSignIn, acl([2, 8]), arcController.listAccess
 r.get('/variants',         passportSignIn, acl([2, 8]), arcController.searchProductVariants);
 r.get('/eligible-vendors', passportSignIn, acl([2, 8]), arcController.listEligibleVendors);
 
-// Detail + active-summary.
+// Detail + lifecycle spine + active-summary.
 r.get('/:id',                  passportSignIn, acl([2, 8]), arcController.getById);
+r.get('/:id/lifecycle',        passportSignIn, acl([2, 8]), arcController.getLifecycle);
 r.get('/:id/active-summary',   passportSignIn, acl([2, 8]), arcContractController.getActiveSummary);
 
 // Mutations — creator + ARC-roles only.

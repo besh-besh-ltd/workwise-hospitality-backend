@@ -11613,3 +11613,21 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment_edit_history (
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_edit_history_amendment
   ON public.tbl_arc_amendment_edit_history (arc_amendment_id, changed_at DESC);
+
+-- Mirrored from migrations/20260611100100_arc_tech_eval_edit_history.sql —
+-- amend-then-approve diffs on technical-evaluation marks.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_eval_edit_history (
+  id                 BIGSERIAL PRIMARY KEY,
+  arc_id             BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  response_id        BIGINT  NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_vendors_response(id) ON DELETE CASCADE,
+  field_changed      VARCHAR(60) NOT NULL,
+  before_value       JSONB,
+  after_value        JSONB,
+  changed_by         INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  comment            TEXT,
+  changed_at         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_arc
+  ON public.tbl_arc_tech_eval_edit_history (arc_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_response
+  ON public.tbl_arc_tech_eval_edit_history (response_id);

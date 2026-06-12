@@ -1,8 +1,15 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
+import {
+  createApprovalInstance,
+  getApprovalInstanceDetails,
+  findBestMatchingPolicyTx,
+} from '../../models/generalModel.js';
+import { executeApprovalAction } from '../../services/approvalActionService.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -19,6 +26,28 @@ import { logger } from '../../util/logger.js';
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
+// Shared catch: lifecycle guards throw {httpStatus:409, code:'STAGE_IMMUTABLE'};
+// everything else is a 500.
+function fail(res, err, tag) {
+  logger.error({ err }, tag);
+  if (err.httpStatus) {
+    return res.status(err.httpStatus).json({
+      status: 0,
+      message: err.message,
+      ...(err.code ? { code: err.code } : {}),
+    });
+  }
+  return bad(res, 500, err.message || 'Internal error', 3);
+}
+
+// Resolve the ARC_<TYPE> approval policy with fallback to the generic 'ARC'
+// policy (same chain as amendments).
+async function resolveArcPolicy(entityType, scope, t) {
+  let policy = await findBestMatchingPolicyTx({ entity_type: entityType, ...scope }, t);
+  if (!policy) policy = await findBestMatchingPolicyTx({ entity_type: 'ARC', ...scope }, t);
+  return policy;
+}
+
 // ============================================================
 // TECH EVAL endpoints
 // ============================================================
@@ -27,7 +56,14 @@ export async function setupTechEval(req, res) {
   try {
     const arcItemId = Number(req.params.itemId);
     const { minimum_passing_score, clauses = [] } = req.body || {};
-    return db.tx(async (t) => {
+    // Immutable once technical is approved; also blocked once commercial is
+    // finalized (configuring clauses then would un-skip technical under a
+    // locked award).
+    const arcId = await arcLifecycleModel.getArcIdForItem(arcItemId);
+    if (!arcId) return bad(res, 404, 'ARC item not found', 2);
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
+    await arcLifecycleModel.assertStageWritable(arcId, 'commercial');
+    return await db.tx(async (t) => {
       const te = await arcEvalModel.upsertTechEval(arcItemId, { minimum_passing_score }, t);
       const inserted = [];
       for (const c of clauses) {
@@ -36,8 +72,7 @@ export async function setupTechEval(req, res) {
       return ok(res, { tech_evaluation: te, clauses: inserted });
     });
   } catch (err) {
-    logger.error({ err }, '[evalController.setupTechEval]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.setupTechEval]');
   }
 }
 
@@ -45,11 +80,13 @@ export async function recordVendorResponse(req, res) {
   try {
     const { clause_id, vendor_id, response } = req.body || {};
     if (!clause_id || !vendor_id) return bad(res, 400, 'clause_id and vendor_id are required');
+    const arcId = await arcLifecycleModel.getArcIdForClause(clause_id);
+    if (!arcId) return bad(res, 404, 'Clause not found', 2);
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
     const row = await arcEvalModel.upsertVendorResponse(clause_id, vendor_id, response || null);
     return ok(res, { response: row });
   } catch (err) {
-    logger.error({ err }, '[evalController.recordVendorResponse]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.recordVendorResponse]');
   }
 }
 
@@ -58,13 +95,15 @@ export async function scoreResponse(req, res) {
     const userId = req.user?.id;
     const { response_id, buyer_marks, buyer_remark } = req.body || {};
     if (!response_id || buyer_marks == null) return bad(res, 400, 'response_id and buyer_marks are required');
+    const arcId = await arcLifecycleModel.getArcIdForResponse(response_id);
+    if (!arcId) return bad(res, 404, 'Response not found', 2);
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
     const row = await arcEvalModel.scoreVendorResponse(response_id, {
       buyer_id: userId, buyer_marks, buyer_remark,
     });
     return ok(res, { response: row });
   } catch (err) {
-    logger.error({ err }, '[evalController.scoreResponse]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.scoreResponse]');
   }
 }
 
@@ -72,10 +111,25 @@ export async function getTechEvalForItem(req, res) {
   try {
     const arcItemId = Number(req.params.itemId);
     const te = await db.oneOrNone(`SELECT * FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [arcItemId]);
-    if (!te) return ok(res, { tech_evaluation: null });
+    if (!te) return ok(res, { tech_evaluation: null, clauses: [], scores: [], responses: [] });
     const clauses = await arcEvalModel.listClauses(te.id);
     const scores = await arcEvalModel.computeItemScores(arcItemId);
-    return ok(res, { tech_evaluation: te, clauses, scores });
+    // Per-(clause × vendor) response rows — the scoring matrix binds inputs
+    // to response_id, so the cells need these (scores alone are per-vendor
+    // aggregates).
+    const responses = await db.any(
+      `SELECT r.id AS response_id,
+              r.arc_item_tech_evaluation_clauses_id AS clause_id,
+              r.vendor_id, u.name AS vendor_name,
+              r.vendor_response, r.buyer_marks, r.buyer_remark, r.score_timestamp
+         FROM tbl_arc_item_tech_evaluation_vendors_response r
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+         LEFT JOIN tbl_users u ON u.id = r.vendor_id
+        WHERE c.arc_item_tech_evaluation_id = $1
+        ORDER BY r.vendor_id, c.id`,
+      [te.id]
+    );
+    return ok(res, { tech_evaluation: te, clauses, scores, responses });
   } catch (err) {
     logger.error({ err }, '[evalController.getTechEvalForItem]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -88,13 +142,28 @@ export async function submitTechEval(req, res) {
     const userId = req.user?.id;
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    return db.tx(async (t) => {
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
+
+    // One in-flight approval round at a time.
+    const pending = await db.oneOrNone(
+      `SELECT id FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_TECH' AND entity_id = $1 AND status = 'PENDING'
+        ORDER BY created_at DESC LIMIT 1`,
+      [arcId]
+    );
+    if (pending) {
+      return bad(res, 400, `Technical evaluation is already with the approvers (instance #${pending.id}).`);
+    }
+
+    return await db.tx(async (t) => {
       const items = await arcModel.listItems(arcId, t);
+      const techEvalIds = [];
       for (const item of items) {
         const scores = await arcEvalModel.computeItemScores(item.id, 1, t);
-        const te = await db.oneOrNone(
+        const te = await t.oneOrNone(
           `SELECT id FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [item.id]
         );
+        if (te) techEvalIds.push(te.id);
         if (te && scores.length > 0) {
           await arcEvalModel.recordClearedVendors(
             te.id,
@@ -103,13 +172,213 @@ export async function submitTechEval(req, res) {
           );
         }
       }
+
+      // Route through the central engine (entity_type ARC_TECH, fallback
+      // to the generic ARC policy — same chain as amendments). The
+      // registered hooks flip the ARC to tech_eval_approved / _rejected.
+      const policy = await resolveArcPolicy('ARC_TECH', {
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+      }, t);
+      if (!policy) {
+        const err = new Error('No approval policy configured for ARC technical evaluation in this scope.');
+        err.httpStatus = 400;
+        throw err;
+      }
+      const engineResult = await createApprovalInstance({
+        entity_type:            'ARC_TECH',
+        entity_id:              arcId,
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+        approval_policy_id:     policy.id,
+        initiated_by:           userId,
+        metadata:               { item_count: items.length },
+        txContext:              t,
+      });
+      const instanceRow = engineResult?.instance || engineResult;
+      if (!instanceRow?.id) throw new Error('Approval engine did not return an instance id');
+      if (techEvalIds.length > 0) {
+        await t.none(
+          `UPDATE tbl_arc_item_tech_evaluation SET approval_instance_id = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ($2:csv)`,
+          [instanceRow.id, techEvalIds]
+        );
+      }
+
       await arcModel.setStatus(arcId, 'tech_eval_in_progress', {}, t);
-      await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId, payload: {}, txContext: t });
-      return ok(res, { ok: true });
+      await logArcEvent({
+        arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId,
+        payload: { approval_instance_id: instanceRow.id }, txContext: t,
+      });
+      return ok(res, { ok: true, approval_instance_id: instanceRow.id });
     });
   } catch (err) {
-    logger.error({ err }, '[evalController.submitTechEval]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.submitTechEval]');
+  }
+}
+
+// ============================================================
+// GET /v1/arc-v2/evaluation/:arcId/tech-eval/approval
+//   Full ARC_TECH chain (steps, approvers, comments) + per-caller
+//   can_user_approve — powers the Technical stage's approval matrix.
+// ============================================================
+export async function getTechEvalApproval(req, res) {
+  try {
+    const arcId = Number(req.params.arcId);
+    const instance = await db.oneOrNone(
+      `SELECT * FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_TECH' AND entity_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [arcId]
+    );
+    if (!instance) return ok(res, { approval: null });
+    const approval = await getApprovalInstanceDetails(instance.id, req.user?.id || null);
+    const edits = await db.any(
+      `SELECT eh.*, u.name AS changed_by_name
+         FROM tbl_arc_tech_eval_edit_history eh
+         LEFT JOIN tbl_users u ON u.id = eh.changed_by
+        WHERE eh.arc_id = $1
+        ORDER BY eh.changed_at DESC, eh.id DESC`,
+      [arcId]
+    );
+    return ok(res, { approval, edit_history: edits });
+  } catch (err) {
+    return fail(res, err, '[evalController.getTechEvalApproval]');
+  }
+}
+
+// ============================================================
+// POST /v1/arc-v2/evaluation/:arcId/tech-eval/decide
+//   Body: { decision:'approve'|'reject', comment?, amend?:{marks:[...]} }
+//   The approver may AMEND any vendor's marks before approving — each
+//   change lands in tbl_arc_tech_eval_edit_history and is folded into the
+//   engine comment (mirrors the amendments edit-then-approve pattern).
+//   executeApprovalAction validates the caller is the current approver and
+//   fires the ARC_TECH hooks on terminal states.
+// ============================================================
+export async function decideTechEval(req, res) {
+  try {
+    const arcId    = Number(req.params.arcId);
+    const userId   = req.user?.id;
+    const decision = String(req.body?.decision || '').trim();
+    const comment  = req.body?.comment ? String(req.body.comment) : null;
+    const amendMarks = Array.isArray(req.body?.amend?.marks) ? req.body.amend.marks : [];
+
+    if (!userId) return bad(res, 401, 'Authentication required');
+    if (decision !== 'approve' && decision !== 'reject') {
+      return bad(res, 400, "decision must be 'approve' or 'reject'");
+    }
+    if (decision === 'reject' && !comment) {
+      return bad(res, 400, 'A reason (comment) is required when rejecting');
+    }
+
+    const instance = await db.oneOrNone(
+      `SELECT * FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_TECH' AND entity_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [arcId]
+    );
+    if (!instance) return bad(res, 404, 'No technical-evaluation approval instance for this ARC', 2);
+    if (instance.status !== 'PENDING') {
+      return bad(res, 400, `Technical evaluation is already ${instance.status} — no further actions allowed`);
+    }
+
+    // ── amend-then-approve: apply edited marks + record diffs ──
+    let engineComment = comment;
+    const amended = [];
+    const touchedItemIds = new Set();
+    if (decision === 'approve' && amendMarks.length > 0) {
+      await db.tx(async (t) => {
+        for (const m of amendMarks) {
+          const responseId = Number(m.response_id);
+          if (!responseId) continue;
+          const current = await t.oneOrNone(
+            `SELECT r.*, i.id AS arc_item_id
+               FROM tbl_arc_item_tech_evaluation_vendors_response r
+               JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+               JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+               JOIN tbl_arc_item i ON i.id = te.arc_item_id
+              WHERE r.id = $1 AND i.arc_id = $2`,
+            [responseId, arcId]
+          );
+          if (!current) continue;
+
+          const diffs = [];
+          if (m.buyer_marks != null && Number(m.buyer_marks) !== Number(current.buyer_marks)) {
+            diffs.push({ field: 'buyer_marks', before: current.buyer_marks, after: Number(m.buyer_marks) });
+          }
+          if (m.buyer_remark !== undefined && String(m.buyer_remark ?? '') !== String(current.buyer_remark ?? '')) {
+            diffs.push({ field: 'buyer_remark', before: current.buyer_remark, after: m.buyer_remark ?? null });
+          }
+          if (diffs.length === 0) continue;
+
+          for (const d of diffs) {
+            await t.none(
+              `INSERT INTO tbl_arc_tech_eval_edit_history
+                 (arc_id, response_id, field_changed, before_value, after_value, changed_by, comment)
+               VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)`,
+              [arcId, responseId, d.field,
+               JSON.stringify(d.before ?? null), JSON.stringify(d.after ?? null),
+               userId, comment]
+            );
+            amended.push({ response_id: responseId, field_changed: d.field, before_value: d.before ?? null, after_value: d.after ?? null });
+          }
+          await arcEvalModel.scoreVendorResponse(responseId, {
+            buyer_id: userId,
+            buyer_marks: m.buyer_marks != null ? Number(m.buyer_marks) : current.buyer_marks,
+            buyer_remark: m.buyer_remark !== undefined ? m.buyer_remark : current.buyer_remark,
+          }, t);
+          touchedItemIds.add(Number(current.arc_item_id));
+        }
+
+        // Recompute qualification for every touched item so the approved
+        // record reflects the amended marks.
+        for (const itemId of touchedItemIds) {
+          const scores = await arcEvalModel.computeItemScores(itemId, 1, t);
+          const te = await t.oneOrNone(
+            `SELECT id FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [itemId]
+          );
+          if (te && scores.length > 0) {
+            await arcEvalModel.recordClearedVendors(
+              te.id,
+              scores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
+              t
+            );
+          }
+        }
+      });
+      if (amended.length > 0) {
+        const summary = amended
+          .map((d) => `response ${d.response_id} ${d.field_changed}: ${JSON.stringify(d.before_value)} → ${JSON.stringify(d.after_value)}`)
+          .join('; ');
+        engineComment = `[Edited before approval] ${summary}${comment ? ` — ${comment}` : ''}`;
+      }
+    }
+
+    const result = await executeApprovalAction({
+      approval_instance_id: instance.id,
+      approver_user_id:     userId,
+      action:               decision.toUpperCase(),
+      comment:              engineComment,
+    });
+
+    const approval = await getApprovalInstanceDetails(instance.id, userId).catch(() => null);
+    // Fresh per-item scores for the touched items (UI refresh without refetch-all).
+    const scores = [];
+    for (const itemId of touchedItemIds) {
+      const itemScores = await arcEvalModel.computeItemScores(itemId, 1);
+      for (const s of itemScores) scores.push({ arc_item_id: itemId, ...s });
+    }
+    return ok(res, { result, approval, amended, scores });
+  } catch (err) {
+    logger.error({ err }, '[evalController.decideTechEval]');
+    const msg = err.message || 'Internal error';
+    const code = /not authorized|not an approver|already acted|already (approved|rejected)|not found|no pending step/i.test(msg) ? 400 : 500;
+    return bad(res, code, msg, code === 500 ? 3 : 0);
   }
 }
 
@@ -120,11 +389,25 @@ export async function submitTechEval(req, res) {
 export async function getCommEval(req, res) {
   try {
     const arcId = Number(req.params.arcId);
+    // The page needs the ARC context too — previously this endpoint returned
+    // no `arc` key and the comm-eval page rendered "Rate contract not found".
+    const arc = await db.oneOrNone(
+      `SELECT a.*, cat.title AS category_title, h.name AS hotel_name,
+              d.title AS department_title, u.name AS created_by_name
+         FROM tbl_arc a
+         LEFT JOIN tbl_category cat ON cat.id = a.category_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+         LEFT JOIN tbl_department d ON d.id = a.department_id
+         LEFT JOIN tbl_users u ON u.id = a.created_by
+        WHERE a.id = $1`,
+      [arcId]
+    );
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
     const items = await arcModel.listItems(arcId);
     const quotes = await arcEvalModel.listAllQuotesForArc(arcId);
     const comm = await arcEvalModel.getCommEval(arcId);
     const awards = comm ? await arcEvalModel.listAwards(comm.id) : [];
-    return ok(res, { comm_evaluation: comm, items, quotes, awards });
+    return ok(res, { arc, comm_evaluation: comm, items, quotes, awards });
   } catch (err) {
     logger.error({ err }, '[evalController.getCommEval]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -146,7 +429,8 @@ export async function saveAllocation(req, res) {
     if (!item_id || !Array.isArray(allocations)) {
       return bad(res, 400, 'item_id and allocations[] are required');
     }
-    return db.tx(async (t) => {
+    await arcLifecycleModel.assertStageWritable(arcId, 'commercial');
+    return await db.tx(async (t) => {
       const item = await t.oneOrNone(`SELECT * FROM tbl_arc_item WHERE id = $1 AND arc_id = $2`, [item_id, arcId]);
       if (!item) return bad(res, 404, 'item not found', 2);
       const sum = allocations.reduce((s, a) => s + Number(a.allocated_qty || 0), 0);
@@ -164,8 +448,7 @@ export async function saveAllocation(req, res) {
       return ok(res, { comm_evaluation: comm, awards: inserted });
     });
   } catch (err) {
-    logger.error({ err }, '[evalController.saveAllocation]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.saveAllocation]');
   }
 }
 
@@ -173,12 +456,18 @@ export async function finalizeCommEval(req, res) {
   try {
     const arcId = Number(req.params.arcId);
     const userId = req.user?.id;
-    return db.tx(async (t) => {
+    return await db.tx(async (t) => {
       const arc = await arcModel.getById(arcId, t);
       if (!arc) return bad(res, 404, 'ARC not found', 2);
       const items = await arcModel.listItems(arcId, t);
       const comm = await arcEvalModel.getCommEval(arcId, t);
       if (!comm) return bad(res, 400, 'Commercial evaluation has not been started');
+      if (comm.status === 'finalized') {
+        return res.status(409).json({
+          status: 0, code: 'STAGE_IMMUTABLE',
+          message: 'Commercial evaluation is already finalized',
+        });
+      }
       // Validate every item has allocations that sum to indicative_qty.
       const awards = await arcEvalModel.listAwards(comm.id, t);
       const byItem = new Map();
@@ -196,21 +485,50 @@ export async function finalizeCommEval(req, res) {
       if (itemsMissing.length > 0) {
         return bad(res, 400, `Allocation incomplete for ${itemsMissing.length} item(s)`);
       }
+
+      // Spawn the committee approval through the central engine — the
+      // Awarding stage becomes actionable the moment commercial finalizes.
+      const policy = await resolveArcPolicy('ARC_COMMITTEE', {
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+      }, t);
+      if (!policy) {
+        const err = new Error('No approval policy configured for the ARC committee in this scope.');
+        err.httpStatus = 400;
+        throw err;
+      }
+      const engineResult = await createApprovalInstance({
+        entity_type:            'ARC_COMMITTEE',
+        entity_id:              arcId,
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+        approval_policy_id:     policy.id,
+        initiated_by:           userId,
+        metadata:               { item_count: items.length, award_count: awards.length },
+        txContext:              t,
+      });
+      const instanceRow = engineResult?.instance || engineResult;
+      if (!instanceRow?.id) throw new Error('Approval engine did not return an instance id');
+
       const updated = await arcEvalModel.setCommEvalStatus(comm.id, 'finalized', {
         finalized_by: userId,
         finalized_at: new Date(),
+        approval_instance_id: instanceRow.id,
       }, t);
       await arcModel.setStatus(arcId, 'committee_review', {}, t);
       await arcEvalModel.appendCommEvalHistory(comm.id, 'finalized', { item_count: items.length }, userId, t);
       await logArcEvent({
         arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_FINALIZED,
-        actorId: userId, payload: { item_count: items.length }, txContext: t,
+        actorId: userId, payload: { item_count: items.length, approval_instance_id: instanceRow.id }, txContext: t,
       });
-      return ok(res, { comm_evaluation: updated }, 'Commercial evaluation finalized');
+      return ok(res, { comm_evaluation: updated, approval_instance_id: instanceRow.id }, 'Commercial evaluation finalized');
     });
   } catch (err) {
-    logger.error({ err }, '[evalController.finalizeCommEval]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.finalizeCommEval]');
   }
 }
 
@@ -219,18 +537,42 @@ export async function sendBackCommEval(req, res) {
     const arcId = Number(req.params.arcId);
     const userId = req.user?.id;
     const reason = req.body?.reason;
-    return db.tx(async (t) => {
+    return await db.tx(async (t) => {
       const comm = await arcEvalModel.getCommEval(arcId, t);
       if (!comm) return bad(res, 404, 'comm eval not found', 2);
+
+      // Once the committee has approved, contracts exist — irreversible here.
+      const committee = await t.oneOrNone(
+        `SELECT id, status FROM tbl_approval_instances
+          WHERE entity_type = 'ARC_COMMITTEE' AND entity_id = $1
+          ORDER BY created_at DESC LIMIT 1`,
+        [arcId]
+      );
+      if (committee?.status === 'APPROVED') {
+        return res.status(409).json({
+          status: 0, code: 'STAGE_IMMUTABLE',
+          message: 'The committee has already approved — contracts are generated and the award is immutable',
+        });
+      }
+      // A PENDING committee vote becomes moot when the evaluator pulls the
+      // proposal back — cancel it so a later re-finalize can spawn a fresh one.
+      if (committee?.status === 'PENDING') {
+        await t.none(
+          `UPDATE tbl_approval_instances
+              SET status = 'CANCELLED', completed_at = NOW()
+            WHERE id = $1`,
+          [committee.id]
+        );
+      }
+
       const updated = await arcEvalModel.setCommEvalStatus(comm.id, 'sent_back', {}, t);
       await arcModel.setStatus(arcId, 'comm_eval_in_progress', {}, t);
-      await arcEvalModel.appendCommEvalHistory(comm.id, 'sent_back', { reason }, userId, t);
+      await arcEvalModel.appendCommEvalHistory(comm.id, 'sent_back', { reason, cancelled_instance_id: committee?.status === 'PENDING' ? committee.id : null }, userId, t);
       await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK, actorId: userId, payload: { reason }, txContext: t });
       return ok(res, { comm_evaluation: updated }, 'Sent back');
     });
   } catch (err) {
-    logger.error({ err }, '[evalController.sendBackCommEval]');
-    return bad(res, 500, err.message || 'Internal error', 3);
+    return fail(res, err, '[evalController.sendBackCommEval]');
   }
 }
 

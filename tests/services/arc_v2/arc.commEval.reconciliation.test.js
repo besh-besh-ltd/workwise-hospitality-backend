@@ -8,6 +8,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
 
 describe("ARC v2 — commercial eval split-award reconciliation", () => {
   const BUYER  = IDS.users.a1_proc_buyer;
@@ -19,6 +20,7 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
   const PROC   = IDS.processes.A_P1;
   const CATEGORY = TEST_CATEGORIES.beverages;
   const VARIANT_ID = 1;
+  const POLICY_ID = 64903; // ARC_COMMITTEE — finalize now spawns the instance
   let client;
   let arcId, itemId, quoteLineA, quoteLineB;
 
@@ -30,6 +32,25 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
     );
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
     client = await httpClient(BUYER);
+    // Evaluation endpoints are gated by requireArcPermission (arc-comm.*).
+    await seedArcEvalPerms(db, [BUYER]);
+
+    // finalizeCommEval creates the ARC_COMMITTEE approval instance, so the
+    // scope needs a policy (one step, finance approver).
+    await db.none(
+      `INSERT INTO tbl_approval_policies
+         (id, entity_type, hospitality_company_id, hotel_id, department_id,
+          is_active, created_by, process_id, is_master, is_department_scoped, version)
+       VALUES ($1, 'ARC_COMMITTEE', $2, $3, NULL, true, $4, $5, false, false, 1)
+       ON CONFLICT (id) DO NOTHING`,
+      [POLICY_ID, HC, HOTEL, BUYER, PROC]
+    );
+    await db.none(
+      `INSERT INTO tbl_approval_policy_steps
+         (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
+       VALUES ($1, 1, 'ALL', 'USER', $2)`,
+      [POLICY_ID, IDS.users.a1_proc_finance]
+    );
 
     // Seed an ARC + item + two submitted vendor quotes so we can run comm-eval.
     const arc = await db.one(
@@ -80,6 +101,20 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
   });
 
   afterAll(async () => {
+    const instanceIds = (await db.any(
+      `SELECT id FROM tbl_approval_instances WHERE entity_type = 'ARC_COMMITTEE' AND entity_id = $1`,
+      [arcId]
+    )).map((r) => r.id);
+    if (instanceIds.length) {
+      await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`, [instanceIds]);
+      await db.none(`DELETE FROM tbl_approval_step_approvers
+                      WHERE approval_instance_step_id IN
+                        (SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[]))`, [instanceIds]);
+      await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])`, [instanceIds]);
+      await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [instanceIds]);
+    }
+    await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [POLICY_ID]);
+    await db.none(`DELETE FROM tbl_approval_policies WHERE id = $1`, [POLICY_ID]);
     await db.none(
       `DELETE FROM tbl_arc_event_log WHERE arc_id = $1`, [arcId]);
     await db.none(`DELETE FROM tbl_arc WHERE id = $1`, [arcId]);
@@ -87,6 +122,7 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
       `DELETE FROM tbl_category_department WHERE category_id = $1 AND department_id = $2`,
       [CATEGORY, DEPT]
     );
+    await cleanupArcEvalPerms(db, [BUYER]);
   });
 
   test("rejects allocation that doesn't sum to indicative_qty", async () => {
@@ -130,13 +166,28 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
     await db.none(`DELETE FROM tbl_arc_item WHERE id = $1`, [item2.id]);
   });
 
-  test("finalize flips ARC to committee_review when all items have full allocation", async () => {
+  test("getCommEval returns the ARC context (regression: 'Rate contract not found')", async () => {
+    const res = await client.get(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval`);
+    expect(res.status).toBe(200);
+    expect(Number(res.body.data.arc?.id)).toBe(Number(arcId));
+    expect(res.body.data.arc.category_title).toBeTruthy();
+    expect(res.body.data.arc.hotel_name).toBeTruthy();
+  });
+
+  test("finalize flips ARC to committee_review and spawns the committee instance", async () => {
     const res = await client.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
     expect(res.status).toBe(200);
+    expect(res.body.data.approval_instance_id).toBeTruthy();
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
     expect(arc.status).toBe("committee_review");
-    const comm = await db.one(`SELECT status FROM tbl_arc_comm_evaluation WHERE arc_id = $1`, [arcId]);
+    const comm = await db.one(`SELECT status, approval_instance_id FROM tbl_arc_comm_evaluation WHERE arc_id = $1`, [arcId]);
     expect(comm.status).toBe("finalized");
+    expect(Number(comm.approval_instance_id)).toBe(Number(res.body.data.approval_instance_id));
+    const instance = await db.one(
+      `SELECT status FROM tbl_approval_instances WHERE entity_type = 'ARC_COMMITTEE' AND entity_id = $1`,
+      [arcId]
+    );
+    expect(instance.status).toBe("PENDING");
   });
 
   test("history records every allocation save and finalize", async () => {
