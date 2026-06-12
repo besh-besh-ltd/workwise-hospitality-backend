@@ -1810,8 +1810,9 @@ WHERE NOT EXISTS (
         });
     });
   },
-  getRfqByUser: async (limit, offset, user_id, negotiationFilter = null) => {
+  getRfqByUser: async (limit, offset, user_id, filters = {}) => {
     return new Promise(function (resolve, reject) {
+      const negotiationFilter = filters?.negotiation_filter || null;
       let negotiationClause = '';
       if (negotiationFilter === 'active') {
         negotiationClause = `
@@ -1930,10 +1931,21 @@ WHERE NOT EXISTS (
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
+        ${filters?.search_val ? `AND (RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%' OR RFQ.company_name ILIKE '%' || $4 || '%')` : ''}
+        ${filters?.rfq_status === 'open' ? `AND RFQ.status = 1 AND (RFQ.bid_end_date = '' OR DATE(RFQ.bid_end_date) >= CURRENT_DATE)` : ''}
+        ${filters?.rfq_status === 'closed' ? `AND (RFQ.status != 1 OR (RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) < CURRENT_DATE))` : ''}
+        ${filters?.bid_ends_in === '3d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
+        ${filters?.bid_ends_in === '5d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
+        ${filters?.bid_ends_in === '1w' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
+        ${filters?.bid_ends_in === '1m' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+        ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
+        ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3)` : ''}
+        ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3 AND TQ.is_regret = 0)` : ''}
+        ${filters?.quote_status === 'rejected' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3 AND TQ.is_regret = 1)` : ''}
         ${negotiationClause}
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
-        [offset, limit, user_id]
+        [offset, limit, user_id, filters?.search_val]
       )
         .then(function (data) {
           resolve(data);
@@ -2705,7 +2717,34 @@ LIMIT 1;`;
             LIMIT 1
           ),
           'No vendor finalized yet'
-        ) AS finalization_status
+        ) AS finalization_status,
+        -- finalized_vendor: additive buyer-facing object naming the WINNING vendor
+        -- for this product/variant (display name + id + finalized ₹ amount), or
+        -- NULL when no finalization exists. Does NOT replace finalization_status
+        -- (a vendor-perspective string other code depends on). Name source mirrors
+        -- the canonical all_vendors pattern: COALESCE(company.company_name,
+        -- user.organization_name, user.name).
+        (
+          SELECT json_build_object(
+            'vendor_id', TQF_FV.vendor_id,
+            'vendor_name', COALESCE(TCC_FV.company_name, TU_FV.organization_name, TU_FV.name),
+            'finalized_amount', (
+              SELECT TQI_FV.total_price
+              FROM tbl_quote_items TQI_FV
+              WHERE TQI_FV.quote_id = TQF_FV.quote_id
+                AND TQI_FV.product_variant_id = RFQ_P.product_variant_id
+                AND TQI_FV.variant = RFQ_P.variant
+              LIMIT 1
+            )
+          )
+          FROM tbl_quote_finalization TQF_FV
+          JOIN tbl_users TU_FV ON TU_FV.id = TQF_FV.vendor_id
+          LEFT JOIN tbl_company TCC_FV ON TCC_FV.id = TU_FV.company_id
+          WHERE TQF_FV.rfq_id = RFQ_P.rfq_id
+            AND TQF_FV.product_variant_id = RFQ_P.product_variant_id
+            AND TQF_FV.variant = RFQ_P.variant
+          LIMIT 1
+        ) AS finalized_vendor
         ${
           // Changes by Agnij 2025-05-05 [Modified to include user_type 2, 3, 8, 9, 10]
           user_type == 2 ||
@@ -3862,7 +3901,7 @@ LIMIT 2;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
+      AND ($6 IS NULL OR RFQ.rfq_no::text LIKE '%' || $6 || '%' OR RFQ.title ILIKE '%' || $6 || '%') -- Search by rfq_no or title
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
       ${completed_status === 'completed' ? `AND (
         (SELECT CASE
@@ -5416,7 +5455,7 @@ LIMIT 2;
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL) -- Filter by rfq_no if provided
+        AND ($4 IS NULL OR RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%') -- Search by rfq_no or title
         ${isTenderFilter}
         ${completed_status === 'completed' ? `AND (
           (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
@@ -5465,7 +5504,8 @@ LIMIT 2;
     reverse_auction,
     rfq_type,
     rfq_no,
-    is_tender
+    is_tender,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -5658,8 +5698,9 @@ LIMIT 2;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
-      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL)
+      AND ($6 IS NULL OR RFQ.rfq_no::text LIKE '%' || $6 || '%' OR RFQ.title ILIKE '%' || $6 || '%')
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND RFQ.hotel_id IN (${hotel_ids.map(Number).filter(Boolean).join(',')})` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -5679,12 +5720,17 @@ LIMIT 2;
     rfq_type,
     reverse_auction,
     rfq_no,
-    is_tender
+    is_tender,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let isTenderFilter = '';
       if (is_tender !== null && is_tender !== undefined) {
         isTenderFilter = `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}`;
+      }
+      let hotelFilter = '';
+      if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+        hotelFilter = `AND RFQ.hotel_id IN (${hotel_ids.map(Number).filter(Boolean).join(',')})`;
       }
       db.any(
         `SELECT COUNT(*) from tbl_rfq RFQ
@@ -5722,8 +5768,9 @@ LIMIT 2;
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
-        ${isTenderFilter};
+        AND ($4 IS NULL OR RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%')
+        ${isTenderFilter}
+        ${hotelFilter};
         `,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
@@ -7249,6 +7296,184 @@ LIMIT 2;
     });
   },
 
+  /**
+   * Recommends product variants for the Start RFQ wizard.
+   *
+   * Score (descending priority):
+   *   1. user_history_score   — boosted if the user has previously RFQ'd this variant (signal of intent)
+   *   2. category_match_score — boosted if the variant is in the same category as one of the staged variants
+   *   3. popularity_score     — overall RFQ frequency across the platform (last 12 months)
+   *
+   * Filters:
+   *   - Only variants with at least one eligible vendor for the selected hotels
+   *   - Excludes variants already staged
+   *   - Only approved & active products + variants
+   *
+   * Returns shape mirrors searchProduct() so the frontend can render with the same component:
+   *   { variant_id, variant_name, product_id, product_name, category_name, vendor_count, ... }
+   */
+  getRecommendedProducts: async ({ user_id, hotel_ids = [], staged_variant_ids = [], limit = 5 }) => {
+    if (!Array.isArray(hotel_ids) || hotel_ids.length === 0) {
+      return [];
+    }
+
+    const params = [user_id, hotel_ids];
+    let pIdx = 3;
+
+    const stagedParam = staged_variant_ids.length > 0
+      ? `$${pIdx++}::int[]`
+      : null;
+    if (staged_variant_ids.length > 0) params.push(staged_variant_ids);
+
+    const limitParam = `$${pIdx++}`;
+    params.push(limit);
+
+    const stagedCategoriesCte = stagedParam
+      ? `staged_categories AS (
+           SELECT DISTINCT pc.category_id
+           FROM tbl_product_variant pv
+           JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+           WHERE pv.id = ANY(${stagedParam})
+         ),`
+      : `staged_categories AS (
+           SELECT NULL::bigint AS category_id WHERE FALSE
+         ),`;
+
+    const stagedExcludeClause = stagedParam
+      ? `AND pv.id <> ALL(${stagedParam})`
+      : '';
+
+    const q = `
+      WITH
+      -- Eligible vendors for the requested hotels (active or expired subs)
+      eligible_hotel_vendors AS (
+        SELECT DISTINCT s.vendor_id
+        FROM tbl_vendor_hotel_category_subscription s
+        WHERE s.item_type = 'hotel'
+          AND s.item_id = ANY($2)
+          AND s.status IN ('active', 'expired')
+      ),
+
+      -- User's previous variants from their own RFQs (last 24 months window)
+      user_history_variants AS (
+        SELECT rp.product_variant_id AS variant_id, COUNT(*)::int AS history_count
+        FROM tbl_rfq_products rp
+        JOIN tbl_rfq r ON r.id = rp.rfq_id
+        WHERE r.created_by = $1
+          AND r.timestamp > NOW() - INTERVAL '24 months'
+        GROUP BY rp.product_variant_id
+      ),
+
+      -- Categories from currently staged variants (to find similar items)
+      ${stagedCategoriesCte}
+
+      -- Platform-wide popularity (last 12 months) — fallback when no signal
+      popular_variants AS (
+        SELECT rp.product_variant_id AS variant_id, COUNT(*)::int AS popularity
+        FROM tbl_rfq_products rp
+        JOIN tbl_rfq r ON r.id = rp.rfq_id
+        WHERE r.timestamp > NOW() - INTERVAL '12 months'
+        GROUP BY rp.product_variant_id
+      ),
+
+      -- Candidate variants: must have at least one eligible vendor for selected hotels
+      candidate_variants AS (
+        SELECT DISTINCT
+          pv.id AS variant_id,
+          pv.product_id,
+          pv.name AS variant_name,
+          pv.slug,
+          p.name AS product_name,
+          p.description
+        FROM tbl_product_variant pv
+        JOIN tbl_product p ON p.id = pv.product_id
+        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
+        JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = pvvm.vendor_id
+        WHERE p.status = 1
+          AND p.is_deleted = 0
+          AND p.is_review = 0
+          AND p.is_approve = 1
+          AND pv.is_approve = 1
+          AND pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+          ${stagedExcludeClause}
+      ),
+
+      -- Vendor count per variant scoped to the selected hotels (active or expired)
+      vendor_counts AS (
+        SELECT pvvm.product_variant_id AS variant_id,
+               COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
+        FROM tbl_product_variant_vendor_mapping pvvm
+        JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = pvvm.vendor_id
+        WHERE pvvm.status = TRUE AND pvvm.is_approved = TRUE
+        GROUP BY pvvm.product_variant_id
+      ),
+
+      -- Per-variant category info (one row per variant, picks first category)
+      variant_category AS (
+        SELECT DISTINCT ON (pc.product_id)
+          pc.product_id,
+          c.id AS category_id,
+          c.title AS category_name
+        FROM tbl_product_categories pc
+        JOIN tbl_category c ON c.id = pc.category_id
+        WHERE c.is_deleted = 0
+        ORDER BY pc.product_id, c.id
+      ),
+
+      scored AS (
+        SELECT
+          cv.variant_id,
+          cv.product_id,
+          cv.variant_name,
+          cv.product_name,
+          cv.description,
+          cv.slug,
+          vcat.category_id,
+          vcat.category_name,
+          COALESCE(vc.vendor_count, 0) AS vendor_count,
+          -- Personalization: 100 base, +20 per past use (max 200)
+          CASE WHEN uh.history_count > 0 THEN 100 + LEAST(uh.history_count * 20, 100) ELSE 0 END AS user_history_score,
+          -- Category match with staged: flat 50 if matches
+          CASE WHEN sc.category_id IS NOT NULL THEN 50 ELSE 0 END AS category_match_score,
+          -- Popularity: log-scaled (0–30 typical)
+          COALESCE(LEAST(pv_pop.popularity, 30), 0) AS popularity_score
+        FROM candidate_variants cv
+        LEFT JOIN vendor_counts vc ON vc.variant_id = cv.variant_id
+        LEFT JOIN variant_category vcat ON vcat.product_id = cv.product_id
+        LEFT JOIN user_history_variants uh ON uh.variant_id = cv.variant_id
+        LEFT JOIN popular_variants pv_pop ON pv_pop.variant_id = cv.variant_id
+        LEFT JOIN staged_categories sc ON sc.category_id = vcat.category_id
+      )
+
+      SELECT
+        variant_id,
+        product_id,
+        variant_name,
+        product_name,
+        description,
+        slug,
+        category_id,
+        category_name,
+        vendor_count,
+        (user_history_score + category_match_score + popularity_score) AS score
+      FROM scored
+      WHERE vendor_count > 0
+      ORDER BY
+        score DESC,
+        user_history_score DESC,
+        popularity_score DESC,
+        product_name ASC
+      LIMIT ${limitParam};
+    `;
+
+    return new Promise((resolve, reject) => {
+      db.query(q, params)
+        .then((data) => resolve(data))
+        .catch((err) => reject(new Error(err)));
+    });
+  },
+
   getCategoryList: async (search_key) => {
     //   let q = `
     //  SELECT DISTINCT c.id AS category_id,
@@ -8624,11 +8849,15 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           existingProductWithNoChange = true;
         }
 
-        // Fetch existing quote item only if there are differences in specified fields
+        // Fetch existing quote item only if there are differences in specified fields.
+        // `delivery_period` is stored as TEXT (legacy schema), but the FE sends it as
+        // a JS number — pg-promise infers integer for the wire param and Postgres
+        // throws "operator does not exist: text <> integer". Cast the param to text
+        // so the comparison stays type-safe regardless of how the FE serializes it.
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
       WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8 OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
+       AND (unit_price != $4 OR tax != $5 OR total_price != $6 OR comment != $7 OR delivery_period != $8::text OR tax_mode != $9 OR COALESCE(other_charges::text, '[]') != $10)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,
@@ -8980,8 +9209,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-  getVendorRfqCount: async (user_id, negotiationFilter = null) => {
+  getVendorRfqCount: async (user_id, filters = {}) => {
     return new Promise((resolve, reject) => {
+      const negotiationFilter = filters?.negotiation_filter || null;
       let negotiationClause = '';
       if (negotiationFilter === 'active') {
         negotiationClause = `
@@ -9015,9 +9245,20 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         `SELECT COUNT(DISTINCT v.rfq_id)
          FROM tbl_rfq_product_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1
-         ${negotiationClause}`, // Matching user_id in tbl_rfq_product_vendors
-        [user_id]
+         WHERE v.user_id = $1 AND r.is_published = 1 AND r.status NOT IN (3, 4)
+         ${filters?.search_val ? `AND (r.rfq_no::text LIKE '%' || $2 || '%' OR r.title ILIKE '%' || $2 || '%' OR r.company_name ILIKE '%' || $2 || '%')` : ''}
+         ${filters?.rfq_status === 'open' ? `AND r.status = 1 AND (r.bid_end_date = '' OR DATE(r.bid_end_date) >= CURRENT_DATE)` : ''}
+         ${filters?.rfq_status === 'closed' ? `AND (r.status != 1 OR (r.bid_end_date != '' AND DATE(r.bid_end_date) < CURRENT_DATE))` : ''}
+         ${filters?.bid_ends_in === '3d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
+         ${filters?.bid_ends_in === '5d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
+         ${filters?.bid_ends_in === '1w' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
+         ${filters?.bid_ends_in === '1m' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+         ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
+         ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1)` : ''}
+         ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1 AND TQ.is_regret = 0)` : ''}
+         ${filters?.quote_status === 'rejected' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1 AND TQ.is_regret = 1)` : ''}
+         ${negotiationClause}`,
+        [user_id, filters?.search_val]
       )
         .then(function (data) {
           resolve(data);
@@ -9027,6 +9268,30 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           reject(error);
         });
     });
+  },
+
+  getVendorRfqStats: async (user_id) => {
+    return db.one(
+      `SELECT
+         COUNT(DISTINCT v.rfq_id) as total,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1)
+         ) as pending,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1 AND q.is_regret = 0)
+         ) as quoted,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
+           AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1)
+         ) as closing_soon,
+         COUNT(DISTINCT v.rfq_id) FILTER (
+           WHERE EXISTS (SELECT 1 FROM tbl_quote_finalization qf WHERE qf.rfq_id = v.rfq_id AND qf.vendor_id = $1)
+         ) as finalized
+       FROM tbl_rfq_product_vendors v
+       JOIN tbl_rfq r ON v.rfq_id = r.id
+       WHERE v.user_id = $1 AND r.is_published = 1 AND r.status NOT IN (3, 4)`,
+      [user_id]
+    );
   },
 
   getAllRfqsForAdmin: async (
@@ -12050,9 +12315,24 @@ ORDER BY m.created_at;
       SELECT
         RFQ.*,
         P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+        -- Real items count (not bounded by the LIMIT 3 in "products"). Used by the
+        -- Create-RFQ landing list so we can show "12 items" without paying for
+        -- the full payload.
+        (SELECT COUNT(*)::int FROM tbl_rfq_products _RPC WHERE _RPC.rfq_id = RFQ.id) AS items_count,
+        -- Business units attached to this draft (id + name) — the landing
+        -- replaces the Project column with this.
+        ARRAY(
+          SELECT json_build_object('id', _HCH.id, 'name', _HCH.name)
+          FROM tbl_rfq_hotel_mappings _RHM
+          JOIN tbl_hospitality_company_hotels _HCH ON _HCH.id = _RHM.hotel_id
+          WHERE _RHM.rfq_id = RFQ.id
+        ) AS hotels,
+        -- Creator's display name so the FE can show "Created by …" and a
+        -- "View only" pill when current user isn't the owner.
+        (SELECT _U.name FROM tbl_users _U WHERE _U.id = RFQ.created_by) AS creator_name,
         ARRAY(
             SELECT json_build_object(
-                'id', RFQ_P.id, 
+                'id', RFQ_P.id,
                 'product_id', RFQ_P.product_variant_id,
                   'product_details', (
                       SELECT json_agg(json_build_object(
@@ -12727,7 +13007,8 @@ ORDER BY tq.timestamp DESC;
     is_tender,
     rfq_id,
     hotel_id = null,
-    quote_compare = false
+    quote_compare = false,
+    search = null
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -12959,6 +13240,8 @@ ORDER BY tq.timestamp DESC;
         RFQ.created_by,
         RFQ.tender_publish_date,
         RFQ.vendor_clarification_date,
+        RFQ.copied_from_rfq_id,
+        RFQ.copied_from_rfq_no,
         (
           SELECT EXISTS (
             SELECT 1 FROM tbl_quotes _tq_exists
@@ -13392,12 +13675,21 @@ ORDER BY tq.timestamp DESC;
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       AND (RFQ.id = $5 OR $5 IS NULL)
       AND (RFQ.hotel_id = $6 OR $6 IS NULL)
+      -- Free-text search: case-insensitive match on rfq_no / title / project
+      -- name. Parameterized ($7) so it's injection-safe; no-op when null. Does
+      -- NOT relax the tenant/ownership WHERE clause above.
+      AND (
+        $7::text IS NULL
+        OR RFQ.rfq_no::text ILIKE '%' || $7 || '%'
+        OR RFQ.title ILIKE '%' || $7 || '%'
+        OR P.name ILIKE '%' || $7 || '%'
+      )
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id, search])
         .then(function (data) {
           resolve(data);
         })
@@ -15560,6 +15852,36 @@ ORDER BY tq.timestamp DESC;
        WHERE id = $1`,
       [rfq_id]
     );
+  },
+
+  // RFQ Copy lineage. accessibleHotelIds is the caller's set of accessible
+  // hotels; rows outside that set are filtered so a buyer can't enumerate
+  // copies they wouldn't otherwise be able to see.
+  getCopyLineage: async (rfqId, accessibleHotelIds) => {
+    const hotelArray = Array.isArray(accessibleHotelIds) ? accessibleHotelIds : [];
+
+    const parent = await db.oneOrNone(
+      `SELECT r.id, r.rfq_no, r.title, r.hotel_id, r.status, r.timestamp,
+              hh.name AS hotel_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+       WHERE r.id = (SELECT copied_from_rfq_id FROM tbl_rfq WHERE id = $1)
+         AND (r.hotel_id IS NULL OR r.hotel_id = ANY($2::int[]))`,
+      [rfqId, hotelArray]
+    );
+
+    const children = await db.any(
+      `SELECT r.id, r.rfq_no, r.title, r.hotel_id, r.status, r.timestamp,
+              hh.name AS hotel_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+       WHERE r.copied_from_rfq_id = $1
+         AND (r.hotel_id IS NULL OR r.hotel_id = ANY($2::int[]))
+       ORDER BY r.id DESC`,
+      [rfqId, hotelArray]
+    );
+
+    return { copied_from: parent, copies: children };
   },
 };
 

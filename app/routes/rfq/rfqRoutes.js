@@ -7,7 +7,7 @@ import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
 import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
-import { acl, verifyAIWebhookBody } from '../../helper/common.js';
+import { acl, noAcl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { can } from '../../middleware/auth.js';
@@ -55,6 +55,22 @@ RfqRoutes.post(
   passportSignIn,
   acl([2, 8]),
   rfqController.createOrUpdateRfqDraftWithProductVendors
+);
+
+// Bulk variant — accepts variants: [{ variant_id }, ...] and adds them all
+RfqRoutes.post(
+  '/add-products-to-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.createOrUpdateRfqDraftWithBulkProducts
+);
+
+// Recommended products for Start RFQ wizard
+RfqRoutes.post(
+  '/recommended-products',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getRecommendedProducts
 );
 
 RfqRoutes.get(
@@ -106,6 +122,29 @@ RfqRoutes.get(
   acl([2, 8]),
   validateParam(rfqSchemas.id),
   rfqController.getEditHistory
+);
+
+// RFQ Copy — creates a DRAFT clone of an existing RFQ for the chosen
+// business unit (hotel), re-resolving vendors against the target's current
+// eligible pool. Returns the new draft ID for the wizard to load.
+RfqRoutes.post(
+  '/copy',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateBody(rfqSchemas.copy),
+  rfqController.copyRfq
+);
+
+// Copy lineage: back-link (copied_from) and forward-links (copies) for
+// rendering the "Copied from RFQ #N" pill and "Copies of this RFQ" list
+// on the RFQ details page. Filtered by the caller's accessible hotels.
+RfqRoutes.get(
+  '/:id/lineage',
+  passportSignIn,
+  acl([2, 8]),
+  validateParam(rfqSchemas.id),
+  rfqController.getRfqLineage
 );
 
 
@@ -244,6 +283,14 @@ RfqRoutes.get(
   validateDbBody.user_id_profileexists,
   acl([2, 8, 10]),
   rfqController.getQuoteComparison
+);
+// Buyer Quote Comparison UI: single flat "QC contract" reshape of the
+// comparison data (see quoteCompareViewModel). Read-only, buyer-facing.
+RfqRoutes.get(
+  '/quote-comparison-view/:id',
+  passportSignIn,
+  noAcl([3]),
+  rfqController.getQuoteComparisonView
 );
 RfqRoutes.get(
   '/download-quote-results/:id',

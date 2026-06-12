@@ -27,6 +27,7 @@ import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from '../../services/notificationService.js';
 import JWT from 'jsonwebtoken';
 import xlsx from 'xlsx';
 //var FCM = new fcm(certPath);
@@ -108,6 +109,23 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
 
         sendMail(mailRecipients);
 
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'buyer_account_created',
+              title: 'Welcome to Phileein Hospitality',
+              body: 'Your account has been created. Use the credentials emailed to you to log in.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch buyer_account_created failed', notifyErr);
+        }
+
         return accountLimitSaved
 }
 
@@ -141,6 +159,23 @@ const continueVendorCompanyRegistration = async (inputData, company_id)=>{
         }
 
         sendMail(mailRecipients);
+
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'vendor_company_registered',
+              title: 'Registration received',
+              body: 'Your account is under review. We will notify you once it is approved.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch vendor_company_registered failed', notifyErr);
+        }
 }
 
 
@@ -1726,6 +1761,16 @@ get_company_users: async (req, res, next) => {
         };
 
         sendMail(mailRecipients);
+
+        dispatchNotification({
+          userIds: [user_detail[0].id],
+          category: 'account',
+          type: 'forgot_password_otp_sent',
+          title: 'Password reset code sent',
+          body: 'Check your email for the verification code to reset your password.',
+          data: {},
+          actionUrl: verificationLink
+        }).catch((err) => logError('dispatch forgot_password_otp_sent failed', err));
 
         let updateOtp = {
           otp: otpseq,

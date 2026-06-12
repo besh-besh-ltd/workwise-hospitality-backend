@@ -79,6 +79,7 @@ export const projectSchemas = {
         reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag,
         limit: Joi.number().integer(),  // add limit,
         rfq_no: Joi.number().integer().optional().allow(null),
+        search_val: Joi.string().optional().allow(null).allow(''),  // Unified search by title or RFQ number
         is_tender: Joi.string().valid('0', '1').optional().allow(null).allow(''),  // Filter by RFQ (0) or Tender (1)
         completed_status: Joi.string().valid('completed', 'active', 'closed').optional().allow(null).allow(''),  // Filter by PO completion status
         hotel_ids: Joi.array().items(Joi.number().integer()).optional(),  // Filter by hospitality hotel IDs (business units)

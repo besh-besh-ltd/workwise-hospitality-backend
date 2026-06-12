@@ -1,7 +1,13 @@
 import { Router } from 'express';
 import UsersController from '../../controllers/users/usersController.js';
+import userNotificationController from '../../controllers/users/userNotificationController.js';
 import vendorController from '../../controllers/admin/vendorController.js';
 import noLogin from '../../middleware/noLogin.js';
+import db from '../../config/dbConn.js';
+import jwtHelper from '../../helper/jwtHelper.js';
+import Cryptr from 'cryptr';
+import Config from '../../config/app.config.js';
+const guestCryptr = new Cryptr(Config.cryptR.secret);
 import {
   validateBody,
   validateParam,
@@ -26,6 +32,74 @@ UsersRoutes.post(
   UsersController.userBookDemo
 );
 
+// Verify a vendor email-link token and return a short-lived JWT
+// so the vendor gets a normal session without manual login.
+UsersRoutes.post('/verify-vendor-token', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ status: 0, message: 'Token is required' });
+    }
+
+    const tokenData = await db.oneOrNone(
+      'SELECT vendor_id FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
+      [token]
+    );
+    if (!tokenData) {
+      return res.status(400).json({ status: 0, message: 'Invalid or expired token' });
+    }
+
+    const user = await db.oneOrNone(
+      'SELECT id, name, email, user_type, company_id, status FROM tbl_users WHERE id = $1',
+      [tokenData.vendor_id]
+    );
+    if (!user) {
+      return res.status(404).json({ status: 0, message: 'Vendor not found' });
+    }
+
+    // Store the request's User-Agent in DB so passport jwtUsr strategy
+    // can verify it against the encrypted ag claim in the JWT.
+    const userAgent = req.get('User-Agent') || 'guest-access';
+    await db.none(
+      'UPDATE tbl_users SET user_agent = $1 WHERE id = $2',
+      [userAgent, user.id]
+    );
+
+    // Build JWT matching the exact format that signAccessTokenUser produces
+    // and that the jwtUsr passport strategy expects:
+    // - sub: encrypted user id
+    // - ag: encrypted user agent
+    // - user: true
+    const expirySeconds = 30 * 60; // 30 minutes
+    const jwt = jwtHelper.signGuestAccessToken(
+      {
+        user_id: guestCryptr.encrypt(String(user.id)),
+        name: user.name,
+        user_agent: guestCryptr.encrypt(userAgent),
+      },
+      expirySeconds
+    );
+
+    return res.json({
+      status: 1,
+      data: {
+        token: jwt,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          user_type: user.user_type,
+          company_id: user.company_id,
+        },
+        expires_in: expirySeconds,
+        is_guest: true,
+      },
+    });
+  } catch (error) {
+    console.error('verify-vendor-token error:', error);
+    return res.status(500).json({ status: 3, message: 'Failed to verify token' });
+  }
+});
 
 // use to create dufferent type of buyer company users,
 // like procurment, management, finance, engineering
@@ -86,6 +160,43 @@ UsersRoutes.post(
 
   UsersController.subscribe
 );
+
+// New push + bell endpoints (multi-device, recipient-based)
+UsersRoutes.get(
+  '/notifications/vapid-public-key',
+  userNotificationController.vapidPublicKey
+);
+UsersRoutes.post(
+  '/notifications/push-subscribe',
+  passportSignIn,
+  userNotificationController.pushSubscribe
+);
+UsersRoutes.delete(
+  '/notifications/push-subscribe',
+  passportSignIn,
+  userNotificationController.pushUnsubscribe
+);
+UsersRoutes.get(
+  '/notifications/list',
+  passportSignIn,
+  userNotificationController.list
+);
+UsersRoutes.get(
+  '/notifications/unread-count',
+  passportSignIn,
+  userNotificationController.unreadCount
+);
+UsersRoutes.post(
+  '/notifications/mark-read/:id',
+  passportSignIn,
+  userNotificationController.markRead
+);
+UsersRoutes.post(
+  '/notifications/mark-all-read',
+  passportSignIn,
+  userNotificationController.markAllRead
+);
+
 UsersRoutes.get(
   '/notifications/notification-list',
   passportSignIn,
