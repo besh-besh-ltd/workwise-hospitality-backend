@@ -9,7 +9,7 @@ import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendE
 import { sendRfqPublishFailureToCreator } from './sendEmailFunctions/rfqPublishFailureEmail.js';
 import rfqModel from '../models/rfqModel.js';
 import userModel from '../models/userModel.js';
-import negotiationModel from '../models/negotiationModel.js';
+import negotiationModel, { getCoveredProductIds } from '../models/negotiationModel.js';
 import rbacModel from '../models/rbacModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from './common.js';
@@ -829,10 +829,11 @@ const buildNegotiationEmailContext = async (round) => {
         vendorsLookup[row.id] = row.name;
       }
 
-      if (round?.rfq_id && round?.rfq_product_id) {
-        const productVariantId = round.product_variant_id || null;
+      const coveredIds = getCoveredProductIds(round);
+      if (round?.rfq_id && coveredIds.length > 0) {
         const quoteRows = await db.any(
           `SELECT q.created_by AS vendor_id,
+                  rp.id AS rfq_product_id,
                   qi.unit_price, qi.freight_price, qi.freight_mode,
                   qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
                   qi.delivery_period, qi.comment, qi.other_charges,
@@ -844,24 +845,38 @@ const buildNegotiationEmailContext = async (round) => {
                   ) AS payment_terms
            FROM tbl_quotes q
            JOIN tbl_quote_items qi ON qi.quote_id = q.id
+           JOIN tbl_rfq_products rp
+             ON rp.rfq_id = q.rfq_id
+             AND rp.product_variant_id = qi.product_variant_id
+             AND rp.id = ANY($3::int[])
            WHERE q.rfq_id = $1
              AND q.created_by IN ($2:csv)
-             AND ($3::int IS NULL OR qi.product_variant_id = $3)
            ORDER BY q."timestamp" DESC`,
-          [round.rfq_id, vendorIds, productVariantId]
+          [round.rfq_id, vendorIds, coveredIds]
         );
         for (const row of quoteRows) {
           if (!vendorQuotes[row.vendor_id]) vendorQuotes[row.vendor_id] = row;
+          if (!vendorQuotes[`${row.vendor_id}:${row.rfq_product_id}`]) {
+            vendorQuotes[`${row.vendor_id}:${row.rfq_product_id}`] = row;
+          }
         }
       }
     }
 
     const chargeSlugs = new Set();
-    for (const va of vendorApprovals) {
-      for (const f of (va.negotiation_fields || [])) {
+    const collectSlugs = (fields) => {
+      for (const f of (fields || [])) {
         if (f?.name && !NON_CHARGE_SYSTEM_SLUGS.has(f.name) && !/_mode$/.test(f.name)) {
           chargeSlugs.add(f.name);
         }
+      }
+    };
+    for (const va of vendorApprovals) {
+      collectSlugs(va.negotiation_fields);
+    }
+    for (const p of (Array.isArray(round?.products) ? round.products : [])) {
+      for (const vt of (p?.vendor_targets || [])) {
+        collectSlugs(vt.fields);
       }
     }
     if (chargeSlugs.size > 0) {
@@ -956,6 +971,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
             rfqNo: round.rfq_no,
             rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
+            productNames: (round.product_names || []).map(p => p?.product_name).filter(Boolean),
             initiator,
             commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
             companyName: emailContext.companyName,
@@ -1006,6 +1022,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
             rfqNo: round.rfq_no,
             rfqTitle: emailContext.rfqTitle,
             productName: round.product_name,
+            productNames: (round.product_names || []).map(p => p?.product_name).filter(Boolean),
             quoteCount,
             commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
             companyName: emailContext.companyName,

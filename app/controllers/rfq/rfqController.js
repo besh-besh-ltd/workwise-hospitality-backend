@@ -8148,7 +8148,23 @@ const rfqController = {
           if (bidEndDateTime && now > bidEndDateTime) {
             // Check if any active negotiation round exists for this RFQ
             const activeNegotiationRounds = await db.any(
-              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+              `SELECT nr.id, cp.covered_product_id AS rfq_product_id
+             FROM tbl_negotiation_rounds nr
+             CROSS JOIN LATERAL (
+               SELECT nr.rfq_product_id AS covered_product_id
+               WHERE nr.rfq_product_id IS NOT NULL
+               UNION
+               SELECT (p_->>'rfq_product_id')::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE p_->>'rfq_product_id' IS NOT NULL
+               UNION
+               -- RFQ-level entries (payment terms / global charges) keep the
+               -- round registered as active even with no product entries.
+               SELECT NULL::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE (p_->>'is_rfq_level')::boolean IS TRUE
+             ) cp
+             WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
               [rfq_id]
             );
 
@@ -8718,9 +8734,15 @@ const rfqController = {
 
                   // Check if there's an active negotiation round for this product
                   const activeRound = await t.oneOrNone(
-                    `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
-                     WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
-                     AND end_date > NOW()`,
+                    `SELECT id, rfq_product_id FROM tbl_negotiation_rounds nr
+                     WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE'
+                       AND nr.end_date > NOW()
+                       AND (nr.rfq_product_id = $2 OR EXISTS (
+                         SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                         WHERE (p_->>'rfq_product_id')::int = $2
+                       ))
+                     ORDER BY nr.round_number DESC
+                     LIMIT 1`,
                     [rfq_id, rfqProductId]
                   );
 
@@ -8728,8 +8750,8 @@ const rfqController = {
                     // Check if vendor has already submitted a quote for this round
                     const existingNegotiationQuote = await t.oneOrNone(
                       `SELECT id FROM tbl_negotiation_round_quotes 
-                       WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-                      [activeRound.id, user.id]
+                       WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+                      [activeRound.id, user.id, rfqProductId]
                     );
 
                     if (!existingNegotiationQuote) {
@@ -13383,7 +13405,23 @@ sendFollowUpEmails: async (req, res) => {
         if (bidEndDateTime && now > bidEndDateTime) {
           // Check if any active negotiation round exists for this RFQ
           const activeNegotiationRounds = await db.any(
-            `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+            `SELECT nr.id, cp.covered_product_id AS rfq_product_id
+             FROM tbl_negotiation_rounds nr
+             CROSS JOIN LATERAL (
+               SELECT nr.rfq_product_id AS covered_product_id
+               WHERE nr.rfq_product_id IS NOT NULL
+               UNION
+               SELECT (p_->>'rfq_product_id')::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE p_->>'rfq_product_id' IS NOT NULL
+               UNION
+               -- RFQ-level entries (payment terms / global charges) keep the
+               -- round registered as active even with no product entries.
+               SELECT NULL::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE (p_->>'is_rfq_level')::boolean IS TRUE
+             ) cp
+             WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
             [quoteExists[0].rfq_id]
           );
 
@@ -13684,9 +13722,15 @@ sendFollowUpEmails: async (req, res) => {
 
             // Check if there's an active negotiation round for this product
             const activeRound = await db.oneOrNone(
-              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
-               WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
-               AND end_date > NOW()`,
+              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds nr
+               WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE'
+                 AND nr.end_date > NOW()
+                 AND (nr.rfq_product_id = $2 OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                   WHERE (p_->>'rfq_product_id')::int = $2
+                 ))
+               ORDER BY nr.round_number DESC
+               LIMIT 1`,
               [rfq_id, rfqProductId]
             );
 
@@ -13694,8 +13738,8 @@ sendFollowUpEmails: async (req, res) => {
               // Check if vendor has already submitted a quote for this round
               const existingNegotiationQuote = await db.oneOrNone(
                 `SELECT id FROM tbl_negotiation_round_quotes 
-                 WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-                [activeRound.id, user.id]
+                 WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+                [activeRound.id, user.id, rfqProductId]
               );
 
               if (!existingNegotiationQuote) {
