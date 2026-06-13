@@ -239,7 +239,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(res.body.data.default_stage).toBe("technical");
   });
 
-  test("3. one vendor fully scored across all items → technical partial, commercial unlocks", async () => {
+  test("3. scoring alone leaves technical partial — commercial stays LOCKED until approval", async () => {
     for (const responseId of responseIdsA) {
       const r = await buyerClient.post(`/api/v1/arc-v2/evaluation/tech-eval/score`).send({
         response_id: responseId, buyer_marks: 8, buyer_remark: "ok",
@@ -251,8 +251,24 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(tech.state).toBe("partial");
     expect(tech.reason).toBe("scoring_partial");
     expect(tech.counts.vendors_fully_scored).toBe(1);
-    expect(stageOf(res.body, "commercial")).toMatchObject({ state: "active", reason: "not_started" });
-    expect(res.body.data.default_stage).toBe("commercial");
+    // Qualification is provisional until the tech approval ratifies it —
+    // commercial must not open, and writes against it must 409.
+    expect(stageOf(res.body, "commercial")).toMatchObject({ state: "locked", reason: "technical_incomplete" });
+    expect(res.body.data.default_stage).toBe("technical");
+
+    const ql = await db.one(
+      `SELECT ql.id FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+        WHERE q.arc_id = $1 AND q.vendor_id = $2 AND ql.arc_item_id = $3`,
+      [arcId, VENDOR_A, itemIds[0]]);
+    const blocked = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: itemIds[0],
+      allocations: [{ awarded_vendor_id: VENDOR_A, awarded_quote_line_id: ql.id, allocated_qty: 100, l_rank: "L1", is_l1_default: true, awarded_quote_snapshot: { rate: 90 } }],
+    });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.code).toBe("STAGE_LOCKED");
+    const finalizeBlocked = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
+    expect(finalizeBlocked.status).toBe(409);
+    expect(finalizeBlocked.body.code).toBe("STAGE_LOCKED");
   });
 
   test("4. submit spawns the ARC_TECH instance; can_user_approve is per-caller", async () => {
@@ -305,6 +321,29 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
   });
 
   test("6. all items allocated → commercial partial, awarding opens as preview", async () => {
+    // Vendor B scored 40% (< 60% minimum) → not technically qualified, so
+    // awarding them is rejected even though commercial is open now.
+    const qlB = await db.one(
+      `SELECT ql.id FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+        WHERE q.arc_id = $1 AND q.vendor_id = $2 AND ql.arc_item_id = $3`,
+      [arcId, VENDOR_B, itemIds[0]]);
+    const itemRow = await db.one(`SELECT indicative_qty FROM tbl_arc_item WHERE id = $1`, [itemIds[0]]);
+    const dq = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: itemIds[0],
+      allocations: [{ awarded_vendor_id: VENDOR_B, awarded_quote_line_id: qlB.id, allocated_qty: Number(itemRow.indicative_qty), l_rank: "L1", is_l1_default: false, awarded_quote_snapshot: { rate: 95 } }],
+    });
+    expect(dq.status).toBe(400);
+    expect(dq.body.message).toMatch(/not technically qualified/);
+
+    // REDACTION: vendor B's commercial terms never leave the server once
+    // technical disqualified them — the comm-eval payload carries sealed lines.
+    const ce = await buyerClient.get(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval`);
+    const bLines = ce.body.data.quotes.filter((q) => Number(q.vendor_id) === VENDOR_B);
+    expect(bLines.length).toBeGreaterThan(0);
+    expect(bLines.every((q) => q.rate === null && q.technically_disqualified === true)).toBe(true);
+    const aLines = ce.body.data.quotes.filter((q) => Number(q.vendor_id) === VENDOR_A);
+    expect(aLines.every((q) => q.rate !== null && !q.technically_disqualified)).toBe(true);
+
     const quoteLines = await db.any(
       `SELECT ql.id, ql.arc_item_id, q.vendor_id
          FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
@@ -322,10 +361,33 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
       });
       expect(r.status).toBe(200);
     }
+    // Clearing the last holder is allowed — the item returns to pending.
+    const cleared = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: items[0].id, allocations: [],
+    });
+    expect(cleared.status).toBe(200);
+    const mid = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(stageOf(mid.body, "commercial").counts.items_allocated).toBe(1);
+    // Restore the allocation so the journey continues to finalize.
+    const qlRestore = quoteLines.find((l) => Number(l.arc_item_id) === Number(items[0].id));
+    const restore = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: items[0].id,
+      allocations: [{
+        awarded_vendor_id: VENDOR_A, awarded_quote_line_id: qlRestore.id,
+        allocated_qty: Number(items[0].indicative_qty), l_rank: 'L1', is_l1_default: true,
+        awarded_quote_snapshot: { rate: 90, gst_pct: 5 },
+      }],
+    });
+    expect(restore.status).toBe(200);
+
     const res = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
     expect(stageOf(res.body, "commercial")).toMatchObject({ state: "partial", reason: "awaiting_finalize" });
     expect(stageOf(res.body, "commercial").counts).toMatchObject({ items_total: 2, items_allocated: 2 });
     expect(stageOf(res.body, "awarding")).toMatchObject({ state: "active", reason: "preview" });
+    // The raw status advanced on the first commercial action; awarding's
+    // read-only preview never steals the default from Commercial.
+    expect(res.body.data.current_status).toBe("comm_eval_in_progress");
+    expect(res.body.data.default_stage).toBe("commercial");
   });
 
   test("7. finalize completes commercial and puts awarding in committee review", async () => {

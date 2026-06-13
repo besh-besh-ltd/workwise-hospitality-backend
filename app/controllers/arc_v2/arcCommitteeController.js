@@ -3,7 +3,7 @@ import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
-import { generateContractsForArc } from './arcContractController.js';
+import { generateContractsForArc, generateContractPdfsForArc } from './arcContractController.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 
@@ -147,6 +147,9 @@ export async function handleArcCommitteeApproval(approvalInstanceId, approverUse
         txContext: t,
       });
     });
+    // Render + upload the draft PDFs AFTER the approval tx commits — slow
+    // Puppeteer/S3 work must never hold the transaction open or fail approval.
+    await generateContractPdfsForArc(arcId);
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[committeeController.handleArcCommitteeApproval]');
   }

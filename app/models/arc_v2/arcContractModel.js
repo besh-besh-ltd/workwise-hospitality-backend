@@ -40,7 +40,8 @@ const arcContractModel = {
 
   getById: async (id, txContext = null) => {
     return (txContext || db).oneOrNone(
-      `SELECT c.*, u.name AS vendor_name, u.email AS vendor_email, a.arc_number, a.title AS arc_title
+      `SELECT c.*, u.name AS vendor_name, u.email AS vendor_email, u.mobile AS vendor_mobile,
+              a.arc_number, a.title AS arc_title
          FROM tbl_arc_contract c
          LEFT JOIN tbl_users u ON u.id = c.vendor_id
          LEFT JOIN tbl_arc a   ON a.id = c.arc_id
@@ -111,7 +112,8 @@ const arcContractModel = {
 
   listLines: async (arcContractId, txContext = null) => {
     return (txContext || db).any(
-      `SELECT cl.*, ai.product_variant_id, pv.name AS variant_name, pv.slug AS variant_slug
+      `SELECT cl.*, ai.product_variant_id, ai.uom, ai.spec_text,
+              pv.name AS variant_name, pv.slug AS variant_slug
          FROM tbl_arc_contract_line cl
          LEFT JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
@@ -121,12 +123,25 @@ const arcContractModel = {
     );
   },
 
+  // Store the generated/signed PDF location + integrity hash on the contract.
+  setDocument: async (id, { url, hash }, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `UPDATE tbl_arc_contract
+          SET document_s3_url = COALESCE($2, document_s3_url),
+              document_hash   = COALESCE($3, document_hash),
+              updated_at      = CURRENT_TIMESTAMP
+        WHERE id = $1 RETURNING *`,
+      [id, url ?? null, hash ?? null]
+    );
+  },
+
   setStatus: async (id, status, extras = {}, txContext = null) => {
     const runner = txContext || db;
     const sets = ['status = $1', 'updated_at = CURRENT_TIMESTAMP'];
     const args = [status];
     let p = 2;
     if (extras.document_hash) { sets.push(`document_hash = $${p++}`); args.push(extras.document_hash); }
+    if (extras.document_s3_url) { sets.push(`document_s3_url = $${p++}`); args.push(extras.document_s3_url); }
     if (extras.signed_by_vendor_at) { sets.push(`signed_by_vendor_at = $${p++}`); args.push(extras.signed_by_vendor_at); }
     if (extras.terminated_at) { sets.push(`terminated_at = $${p++}`); args.push(extras.terminated_at); }
     if (extras.terminated_reason) { sets.push(`terminated_reason = $${p++}`); args.push(extras.terminated_reason); }

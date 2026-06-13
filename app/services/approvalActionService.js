@@ -109,25 +109,39 @@ export async function executeApprovalAction(args) {
 
   // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
-    try {
-      const instance = await getApprovalInstanceById(args.approval_instance_id);
-      const lookup = postActionRegistry[instance?.entity_type];
-      const loader = lookup?.[result.instance_status];
-      if (loader) {
-        const handler = await loader();
-        if (typeof handler === 'function') {
-          await handler(args.approval_instance_id, args.approver_user_id, {
-            comment: args.comment,
-            instance,
-          });
-        }
-      }
-    } catch (postErr) {
-      // Post-actions must never fail the approval itself — log and swallow,
-      // matching the behaviour of the existing inline try/catch blocks.
-      logError(`Post-approval handler failed for instance ${args.approval_instance_id}`, postErr);
-    }
+    await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
+      status: result.instance_status,
+      comment: args.comment,
+    });
   }
 
   return result;
+}
+
+/**
+ * Fire the entity-specific post-action for an instance that reached a
+ * terminal status. Exported because instances can ALSO terminally transition
+ * at CREATION time — createApprovalInstance auto-approves every step whose
+ * only required approver is the initiator, returning `autoApproved: true`
+ * WITHOUT any executeApprovalAction call. Callers that create instances must
+ * invoke this when that happens, or side effects (contract generation,
+ * status flips) silently never run.
+ *
+ * Post-actions must never fail the approval itself — errors are logged and
+ * swallowed, matching the behaviour of the entity handlers' own try/catch.
+ */
+export async function dispatchPostApprovalAction(approvalInstanceId, actorUserId, { status, comment } = {}) {
+  try {
+    const instance = await getApprovalInstanceById(approvalInstanceId);
+    const lookup = postActionRegistry[instance?.entity_type];
+    const loader = lookup?.[status];
+    if (loader) {
+      const handler = await loader();
+      if (typeof handler === 'function') {
+        await handler(approvalInstanceId, actorUserId, { comment, instance });
+      }
+    }
+  } catch (postErr) {
+    logError(`Post-approval handler failed for instance ${approvalInstanceId}`, postErr);
+  }
 }

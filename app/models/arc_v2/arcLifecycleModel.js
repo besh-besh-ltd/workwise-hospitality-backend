@@ -42,6 +42,13 @@ function stageImmutableError(stageKey) {
   return err;
 }
 
+function stageLockedError(stageKey) {
+  const err = new Error(`Stage '${stageKey}' is not open yet — complete the preceding stage first`);
+  err.httpStatus = 409;
+  err.code = 'STAGE_LOCKED';
+  return err;
+}
+
 /** Latest approval instance of a type for an ARC, with caller's actability. */
 async function loadInstance(runner, entityType, arcId, userId) {
   const instance = await runner.oneOrNone(
@@ -235,8 +242,12 @@ export function deriveStages(arc, f) {
   };
 
   // ── commercial ──
+  // Commercial opens ONLY once technical is settled: APPROVED (complete) or
+  // skipped (no clauses anywhere). Scoring alone — even all vendors on all
+  // items — is provisional until the tech approval ratifies qualification,
+  // so awarding against it would let unratified verdicts drive money.
   let commercial;
-  const techUnlocksCommercial = ['partial', 'complete', 'skipped'].includes(technical.state);
+  const techUnlocksCommercial = ['complete', 'skipped'].includes(technical.state);
   if (!techUnlocksCommercial) {
     commercial = { state: 'locked', reason: 'technical_incomplete' };
   } else if (f.comm?.status === 'finalized') {
@@ -304,8 +315,11 @@ export function deriveStages(arc, f) {
   const stages = [overview, technical, commercial, awarding, active];
 
   // Default stage: last in order that is actionable / terminal for the user.
+  // Awarding in 'preview' is read-only by definition — the actionable work
+  // (finalize) still lives on Commercial, so preview never wins the default.
   let defaultStage = 'overview';
   for (const s of stages) {
+    if (s.key === 'awarding' && s.reason === 'preview') continue;
     if (['active', 'partial', 'ended'].includes(s.state)) defaultStage = s.key;
   }
   return { stages, default_stage: defaultStage };
@@ -366,7 +380,10 @@ const arcLifecycleModel = {
    * Immutability guard for write endpoints. Throws 409 STAGE_IMMUTABLE when
    * the named stage is complete. Never lazy-flips.
    */
-  assertStageWritable: async (arcId, stageKey, txContext = null) => {
+  // blockLocked: also reject writes to a stage that hasn't OPENED yet (409
+  // STAGE_LOCKED). Opt-in because setupTechEval legitimately asserts the
+  // commercial stage isn't complete while commercial is still locked.
+  assertStageWritable: async (arcId, stageKey, txContext = null, { blockLocked = false } = {}) => {
     const lifecycle = await arcLifecycleModel.computeLifecycle(arcId, { txContext });
     if (!lifecycle) {
       const err = new Error('ARC not found');
@@ -375,6 +392,7 @@ const arcLifecycleModel = {
     }
     const stage = lifecycle.stages.find((s) => s.key === stageKey);
     if (stage && stage.state === 'complete') throw stageImmutableError(stageKey);
+    if (blockLocked && stage && stage.state === 'locked') throw stageLockedError(stageKey);
     return lifecycle;
   },
 

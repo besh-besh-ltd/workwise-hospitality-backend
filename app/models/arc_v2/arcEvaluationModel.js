@@ -140,6 +140,34 @@ const arcEvalModel = {
     return inserted;
   },
 
+  // item_id → qualified vendor_ids (latest evaluation round). Only items
+  // that HAVE technical clauses appear in the map — absent items carry no
+  // technical restriction (technical was skipped for them). An item present
+  // with an empty array has clauses but no qualified vendor yet.
+  qualifiedVendorsByItem: async (arcId, txContext = null) => {
+    const runner = txContext || db;
+    const rows = await runner.any(
+      `SELECT i.id AS item_id, cv.vendor_id
+         FROM tbl_arc_item i
+         JOIN tbl_arc_item_tech_evaluation te ON te.arc_item_id = i.id
+         JOIN tbl_arc_item_tech_evaluation_clauses cl ON cl.arc_item_tech_evaluation_id = te.id
+         LEFT JOIN tbl_arc_item_tech_evaluation_cleared_vendors cv
+           ON cv.arc_item_tech_evaluation_id = te.id
+          AND cv.evaluation_round = te.current_round
+          AND cv.status = 'qualified'
+        WHERE i.arc_id = $1
+        GROUP BY i.id, cv.vendor_id`,
+      [arcId]
+    );
+    const map = {};
+    rows.forEach((r) => {
+      const k = Number(r.item_id);
+      if (!map[k]) map[k] = [];
+      if (r.vendor_id != null) map[k].push(Number(r.vendor_id));
+    });
+    return map;
+  },
+
   // ============================================================
   // Commercial evaluation
   // ============================================================

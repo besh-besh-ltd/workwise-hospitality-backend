@@ -9,7 +9,7 @@ import {
   getApprovalInstanceDetails,
   findBestMatchingPolicyTx,
 } from '../../models/generalModel.js';
-import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -63,14 +63,17 @@ export async function setupTechEval(req, res) {
     if (!arcId) return bad(res, 404, 'ARC item not found', 2);
     await arcLifecycleModel.assertStageWritable(arcId, 'technical');
     await arcLifecycleModel.assertStageWritable(arcId, 'commercial');
-    return await db.tx(async (t) => {
+    // Respond only AFTER the tx commits — sending inside the callback races
+    // the caller's next request against an uncommitted transaction.
+    const result = await db.tx(async (t) => {
       const te = await arcEvalModel.upsertTechEval(arcItemId, { minimum_passing_score }, t);
       const inserted = [];
       for (const c of clauses) {
         inserted.push(await arcEvalModel.addClause(te.id, c, t));
       }
-      return ok(res, { tech_evaluation: te, clauses: inserted });
+      return { tech_evaluation: te, clauses: inserted };
     });
+    return ok(res, result);
   } catch (err) {
     return fail(res, err, '[evalController.setupTechEval]');
   }
@@ -155,7 +158,7 @@ export async function submitTechEval(req, res) {
       return bad(res, 400, `Technical evaluation is already with the approvers (instance #${pending.id}).`);
     }
 
-    return await db.tx(async (t) => {
+    const result = await db.tx(async (t) => {
       const items = await arcModel.listItems(arcId, t);
       const techEvalIds = [];
       for (const item of items) {
@@ -214,8 +217,18 @@ export async function submitTechEval(req, res) {
         arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId,
         payload: { approval_instance_id: instanceRow.id }, txContext: t,
       });
-      return ok(res, { ok: true, approval_instance_id: instanceRow.id });
+      return { ok: true, approval_instance_id: instanceRow.id, auto_approved: engineResult.autoApproved === true };
     });
+    // The engine auto-approves when the submitter is also the (only/ANY)
+    // approver — the instance is born APPROVED and executeApprovalAction
+    // never runs, so the post-approval side effects must be fired here.
+    if (result.auto_approved) {
+      await dispatchPostApprovalAction(result.approval_instance_id, userId, {
+        status: 'APPROVED', comment: 'Auto-approved — submitter is the configured approver',
+      });
+    }
+    // respond after commit — never inside the tx
+    return ok(res, result);
   } catch (err) {
     return fail(res, err, '[evalController.submitTechEval]');
   }
@@ -407,7 +420,25 @@ export async function getCommEval(req, res) {
     const quotes = await arcEvalModel.listAllQuotesForArc(arcId);
     const comm = await arcEvalModel.getCommEval(arcId);
     const awards = comm ? await arcEvalModel.listAwards(comm.id) : [];
-    return ok(res, { arc, comm_evaluation: comm, items, quotes, awards });
+    // item_id → qualified vendor ids (only items WITH technical clauses).
+    const qualified_by_item = await arcEvalModel.qualifiedVendorsByItem(arcId);
+    // REDACTION: the technical committee deemed these vendor × item pairs
+    // unfit — their commercial terms must never reach the commercial
+    // evaluator's browser. Strip pricing server-side, keep the line as a
+    // marker so the matrix can show a locked cell.
+    const redacted = quotes.map((q) => {
+      const allowed = qualified_by_item[Number(q.arc_item_id)];
+      if (allowed && !allowed.includes(Number(q.vendor_id))) {
+        return {
+          quote_id: q.quote_id, vendor_id: q.vendor_id, vendor_name: q.vendor_name,
+          submitted_at: q.submitted_at, quote_line_id: q.quote_line_id, arc_item_id: q.arc_item_id,
+          rate: null, gst_pct: null, charges: null, lead_time_days: null, moq: null,
+          technically_disqualified: true,
+        };
+      }
+      return q;
+    });
+    return ok(res, { arc, comm_evaluation: comm, items, quotes: redacted, awards, qualified_by_item });
   } catch (err) {
     logger.error({ err }, '[evalController.getCommEval]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -429,24 +460,55 @@ export async function saveAllocation(req, res) {
     if (!item_id || !Array.isArray(allocations)) {
       return bad(res, 400, 'item_id and allocations[] are required');
     }
-    await arcLifecycleModel.assertStageWritable(arcId, 'commercial');
-    return await db.tx(async (t) => {
+    // Locked = technical not yet approved/skipped — awarding against
+    // unratified qualification is rejected outright.
+    const lifecycle = await arcLifecycleModel.assertStageWritable(arcId, 'commercial', null, { blockLocked: true });
+    const result = await db.tx(async (t) => {
       const item = await t.oneOrNone(`SELECT * FROM tbl_arc_item WHERE id = $1 AND arc_id = $2`, [item_id, arcId]);
       if (!item) return bad(res, 404, 'item not found', 2);
-      const sum = allocations.reduce((s, a) => s + Number(a.allocated_qty || 0), 0);
-      const target = Number(item.indicative_qty);
-      if (Math.abs(sum - target) > 1e-6) {
-        return bad(res, 400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
+      // Empty allocations[] = explicit CLEAR — the item returns to pending.
+      // Non-empty allocations must reconcile to the indicative qty and only
+      // name vendors the (approved) technical evaluation qualified.
+      if (allocations.length > 0) {
+        const sum = allocations.reduce((s, a) => s + Number(a.allocated_qty || 0), 0);
+        const target = Number(item.indicative_qty);
+        if (Math.abs(sum - target) > 1e-6) {
+          return bad(res, 400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
+        }
+        const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
+        const allowed = qualifiedMap[Number(item_id)];
+        if (allowed) {
+          const notQualified = allocations.find((a) => !allowed.includes(Number(a.awarded_vendor_id)));
+          if (notQualified) {
+            return bad(res, 400, `Vendor ${notQualified.awarded_vendor_id} is not technically qualified for this item`);
+          }
+        }
       }
       const comm = await arcEvalModel.upsertCommEval(arcId, t);
+      // First commercial action advances the ARC's raw status — the hero
+      // chip and list deep-links read it, so it must not linger on
+      // tech_eval_approved (or submission_closed when technical was skipped).
+      if (['tech_eval_approved', 'submission_closed'].includes(lifecycle.arc.status)) {
+        await arcModel.setStatus(arcId, 'comm_eval_in_progress', {}, t);
+        await logArcEvent({
+          arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_OPENED,
+          actorId: userId, payload: {}, txContext: t,
+        });
+      }
       const inserted = await arcEvalModel.setItemAwards(comm.id, item_id, allocations, t);
-      await arcEvalModel.appendCommEvalHistory(comm.id, 'allocation_saved', { item_id, allocations }, userId, t);
+      await arcEvalModel.appendCommEvalHistory(
+        comm.id, allocations.length ? 'allocation_saved' : 'allocation_cleared',
+        { item_id, allocations }, userId, t);
       await logArcEvent({
         arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_ALLOCATION_UPDATED,
         actorId: userId, payload: { item_id, vendor_count: allocations.length }, txContext: t,
       });
-      return ok(res, { comm_evaluation: comm, awards: inserted });
+      return { __data: { comm_evaluation: comm, awards: inserted } };
     });
+    // respond after commit — a response sent inside the tx races the
+    // caller's next request against uncommitted state
+    if (result && result.__data) return ok(res, result.__data);
+    return result;
   } catch (err) {
     return fail(res, err, '[evalController.saveAllocation]');
   }
@@ -456,7 +518,9 @@ export async function finalizeCommEval(req, res) {
   try {
     const arcId = Number(req.params.arcId);
     const userId = req.user?.id;
-    return await db.tx(async (t) => {
+    // Can't finalize a stage that never opened (technical unapproved).
+    await arcLifecycleModel.assertStageWritable(arcId, 'commercial', null, { blockLocked: true });
+    const result = await db.tx(async (t) => {
       const arc = await arcModel.getById(arcId, t);
       if (!arc) return bad(res, 404, 'ARC not found', 2);
       const items = await arcModel.listItems(arcId, t);
@@ -484,6 +548,17 @@ export async function finalizeCommEval(req, res) {
       }
       if (itemsMissing.length > 0) {
         return bad(res, 400, `Allocation incomplete for ${itemsMissing.length} item(s)`);
+      }
+      // Defense against stale awards saved before a technical re-evaluation:
+      // every awarded vendor must still be qualified for their item.
+      const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
+      const staleAward = awards.find((a) => {
+        const allowed = qualifiedMap[Number(a.arc_item_id)];
+        return allowed && !allowed.includes(Number(a.awarded_vendor_id));
+      });
+      if (staleAward) {
+        return bad(res, 400,
+          `Vendor ${staleAward.awarded_vendor_id} is no longer technically qualified for item ${staleAward.arc_item_id} — re-allocate before finalizing`);
       }
 
       // Spawn the committee approval through the central engine — the
@@ -525,8 +600,23 @@ export async function finalizeCommEval(req, res) {
         arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_FINALIZED,
         actorId: userId, payload: { item_count: items.length, approval_instance_id: instanceRow.id }, txContext: t,
       });
-      return ok(res, { comm_evaluation: updated, approval_instance_id: instanceRow.id }, 'Commercial evaluation finalized');
+      return {
+        __data: { comm_evaluation: updated, approval_instance_id: instanceRow.id },
+        __autoApproved: engineResult.autoApproved === true,
+      };
     });
+    if (result && result.__data) {
+      // Auto-approved at creation (finalizer is also the committee approver):
+      // executeApprovalAction never runs, so fire the post-approval effects
+      // (contract generation, status flips) here — AFTER the commit.
+      if (result.__autoApproved) {
+        await dispatchPostApprovalAction(result.__data.approval_instance_id, userId, {
+          status: 'APPROVED', comment: 'Auto-approved — finalizer is the configured committee approver',
+        });
+      }
+      return ok(res, result.__data, 'Commercial evaluation finalized');
+    }
+    return result;
   } catch (err) {
     return fail(res, err, '[evalController.finalizeCommEval]');
   }
@@ -537,7 +627,7 @@ export async function sendBackCommEval(req, res) {
     const arcId = Number(req.params.arcId);
     const userId = req.user?.id;
     const reason = req.body?.reason;
-    return await db.tx(async (t) => {
+    const result = await db.tx(async (t) => {
       const comm = await arcEvalModel.getCommEval(arcId, t);
       if (!comm) return bad(res, 404, 'comm eval not found', 2);
 
@@ -569,8 +659,11 @@ export async function sendBackCommEval(req, res) {
       await arcModel.setStatus(arcId, 'comm_eval_in_progress', {}, t);
       await arcEvalModel.appendCommEvalHistory(comm.id, 'sent_back', { reason, cancelled_instance_id: committee?.status === 'PENDING' ? committee.id : null }, userId, t);
       await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK, actorId: userId, payload: { reason }, txContext: t });
-      return ok(res, { comm_evaluation: updated }, 'Sent back');
+      return { __data: { comm_evaluation: updated } };
     });
+    // respond after commit — never inside the tx
+    if (result && result.__data) return ok(res, result.__data, 'Sent back');
+    return result;
   } catch (err) {
     return fail(res, err, '[evalController.sendBackCommEval]');
   }
