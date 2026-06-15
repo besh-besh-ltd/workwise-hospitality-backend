@@ -237,12 +237,35 @@ const arcContractModel = {
                    ELSE ROUND((cl.consumed_qty / cl.committed_qty) * 100, 2)
               END AS pct_used,
               cl.awarded_quote_snapshot,
-              subc.title AS sub_category_title
+              subc.title AS sub_category_title,
+              -- Live amendment overlay (price/qty), window-driven, mirrors
+              -- arcPricingResolver. effective_* is what a call-off released today
+              -- would use; cl.unit_rate / cl.committed_qty stay the committed
+              -- baseline (the amendment is a time-boxed overlay, not a rewrite).
+              ovl.id   AS amendment_id,
+              ovl.amendment_type AS amendment_type,
+              ovl.amendment_to   AS amendment_effective_to,
+              CASE WHEN ovl.amendment_type = 'price' AND (ovl.payload->>'new_rate')::numeric > 0
+                   THEN (ovl.payload->>'new_rate')::numeric ELSE cl.unit_rate END AS effective_unit_rate,
+              CASE WHEN ovl.amendment_type = 'qty' AND (ovl.payload->>'new_qty')::numeric > 0
+                   THEN (ovl.payload->>'new_qty')::numeric ELSE cl.committed_qty END AS effective_committed_qty
          FROM tbl_arc_contract_line cl
          LEFT JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
          LEFT JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
          LEFT JOIN tbl_arc a ON a.id = c.arc_id
+         LEFT JOIN LATERAL (
+           SELECT am.id, am.amendment_type, am.payload, am.amendment_to
+             FROM tbl_arc_amendment am
+            WHERE am.arc_contract_id = cl.arc_contract_id
+              AND am.status IN ('approved','live')
+              AND am.amendment_type IN ('price','qty')
+              AND (am.payload->>'arc_contract_line_id')::bigint = cl.id
+              AND am.amendment_from <= CURRENT_DATE
+              AND (am.amendment_to IS NULL OR am.amendment_to >= CURRENT_DATE)
+            ORDER BY am.amendment_from DESC, am.id DESC
+            LIMIT 1
+         ) ovl ON TRUE
          LEFT JOIN LATERAL (
            SELECT cat.title
              FROM tbl_product_categories pc

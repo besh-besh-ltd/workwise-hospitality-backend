@@ -209,6 +209,17 @@ describe("ARC amendment addendum re-signing", () => {
     expect(Number(priced.unit_rate)).toBe(200);
     expect(Number(priced.applied_amendment_id)).toBe(Number(priceAmdId));
 
+    // The consumption view must surface the EFFECTIVE rate (200) while keeping
+    // the committed baseline (100) — so a live amendment is visible on the
+    // contract, not just on the amendment record.
+    const summary = await buyerClient.get(`/api/v1/arc-v2/${arcId}/active-summary`);
+    const cons = summary.body.data.contracts
+      .flatMap((c) => c.consumption || [])
+      .find((ln) => Number(ln.arc_contract_line_id) === Number(line1Id));
+    expect(Number(cons.unit_rate)).toBe(100);            // committed baseline preserved
+    expect(Number(cons.effective_unit_rate)).toBe(200);  // amended effective rate surfaced
+    expect(Number(cons.amendment_id)).toBe(Number(priceAmdId));
+
     // The ORIGINAL contract document hash is unchanged.
     const after = await db.one(`SELECT document_hash FROM tbl_arc_contract WHERE id = $1`, [contractId]);
     expect(after.document_hash).toBe(before.document_hash);
