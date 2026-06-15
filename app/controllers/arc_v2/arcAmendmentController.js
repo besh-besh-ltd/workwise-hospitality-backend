@@ -1,7 +1,7 @@
 import { logger } from '../../util/logger.js';
 import db from '../../config/dbConn.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
-import { applyAmendmentApprovalEffects } from '../../services/arcAmendmentLifecycleService.js';
+import { prepareAddendumForSignature } from '../../services/arcAddendumService.js';
 import {
   createApprovalInstance,
   submitApprovalAction,
@@ -82,7 +82,7 @@ async function refreshChainCache(amendmentId, instanceId, userId) {
     `UPDATE public.tbl_arc_amendment
         SET approval_chain = $1::jsonb,
             current_step   = $2,
-            status         = CASE WHEN status IN ('live','ended','voided') THEN status ELSE $3 END,
+            status         = CASE WHEN status IN ('awaiting_signature','live','ended','voided') THEN status ELSE $3 END,
             updated_at     = CURRENT_TIMESTAMP
       WHERE id = $4
       RETURNING status`,
@@ -230,11 +230,12 @@ export async function requestAmendment(req, res) {
     });
 
     // Snapshot the chain into the cache (outside the tx — read-only). If the
-    // engine auto-approved (initiator-only chains), apply lifecycle effects
-    // immediately so the amendment doesn't strand in 'approved'.
+    // engine auto-approved (initiator-only chains), generate the addendum and
+    // park the amendment in 'awaiting_signature' — effects bind only once the
+    // vendor re-signs the addendum (never on approval alone).
     const refreshed = await refreshChainCache(result.amendment_id, result.instance_id, userId);
     if (refreshed.engineStatus === 'approved') {
-      await applyAmendmentApprovalEffects(result.amendment_id, { actorId: userId });
+      await prepareAddendumForSignature(result.amendment_id, { actorId: userId });
     }
     const row = await arcAmendmentModel.getById(result.amendment_id);
     // The requester is the vendor — return the anonymised (level-only) view.
@@ -371,12 +372,13 @@ export async function reviewAmendment(req, res) {
       comment:              engineComment,
     });
 
-    // Refresh cache + status mirror, then apply post-approval lifecycle
-    // effects (term-date application, immediate live/ended) when the engine
-    // reached its terminal APPROVED state on this action.
+    // Refresh cache + status mirror, then — when the engine reached its
+    // terminal APPROVED state — generate the addendum and park the amendment in
+    // 'awaiting_signature'. Effects (term-date application, live/ended) are
+    // applied later, when the vendor re-signs the addendum, not here.
     const refreshed = await refreshChainCache(amendmentId, am.approval_instance_id, userId);
     if (refreshed.engineStatus === 'approved') {
-      await applyAmendmentApprovalEffects(amendmentId, { actorId: userId });
+      await prepareAddendumForSignature(amendmentId, { actorId: userId });
     }
     const row = await arcAmendmentModel.getById(amendmentId);
     return ok(res, { amendment: row });
@@ -406,9 +408,9 @@ export async function handleArcAmendmentApproval(approvalInstanceId, approverUse
       return;
     }
     await refreshChainCache(am.id, approvalInstanceId, approverUserId);
-    await applyAmendmentApprovalEffects(am.id, { actorId: approverUserId });
+    await prepareAddendumForSignature(am.id, { actorId: approverUserId });
     logger.info({ approvalInstanceId, amendmentId: am.id },
-      '[amendmentController.handleArcAmendmentApproval] amendment approved via central engine');
+      '[amendmentController.handleArcAmendmentApproval] amendment approved via central engine — addendum awaiting vendor signature');
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[amendmentController.handleArcAmendmentApproval]');
   }

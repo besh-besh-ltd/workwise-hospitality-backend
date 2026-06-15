@@ -180,7 +180,8 @@ const arcAmendmentModel = {
   },
 
   /**
-   * One-in-flight guard. While an amendment is requested / approved / live:
+   * One-in-flight guard. While an amendment is requested / approved /
+   * awaiting_signature / live:
    *   - no second amendment may target the SAME contract line, regardless
    *     of effective window;
    *   - no second TERM extension may be raised while one is in flight.
@@ -195,7 +196,7 @@ const arcAmendmentModel = {
            FROM public.tbl_arc_amendment
           WHERE arc_contract_id = $1
             AND amendment_type = 'term'
-            AND status IN ('requested','approved','live')
+            AND status IN ('requested','approved','awaiting_signature','live')
           ORDER BY created_at DESC
           LIMIT 1`,
         [arc_contract_id]
@@ -207,7 +208,7 @@ const arcAmendmentModel = {
            FROM public.tbl_arc_amendment
           WHERE arc_contract_id = $1
             AND amendment_type = 'item_add'
-            AND status IN ('requested','approved','live')
+            AND status IN ('requested','approved','awaiting_signature','live')
             AND (payload->>'product_variant_id')::bigint = $2::bigint
           ORDER BY created_at DESC
           LIMIT 1`,
@@ -219,7 +220,7 @@ const arcAmendmentModel = {
       `SELECT id, amendment_type, amendment_from, amendment_to, status
          FROM public.tbl_arc_amendment
         WHERE arc_contract_id = $1
-          AND status IN ('requested','approved','live')
+          AND status IN ('requested','approved','awaiting_signature','live')
           AND (payload->>'arc_contract_line_id')::bigint = $2::bigint
         ORDER BY created_at DESC
         LIMIT 1`,

@@ -290,13 +290,19 @@ describe("ARC amendment flow — request → review → terminal state", () => {
     expect(action.comment).toMatch(/new_rate/);
   });
 
-  test("step-2 approval lands the engine-terminal state; future window stays 'approved'", async () => {
+  test("step-2 approval parks the amendment in awaiting_signature pending vendor re-sign", async () => {
     const res = await approver2Client
       .post(`/api/v1/arc-v2/amendments/${amdPriceId}/review`)
       .send({ decision: "approve", comment: "Cleared" });
     expect(res.status).toBe(200);
-    // Window opens tomorrow — approved, not yet live.
-    expect(res.body.data.amendment.status).toBe("approved");
+    // Engine reached terminal APPROVED, but effects no longer bind on approval —
+    // the amendment is parked until the vendor signs the addendum.
+    expect(res.body.data.amendment.status).toBe("awaiting_signature");
+    // An addendum document was generated for the vendor to sign.
+    const doc = await db.oneOrNone(
+      `SELECT status FROM tbl_arc_amendment_document WHERE arc_amendment_id = $1`, [amdPriceId]);
+    expect(doc).toBeTruthy();
+    expect(doc.status).toBe("awaiting_signature");
   });
 
   test("re-reviewing a decided amendment is rejected", async () => {
@@ -304,7 +310,8 @@ describe("ARC amendment flow — request → review → terminal state", () => {
       .post(`/api/v1/arc-v2/amendments/${amdPriceId}/review`)
       .send({ decision: "approve" });
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/approved/);
+    // Amendment is now awaiting_signature — no further review actions allowed.
+    expect(res.body.message).toMatch(/no further actions|awaiting_signature/);
   });
 
   // ── 5. reject path ──────────────────────────────────────────────────────
@@ -373,9 +380,11 @@ describe("ARC amendment flow — request → review → terminal state", () => {
     expect(list.body.data.amendments.find((a) => a.id === amdPriceId)).toBeUndefined();
   });
 
-  // ── 7. term extension — durable application ─────────────────────────────
-  test("approved term extension moves tbl_arc.contract_end_at and goes live immediately", async () => {
+  // ── 7. term extension — gated, effects deferred until vendor re-signs ────
+  test("approved term extension parks in awaiting_signature WITHOUT moving contract_end_at", async () => {
     const newEnd = dIso(240);
+    const beforeEnd = (await db.one(`SELECT contract_end_at::date::text AS d FROM tbl_arc WHERE id = $1`, [arcId])).d;
+
     const req = await vendorClient.post("/api/v1/arc-v2/amendments/request").send({
       arc_contract_id: contractId, amendment_type: "term",
       amendment_from: newEnd, // proposed new end date
@@ -392,21 +401,32 @@ describe("ARC amendment flow — request → review → terminal state", () => {
       .post(`/api/v1/arc-v2/amendments/${termId}/review`)
       .send({ decision: "approve" });
     expect(s2.status).toBe(200);
-    expect(s2.body.data.amendment.status).toBe("live");
+    // Gate: approval no longer binds — parks for the vendor's addendum signature.
+    expect(s2.body.data.amendment.status).toBe("awaiting_signature");
 
+    // contract_end_at is UNCHANGED until the vendor signs the addendum.
     const arcRow = await db.one(`SELECT contract_end_at::date::text AS d FROM tbl_arc WHERE id = $1`, [arcId]);
-    expect(arcRow.d).toBe(newEnd);
+    expect(arcRow.d).toBe(beforeEnd);
 
-    const ev = await db.oneOrNone(
-      `SELECT * FROM tbl_arc_event_log
+    // No amendment_live event yet; instead an awaiting-signature event + addendum row.
+    const liveEv = await db.oneOrNone(
+      `SELECT 1 FROM tbl_arc_event_log
         WHERE arc_id = $1 AND event_type = 'amendment_live'
           AND (payload->>'amendment_id')::bigint = $2`, [arcId, termId]);
-    expect(ev).toBeTruthy();
-    expect(ev.payload.new_end_date).toBe(newEnd);
+    expect(liveEv).toBeFalsy();
+    const awaitingEv = await db.oneOrNone(
+      `SELECT 1 FROM tbl_arc_event_log
+        WHERE arc_id = $1 AND event_type = 'amendment_awaiting_signature'
+          AND (payload->>'amendment_id')::bigint = $2`, [arcId, termId]);
+    expect(awaitingEv).toBeTruthy();
+    const doc = await db.oneOrNone(
+      `SELECT status FROM tbl_arc_amendment_document WHERE arc_amendment_id = $1`, [termId]);
+    expect(doc?.status).toBe("awaiting_signature");
   });
 
   test("only one term extension may be in flight per contract", async () => {
-    // The previous test left a LIVE term extension on this contract.
+    // The previous test left an awaiting_signature term extension on this
+    // contract — still in flight, so a second term extension is blocked.
     const res = await vendorClient.post("/api/v1/arc-v2/amendments/request").send({
       arc_contract_id: contractId, amendment_type: "term",
       amendment_from: dIso(300),
@@ -416,8 +436,8 @@ describe("ARC amendment flow — request → review → terminal state", () => {
     expect(res.body.message).toMatch(/term extension/);
   });
 
-  // ── 8. already-open window goes live on final approval, no cron needed ──
-  test("amendment whose window already opened flips straight to live on approval", async () => {
+  // ── 8. even an already-open window parks for signature (no effects yet) ──
+  test("amendment whose window already opened still parks in awaiting_signature on approval", async () => {
     const req = await vendorClient.post("/api/v1/arc-v2/amendments/request").send({
       arc_contract_id: contractId, amendment_type: "qty",
       amendment_from: dIso(0), amendment_to: dIso(30),
@@ -430,12 +450,13 @@ describe("ARC amendment flow — request → review → terminal state", () => {
     await approver1Client.post(`/api/v1/arc-v2/amendments/${id}/review`).send({ decision: "approve" });
     const fin = await approver2Client.post(`/api/v1/arc-v2/amendments/${id}/review`).send({ decision: "approve" });
     expect(fin.status).toBe(200);
-    expect(fin.body.data.amendment.status).toBe("live");
+    // Gate applies regardless of window timing: approval parks, sign binds.
+    expect(fin.body.data.amendment.status).toBe("awaiting_signature");
 
     const ev = await db.oneOrNone(
       `SELECT * FROM tbl_arc_event_log
         WHERE arc_id = $1 AND event_type = 'amendment_live'
           AND (payload->>'amendment_id')::bigint = $2`, [arcId, id]);
-    expect(ev).toBeTruthy();
+    expect(ev).toBeFalsy();
   });
 });
