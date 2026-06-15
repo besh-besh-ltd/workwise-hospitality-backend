@@ -4,6 +4,13 @@ import { releaseForMr } from '../../services/callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
+import {
+  createApprovalInstance,
+  findBestMatchingPolicy,
+  findBestMatchingPolicyTx,
+  getApprovalInstanceDetails,
+} from '../../models/generalModel.js';
+import { dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 
 /**
  * MR (Material Requisition) — Buyer-side controller.
@@ -115,11 +122,56 @@ export async function submit(req, res) {
     if (invalid.length > 0) {
       return bad(res, 400, `${invalid.length} item(s) reference no active contract`);
     }
-    return db.tx(async (t) => {
-      const updated = await mrModel.setStatus(id, 'pending_approval', { submitted_at: new Date() }, t);
-      return ok(res, { mr: updated, items }, 'MR submitted for approval');
+    const result = await db.tx(async (t) => {
+      // Spin up a REAL approval instance through the central engine. Every step
+      // in the resolved MR policy is required — there is no threshold-based
+      // skip. The post-approval hook (handleMrPostApproval, registered for
+      // entity_type 'MR') fires on terminal APPROVED and releases the call-off.
+      const policy = await findBestMatchingPolicyTx({
+        entity_type: 'MR',
+        hospitality_company_id: mr.hospitality_company_id,
+        hotel_id: mr.hotel_id,
+        process_id: null,
+      }, t);
+      if (!policy) {
+        const e = new Error('No approval policy is configured for Material Requisitions in this business unit. Ask an administrator to set one up.');
+        e.httpStatus = 400; throw e;
+      }
+      const engineResult = await createApprovalInstance({
+        entity_type:            'MR',
+        entity_id:              id,
+        hospitality_company_id: mr.hospitality_company_id,
+        hotel_id:               mr.hotel_id,
+        department_id:          mr.department_id,
+        approval_policy_id:     policy.id,
+        initiated_by:           userId,
+        metadata:               { mr_number: mr.mr_number, item_count: items.length },
+        txContext:              t,
+      });
+      const instanceRow = engineResult?.instance || engineResult;
+      if (!instanceRow?.id) throw new Error('Approval engine did not return an instance id');
+      const updated = await mrModel.setStatus(id, 'pending_approval', {
+        submitted_at: new Date(),
+        approval_instance_id: instanceRow.id,
+      }, t);
+      return {
+        __data: { mr: updated, items, approval_instance_id: instanceRow.id },
+        __autoApproved: engineResult.autoApproved === true,
+      };
     });
+    // Respond AFTER commit. If the chain auto-approved at creation (submitter is
+    // the sole configured approver), fire the post-approval effects now.
+    if (result && result.__data) {
+      if (result.__autoApproved) {
+        await dispatchPostApprovalAction(result.__data.approval_instance_id, userId, {
+          status: 'APPROVED', comment: 'Auto-approved — submitter is the sole configured approver',
+        });
+      }
+      return ok(res, result.__data, 'MR submitted for approval');
+    }
+    return result;
   } catch (err) {
+    if (err.httpStatus) return bad(res, err.httpStatus, err.message);
     logger.error({ err }, '[mrController.submit]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
@@ -131,9 +183,38 @@ export async function getById(req, res) {
     const mr = await mrModel.getById(id);
     if (!mr) return bad(res, 404, 'MR not found', 2);
     const items = await mrModel.listItems(id);
-    return ok(res, { mr, items });
+    const callOffs = await mrModel.callOffPos(id).catch(() => []);
+    // The live approval chain (steps + per-approver status + whether the caller
+    // is the current approver) drives the detail page's chain + approve/reject.
+    let approval = null;
+    if (mr.approval_instance_id) {
+      approval = await getApprovalInstanceDetails(mr.approval_instance_id, req.user?.id || null).catch((e) => {
+        logger.warn({ e: e.message, mrId: id }, '[mrController.getById] approval detail load failed');
+        return null;
+      });
+    }
+    return ok(res, { mr, items, approval, callOffs });
   } catch (err) {
     logger.error({ err }, '[mrController.getById]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// GET /v1/mr/approval-preview?hotel_id= — the resolved MR approval chain for a
+// scope, so the create page can show the REAL routing (not a hardcoded mock).
+export async function approvalPreview(req, res) {
+  try {
+    const hcId = await resolveHospitalityCompanyId(req);
+    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const hotelId = req.query.hotel_id ? Number(req.query.hotel_id) : null;
+    const policy = await findBestMatchingPolicy({
+      entity_type: 'MR', hospitality_company_id: hcId, hotel_id: hotelId, process_id: null,
+    });
+    if (!policy) return ok(res, { found: false, steps: [] });
+    const steps = await mrModel.policySteps(policy.id);
+    return ok(res, { found: true, policy_id: policy.id, steps });
+  } catch (err) {
+    logger.error({ err }, '[mrController.approvalPreview]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
@@ -173,6 +254,24 @@ export async function dashboardCounts(req, res) {
     return ok(res, { counts });
   } catch (err) {
     logger.error({ err }, '[mrController.dashboardCounts]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export async function analytics(req, res) {
+  try {
+    const { hotel_ids, department_ids, raised_by } = req.query;
+    const hcId = await resolveHospitalityCompanyId(req);
+    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const data = await mrModel.analytics({
+      hospitality_company_id: hcId,
+      hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
+      department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
+      raised_by:      raised_by ? Number(raised_by) : null,
+    });
+    return ok(res, data);
+  } catch (err) {
+    logger.error({ err }, '[mrController.analytics]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }

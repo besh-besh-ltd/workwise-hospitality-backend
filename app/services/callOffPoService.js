@@ -59,8 +59,11 @@ async function buildCallOffBuckets(mrId, txContext) {
   }
 
   const mr = await runner.oneOrNone(
-    `SELECT id, hospitality_company_id, hotel_id, department_id, raised_by
-       FROM tbl_material_requisition WHERE id = $1`,
+    `SELECT m.id, m.hospitality_company_id, m.hotel_id, m.department_id, m.raised_by,
+            hc.buyer_company_id
+       FROM tbl_material_requisition m
+       LEFT JOIN tbl_hospitality_companies hc ON hc.id = m.hospitality_company_id
+      WHERE m.id = $1`,
     [mrId]
   );
 
@@ -81,6 +84,7 @@ async function buildCallOffBuckets(mrId, txContext) {
         vendor_id:              it.vendor_id,
         arc_id:                 it.arc_id,
         hospitality_company_id: mr?.hospitality_company_id,
+        buyer_company_id:       mr?.buyer_company_id,
         hotel_id:               mr?.hotel_id,
         items:                  [],
         total_value:            0,
@@ -111,7 +115,11 @@ async function buildCallOffBuckets(mrId, txContext) {
  *   quantity          — sum of line quantities (denormalised summary)
  *   unit_price        — first line's unit_rate (denormalised summary)
  *   total_value       — sum of (qty × unit_rate)
- *   company_id        — the buyer hospitality_company_id
+ *   company_id        — the buyer's tbl_company id (hospitality_companies.buyer_company_id),
+ *                       NOT the hospitality_company_id — this MUST match what regular
+ *                       RFQ-backed POs store so the PO read APIs' company-scope fallback
+ *                       (po.company_id = req.user.company_id, used when no hospitality
+ *                       header is sent) resolves call-off POs too.
  *
  * TODO before first end-to-end smoke: confirm rfq_id can be NULL on call-off
  * rows. The current schema enforces NOT NULL — the safest follow-up is to
@@ -137,7 +145,10 @@ async function insertCallOffPoHeader(group, mrId, txContext) {
         $8, $9, TRUE)
      RETURNING *`,
     [
-      group.hospitality_company_id,
+      // buyer_company_id (parent tbl_company) keeps call-offs scope-consistent
+      // with regular POs; fall back to hospitality_company_id only if a hosp
+      // company somehow has no buyer_company_id mapping.
+      group.buyer_company_id || group.hospitality_company_id,
       `CO-${Date.now()}-${group.arc_contract_id}`,
       totalQty,
       firstLineRate,

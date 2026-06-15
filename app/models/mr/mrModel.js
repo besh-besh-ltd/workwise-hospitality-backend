@@ -64,23 +64,63 @@ const mrModel = {
 
   getById: async (id, txContext = null) => {
     return (txContext || db).oneOrNone(
-      `SELECT m.*, u.name AS raised_by_name, u.email AS raised_by_email
+      `SELECT m.*, u.name AS raised_by_name, u.email AS raised_by_email,
+              h.name AS hotel_name, d.title AS department_name
          FROM tbl_material_requisition m
          LEFT JOIN tbl_users u ON u.id = m.raised_by
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = m.hotel_id
+         LEFT JOIN tbl_department d ON d.id = m.department_id
         WHERE m.id = $1`,
       [id]
+    );
+  },
+
+  // Labelled steps of an approval policy — for the create-page routing preview.
+  policySteps: async (policyId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT s.step_order, s.decision_rule, s.approver_source_type, s.approver_source_id,
+              CASE s.approver_source_type
+                WHEN 'ROLE'       THEN r.title
+                WHEN 'USER'       THEN u.name
+                WHEN 'DEPARTMENT' THEN 'Department head'
+                ELSE s.approver_source_type
+              END AS approver_label
+         FROM tbl_approval_policy_steps s
+         LEFT JOIN tbl_roles r ON s.approver_source_type = 'ROLE' AND r.id = s.approver_source_id
+         LEFT JOIN tbl_users u ON s.approver_source_type = 'USER' AND u.id = s.approver_source_id
+        WHERE s.approval_policy_id = $1
+        ORDER BY s.step_order`,
+      [policyId]
     );
   },
 
   listItems: async (mrId, txContext = null) => {
     return (txContext || db).any(
       `SELECT mi.*, pv.name AS variant_name, pv.slug AS variant_slug,
-              c.vendor_id, c.arc_id
+              c.vendor_id, c.arc_id,
+              uv.name AS vendor_name, uv.email AS vendor_email,
+              a.arc_number, a.title AS arc_title
          FROM tbl_material_requisition_item mi
          LEFT JOIN tbl_product_variant pv ON pv.id = mi.product_variant_id
          LEFT JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
+         LEFT JOIN tbl_users uv ON uv.id = c.vendor_id
+         LEFT JOIN tbl_arc a ON a.id = c.arc_id
         WHERE mi.mr_id = $1
         ORDER BY mi.id`,
+      [mrId]
+    );
+  },
+
+  // Call-off PO(s) released from this MR — links the approval chain's final
+  // "PO released" row to the actual purchase order.
+  callOffPos: async (mrId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT cp.po_id, cp.arc_contract_id, cp.released_at,
+              po.po_number, po.status AS po_status
+         FROM tbl_arc_callof_po cp
+         LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
+        WHERE cp.mr_id = $1
+        ORDER BY cp.released_at DESC`,
       [mrId]
     );
   },
@@ -112,42 +152,74 @@ const mrModel = {
     limit = 20,
   }, txContext = null) => {
     const runner = txContext || db;
-    const conditions = ['hospitality_company_id = $1'];
+    const conditions = ['m.hospitality_company_id = $1'];
     const args = [hospitality_company_id];
     let p = 2;
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`hotel_id = ANY($${p++}::int[])`);
+      conditions.push(`m.hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {
-      conditions.push(`department_id = ANY($${p++}::int[])`);
+      conditions.push(`m.department_id = ANY($${p++}::int[])`);
       args.push(department_ids);
     }
     if (raised_by) {
-      conditions.push(`raised_by = $${p++}`);
+      conditions.push(`m.raised_by = $${p++}`);
       args.push(raised_by);
     }
     const statuses = STATUS_GROUPS_MR[statusGroup] || null;
     if (statuses) {
-      conditions.push(`status = ANY($${p++}::varchar[])`);
+      conditions.push(`m.status = ANY($${p++}::varchar[])`);
       args.push(statuses);
     }
     args.push(limit);
     args.push((page - 1) * limit);
     const where = `WHERE ${conditions.join(' AND ')}`;
+    // Per-row aggregates (item value, vendors, products, categories) come from a
+    // LATERAL over the MR's items + their contract/ARC — powers the faceted
+    // All-MRs listing without N+1 round-trips.
     const [rows, count] = await Promise.all([
       runner.any(
         `SELECT m.id, m.mr_number, m.title, m.status, m.hotel_id, m.department_id,
                 m.urgency, m.required_by_date, m.submitted_at, m.created_at, m.updated_at,
-                m.raised_by, u.name AS raised_by_name
+                m.raised_by, u.name AS raised_by_name,
+                h.name AS hotel_name, d.title AS department_name,
+                agg.item_count, agg.total_est_value,
+                agg.item_names, agg.product_variant_ids,
+                agg.vendor_ids, agg.vendor_names,
+                agg.category_ids, agg.category_titles,
+                COALESCE(po.call_off_count, 0) AS call_off_count
            FROM tbl_material_requisition m
            LEFT JOIN tbl_users u ON u.id = m.raised_by
+           LEFT JOIN tbl_hospitality_company_hotels h ON h.id = m.hotel_id
+           LEFT JOIN tbl_department d ON d.id = m.department_id
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)::int AS item_count,
+                    COALESCE(SUM(mi.quantity * COALESCE(mi.matched_unit_rate, 0)), 0)::numeric AS total_est_value,
+                    COALESCE(json_agg(DISTINCT pv.name)     FILTER (WHERE pv.name IS NOT NULL),   '[]'::json) AS item_names,
+                    COALESCE(json_agg(DISTINCT pv.id)       FILTER (WHERE pv.id IS NOT NULL),     '[]'::json) AS product_variant_ids,
+                    COALESCE(json_agg(DISTINCT c.vendor_id) FILTER (WHERE c.vendor_id IS NOT NULL), '[]'::json) AS vendor_ids,
+                    COALESCE(json_agg(DISTINCT uv.name)     FILTER (WHERE uv.name IS NOT NULL),   '[]'::json) AS vendor_names,
+                    COALESCE(json_agg(DISTINCT a.category_id) FILTER (WHERE a.category_id IS NOT NULL), '[]'::json) AS category_ids,
+                    COALESCE(json_agg(DISTINCT cat.title)   FILTER (WHERE cat.title IS NOT NULL),  '[]'::json) AS category_titles
+               FROM tbl_material_requisition_item mi
+               LEFT JOIN tbl_product_variant pv ON pv.id = mi.product_variant_id
+               LEFT JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
+               LEFT JOIN tbl_users uv ON uv.id = c.vendor_id
+               LEFT JOIN tbl_arc a ON a.id = c.arc_id
+               LEFT JOIN tbl_category cat ON cat.id = a.category_id
+              WHERE mi.mr_id = m.id
+           ) agg ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)::int AS call_off_count
+               FROM tbl_arc_callof_po cp WHERE cp.mr_id = m.id
+           ) po ON TRUE
            ${where}
           ORDER BY m.created_at DESC
           LIMIT $${p} OFFSET $${p + 1}`,
         args
       ),
-      runner.one(`SELECT COUNT(*)::int AS c FROM tbl_material_requisition ${where}`, args.slice(0, args.length - 2)),
+      runner.one(`SELECT COUNT(*)::int AS c FROM tbl_material_requisition m ${where}`, args.slice(0, args.length - 2)),
     ]);
     return { data: rows, total: count.c, page, limit };
   },
@@ -182,6 +254,86 @@ const mrModel = {
       }
     }
     return counts;
+  },
+
+  /**
+   * Single-source-of-truth analytics for the MR dashboard. Returns status +
+   * value breakdowns, MR→PO conversion, avg approval time, overdue count, and
+   * breakdowns by department / hotel / urgency / month, top requesters, and a
+   * recent-MR feed. All scoped by the same filters as list/dashboardCounts.
+   */
+  analytics: async ({ hospitality_company_id, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
+    const runner = txContext || db;
+    const conditions = ['m.hospitality_company_id = $1'];
+    const args = [hospitality_company_id];
+    let p = 2;
+    if (Array.isArray(hotel_ids) && hotel_ids.length > 0) { conditions.push(`m.hotel_id = ANY($${p++}::int[])`); args.push(hotel_ids); }
+    if (Array.isArray(department_ids) && department_ids.length > 0) { conditions.push(`m.department_id = ANY($${p++}::int[])`); args.push(department_ids); }
+    if (raised_by) { conditions.push(`m.raised_by = $${p++}`); args.push(raised_by); }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+    // Reusable per-MR value LATERAL.
+    const VAL = `LEFT JOIN LATERAL (SELECT COALESCE(SUM(mi.quantity * COALESCE(mi.matched_unit_rate,0)),0)::numeric AS val
+                   FROM tbl_material_requisition_item mi WHERE mi.mr_id = m.id) v ON TRUE`;
+
+    const [byStatus, byDept, byHotel, byUrgency, byMonth, topReq, cycle, overdue, recent] = await Promise.all([
+      runner.any(`SELECT m.status, COUNT(*)::int AS count, COALESCE(SUM(v.val),0)::numeric AS value
+                    FROM tbl_material_requisition m ${VAL} ${where} GROUP BY m.status`, args),
+      runner.any(`SELECT m.department_id, d.title AS department_name, COUNT(*)::int AS count, COALESCE(SUM(v.val),0)::numeric AS value
+                    FROM tbl_material_requisition m LEFT JOIN tbl_department d ON d.id = m.department_id ${VAL}
+                   ${where} GROUP BY m.department_id, d.title ORDER BY count DESC`, args),
+      runner.any(`SELECT m.hotel_id, h.name AS hotel_name, COUNT(*)::int AS count, COALESCE(SUM(v.val),0)::numeric AS value
+                    FROM tbl_material_requisition m LEFT JOIN tbl_hospitality_company_hotels h ON h.id = m.hotel_id ${VAL}
+                   ${where} GROUP BY m.hotel_id, h.name ORDER BY count DESC`, args),
+      runner.any(`SELECT m.urgency, COUNT(*)::int AS count FROM tbl_material_requisition m ${where} GROUP BY m.urgency`, args),
+      runner.any(`SELECT to_char(date_trunc('month', m.created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
+                    FROM tbl_material_requisition m ${where}
+                      AND m.created_at >= (date_trunc('month', NOW()) - INTERVAL '5 months')
+                   GROUP BY 1 ORDER BY 1`, args),
+      runner.any(`SELECT m.raised_by, u.name AS raised_by_name, COUNT(*)::int AS count
+                    FROM tbl_material_requisition m LEFT JOIN tbl_users u ON u.id = m.raised_by
+                   ${where} GROUP BY m.raised_by, u.name ORDER BY count DESC LIMIT 6`, args),
+      runner.one(`SELECT AVG(EXTRACT(EPOCH FROM (m.updated_at - m.submitted_at)) / 86400.0) AS avg_days
+                    FROM tbl_material_requisition m
+                   ${where} AND m.status IN ('approved','po_released') AND m.submitted_at IS NOT NULL`, args),
+      runner.one(`SELECT COUNT(*)::int AS c FROM tbl_material_requisition m
+                   ${where} AND m.required_by_date < CURRENT_DATE
+                     AND m.status NOT IN ('po_released','cancelled','rejected')`, args),
+      runner.any(`SELECT m.id, m.mr_number, m.title, m.status, m.urgency, m.created_at,
+                         h.name AS hotel_name, d.title AS department_name, u.name AS raised_by_name,
+                         COALESCE(v.val,0)::numeric AS total_est_value
+                    FROM tbl_material_requisition m
+                    LEFT JOIN tbl_hospitality_company_hotels h ON h.id = m.hotel_id
+                    LEFT JOIN tbl_department d ON d.id = m.department_id
+                    LEFT JOIN tbl_users u ON u.id = m.raised_by
+                    ${VAL}
+                   ${where} ORDER BY m.created_at DESC LIMIT 8`, args),
+    ]);
+
+    const totals = { all: 0, draft: 0, pending_approval: 0, approved: 0, po_released: 0, rejected: 0, cancelled: 0,
+                     total_value: 0, pending_value: 0, po_released_value: 0 };
+    for (const r of byStatus) {
+      totals.all += r.count;
+      totals[r.status] = (totals[r.status] || 0) + r.count;
+      totals.total_value += Number(r.value);
+      if (r.status === 'pending_approval') totals.pending_value += Number(r.value);
+      if (r.status === 'po_released') totals.po_released_value += Number(r.value);
+    }
+    const convDenom = (totals.approved || 0) + (totals.po_released || 0);
+    const conversion_rate = convDenom > 0 ? Math.round((totals.po_released / convDenom) * 1000) / 10 : null;
+
+    return {
+      totals,
+      conversion_rate,
+      avg_approval_days: cycle.avg_days != null ? Math.round(Number(cycle.avg_days) * 10) / 10 : null,
+      overdue_count: overdue.c,
+      by_status: byStatus,
+      by_department: byDept,
+      by_hotel: byHotel,
+      by_urgency: byUrgency,
+      by_month: byMonth,
+      top_requesters: topReq,
+      recent,
+    };
   },
 
   /**

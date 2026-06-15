@@ -33,4 +33,8 @@ r.post('/:arcId/comm-eval/allocation',      passportSignIn, acl([2, 8]), COMM_WR
 r.post('/:arcId/comm-eval/finalize',        passportSignIn, acl([2, 8]), COMM_WRITE, evalController.finalizeCommEval);
 r.post('/:arcId/comm-eval/send-back',       passportSignIn, acl([2, 8]), COMM_WRITE, evalController.sendBackCommEval);
 
+// Vendor-clarification resolution — scoped field revise / uphold.
+r.post('/:arcId/comm-eval/clarification/:clarificationId/revise', passportSignIn, acl([2, 8]), COMM_WRITE, evalController.reviseClarification);
+r.post('/:arcId/comm-eval/clarification/:clarificationId/uphold', passportSignIn, acl([2, 8]), COMM_WRITE, evalController.upholdClarification);
+
 export default r;

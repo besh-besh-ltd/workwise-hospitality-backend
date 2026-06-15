@@ -11368,7 +11368,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_contract (
   updated_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (arc_id, vendor_id),
   CONSTRAINT tbl_arc_contract_status_chk CHECK (status IN (
-    'generated','awaiting_acceptance','active','expiring_soon','expired','terminated','declined'
+    'generated','awaiting_acceptance','clarification','active','expiring_soon','expired','terminated','declined'
   ))
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_arc     ON public.tbl_arc_contract (arc_id);
@@ -11402,6 +11402,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_signature_otp (
   expires_at           TIMESTAMP WITHOUT TIME ZONE NOT NULL,
   verified_at          TIMESTAMP WITHOUT TIME ZONE,
   attempts             INTEGER NOT NULL DEFAULT 0,
+  arc_amendment_document_id BIGINT,
   created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_signature_otp_contract
@@ -11587,7 +11588,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment (
   CONSTRAINT tbl_arc_amendment_type_chk
     CHECK (amendment_type IN ('price','qty','item_add','item_remove','term')),
   CONSTRAINT tbl_arc_amendment_status_chk
-    CHECK (status IN ('requested','approved','rejected','live','ended','voided')),
+    CHECK (status IN ('requested','approved','awaiting_signature','rejected','live','ended','voided')),
   CONSTRAINT tbl_arc_amendment_window_chk
     CHECK (amendment_to IS NULL OR amendment_to >= amendment_from)
 );
@@ -11614,6 +11615,28 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment_edit_history (
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_edit_history_amendment
   ON public.tbl_arc_amendment_edit_history (arc_amendment_id, changed_at DESC);
 
+-- Mirrored from migrations/20260615100100_arc_amendment_document.sql — the
+-- per-amendment addendum document the vendor re-signs (OTP) before effects bind.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment_document (
+  id                   BIGSERIAL PRIMARY KEY,
+  arc_amendment_id     BIGINT  NOT NULL REFERENCES public.tbl_arc_amendment(id) ON DELETE CASCADE,
+  arc_contract_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id)  ON DELETE CASCADE,
+  addendum_number      INTEGER NOT NULL,
+  document_s3_url      TEXT,
+  document_hash        VARCHAR(128),
+  status               VARCHAR(30) NOT NULL DEFAULT 'awaiting_signature'
+                         CHECK (status IN ('awaiting_signature','signed','voided')),
+  signed_by_vendor_at  TIMESTAMP WITHOUT TIME ZONE,
+  signed_by            INTEGER REFERENCES public.tbl_users(id),
+  generated_at         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tbl_arc_amendment_document_amendment
+  ON public.tbl_arc_amendment_document (arc_amendment_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_document_contract
+  ON public.tbl_arc_amendment_document (arc_contract_id, addendum_number);
+
 -- Mirrored from migrations/20260611100100_arc_tech_eval_edit_history.sql —
 -- amend-then-approve diffs on technical-evaluation marks.
 CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_eval_edit_history (
@@ -11631,3 +11654,33 @@ CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_arc
   ON public.tbl_arc_tech_eval_edit_history (arc_id, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_response
   ON public.tbl_arc_tech_eval_edit_history (response_id);
+
+-- Mirrored from migrations/20260613100000_arc_contract_clarification.sql —
+-- vendor-initiated, field-scoped contract clarification loop.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_clarification (
+  id                    BIGSERIAL PRIMARY KEY,
+  arc_id                BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  arc_contract_id       BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE CASCADE,
+  arc_item_id           BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  vendor_id             INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  field                 VARCHAR(24) NOT NULL,
+  round                 INTEGER NOT NULL DEFAULT 1,
+  vendor_comment        TEXT NOT NULL,
+  status                VARCHAR(16) NOT NULL DEFAULT 'open',
+  old_value             JSONB,
+  new_value             JSONB,
+  buyer_response        TEXT,
+  raised_by             INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  resolved_by           INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  resolved_at           TIMESTAMP WITHOUT TIME ZONE,
+  created_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_arc_contract_clarification_field_chk
+    CHECK (field IN ('base_price','gst','charges','committed_qty','payment_terms','delivery_terms')),
+  CONSTRAINT tbl_arc_contract_clarification_status_chk
+    CHECK (status IN ('open','revised','upheld','withdrawn'))
+);
+CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_arc
+  ON public.tbl_arc_contract_clarification (arc_id);
+CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_contract
+  ON public.tbl_arc_contract_clarification (arc_contract_id, status);

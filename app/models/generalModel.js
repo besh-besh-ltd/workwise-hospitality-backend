@@ -12,6 +12,9 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   'NEGOTIATION_QUOTE': 'quote-compare',
   'PO': 'awarding',
   'ARC': 'arc',
+  // MR is the call-off/demand path — role approvers resolve against the same
+  // 'awarding' permission as POs (USER-source steps bypass this map).
+  'MR': 'awarding',
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -2028,7 +2031,10 @@ export async function createApprovalInstance({
     // because multiple rounds can exist per product and each needs its own approval.
     // For NEGOTIATION_QUOTE, allow re-approval because a vendor may reject a PO,
     // requiring re-finalization and a fresh approval cycle while preserving the old approved instance.
-    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE';
+    // ARC_COMMITTEE is the same shape: a vendor clarification on an awarded rate
+    // contract re-routes the (revised) award through a fresh awarding approval
+    // while the original approved instance stays in history.
+    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE' || entity_type === 'ARC_COMMITTEE';
     const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
 
     const existingInstance = await t.oneOrNone(`

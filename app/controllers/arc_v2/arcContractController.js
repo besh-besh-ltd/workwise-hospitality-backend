@@ -2,10 +2,12 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
+import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
 import fs from 'fs';
@@ -342,7 +344,17 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
   acceptanceWindow.setDate(acceptanceWindow.getDate() + 7); // default 7-day window
   const contracts = [];
 
+  // On a clarification-driven REGENERATION a sibling vendor on this ARC may
+  // already have signed (split award). Their contract is immutable — never
+  // reset it back to awaiting_acceptance. Skip those vendors entirely; only the
+  // vendor whose award was re-edited gets a fresh draft.
+  const existing = await arcContractModel.listForArc(arcId, t);
+  const lockedVendors = new Set(
+    existing.filter((c) => c.status === 'active').map((c) => Number(c.vendor_id))
+  );
+
   for (const [vendorId, vendorAwards] of groups) {
+    if (lockedVendors.has(Number(vendorId))) continue; // preserve signed sibling
     const contract = await arcContractModel.createContract({
       arc_id:          arcId,
       vendor_id:       vendorId,
@@ -507,9 +519,18 @@ export async function getContractDetail(req, res) {
         throw err;
       }),
     ]);
+    // Pre-signature clarifications (open + resolved) so the accept page shows
+    // pending disputes and, on re-review, how the buyer revised / upheld each.
+    const clarifications = await arcContractClarificationModel
+      .listForContract(id)
+      .catch((err) => {
+        if (/relation .* does not exist/i.test(err.message)) return [];
+        throw err;
+      });
     return ok(res, {
       contract, lines, arc: arcInfo, callOffs,
       amendments: amendments.map(arcAmendmentModel.vendorView),
+      clarifications,
     });
   } catch (err) {
     logger.error({ err }, '[contractController.getContractDetail]');
@@ -578,8 +599,8 @@ export async function verifyOtp(req, res) {
         .digest('hex');
     }
 
-    return db.tx(async (t) => {
-      const updated = await arcContractModel.setStatus(id, 'active', {
+    const updated = await db.tx(async (t) => {
+      const row = await arcContractModel.setStatus(id, 'active', {
         document_hash: documentHash,
         document_s3_url: documentUrl || undefined,
         signed_by_vendor_at: signedAt,
@@ -601,8 +622,11 @@ export async function verifyOtp(req, res) {
           actorId: vendorUserId, payload: {}, txContext: t,
         });
       }
-      return ok(res, { contract: updated }, 'Contract signed');
+      return row;
     });
+    // respond AFTER the commit — never inside db.tx, or the caller can read
+    // pre-commit state on its next request (raced the signed→active flip).
+    return ok(res, { contract: updated }, 'Contract signed');
   } catch (err) {
     logger.error({ err }, '[contractController.verifyOtp]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -627,6 +651,154 @@ export async function declineContract(req, res) {
     });
   } catch (err) {
     logger.error({ err }, '[contractController.declineContract]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// POST /v1/arc-v2/vendor/contracts/:contractId/clarification
+//   Body: { items: [{ arc_contract_line_id, field, comment }] }
+//   Vendor disputes one field per awarded line BEFORE signing. This rolls the
+//   ARC back to the commercial stage (red / "clarification needed"): the
+//   committee approval is cancelled, the commercial eval reopens (sent_back),
+//   and the contract parks in 'clarification' until the evaluator resolves
+//   every dispute and re-finalises. Signing is blocked throughout.
+// ============================================================
+const CLARIFY_FIELD_COL = {
+  base_price: 'unit_rate', gst: 'gst_pct', charges: 'charges',
+  committed_qty: 'committed_qty', payment_terms: 'payment_terms', delivery_terms: 'delivery_terms',
+};
+
+export async function requestClarification(req, res) {
+  try {
+    const id = Number(req.params.contractId);
+    const vendorUserId = req.user?.id;
+    const items = Array.isArray(req.body?.items) ? req.body.items : null;
+    if (!id) return bad(res, 400, 'contractId is required');
+    if (!vendorUserId) return bad(res, 401, 'Authentication required');
+    if (!items || items.length === 0) return bad(res, 400, 'items[] with at least one disputed line is required');
+
+    const contract = await arcContractModel.getById(id);
+    if (!contract) return bad(res, 404, 'Contract not found', 2);
+    if (Number(contract.vendor_id) !== Number(vendorUserId)) return bad(res, 403, 'Not the contracted vendor');
+    if (contract.status !== 'awaiting_acceptance') {
+      return bad(res, 409, `Clarifications can only be raised while the contract is awaiting acceptance (status=${contract.status})`);
+    }
+
+    // NOTE: on a split award a sibling vendor may already be signed (active).
+    // That's fine — the clarification only re-edits THIS vendor's award, and
+    // contract regeneration preserves any already-active sibling contract
+    // (see generateContractsForArc — it skips active vendors).
+
+    // Validate each disputed line belongs to this contract and capture the
+    // current value of the disputed field (so the dispute records a baseline).
+    const lines = await arcContractModel.listLines(id);
+    const lineById = new Map(lines.map((l) => [Number(l.id), l]));
+    const prepared = [];
+    for (const it of items) {
+      const line = lineById.get(Number(it.arc_contract_line_id));
+      if (!line) return bad(res, 400, `Line ${it.arc_contract_line_id} is not on this contract`);
+      const field = String(it.field || '');
+      if (!CLARIFY_FIELD_COL[field]) return bad(res, 400, `Unknown disputed field '${field}'`);
+      const comment = String(it.comment || '').trim();
+      if (!comment) return bad(res, 400, 'Each disputed line needs a comment explaining the concern');
+      prepared.push({
+        arc_item_id: line.arc_item_id,
+        field,
+        vendor_comment: comment,
+        old_value: line[CLARIFY_FIELD_COL[field]] ?? null,
+      });
+    }
+
+    const result = await db.tx(async (t) => {
+      const round = await arcContractClarificationModel.nextRound(id, t);
+      const created = await arcContractClarificationModel.createMany(
+        contract.arc_id, id, vendorUserId, prepared, vendorUserId, round, t
+      );
+
+      // SURGICAL by design — awarded means awarded. We do NOT de-finalise the
+      // commercial evaluation, cancel the committee, or re-open the allocation
+      // matrix. Other vendors' awards (incl. already-signed ones) are untouched.
+      // Only THIS contract parks in 'clarification'; the commercial evaluator
+      // can solely revise the disputed value or uphold it (no re-allocation),
+      // after which the change flows forward through a fresh awarding approval.
+      await arcContractModel.setStatus(id, 'clarification', {}, t);
+      await logArcEvent({
+        arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CLARIFICATION_REQUESTED,
+        actorId: vendorUserId,
+        payload: { contract_id: id, round, fields: prepared.map((p) => p.field), count: created.length },
+        txContext: t,
+      });
+      return { clarifications: created, round };
+    });
+
+    return ok(res, result, 'Clarification raised — routed to the commercial evaluator');
+  } catch (err) {
+    logger.error({ err }, '[contractController.requestClarification]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// GET /v1/arc-v2/contracts/:contractId/vendor-documents
+//   Buyer-side: collect the contracted vendor's uploaded compliance documents
+//   (GST, PAN, MSME, FSSAI, cancelled cheque) so the active page can offer a
+//   one-click "documents bundle". We fetch each S3 object server-side (no
+//   browser CORS) and return the bytes base64-encoded; the client zips them.
+//   URLs come from our own tbl_vendor_documents — not request input.
+// ============================================================
+const VDOC_LABEL = {
+  pan: 'PAN', gst: 'GST_Certificate', msme: 'MSME_Udyam',
+  fssai: 'FSSAI_License', cancelled_cheque: 'Cancelled_Cheque',
+};
+function extFromDocUrl(u) {
+  try {
+    const p = new URL(u).pathname;
+    const m = p.match(/\.([a-zA-Z0-9]{2,5})$/);
+    return m ? m[1].toLowerCase() : null;
+  } catch { return null; }
+}
+
+export async function getVendorDocumentsBundle(req, res) {
+  try {
+    const contractId = Number(req.params.contractId);
+    const contract = await arcContractModel.getById(contractId);
+    if (!contract) return bad(res, 404, 'Contract not found', 2);
+    const vendorId = contract.vendor_id;
+
+    const docs = await db.any(
+      `SELECT document_type, document_number, document_url
+         FROM tbl_vendor_documents
+        WHERE vendor_id = $1
+          AND document_type IN ('pan','gst','msme','fssai','cancelled_cheque')
+          AND document_url IS NOT NULL AND document_url <> ''
+        ORDER BY document_type`,
+      [vendorId]
+    );
+
+    const files = [];
+    for (const d of docs) {
+      const ext = extFromDocUrl(d.document_url) || 'pdf';
+      const num = d.document_number ? '_' + String(d.document_number).replace(/[^a-zA-Z0-9_-]/g, '') : '';
+      const filename = `${VDOC_LABEL[d.document_type] || d.document_type}${num}.${ext}`;
+      try {
+        const resp = await axios.get(d.document_url, {
+          responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+        });
+        files.push({
+          document_type: d.document_type, document_number: d.document_number, filename,
+          content_type: resp.headers['content-type'] || 'application/octet-stream',
+          content_base64: Buffer.from(resp.data).toString('base64'),
+        });
+      } catch (e) {
+        logger.warn({ err: e.message, contractId, document_type: d.document_type },
+          '[contractController.getVendorDocumentsBundle] document fetch failed');
+        files.push({ document_type: d.document_type, filename, error: true });
+      }
+    }
+    return ok(res, { vendor_name: contract.vendor_name, vendor_id: vendorId, files });
+  } catch (err) {
+    logger.error({ err }, '[contractController.getVendorDocumentsBundle]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }

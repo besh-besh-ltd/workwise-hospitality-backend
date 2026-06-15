@@ -10,6 +10,8 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 // Listing + dashboard counts.
 MrRoutes.get( '/',                       passportSignIn, acl([2, 8]), mrController.list);
 MrRoutes.get( '/kpis',                   passportSignIn, acl([2, 8]), mrController.dashboardCounts);
+MrRoutes.get( '/analytics',              passportSignIn, acl([2, 8]), mrController.analytics);
+MrRoutes.get( '/approval-preview',       passportSignIn, acl([2, 8]), mrController.approvalPreview);
 
 // Search contracted items (picker).
 MrRoutes.get( '/search-contracted-items', passportSignIn, acl([2, 8]), mrController.searchContractedItems);

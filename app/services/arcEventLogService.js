@@ -55,6 +55,11 @@ export const ARC_EVENT_TYPES = Object.freeze({
   CONTRACT_SIGNED: 'contract_signed',
   CONTRACT_DECLINED: 'contract_declined',
   CONTRACT_ACTIVE: 'contract_active',
+  // Vendor contract clarification loop (pre-signature dispute → CE re-edit → re-award)
+  CLARIFICATION_REQUESTED: 'contract_clarification_requested',
+  CLARIFICATION_REVISED: 'contract_clarification_revised',
+  CLARIFICATION_UPHELD: 'contract_clarification_upheld',
+  CONTRACT_REISSUED: 'contract_reissued',
   // Amendments (Phase C)
   AMENDMENT_REQUESTED: 'amendment_requested',
   AMENDMENT_APPROVED: 'amendment_approved',

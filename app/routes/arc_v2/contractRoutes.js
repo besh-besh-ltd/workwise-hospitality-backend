@@ -29,6 +29,8 @@ r.get('/eligible-vendors', passportSignIn, acl([2, 8]), arcController.listEligib
 r.get('/:id',                  passportSignIn, acl([2, 8]), arcController.getById);
 r.get('/:id/lifecycle',        passportSignIn, acl([2, 8]), arcController.getLifecycle);
 r.get('/:id/active-summary',   passportSignIn, acl([2, 8]), arcContractController.getActiveSummary);
+// Bundle of the contracted vendor's uploaded compliance docs (GST/PAN/cheque…).
+r.get('/contracts/:contractId/vendor-documents', passportSignIn, acl([2, 8]), arcContractController.getVendorDocumentsBundle);
 
 // Mutations — creator + ARC-roles only.
 r.post('/',                    passportSignIn, acl([2, 8]), arcController.createDraft);

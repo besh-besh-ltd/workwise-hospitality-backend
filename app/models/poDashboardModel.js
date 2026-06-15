@@ -603,62 +603,106 @@ export async function getPODetailFull(po_id, scope) {
   const poId = parseInt(po_id, 10);
   if (!poId) return null;
 
-  // Load + scope-verify the PO via its RFQ.
+  // Load + scope-verify the PO. Call-off POs have rfq_id NULL — their scope,
+  // company, BU and department come from the ARC contract instead, so we
+  // LEFT JOIN the RFQ and COALESCE every RFQ-vs-ARC field.
   const values = [poId];
-  const scoped = buildScopeClause(scope, values, 2);
+  let scopeClause;
+  let i = 2;
+  if (scope.hospitalityCompanyId) {
+    scopeClause = `COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) = $${i++}`;
+    values.push(scope.hospitalityCompanyId);
+    if (scope.hotelIds && scope.hotelIds.length > 0) {
+      scopeClause += ` AND COALESCE(rfq.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`;
+      values.push(scope.hotelIds);
+    }
+    if (scope.departmentId) {
+      scopeClause += ` AND COALESCE(rfq.department_id, arc.department_id) = $${i++}`;
+      values.push(scope.departmentId);
+    }
+  } else {
+    scopeClause = `po.company_id = $${i++}`;
+    values.push(scope.companyId);
+  }
   const po = await db.oneOrNone(
     `SELECT po.*,
             rfq.rfq_no, rfq.title AS rfq_title, rfq.created_by AS rfq_created_by,
-            rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id,
-            COALESCE(THC.name, TC.company_name) AS company_name,
-            THCH.name AS business_unit,
-            DEPT.title AS department_name,
-            THC.gst AS hosp_gst, THC.pan AS hosp_pan,
-            THC.bank_name AS hosp_bank, THC.bank_account_number AS hosp_bank_acct,
+            COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) AS hospitality_company_id,
+            COALESCE(rfq.hotel_id, arc.hotel_id) AS hotel_id,
+            COALESCE(rfq.department_id, arc.department_id) AS department_id,
+            COALESCE(THC.name, ATHC.name, TC.company_name) AS company_name,
+            COALESCE(THCH.name, ATHCH.name) AS business_unit,
+            COALESCE(DEPT.title, ADEPT.title) AS department_name,
+            COALESCE(THC.gst, ATHC.gst) AS hosp_gst, COALESCE(THC.pan, ATHC.pan) AS hosp_pan,
+            COALESCE(THC.bank_name, ATHC.bank_name) AS hosp_bank,
+            COALESCE(THC.bank_account_number, ATHC.bank_account_number) AS hosp_bank_acct,
             COALESCE(VC.company_name, VENDOR.organization_name, VENDOR.name) AS vendor_name,
             VENDOR.email AS vendor_email, VENDOR.mobile AS vendor_phone,
             VC.gstin AS vendor_gstin,
             INI.name AS initiator_name,
-            tai.status AS instance_status, tai.completed_at AS instance_completed_at
+            tai.status AS instance_status, tai.completed_at AS instance_completed_at,
+            arc.arc_number, arc.title AS arc_title, arc.id AS arc_id,
+            mr.mr_number AS source_mr_number
      FROM tbl_rfq_purchase_order po
-     JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+     LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
      JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
      LEFT JOIN tbl_company VC ON VC.id = VENDOR.company_id
      LEFT JOIN tbl_hospitality_companies THC ON THC.id = rfq.hospitality_company_id
      LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = rfq.hotel_id
      LEFT JOIN tbl_company TC ON TC.id = po.company_id
      LEFT JOIN tbl_department DEPT ON DEPT.id = rfq.department_id
+     LEFT JOIN tbl_arc_contract acon ON acon.id = po.arc_contract_id
+     LEFT JOIN tbl_arc arc ON arc.id = acon.arc_id
+     LEFT JOIN tbl_hospitality_companies ATHC ON ATHC.id = arc.hospitality_company_id
+     LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = arc.hotel_id
+     LEFT JOIN tbl_department ADEPT ON ADEPT.id = arc.department_id
+     LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
      LEFT JOIN tbl_users INI ON INI.id = po.initiated_by
      LEFT JOIN tbl_approval_instances tai ON tai.id = po.approval_instance_id
-     WHERE po.id = $1 AND ${scoped.clause}`,
+     WHERE po.id = $1 AND ${scopeClause}`,
     values
   );
 
   if (!po) return null;
 
-  // Items (with HSN + GST from charges_meta).
-  const items = await db.any(
-    `SELECT pv.name AS name,
-            rp.comment AS spec,
-            pop.quantity, pop.unit, pop.unit_price, pop.total_price,
-            pop.charges_meta,
-            (
-              SELECT h.hsn_code FROM tbl_purchase_order_hsn_mapping h
-              WHERE h.po_id = po.id AND h.rfq_item_id = pop.rfq_product_id
-              ORDER BY h.id DESC LIMIT 1
-            ) AS hsn
-     FROM tbl_purchase_order_product pop
-     JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
-     JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-     WHERE pop.purchase_order_id = $1
-     ORDER BY pop.id ASC`,
-    [poId]
-  );
+  // Items. Call-off POs hold their lines in tbl_arc_callof_po (no
+  // tbl_purchase_order_product rows); regular POs use the RFQ product join.
+  const items = po.is_call_off
+    ? await db.any(
+        `SELECT pv.name AS name, ai.spec_text AS spec,
+                cp.quantity, ai.uom AS unit, cp.price_applied AS unit_price,
+                (cp.quantity * cp.price_applied) AS total_price,
+                cl.gst_pct AS gst_pct, NULL AS hsn, NULL AS charges_meta
+           FROM tbl_arc_callof_po cp
+           JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
+           JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
+           JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+          WHERE cp.po_id = $1
+          ORDER BY cp.id ASC`,
+        [poId]
+      )
+    : await db.any(
+        `SELECT pv.name AS name,
+                rp.comment AS spec,
+                pop.quantity, pop.unit, pop.unit_price, pop.total_price,
+                pop.charges_meta, NULL AS gst_pct,
+                (
+                  SELECT h.hsn_code FROM tbl_purchase_order_hsn_mapping h
+                  WHERE h.po_id = po.id AND h.rfq_item_id = pop.rfq_product_id
+                  ORDER BY h.id DESC LIMIT 1
+                ) AS hsn
+         FROM tbl_purchase_order_product pop
+         JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+         JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+         JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE pop.purchase_order_id = $1
+         ORDER BY pop.id ASC`,
+        [poId]
+      );
 
   const mappedItems = items.map((it) => {
     const cm = it.charges_meta || {};
-    const gst = cm.tax != null ? Number(cm.tax) : null;
+    const gst = it.gst_pct != null ? Number(it.gst_pct) : (cm.tax != null ? Number(cm.tax) : null);
     return {
       name: it.name,
       spec: it.spec || null,
@@ -682,6 +726,8 @@ export async function getPODetailFull(po_id, scope) {
     const cm = it.charges_meta || {};
     if (cm.tax != null) {
       tax += cm.tax_mode === "absolute" ? Number(cm.tax) || 0 : (basic * (Number(cm.tax) || 0)) / 100;
+    } else if (it.gst_pct != null) {
+      tax += (basic * (Number(it.gst_pct) || 0)) / 100;
     }
   }
   const pricing = {
@@ -759,20 +805,23 @@ export async function getPODetailFull(po_id, scope) {
     }
   }
 
-  // Commercial comparison: all vendor quotes on this RFQ vs the winning vendor.
-  const comparison = await buildComparison(po);
+  // Commercial comparison + technical evaluation are RFQ-sourced. Call-off POs
+  // have no RFQ (their award came from the ARC); skip these cleanly.
+  const comparison = po.is_call_off ? [] : await buildComparison(po);
 
   // Technical evaluation: per PO product, the finalized vendor's clause-wise
   // marks, the percentage they scored, and who approved the evaluation.
-  const tech_eval = await buildTechEval(po);
+  const tech_eval = po.is_call_off ? null : await buildTechEval(po);
 
   // RFQ summary numbers (vendors participated = distinct quote authors;
   // vendors_invited + rounds are not cleanly derivable in scope -> null).
-  const rfqStats = await db.oneOrNone(
-    `SELECT COUNT(DISTINCT q.created_by)::int AS participated
-     FROM tbl_quotes q WHERE q.rfq_id = $1 AND q.is_regret = 0`,
-    [po.rfq_id]
-  );
+  const rfqStats = po.rfq_id
+    ? await db.oneOrNone(
+        `SELECT COUNT(DISTINCT q.created_by)::int AS participated
+         FROM tbl_quotes q WHERE q.rfq_id = $1 AND q.is_regret = 0`,
+        [po.rfq_id]
+      )
+    : null;
   const rfqCreator = po.rfq_created_by
     ? await db.oneOrNone(`SELECT name FROM tbl_users WHERE id = $1`, [po.rfq_created_by])
     : null;
@@ -783,6 +832,19 @@ export async function getPODetailFull(po_id, scope) {
     status: po.status,
     status_label: humanizeStatus(po.status),
     total_value: po.total_value != null ? Number(po.total_value) : 0,
+    is_call_off: !!po.is_call_off,
+    // Call-off provenance (null for regular RFQ-sourced POs) — lets the detail
+    // page link back to the originating ARC and material requisition.
+    call_off: po.is_call_off
+      ? {
+          arc_id: po.arc_id || null,
+          arc_contract_id: po.arc_contract_id || null,
+          arc_number: po.arc_number || null,
+          arc_title: po.arc_title || null,
+          mr_id: po.source_mr_id || null,
+          mr_number: po.source_mr_number || null,
+        }
+      : null,
     rfq: {
       id: po.rfq_id,
       number: po.rfq_no != null ? String(po.rfq_no) : null,

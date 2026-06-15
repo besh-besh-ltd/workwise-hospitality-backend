@@ -163,6 +163,14 @@ async function gatherFacts(runner, arc, userId) {
     [arcId]
   );
 
+  // Open vendor clarifications keep the (locked) commercial stage flagged so
+  // the buyer is routed to resolve them; absent table → 0 (defensive).
+  const clarificationsOpen = await runner.oneOrNone(
+    `SELECT COUNT(*)::int AS c FROM tbl_arc_contract_clarification
+      WHERE arc_id = $1 AND status = 'open'`,
+    [arcId]
+  ).then((r) => (r ? r.c : 0)).catch(() => 0);
+
   const [techApproval, committeeApproval] = await Promise.all([
     loadInstance(runner, 'ARC_TECH', arcId, userId),
     loadInstance(runner, 'ARC_COMMITTEE', arcId, userId),
@@ -183,6 +191,7 @@ async function gatherFacts(runner, arc, userId) {
     items_allocated: allocated.items_allocated,
     contracts_total: contracts.total,
     contracts_accepted: contracts.accepted,
+    clarifications_open: clarificationsOpen,
     techApproval,
     committeeApproval,
   };
@@ -265,10 +274,17 @@ export function deriveStages(arc, f) {
         : 'not_started',
     };
   }
+  // A vendor clarification keeps commercial LOCKED (awarded means awarded) but
+  // flags it: the evaluator resolves the disputed value here (revise/uphold),
+  // it never re-opens the allocation matrix.
+  if (f.clarifications_open > 0 && commercial.state === 'complete') {
+    commercial.reason = 'clarification_pending';
+  }
   commercial = {
     key: 'commercial', label: STAGE_LABEL.commercial,
     ...commercial,
     counts: { items_total: f.items_total, items_allocated: f.items_allocated },
+    clarifications_open: f.clarifications_open,
     comm_evaluation: f.comm
       ? { id: Number(f.comm.id), status: f.comm.status, finalized_at: f.comm.finalized_at }
       : null,
@@ -322,6 +338,8 @@ export function deriveStages(arc, f) {
     if (s.key === 'awarding' && s.reason === 'preview') continue;
     if (['active', 'partial', 'ended'].includes(s.state)) defaultStage = s.key;
   }
+  // An open vendor clarification needs the evaluator on Commercial to resolve it.
+  if (f.clarifications_open > 0) defaultStage = 'commercial';
   return { stages, default_stage: defaultStage };
 }
 

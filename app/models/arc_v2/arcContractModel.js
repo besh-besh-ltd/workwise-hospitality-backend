@@ -24,12 +24,26 @@ const arcContractModel = {
     );
   },
 
+  // Idempotent on (arc_contract_id, arc_item_id): the FIRST generation inserts,
+  // and a clarification-driven REGENERATION updates the same row in place. This
+  // keeps line ids (and consumed_qty) stable across re-issuance so nothing that
+  // references a line is cascade-deleted, while picking up any revised
+  // rate/gst/charges/qty/terms from the re-approved award snapshot.
   addLine: async (arcContractId, line, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_contract_line
          (arc_contract_id, arc_item_id, unit_rate, gst_pct, charges,
           payment_terms, delivery_terms, committed_qty, awarded_quote_snapshot)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb)
+       ON CONFLICT (arc_contract_id, arc_item_id) DO UPDATE
+         SET unit_rate              = EXCLUDED.unit_rate,
+             gst_pct                = EXCLUDED.gst_pct,
+             charges                = EXCLUDED.charges,
+             payment_terms          = EXCLUDED.payment_terms,
+             delivery_terms         = EXCLUDED.delivery_terms,
+             committed_qty          = EXCLUDED.committed_qty,
+             awarded_quote_snapshot = EXCLUDED.awarded_quote_snapshot,
+             updated_at             = CURRENT_TIMESTAMP
        RETURNING *`,
       [arcContractId, line.arc_item_id, line.unit_rate, line.gst_pct ?? null,
        JSON.stringify(line.charges || []),

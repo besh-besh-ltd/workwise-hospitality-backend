@@ -244,6 +244,72 @@ const arcEvalModel = {
     );
   },
 
+  getAwardForVendorItem: async (commEvalId, arcItemId, vendorId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT * FROM tbl_arc_comm_evaluation_award
+        WHERE arc_comm_evaluation_id = $1 AND arc_item_id = $2 AND awarded_vendor_id = $3`,
+      [commEvalId, arcItemId, vendorId]
+    );
+  },
+
+  /**
+   * Apply a commercial evaluator's scoped revision to ONE field of ONE award
+   * (item × vendor) in response to a vendor clarification. Price/term fields
+   * live on the award snapshot (which flows straight into the regenerated
+   * contract line). committed_qty additionally shifts the item's indicative_qty
+   * by the same delta so the allocation→indicative reconciliation invariant
+   * stays intact for finalize. Returns { old_value, new_value }.
+   */
+  updateAwardField: async (commEvalId, arcItemId, vendorId, field, newValue, txContext = null) => {
+    const runner = txContext || db;
+    const award = await runner.oneOrNone(
+      `SELECT * FROM tbl_arc_comm_evaluation_award
+        WHERE arc_comm_evaluation_id = $1 AND arc_item_id = $2 AND awarded_vendor_id = $3
+        FOR UPDATE`,
+      [commEvalId, arcItemId, vendorId]
+    );
+    if (!award) { const e = new Error('Award not found for this item/vendor'); e.httpStatus = 404; throw e; }
+    const snap = typeof award.awarded_quote_snapshot === 'string'
+      ? JSON.parse(award.awarded_quote_snapshot)
+      : (award.awarded_quote_snapshot || {});
+
+    const SNAP_KEY = {
+      base_price: 'rate', gst: 'gst_pct', charges: 'charges',
+      payment_terms: 'payment_terms', delivery_terms: 'delivery_terms',
+    };
+
+    let oldValue;
+    if (field === 'committed_qty') {
+      oldValue = Number(award.allocated_qty);
+      const next = Number(newValue);
+      const delta = next - oldValue;
+      await runner.none(
+        `UPDATE tbl_arc_comm_evaluation_award
+            SET allocated_qty = $2
+          WHERE id = $1`,
+        [award.id, next]
+      );
+      // Keep SUM(allocated_qty) == indicative_qty by absorbing the delta.
+      await runner.none(
+        `UPDATE tbl_arc_item SET indicative_qty = indicative_qty + $2, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $1`,
+        [arcItemId, delta]
+      );
+      return { old_value: oldValue, new_value: next };
+    }
+
+    const key = SNAP_KEY[field];
+    oldValue = snap[key] ?? null;
+    snap[key] = newValue;
+    await runner.none(
+      `UPDATE tbl_arc_comm_evaluation_award
+          SET awarded_quote_snapshot = $2::jsonb
+        WHERE id = $1`,
+      [award.id, JSON.stringify(snap)]
+    );
+    return { old_value: oldValue, new_value: newValue };
+  },
+
   appendCommEvalHistory: async (commEvalId, action, payload, changedBy, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_comm_evaluation_history

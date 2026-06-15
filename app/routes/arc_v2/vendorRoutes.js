@@ -25,6 +25,7 @@ r.get( '/active',                                   passportSignIn, acl([3]), co
 r.get( '/contracts/:contractId',                    passportSignIn, acl([3]), contractController.getContractDetail);
 r.post('/contracts/:contractId/otp/request',        passportSignIn, acl([3]), contractController.requestOtp);
 r.post('/contracts/:contractId/otp/verify',         passportSignIn, acl([3]), contractController.verifyOtp);
+r.post('/contracts/:contractId/clarification',      passportSignIn, acl([3]), contractController.requestClarification);
 r.post('/contracts/:contractId/decline',            passportSignIn, acl([3]), contractController.declineContract);
 
 export default r;

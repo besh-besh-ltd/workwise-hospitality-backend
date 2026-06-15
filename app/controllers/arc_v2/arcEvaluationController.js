@@ -1,6 +1,7 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
@@ -438,7 +439,16 @@ export async function getCommEval(req, res) {
       }
       return q;
     });
-    return ok(res, { arc, comm_evaluation: comm, items, quotes: redacted, awards, qualified_by_item });
+    // All clarifications on the ARC (open + resolved). Open ones drive the
+    // "needs your decision" panel; resolved 'revised' ones let the matrix
+    // overlay the new value on the awarded cell with who/why provenance.
+    const clarifications = await arcContractClarificationModel
+      .listForArc(arcId)
+      .catch((err) => {
+        if (/relation .* does not exist/i.test(err.message)) return [];
+        throw err;
+      });
+    return ok(res, { arc, comm_evaluation: comm, items, quotes: redacted, awards, qualified_by_item, clarifications });
   } catch (err) {
     logger.error({ err }, '[evalController.getCommEval]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -668,6 +678,130 @@ export async function sendBackCommEval(req, res) {
     return fail(res, err, '[evalController.sendBackCommEval]');
   }
 }
+
+// ============================================================
+// Vendor-clarification resolution (commercial evaluator).
+//   POST /v1/arc-v2/evaluation/:arcId/comm-eval/clarification/:clarificationId/revise
+//     Body: { value, response? }  — overrides ONLY the disputed field on the
+//     award snapshot (price/term) or shifts committed_qty (+ indicative_qty).
+//   POST .../clarification/:clarificationId/uphold
+//     Body: { response }          — keeps the value, records the reply.
+//
+// SURGICAL — the commercial stage stays FINALIZED/locked throughout. The
+// evaluator can ONLY revise the disputed value or uphold it (no re-allocation,
+// no vendor deselection). When the LAST open clarification on the ARC is
+// resolved, the (possibly-revised) award is re-routed through a fresh awarding
+// committee approval; on approval the affected contract regenerates and the
+// vendor re-accepts — same forward flow, for revise AND uphold.
+// ============================================================
+async function resolveClarification(req, res, mode) {
+  try {
+    const arcId = Number(req.params.arcId);
+    const clarificationId = Number(req.params.clarificationId);
+    const userId = req.user?.id;
+    const response = req.body?.response ? String(req.body.response) : null;
+    if (mode === 'uphold' && !response) {
+      return bad(res, 400, 'A response is required when upholding the original term');
+    }
+
+    const result = await db.tx(async (t) => {
+      const cl = await arcContractClarificationModel.getById(clarificationId, t);
+      if (!cl || Number(cl.arc_id) !== arcId) return bad(res, 404, 'Clarification not found', 2);
+      if (cl.status !== 'open') return bad(res, 409, `Clarification already ${cl.status}`);
+      const comm = await arcEvalModel.getCommEval(arcId, t);
+      if (!comm) return bad(res, 400, 'Commercial evaluation has not been started');
+
+      let oldValue = cl.old_value ?? null;
+      let newValue = oldValue;
+      if (mode === 'revise') {
+        if (req.body?.value === undefined || req.body?.value === null || req.body?.value === '') {
+          return bad(res, 400, 'A revised value is required');
+        }
+        // Scoped to THIS vendor × item only — never touches any other award.
+        const applied = await arcEvalModel.updateAwardField(
+          comm.id, Number(cl.arc_item_id), Number(cl.vendor_id), cl.field, req.body.value, t
+        );
+        oldValue = applied.old_value;
+        newValue = applied.new_value;
+      }
+      const updated = await arcContractClarificationModel.resolve(clarificationId, {
+        status: mode === 'revise' ? 'revised' : 'upheld',
+        buyer_response: response,
+        old_value: oldValue,
+        new_value: newValue,
+        resolved_by: userId,
+      }, t);
+      await arcEvalModel.appendCommEvalHistory(
+        comm.id, `clarification_${mode}`,
+        { clarification_id: clarificationId, field: cl.field, old_value: oldValue, new_value: newValue }, userId, t);
+      await logArcEvent({
+        arcId,
+        eventType: mode === 'revise' ? ARC_EVENT_TYPES.CLARIFICATION_REVISED : ARC_EVENT_TYPES.CLARIFICATION_UPHELD,
+        actorId: userId,
+        payload: { clarification_id: clarificationId, field: cl.field, old_value: oldValue, new_value: newValue },
+        txContext: t,
+      });
+
+      // Once every dispute on the ARC is settled, re-route the award through a
+      // fresh committee approval (awarding) — same forward flow that ends at
+      // vendor acceptance. No effect on commercial allocation.
+      const remainingOpen = await arcContractClarificationModel.countOpenForArc(arcId, t);
+      let reapprove = null;
+      if (remainingOpen === 0) {
+        const arc = await arcModel.getById(arcId, t);
+        const policy = await resolveArcPolicy('ARC_COMMITTEE', {
+          hospitality_company_id: arc.hospitality_company_id,
+          hotel_id:               arc.hotel_id,
+          department_id:          arc.department_id,
+          process_id:             arc.process_id,
+        }, t);
+        if (!policy) {
+          const err = new Error('No approval policy configured for the ARC committee in this scope.');
+          err.httpStatus = 400; throw err;
+        }
+        const engineResult = await createApprovalInstance({
+          entity_type:            'ARC_COMMITTEE',
+          entity_id:              arcId,
+          hospitality_company_id: arc.hospitality_company_id,
+          hotel_id:               arc.hotel_id,
+          department_id:          arc.department_id,
+          process_id:             arc.process_id,
+          approval_policy_id:     policy.id,
+          initiated_by:           userId,
+          metadata:               { reason: 'vendor_clarification', via: 'clarification_reapproval' },
+          txContext:              t,
+        });
+        const instanceRow = engineResult?.instance || engineResult;
+        if (!instanceRow?.id) throw new Error('Approval engine did not return an instance id');
+        await arcEvalModel.setCommEvalStatus(comm.id, 'finalized', { approval_instance_id: instanceRow.id }, t);
+        await arcModel.setStatus(arcId, 'committee_review', {}, t);
+        await logArcEvent({
+          arcId, eventType: ARC_EVENT_TYPES.CONTRACT_REISSUED,
+          actorId: userId,
+          payload: { reason: 'vendor_clarification', approval_instance_id: instanceRow.id }, txContext: t,
+        });
+        reapprove = { instanceId: instanceRow.id, autoApproved: engineResult.autoApproved === true };
+      }
+      return { __data: { clarification: updated, open_remaining: remainingOpen }, __reapprove: reapprove };
+    });
+    if (result && result.__data) {
+      // Auto-approved committee (initiator is the configured approver): fire the
+      // post-approval effects (regenerate the affected contract) AFTER commit.
+      if (result.__reapprove?.autoApproved) {
+        await dispatchPostApprovalAction(result.__reapprove.instanceId, userId, {
+          status: 'APPROVED', comment: 'Auto-approved — clarification re-award',
+        });
+      }
+      return ok(res, result.__data, mode === 'revise' ? 'Term revised' : 'Original term upheld');
+    }
+    return result;
+  } catch (err) {
+    return fail(res, err, `[evalController.${mode}Clarification]`);
+  }
+}
+
+export function reviseClarification(req, res) { return resolveClarification(req, res, 'revise'); }
+export function upholdClarification(req, res) { return resolveClarification(req, res, 'uphold'); }
 
 // ============================================================
 // Post-approval hooks (registered in approvalActionService)
