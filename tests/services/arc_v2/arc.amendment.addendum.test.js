@@ -220,6 +220,12 @@ describe("ARC amendment addendum re-signing", () => {
     expect(Number(cons.effective_unit_rate)).toBe(200);  // amended effective rate surfaced
     expect(Number(cons.amendment_id)).toBe(Number(priceAmdId));
 
+    // The vendor contract-detail lines must surface it too (separate query).
+    const vdetail = await vendorClient.get(`/api/v1/arc-v2/vendor/contracts/${contractId}`);
+    const vline = vdetail.body.data.lines.find((l) => Number(l.id) === Number(line1Id));
+    expect(Number(vline.unit_rate)).toBe(100);
+    expect(Number(vline.effective_unit_rate)).toBe(200);
+
     // The ORIGINAL contract document hash is unchanged.
     const after = await db.one(`SELECT document_hash FROM tbl_arc_contract WHERE id = $1`, [contractId]);
     expect(after.document_hash).toBe(before.document_hash);

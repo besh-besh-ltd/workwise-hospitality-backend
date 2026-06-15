@@ -127,10 +127,32 @@ const arcContractModel = {
   listLines: async (arcContractId, txContext = null) => {
     return (txContext || db).any(
       `SELECT cl.*, ai.product_variant_id, ai.uom, ai.spec_text,
-              pv.name AS variant_name, pv.slug AS variant_slug
+              pv.name AS variant_name, pv.slug AS variant_slug,
+              -- Live amendment overlay (price/qty), window-driven, mirrors
+              -- arcPricingResolver. effective_* = what a call-off released today
+              -- would use; cl.unit_rate / cl.committed_qty stay the baseline.
+              ovl.id   AS amendment_id,
+              ovl.amendment_type AS amendment_type,
+              ovl.amendment_to   AS amendment_effective_to,
+              CASE WHEN ovl.amendment_type = 'price' AND (ovl.payload->>'new_rate')::numeric > 0
+                   THEN (ovl.payload->>'new_rate')::numeric ELSE cl.unit_rate END AS effective_unit_rate,
+              CASE WHEN ovl.amendment_type = 'qty' AND (ovl.payload->>'new_qty')::numeric > 0
+                   THEN (ovl.payload->>'new_qty')::numeric ELSE cl.committed_qty END AS effective_committed_qty
          FROM tbl_arc_contract_line cl
          LEFT JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+         LEFT JOIN LATERAL (
+           SELECT am.id, am.amendment_type, am.payload, am.amendment_to
+             FROM tbl_arc_amendment am
+            WHERE am.arc_contract_id = cl.arc_contract_id
+              AND am.status IN ('approved','live')
+              AND am.amendment_type IN ('price','qty')
+              AND (am.payload->>'arc_contract_line_id')::bigint = cl.id
+              AND am.amendment_from <= CURRENT_DATE
+              AND (am.amendment_to IS NULL OR am.amendment_to >= CURRENT_DATE)
+            ORDER BY am.amendment_from DESC, am.id DESC
+            LIMIT 1
+         ) ovl ON TRUE
         WHERE cl.arc_contract_id = $1
         ORDER BY cl.id`,
       [arcContractId]
