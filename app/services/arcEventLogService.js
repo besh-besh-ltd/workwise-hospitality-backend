@@ -66,6 +66,11 @@ export const ARC_EVENT_TYPES = Object.freeze({
   AMENDMENT_REJECTED: 'amendment_rejected',
   AMENDMENT_LIVE: 'amendment_live',
   AMENDMENT_ENDED: 'amendment_ended',
+  // Addendum re-signing (amendment binds only after the vendor re-signs)
+  AMENDMENT_AWAITING_SIGNATURE: 'amendment_awaiting_signature',
+  ADDENDUM_SIGNED: 'addendum_signed',
+  AMENDMENT_SIGN_DECLINED: 'amendment_sign_declined',
+  AMENDMENT_VOIDED: 'amendment_voided',
   // Expiry / renewal
   EXPIRING_SOON: 'expiring_soon',
   EXPIRED: 'expired',
