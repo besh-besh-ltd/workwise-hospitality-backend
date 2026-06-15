@@ -4,6 +4,7 @@ import { acl } from '../../helper/common.js';
 import * as vendorController from '../../controllers/arc_v2/arcVendorController.js';
 import * as contractController from '../../controllers/arc_v2/arcContractController.js';
 import * as amendmentController from '../../controllers/arc_v2/arcAmendmentController.js';
+import * as addendumController from '../../controllers/arc_v2/arcAddendumController.js';
 
 const r = Router();
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
@@ -18,6 +19,13 @@ r.post('/quote/withdraw',                 passportSignIn, acl([3]), vendorContro
 
 // Amendments — vendor's own requests across every contract (My Amendments).
 r.get( '/amendments',                     passportSignIn, acl([3]), amendmentController.listVendorAmendments);
+
+// Addendum re-signing — vendor signs the approved amendment's addendum before
+// its effects bind (sign-to-activate gate).
+r.get( '/addendums',                      passportSignIn, acl([3]), addendumController.listVendorAddendums);
+r.post('/addendums/:id/otp/request',      passportSignIn, acl([3]), addendumController.requestAddendumOtp);
+r.post('/addendums/:id/otp/verify',       passportSignIn, acl([3]), addendumController.verifyAddendumOtp);
+r.post('/addendums/:id/decline',          passportSignIn, acl([3]), addendumController.declineAddendum);
 
 // Contract acceptance + active list.
 r.get( '/pending-acceptance',                       passportSignIn, acl([3]), contractController.getPendingAcceptance);
