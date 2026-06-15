@@ -150,10 +150,15 @@ const arcAmendmentModel = {
               a.contract_end_at,
               cat.title           AS category_title,
               h.name              AS hotel_name,
-              ub.name             AS buyer_name
+              ub.name             AS buyer_name,
+              ad.id               AS addendum_id,
+              ad.status           AS addendum_status,
+              ad.addendum_number,
+              ad.document_s3_url  AS addendum_url
          FROM public.tbl_arc_amendment am
          JOIN public.tbl_arc_contract c ON c.id = am.arc_contract_id
          JOIN public.tbl_arc a          ON a.id = c.arc_id
+         LEFT JOIN public.tbl_arc_amendment_document ad ON ad.arc_amendment_id = am.id
          LEFT JOIN public.tbl_category cat ON cat.id = a.category_id
          LEFT JOIN public.tbl_hospitality_company_hotels h ON h.id = a.hotel_id
          LEFT JOIN public.tbl_users ub ON ub.id = a.created_by

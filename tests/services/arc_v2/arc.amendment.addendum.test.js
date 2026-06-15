@@ -177,6 +177,16 @@ describe("ARC amendment addendum re-signing", () => {
     const priced = await resolveCurrentPrice(line1Id, new Date());
     expect(Number(priced.unit_rate)).toBe(100);
     expect(priced.applied_amendment_id).toBeNull();
+
+    // The vendor-facing reads must surface the addendum id on the amendment row
+    // (the FE sign CTAs depend on it). Both contract-detail and My Amendments.
+    const detail = await vendorClient.get(`/api/v1/arc-v2/vendor/contracts/${contractId}`);
+    const fromDetail = detail.body.data.amendments.find((a) => a.id === priceAmdId);
+    expect(Number(fromDetail.addendum_id)).toBe(Number(priceAddendumId));
+    expect(fromDetail.addendum_status).toBe("awaiting_signature");
+    const list = await vendorClient.get(`/api/v1/arc-v2/vendor/amendments`);
+    const fromList = list.body.data.amendments.find((a) => a.id === priceAmdId);
+    expect(Number(fromList.addendum_id)).toBe(Number(priceAddendumId));
   });
 
   test("vendor signs the addendum (OTP) → amendment live, new rate applies, original contract untouched", async () => {

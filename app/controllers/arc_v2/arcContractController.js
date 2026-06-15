@@ -500,8 +500,11 @@ export async function getContractDetail(req, res) {
         `SELECT am.id, am.amendment_type, am.amendment_from, am.amendment_to,
                 am.status, am.reason, am.payload, am.current_step,
                 am.approval_chain, am.created_at, am.decided_at,
+                ad.id AS addendum_id, ad.status AS addendum_status,
+                ad.addendum_number, ad.document_s3_url AS addendum_url,
                 COALESCE(eh.edits, '[]'::json) AS edit_history
            FROM tbl_arc_amendment am
+           LEFT JOIN tbl_arc_amendment_document ad ON ad.arc_amendment_id = am.id
            LEFT JOIN LATERAL (
              SELECT json_agg(json_build_object(
                       'field_changed', e.field_changed,
