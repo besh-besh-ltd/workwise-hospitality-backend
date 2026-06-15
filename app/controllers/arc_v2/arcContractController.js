@@ -276,8 +276,10 @@ function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signed
  * caller can decide how to handle it (generation is best-effort; signing falls
  * back to a content hash if PDF/S3 is unavailable).
  */
-export async function generateContractPdf(ctx, vendor, lines, contractId, { signed = false, signedAt = null } = {}) {
-  const html = renderContractDocumentHtml(ctx, vendor, lines, { signed, signedAt });
+export async function generateContractPdf(ctx, vendor, lines, contractId, { signed = false, signedAt = null, htmlOverride = null } = {}) {
+  // htmlOverride lets the addendum flow reuse this Puppeteer→S3→hash pipeline
+  // with its own delta template instead of the rate-contract template.
+  const html = htmlOverride || renderContractDocumentHtml(ctx, vendor, lines, { signed, signedAt });
   const tmpPath = path.join(os.tmpdir(), `arc-contract-${contractId}-${signed ? 'signed' : 'draft'}-${Date.now()}.pdf`);
   let browser = null;
   try {
