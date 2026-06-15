@@ -57,6 +57,7 @@ const VENDOR_SAFE_EVENTS = [
   'contract_active', 'contract_declined',
   'amendment_requested', 'amendment_approved', 'amendment_rejected',
   'amendment_live', 'amendment_ended',
+  'amendment_awaiting_signature', 'addendum_signed', 'amendment_sign_declined',
   'expiring_soon', 'expired', 'renewed',
   'call_off_released', 'call_off_rejected',
 ];

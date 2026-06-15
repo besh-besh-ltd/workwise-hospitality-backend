@@ -4,6 +4,7 @@ import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
 import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
+import arcAmendmentDocumentModel from '../../models/arc_v2/arcAmendmentDocumentModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
@@ -816,7 +817,7 @@ export async function getActiveSummary(req, res) {
     if (!arc) return bad(res, 404, 'ARC not found', 2);
 
     // Enrich ARC with display labels the active page needs in its hero.
-    const [enrichedArc, contracts, events, callOffs, amendments] = await Promise.all([
+    const [enrichedArc, contracts, events, callOffs, amendments, addendums] = await Promise.all([
       db.oneOrNone(
         `SELECT a.*,
                 cat.title    AS category_title,
@@ -924,13 +925,24 @@ export async function getActiveSummary(req, res) {
         }
         throw err;
       }),
+      // Addendum documents (per-amendment re-signing artefacts) for every
+      // contract under this ARC — the documents tab lists them alongside the
+      // original signed contract, never overwriting it.
+      arcAmendmentDocumentModel.listForArc(arcId).catch((err) => {
+        if (/relation .* does not exist|column .* does not exist/i.test(err.message)) {
+          logger.warn({ err: err.message },
+            '[contractController.getActiveSummary] addendums query degraded to [] — apply migration 20260615100100_arc_amendment_document');
+          return [];
+        }
+        throw err;
+      }),
     ]);
 
     const summary = await Promise.all(contracts.map(async (c) => ({
       contract:    c,
       consumption: await arcContractModel.consumptionForContract(c.id),
     })));
-    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments });
+    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums });
   } catch (err) {
     logger.error({ err }, '[contractController.getActiveSummary]');
     return bad(res, 500, err.message || 'Internal error', 3);
