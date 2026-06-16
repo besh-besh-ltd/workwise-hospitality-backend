@@ -13,10 +13,12 @@ DashboardRoutes.get('/procurement-snapshot', passportSignIn, dashboardController
 DashboardRoutes.get('/negotiation-savings', passportSignIn, dashboardController.getNegotiationSavings);
 DashboardRoutes.get('/cost-intelligence', passportSignIn, dashboardController.getCostIntelligence);
 DashboardRoutes.get('/category-insights', passportSignIn, dashboardController.getCategoryInsights);
+DashboardRoutes.get('/abc-analysis', passportSignIn, dashboardController.getAbcAnalysis);
 DashboardRoutes.get('/workflow-efficiency', passportSignIn, dashboardController.getWorkflowEfficiency);
 DashboardRoutes.get('/smart-insights', passportSignIn, dashboardController.getSmartInsights);
 DashboardRoutes.get('/pending-approvals', passportSignIn, dashboardController.getPendingApprovals);
 DashboardRoutes.get('/rejected-pos', passportSignIn, dashboardController.getRejectedPOs);
+DashboardRoutes.get('/no-response', passportSignIn, dashboardController.getNoResponse);
 
 // ─── Role-aware buyer dashboard — persona widget endpoints ──────────
 // Stub responses today (safe-default shapes the FE renders via its

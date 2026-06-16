@@ -45,7 +45,8 @@ const vendorDashboardController = {
         `SELECT name FROM tbl_users WHERE id = $1`,
         [vendor_id]
       );
-      const data = await vendorDashboardModel.getStatusBannerData(vendor_id);
+      const { start_date, end_date } = req.query;
+      const data = await vendorDashboardModel.getStatusBannerData(vendor_id, start_date, end_date);
       const firstName = (userRow?.name || '').trim().split(/\s+/)[0] || null;
       res.status(200).json({
         status: 1,

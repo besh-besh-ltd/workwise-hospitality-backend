@@ -216,6 +216,43 @@ describe("GET /dashboard-v2/buyer-status-banner — mode escalates with state", 
   });
 });
 
+describe("GET /dashboard-v2/buyer-status-banner — respects selected date range", () => {
+  it("excludes a closed-no-quotes RFQ whose bid_end falls outside the range", async () => {
+    // RFQ closed without quotes, bid ended ~3 days ago (i.e. in 2026).
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 2,
+      bid_end_date: offsetString(-3 * 86400_000),
+      title: "Out-of-range closed-no-quotes",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+
+    // A range entirely in the past (calendar year 2020) must NOT include the
+    // RFQ that closed a few days ago.
+    const past = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1),
+      start_date: "2020-01-01",
+      end_date: "2020-12-31",
+    });
+    expect(past.status).toBe(200);
+    expect(past.body.data.counts.closed_no_quotes).toBe(0);
+
+    // A wide range that includes today DOES count it.
+    const wide = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1),
+      start_date: "2020-01-01",
+      end_date: "2999-01-01",
+    });
+    expect(wide.status).toBe(200);
+    expect(wide.body.data.counts.closed_no_quotes).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("GET /dashboard-v2/buyer-status-banner — scope", () => {
   it("excludes RFQs from a hotel the user has not selected", async () => {
     // RFQ on hotel A2 — the buyer has scope on A1+A2 in fixtures, but the

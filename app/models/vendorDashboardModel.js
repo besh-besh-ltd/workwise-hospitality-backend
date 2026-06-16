@@ -303,8 +303,11 @@ async function getInsights(vendor_id, start_date, end_date) {
 //    steady        → new_rfqs_unviewed ≥ 1 or po_in_transit ≥ 1
 //    clear         → otherwise
 // ─────────────────────────────────────────────────────────────────────
-async function getStatusBannerData(vendor_id) {
-  const params = [vendor_id];
+async function getStatusBannerData(vendor_id, start_date, end_date) {
+  // Period-based counts respect the selected range when supplied; forward-looking
+  // signals (closing-soon, pending negotiation, subscription expiry) stay live.
+  const hasDates = !!(start_date && end_date);
+  const params = [vendor_id, start_date, end_date];
 
   // 1. New RFQs the vendor was invited to but hasn't opened yet. Uses
   //    tbl_rfq_product_vendors.is_rfq_viewed; treat NULL/0 as "unviewed".
@@ -316,7 +319,8 @@ async function getStatusBannerData(vendor_id) {
         AND r.is_published = 1
         AND r.status = 1
         AND (rpv.is_rfq_viewed IS NULL OR rpv.is_rfq_viewed = 0)
-        AND (r.bid_end_date IS NULL OR r.bid_end_date = '' OR r.bid_end_date::timestamp > NOW())`,
+        AND (r.bid_end_date IS NULL OR r.bid_end_date = '' OR r.bid_end_date::timestamp > NOW())
+        ${hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : ''}`,
     params
   );
 
@@ -378,7 +382,8 @@ async function getStatusBannerData(vendor_id) {
     `SELECT COUNT(*)::INTEGER AS count
        FROM tbl_rfq_purchase_order po
       WHERE po.finalized_vendor_id = $1
-        AND po.status = 'acceptance_pending'`,
+        AND po.status = 'acceptance_pending'
+        ${hasDates ? 'AND po.created_at BETWEEN $2 AND $3' : ''}`,
     params
   );
 
@@ -388,7 +393,8 @@ async function getStatusBannerData(vendor_id) {
     `SELECT COUNT(*)::INTEGER AS count
        FROM tbl_rfq_purchase_order po
       WHERE po.finalized_vendor_id = $1
-        AND po.status IN ('sent', 'dispatched', 'GRN')`,
+        AND po.status IN ('sent', 'dispatched', 'GRN')
+        ${hasDates ? 'AND po.created_at BETWEEN $2 AND $3' : ''}`,
     params
   );
 
@@ -412,7 +418,7 @@ async function getStatusBannerData(vendor_id) {
        LEFT JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
       WHERE po.finalized_vendor_id = $1
         AND po.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed')
-        AND po.created_at >= NOW() - INTERVAL '7 days'`,
+        ${hasDates ? 'AND po.created_at BETWEEN $2 AND $3' : "AND po.created_at >= NOW() - INTERVAL '7 days'"}`,
     params
   );
 
@@ -443,24 +449,28 @@ async function getStatusBannerData(vendor_id) {
     subscription_expiring: subscriptionExpiring.count,
   };
 
+  // Precedence (lowest → highest): clear < steady < win < action_needed < critical.
   let mode = 'clear';
-  if (counts.subscription_expiring >= 1 &&
-      (counts.po_acceptance_pending === 0 && counts.closing_soon === 0)) {
-    // Subscription alone with no other action → still flag but as action_needed.
-    mode = 'action_needed';
+  if (counts.new_rfqs_unviewed >= 1 || counts.po_in_transit >= 1) {
+    mode = 'steady';
   }
+  // A PO to accept is a WIN — the vendor was awarded an order. Treated as a
+  // positive (green) state rather than an amber warning (Sr 335)...
+  if (counts.po_acceptance_pending >= 1) {
+    mode = 'win';
+  }
+  // ...unless something genuinely time-pressured needs them now: a closing bid,
+  // an open negotiation round, or a subscription about to lapse.
   if (
     counts.closing_soon >= 1 ||
     counts.pending_negotiation >= 1 ||
-    counts.po_acceptance_pending >= 1
+    counts.subscription_expiring >= 1
   ) {
     mode = 'action_needed';
   }
+  // Subscription lapsing while POs pile up = the one truly critical combination.
   if (counts.subscription_expiring >= 1 && counts.po_acceptance_pending >= 2) {
     mode = 'critical';
-  }
-  if (mode === 'clear' && (counts.new_rfqs_unviewed >= 1 || counts.po_in_transit >= 1)) {
-    mode = 'steady';
   }
 
   return {

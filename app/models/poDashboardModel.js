@@ -455,6 +455,10 @@ export async function getDashboardKpis(scope) {
     `SELECT
         COUNT(*) FILTER (WHERE po.status <> ALL($${scoped.nextIndex}::po_status[]))::int AS active_count,
         COUNT(*) FILTER (WHERE po.status = 'dispatched')::int AS in_transit,
+        -- Vendor acceptance (Sr 221): pending = awaiting vendor response;
+        -- accepted = vendor explicitly accepted (status approved + action stamped).
+        COUNT(*) FILTER (WHERE po.status = 'acceptance_pending')::int AS vendor_acceptance_pending,
+        COUNT(*) FILTER (WHERE po.status = 'approved' AND po.vendor_action_at IS NOT NULL)::int AS vendor_accepted,
         COUNT(*) FILTER (
           WHERE po.status = 'approved'
             AND date_trunc('month', po.updated_at) = date_trunc('month', NOW())
@@ -539,6 +543,8 @@ export async function getDashboardKpis(scope) {
     awaitingYou: awaiting.awaiting_you,
     awaitingOldestDays: awaiting.oldest_days,
     inTransit: agg.in_transit,
+    vendorAccepted: agg.vendor_accepted,
+    vendorAcceptancePending: agg.vendor_acceptance_pending,
     avgDeliveryDays: delivery ? Number(delivery.avg_delivery_days) : 0,
     approvedThisMonth: agg.approved_this_month,
     approvedDeltaPct: pctDelta(agg.approved_this_month, agg.approved_last_month),

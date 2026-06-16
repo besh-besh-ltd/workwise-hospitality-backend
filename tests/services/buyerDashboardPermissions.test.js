@@ -30,6 +30,7 @@ const DASHBOARD_WIDGETS = [
   "negotiation_savings",
   "cost_intelligence",
   "category_insights",
+  "abc_analysis",
   "workflow_efficiency",
   "smart_insights",
   // RFQ Creator
