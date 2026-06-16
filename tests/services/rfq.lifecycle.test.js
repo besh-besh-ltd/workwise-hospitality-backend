@@ -1,4 +1,9 @@
+import { describe, it, test, expect, beforeAll, afterAll } from "@jest/globals";
 import { shapeRfqLifecycle, STAGE_ORDER } from "../../app/models/rfq/rfqLifecycleShaper.js";
+import { db } from "../setup/db.js";
+import { httpClient } from "../helpers/http.js";
+import { IDS } from "../fixtures/ids.js";
+import { makeRfqVisibleToDashboard, addProductToRfq, cleanupRfqs } from "../helpers/dashboardSeed.js";
 
 // Minimal getLifecycleSummary-shaped fixture.
 const summary = (overrides = {}) => ({
@@ -77,5 +82,65 @@ describe("shapeRfqLifecycle", () => {
     const out = shapeRfqLifecycle(summary(), { permissions: { rfq: ["read"] } });
     expect(out.permissions).toEqual({ rfq: ["read"] });
     expect(out.current_status).toBe("COMMERCIAL_EVALUATION");
+  });
+});
+
+// ── Integration: GET /api/v1/rfq/:rfqId/lifecycle ───────────────────────────
+describe("GET /rfq/:rfqId/lifecycle", () => {
+  const BUYER = IDS.users.a1_proc_buyer;
+  let client;
+  const rfqIds = [];
+  let publishedId, draftId, tenderId;
+
+  beforeAll(async () => {
+    client = await httpClient(BUYER);
+    await db.tx(async (t) => {
+      const pub = await makeRfqVisibleToDashboard(t, {
+        createdBy: BUYER, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+        status: 1, is_published: 1, title: "Lifecycle published RFQ",
+      });
+      publishedId = pub.rfq_id;
+      await addProductToRfq(t, publishedId);
+
+      const draft = await makeRfqVisibleToDashboard(t, {
+        createdBy: BUYER, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+        status: 0, is_published: 0, title: "Lifecycle draft RFQ",
+      });
+      draftId = draft.rfq_id;
+
+      const tender = await makeRfqVisibleToDashboard(t, {
+        createdBy: BUYER, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+        status: 1, is_published: 1, is_tender: 1, title: "Lifecycle tender",
+      });
+      tenderId = tender.rfq_id;
+    });
+    rfqIds.push(publishedId, draftId, tenderId);
+  });
+
+  afterAll(async () => {
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1)`, [rfqIds]);
+    await cleanupRfqs(db, rfqIds);
+  });
+
+  it("returns the 4 timeline stages + a default_stage + RFQ-scoped permissions", async () => {
+    const res = await client.get(`/api/v1/rfq/${publishedId}/lifecycle`);
+    expect(res.body.status).toBe(1);
+    expect(res.body.data.stages.map((s) => s.key)).toEqual(STAGE_ORDER);
+    expect(STAGE_ORDER).toContain(res.body.data.default_stage);
+    expect(Array.isArray(res.body.data.permissions.rfq)).toBe(true);
+    expect(res.body.data.rfq.id).toBe(publishedId);
+  });
+
+  it("returns a redirectable draft shape for a draft RFQ", async () => {
+    const res = await client.get(`/api/v1/rfq/${draftId}/lifecycle`);
+    expect(res.body.status).toBe(1);
+    expect(res.body.data.rfq.status).toBe("draft");
+    expect(res.body.data.stages).toEqual([]);
+    expect(res.body.data.default_stage).toBeNull();
+  });
+
+  it("rejects a tender id with 403", async () => {
+    const res = await client.get(`/api/v1/rfq/${tenderId}/lifecycle`);
+    expect(res.status).toBe(403);
   });
 });

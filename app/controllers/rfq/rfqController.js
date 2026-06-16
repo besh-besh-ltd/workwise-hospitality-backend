@@ -11,6 +11,7 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
+import { shapeRfqLifecycle } from '../../models/rfq/rfqLifecycleShaper.js';
 import userModel from '../../models/userModel.js';
 import { sendNotification, dispatch as dispatchNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
@@ -7370,6 +7371,68 @@ const rfqController = {
     } catch (err) {
       logError('getLifecycleSummary error', err);
       return res.status(200).json({ status: 3, message: 'Error fetching lifecycle summary' });
+    }
+  },
+
+  // GET /rfq/:rfqId/lifecycle — ARC-style stage lifecycle for the single RFQ
+  // workspace page. Shapes the existing getLifecycleSummary phases into 4
+  // navigable stages + adds tender guard, draft handling, and RFQ-scoped perms.
+  getRfqLifecycle: async (req, res) => {
+    try {
+      const rfqId = parseInt(req.params.rfqId, 10);
+      const userId = req.user?.id || null;
+      if (!rfqId || isNaN(rfqId)) {
+        return res.status(200).json({ status: 0, message: 'Invalid RFQ ID' });
+      }
+
+      // Basic row first — for tender guard + draft handling + permission scope.
+      const rfq = await db.oneOrNone(
+        `SELECT id, rfq_no, title, status, is_published, is_tender, hotel_id,
+                department_id, hospitality_company_id, created_by, bid_end_date,
+                ra_start_date, ra_end_date
+           FROM tbl_rfq WHERE id = $1`,
+        [rfqId]
+      );
+      if (!rfq) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      if (Number(rfq.is_tender) === 1) {
+        return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
+      }
+
+      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
+      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
+      let permissions;
+      if (Number(req.user?.user_type) === 8) {
+        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
+      } else {
+        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
+        if (rfq.hotel_id != null) {
+          const rows = await rbacModel
+            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
+            .catch(() => []);
+          for (const row of rows) {
+            const resource = String(row.resource);
+            if (permissions[resource]) permissions[resource].push(String(row.action));
+          }
+        }
+      }
+
+      // Draft (status 0 = not yet submitted) → redirectable shape so the shell
+      // sends the buyer to the edit/create flow instead of the stage page.
+      const summary = (Number(rfq.status) === 0)
+        ? null
+        : await rfqModel.getLifecycleSummary(rfqId, userId);
+      if (!summary || !summary.current_stage) {
+        return res.status(200).json({
+          status: 1,
+          data: { rfq: { ...rfq, status: 'draft' }, stages: [], default_stage: null, permissions },
+        });
+      }
+
+      const shaped = shapeRfqLifecycle(summary, { permissions });
+      return res.status(200).json({ status: 1, data: { ...shaped, rfq } });
+    } catch (err) {
+      logError('getRfqLifecycle error', err);
+      return res.status(200).json({ status: 3, message: 'Error fetching RFQ lifecycle' });
     }
   },
 

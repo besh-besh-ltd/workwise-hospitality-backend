@@ -175,6 +175,12 @@ RfqRoutes.get(
 );
 
 RfqRoutes.get(
+  '/:rfqId/lifecycle',
+  passportSignIn,
+  rfqController.getRfqLifecycle
+);
+
+RfqRoutes.get(
   '/getRfqById/:id',
   noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
