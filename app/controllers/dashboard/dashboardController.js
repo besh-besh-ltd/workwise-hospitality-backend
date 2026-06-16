@@ -153,6 +153,21 @@ const dashboardController = {
     }
   },
 
+  // No-response drill-down — published RFQs with zero quotes, split into
+  // active (bid window open) vs expired (bid window passed). See Sr 228.
+  getNoResponse: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const { start_date, end_date } = req.query;
+      const data = await dashboardModel.getNoResponseDetail(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
   getPendingApprovals: async (req, res) => {
     try {
       const scope = await resolveScope(req, res);

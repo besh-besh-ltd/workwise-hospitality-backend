@@ -206,6 +206,59 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 1b. No-response detail (drill-down behind the "No responses" card)
+//     Same base set as the Action Centre rfqs_awaiting count (published,
+//     OPEN, zero quotes), segregated by bid window (Sr 228):
+//       active  — bid_end_date still in the future (or unset)
+//       expired — bid_end_date already passed
+// ─────────────────────────────────────────────────────────────────────
+async function getNoResponseDetail(buyer_company_id, hotel_ids = [], start_date, end_date) {
+  const hf = hotelFilter();
+  const hasDates = start_date && end_date;
+  const dateFilter = hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : '';
+  const params = [buyer_company_id, start_date, end_date, hotel_ids];
+
+  const rows = await db.any(
+    `SELECT
+       r.id,
+       r.rfq_no,
+       r.title,
+       r.bid_end_date,
+       (SELECT hch.name
+          FROM tbl_rfq_hotel_mappings rhm0
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm0.hotel_id
+          WHERE rhm0.rfq_id = r.id AND rhm0.hotel_id = ANY($4)
+          LIMIT 1) as hotel_name,
+       (SELECT COUNT(*) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id) as invited_vendor_count,
+       CASE
+         WHEN r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
+              AND DATE(r.bid_end_date) < CURRENT_DATE
+         THEN true ELSE false
+       END as is_expired
+     FROM tbl_rfq r
+     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
+     AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
+     ${dateFilter} ${hf}
+     ORDER BY r.bid_end_date ASC NULLS LAST`,
+    params
+  );
+
+  const shape = (r) => ({
+    id: r.id,
+    rfq_no: r.rfq_no,
+    title: r.title,
+    bid_end_date: r.bid_end_date,
+    hotel_name: r.hotel_name,
+    invited_vendor_count: parseInt(r.invited_vendor_count, 10),
+  });
+
+  return {
+    active: rows.filter((r) => !r.is_expired).map(shape),
+    expired: rows.filter((r) => r.is_expired).map(shape),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 2. Procurement Snapshot
 // ─────────────────────────────────────────────────────────────────────
 async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], start_date, end_date) {
@@ -224,6 +277,22 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
     params
   );
 
+  // Active RFQs: currently live (published, OPEN). Reflects current state, so
+  // intentionally NOT date-filtered (matches active_tenders semantics).
+  const activeRfqsQuery = db.one(
+    `SELECT COUNT(*) as count FROM tbl_rfq r
+     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1 ${hf}`,
+    params
+  );
+
+  // Closed RFQs: in CLOSED state (status=2), scoped to the selected period
+  // via the RFQ creation timestamp.
+  const closedRfqsQuery = db.one(
+    `SELECT COUNT(*) as count FROM tbl_rfq r
+     WHERE ${companyScope()} AND r.status = 2 AND r.timestamp BETWEEN $2 AND $3 ${hf}`,
+    params
+  );
+
   const posIssuedQuery = db.one(
     `SELECT COUNT(*) as count
      FROM tbl_rfq_purchase_order po
@@ -232,9 +301,22 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
     params
   );
 
-  // Total Spend: approved POs, using total_price (includes tax, freight, packaging)
+  // Total Spend with a Base / GST / Total breakup (Sr 235). total_price is the
+  // authoritative all-in line value; GST is derived per line from charges_meta
+  // (percentage-of-basic unless tax_mode='absolute'), matching the PO-detail
+  // pricing roll-up in poDashboardModel.js. Base = Total − GST so the three
+  // figures always reconcile.
   const totalSpendQuery = db.one(
-    `SELECT COALESCE(SUM(pop.total_price), 0) as total_spend
+    `SELECT
+       COALESCE(SUM(pop.total_price), 0) as total_incl_gst,
+       COALESCE(SUM(
+         CASE
+           WHEN (pop.charges_meta->>'tax') IS NULL THEN 0
+           WHEN pop.charges_meta->>'tax_mode' = 'absolute'
+             THEN (pop.charges_meta->>'tax')::numeric
+           ELSE (pop.unit_price * pop.quantity) * (pop.charges_meta->>'tax')::numeric / 100
+         END
+       ), 0) as total_gst
      FROM tbl_rfq_purchase_order po
      JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
      JOIN tbl_rfq r ON r.id = po.rfq_id
@@ -253,15 +335,27 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
     params
   );
 
-  const [tr, at, pi, ts, avt] = await Promise.all([
-    totalRfqsQuery, activeTendersQuery, posIssuedQuery, totalSpendQuery, avgTurnaroundQuery,
+  const [tr, ar, cr, at, pi, ts, avt] = await Promise.all([
+    totalRfqsQuery, activeRfqsQuery, closedRfqsQuery, activeTendersQuery, posIssuedQuery, totalSpendQuery, avgTurnaroundQuery,
   ]);
+
+  const totalInclGst = parseFloat(ts.total_incl_gst);
+  const totalGst = parseFloat(ts.total_gst);
+  const round2 = (n) => Math.round(n * 100) / 100;
 
   return {
     total_rfqs: parseInt(tr.count, 10),
+    active_rfqs: parseInt(ar.count, 10),
+    closed_rfqs: parseInt(cr.count, 10),
     active_tenders: parseInt(at.count, 10),
     pos_issued: parseInt(pi.count, 10),
-    total_spend: parseFloat(ts.total_spend),
+    // total_spend kept as the all-in figure for backward compatibility.
+    total_spend: totalInclGst,
+    spend_breakup: {
+      base_excl_gst: round2(totalInclGst - totalGst),
+      total_gst: round2(totalGst),
+      total_incl_gst: round2(totalInclGst),
+    },
     avg_turnaround: parseFloat(parseFloat(avt.avg_turnaround).toFixed(1)),
   };
 }
@@ -275,12 +369,24 @@ async function getNegotiationSavingsData(buyer_company_id, hotel_ids = [], start
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
 
-  const savingsQuery = db.oneOrNone(
+  const savingsQuery = await db.oneOrNone(
     `WITH scoped_rfqs AS (
        SELECT DISTINCT nr.rfq_id
        FROM tbl_negotiation_rounds nr
        JOIN tbl_rfq r ON r.id = nr.rfq_id
        WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf}
+       -- Sr 240: exclude Terminated/Rejected RFQs. WITHDRAWN (status=5) is the
+       -- terminated/rejected-by-us state; also drop RFQs whose only PO was
+       -- rejected by the vendor (no surviving non-rejected/cancelled PO).
+       AND r.status <> 5
+       AND NOT (
+         EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_rfq_purchase_order po2
+           WHERE po2.rfq_id = r.id
+           AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
+         )
+       )
      ),
      round1 AS (
        SELECT sr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
@@ -2130,6 +2236,7 @@ export default {
   getSmartInsightsData,
   getPendingApprovalsDetail,
   getRejectedPOsDetail,
+  getNoResponseDetail,
 
   // Role-aware widgets — RFQ Creator
   getMyDraftsData,

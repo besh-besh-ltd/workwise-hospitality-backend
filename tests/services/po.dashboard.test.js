@@ -432,6 +432,31 @@ describe("GET /po/dashboard/kpis", () => {
     }
     expect(after.body.activeCount).toBe(baselineActive + 1);
   });
+
+  it("counts vendor acceptance: accepted (approved + vendor_action_at) vs pending (Sr 221)", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await client.get("/api/v1/po/dashboard/kpis");
+    expect(before.status).toBe(200);
+    const basePending = before.body.vendorAcceptancePending;
+    const baseAccepted = before.body.vendorAccepted;
+    expect(typeof basePending).toBe("number");
+    expect(typeof baseAccepted).toBe("number");
+
+    // A PO awaiting the vendor's acceptance.
+    const a = await makeRfqWithProductAndVendor();
+    const poPending = await makePo({ rfq_id: a.rfq_id, status: "acceptance_pending", rfq_product_ids: [a.rfq_product_id], quote_ids: [a.quote_id] });
+    await attachProductToPo(poPending, a.rfq_product_id, a.quote_id);
+
+    // A PO the vendor has accepted (status -> approved, vendor_action_at set).
+    const b = await makeRfqWithProductAndVendor();
+    const poAccepted = await makePo({ rfq_id: b.rfq_id, status: "approved", rfq_product_ids: [b.rfq_product_id], quote_ids: [b.quote_id] });
+    await attachProductToPo(poAccepted, b.rfq_product_id, b.quote_id);
+    await db.none(`UPDATE tbl_rfq_purchase_order SET vendor_action_at = NOW() WHERE id = $1`, [poAccepted]);
+
+    const after = await client.get("/api/v1/po/dashboard/kpis");
+    expect(after.body.vendorAcceptancePending).toBe(basePending + 1);
+    expect(after.body.vendorAccepted).toBe(baseAccepted + 1);
+  });
 });
 
 // ===========================================================================
