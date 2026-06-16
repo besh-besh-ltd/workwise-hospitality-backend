@@ -13,6 +13,7 @@ DashboardRoutes.get('/procurement-snapshot', passportSignIn, dashboardController
 DashboardRoutes.get('/negotiation-savings', passportSignIn, dashboardController.getNegotiationSavings);
 DashboardRoutes.get('/cost-intelligence', passportSignIn, dashboardController.getCostIntelligence);
 DashboardRoutes.get('/category-insights', passportSignIn, dashboardController.getCategoryInsights);
+DashboardRoutes.get('/abc-analysis', passportSignIn, dashboardController.getAbcAnalysis);
 DashboardRoutes.get('/workflow-efficiency', passportSignIn, dashboardController.getWorkflowEfficiency);
 DashboardRoutes.get('/smart-insights', passportSignIn, dashboardController.getSmartInsights);
 DashboardRoutes.get('/pending-approvals', passportSignIn, dashboardController.getPendingApprovals);

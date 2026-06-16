@@ -437,32 +437,64 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
 
-  const topProducts = await db.any(
-    `SELECT rp.product_variant_id, pv.name as product_name, COUNT(*) as order_count
-     FROM tbl_rfq_products rp
-     JOIN tbl_rfq r ON r.id = rp.rfq_id AND ${companyScope()}
-     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-     WHERE r.timestamp BETWEEN $2 AND $3 ${hf}
-     GROUP BY rp.product_variant_id, pv.name
-     ORDER BY order_count DESC
-     LIMIT 5`,
+  // Item selector — ordered by purchase VALUE so the highest-spend (A-class)
+  // items lead the dropdown (Sr 301), not an arbitrary first item (Sr 302).
+  let topProducts = await db.any(
+    `WITH item_value AS (
+       SELECT rp.product_variant_id,
+         SUM(pop.total_price) as value,
+         COUNT(DISTINCT po.id) as order_count
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
+       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       GROUP BY rp.product_variant_id
+     )
+     SELECT iv.product_variant_id, pv.name as product_name, iv.order_count, iv.value
+     FROM item_value iv
+     JOIN tbl_product_variant pv ON pv.id = iv.product_variant_id
+     ORDER BY iv.value DESC NULLS LAST
+     LIMIT 8`,
     params
   );
 
+  // Fallback: items with RFQ activity but no PO spend yet, so the widget still
+  // shows something when nothing has been purchased in the period.
   if (topProducts.length === 0) {
-    return { top_products: [], price_trend: { labels: [], data: [] }, vendor_comparison: [] };
+    topProducts = await db.any(
+      `SELECT rp.product_variant_id, pv.name as product_name, COUNT(*) as order_count, 0 as value
+       FROM tbl_rfq_products rp
+       JOIN tbl_rfq r ON r.id = rp.rfq_id AND ${companyScope()}
+       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+       WHERE r.timestamp BETWEEN $2 AND $3 ${hf}
+       GROUP BY rp.product_variant_id, pv.name
+       ORDER BY order_count DESC
+       LIMIT 8`,
+      params
+    );
+  }
+
+  if (topProducts.length === 0) {
+    return { top_products: [], price_trend: { labels: [], avg: [], max: [], min: [] }, vendor_comparison: [], benchmark: null };
   }
 
   const pid = product_variant_id || topProducts[0].product_variant_id;
 
-  // Time granularity based on duration
+  // Time granularity: day for short ranges, month for long ones (Sr 301
+  // "month-wise"). Falls back to span-based detection for custom/FY ranges.
   const truncMap = {
     past7days: 'day',
     past15days: 'day',
     currentMonth: 'day',
     past6months: 'month',
   };
-  const trunc = truncMap[duration_type] || 'day';
+  let trunc = truncMap[duration_type];
+  if (!trunc) {
+    const spanDays = (new Date(end_date) - new Date(start_date)) / 86400000;
+    trunc = Number.isFinite(spanDays) && spanDays > 62 ? 'month' : 'day';
+  }
 
   // Generate complete time series with gaps filled as nulls
   // Then LEFT JOIN actual price data onto it
@@ -475,10 +507,13 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
        ) as period
      ),
      prices AS (
+       -- Per-UNIT prices so the trend is comparable across orders and against
+       -- the per-unit benchmark (best price paid). Line totals (qi.total_price)
+       -- scale with quantity and are NOT a valid price-benchmark basis.
        SELECT DATE_TRUNC('${trunc}', q.timestamp) as period,
-         AVG(qi.total_price) as avg_price,
-         MAX(qi.total_price) as max_price,
-         MIN(qi.total_price) as min_price
+         AVG(qi.unit_price) as avg_price,
+         MAX(qi.unit_price) as max_price,
+         MIN(qi.unit_price) as min_price
        FROM tbl_quote_items qi
        JOIN tbl_quotes q ON q.id = qi.quote_id
        JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
@@ -493,10 +528,10 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
     [...params, pid]
   );
 
-  // Vendor comparison using total_price
+  // Vendor comparison using per-UNIT price (consistent with the trend + benchmark).
   const vendorComparisonQuery = db.any(
     `SELECT u.name as vendor_name, COALESCE(c.company_name, u.organization_name) as company_name,
-       AVG(qi.total_price) as avg_price
+       AVG(qi.unit_price) as avg_price
      FROM tbl_quote_items qi
      JOIN tbl_quotes q ON q.id = qi.quote_id
      JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
@@ -509,15 +544,52 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
     [...params, pid]
   );
 
-  const [priceTrend, vendorComparison] = await Promise.all([priceTrendQuery, vendorComparisonQuery]);
+  // Benchmark = best (lowest) unit price ever PAID for this item (all-time,
+  // value-based) — the reference the client wants purchases compared against
+  // (Sr 299/300/301). No date filter: "previously paid" spans history.
+  const benchmarkQuery = db.oneOrNone(
+    `SELECT MIN(pop.unit_price) as benchmark_price, MAX(po.created_at) as last_purchased_at
+     FROM tbl_purchase_order_product pop
+     JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+     JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+     JOIN tbl_rfq r ON r.id = po.rfq_id
+     WHERE ${companyScope()} AND rp.product_variant_id = $5
+     AND po.status NOT IN ('draft', 'cancelled') ${hf}`,
+    [...params, pid]
+  );
+
+  const [priceTrend, vendorComparison, benchmarkRow] = await Promise.all([
+    priceTrendQuery, vendorComparisonQuery, benchmarkQuery,
+  ]);
   const bestPrice = vendorComparison.length > 0 ? parseFloat(vendorComparison[0].avg_price) : null;
+
+  // Latest non-zero average in the trend = the "current" price level.
+  const avgSeries = priceTrend
+    .map((pt) => (pt.avg_price ? parseFloat(pt.avg_price) : null))
+    .filter((v) => v != null && v > 0);
+  const currentPrice = avgSeries.length ? avgSeries[avgSeries.length - 1] : null;
+  const benchmarkPrice = benchmarkRow && benchmarkRow.benchmark_price != null
+    ? parseFloat(benchmarkRow.benchmark_price) : null;
+  const vsBenchmarkPct = benchmarkPrice && currentPrice
+    ? parseFloat((((currentPrice - benchmarkPrice) / benchmarkPrice) * 100).toFixed(1))
+    : null;
 
   return {
     top_products: topProducts.map((p) => ({
       product_variant_id: p.product_variant_id,
       product_name: p.product_name,
       order_count: parseInt(p.order_count, 10),
+      value: p.value != null ? parseFloat(parseFloat(p.value).toFixed(2)) : 0,
     })),
+    selected_product_variant_id: pid,
+    granularity: trunc,
+    benchmark: {
+      product_variant_id: pid,
+      benchmark_price: benchmarkPrice != null ? parseFloat(benchmarkPrice.toFixed(2)) : null,
+      current_price: currentPrice != null ? parseFloat(currentPrice.toFixed(2)) : null,
+      vs_benchmark_pct: vsBenchmarkPct,
+      last_purchased_at: benchmarkRow ? benchmarkRow.last_purchased_at : null,
+    },
     price_trend: {
       labels: priceTrend.map((pt) => pt.period),
       avg: priceTrend.map((pt) => pt.avg_price ? parseFloat(parseFloat(pt.avg_price).toFixed(2)) : 0),
@@ -535,14 +607,52 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
 
 // ─────────────────────────────────────────────────────────────────────
 // 5. Category Insights
-//    Aggregates spend FIRST, then joins category to avoid row multiplication.
-//    Uses a single category per product (picks the first alphabetically).
+//    Aggregates spend FIRST, then resolves a bucket label per product variant
+//    to avoid row multiplication. The `dimension` param (Sr 296) selects the
+//    grouping label:
+//      category    — top-level category (rolls a sub-category up to its parent)
+//      subcategory — the category the product is mapped to (the leaf)
+//      item        — the product variant itself
+//    Top 12 buckets are returned; the remainder collapse into an "Others" row.
 // ─────────────────────────────────────────────────────────────────────
-async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_date, end_date) {
+function categoryLabelCte(dimension) {
+  if (dimension === 'item') {
+    return `product_bucket AS (
+       SELECT pv.id as product_variant_id,
+         COALESCE(NULLIF(pv.name, ''), 'Unknown item') as bucket_name
+       FROM tbl_product_variant pv
+     )`;
+  }
+  if (dimension === 'subcategory') {
+    return `product_bucket AS (
+       SELECT DISTINCT ON (pv.id)
+         pv.id as product_variant_id,
+         COALESCE(cat.title, 'Uncategorized') as bucket_name
+       FROM tbl_product_variant pv
+       LEFT JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+       LEFT JOIN tbl_category cat ON cat.id = pc.category_id
+       ORDER BY pv.id, cat.title
+     )`;
+  }
+  // default: top-level category (parent of the mapped category when nested).
+  return `product_bucket AS (
+       SELECT DISTINCT ON (pv.id)
+         pv.id as product_variant_id,
+         COALESCE(parent.title, cat.title, 'Uncategorized') as bucket_name
+       FROM tbl_product_variant pv
+       LEFT JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+       LEFT JOIN tbl_category cat ON cat.id = pc.category_id
+       LEFT JOIN tbl_category parent ON parent.id = cat.parent_id
+       ORDER BY pv.id, COALESCE(parent.title, cat.title)
+     )`;
+}
+
+async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_date, end_date, dimension = 'category') {
+  const dim = ['category', 'subcategory', 'item'].includes(dimension) ? dimension : 'category';
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
 
-  const categories = await db.any(
+  const rows = await db.any(
     `WITH product_spend AS (
        SELECT
          rp.product_variant_id,
@@ -556,37 +666,129 @@ async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_d
        AND po.status NOT IN ('draft', 'cancelled') ${hf}
        GROUP BY rp.product_variant_id
      ),
-     product_category AS (
-       SELECT DISTINCT ON (pv.id)
-         pv.id as product_variant_id,
-         COALESCE(cat.title, 'Uncategorized') as category_name
-       FROM tbl_product_variant pv
-       LEFT JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
-       LEFT JOIN tbl_category cat ON cat.id = pc.category_id
-       ORDER BY pv.id, cat.title
-     )
+     ${categoryLabelCte(dim)}
      SELECT
-       COALESCE(pcg.category_name, 'Uncategorized') as category_name,
+       COALESCE(pb.bucket_name, 'Uncategorized') as category_name,
        SUM(ps.spend_amount) as spend_amount,
        SUM(ps.rfq_count) as rfq_count
      FROM product_spend ps
-     LEFT JOIN product_category pcg ON pcg.product_variant_id = ps.product_variant_id
-     GROUP BY pcg.category_name
+     LEFT JOIN product_bucket pb ON pb.product_variant_id = ps.product_variant_id
+     GROUP BY pb.bucket_name
      ORDER BY spend_amount DESC`,
     params
   );
 
-  const totalSpend = categories.reduce((sum, c) => sum + parseFloat(c.spend_amount), 0);
+  const totalSpend = rows.reduce((sum, c) => sum + parseFloat(c.spend_amount), 0);
+
+  // Keep the top 12 buckets readable; collapse the long tail into "Others".
+  const TOP_N = 12;
+  const top = rows.slice(0, TOP_N);
+  const rest = rows.slice(TOP_N);
+  const buckets = top.map((c) => ({
+    category_name: c.category_name,
+    spend_amount: parseFloat(c.spend_amount),
+    rfq_count: parseInt(c.rfq_count, 10),
+  }));
+  if (rest.length > 0) {
+    buckets.push({
+      category_name: 'Others',
+      spend_amount: rest.reduce((s, c) => s + parseFloat(c.spend_amount), 0),
+      rfq_count: rest.reduce((s, c) => s + parseInt(c.rfq_count, 10), 0),
+    });
+  }
 
   return {
-    categories: categories.map((c) => ({
-      category_name: c.category_name,
-      spend_amount: parseFloat(c.spend_amount),
-      rfq_count: parseInt(c.rfq_count, 10),
+    dimension: dim,
+    categories: buckets.map((c) => ({
+      ...c,
       percentage: totalSpend > 0
-        ? parseFloat(((parseFloat(c.spend_amount) / totalSpend) * 100).toFixed(1))
+        ? parseFloat(((c.spend_amount / totalSpend) * 100).toFixed(1))
         : 0,
     })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 5b. ABC Analysis (Pareto) — classify procured items into A/B/C tiers by
+//     cumulative contribution to the chosen metric (value=spend or
+//     volume=quantity), respecting the selected period (Sr 297/298/303).
+//       A: items making up the first ~70% of the metric
+//       B: the next ~20% (70–90%)
+//       C: the bottom ~10% (90–100%)
+//     An item is assigned by the cumulative % BEFORE it, so the largest item
+//     is always A and the boundary item is included in the higher tier.
+// ─────────────────────────────────────────────────────────────────────
+async function getAbcAnalysisData(buyer_company_id, hotel_ids = [], start_date, end_date, metric = 'value') {
+  const m = metric === 'volume' ? 'volume' : 'value';
+  const hf = hotelFilter();
+  const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  const rows = await db.any(
+    `WITH item_spend AS (
+       SELECT
+         rp.product_variant_id,
+         SUM(pop.total_price) as value,
+         SUM(pop.quantity) as volume
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
+       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       GROUP BY rp.product_variant_id
+     )
+     SELECT
+       it.product_variant_id,
+       COALESCE(NULLIF(pv.name, ''), 'Unknown item') as name,
+       COALESCE(it.value, 0) as value,
+       COALESCE(it.volume, 0) as volume
+     FROM item_spend it
+     LEFT JOIN tbl_product_variant pv ON pv.id = it.product_variant_id
+     ORDER BY (CASE WHEN '${m}' = 'volume' THEN it.volume ELSE it.value END) DESC NULLS LAST`,
+    params
+  );
+
+  const metricOf = (r) => parseFloat(m === 'volume' ? r.volume : r.value) || 0;
+  const total = rows.reduce((s, r) => s + metricOf(r), 0);
+
+  let cumulative = 0;
+  const classified = rows.map((r, i) => {
+    const prevPct = total > 0 ? (cumulative / total) * 100 : 0;
+    cumulative += metricOf(r);
+    let cls = 'C';
+    if (prevPct < 70) cls = 'A';
+    else if (prevPct < 90) cls = 'B';
+    return {
+      product_variant_id: r.product_variant_id,
+      name: r.name,
+      value: round2(parseFloat(r.value) || 0),
+      volume: round2(parseFloat(r.volume) || 0),
+      class: cls,
+      rank: i + 1,
+    };
+  });
+
+  const classes = ['A', 'B', 'C'].map((c) => {
+    const items = classified.filter((x) => x.class === c);
+    const classMetric = items.reduce((s, x) => s + (m === 'volume' ? x.volume : x.value), 0);
+    return {
+      class: c,
+      item_count: items.length,
+      value: round2(items.reduce((s, x) => s + x.value, 0)),
+      volume: round2(items.reduce((s, x) => s + x.volume, 0)),
+      metric_pct: total > 0 ? parseFloat(((classMetric / total) * 100).toFixed(1)) : 0,
+      item_pct: classified.length > 0 ? parseFloat(((items.length / classified.length) * 100).toFixed(1)) : 0,
+    };
+  });
+
+  return {
+    metric: m,
+    total_items: classified.length,
+    total_value: round2(classified.reduce((s, x) => s + x.value, 0)),
+    total_volume: round2(classified.reduce((s, x) => s + x.volume, 0)),
+    classes,
+    items: classified.slice(0, 50), // top 50 for display; classification uses all
   };
 }
 
@@ -803,11 +1005,58 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
     params
   );
 
-  const [priceDeviations, bestVendor, spendTrend] = await Promise.all([
-    priceDeviationsQuery, bestVendorQuery, spendTrendQuery,
+  // Sr 299: items paid in-period ABOVE the best price previously paid for them
+  // (value-based benchmark, same as the Price benchmarking widget). Ordered by
+  // in-period spend so the highest-impact (A-class) items surface first.
+  const benchmarkDeviationsQuery = db.any(
+    `WITH item_po AS (
+       SELECT rp.product_variant_id,
+         SUM(pop.total_price) as period_value,
+         (ARRAY_AGG(pop.unit_price ORDER BY po.created_at DESC))[1] as latest_price
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
+       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       GROUP BY rp.product_variant_id
+     ),
+     benchmark AS (
+       SELECT rp.product_variant_id, MIN(pop.unit_price) as best_price
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+       WHERE ${companyScope()} AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       GROUP BY rp.product_variant_id
+     )
+     SELECT pv.name as product_name, ip.latest_price, b.best_price, ip.period_value,
+       ROUND(((ip.latest_price - b.best_price) / b.best_price * 100)::numeric, 1) as above_pct
+     FROM item_po ip
+     JOIN benchmark b ON b.product_variant_id = ip.product_variant_id
+     JOIN tbl_product_variant pv ON pv.id = ip.product_variant_id
+     WHERE b.best_price > 0 AND ip.latest_price > b.best_price * 1.1
+     ORDER BY ip.period_value DESC
+     LIMIT 3`,
+    params
+  );
+
+  const [priceDeviations, bestVendor, spendTrend, benchmarkDeviations] = await Promise.all([
+    priceDeviationsQuery, bestVendorQuery, spendTrendQuery, benchmarkDeviationsQuery,
   ]);
 
   const insights = [];
+
+  benchmarkDeviations.forEach((bd) => {
+    insights.push({
+      type: 'benchmark_alert',
+      severity: parseFloat(bd.above_pct) > 25 ? 'high' : 'medium',
+      title: `${bd.product_name} above price benchmark`,
+      description: `Latest purchase is ${bd.above_pct}% above the best price paid.<br/>Benchmark: ₹${parseFloat(bd.best_price).toFixed(2)}, Latest: ₹${parseFloat(bd.latest_price).toFixed(2)}.`,
+      action_label: 'View benchmarking',
+      action_url: '/dashboard/buyer',
+    });
+  });
 
   priceDeviations.forEach((pd) => {
     insights.push({
@@ -1980,12 +2229,14 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
 //  The FE derives mode (clear / steady / action_needed / critical) from the
 //  numbers — we do the same here so two clients can't disagree on tone.
 // ─────────────────────────────────────────────────────────────────────
-async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = []) {
-  const params = [buyer_company_id, user_id, hotel_ids];
+async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
+  // When a date range is supplied (the dashboard always sends one), the
+  // period-based counts are bounded to it so the banner reflects the selected
+  // range (Sr feedback). Forward-looking signals (closing-soon) stay live.
+  const hasDates = !!(start_date && end_date);
+  const params = [buyer_company_id, user_id, hotel_ids, start_date, end_date];
 
   // 1. Approvals where I'm the current-step approver, still pending.
-  //    Mirrors the action-center query but without date-window filtering —
-  //    the banner shows the live queue, not a windowed slice.
   const pendingApprovalsP = db.one(
     `SELECT COUNT(*)::INTEGER AS count
        FROM tbl_approval_instances i
@@ -2002,7 +2253,8 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
           i.entity_type IN ('RFQ', 'TENDER')
           AND EXISTS (SELECT 1 FROM tbl_rfq r WHERE r.id = i.entity_id AND r.is_published = 1)
         )
-        AND i.hotel_id = ANY($3)`,
+        AND i.hotel_id = ANY($3)
+        ${hasDates ? 'AND i.created_at BETWEEN $4 AND $5' : ''}`,
     params
   );
 
@@ -2053,7 +2305,9 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
         AND r.status IN (1, 2)
         AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
         AND r.bid_end_date::timestamp < NOW()
-        AND r.bid_end_date::timestamp > NOW() - INTERVAL '14 days'
+        ${hasDates
+          ? 'AND r.bid_end_date::timestamp BETWEEN $4 AND $5'
+          : "AND r.bid_end_date::timestamp > NOW() - INTERVAL '14 days'"}
         AND r.hospitality_company_id IN (
           SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
         )
@@ -2088,7 +2342,8 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
           SELECT 1 FROM tbl_negotiation_rounds nr
            WHERE nr.rfq_id = r.id AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
         )
-        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)`,
+        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
+        ${hasDates ? 'AND r.timestamp BETWEEN $4 AND $5' : ''}`,
     params
   );
 
@@ -2105,7 +2360,8 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
         )
         AND EXISTS (
           SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )`,
+        )
+        ${hasDates ? 'AND po.created_at BETWEEN $4 AND $5' : ''}`,
     params
   );
 
@@ -2116,7 +2372,7 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
        FROM tbl_rfq r
       WHERE r.created_by = $2
         AND r.is_published = 1
-        AND r.timestamp >= NOW() - INTERVAL '7 days'
+        ${hasDates ? 'AND r.timestamp BETWEEN $4 AND $5' : "AND r.timestamp >= NOW() - INTERVAL '7 days'"}
         AND r.hospitality_company_id IN (
           SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
         )
@@ -2137,7 +2393,7 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
           SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
         )
           AND r.created_by = $2
-          AND nr.created_at >= NOW() - INTERVAL '7 days'
+          ${hasDates ? 'AND nr.created_at BETWEEN $4 AND $5' : "AND nr.created_at >= NOW() - INTERVAL '7 days'"}
           AND EXISTS (
             SELECT 1 FROM tbl_rfq_hotel_mappings rhm
              WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
@@ -2232,6 +2488,7 @@ export default {
   getNegotiationSavingsData,
   getCostIntelligenceData,
   getCategoryInsightsData,
+  getAbcAnalysisData,
   getWorkflowEfficiencyData,
   getSmartInsightsData,
   getPendingApprovalsDetail,

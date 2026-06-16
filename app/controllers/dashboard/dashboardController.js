@@ -45,10 +45,13 @@ const dashboardController = {
         `SELECT name FROM tbl_users WHERE id = $1`,
         [req.user.id]
       );
+      const { start_date, end_date } = req.query;
       const data = await dashboardModel.getBuyerStatusBannerData(
         scope.buyer_company_id,
         req.user.id,
-        scope.hotel_ids
+        scope.hotel_ids,
+        start_date,
+        end_date
       );
       // Strip trailing/extra whitespace; first token only so headlines stay tight.
       const firstName = (userRow?.name || '').trim().split(/\s+/)[0] || null;
@@ -106,8 +109,22 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getCategoryInsightsData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const { start_date, end_date, dimension } = req.query;
+      const data = await dashboardModel.getCategoryInsightsData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date, dimension);
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
+  // ABC (Pareto) analysis of procured items by value or volume (Sr 297/298/303).
+  getAbcAnalysis: async (req, res) => {
+    try {
+      const scope = await resolveScope(req, res);
+      if (!scope) return;
+      const { start_date, end_date, metric } = req.query;
+      const data = await dashboardModel.getAbcAnalysisData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date, metric);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
