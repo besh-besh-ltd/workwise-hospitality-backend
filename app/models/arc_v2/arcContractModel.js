@@ -133,6 +133,7 @@ const arcContractModel = {
               -- would use; cl.unit_rate / cl.committed_qty stay the baseline.
               ovl.id   AS amendment_id,
               ovl.amendment_type AS amendment_type,
+              ovl.amendment_from AS amendment_effective_from,
               ovl.amendment_to   AS amendment_effective_to,
               CASE WHEN ovl.amendment_type = 'price' AND (ovl.payload->>'new_rate')::numeric > 0
                    THEN (ovl.payload->>'new_rate')::numeric ELSE cl.unit_rate END AS effective_unit_rate,
@@ -142,7 +143,7 @@ const arcContractModel = {
          LEFT JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
          LEFT JOIN LATERAL (
-           SELECT am.id, am.amendment_type, am.payload, am.amendment_to
+           SELECT am.id, am.amendment_type, am.payload, am.amendment_from, am.amendment_to
              FROM tbl_arc_amendment am
             WHERE am.arc_contract_id = cl.arc_contract_id
               AND am.status IN ('approved','live')
@@ -266,6 +267,7 @@ const arcContractModel = {
               -- baseline (the amendment is a time-boxed overlay, not a rewrite).
               ovl.id   AS amendment_id,
               ovl.amendment_type AS amendment_type,
+              ovl.amendment_from AS amendment_effective_from,
               ovl.amendment_to   AS amendment_effective_to,
               CASE WHEN ovl.amendment_type = 'price' AND (ovl.payload->>'new_rate')::numeric > 0
                    THEN (ovl.payload->>'new_rate')::numeric ELSE cl.unit_rate END AS effective_unit_rate,
@@ -277,7 +279,7 @@ const arcContractModel = {
          LEFT JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
          LEFT JOIN tbl_arc a ON a.id = c.arc_id
          LEFT JOIN LATERAL (
-           SELECT am.id, am.amendment_type, am.payload, am.amendment_to
+           SELECT am.id, am.amendment_type, am.payload, am.amendment_from, am.amendment_to
              FROM tbl_arc_amendment am
             WHERE am.arc_contract_id = cl.arc_contract_id
               AND am.status IN ('approved','live')
