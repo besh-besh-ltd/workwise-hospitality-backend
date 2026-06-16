@@ -194,6 +194,97 @@ const negotiationModel = {
   },
 
   /**
+   * Buyer landing list: every RFQ that has at least one negotiation round,
+   * scoped to a hospitality company (and optionally a single hotel). One row
+   * per RFQ, rolled up to the RFQ's LATEST round (max created_at), with the
+   * aggregated facets the Negotiation list page renders (hotel, department,
+   * product names, vendor names) plus an effective `neg_status` string the
+   * page buckets into its tabs.
+   *
+   * neg_status mapping (latest round, with end_date check):
+   *   DRAFT | PENDING_APPROVAL                 → 'pending_approval'
+   *   ACTIVE & end_date in future (or null)    → 'active'
+   *   ACTIVE & end_date passed, or ENDED       → 'awaiting_decision'
+   *   COMPLETED                                → 'completed'
+   *   CANCELLED | EXPIRED                       → 'cancelled'
+   *
+   * Stored timestamps are UTC-naive (timestamp without time zone), so compare
+   * end_date against now() converted to UTC.
+   */
+  getNegotiationRfqList: async ({ companyId, hotelId = null }) => {
+    return db.any(
+      `WITH neg AS (
+         SELECT nr.rfq_id,
+                COUNT(*)::int AS total_rounds,
+                MAX(nr.round_number) AS latest_round_number,
+                (ARRAY_AGG(nr.id ORDER BY nr.created_at DESC))[1] AS latest_round_id
+           FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_id IS NOT NULL
+          GROUP BY nr.rfq_id
+       )
+       SELECT rfq.id                AS rfq_id,
+              rfq.rfq_no,
+              rfq.title,
+              rfq.is_tender,
+              rfq.hotel_id,
+              h.name                AS hotel_name,
+              rfq.department_id,
+              d.title               AS department_title,
+              neg.total_rounds,
+              neg.latest_round_number,
+              lr.status             AS latest_round_status,
+              lr.end_date,
+              lr.created_at         AS latest_round_created_at,
+              lr.approved_at,
+              lr.published_at,
+              lr.closed_at,
+              COALESCE(array_length(lr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN lr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN lr.status = 'ACTIVE'
+                     AND (lr.end_date IS NULL OR lr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN lr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN lr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN lr.status = 'COMPLETED' THEN 'completed'
+                WHEN lr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors
+         FROM neg
+         JOIN tbl_rfq rfq ON rfq.id = neg.rfq_id
+         JOIN tbl_negotiation_rounds lr ON lr.id = neg.latest_round_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
+         LEFT JOIN tbl_department d ON d.id = rfq.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = lr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT COALESCE(PV.name, P.name))
+                    FILTER (WHERE COALESCE(PV.name, P.name) IS NOT NULL) AS item_names
+             FROM tbl_rfq_products rp
+             LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+             LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.rfq_id = rfq.id
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM tbl_negotiation_rounds nr2
+             CROSS JOIN LATERAL unnest(COALESCE(nr2.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+            WHERE nr2.rfq_id = rfq.id
+         ) vend ON TRUE
+        WHERE rfq.hospitality_company_id = $1
+          AND ($2::int IS NULL OR rfq.hotel_id = $2)
+        ORDER BY lr.created_at DESC`,
+      [companyId, hotelId]
+    );
+  },
+
+  /**
    * Get active round for a product.
    * When vendorId is provided, returns only the round assigned to that vendor.
    * When vendorId is omitted, returns the most recent active round (admin view).

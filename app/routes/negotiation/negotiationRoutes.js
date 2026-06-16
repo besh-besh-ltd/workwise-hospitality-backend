@@ -10,6 +10,17 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 const NegotiationRoutes = Router();
 
+// Buyer landing list — all RFQs in negotiation for the active company/hotel
+// context, grouped client-side by negotiation status. Distinct path from the
+// '/rounds/:rfq_id' routes; kept near the top for clarity.
+NegotiationRoutes.get(
+  '/rfqs',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management (buyer)
+  hospitalityMiddleware.attachHospitalityContext(),
+  negotiationController.listNegotiationRfqs
+);
+
 // Create negotiation round
 NegotiationRoutes.post(
   '/rounds',

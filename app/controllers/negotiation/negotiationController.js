@@ -14,6 +14,7 @@ import {
   resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
 // Parse date strings as UTC when no timezone suffix is present
 const parseAsUTC = (d) => {
@@ -2725,6 +2726,49 @@ const NegotiationController = {
       return res.status(200).json({
         status: 1,
         data: bundle
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Buyer landing list — every RFQ in negotiation for the active hospitality
+   * company/hotel context, with an effective neg_status the frontend buckets
+   * into tabs. Scope comes from attachHospitalityContext() (company required,
+   * hotel optional).
+   */
+  listNegotiationRfqs: async (req, res) => {
+    try {
+      // Resolve company scope the same robust way the ARC buyer list does:
+      // query param → X-Hospitality-Company header → req.user → the user's
+      // company mapping in the DB. Works whether or not the FE has surfaced
+      // the BU picker yet.
+      const companyId = await resolveHospitalityCompanyId(req);
+
+      if (!companyId) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Hospitality company context is required'
+        });
+      }
+
+      // Hotel scope is optional. Prefer the validated context set by
+      // attachHospitalityContext(); else fall back to the raw header.
+      const rawHotel =
+        req.hospitalityContext?.hotelId ??
+        req.headers['x-hospitality-hotel'] ??
+        req.headers['x-hospitality-hotel-id'] ??
+        req.query.hotel_id;
+      const hotelNum = rawHotel != null && rawHotel !== '' ? Number(rawHotel) : null;
+      const hotelId = Number.isFinite(hotelNum) ? hotelNum : null;
+
+      const rows = await negotiationModel.getNegotiationRfqList({ companyId, hotelId });
+
+      return res.status(200).json({
+        status: 1,
+        data: rows
       });
     } catch (error) {
       logError(error);
