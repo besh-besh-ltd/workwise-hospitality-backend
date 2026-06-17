@@ -3584,6 +3584,16 @@ LIMIT 2;
         SELECT
           RFQ.*,
           P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+          -- Facet fields for the management listing (Business Unit / Department / Category)
+          (SELECT name FROM tbl_hospitality_company_hotels WHERE id = RFQ.hotel_id) AS hotel_name,
+          (SELECT title FROM tbl_department WHERE id = RFQ.department_id) AS department_title,
+          COALESCE((
+            SELECT json_agg(DISTINCT jsonb_build_object('id', TC.id, 'title', TC.title))
+            FROM tbl_rfq_products RP_CAT
+            JOIN tbl_product_categories TPC ON TPC.product_id = RP_CAT.id
+            JOIN tbl_category TC ON TC.id = TPC.category_id
+            WHERE RP_CAT.rfq_id = RFQ.id
+          ), '[]'::json) AS categories,
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
           WHERE TQM.rfq_id = RFQ.id

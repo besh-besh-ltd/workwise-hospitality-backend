@@ -223,6 +223,13 @@ RfqRoutes.post(
   rfqController.getBuyerRfq
 );
 
+// Server-side faceted + paginated RFQ management listing (rate-contracts-style).
+RfqRoutes.post(
+  '/list-view',
+  passportSignIn,
+  rfqController.getRfqListView
+);
+
 // Get RFQs/Tenders where user is in the approval line (current pending step)
 RfqRoutes.post(
   '/pending-approvals',
