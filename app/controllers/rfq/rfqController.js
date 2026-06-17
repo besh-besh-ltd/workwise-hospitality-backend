@@ -8068,6 +8068,9 @@ const rfqController = {
         submitted_count: parseArr(r.vendors)[0] ? (parseArr(r.vendors)[0].quote_received ?? 0) : 0,
         unseen_query_count: r.unseen_query_count ?? 0,
         is_finalized: r.is_finalized, po_completed: r.po_completed, can_edit: r.can_edit,
+        // Fields canEditRfq() needs so the client can gate the Edit button.
+        is_quotes_present: r.is_quotes_present, has_dead_end_product: r.has_dead_end_product,
+        has_tech_stuck_product: r.has_tech_stuck_product,
         action_holders: actionMap[parseInt(r.id)] || null,
       }));
 
