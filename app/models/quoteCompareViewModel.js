@@ -141,11 +141,25 @@ function diffHistoryRows(a, b) {
   return ch;
 }
 
-// Build the negotiation round history for one cell from the quotation's
+// Build the NEGOTIATION-ROUND history for one cell from the quotation's
 // previous_quotes (newest-first from the model) + the current submission.
-// Oldest→newest with a SIGNED price delta (+ = cheaper/savings, − = pricier) and
-// a per-round `changes` breakdown (every edited field, with up/down direction).
-function buildCellHistory(quote, merged) {
+//
+// A vendor can save the same quote many times — both before negotiation starts
+// and several times within a single round. We only want, per negotiation round,
+// the vendor's FINAL update. tbl_quote_item_history carries no round id, so we
+// align each revision to a round purely by timestamp: a revision belongs to the
+// latest round whose start (`created_at`) is <= its timestamp. Revisions before
+// the first round's start are pre-negotiation noise (kept only as the baseline
+// the first round diffs against, never emitted).
+//
+// `allRounds` is the full ordered list for the RFQ; we keep the rounds relevant
+// to THIS product (RFQ-level rfq_product_id=NULL applies to all; product-level
+// only to its own product) and, when vendor_ids is set, that targeted this
+// vendor. One entry is emitted per round the vendor actually updated, labelled
+// with the real round_number, oldest→newest, with a SIGNED price delta and a
+// `changes` breakdown vs the previous emitted round (or the baseline for the
+// first one).
+function buildCellHistory(quote, merged, allRounds = [], rfqProductId = null, vendorId = null) {
   const prev = Array.isArray(quote?.previous_quotes) ? [...quote.previous_quotes] : [];
   prev.reverse(); // previous_quotes is ORDER BY timestamp DESC -> oldest-first
   const norms = prev.map(normHistoryRow);
@@ -153,18 +167,75 @@ function buildCellHistory(quote, merged) {
   if (cur.timestamp == null) cur.timestamp = quote?.timestamp || null;
   norms.push(cur);
 
-  return norms.map((n, i) => {
-    const prior = i > 0 ? norms[i - 1] : null;
-    // signed: prior - current. positive => price dropped (savings), negative => rose.
+  const tsOf = (n) => (n?.timestamp ? new Date(n.timestamp).getTime() : null);
+
+  // Rounds that apply to this product + vendor, oldest-first by start.
+  const relevant = (allRounds || [])
+    .filter((r) => r.rfq_product_id == null || Number(r.rfq_product_id) === Number(rfqProductId))
+    .filter((r) => {
+      const ids = Array.isArray(r.vendor_ids) ? r.vendor_ids.map(Number) : [];
+      return ids.length === 0 || vendorId == null || ids.includes(Number(vendorId));
+    })
+    .map((r) => ({ round_number: Number(r.round_number), start: new Date(r.created_at).getTime() }))
+    .filter((r) => Number.isFinite(r.start))
+    .sort((a, b) => a.start - b.start);
+
+  if (relevant.length === 0) return [];
+  const firstStart = relevant[0].start;
+
+  // Original quote = the vendor's quote as it stood BEFORE negotiation started
+  // (last revision strictly before the first round). Every round is diffed
+  // against this so the modal can show "original (struck) → this round's value".
+  let baseline = null;
+  for (const n of norms) {
+    const t = tsOf(n);
+    if (t != null && t < firstStart) baseline = n;
+  }
+  // Fallback: if the vendor has no pre-negotiation revision, use the earliest
+  // revision we have as the original reference.
+  if (!baseline && norms.length) baseline = norms[0];
+
+  // Bucket each in-round revision into the latest round whose start <= ts.
+  // norms are oldest→newest, so the last write per round is that round's final.
+  const finalByRound = new Map(); // round_number -> norm
+  for (const n of norms) {
+    const t = tsOf(n);
+    if (t == null || t < firstStart) continue;
+    let chosen = null;
+    for (const r of relevant) {
+      if (r.start <= t) chosen = r;
+      else break;
+    }
+    if (chosen) finalByRound.set(chosen.round_number, n);
+  }
+
+  // One entry per round that had an update, ascending by round_number.
+  const orderedRounds = [];
+  const seen = new Set();
+  for (const r of relevant) {
+    if (finalByRound.has(r.round_number) && !seen.has(r.round_number)) {
+      seen.add(r.round_number);
+      orderedRounds.push(r.round_number);
+    }
+  }
+
+  // Each round is compared to the ORIGINAL (pre-negotiation) quote — both the
+  // savings delta and the per-field `changes` (original → this round's value).
+  const original = baseline;
+  return orderedRounds.map((rn, idx) => {
+    const n = finalByRound.get(rn);
+    const final = idx === orderedRounds.length - 1;
+    // signed: original - current. positive => price dropped (savings).
     const delta =
-      prior && n.unit_price != null && prior.unit_price != null ? prior.unit_price - n.unit_price : null;
-    const final = i === norms.length - 1;
+      original && n.unit_price != null && original.unit_price != null
+        ? original.unit_price - n.unit_price
+        : null;
     return {
-      round: i + 1,
+      round: rn,
       price: n.unit_price ?? n.total_price,
       total_price: n.total_price,
       date: iso(n.timestamp),
-      note: n.comment || (final ? "Best & final" : "Revised submission"),
+      note: n.comment || `Round ${rn} update`,
       delta,
       final,
       breakdown: {
@@ -175,7 +246,8 @@ function buildCellHistory(quote, merged) {
         delivery_period: n.delivery_period,
         quantity: n.quantity,
       },
-      changes: prior ? diffHistoryRows(prior, n) : [],
+      // original → round value, per field (label + from/to/dir/kind)
+      changes: original ? diffHistoryRows(original, n) : [],
     };
   });
 }
@@ -329,6 +401,7 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   const approvalByRfqProduct = await fetchQuoteApprovals(rfqProductIds);
   const finalizationByRfqProduct = await fetchFinalizations(id, products);
   const roundByRfqProduct = await fetchActiveRounds(rfqProductIds);
+  const allRounds = await fetchAllRounds(id);
   const docCountByQuote = await fetchQuoteDocCounts(id);
   const techByVendor = await fetchVendorTech(id);
   const techByProduct = await fetchProductTech(id);
@@ -512,9 +585,10 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
             other_charges: merged.other_charges || detail.other_charges || [],
           },
         },
-        // Negotiation round history (previous_quotes + current submission),
-        // oldest→newest with per-round savings delta — powers the history modal.
-        history: buildCellHistory(q, merged),
+        // Negotiation round history — one entry per round the vendor updated in
+        // (final update only), oldest→newest with savings delta. Powers the
+        // history modal. See buildCellHistory for the timestamp→round bucketing.
+        history: buildCellHistory(q, merged, allRounds, Number(p.id), vId),
       };
     }
     // Every vendor in vendors[] gets an explicit null when they didn't quote.
@@ -1055,6 +1129,25 @@ async function fetchFinalizations(rfqId, products) {
 }
 
 // rfq_product_id -> latest negotiation round row.
+// All negotiation rounds for an RFQ (both RFQ-level and product-level), oldest
+// first — powers the per-round quote history (buildCellHistory). Unlike
+// fetchActiveRounds (latest active round per product, product-scoped only) this
+// keeps every round and its `created_at` start + vendor_ids for time-bucketing.
+async function fetchAllRounds(rfqId) {
+  try {
+    return await db.any(
+      `SELECT round_number, rfq_product_id, created_at, vendor_ids
+         FROM tbl_negotiation_rounds
+        WHERE rfq_id = $1
+        ORDER BY created_at ASC, round_number ASC`,
+      [rfqId]
+    );
+  } catch (e) {
+    logError("quoteCompareView fetchAllRounds failed", e);
+    return [];
+  }
+}
+
 async function fetchActiveRounds(rfqProductIds) {
   const map = new Map();
   if (!rfqProductIds.length) return map;
