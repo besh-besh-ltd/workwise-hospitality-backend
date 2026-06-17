@@ -8377,7 +8377,8 @@ const rfqController = {
         };
         if (!req.body.is_regret) {
           for (const product of products) {
-            const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+            const productLabel = product.product_name || `Product ${product.product_id}`;
+            const err = validateProductChargeComments(product.other_charges, productLabel);
             if (err) {
               return res.status(400).json({ status: 0, message: err }).end();
             }
@@ -13541,7 +13542,8 @@ sendFollowUpEmails: async (req, res) => {
       };
 
       for (const product of products) {
-        const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+        const productLabel = product.product_name || `Product ${product.product_id}`;
+        const err = validateProductChargeComments(product.other_charges, productLabel);
         if (err) {
           return res.status(400).json({ status: 0, message: err });
         }
@@ -13629,15 +13631,23 @@ sendFollowUpEmails: async (req, res) => {
 
       logger.debug({ data: quoteItemChanges }, 'QUOTE ITEM CHANGES:');
 
-      // Check if global terms & conditions file are uploaded
-      if (term_and_condition_files && term_and_condition_files.length > 0) {
-        const global_files = term_and_condition_files.map((url) => ({
+      // Replace the quote's global attachments. When the key is present we
+      // treat the incoming list as the full desired set: clear the existing
+      // rows first, then insert the new ones. This makes updates reflect both
+      // additions and removals (and avoids duplicating already-saved files on
+      // every re-save). An empty array clears all attachments; an absent key
+      // leaves them untouched.
+      if (Array.isArray(term_and_condition_files)) {
+        await rfqModel.deleteWithReturnIds('tbl_quotes_files', {
           quote_id: quoteId,
-          file_type: 'term_and_condition',
-          file_url: url
-        }));
-        for (const fileData of global_files) {
-          await rfqModel.insert('tbl_quotes_files', fileData);
+          file_type: 'term_and_condition'
+        });
+        for (const url of term_and_condition_files) {
+          await rfqModel.insert('tbl_quotes_files', {
+            quote_id: quoteId,
+            file_type: 'term_and_condition',
+            file_url: url
+          });
         }
       }
 
