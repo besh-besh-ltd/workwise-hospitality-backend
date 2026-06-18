@@ -2345,8 +2345,27 @@ CREATE TABLE public.tbl_notifications (
     additional_data json,
     created_at timestamp with time zone DEFAULT now(),
     admin_is_read smallint DEFAULT '0'::smallint,
-    token text
+    token text,
+    recipient_user_id integer,
+    action_url text,
+    category character varying(32)
 );
+
+-- Browser push subscriptions + per-recipient notification columns mirror
+-- migrations/2026_05_26_push_notifications.sql so the test schema stays in
+-- sync with production and notificationService.dispatch persists rows.
+CREATE TABLE IF NOT EXISTS public.tbl_push_subscriptions (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL,
+    endpoint text NOT NULL UNIQUE,
+    p256dh text NOT NULL,
+    auth text NOT NULL,
+    user_agent text,
+    created_at timestamp with time zone DEFAULT now(),
+    last_used_at timestamp with time zone
+);
+CREATE INDEX IF NOT EXISTS idx_push_sub_user ON public.tbl_push_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_notif_recipient_unread ON public.tbl_notifications(recipient_user_id, is_read);
 
 
 --
@@ -11095,7 +11114,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc (
   hospitality_company_id          INTEGER NOT NULL REFERENCES public.tbl_hospitality_companies(id) ON DELETE RESTRICT,
   hotel_id                        INTEGER NOT NULL REFERENCES public.tbl_hospitality_company_hotels(id) ON DELETE RESTRICT,
   department_id                   INTEGER NOT NULL REFERENCES public.tbl_department(id) ON DELETE RESTRICT,
-  process_id                      INTEGER NOT NULL REFERENCES public.tbl_approval_processes(id) ON DELETE RESTRICT,
+  process_id                      INTEGER REFERENCES public.tbl_approval_processes(id) ON DELETE RESTRICT,
   status                          VARCHAR(40) NOT NULL DEFAULT 'draft',
   submission_start_at             TIMESTAMP WITHOUT TIME ZONE,
   submission_end_at               TIMESTAMP WITHOUT TIME ZONE,

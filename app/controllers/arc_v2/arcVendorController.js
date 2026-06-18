@@ -20,6 +20,59 @@ import { logger } from '../../util/logger.js';
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
+// ── Quote eligibility + validation guards (audit H1 / H3) ──────────────────
+
+// H1 — vendor must have been invited (tagged) to this ARC.
+async function vendorInvitedToArc(arcId, vendorId) {
+  const row = await db.oneOrNone(
+    `SELECT 1 FROM tbl_arc_invitation WHERE arc_id = $1 AND vendor_id = $2`,
+    [arcId, vendorId]
+  );
+  return !!row;
+}
+
+// H1 — submitting a binding quote requires a CURRENTLY ACTIVE subscription for
+// the ARC's hotel or category (lapsed/expired vendors may draft but not send).
+async function vendorHasActiveSubscription(vendorId, arc) {
+  const row = await db.oneOrNone(
+    `SELECT 1 FROM tbl_vendor_hotel_category_subscription
+      WHERE vendor_id = $1 AND status = 'active'
+        AND ((item_type = 'hotel'    AND item_id = $2)
+          OR (item_type = 'category' AND item_id = $3))
+      LIMIT 1`,
+    [vendorId, arc.hotel_id, arc.category_id]
+  );
+  return !!row;
+}
+
+// H3 — any supplied rate/gst must be a non-negative number (draft tolerance:
+// a still-blank rate is allowed while drafting).
+function validateDraftLines(lines) {
+  for (const line of (lines || [])) {
+    if (line == null) continue;
+    if (line.rate != null) {
+      const r = Number(line.rate);
+      if (!Number.isFinite(r) || r < 0) return 'Each rate must be a non-negative number';
+    }
+    if (line.gst_pct != null) {
+      const g = Number(line.gst_pct);
+      if (!Number.isFinite(g) || g < 0) return 'GST % must be a non-negative number';
+    }
+  }
+  return null;
+}
+
+// H3 — at submit time every line must carry a valid non-negative rate.
+function validateSubmittedLines(lines) {
+  for (const line of lines) {
+    const r = Number(line.rate);
+    if (line.rate == null || !Number.isFinite(r) || r < 0) {
+      return 'Every line item must have a valid non-negative rate before submitting';
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // Vendor dashboard
 // ============================================================
@@ -286,6 +339,24 @@ export async function saveQuoteDraft(req, res) {
     if (!['floated','submission_closed'].includes(arc.status)) {
       return bad(res, 409, `ARC not open for quotes (status=${arc.status})`);
     }
+    // H1 — only invited vendors may quote.
+    if (!(await vendorInvitedToArc(arc_id, vendorId))) {
+      return bad(res, 403, 'You were not invited to this rate contract');
+    }
+    // H2 — enforce the submission deadline on draft-save too (not just submit).
+    if (arc.submission_end_at && new Date(arc.submission_end_at) < new Date()) {
+      return bad(res, 409, 'Submission deadline has passed');
+    }
+    // H3 — reject malformed rates before persisting anything.
+    const draftLineErr = validateDraftLines(lines);
+    if (draftLineErr) return bad(res, 400, draftLineErr);
+    // M8 — every line must reference an item that belongs to THIS ARC.
+    const arcItemIds = (await arcModel.listItems(arc_id)).map((i) => Number(i.id));
+    for (const line of (lines || [])) {
+      if (line?.arc_item_id != null && !arcItemIds.includes(Number(line.arc_item_id))) {
+        return bad(res, 400, 'A quote line references an item that does not belong to this rate contract');
+      }
+    }
     return db.tx(async (t) => {
       const quote = await arcEvalModel.upsertQuote(arc_id, vendorId, { payment_terms, gstin_used }, t);
       const upserted = [];
@@ -311,11 +382,23 @@ export async function submitQuote(req, res) {
     if (arc.submission_end_at && new Date(arc.submission_end_at) < new Date()) {
       return bad(res, 409, 'Submission deadline has passed');
     }
+    // H1 — only invited vendors with a CURRENTLY ACTIVE subscription may submit.
+    if (!(await vendorInvitedToArc(arc_id, vendorId))) {
+      return bad(res, 403, 'You were not invited to this rate contract');
+    }
+    if (!(await vendorHasActiveSubscription(vendorId, arc))) {
+      return bad(res, 403, 'Your subscription is not active — renew it to submit a quote');
+    }
     const quote = await db.oneOrNone(
       `SELECT * FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
       [arc_id, vendorId]
     );
     if (!quote) return bad(res, 400, 'No draft quote to submit');
+    // H3 — completeness: at least one line, each with a valid non-negative rate.
+    const quoteLines = await arcEvalModel.listQuoteLines(quote.id);
+    if (quoteLines.length === 0) return bad(res, 400, 'Quote has no line items');
+    const submitLineErr = validateSubmittedLines(quoteLines);
+    if (submitLineErr) return bad(res, 400, submitLineErr);
     return db.tx(async (t) => {
       const updated = await arcEvalModel.submitQuote(quote.id, t);
       await arcModel.recordVendorResponse(arc_id, vendorId, 'submitted', t);

@@ -1,44 +1,45 @@
 import db from '../../config/dbConn.js';
 
 /**
- * Resolve the buyer-side hospitality_company_id for an Express request.
+ * Resolve the buyer-side hospitality_company_id for an Express request — WITHOUT
+ * trusting the client to widen scope (audit H7).
  *
- * Priority:
- *   1. Explicit query param  hospitality_company_id (caller override)
- *   2. X-Hospitality-Company / X-Hospitality-Company-Id header
- *      (injected by frontend/lib/axios.js once the user has picked a BU)
- *   3. req.user.hospitality_company_id (legacy; rarely populated on the
- *      JWT payload but kept for safety)
- *   4. Fallback: first row in tbl_hospitality_user_mappings for this user
- *      (covers the case where a buyer has access to exactly one hospitality
- *      company and the FE hasn't surfaced the BU picker yet)
+ * A client may *hint* a company via the query param or the
+ * X-Hospitality-Company(-Id) header (the FE sends the user's selected BU), but
+ * the hint is honored ONLY if the user is actually mapped to that company.
+ * Otherwise it's refused (returns null → callers answer 400). With no hint, we
+ * fall back to the user's first mapped company. Super admins (user_type 8) may
+ * act on any company.
  *
- * Returns a positive integer, or null if nothing resolved.
+ * Returns a positive integer, or null if nothing valid resolved.
  */
 export async function resolveHospitalityCompanyId(req) {
-  const explicit =
+  const raw =
     req.query?.hospitality_company_id ||
     req.headers?.['x-hospitality-company'] ||
     req.headers?.['x-hospitality-company-id'] ||
     req.user?.hospitality_company_id;
+  const hinted = (raw != null && Number.isFinite(Number(raw)) && Number(raw) > 0)
+    ? Number(raw)
+    : null;
 
-  if (explicit) {
-    const n = Number(explicit);
-    return Number.isFinite(n) && n > 0 ? n : null;
+  // Super admin may operate on any company.
+  if (Number(req.user?.user_type) === 8) return hinted;
+
+  if (!req.user?.id) return null;
+
+  const allowed = (await db.any(
+    `SELECT DISTINCT hospitality_company_id
+       FROM tbl_hospitality_user_mappings
+      WHERE user_id = $1
+        AND hospitality_company_id IS NOT NULL
+      ORDER BY hospitality_company_id`,
+    [req.user.id]
+  )).map((r) => Number(r.hospitality_company_id));
+
+  if (hinted != null) {
+    // Honor the client hint ONLY if the user belongs to that company.
+    return allowed.includes(hinted) ? hinted : null;
   }
-
-  if (req.user?.id) {
-    const row = await db.oneOrNone(
-      `SELECT hospitality_company_id
-         FROM tbl_hospitality_user_mappings
-        WHERE user_id = $1
-          AND hospitality_company_id IS NOT NULL
-        ORDER BY id
-        LIMIT 1`,
-      [req.user.id]
-    );
-    if (row?.hospitality_company_id) return Number(row.hospitality_company_id);
-  }
-
-  return null;
+  return allowed.length > 0 ? allowed[0] : null;
 }
