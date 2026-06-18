@@ -211,24 +211,36 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         );
       }
 
-      // Standard: ONE Purchase Order per (RFQ, vendor). When the caller didn't
-      // pin a specific PO, reuse this vendor's existing OPEN PO for this RFQ
-      // (draft or pending-approval) and append the line to it — instead of
-      // spawning a separate PO per finalized product. Different vendors still
-      // get separate POs. Cancelled/sent/etc. POs are excluded so re-drafting
-      // after a cancel correctly starts a fresh PO.
-      if (!existing_po_id && finalized_vendor_id) {
-        const vendorPo = await t.oneOrNone(
-          `SELECT id FROM tbl_rfq_purchase_order
-            WHERE rfq_id = $1 AND finalized_vendor_id = $2
-              AND status = ANY($3::po_status[])
-            ORDER BY id DESC LIMIT 1`,
-          [rfq_id, finalized_vendor_id, [PO_STATUSES.DRAFT, PO_STATUSES.PENDING_APPROVAL]]
-        );
-        if (vendorPo) existing_po_id = vendorPo.id;
-      }
-
       let po = null;
+
+      // Auto-merge: if the caller did not nominate a merge target, look for an
+      // existing draft PO on this RFQ for the same vendor that shares the same
+      // project + selected_hierarchy. If found, treat the new line as an
+      // append onto that PO. SELECT ... FOR UPDATE serializes concurrent
+      // finalize transactions targeting the same (rfq, vendor, project,
+      // hierarchy), so the "at most one draft PO per tuple" invariant holds
+      // even under parallel awards. selected_hierarchy is compared via ::text
+      // to be agnostic to json/jsonb/text storage; IS NOT DISTINCT FROM keeps
+      // NULL == NULL so legacy rows without a hierarchy can still merge.
+      // Restricted to status='draft' — pending-approval POs are mid-review
+      // and must not absorb new lines (would invalidate approval context).
+      if (!existing_po_id && finalized_vendor_id) {
+        const mergeTarget = await t.oneOrNone(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1
+              AND finalized_vendor_id = $2
+              AND project_id IS NOT DISTINCT FROM $3
+              AND selected_hierarchy::text IS NOT DISTINCT FROM $4::text
+              AND status = $5
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE`,
+          [rfq_id, finalized_vendor_id, project_id, selected_hierarchy, PO_STATUSES.DRAFT]
+        );
+        if (mergeTarget) {
+          existing_po_id = mergeTarget.id;
+        }
+      }
 
       if(existing_po_id) {
         if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
