@@ -43,3 +43,37 @@ export async function resolveHospitalityCompanyId(req) {
   }
   return allowed.length > 0 ? allowed[0] : null;
 }
+
+/**
+ * Resolve the FULL set of hospitality companies a request may read — for list /
+ * dashboard scope. Unlike resolveHospitalityCompanyId (which collapses to a
+ * single company and so silently hides data for multi-company users), this
+ * returns EVERY company the user is mapped to, so the ARC listing behaves like
+ * the RFQ listing (show everything you can access; narrow with the in-page
+ * facets). Still never widens beyond the user's own mappings.
+ *
+ * Returns: number[] of company ids (possibly empty = no access), or `null` =
+ * "no company filter" (super admins, who see every company).
+ */
+export async function resolveHospitalityCompanyScope(req) {
+  // Super admin sees all companies — or a single hinted one if explicitly asked.
+  if (Number(req.user?.user_type) === 8) {
+    const raw =
+      req.query?.hospitality_company_id ||
+      req.headers?.['x-hospitality-company'] ||
+      req.headers?.['x-hospitality-company-id'];
+    const hinted = (raw != null && Number.isFinite(Number(raw)) && Number(raw) > 0) ? Number(raw) : null;
+    return hinted != null ? [hinted] : null;
+  }
+  if (!req.user?.id) return [];
+
+  const allowed = (await db.any(
+    `SELECT DISTINCT hospitality_company_id
+       FROM tbl_hospitality_user_mappings
+      WHERE user_id = $1
+        AND hospitality_company_id IS NOT NULL`,
+    [req.user.id]
+  )).map((r) => Number(r.hospitality_company_id));
+
+  return allowed; // [] = no access → empty results (never "all")
+}

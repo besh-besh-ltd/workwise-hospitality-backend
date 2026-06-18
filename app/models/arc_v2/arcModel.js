@@ -142,7 +142,7 @@ const arcModel = {
    * (plan §6.4): drafts, ongoing, approved, active, ended, all.
    */
   list: async ({
-    hospitality_company_id,
+    hospitality_company_ids = null, // number[] (scope) | null (all, super admin)
     hotel_ids = null,
     department_ids = null,
     statusGroup = 'all',
@@ -153,9 +153,15 @@ const arcModel = {
     // tbl_hospitality_company_hotels (joined as `h` below) also has a
     // `hospitality_company_id` column; alias every filter column to `a.`
     // so Postgres doesn't error with "column reference is ambiguous".
-    const conditions = ['a.hospitality_company_id = $1'];
-    const args = [hospitality_company_id];
-    let p = 2;
+    const conditions = [];
+    const args = [];
+    let p = 1;
+    // null = no company filter (super admin); an array (incl. empty) scopes to
+    // exactly those companies — empty array deliberately matches nothing.
+    if (hospitality_company_ids !== null) {
+      conditions.push(`a.hospitality_company_id = ANY($${p++}::int[])`);
+      args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
@@ -171,7 +177,7 @@ const arcModel = {
     }
     args.push(limit);
     args.push((page - 1) * limit);
-    const where = `WHERE ${conditions.join(' AND ')}`;
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const [rows, count] = await Promise.all([
       runner.any(
         `SELECT a.id, a.arc_number, a.title, a.status, a.category_id, a.hotel_id,
@@ -252,11 +258,15 @@ const arcModel = {
   /**
    * Dashboard KPI counts per status-group — feeds the sidebar live badges.
    */
-  dashboardCounts: async ({ hospitality_company_id, hotel_ids = null, department_ids = null }, txContext = null) => {
+  dashboardCounts: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null }, txContext = null) => {
     const runner = txContext || db;
-    const conditions = ['hospitality_company_id = $1'];
-    const args = [hospitality_company_id];
-    let p = 2;
+    const conditions = [];
+    const args = [];
+    let p = 1;
+    if (hospitality_company_ids !== null) {
+      conditions.push(`hospitality_company_id = ANY($${p++}::int[])`);
+      args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       conditions.push(`hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
@@ -265,7 +275,7 @@ const arcModel = {
       conditions.push(`department_id = ANY($${p++}::int[])`);
       args.push(department_ids);
     }
-    const where = `WHERE ${conditions.join(' AND ')}`;
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await runner.any(
       `SELECT status, COUNT(*)::int AS c FROM tbl_arc ${where} GROUP BY status`,
       args

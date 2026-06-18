@@ -4,7 +4,7 @@ import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
-import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
+import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { sendMail } from '../../helper/common.js';
 
@@ -310,11 +310,12 @@ export async function terminate(req, res) {
 
 export async function list(req, res) {
   try {
-    const { hospitality_company_id, hotel_ids, department_ids, statusGroup, page, limit } = req.query;
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const { hotel_ids, department_ids, statusGroup, page, limit } = req.query;
+    // Scope to ALL the user's companies (super admin → null = all) so multi-
+    // company users see their ARCs; the in-page Business Unit facet narrows.
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const result = await arcModel.list({
-      hospitality_company_id: hcId,
+      hospitality_company_ids: companyIds,
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
       statusGroup: statusGroup || 'all',
@@ -392,11 +393,10 @@ export async function getLifecycle(req, res) {
 
 export async function dashboardCounts(req, res) {
   try {
-    const { hospitality_company_id, hotel_ids, department_ids } = req.query;
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const { hotel_ids, department_ids } = req.query;
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const counts = await arcModel.dashboardCounts({
-      hospitality_company_id: hcId,
+      hospitality_company_ids: companyIds,
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
     });
