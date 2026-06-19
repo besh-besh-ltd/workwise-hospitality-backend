@@ -322,6 +322,17 @@ export async function list(req, res) {
       page:  Number(page || 1),
       limit: Number(limit || 20),
     });
+    // Stamp "is this ARC waiting on the current user's approval?" so the
+    // listing can offer a "Pending for me" tab without a second round-trip.
+    const rows = Array.isArray(result.data) ? result.data : [];
+    if (rows.length > 0 && req.user?.id) {
+      const pendingIds = new Set(
+        await arcModel.getPendingForUserArcIds(rows.map((r) => r.id), req.user.id)
+      );
+      rows.forEach((r) => { r.pending_for_user = pendingIds.has(Number(r.id)); });
+    } else {
+      rows.forEach((r) => { r.pending_for_user = false; });
+    }
     return ok(res, result);
   } catch (err) {
     logger.error({ err }, '[arcController.list]');

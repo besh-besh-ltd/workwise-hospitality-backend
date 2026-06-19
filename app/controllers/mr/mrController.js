@@ -11,6 +11,74 @@ import {
   getApprovalInstanceDetails,
 } from '../../models/generalModel.js';
 import { dispatchPostApprovalAction } from '../../services/approvalActionService.js';
+import rbacModel from '../../models/rbacModel.js';
+import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import { sendMail } from '../../helper/common.js';
+import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
+
+// Notify the vendor + the MR raiser that a call-off PO was released and awaits
+// the vendor's acceptance (audit CO10). Best-effort, post-commit — a
+// notification failure must never undo the release.
+async function notifyCallOffReleased(mr, released) {
+  for (const { po, group } of released) {
+    const recipients = [Number(group.vendor_id), Number(mr.raised_by)].filter(Boolean);
+    try {
+      await dispatchNotification({
+        userIds: recipients,
+        senderUserId: mr.raised_by || null,
+        category: 'CALL_OFF',
+        type: 'CALL_OFF_RELEASED',
+        title: 'Released PO awaiting acceptance',
+        body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr.mr_number} and is awaiting vendor acceptance.`,
+        data: { po_id: po.id, mr_id: mr.id, po_number: po.po_number },
+        actionUrl: `/dashboard/buyer/purchase-orders/${po.id}`,
+      });
+    } catch (err) {
+      logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] in-app notify failed');
+    }
+    const vendorEmail = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [group.vendor_id]);
+    if (vendorEmail?.email) {
+      sendMail({
+        to: vendorEmail.email,
+        subject: `New released purchase order ${po.po_number} — acceptance required`,
+        html: `<p>Hello ${vendorEmail.name || 'Vendor'},</p>
+               <p>A new released purchase order <strong>${po.po_number}</strong> has been released against your active rate contract and is awaiting your acceptance.</p>
+               <p>Please log in to your vendor portal to review and accept it.</p>`,
+      }).catch((err) => logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] email failed'));
+    }
+  }
+}
+
+// Authorization: may this caller act on the given hotel? Super admin (8)
+// bypasses; everyone else must have the hotel in their accessible set. Scope is
+// derived from the hotel, never trusted from the client (audit CO1).
+async function userCanAccessHotel(req, hotelId) {
+  if (Number(req.user?.user_type) === 8) return true;
+  if (!req.user?.id || !hotelId) return false;
+  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
+  return accessible.map(Number).includes(Number(hotelId));
+}
+
+// Validate a single MR item against its referenced contract line (audit CO2).
+// `line` is the row from mrModel.getContractLineDetail. Returns an error string
+// or null. `mr` carries the derived hotel_id + chosen department_id.
+function validateMrItemAgainstLine(item, line, mr) {
+  if (!line) return 'references an unknown contract line';
+  if (Number(line.arc_contract_id) !== Number(item.arc_contract_id)) {
+    return 'contract line does not belong to the given contract';
+  }
+  if (!['active', 'expiring_soon'].includes(line.contract_status)) {
+    return 'the contract is not active';
+  }
+  if (Number(line.hotel_id) !== Number(mr.hotel_id) ||
+      Number(line.department_id) !== Number(mr.department_id)) {
+    return "the contract is not in this requisition's hotel/department";
+  }
+  if (Number(line.product_variant_id) !== Number(item.product_variant_id)) {
+    return 'the product does not match the contract line';
+  }
+  return null;
+}
 
 /**
  * MR (Material Requisition) — Buyer-side controller.
@@ -29,8 +97,11 @@ function bad(res, status, message, code = 0) { return res.status(status).json({ 
 
 function generateMrNumber(now = new Date()) {
   const yyyy = now.getFullYear();
-  const rand = Math.floor(Math.random() * 9000) + 1000;
-  return `MR-${yyyy}-${rand}`;
+  // Wide, time-seeded suffix to avoid collisions on the UNIQUE mr_number
+  // (audit CO17) — the old 4-digit random had only ~9000 values/year.
+  const stamp = now.getTime().toString(36).toUpperCase();
+  const rand = Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0');
+  return `MR-${yyyy}-${stamp}${rand}`;
 }
 
 /**
@@ -44,6 +115,11 @@ export async function searchContractedItems(req, res) {
     const hotelId      = Number(req.query.hotel_id);
     const departmentId = Number(req.query.department_id);
     if (!hotelId || !departmentId) return bad(res, 400, 'hotel_id and department_id are required');
+    // Authorize the hotel against the caller's own scope (audit CO1) — the
+    // picker exposes commercial rates, so it must not be enumerable cross-tenant.
+    if (!(await userCanAccessHotel(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel');
+    }
     const rows = await mrModel.searchContractedItems({
       hotel_id:      hotelId,
       department_id: departmentId,
@@ -62,17 +138,54 @@ export async function createDraft(req, res) {
     const userId = req.user?.id;
     if (!userId) return bad(res, 401, 'Unauthorized');
     const body = req.body || {};
-    const required = ['title','hospitality_company_id','hotel_id','department_id'];
-    for (const k of required) {
-      if (!body[k]) return bad(res, 400, `${k} is required`);
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title || !body.hotel_id || !body.department_id) {
+      return bad(res, 400, 'title, hotel_id, department_id are required');
     }
+    const hotelId = Number(body.hotel_id);
+    const departmentId = Number(body.department_id);
+    // Derive the hotel's TRUE hospitality company server-side — never trust a
+    // client-supplied hospitality_company_id (audit CO1).
+    const [hotelMapping] = await rbacModel.getHotelCompanyMappings([hotelId]);
+    if (!hotelMapping) return bad(res, 400, 'invalid hotel_id');
+    if (!(await userCanAccessHotel(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel');
+    }
+    const mrScope = { hotel_id: hotelId, department_id: departmentId };
+
+    // Validate every item against its contract line BEFORE writing anything
+    // (audit CO2/CO16 — no silent skipping). The matched_unit_rate is taken
+    // from the contract line, never the client.
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const validatedItems = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const it = rawItems[i] || {};
+      if (!it.arc_contract_id || !it.arc_contract_line_id || !it.product_variant_id || !it.quantity) {
+        return bad(res, 400, `Item ${i + 1}: arc_contract_id, arc_contract_line_id, product_variant_id and quantity are required`);
+      }
+      if (Number(it.quantity) <= 0) {
+        return bad(res, 400, `Item ${i + 1}: quantity must be greater than zero`);
+      }
+      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id);
+      const err = validateMrItemAgainstLine(it, line, mrScope);
+      if (err) return bad(res, 400, `Item ${i + 1}: ${err}`);
+      validatedItems.push({
+        product_variant_id:   it.product_variant_id,
+        quantity:             it.quantity,
+        uom:                  it.uom,
+        arc_contract_id:      it.arc_contract_id,
+        arc_contract_line_id: it.arc_contract_line_id,
+        matched_unit_rate:    line.unit_rate, // authoritative — from the contract line
+      });
+    }
+
     return db.tx(async (t) => {
       const mr = await mrModel.createDraft({
-        mr_number: body.mr_number || generateMrNumber(),
-        title: body.title,
-        hospitality_company_id: body.hospitality_company_id,
-        hotel_id: body.hotel_id,
-        department_id: body.department_id,
+        mr_number: generateMrNumber(), // always server-generated (audit CO17)
+        title,
+        hospitality_company_id: Number(hotelMapping.hospitality_company_id),
+        hotel_id: hotelId,
+        department_id: departmentId,
         cost_center: body.cost_center,
         urgency: body.urgency,
         required_by_date: body.required_by_date,
@@ -80,12 +193,8 @@ export async function createDraft(req, res) {
         delivery_location: body.delivery_location,
         raised_by: userId,
       }, t);
-      const items = Array.isArray(body.items) ? body.items : [];
       const inserted = [];
-      for (const it of items) {
-        if (!it.arc_contract_id || !it.arc_contract_line_id || !it.product_variant_id || !it.quantity) {
-          continue;
-        }
+      for (const it of validatedItems) {
         inserted.push(await mrModel.addItem(mr.id, it, t));
       }
       return ok(res, { mr, items: inserted }, 'MR draft created');
@@ -113,14 +222,17 @@ export async function submit(req, res) {
     if (mr.status !== 'draft') return bad(res, 409, `Cannot submit MR in status ${mr.status}`);
     const items = await mrModel.listItems(id);
     if (items.length === 0) return bad(res, 400, 'MR must have at least one item');
-    // Defence-in-depth: every item must reference an active contract for the
-    // MR's department + hotel.
-    const invalid = items.filter(it =>
-      !it.arc_contract_id ||
-      !it.arc_contract_line_id
-    );
-    if (invalid.length > 0) {
-      return bad(res, 400, `${invalid.length} item(s) reference no active contract`);
+    // Defence-in-depth re-validation (audit CO2) + hard over-consumption guard
+    // (audit CO4): every item must still reference an in-scope, active contract
+    // line, and its quantity must fit the line's remaining quantity.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id);
+      const err = validateMrItemAgainstLine(it, line, mr);
+      if (err) return bad(res, 400, `Item ${i + 1}: ${err}`);
+      if (Number(it.quantity) > Number(line.remaining_qty)) {
+        return bad(res, 400, `Item ${i + 1}: requested quantity (${it.quantity}) exceeds the contract's remaining quantity (${line.remaining_qty})`);
+      }
     }
     const result = await db.tx(async (t) => {
       // Spin up a REAL approval instance through the central engine. Every step
@@ -182,6 +294,11 @@ export async function getById(req, res) {
     const id = Number(req.params.id);
     const mr = await mrModel.getById(id);
     if (!mr) return bad(res, 404, 'MR not found', 2);
+    // Scope guard (audit CO1): only the raiser or a user with access to the
+    // MR's hotel may read it — no cross-tenant MR reads by id.
+    if (mr.raised_by !== req.user?.id && !(await userCanAccessHotel(req, mr.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this requisition');
+    }
     const items = await mrModel.listItems(id);
     const callOffs = await mrModel.callOffPos(id).catch(() => []);
     // The live approval chain (steps + per-approver status + whether the caller
@@ -310,14 +427,61 @@ export async function handleMrPostApproval(approvalInstanceId, approverUserId, o
       logger.warn({ approvalInstanceId, mrId }, '[mrController.handleMrPostApproval] MR not found');
       return;
     }
-    await db.tx(async (t) => {
+    const released = await db.tx(async (t) => {
+      // Idempotency guard (audit CO3): lock the MR row and bail if it has
+      // already been released. This makes a double-fire (normal completion +
+      // propagation auto-complete, both registered for MR APPROVED) a no-op
+      // instead of a duplicate PO + double consumption.
+      const locked = await t.oneOrNone(
+        `SELECT status FROM tbl_material_requisition WHERE id = $1 FOR UPDATE`, [mrId]
+      );
+      if (!locked) return [];
+      if (locked.status === 'po_released') {
+        logger.info({ mrId }, '[mrController.handleMrPostApproval] MR already released — skipping duplicate');
+        return [];
+      }
       await mrModel.setStatus(mrId, 'approved', {}, t);
-      const released = await releaseForMr(mrId, t);
+      const rel = await releaseForMr(mrId, t);
       // releaseForMr already flips MR to po_released after writing the PO links.
-      logger.info({ mrId, contracts: released.length }, '[mrController.handleMrPostApproval] call-off POs released');
+      logger.info({ mrId, contracts: rel.length }, '[mrController.handleMrPostApproval] call-off POs released');
+      return rel;
     });
+    // Notify vendor + raiser and render the call-off PO PDF AFTER commit
+    // (audit CO10) — both best-effort, never undo the release.
+    if (released && released.length) {
+      await notifyCallOffReleased(mr, released);
+      for (const { po } of released) {
+        await generateCallOffPoPdf(po.id).catch((err) =>
+          logger.error({ err, poId: po.id }, '[mrController.handleMrPostApproval] call-off PDF failed'));
+      }
+    }
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[mrController.handleMrPostApproval]');
+    // Surface the failure instead of swallowing it (audit CO11): the approval
+    // already committed, so the buyer would otherwise see "approved" with no PO
+    // and no signal. Notify the raiser that the call-off release failed.
+    try {
+      const mrId = options.instance?.entity_id;
+      const failedMr = mrId ? await mrModel.getById(mrId) : null;
+      if (failedMr?.raised_by) {
+        const why = err.code === 'OVER_CONSUMPTION'
+          ? 'the contract has insufficient remaining quantity'
+          : err.code === 'INVALID_PRICE'
+            ? 'a contracted rate is invalid'
+            : 'an unexpected error';
+        await dispatchNotification({
+          userIds: [Number(failedMr.raised_by)],
+          category: 'CALL_OFF',
+          type: 'CALL_OFF_RELEASE_FAILED',
+          title: 'Call-off PO could not be released',
+          body: `Requisition ${failedMr.mr_number || ''} was approved but its call-off PO could not be released (${why}). Please review the requisition.`,
+          data: { mr_id: mrId, reason: err.code || 'error' },
+          actionUrl: '/dashboard/buyer/material-requisitions',
+        });
+      }
+    } catch (notifyErr) {
+      logger.error({ notifyErr, approvalInstanceId }, '[mrController.handleMrPostApproval] failure-notify failed');
+    }
   }
 }
 

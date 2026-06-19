@@ -1524,13 +1524,14 @@ export const getPODetailsById = async (po_id, user_id) => {
          ON tai.id = po.approval_instance_id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_users TU ON TU.id = po.initiated_by
+       -- LEFT so call-off POs (initiated_by NULL, rfq_id NULL) still load (CO5).
+       LEFT JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id
-       JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
+       LEFT JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
        LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
        LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
        WHERE po.id = $1`,

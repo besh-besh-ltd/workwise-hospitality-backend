@@ -36,6 +36,11 @@ describe("ARC v2 — create → publish → detail flow", () => {
     // suite so the route auth passes. This matches the assumption baked
     // into every acl([2,8]) route in the existing codebase.
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
+    // Publish now refuses to float to zero vendors (audit M2). Ensure the
+    // beverages-subscribed vendor is an active vendor user so the open ARC
+    // resolves ≥1 eligible vendor on publish (self-sufficient, no cross-suite
+    // dependency).
+    await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [IDS.users.vendor_alpha]);
     client = await httpClient(BUYER);
   });
 

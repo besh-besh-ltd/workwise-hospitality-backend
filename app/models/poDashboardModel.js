@@ -63,16 +63,33 @@ function buildScopeClause(scope, values, startIndex) {
   const parts = [];
 
   if (scope.hospitalityCompanyId) {
-    parts.push(`rfq.hospitality_company_id = $${i++}`);
+    // Scope RFQ POs via the RFQ, and call-off POs via their ARC (no RFQ) — the
+    // call-off branch is a self-contained EXISTS so it works regardless of the
+    // caller's join block (audit CO8).
+    const hcIdx = i++;
     values.push(scope.hospitalityCompanyId);
+    const rfqConds = [`rfq.hospitality_company_id = $${hcIdx}`];
+    const arcConds = [`aa.hospitality_company_id = $${hcIdx}`];
     if (scope.hotelIds && scope.hotelIds.length > 0) {
-      parts.push(`rfq.hotel_id = ANY($${i++}::int[])`);
+      const hIdx = i++;
       values.push(scope.hotelIds);
+      rfqConds.push(`rfq.hotel_id = ANY($${hIdx}::int[])`);
+      arcConds.push(`aa.hotel_id = ANY($${hIdx}::int[])`);
     }
     if (scope.departmentId) {
-      parts.push(`rfq.department_id = $${i++}`);
+      const dIdx = i++;
       values.push(scope.departmentId);
+      rfqConds.push(`rfq.department_id = $${dIdx}`);
+      arcConds.push(`aa.department_id = $${dIdx}`);
     }
+    parts.push(`(
+      (${rfqConds.join(' AND ')})
+      OR (po.is_call_off = TRUE AND EXISTS (
+        SELECT 1 FROM tbl_arc_contract cc
+          JOIN tbl_arc aa ON aa.id = cc.arc_id
+         WHERE cc.id = po.arc_contract_id AND ${arcConds.join(' AND ')}
+      ))
+    )`);
   } else {
     // Legacy / non-hospitality fallback: scope on the buyer company id stored
     // directly on the PO header.
@@ -266,7 +283,7 @@ function poCoreSelect(userParamIdx) {
 function poCoreJoins() {
   return `
     FROM tbl_rfq_purchase_order po
-    JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+    LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
     JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
     LEFT JOIN tbl_company VC ON VC.id = VENDOR.company_id
     LEFT JOIN tbl_users INITIATOR ON INITIATOR.id = po.initiated_by

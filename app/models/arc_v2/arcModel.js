@@ -194,6 +194,7 @@ const arcModel = {
                 COALESCE(inv_agg.submitted_count, 0)::int AS submitted_count,
                 COALESCE(award_agg.awarded_vendor_names, '[]'::json) AS awarded_vendor_names,
                 COALESCE(award_agg.awarded_vendor_ids, '[]'::json) AS awarded_vendor_ids,
+                COALESCE(award_agg.awarded_vendors, '[]'::json) AS awarded_vendors,
                 COALESCE(line_agg.total_committed_value, 0)::numeric AS committed_value,
                 COALESCE(line_agg.total_consumed_value, 0)::numeric AS consumed_value,
                 COALESCE(co_agg.call_off_count, 0)::int AS call_off_count,
@@ -219,11 +220,25 @@ const arcModel = {
               WHERE arc_id = a.id
            ) inv_agg ON TRUE
            LEFT JOIN LATERAL (
-             SELECT json_agg(DISTINCT uvend.name) AS awarded_vendor_names,
-                    json_agg(DISTINCT c.vendor_id) AS awarded_vendor_ids
-               FROM tbl_arc_contract c
-               LEFT JOIN tbl_users uvend ON uvend.id = c.vendor_id
-              WHERE c.arc_id = a.id
+             -- Dedupe to one row per awarded vendor first, so names / ids /
+             -- {name,company} objects stay index-aligned (the listing pairs
+             -- them in the vendor hover tooltip). Company name prefers
+             -- tbl_company.company_name, falling back to the user's
+             -- organization_name.
+             SELECT json_agg(v.name ORDER BY v.name)       AS awarded_vendor_names,
+                    json_agg(v.vendor_id ORDER BY v.name)  AS awarded_vendor_ids,
+                    json_agg(jsonb_build_object(
+                      'id', v.vendor_id, 'name', v.name, 'company', v.company
+                    ) ORDER BY v.name)                     AS awarded_vendors
+               FROM (
+                 SELECT DISTINCT c.vendor_id,
+                        uvend.name AS name,
+                        COALESCE(tc.company_name, uvend.organization_name) AS company
+                   FROM tbl_arc_contract c
+                   LEFT JOIN tbl_users uvend ON uvend.id = c.vendor_id
+                   LEFT JOIN tbl_company tc ON tc.id = uvend.company_id
+                  WHERE c.arc_id = a.id
+               ) v
            ) award_agg ON TRUE
            LEFT JOIN LATERAL (
              SELECT SUM(cl.unit_rate * cl.committed_qty) AS total_committed_value,
@@ -253,6 +268,54 @@ const arcModel = {
       runner.one(`SELECT COUNT(*)::int AS c FROM tbl_arc a ${where}`, args.slice(0, args.length - 2)),
     ]);
     return { data: rows, total: count.c, page, limit };
+  },
+
+  /**
+   * Of the given ARC ids, which ones currently have an action waiting on
+   * `userId` — i.e. the user is a PENDING approver at the CURRENT step of a
+   * PENDING approval instance tied to the ARC. Covers the three ARC-linked
+   * approval entities: ARC_TECH + ARC_COMMITTEE (entity_id = arc_id) and
+   * ARC_AMENDMENT (entity_id = amendment_id → arc_contract → arc).
+   *
+   * Mirrors arcLifecycleModel.loadInstance's "can_user_approve" check (user-
+   * level approvers only), so the listing's "Pending for me" tab stays
+   * consistent with the per-ARC approver gating elsewhere.
+   *
+   * Returns: number[] of arc ids (subset of the input).
+   */
+  getPendingForUserArcIds: async (arcIds, userId, txContext = null) => {
+    if (!Array.isArray(arcIds) || arcIds.length === 0 || !userId) return [];
+    const rows = await (txContext || db).any(
+      `SELECT DISTINCT arc_id FROM (
+         SELECT ai.entity_id AS arc_id
+           FROM tbl_approval_instances ai
+           JOIN tbl_approval_instance_steps s
+             ON s.approval_instance_id = ai.id AND s.step_order = ai.current_step
+           JOIN tbl_approval_step_approvers sa
+             ON sa.approval_instance_step_id = s.id
+          WHERE ai.entity_type IN ('ARC_TECH','ARC_COMMITTEE')
+            AND ai.status = 'PENDING'
+            AND ai.entity_id = ANY($1::int[])
+            AND sa.approver_user_id = $2
+            AND sa.status = 'PENDING'
+         UNION
+         SELECT c.arc_id
+           FROM tbl_approval_instances ai
+           JOIN tbl_arc_amendment am ON am.approval_instance_id = ai.id
+           JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+           JOIN tbl_approval_instance_steps s
+             ON s.approval_instance_id = ai.id AND s.step_order = ai.current_step
+           JOIN tbl_approval_step_approvers sa
+             ON sa.approval_instance_step_id = s.id
+          WHERE ai.entity_type = 'ARC_AMENDMENT'
+            AND ai.status = 'PENDING'
+            AND c.arc_id = ANY($1::int[])
+            AND sa.approver_user_id = $2
+            AND sa.status = 'PENDING'
+       ) t`,
+      [arcIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.arc_id));
   },
 
   /**
@@ -383,7 +446,7 @@ const arcModel = {
 
   listInvitations: async (arcId, txContext = null) => {
     return (txContext || db).any(
-      `SELECT i.*, u.name AS vendor_name, u.email AS vendor_email
+      `SELECT i.*, u.name AS vendor_name, u.email AS vendor_email, u.mobile AS vendor_mobile
          FROM tbl_arc_invitation i
          LEFT JOIN tbl_users u ON u.id = i.vendor_id
         WHERE i.arc_id = $1

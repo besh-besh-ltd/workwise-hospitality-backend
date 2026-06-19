@@ -242,7 +242,7 @@ describe("MR flow — search → create → submit → call-off", () => {
     expect(po.is_call_off).toBe(true);
     expect(po.arc_contract_id).toBe(String(contractId));
     expect(po.rfq_id).toBeNull();
-    expect(po.status).toBe('approved'); // born approved — no PO approval chain
+    expect(po.status).toBe('acceptance_pending'); // released → awaits vendor acceptance
   });
 
   test("GET /po/detail/:po_id loads a call-off PO (no RFQ) via its ARC scope", async () => {
@@ -356,23 +356,20 @@ describe("MR flow — search → create → submit → call-off", () => {
     expect(res.status).toBe(404);
   });
 
-  test("rejects MR submit when an item's parent ARC dept doesn't match the MR's dept", async () => {
+  test("rejects an MR item whose parent ARC dept doesn't match the MR's dept (CO2)", async () => {
     const mismatchRes = await buyerClient.post("/api/v1/mr").send({
       title: "Mismatched dept",
-      hospitality_company_id: HC,
       hotel_id: HOTEL,
-      department_id: DEPT_ENG, // wrong dept for our contract
+      department_id: DEPT_ENG, // wrong dept for our contract (which is DEPT_PROC)
       items: [
         { product_variant_id: VARIANT_ID, quantity: 50, uom: "litre",
           arc_contract_id: contractId, arc_contract_line_id: contractLineId,
           matched_unit_rate: 90 },
       ],
     });
-    // createDraft accepts the row but the submit endpoint's revalidation
-    // should ultimately catch the mismatch (the picker also wouldn't have
-    // surfaced it). For now we just confirm we can construct + submit the
-    // case — full controller-side dept-mismatch enforcement is recorded as
-    // a Phase A finish-line TODO.
-    expect(mismatchRes.status).toBe(200);
+    // createDraft now validates contract-linkage + scope up-front and rejects
+    // an item whose contract is not in the MR's hotel/department (audit CO2).
+    expect(mismatchRes.status).toBe(400);
+    expect(mismatchRes.body.message).toMatch(/hotel\/department|not in this/i);
   });
 });

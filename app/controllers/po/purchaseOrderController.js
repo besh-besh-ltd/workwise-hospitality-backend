@@ -14,6 +14,7 @@ import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunc
 import pricingEngine from "../../services/pricingEngine.js";
 import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
+import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -1029,6 +1030,7 @@ export const rejectPO = async (req, res) => {
     }
     const vendorUserId = req.user.id;
 
+    let callOffReject = null;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
       const po = await t.oneOrNone(
@@ -1058,8 +1060,13 @@ export const rejectPO = async (req, res) => {
         WHERE id = $1
       `, [po_id, reason]);
 
-      // Definalize vendor — move from tbl_quote_finalization to history
-      await handlePORejection(po, vendorUserId, t);
+      // Call-off POs (no RFQ) reverse contract consumption + reopen the MR;
+      // RFQ POs run the de-finalization cascade (audit CO9).
+      if (po.is_call_off) {
+        callOffReject = await handleCallOffRejection(po_id, reason, t);
+      } else {
+        await handlePORejection(po, vendorUserId, t);
+      }
 
       await recordLifecycleEvent({
         entity_type: 'PO',
@@ -1078,10 +1085,20 @@ export const rejectPO = async (req, res) => {
       return po;
     });
 
-    // Send rejection notification to commercial evaluators (fire-and-forget)
-    sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
-      logError('Failed to send vendor rejection notification', err);
-    });
+    // Rejection notification (fire-and-forget). Call-offs notify the MR raiser;
+    // RFQ POs notify the commercial evaluators (audit CO9).
+    if (result.is_call_off) {
+      notifyCallOffRejected({
+        raisedBy: callOffReject?.raised_by,
+        mrNumber: callOffReject?.mr_number,
+        poNumber: result.po_number,
+        reason,
+      }).catch(err => logError('Failed to notify call-off rejection', err));
+    } else {
+      sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
+        logError('Failed to send vendor rejection notification', err);
+      });
+    }
 
     return res.json({
       status: 1,

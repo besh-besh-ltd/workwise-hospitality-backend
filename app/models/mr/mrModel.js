@@ -39,6 +39,33 @@ const mrModel = {
     );
   },
 
+  // Resolve a contract line with its contract + parent ARC scope, for
+  // server-side validation of MR items (audit CO2/CO4). Returns null if the
+  // line id doesn't exist.
+  getContractLineDetail: async (lineId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT cl.id              AS line_id,
+              cl.arc_contract_id,
+              cl.arc_item_id,
+              cl.unit_rate,
+              cl.committed_qty,
+              cl.consumed_qty,
+              (cl.committed_qty - cl.consumed_qty) AS remaining_qty,
+              c.status           AS contract_status,
+              c.vendor_id,
+              c.arc_id,
+              a.hotel_id,
+              a.department_id,
+              ai.product_variant_id
+         FROM tbl_arc_contract_line cl
+         JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
+         JOIN tbl_arc a          ON a.id = c.arc_id
+         JOIN tbl_arc_item ai    ON ai.id = cl.arc_item_id
+        WHERE cl.id = $1`,
+      [lineId]
+    );
+  },
+
   addItem: async (mrId, data, txContext = null) => {
     const runner = txContext || db;
     return runner.one(
@@ -375,7 +402,7 @@ const mrModel = {
               pv.slug          AS variant_slug,
               uvend.name       AS vendor_name
          FROM tbl_arc_contract_line cl
-         JOIN tbl_arc_contract c    ON c.id = cl.arc_contract_id AND c.status = 'active'
+         JOIN tbl_arc_contract c    ON c.id = cl.arc_contract_id AND c.status IN ('active','expiring_soon')
          JOIN tbl_arc a             ON a.id = c.arc_id AND a.hotel_id = $1 AND a.department_id = $2
          JOIN tbl_arc_item ai       ON ai.id = cl.arc_item_id
          JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id

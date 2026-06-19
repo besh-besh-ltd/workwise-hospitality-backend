@@ -3081,13 +3081,15 @@ ALTER SEQUENCE public.tbl_purchase_order_hsn_mapping_id_seq OWNED BY public.tbl_
 CREATE TABLE public.tbl_purchase_order_product (
     id integer NOT NULL,
     purchase_order_id bigint NOT NULL,
-    rfq_product_id bigint NOT NULL,
-    quote_id bigint NOT NULL,
+    rfq_product_id bigint,
+    quote_id bigint,
     quantity numeric NOT NULL,
     unit character varying(99) NOT NULL,
     unit_price numeric NOT NULL,
     charges_meta jsonb,
-    total_price numeric NOT NULL
+    total_price numeric NOT NULL,
+    product_variant_id integer,
+    arc_contract_line_id bigint
 );
 
 

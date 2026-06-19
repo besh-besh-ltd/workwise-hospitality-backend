@@ -2,6 +2,8 @@ import db from '../config/dbConn.js';
 import { logger } from '../util/logger.js';
 import { resolveCurrentPrice } from './arcPricingResolver.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
+import { dispatch as dispatchNotification } from './notificationService.js';
+import { sendMail } from '../helper/common.js';
 
 /**
  * Call-off PO Service
@@ -70,6 +72,13 @@ async function buildCallOffBuckets(mrId, txContext) {
   const today = new Date();
   const itemsWithPricing = await Promise.all(items.map(async (it) => {
     const pricing = await resolveCurrentPrice(it.arc_contract_line_id, today, txContext);
+    // Price floor (audit CO13): never mint a ₹0/negative-rate call-off — that
+    // signals a misconfigured contract line. Abort the release loudly instead.
+    if (!(Number(pricing.unit_rate) > 0)) {
+      const e = new Error(`Contract line ${it.arc_contract_line_id} has an invalid unit rate (${pricing.unit_rate}) — cannot release a call-off`);
+      e.code = 'INVALID_PRICE';
+      throw e;
+    }
     const lineValue = Number(pricing.unit_rate) * Number(it.quantity);
     return { ...it, pricing, lineValue };
   }));
@@ -101,8 +110,10 @@ async function buildCallOffBuckets(mrId, txContext) {
  * Insert the call-off PO header and return the new PO row.
  *
  * Relies on migration 8 having added (arc_contract_id, source_mr_id,
- * is_call_off) columns. Sets status to 'approved' directly — call-off POs are
- * born approved (the MR approval was the gate).
+ * is_call_off) columns. Born in 'acceptance_pending' — the MR approval gates
+ * RELEASE, but the vendor must still accept the call-off PO (audit decision);
+ * acceptance flips it to 'approved', rejection reverses consumption + reopens
+ * the MR (handleCallOffRejection).
  *
  * NOTE: the existing tbl_rfq_purchase_order has several NOT-NULL columns
  * scoped to the RFQ flow (rfq_id, rfq_product_id, finalized_vendor_id,
@@ -139,7 +150,7 @@ async function insertCallOffPoHeader(group, mrId, txContext) {
         total_value, quote_id, initiated_by, created_at, updated_at,
         arc_contract_id, source_mr_id, is_call_off)
      VALUES
-       (NULL, NULL, $1, $2, 'approved'::public.po_status,
+       (NULL, NULL, $1, $2, 'acceptance_pending'::public.po_status,
         '{}'::integer[], $3, $4, $5,
         $6, '{}'::integer[], $7, NOW(), NOW(),
         $8, $9, TRUE)
@@ -149,7 +160,9 @@ async function insertCallOffPoHeader(group, mrId, txContext) {
       // with regular POs; fall back to hospitality_company_id only if a hosp
       // company somehow has no buyer_company_id mapping.
       group.buyer_company_id || group.hospitality_company_id,
-      `CO-${Date.now()}-${group.arc_contract_id}`,
+      // Wide suffix avoids same-millisecond collisions on the same contract
+      // (audit CO14); po_number is not UNIQUE-constrained so we must not collide.
+      `CO-${Date.now().toString(36).toUpperCase()}-${group.arc_contract_id}-${Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0')}`,
       totalQty,
       firstLineRate,
       group.vendor_id,
@@ -160,6 +173,26 @@ async function insertCallOffPoHeader(group, mrId, txContext) {
     ]
   );
   return po;
+}
+
+/**
+ * Write tbl_purchase_order_product line rows so a call-off PO carries first-class
+ * line items (audit CO7) readable by the same detail/GRN/invoice paths as RFQ
+ * POs. rfq_product_id/quote_id are NULL; product_variant_id + arc_contract_line_id
+ * identify the line (relaxed by migration 20260618110000).
+ */
+async function writeCallOffPoLines(po, group, txContext) {
+  const runner = txContext || db;
+  for (const it of group.items) {
+    await runner.none(
+      `INSERT INTO tbl_purchase_order_product
+         (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price,
+          charges_meta, total_price, product_variant_id, arc_contract_line_id)
+       VALUES ($1, NULL, NULL, $2, $3, $4, NULL, $5, $6, $7)`,
+      [po.id, it.quantity, it.uom || null, Number(it.pricing.unit_rate),
+       it.lineValue, it.product_variant_id, it.arc_contract_line_id]
+    );
+  }
 }
 
 /**
@@ -184,13 +217,23 @@ async function recordCallOffAndUpdateConsumption(po, group, txContext) {
         it.pricing.unit_rate,
       ]
     );
-    await runner.none(
+    // Atomic over-consumption guard (audit CO4): only increment if it stays
+    // within the committed quantity. rowCount 0 => the draw would exceed the
+    // contract cap (e.g. a concurrent MR consumed the remainder since submit) —
+    // abort the whole release so nothing is over-drawn.
+    const updRes = await runner.result(
       `UPDATE tbl_arc_contract_line
          SET consumed_qty = consumed_qty + $1,
              updated_at   = NOW()
-       WHERE id = $2`,
+       WHERE id = $2
+         AND consumed_qty + $1 <= committed_qty`,
       [it.quantity, it.arc_contract_line_id]
     );
+    if (updRes.rowCount === 0) {
+      const e = new Error(`Call-off would exceed the contracted quantity on contract line ${it.arc_contract_line_id}`);
+      e.code = 'OVER_CONSUMPTION';
+      throw e;
+    }
   }
 }
 
@@ -212,6 +255,7 @@ export async function releaseForMr(mrId, txContext = null) {
   const released = [];
   for (const group of buckets) {
     const po = await insertCallOffPoHeader(group, mrId, runner);
+    await writeCallOffPoLines(po, group, runner);
     await recordCallOffAndUpdateConsumption(po, group, runner);
     released.push({ po, group });
 
@@ -252,6 +296,9 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
     return { handled: false, reason: 'not_a_call_off_po' };
   }
   const mrId = links[0].mr_id;
+  const mr = await runner.oneOrNone(
+    `SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId]
+  );
   const arcId = (await runner.oneOrNone(
     `SELECT c.arc_id FROM tbl_arc_callof_po cp
        JOIN tbl_arc_contract c ON c.id = cp.arc_contract_id
@@ -282,5 +329,44 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
       txContext: runner,
     });
   }
-  return { handled: true, mr_id: mrId, reverted_lines: links.length };
+  return {
+    handled: true,
+    mr_id: mrId,
+    raised_by: mr?.raised_by || null,
+    mr_number: mr?.mr_number || null,
+    reverted_lines: links.length,
+  };
+}
+
+/**
+ * Notify the MR raiser that a vendor rejected their call-off PO (audit CO9).
+ * Post-commit + best-effort — in-app via notificationService + email. The
+ * RFQ-side sendVendorRejectionNotification is skipped for call-offs (it targets
+ * commercial evaluators, which a call-off has none of).
+ */
+export async function notifyCallOffRejected({ raisedBy, mrNumber, poNumber, reason }) {
+  if (!raisedBy) return;
+  try {
+    await dispatchNotification({
+      userIds: [Number(raisedBy)],
+      category: 'CALL_OFF',
+      type: 'CALL_OFF_REJECTED',
+      title: 'Call-off PO rejected by vendor',
+      body: `The vendor rejected call-off PO ${poNumber || ''} (from requisition ${mrNumber || ''})${reason ? `: ${reason}` : ''}. The contract quantity has been released back.`,
+      data: { mr_number: mrNumber, po_number: poNumber, reason: reason || null },
+      actionUrl: '/dashboard/buyer/material-requisitions',
+    });
+  } catch (err) {
+    logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] in-app notify failed');
+  }
+  const raiser = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [raisedBy]);
+  if (raiser?.email) {
+    sendMail({
+      to: raiser.email,
+      subject: `Call-off PO ${poNumber || ''} rejected by vendor`,
+      html: `<p>Hello ${raiser.name || ''},</p>
+             <p>The vendor has <strong>rejected</strong> call-off purchase order <strong>${poNumber || ''}</strong> raised from requisition <strong>${mrNumber || ''}</strong>${reason ? ` with the reason: <em>${reason}</em>` : ''}.</p>
+             <p>The contracted quantity has been released back to the rate contract. You may raise a fresh requisition if the materials are still required.</p>`,
+    }).catch((err) => logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] email failed'));
+  }
 }
