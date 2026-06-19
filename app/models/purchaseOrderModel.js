@@ -30,15 +30,22 @@ const resolvePoPdfVisibility = (status, url) => {
 };
 
 const getNextPONumber = async () => {
-  return new Promise(async function (resolve, reject) {
-    const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
-    const response = await db.oneOrNone(query);
-    if (response) {
-      resolve(parseInt(response.po_number) + 1);
-    } else {
-      resolve(Math.floor(100000 + Math.random() * 900000));
-    }
-  });
+  // Next sequential number = (max existing NUMERIC po_number) + 1. We must
+  // ignore non-numeric po_numbers — legacy/seeded values like
+  // "PO-STG-2095943-228-8-2" — and pick the MAX rather than the latest row by
+  // created_at. The previous version took `ORDER BY created_at DESC LIMIT 1`
+  // and did `parseInt(po_number) + 1`, which produced the string "NaN" whenever
+  // the most recent PO happened to carry a non-numeric number.
+  const row = await db.oneOrNone(
+    `SELECT MAX(po_number::bigint) AS maxnum
+       FROM tbl_rfq_purchase_order
+      WHERE po_number ~ '^[0-9]+$'`
+  );
+  if (row && row.maxnum != null) {
+    return Number(row.maxnum) + 1;
+  }
+  // No numeric PO numbers yet — seed with a random 6-digit base.
+  return Math.floor(100000 + Math.random() * 900000);
 };
 
 const getItemTotalWOFreight = (item) => {
@@ -292,14 +299,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         else if (typeof rawGc === 'string' && rawGc.trim()) {
           try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
         }
-        let gcTotal = 0;
-        for (const gc of snapshotGlobals) {
-          const norm = pricingEngine.normalizeGlobalCharge(gc);
-          if (!norm) continue;
-          gcTotal += pricingEngine.applyChargeMode(
-            norm.amount, norm.amount_mode, lineSubtotal
-          );
-        }
+        // Includes each charge's additional_tax (e.g. GST on TCS). Delegating to
+        // the engine keeps this in lock-step with calculateDocumentTotals —
+        // previously this hand-rolled loop applied only norm.amount and dropped
+        // additional_tax, so merged (multi-product) POs undercounted total_value.
+        const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
         // Quantise to 2dp, matching pricingEngine.calculateDocumentTotals
         // (which is what the new-PO branch uses). Keeping rounding consistent
         // across the new-PO path and the merge path means the stored
@@ -533,12 +537,9 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     else if (typeof rawGc === 'string' && rawGc.trim()) {
       try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
     }
-    let gcTotal = 0;
-    for (const gc of snapshotGlobals) {
-      const norm = pricingEngine.normalizeGlobalCharge(gc);
-      if (!norm) continue;
-      gcTotal += pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, lineSubtotal);
-    }
+    // Includes each charge's additional_tax — same engine helper as the
+    // draft-merge branch, so a kept PO's recomputed total can't drift either.
+    const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
     const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
 
     // Refresh derived header columns from the current line set. quote_id /
