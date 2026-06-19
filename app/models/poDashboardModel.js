@@ -633,7 +633,15 @@ export async function getPODetailFull(po_id, scope) {
   const values = [poId];
   let scopeClause;
   let i = 2;
-  if (scope.hospitalityCompanyId) {
+  if (scope.vendorId) {
+    // Vendor-scoped read (GET /po/vendor/detail/:po_id): the buyer company gate
+    // does NOT apply — the vendor authenticates against their OWN PO. We skip the
+    // company/hospitality filter here (TRUE keeps the SQL valid + param indexing
+    // intact) and instead require po.finalized_vendor_id === scope.vendorId after
+    // the row loads (see the guard below), returning null on mismatch so the
+    // controller 404s without leaking the existence of another vendor's PO.
+    scopeClause = "TRUE";
+  } else if (scope.hospitalityCompanyId) {
     scopeClause = `COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) = $${i++}`;
     values.push(scope.hospitalityCompanyId);
     if (scope.hotelIds && scope.hotelIds.length > 0) {
@@ -688,6 +696,10 @@ export async function getPODetailFull(po_id, scope) {
   );
 
   if (!po) return null;
+
+  // Vendor-scope authorization guard: a vendor may only read POs whose
+  // finalized_vendor_id is themselves. Mismatch → null (controller 404s).
+  if (scope.vendorId && Number(po.finalized_vendor_id) !== Number(scope.vendorId)) return null;
 
   // Items. Call-off POs hold their lines in tbl_arc_callof_po (no
   // tbl_purchase_order_product rows); regular POs use the RFQ product join.
@@ -843,13 +855,18 @@ export async function getPODetailFull(po_id, scope) {
     if (info) {
       current_step_label = info.step_label;
       current_approvers = info.approvers;
+      // scope.userId is intentionally absent on the vendor path, so awaiting_me is
+      // always false for vendors (correct — vendors aren't approval participants).
       awaiting_me = info.approvers.some((a) => a.user_id === scope.userId);
     }
   }
 
   // Commercial comparison + technical evaluation are RFQ-sourced. Call-off POs
   // have no RFQ (their award came from the ARC); skip these cleanly.
-  const comparison = po.is_call_off ? [] : await buildComparison(po);
+  // Confidentiality: buildComparison returns EVERY competing vendor's quote
+  // amounts, so on the vendor path (scope.vendorId set) we must NOT expose it —
+  // gate to [] to avoid leaking competitors' prices to the vendor.
+  const comparison = po.is_call_off || scope.vendorId ? [] : await buildComparison(po);
 
   // Technical evaluation: per PO product, the finalized vendor's clause-wise
   // marks, the percentage they scored, and who approved the evaluation.
@@ -1101,8 +1118,12 @@ async function buildAuditTrail(po, docRows = []) {
   // ---- 3) Vendor + logistics lifecycle ----
   const invoiceDoc = docRows.find((d) => d.document_type === "invoice");
   const grnDoc = docRows.find((d) => d.document_type === "grn");
-  const sentDone = ["sent", "acceptance_pending", "invoice_raised", "dispatched", "GRN", "completed"].includes(status) || !!po.vendor_action_at;
-  const vendorActed = !!po.vendor_action_at || ["invoice_raised", "dispatched", "GRN", "completed"].includes(status) || isRejectedVendor;
+  // 'approved' = the vendor has accepted (acceptPO flips acceptance_pending→approved,
+  // and call-offs reach 'approved' only via acceptance) — so an accepted PO must
+  // mark both "Sent" and "Vendor accepted" as done even when vendor_action_at is
+  // absent on legacy/seeded rows.
+  const sentDone = ["sent", "acceptance_pending", "approved", "invoice_raised", "dispatched", "GRN", "completed"].includes(status) || !!po.vendor_action_at;
+  const vendorActed = !!po.vendor_action_at || ["approved", "invoice_raised", "dispatched", "GRN", "completed"].includes(status) || isRejectedVendor;
   const dispatchedDone = ["dispatched", "GRN", "completed"].includes(status);
   const grnDone = !!grnDoc || ["GRN", "completed"].includes(status);
   const invoiceDone = !!invoiceDoc || status === "invoice_raised";

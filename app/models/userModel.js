@@ -1100,6 +1100,63 @@ user_book_demo: async (mobile) => {
   },
 
 
+  /**
+   * Buyer-facing engagement metrics for a vendor — how much business the
+   * requesting buyer's organisation has actually done with them. Combines the
+   * RFQ side (the buyer's own RFQs) and the ARC / rate-contract side (scoped to
+   * the buyer's hospitality companies), so the figures reflect THIS buyer's
+   * history, never another tenant's.
+   *
+   * @param vendorId      the vendor being viewed
+   * @param buyerUserId   req.user.id — scopes the RFQ side
+   * @param companyIds    number[] of the buyer's hospitality companies, or null
+   *                      for super admins (no company filter on the ARC side)
+   */
+  getVendorEngagementStats: async (vendorId, buyerUserId, companyIds) => {
+    const scopeArc = Array.isArray(companyIds);
+    // Empty scope array = no ARC access → match nothing (don't widen to all).
+    const arcCond = scopeArc ? `AND a.hospitality_company_id = ANY($3::int[])` : ``;
+    const args = scopeArc ? [vendorId, buyerUserId, companyIds] : [vendorId, buyerUserId];
+    const row = await db.one(
+      `SELECT
+         (SELECT COUNT(DISTINCT q.rfq_id)
+            FROM tbl_quotes q JOIN tbl_rfq r ON r.id = q.rfq_id
+           WHERE q.created_by = $1 AND r.created_by = $2)                       AS rfq_participated,
+         (SELECT COUNT(DISTINCT aq.arc_id)
+            FROM tbl_arc_quote aq JOIN tbl_arc a ON a.id = aq.arc_id
+           WHERE aq.vendor_id = $1 ${arcCond})                                  AS arc_participated,
+         (SELECT COUNT(DISTINCT f.rfq_id)
+            FROM tbl_quote_finalization f JOIN tbl_rfq r ON r.id = f.rfq_id
+           WHERE f.vendor_id = $1 AND r.created_by = $2)                        AS rfq_awarded,
+         (SELECT COUNT(*)
+            FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id
+           WHERE c.vendor_id = $1 ${arcCond})                                   AS arc_contracts,
+         (SELECT COUNT(*)
+            FROM tbl_arc_callof_po cp
+            JOIN tbl_arc_contract c ON c.id = cp.arc_contract_id
+            JOIN tbl_arc a ON a.id = c.arc_id
+           WHERE c.vendor_id = $1 ${arcCond})                                   AS released_pos,
+         (SELECT COALESCE(SUM(cl.unit_rate * cl.committed_qty), 0)
+            FROM tbl_arc_contract_line cl
+            JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
+            JOIN tbl_arc a ON a.id = c.arc_id
+           WHERE c.vendor_id = $1 ${arcCond})                                   AS committed_value,
+         (SELECT COALESCE(SUM(cl.unit_rate * cl.consumed_qty), 0)
+            FROM tbl_arc_contract_line cl
+            JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
+            JOIN tbl_arc a ON a.id = c.arc_id
+           WHERE c.vendor_id = $1 ${arcCond})                                   AS consumed_value`,
+      args
+    );
+    return {
+      rfqs_participated: Number(row.rfq_participated) + Number(row.arc_participated),
+      contracts_awarded: Number(row.rfq_awarded) + Number(row.arc_contracts),
+      pos_released: Number(row.released_pos),
+      total_value: Number(row.committed_value),
+      consumed_value: Number(row.consumed_value),
+    };
+  },
+
   update_change_password_status: async (user_id, password) => {
     return new Promise(function (resolve, reject) {
       db.any(

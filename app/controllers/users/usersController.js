@@ -1,4 +1,5 @@
 import userModel from '../../models/userModel.js';
+import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import notificationModel from '../../models/notificationModel.js';
 import Config from '../../config/app.config.js';
 import {
@@ -3148,6 +3149,26 @@ publish_profile_reviews: async (req, res, next) => {
     }
   },
 
+
+  // Engagement metrics for the buyer-facing vendor dossier (RFQs participated,
+  // contracts awarded, POs released, business value) — scoped to the requesting
+  // buyer's own RFQs + hospitality companies so it never exposes other tenants'
+  // dealings with the vendor.
+  vendor_engagement: async (req, res, next) => {
+    try {
+      const vendorId = Number(req.params.vendor_id);
+      const buyerUserId = req.user?.id;
+      if (!vendorId || !buyerUserId) {
+        return res.status(400).json({ status: 2, message: 'Invalid request' }).end();
+      }
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const stats = await userModel.getVendorEngagementStats(vendorId, buyerUserId, companyIds);
+      return res.status(200).json({ status: 1, data: stats }).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
 
   hospitalitySubscriptionPayment: async (req, res, next) => {
     try {

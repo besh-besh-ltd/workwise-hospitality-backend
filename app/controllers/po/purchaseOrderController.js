@@ -958,11 +958,13 @@ export const acceptPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 
@@ -1043,11 +1045,13 @@ export const rejectPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 

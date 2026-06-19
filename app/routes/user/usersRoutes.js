@@ -390,6 +390,11 @@ UsersRoutes.get(
   noLogin.customer_auth,
   UsersController.vendor_profile
 );
+UsersRoutes.get(
+  '/vendor-profile/:vendor_id/engagement',
+  noLogin.customer_auth,
+  UsersController.vendor_engagement
+);
 UsersRoutes.post(
   '/create-vendor-review',
   passportSignIn,

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics } from "../../controllers/po/poDashboardController.js";
+import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf } from "../../controllers/po/poVendorController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
@@ -24,6 +25,17 @@ PORoutes.get('/awaiting', passportSignIn, noAcl([3]), awaitingPOs);
 PORoutes.get('/tracking', passportSignIn, noAcl([3]), tracking);
 PORoutes.get('/analytics', passportSignIn, noAcl([3]), analytics);
 PORoutes.get('/detail/:po_id', passportSignIn, noAcl([3]), poDetailFull);
+
+// ---------------------------------------------------------------------------
+// Vendor-facing PO endpoints (vendors only — acl([3])). Registered BEFORE the
+// dynamic `/:po_id` route so the static `/vendor/*` paths are not swallowed.
+// Scope is the authenticated vendor's id (finalized_vendor_id) derived from
+// req.user inside the controller — never from body/query.
+// ---------------------------------------------------------------------------
+PORoutes.get('/vendor/dashboard', passportSignIn, acl([3]), vendorDashboard);
+PORoutes.post('/vendor/list-view', passportSignIn, acl([3]), vendorListView);
+PORoutes.get('/vendor/detail/:po_id', passportSignIn, acl([3]), vendorPoDetail);
+PORoutes.get('/vendor/detail/:po_id/pdf', passportSignIn, acl([3]), vendorPoPdf);
 
 PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
