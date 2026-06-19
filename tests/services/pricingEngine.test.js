@@ -10,6 +10,7 @@ import {
   proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
+  sumGlobalCharges,
   applyPaymentTermNormalization,
   fillMissingChargesFromPeers,
   computeComparisonBands,
@@ -437,6 +438,32 @@ describe("pricingEngine.calculateDocumentTotals", () => {
     expect(out.grand_total).toBe(0);
     expect(out.lines).toEqual([]);
     expect(out.global_charges).toEqual([]);
+  });
+});
+
+describe("pricingEngine.sumGlobalCharges", () => {
+  it("includes each charge's additional_tax (regression: PO merge dropped it)", () => {
+    // Mirrors the real quote that surfaced the bug: TCS 10% of the subtotal
+    // PLUS a flat ₹150 additional tax. Subtotal 33,571 → 3,357.10 + 150.
+    const globals = [
+      { name: "TCS", tax: 10, tax_mode: "percentage", additional_tax: 150, additional_tax_mode: "absolute" },
+    ];
+    expect(sumGlobalCharges(globals, 33571)).toBeCloseTo(3507.1, 2);
+  });
+
+  it("matches calculateDocumentTotals' global_charges_total for the same subtotal", () => {
+    const globals = [
+      { name: "TCS", amount: 2, amount_mode: "percentage", additional_tax: 18, additional_tax_mode: "percentage" },
+      { name: "Doc fee", amount: 500, amount_mode: "absolute" },
+    ];
+    const doc = calculateDocumentTotals([{ unit_price: 100, quantity: 100, tax: 0 }], globals);
+    // calculateDocumentTotals q2's its total; the raw helper should agree to 2dp.
+    expect(sumGlobalCharges(globals, doc.grand_subtotal)).toBeCloseTo(doc.global_charges_total, 2);
+  });
+
+  it("returns 0 for no charges", () => {
+    expect(sumGlobalCharges([], 1000)).toBe(0);
+    expect(sumGlobalCharges(undefined, 1000)).toBe(0);
   });
 });
 

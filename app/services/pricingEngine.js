@@ -242,6 +242,25 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
   };
 };
 
+// Document-level global charges total for a *known* line subtotal — the same
+// per-charge math calculateDocumentTotals applies (charge amount on the
+// subtotal, PLUS the charge's additional_tax on that amount), summed raw.
+// Callers that already have a subtotal (e.g. the PO multi-line merge path)
+// MUST use this instead of hand-rolling the loop, so they can never drift from
+// the engine by, say, forgetting additional_tax. Returns the raw (un-q2'd)
+// total — quantise at the caller's own boundary.
+export const sumGlobalCharges = (globalCharges = [], subtotal = 0) => {
+  let total = 0;
+  for (const gc of globalCharges || []) {
+    const norm = normalizeGlobalCharge(gc);
+    if (!norm) continue;
+    const amount = applyChargeMode(norm.amount, norm.amount_mode, subtotal);
+    const additionalTax = applyChargeMode(norm.additional_tax, norm.additional_tax_mode, amount);
+    total += amount + additionalTax;
+  }
+  return total;
+};
+
 // Quote-compare's "normalize" filter applies a payment-term factor to the
 // total, simulating the cost-of-money for advance/credit terms so vendors with
 // different payment terms can be compared apples-to-apples.
@@ -560,6 +579,7 @@ export default {
   proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
+  sumGlobalCharges,
   applyPaymentTermNormalization,
   fillMissingChargesFromPeers,
   computeComparisonBands,

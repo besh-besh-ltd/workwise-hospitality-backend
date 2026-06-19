@@ -17,6 +17,7 @@
 
 import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
+import pricingEngine from "../services/pricingEngine.js";
 
 // ---------------------------------------------------------------------------
 // Status bucket mapping (UI bucket -> raw po_status enum value[])
@@ -689,7 +690,23 @@ export async function getPODetailFull(po_id, scope) {
       )
     : await db.any(
         `SELECT pv.name AS name,
-                rp.comment AS spec,
+                rp.comment AS buyer_comment,
+                (
+                  SELECT s.value FROM tbl_rfq_products_specs s
+                  WHERE s.product_variant_id = rp.product_variant_id
+                    AND s.rfq_id = rp.rfq_id
+                    AND s.variant = rp.variant
+                    AND LOWER(s.title) = 'size'
+                  LIMIT 1
+                ) AS product_size,
+                (
+                  SELECT s.value FROM tbl_rfq_products_specs s
+                  WHERE s.product_variant_id = rp.product_variant_id
+                    AND s.rfq_id = rp.rfq_id
+                    AND s.variant = rp.variant
+                    AND LOWER(s.title) = 'spec'
+                  LIMIT 1
+                ) AS product_spec,
                 pop.quantity, pop.unit, pop.unit_price, pop.total_price,
                 pop.charges_meta, NULL AS gst_pct,
                 (
@@ -711,7 +728,9 @@ export async function getPODetailFull(po_id, scope) {
     const gst = it.gst_pct != null ? Number(it.gst_pct) : (cm.tax != null ? Number(cm.tax) : null);
     return {
       name: it.name,
-      spec: it.spec || null,
+      size: it.product_size || null,
+      spec: it.product_spec || null,
+      comment: it.buyer_comment || null,
       hsn: it.hsn || null,
       quantity: Number(it.quantity) || 0,
       unit: it.unit || null,
@@ -1141,44 +1160,77 @@ async function buildAuditTrail(po, docRows = []) {
 
 // Commercial comparison across all participating vendors on this RFQ.
 async function buildComparison(po) {
+  // One row per quote (not per vendor) so we can apply each quote's own
+  // document-level global charges (TCS/TDS, incl. their additional_tax) on that
+  // quote's line subtotal — the "Quoted" figure must equal the vendor's grand
+  // total (and the PO total_value), not just the sum of line totals.
   const rows = await db.any(
-    `SELECT q.created_by AS vendor_id,
+    `SELECT q.id AS quote_id, q.created_by AS vendor_id,
             COALESCE(VC.company_name, U.organization_name, U.name) AS vendor_name,
-            U.organization_name, VC.gstin,
-            SUM(qi.total_price)::numeric AS amount,
+            U.organization_name, VC.gstin, q.global_charges,
+            SUM(qi.total_price)::numeric AS subtotal,
             MAX(qi.delivery_period) AS delivery_period
      FROM tbl_quotes q
      JOIN tbl_quote_items qi ON qi.quote_id = q.id
      JOIN tbl_users U ON U.id = q.created_by
      LEFT JOIN tbl_company VC ON VC.id = U.company_id
      WHERE q.rfq_id = $1 AND q.is_regret = 0
-     GROUP BY q.created_by, vendor_name, U.organization_name, VC.gstin`,
+     GROUP BY q.id, q.created_by, vendor_name, U.organization_name, VC.gstin, q.global_charges`,
     [po.rfq_id]
   );
 
   if (rows.length === 0) return [];
 
+  // Roll quotes up per vendor, adding the global-charge total per quote.
+  const byVendor = new Map();
+  for (const r of rows) {
+    const subtotal = Number(r.subtotal) || 0;
+    let globals = [];
+    const raw = r.global_charges;
+    if (Array.isArray(raw)) globals = raw;
+    else if (typeof raw === "string" && raw.trim()) {
+      try { globals = JSON.parse(raw); } catch (_e) { globals = []; }
+    }
+    const grand = subtotal + pricingEngine.sumGlobalCharges(globals, subtotal);
+    const deliveryDays = parseInt(r.delivery_period, 10);
+    const existing = byVendor.get(r.vendor_id);
+    if (existing) {
+      existing.amount += grand;
+      if (!Number.isNaN(deliveryDays)) {
+        existing.delivery_days = Math.max(existing.delivery_days ?? 0, deliveryDays);
+      }
+    } else {
+      byVendor.set(r.vendor_id, {
+        vendor_id: r.vendor_id,
+        vendor_name: r.vendor_name,
+        gstin: r.gstin,
+        amount: grand,
+        delivery_days: Number.isNaN(deliveryDays) ? null : deliveryDays,
+      });
+    }
+  }
+
+  const vendors = Array.from(byVendor.values());
   const winnerAmount = (() => {
-    const winner = rows.find((r) => r.vendor_id === po.finalized_vendor_id);
+    const winner = vendors.find((v) => v.vendor_id === po.finalized_vendor_id);
     return winner ? Number(winner.amount) : null;
   })();
 
-  return rows.map((r) => {
-    const amount = Number(r.amount) || 0;
-    const isWinner = r.vendor_id === po.finalized_vendor_id;
+  return vendors.map((v) => {
+    const amount = Math.round((Number(v.amount) || 0) * 100) / 100;
+    const isWinner = v.vendor_id === po.finalized_vendor_id;
     let deltaPct = null;
     if (winnerAmount != null && winnerAmount > 0 && !isWinner) {
       deltaPct = Math.round(((amount - winnerAmount) / winnerAmount) * 100);
     } else if (isWinner) {
       deltaPct = 0;
     }
-    const deliveryDays = parseInt(r.delivery_period, 10);
     return {
-      vendor: r.vendor_name || "Unknown",
-      short: initialsOf(r.vendor_name),
+      vendor: v.vendor_name || "Unknown",
+      short: initialsOf(v.vendor_name),
       amount,
-      delivery_days: Number.isNaN(deliveryDays) ? null : deliveryDays,
-      gstin: r.gstin || null,
+      delivery_days: v.delivery_days,
+      gstin: v.gstin || null,
       is_winner: isWinner,
       delta_pct: deltaPct,
     };
