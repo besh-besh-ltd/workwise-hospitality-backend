@@ -885,6 +885,129 @@ export async function getPODetailFull(po_id, scope) {
     ? await db.oneOrNone(`SELECT name FROM tbl_users WHERE id = $1`, [po.rfq_created_by])
     : null;
 
+  // --- RFQ buyer docs + vendor quote docs ---
+  // Only available for RFQ-sourced POs (call-off POs have no rfq_id).
+  let rfq_docs = null;
+  let vendor_docs = null;
+
+  if (po.rfq_id) {
+    const FILE_LABEL = {
+      TDS: "TDS",
+      QAP: "QAP",
+      SPEC: "Spec",
+      term_and_condition: "T&C",
+      DOC: "Document",
+    };
+    const toLabel = (type) => FILE_LABEL[type] || type || "File";
+
+    const [rfqLevelRows, rfqProductRows, buyerClauseFileRows, vendorProductDocRows, vendorEvalRows] = await Promise.all([
+      // Buyer: RFQ-level T&C files
+      db.any(
+        `SELECT file_url AS url, file_type
+         FROM tbl_rfq_files
+         WHERE rfq_id = $1
+         ORDER BY id ASC`,
+        [po.rfq_id]
+      ),
+      // Buyer: per-product TDS / QAP / SPEC files
+      db.any(
+        `SELECT rpf.file_url AS url, rpf.file_type, pv.name AS product_name
+         FROM tbl_rfq_product_files rpf
+         JOIN tbl_rfq_products rp ON rp.id = rpf.rfq_product_id
+         JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE rp.rfq_id = $1
+         ORDER BY rp.id, rpf.id`,
+        [po.rfq_id]
+      ),
+      // Buyer: per-product tech-eval clause files
+      db.any(
+        `SELECT f.file_url AS url, pv.name AS product_name
+         FROM tbl_rfq_product_tech_evaluation_clauses_files f
+         JOIN tbl_rfq_product_tech_evaluation_clauses c
+              ON c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+         JOIN tbl_rfq_product_tech_evaluation te
+              ON te.id = c.tbl_rfq_product_tech_evaluation_id
+         JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+         JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE rp.rfq_id = $1
+         ORDER BY rp.id, f.id`,
+        [po.rfq_id]
+      ),
+      // Vendor: per-product quote item files
+      db.any(
+        `SELECT qif.file_url AS url, qif.file_type, pv.name AS product_name
+         FROM tbl_quote_item_files qif
+         JOIN tbl_quote_items qi ON qi.id = qif.quote_item_id
+         JOIN tbl_purchase_order_product pop
+              ON pop.quote_id = qi.id AND pop.purchase_order_id = $1
+         JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+         JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         ORDER BY rp.id, qif.id`,
+        [poId]
+      ),
+      // Vendor: tech-eval clause response files
+      db.any(
+        `SELECT f.file_url AS url, pv.name AS product_name
+         FROM tbl_rfq_product_tech_evaluation_vendors_response_files f
+         JOIN tbl_rfq_product_tech_evaluation_vendors_response r
+              ON r.id = f.tbl_rfq_product_tech_evaluation_vendors_response_id
+         JOIN tbl_rfq_product_tech_evaluation_clauses c
+              ON c.id = r.tbl_rfq_product_tech_evaluation_clauses_id
+         JOIN tbl_rfq_product_tech_evaluation te
+              ON te.id = c.tbl_rfq_product_tech_evaluation_id
+         JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+         JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE r.vendor_id = $2 AND rp.rfq_id = $1
+         ORDER BY rp.id, f.id`,
+        [po.rfq_id, po.finalized_vendor_id]
+      ),
+    ]);
+
+    // Vendor: quote-level T&C files (po.quote_id is an integer array)
+    const quoteIds = Array.isArray(po.quote_id) ? po.quote_id.filter(Boolean) : [];
+    const vendorQuoteLevelRows = quoteIds.length > 0
+      ? await db.any(
+          `SELECT file_url AS url, file_type
+           FROM tbl_quotes_files
+           WHERE quote_id = ANY($1::int[])
+           ORDER BY id ASC`,
+          [quoteIds]
+        )
+      : [];
+
+    // Merge buyer per-product files (TDS/QAP/SPEC) + clause files
+    const buyerProductMap = new Map();
+    for (const row of rfqProductRows) {
+      if (!buyerProductMap.has(row.product_name)) buyerProductMap.set(row.product_name, []);
+      buyerProductMap.get(row.product_name).push({ url: row.url, label: toLabel(row.file_type) });
+    }
+    for (const row of buyerClauseFileRows) {
+      if (!buyerProductMap.has(row.product_name)) buyerProductMap.set(row.product_name, []);
+      buyerProductMap.get(row.product_name).push({ url: row.url, label: "Clause doc" });
+    }
+
+    rfq_docs = {
+      rfq_level: rfqLevelRows.map((r) => ({ url: r.url, label: toLabel(r.file_type) })),
+      products: Array.from(buyerProductMap.entries()).map(([name, files]) => ({ name, files })),
+    };
+
+    // Merge vendor per-product docs + eval response files
+    const vendorProdMap = new Map();
+    for (const row of vendorProductDocRows) {
+      if (!vendorProdMap.has(row.product_name)) vendorProdMap.set(row.product_name, []);
+      vendorProdMap.get(row.product_name).push({ url: row.url, label: toLabel(row.file_type) });
+    }
+    for (const row of vendorEvalRows) {
+      if (!vendorProdMap.has(row.product_name)) vendorProdMap.set(row.product_name, []);
+      vendorProdMap.get(row.product_name).push({ url: row.url, label: "Eval response" });
+    }
+
+    vendor_docs = {
+      quote_level: vendorQuoteLevelRows.map((r) => ({ url: r.url, label: toLabel(r.file_type) })),
+      products: Array.from(vendorProdMap.entries()).map(([name, files]) => ({ name, files })),
+    };
+  }
+
   return {
     id: po.id,
     po_number: po.po_number,
@@ -949,6 +1072,8 @@ export async function getPODetailFull(po_id, scope) {
     awaiting_me,
     current_step_label,
     current_approvers,
+    rfq_docs,
+    vendor_docs,
   };
 }
 
