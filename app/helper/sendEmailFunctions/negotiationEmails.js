@@ -299,60 +299,10 @@ const productNamesById = (round) => {
   return map;
 };
 
-/**
- * Build per-vendor negotiation fields HTML block for buyer-side emails.
- * Each vendor gets a card showing `<vendor quoted> → <target>` per field.
- *
- * @param {Array} vendorApprovals - from round.vendor_approvals
- * @param {Object} vendorsLookup  - { [vendorId]: vendorName }
- * @param {Object} vendorQuotes   - { [vendorId]: quoteItemRow } from tbl_quote_items
- */
-const buildVendorTargetsHtml = (vendorApprovals = [], vendorsLookup = {}, vendorQuotes = {}, chargeLabels = {}, round = null) => {
-  if (!Array.isArray(vendorApprovals) || vendorApprovals.length === 0) return '';
-
-  // Multi-product rounds: fields live in round.products[].vendor_targets —
-  // render one sub-block per covered product (plus "RFQ-level terms").
-  const isMulti = Array.isArray(round?.products) && round.products.length > 0;
-  const nameById = isMulti ? productNamesById(round) : {};
-
-  const sections = vendorApprovals.map(va => {
-    const vendorName = vendorsLookup[va.vendor_id] || `Vendor #${va.vendor_id}`;
-
-    let body = '';
-    if (isMulti) {
-      body = round.products.map(p => {
-        const vt = (p?.vendor_targets || []).find(v => Number(v?.vendor_id) === Number(va.vendor_id));
-        if (!vt || !(vt.fields || []).length) return '';
-        const label = p?.is_rfq_level === true
-          ? 'RFQ-level terms'
-          : (nameById[p?.rfq_product_id] || `Product #${p?.rfq_product_id}`);
-        const vendorQuote = vendorQuotes[`${va.vendor_id}:${p?.rfq_product_id}`]
-          || vendorQuotes[va.vendor_id]
-          || null;
-        const rows = renderFieldRows(vt.fields || [], p?.is_rfq_level ? null : vendorQuote, chargeLabels);
-        if (!rows) return '';
-        return `
-          <p style="margin:8px 0 4px; font-size:12px; font-weight:600; color:#334155;">${label}</p>
-          <ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>`;
-      }).filter(Boolean).join('');
-    } else {
-      const vendorQuote = vendorQuotes[va.vendor_id] || null;
-      const rows = renderFieldRows(va.negotiation_fields || [], vendorQuote, chargeLabels);
-      body = rows ? `<ul style="list-style:none; padding-left:0; margin:0;">${rows}</ul>` : '';
-    }
-
-    if (!body) return '';
-    return `
-      <div style="margin-top:10px; padding:10px 12px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px;">
-        <p style="margin:0 0 6px; font-weight:600; color:#1E293B;">${vendorName}</p>
-        <p style="margin:0 0 6px; font-size:12px; color:#64748B;">Vendor Quoted → Target</p>
-        ${body}
-      </div>`;
-  }).filter(Boolean).join('');
-  return sections
-    ? `<div style="margin-top:16px;"><p style="margin:0 0 4px; font-weight:600; color:#1F2937;">Negotiation Fields & Targets:</p>${sections}</div>`
-    : '';
-};
+// NOTE: The buyer-side "Negotiation Fields & Targets:" block was intentionally
+// removed from all buyer emails (round submitted/approved/ended/expired) per
+// product decision — buyers no longer see per-vendor target details in email.
+// The vendor-side targets blocks below are unchanged (vendors still need them).
 
 /**
  * Build single-vendor negotiation fields HTML block (vendor-side email).
@@ -453,7 +403,6 @@ export const sendNegotiationExpiredNotification = async ({
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <p style="margin-top:16px;">
           A new negotiation round will be needed if you wish to negotiate again on this product.
@@ -573,8 +522,7 @@ export const sendNegotiationRoundEndedNotification = async ({
             <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
           </ul>
 
-          ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
-
+  
           <p style="margin-top:16px;">
             ${quotesMessage}
           </p>
@@ -692,7 +640,6 @@ export const sendNegotiationRoundCreatedNotification = async ({
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <div style="text-align:center; margin-top:24px;">
           <a href="${quoteCompareUrl}"
@@ -907,7 +854,6 @@ export const sendNegotiationRoundApprovedNotification = async ({
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
         </ul>
 
-        ${buildVendorTargetsHtml(vendorApprovals, vendorsLookup, vendorQuotes, chargeLabels, round)}
 
         <div style="text-align:center; margin-top:24px;">
           <a href="${quoteCompareUrl}"
