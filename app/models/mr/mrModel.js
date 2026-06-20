@@ -66,6 +66,63 @@ const mrModel = {
     );
   },
 
+  // Hotels the user can raise an MR for — the same accessible set used for
+  // authorization (hotel-level mappings + every hotel under a company-level
+  // mapping). Scoped to the user; never depends on a client-supplied company.
+  accessibleHotels: async (userId, txContext = null) => {
+    return (txContext || db).any(
+      `WITH user_hotels AS (
+         SELECT DISTINCT hum.hospitality_hotel_id AS hotel_id
+           FROM tbl_hospitality_user_mappings hum
+          WHERE hum.user_id = $1 AND hum.mapping_type = 1 AND hum.hospitality_hotel_id IS NOT NULL
+         UNION
+         SELECT DISTINCT h.id AS hotel_id
+           FROM tbl_hospitality_user_mappings hum
+           JOIN tbl_hospitality_company_hotels h ON h.hospitality_company_id = hum.hospitality_company_id
+          WHERE hum.user_id = $1 AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL AND h.is_deleted = 0
+       )
+       SELECT h.id, h.name, h.city, h.hospitality_company_id
+         FROM tbl_hospitality_company_hotels h
+         JOIN user_hotels uh ON uh.hotel_id = h.id
+        WHERE h.is_deleted = 0
+        ORDER BY h.name`,
+      [userId]
+    );
+  },
+
+  // Departments the user is mapped to at a hotel (role-scope membership, not a
+  // specific permission). A NULL-department scope at the hotel = all-departments
+  // grant → return every department.
+  hotelDepartmentsForUser: async (userId, hotelId, txContext = null) => {
+    return (txContext || db).any(
+      `WITH hotel_company AS (
+         SELECT hospitality_company_id FROM tbl_hospitality_company_hotels
+          WHERE id = $2 AND is_deleted = 0 LIMIT 1
+       ),
+       has_all AS (
+         SELECT EXISTS (
+           SELECT 1 FROM tbl_user_role_scopes urs
+            WHERE urs.user_id = $1
+              AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
+              AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
+              AND urs.department_id IS NULL
+         ) AS all_depts
+       )
+       SELECT d.id, d.title
+         FROM tbl_department d
+        WHERE (SELECT all_depts FROM has_all) = true
+           OR d.id IN (
+             SELECT urs.department_id FROM tbl_user_role_scopes urs
+              WHERE urs.user_id = $1
+                AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
+                AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
+                AND urs.department_id IS NOT NULL
+           )
+        ORDER BY d.title`,
+      [userId, hotelId]
+    );
+  },
+
   addItem: async (mrId, data, txContext = null) => {
     const runner = txContext || db;
     return runner.one(
@@ -278,11 +335,15 @@ const mrModel = {
     return rows.map((r) => Number(r.mr_id));
   },
 
-  dashboardCounts: async ({ hospitality_company_id, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
+  dashboardCounts: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
     const runner = txContext || db;
-    const conditions = ['hospitality_company_id = $1'];
-    const args = [hospitality_company_id];
-    let p = 2;
+    const conditions = [];
+    const args = [];
+    let p = 1;
+    if (hospitality_company_ids !== null) {
+      conditions.push(`hospitality_company_id = ANY($${p++}::int[])`);
+      args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       conditions.push(`hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
@@ -295,7 +356,7 @@ const mrModel = {
       conditions.push(`raised_by = $${p++}`);
       args.push(raised_by);
     }
-    const where = `WHERE ${conditions.join(' AND ')}`;
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : 'WHERE TRUE';
     const rows = await runner.any(
       `SELECT status, COUNT(*)::int AS c FROM tbl_material_requisition ${where} GROUP BY status`,
       args
@@ -316,15 +377,21 @@ const mrModel = {
    * breakdowns by department / hotel / urgency / month, top requesters, and a
    * recent-MR feed. All scoped by the same filters as list/dashboardCounts.
    */
-  analytics: async ({ hospitality_company_id, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
+  analytics: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
     const runner = txContext || db;
-    const conditions = ['m.hospitality_company_id = $1'];
-    const args = [hospitality_company_id];
-    let p = 2;
+    const conditions = [];
+    const args = [];
+    let p = 1;
+    if (hospitality_company_ids !== null) {
+      conditions.push(`m.hospitality_company_id = ANY($${p++}::int[])`);
+      args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) { conditions.push(`m.hotel_id = ANY($${p++}::int[])`); args.push(hotel_ids); }
     if (Array.isArray(department_ids) && department_ids.length > 0) { conditions.push(`m.department_id = ANY($${p++}::int[])`); args.push(department_ids); }
     if (raised_by) { conditions.push(`m.raised_by = $${p++}`); args.push(raised_by); }
-    const where = `WHERE ${conditions.join(' AND ')}`;
+    // 'WHERE TRUE' fallback so the `${where} AND …` queries below stay valid
+    // when there's no company filter (super admin).
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : 'WHERE TRUE';
     // Reusable per-MR value LATERAL.
     const VAL = `LEFT JOIN LATERAL (SELECT COALESCE(SUM(mi.quantity * COALESCE(mi.matched_unit_rate,0)),0)::numeric AS val
                    FROM tbl_material_requisition_item mi WHERE mi.mr_id = m.id) v ON TRUE`;

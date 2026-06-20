@@ -62,41 +62,50 @@ const TERMINAL_STATUSES = ["completed", "cancelled", "rejected", "rejected_by_ve
 function buildScopeClause(scope, values, startIndex) {
   let i = startIndex;
   const parts = [];
+  const hcIds = scope.hospitalityCompanyIds;
 
-  if (scope.hospitalityCompanyId) {
-    // Scope RFQ POs via the RFQ, and call-off POs via their ARC (no RFQ) — the
-    // call-off branch is a self-contained EXISTS so it works regardless of the
-    // caller's join block (audit CO8).
-    const hcIdx = i++;
-    values.push(scope.hospitalityCompanyId);
-    const rfqConds = [`rfq.hospitality_company_id = $${hcIdx}`];
-    const arcConds = [`aa.hospitality_company_id = $${hcIdx}`];
-    if (scope.hotelIds && scope.hotelIds.length > 0) {
-      const hIdx = i++;
-      values.push(scope.hotelIds);
-      rfqConds.push(`rfq.hotel_id = ANY($${hIdx}::int[])`);
-      arcConds.push(`aa.hotel_id = ANY($${hIdx}::int[])`);
-    }
-    if (scope.departmentId) {
-      const dIdx = i++;
-      values.push(scope.departmentId);
-      rfqConds.push(`rfq.department_id = $${dIdx}`);
-      arcConds.push(`aa.department_id = $${dIdx}`);
-    }
-    parts.push(`(
-      (${rfqConds.join(' AND ')})
-      OR (po.is_call_off = TRUE AND EXISTS (
-        SELECT 1 FROM tbl_arc_contract cc
-          JOIN tbl_arc aa ON aa.id = cc.arc_id
-         WHERE cc.id = po.arc_contract_id AND ${arcConds.join(' AND ')}
-      ))
-    )`);
-  } else {
-    // Legacy / non-hospitality fallback: scope on the buyer company id stored
-    // directly on the PO header.
+  // Empty array = the user has no hospitality mappings → legacy fallback: scope
+  // on the buyer company id stored directly on the PO header.
+  if (Array.isArray(hcIds) && hcIds.length === 0) {
     parts.push(`po.company_id = $${i++}`);
     values.push(scope.companyId);
+    return { clause: parts.join(" AND "), values, nextIndex: i };
   }
+
+  // Hospitality scope: a company array (narrow to ALL the user's companies), or
+  // null (super admin → no company filter). Scope RFQ POs via the RFQ, and
+  // call-off POs via their ARC (no RFQ) — the call-off branch is a self-
+  // contained EXISTS so it works regardless of the caller's join block (CO8).
+  const rfqConds = [];
+  const arcConds = [];
+  if (Array.isArray(hcIds)) {
+    const hcIdx = i++;
+    values.push(hcIds);
+    rfqConds.push(`rfq.hospitality_company_id = ANY($${hcIdx}::int[])`);
+    arcConds.push(`aa.hospitality_company_id = ANY($${hcIdx}::int[])`);
+  }
+  if (scope.hotelIds && scope.hotelIds.length > 0) {
+    const hIdx = i++;
+    values.push(scope.hotelIds);
+    rfqConds.push(`rfq.hotel_id = ANY($${hIdx}::int[])`);
+    arcConds.push(`aa.hotel_id = ANY($${hIdx}::int[])`);
+  }
+  if (scope.departmentId) {
+    const dIdx = i++;
+    values.push(scope.departmentId);
+    rfqConds.push(`rfq.department_id = $${dIdx}`);
+    arcConds.push(`aa.department_id = $${dIdx}`);
+  }
+  const rfqClause = rfqConds.length ? rfqConds.join(' AND ') : 'TRUE';
+  const arcClause = arcConds.length ? arcConds.join(' AND ') : 'TRUE';
+  parts.push(`(
+    (${rfqClause})
+    OR (po.is_call_off = TRUE AND EXISTS (
+      SELECT 1 FROM tbl_arc_contract cc
+        JOIN tbl_arc aa ON aa.id = cc.arc_id
+       WHERE cc.id = po.arc_contract_id AND ${arcClause}
+    ))
+  )`);
 
   return { clause: parts.join(" AND "), values, nextIndex: i };
 }
@@ -180,9 +189,9 @@ async function userHasAwardingCreate(scope) {
          JOIN tbl_permissions p ON p.id = rp.permission_id
          WHERE urs.user_id = $1
            AND p.resource = 'awarding' AND p.action = 'create'
-           AND ($2::int IS NULL OR urs.company_id = $2)
+           AND ($2::int[] IS NULL OR urs.company_id = ANY($2::int[]))
        ) AS has`,
-      [scope.userId, scope.hospitalityCompanyId || null]
+      [scope.userId, Array.isArray(scope.hospitalityCompanyIds) ? scope.hospitalityCompanyIds : null]
     );
     return !!(row && row.has);
   } catch (e) {
@@ -641,20 +650,27 @@ export async function getPODetailFull(po_id, scope) {
     // the row loads (see the guard below), returning null on mismatch so the
     // controller 404s without leaking the existence of another vendor's PO.
     scopeClause = "TRUE";
-  } else if (scope.hospitalityCompanyId) {
-    scopeClause = `COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) = $${i++}`;
-    values.push(scope.hospitalityCompanyId);
+  } else if (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length === 0) {
+    // No hospitality mappings → legacy buyer-company gate.
+    scopeClause = `po.company_id = $${i++}`;
+    values.push(scope.companyId);
+  } else {
+    // Company array (narrow to the user's companies) or null (super admin → no
+    // company filter). Hotel/department narrow further when supplied.
+    const conds = [];
+    if (Array.isArray(scope.hospitalityCompanyIds)) {
+      conds.push(`COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) = ANY($${i++}::int[])`);
+      values.push(scope.hospitalityCompanyIds);
+    }
     if (scope.hotelIds && scope.hotelIds.length > 0) {
-      scopeClause += ` AND COALESCE(rfq.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`;
+      conds.push(`COALESCE(rfq.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`);
       values.push(scope.hotelIds);
     }
     if (scope.departmentId) {
-      scopeClause += ` AND COALESCE(rfq.department_id, arc.department_id) = $${i++}`;
+      conds.push(`COALESCE(rfq.department_id, arc.department_id) = $${i++}`);
       values.push(scope.departmentId);
     }
-  } else {
-    scopeClause = `po.company_id = $${i++}`;
-    values.push(scope.companyId);
+    scopeClause = conds.length ? conds.join(' AND ') : 'TRUE';
   }
   const po = await db.oneOrNone(
     `SELECT po.*,

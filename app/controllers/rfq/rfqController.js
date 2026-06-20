@@ -7941,7 +7941,7 @@ const rfqController = {
       // 1. Fetch the buyer's scoped RFQs (RFQ-only). Big cap so faceting is
       //    complete; search is pushed to SQL.
       const FETCH_CAP = 1000;
-      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids);
+      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true);
       const rows = Array.isArray(all) ? all : [];
 
       // 2. Lifecycle stage → bucket + normalized status key.
@@ -7960,6 +7960,9 @@ const rfqController = {
         if (s === 2) return 'CLOSED';
         if (s === 5) return 'WITHDRAWN';
         if (s === 0) return 'DRAFT';
+        // status 0 is unused in practice — a saved draft is an unpublished RFQ
+        // (is_published = 0) that isn't awaiting publish approval (status 3/4).
+        if (Number(r.is_published) === 0 && s !== 3 && s !== 4) return 'DRAFT';
         if (r.lifecycle_stage) return r.lifecycle_stage;
         if (s === 3 || s === 4) return 'RFQ_APPROVAL';
         return 'AWAITING_QUOTES';
@@ -7968,6 +7971,10 @@ const rfqController = {
         const s = Number(r.status);
         if (s === 2) return 'closed';
         if (s === 0 || s === 5) return 'drafts';
+        // Not yet published (and not closed) → still a draft. The real drafts in
+        // this system are unpublished status-1 RFQs; awaiting-publish-approval
+        // (3/4) also belongs in Drafts. Key off is_published, not status alone.
+        if (Number(r.is_published) === 0) return 'drafts';
         const stage = r.lifecycle_stage;
         if (stage && STAGE_BUCKET[stage]) return STAGE_BUCKET[stage];
         if (s === 3 || s === 4) return 'drafts';

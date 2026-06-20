@@ -3577,7 +3577,8 @@ LIMIT 2;
     rfq_no,
     is_tender,
     completed_status,
-    hotel_ids
+    hotel_ids,
+    include_drafts = false // management listing: also surface saved drafts (unpublished status-1)
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -3891,7 +3892,7 @@ LIMIT 2;
           OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
               AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
         )
-      )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
+      )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4)${include_drafts ? ` OR (RFQ.is_published = 0 AND RFQ.created_by = ${user_id})` : ''})
       -- Permission filter: only RFQs the user has read access for
       AND EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2

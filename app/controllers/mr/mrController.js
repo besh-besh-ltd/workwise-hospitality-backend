@@ -133,6 +133,39 @@ export async function searchContractedItems(req, res) {
   }
 }
 
+/**
+ * GET /v1/mr/form/hotels — hotels the requesting user can raise an MR for.
+ * Derived from the user's own mappings (req.user) — no client company id.
+ */
+export async function formHotels(req, res) {
+  try {
+    const hotels = await mrModel.accessibleHotels(req.user.id);
+    return ok(res, { hotels });
+  } catch (err) {
+    logger.error({ err }, '[mrController.formHotels]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+/**
+ * GET /v1/mr/form/departments?hotel_id= — departments the user is mapped to at
+ * the given hotel. Hotel access is authorized first (no cross-tenant enumeration).
+ */
+export async function formDepartments(req, res) {
+  try {
+    const hotelId = Number(req.query.hotel_id);
+    if (!hotelId) return bad(res, 400, 'hotel_id is required');
+    if (!(await userCanAccessHotel(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel');
+    }
+    const departments = await mrModel.hotelDepartmentsForUser(req.user.id, hotelId);
+    return ok(res, { departments });
+  } catch (err) {
+    logger.error({ err }, '[mrController.formDepartments]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
 export async function createDraft(req, res) {
   try {
     const userId = req.user?.id;
@@ -487,10 +520,9 @@ export async function list(req, res) {
 export async function dashboardCounts(req, res) {
   try {
     const { hospitality_company_id, hotel_ids, department_ids, raised_by } = req.query;
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const counts = await mrModel.dashboardCounts({
-      hospitality_company_id: hcId,
+      hospitality_company_ids: companyIds,
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
       raised_by:      raised_by ? Number(raised_by) : null,
@@ -505,10 +537,9 @@ export async function dashboardCounts(req, res) {
 export async function analytics(req, res) {
   try {
     const { hotel_ids, department_ids, raised_by } = req.query;
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const data = await mrModel.analytics({
-      hospitality_company_id: hcId,
+      hospitality_company_ids: companyIds,
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
       raised_by:      raised_by ? Number(raised_by) : null,
