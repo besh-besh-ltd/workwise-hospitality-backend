@@ -1112,6 +1112,17 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
        ROUND(EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 3600) as waiting_hours,
        CASE WHEN i.entity_type IN ('RFQ', 'TENDER') THEN r.title ELSE NULL END as entity_title,
        CASE WHEN i.entity_type IN ('RFQ', 'TENDER') THEN r.rfq_no ELSE NULL END as entity_rfq_no,
+       -- ARC enrichment: resolve the parent rate-contract id + number for the
+       -- ARC_* entity types so the Action Centre can deep-link to the right
+       -- stage tab. ARC_TECH/ARC_COMMITTEE.entity_id IS the arc id; an
+       -- amendment's entity_id is the amendment id → hop through its contract.
+       CASE
+         WHEN i.entity_type IN ('ARC_TECH','ARC_COMMITTEE') THEN i.entity_id
+         WHEN i.entity_type = 'ARC_AMENDMENT' THEN amdc.arc_id
+         ELSE NULL
+       END as arc_id,
+       ac.arc_number as arc_number,
+       ac.title as arc_title,
        hch.name as hotel_name,
        (SELECT COUNT(*) FROM tbl_approval_policy_steps ps
         WHERE ps.approval_policy_id = i.approval_policy_id) as total_steps
@@ -1119,6 +1130,11 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
      JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
      JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
      LEFT JOIN tbl_rfq r ON i.entity_type IN ('RFQ','TENDER') AND r.id = i.entity_id
+     LEFT JOIN tbl_arc_amendment amd  ON i.entity_type = 'ARC_AMENDMENT' AND amd.id = i.entity_id
+     LEFT JOIN tbl_arc_contract amdc  ON amdc.id = amd.arc_contract_id
+     LEFT JOIN tbl_arc ac ON
+       (i.entity_type IN ('ARC_TECH','ARC_COMMITTEE') AND ac.id = i.entity_id)
+       OR (i.entity_type = 'ARC_AMENDMENT' AND ac.id = amdc.arc_id)
      LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = i.hotel_id
      WHERE i.status = 'PENDING'
      AND sa.approver_user_id = $2

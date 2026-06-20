@@ -7925,7 +7925,7 @@ const rfqController = {
     const user_id = req.user.id;
     try {
       const body = req.body || {};
-      const tab = ['all', 'drafts', 'ongoing', 'approved', 'closed'].includes(body.tab) ? body.tab : 'all';
+      const tab = ['all', 'pending', 'drafts', 'ongoing', 'approved', 'closed'].includes(body.tab) ? body.tab : 'all';
       const search = (body.search || body.search_val || '').toString().trim() || null;
       const sort = ['recent', 'oldest', 'deadline'].includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
@@ -7980,6 +7980,18 @@ const rfqController = {
         r._statusKey = statusKey(r);
       }
 
+      // Action holders for ALL scoped rows — powers both the "Pending for me"
+      // tab (filter + count) and the per-row lifecycle tooltip. The helper
+      // batches its approval + RBAC queries, so it stays bounded over the set.
+      let actionMap = {};
+      if (rows.length > 0) {
+        try { actionMap = await rfqModel.getActionHoldersForRFQs(rows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
+      }
+      for (const r of rows) {
+        const users = actionMap[parseInt(r.id)]?.users || [];
+        r._isMyAction = users.some((u) => Number(u.id) === Number(user_id));
+      }
+
       // Safe array accessors for the json columns.
       const parseArr = (v) => {
         if (Array.isArray(v)) return v;
@@ -8003,11 +8015,16 @@ const rfqController = {
       const categoryPairs = (r) => dedupe(parseArr(r.categories).map((c) => ({ id: String(c.id), title: c.title })), (c) => c.id);
 
       // 3. tab counts (full scoped+search set).
-      const tab_counts = { all: rows.length, drafts: 0, ongoing: 0, approved: 0, closed: 0 };
-      for (const r of rows) tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+      const tab_counts = { all: rows.length, pending: 0, drafts: 0, ongoing: 0, approved: 0, closed: 0 };
+      for (const r of rows) {
+        tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+        if (r._isMyAction) tab_counts.pending++;
+      }
 
-      // 4. tab scope.
-      const tabRows = tab === 'all' ? rows : rows.filter((r) => r._bucket === tab);
+      // 4. tab scope. "pending" cuts across buckets — every row needing my action.
+      const tabRows = tab === 'all' ? rows
+        : tab === 'pending' ? rows.filter((r) => r._isMyAction)
+        : rows.filter((r) => r._bucket === tab);
 
       // 5. facets over the tab scope (not narrowed by facet selections).
       const fm = { status: new Map(), buId: new Map(), categoryId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
@@ -8049,13 +8066,7 @@ const rfqController = {
       const start = (page - 1) * limit;
       const pageRows = filtered.slice(start, start + limit);
 
-      // 9. action holders for the page only (lifecycle hover tooltip).
-      let actionMap = {};
-      if (pageRows.length > 0) {
-        try { actionMap = await rfqModel.getActionHoldersForRFQs(pageRows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
-      }
-
-      // 10. trim to the display payload.
+      // 9. trim to the display payload (action holders already computed above).
       const data = pageRows.map((r) => ({
         id: r.id, rfq_no: r.rfq_no, title: r.title, status: r.status, is_published: r.is_published,
         is_tender: r.is_tender, rfq_type: r.rfq_type, reverse_auction: r.reverse_auction,

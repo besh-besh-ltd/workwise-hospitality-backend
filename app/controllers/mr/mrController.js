@@ -3,7 +3,7 @@ import mrModel from '../../models/mr/mrModel.js';
 import { releaseForMr } from '../../services/callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
-import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
+import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import {
   createApprovalInstance,
   findBestMatchingPolicy,
@@ -336,13 +336,140 @@ export async function approvalPreview(req, res) {
   }
 }
 
+// Server-authoritative listing — search, facet, sort, paginate + a "Pending
+// for me" tab, all computed server-side. Mirrors rfqController.getRfqListView.
+export async function getMrListView(req, res) {
+  try {
+    const userId = req.user?.id;
+    // Scope to ALL the user's companies (super admin → null = all) so multi-
+    // company users see their MRs; the in-page Business Unit facet narrows.
+    const companyIds = await resolveHospitalityCompanyScope(req);
+    const body = req.body || {};
+    const tab = ['all', 'for_me', 'drafts', 'pending', 'approved', 'po_released', 'cancelled'].includes(body.tab) ? body.tab : 'all';
+    const search = (body.search || '').toString().trim().toLowerCase() || null;
+    const sort = ['recent', 'oldest', 'value', 'required'].includes(body.sort) ? body.sort : 'recent';
+    const page = Number(body.page) > 0 ? Number(body.page) : 1;
+    const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
+    const f = body.filters || {};
+    const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+    const filters = {
+      status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
+      categoryId: asStrArr(f.categoryId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+      urgency: asStrArr(f.urgency),
+    };
+    const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids.map(Number) : null;
+
+    // 1. fetch the full scoped set (big cap so faceting is complete).
+    const { data: allRows } = await mrModel.list({
+      hospitality_company_ids: companyIds,
+      hotel_ids: hotel_ids && hotel_ids.length ? hotel_ids : null,
+      statusGroup: 'all', page: 1, limit: 1000,
+    });
+    const rows = Array.isArray(allRows) ? allRows : [];
+
+    // 2. bucket + "pending for me" stamping.
+    const STATUS_BUCKET = { draft: 'drafts', pending_approval: 'pending', approved: 'approved', po_released: 'po_released', rejected: 'cancelled', cancelled: 'cancelled' };
+    const pendingIds = new Set(rows.length && userId ? await mrModel.getPendingMrIds(rows.map((r) => r.id), userId) : []);
+    for (const r of rows) {
+      r._bucket = STATUS_BUCKET[r.status] || 'drafts';
+      r._isMyAction = pendingIds.has(Number(r.id));
+      r.action_required = r._isMyAction;
+      r.action_label = r._isMyAction ? 'Approval needed' : null;
+    }
+
+    // array helpers (json columns arrive as arrays or strings depending on driver path)
+    const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
+    const pairs = (ids, names) => { const a = parseArr(ids); const b = parseArr(names); const out = []; for (let i = 0; i < a.length; i++) { if (a[i] != null) out.push({ id: String(a[i]), label: b[i] != null ? String(b[i]) : `#${a[i]}` }); } return out; };
+    const catPairs = (r) => pairs(r.category_ids, r.category_titles);
+    const prodPairs = (r) => pairs(r.product_variant_ids, r.item_names);
+    const vendPairs = (r) => pairs(r.vendor_ids, r.vendor_names);
+
+    // 3. tab counts.
+    const tab_counts = { all: rows.length, for_me: 0, drafts: 0, pending: 0, approved: 0, po_released: 0, cancelled: 0 };
+    for (const r of rows) {
+      tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+      if (r._isMyAction) tab_counts.for_me++;
+    }
+
+    // 4. tab scope.
+    const tabRows = tab === 'all' ? rows
+      : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
+      : rows.filter((r) => r._bucket === tab);
+
+    // 5. facets over the tab scope.
+    const fm = { status: new Map(), buId: new Map(), departmentId: new Map(), categoryId: new Map(), productId: new Map(), vendorId: new Map(), urgency: new Map() };
+    const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
+    const BUCKET_LABEL = { drafts: 'Draft', pending: 'Awaiting approval', approved: 'Approved', po_released: 'Released PO', cancelled: 'Cancelled' };
+    for (const r of tabRows) {
+      bump(fm.status, r._bucket, BUCKET_LABEL[r._bucket] || r._bucket);
+      if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+      if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_name || `Dept ${r.department_id}`);
+      for (const c of catPairs(r)) bump(fm.categoryId, c.id, c.label);
+      for (const p of prodPairs(r)) bump(fm.productId, p.id, p.label);
+      for (const v of vendPairs(r)) bump(fm.vendorId, v.id, v.label);
+      if (r.urgency) bump(fm.urgency, String(r.urgency), String(r.urgency).charAt(0).toUpperCase() + String(r.urgency).slice(1));
+    }
+    const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
+    const facets = {
+      status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId),
+      categoryId: toFacet(fm.categoryId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId), urgency: toFacet(fm.urgency),
+    };
+
+    // 6. apply facet + search filters.
+    const filtered = tabRows.filter((r) => {
+      if (filters.status.length && !filters.status.includes(r._bucket)) return false;
+      if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+      if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
+      if (filters.categoryId.length && !catPairs(r).some((c) => filters.categoryId.includes(c.id))) return false;
+      if (filters.productId.length && !prodPairs(r).some((p) => filters.productId.includes(p.id))) return false;
+      if (filters.vendorId.length && !vendPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
+      if (filters.urgency.length && !filters.urgency.includes(String(r.urgency))) return false;
+      if (search) {
+        const hay = `${r.title || ''} ${r.mr_number || ''} ${r.hotel_name || ''} ${r.department_name || ''} ${r.raised_by_name || ''}`.toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    // 7. sort.
+    const ts = (r) => new Date(r.created_at || 0).getTime();
+    const req4 = (r) => new Date(r.required_by_date || '9999-12-31').getTime();
+    if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
+    else if (sort === 'value') filtered.sort((a, b) => Number(b.total_est_value || 0) - Number(a.total_est_value || 0));
+    else if (sort === 'required') filtered.sort((a, b) => req4(a) - req4(b));
+    else filtered.sort((a, b) => ts(b) - ts(a));
+
+    // 8. paginate + trim.
+    const total = filtered.length;
+    const pageRows = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
+    const data = pageRows.map((r) => ({
+      id: r.id, mr_number: r.mr_number, title: r.title, status: r.status, bucket: r._bucket,
+      hotel_id: r.hotel_id, hotel_name: r.hotel_name, department_id: r.department_id, department_name: r.department_name,
+      urgency: r.urgency, required_by_date: r.required_by_date, submitted_at: r.submitted_at, created_at: r.created_at,
+      raised_by: r.raised_by, raised_by_name: r.raised_by_name,
+      item_count: r.item_count, total_est_value: r.total_est_value, call_off_count: r.call_off_count,
+      item_names: prodPairs(r).map((p) => p.label).filter(Boolean),
+      categories: catPairs(r).map((c) => ({ id: c.id, title: c.label })),
+      products: prodPairs(r).map((p) => ({ id: p.id, name: p.label })),
+      vendors: vendPairs(r).map((v) => ({ id: v.id, name: v.label })),
+      action_required: r.action_required, action_label: r.action_label,
+    }));
+
+    return ok(res, { rows: data, facets, tab_counts, total, page, limit });
+  } catch (err) {
+    logger.error({ err }, '[mrController.getMrListView]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
 export async function list(req, res) {
   try {
     const { hospitality_company_id, hotel_ids, department_ids, statusGroup, raised_by, page, limit } = req.query;
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    // Scope to ALL the user's companies (super admin → null = all), consistent
+    // with the ARC + list-view listings — fixes multi-company users seeing none.
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const result = await mrModel.list({
-      hospitality_company_id: hcId,
+      hospitality_company_ids: companyIds,
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
       raised_by:      raised_by ? Number(raised_by) : null,

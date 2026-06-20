@@ -9,6 +9,7 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 // Buyer-side MR endpoints.
 // Listing + dashboard counts.
 MrRoutes.get( '/',                       passportSignIn, acl([2, 8]), mrController.list);
+MrRoutes.post('/list-view',              passportSignIn, acl([2, 8]), mrController.getMrListView);
 MrRoutes.get( '/kpis',                   passportSignIn, acl([2, 8]), mrController.dashboardCounts);
 MrRoutes.get( '/analytics',              passportSignIn, acl([2, 8]), mrController.analytics);
 MrRoutes.get( '/approval-preview',       passportSignIn, acl([2, 8]), mrController.approvalPreview);

@@ -308,6 +308,168 @@ export async function terminate(req, res) {
   }
 }
 
+// Fine-grained ARC status → display bucket (mirrors the FE statusBucket so the
+// server-side list view groups/filters identically to the old client logic).
+function arcStatusBucket(s) {
+  if (!s || s === 'draft') return 'draft';
+  if (s === 'floated' || s === 'submission_closed') return 'floated';
+  if (['tech_eval_in_progress', 'tech_eval_approved', 'tech_eval_rejected', 'comm_eval_in_progress'].includes(s)) return 'eval';
+  if (['comm_eval_finalized', 'committee_review', 'committee_sent_back'].includes(s)) return 'committee';
+  if (['committee_approved', 'contract_generated', 'awaiting_vendor_acceptance'].includes(s)) return 'awaiting';
+  if (s === 'contract_active') return 'active';
+  if (s === 'expiring_soon') return 'expiring';
+  if (['expired', 'terminated', 'closed_no_award', 'committee_rejected'].includes(s)) return 'expired';
+  return 'draft';
+}
+const ARC_TAB_BUCKETS = {
+  drafts: ['draft'], ongoing: ['floated', 'eval', 'committee'], approved: ['awaiting'],
+  active: ['active', 'expiring'], ended: ['expired'],
+};
+
+// Server-authoritative listing — search / facet / sort / paginate + the
+// "Pending for me" tab, all server-side. Mirrors rfqController.getRfqListView;
+// reuses the same action-stamping (approvals + open eval windows) as list().
+export async function getArcListView(req, res) {
+  try {
+    const companyIds = await resolveHospitalityCompanyScope(req);
+    const body = req.body || {};
+    const tab = ['all', 'pending', 'drafts', 'ongoing', 'approved', 'active', 'ended'].includes(body.tab) ? body.tab : 'all';
+    const search = (body.search || '').toString().trim().toLowerCase() || null;
+    const sort = ['recent', 'value', 'expiry'].includes(body.sort) ? body.sort : 'recent';
+    const page = Number(body.page) > 0 ? Number(body.page) : 1;
+    const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
+    const f = body.filters || {};
+    const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+    const filters = {
+      status: asStrArr(f.status), buId: asStrArr(f.buId), categoryId: asStrArr(f.categoryId),
+      departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+    };
+
+    // 1. fetch the full scoped set (big cap so faceting is complete).
+    const result = await arcModel.list({ hospitality_company_ids: companyIds, statusGroup: 'all', page: 1, limit: 1000 });
+    const rows = Array.isArray(result.data) ? result.data : [];
+
+    // 2. action stamping (approval waiting on me OR open eval window) + bucket.
+    if (rows.length > 0 && req.user?.id) {
+      const pendingIds = new Set(await arcModel.getPendingForUserArcIds(rows.map((r) => r.id), req.user.id));
+      const evalIds = await computeArcEvalActionIds(req, rows);
+      rows.forEach((r) => {
+        const approval = pendingIds.has(Number(r.id));
+        const techEval = evalIds.has(Number(r.id)) && (r.status === 'tech_eval_in_progress' || r.status === 'tech_eval_rejected');
+        const commEval = evalIds.has(Number(r.id)) && r.status === 'comm_eval_in_progress';
+        r.action_required = approval || techEval || commEval;
+        r.pending_for_user = r.action_required;
+        r.action_label = approval ? 'Approval needed' : techEval ? 'Technical evaluation' : commEval ? 'Commercial evaluation' : null;
+        r._bucket = arcStatusBucket(r.status);
+      });
+    } else {
+      rows.forEach((r) => { r.pending_for_user = false; r.action_required = false; r.action_label = null; r._bucket = arcStatusBucket(r.status); });
+    }
+
+    const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
+    const pairs = (ids, names) => { const a = parseArr(ids); const b = parseArr(names); const out = []; a.forEach((id, i) => { if (id != null) out.push({ id: String(id), label: b[i] != null ? String(b[i]) : `#${id}` }); }); return out; };
+    const prodPairs = (r) => pairs(r.product_variant_ids, r.item_names);
+    const vendPairs = (r) => pairs(r.awarded_vendor_ids, r.awarded_vendor_names);
+
+    // 3. tab counts.
+    const tab_counts = { all: rows.length, pending: 0, drafts: 0, ongoing: 0, approved: 0, active: 0, ended: 0 };
+    for (const r of rows) {
+      if (r.pending_for_user) tab_counts.pending++;
+      for (const [t, buckets] of Object.entries(ARC_TAB_BUCKETS)) if (buckets.includes(r._bucket)) tab_counts[t]++;
+    }
+
+    // 4. tab scope.
+    const tabRows = tab === 'all' ? rows
+      : tab === 'pending' ? rows.filter((r) => r.pending_for_user)
+      : rows.filter((r) => (ARC_TAB_BUCKETS[tab] || []).includes(r._bucket));
+
+    // 5. facets over tab scope.
+    const fm = { status: new Map(), buId: new Map(), categoryId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+    const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
+    const BUCKET_LABEL = { draft: 'Draft', floated: 'Floated', eval: 'In Evaluation', committee: 'Committee Review', awaiting: 'Awaiting Vendor', active: 'Active', expiring: 'Expiring Soon', expired: 'Ended' };
+    for (const r of tabRows) {
+      bump(fm.status, r._bucket, BUCKET_LABEL[r._bucket] || r._bucket);
+      if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+      if (r.category_id != null) bump(fm.categoryId, String(r.category_id), r.category_title || `Category ${r.category_id}`);
+      if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
+      for (const p of prodPairs(r)) bump(fm.productId, p.id, p.label);
+      for (const v of vendPairs(r)) bump(fm.vendorId, v.id, v.label);
+    }
+    const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
+    const facets = {
+      status: toFacet(fm.status), buId: toFacet(fm.buId), categoryId: toFacet(fm.categoryId),
+      departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId),
+    };
+
+    // 6. facet + search filtering.
+    const filtered = tabRows.filter((r) => {
+      if (filters.status.length && !filters.status.includes(r._bucket)) return false;
+      if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+      if (filters.categoryId.length && !filters.categoryId.includes(String(r.category_id))) return false;
+      if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
+      if (filters.productId.length && !prodPairs(r).some((p) => filters.productId.includes(p.id))) return false;
+      if (filters.vendorId.length && !vendPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
+      if (search) {
+        const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${r.hotel_name || ''}`.toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    // 7. sort.
+    const ORDER = { expiring: 0, active: 1, eval: 2, committee: 3, awaiting: 4, floated: 5, draft: 6, expired: 7 };
+    const ts = (r) => new Date(r.created_at || 0).getTime();
+    if (sort === 'expiry') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
+    else if (sort === 'value') filtered.sort((a, b) => Number(b.committed_value || 0) - Number(a.committed_value || 0));
+    else filtered.sort((a, b) => ts(b) - ts(a));
+
+    // 8. paginate (rows are returned whole — they carry every field the rich
+    //    card renders: awarded_vendors, committed/consumed value, amendments…).
+    const total = filtered.length;
+    const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+    return ok(res, { rows: data, facets, tab_counts, total, page, limit });
+  } catch (err) {
+    logger.error({ err }, '[arcController.getArcListView]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// Of the given rows, which ARCs are in an open evaluation window that the
+// current user can actually act on (i.e. holds arc-tech.evaluate /
+// arc-comm.evaluate / arc.admin for the ARC's hotel + department)? Super admins
+// can act on all. Permissions are resolved once per distinct hotel:department.
+async function computeArcEvalActionIds(req, rows) {
+  const ids = new Set();
+  const TECH = new Set(['tech_eval_in_progress', 'tech_eval_rejected']);
+  const COMM = new Set(['comm_eval_in_progress']);
+  const candidates = rows.filter((r) => TECH.has(r.status) || COMM.has(r.status));
+  if (candidates.length === 0) return ids;
+  if (Number(req.user?.user_type) === 8) {
+    candidates.forEach((r) => ids.add(Number(r.id)));
+    return ids;
+  }
+  const cache = new Map();
+  const permsFor = async (hotelId, deptId) => {
+    const key = `${hotelId}:${deptId ?? ''}`;
+    if (cache.has(key)) return cache.get(key);
+    const list = await rbacModel.getUserPermissionsForHotels(req.user.id, [hotelId], null, deptId || null);
+    const set = new Set((list || []).map((p) => `${p.resource}.${p.action}`));
+    cache.set(key, set);
+    return set;
+  };
+  for (const r of candidates) {
+    if (!r.hotel_id) continue;
+    const perms = await permsFor(r.hotel_id, r.department_id);
+    const canTech = perms.has('arc-tech.evaluate') || perms.has('arc.admin');
+    const canComm = perms.has('arc-comm.evaluate') || perms.has('arc.admin');
+    if ((TECH.has(r.status) && canTech) || (COMM.has(r.status) && canComm)) {
+      ids.add(Number(r.id));
+    }
+  }
+  return ids;
+}
+
 export async function list(req, res) {
   try {
     const { hotel_ids, department_ids, statusGroup, page, limit } = req.query;
@@ -322,16 +484,29 @@ export async function list(req, res) {
       page:  Number(page || 1),
       limit: Number(limit || 20),
     });
-    // Stamp "is this ARC waiting on the current user's approval?" so the
-    // listing can offer a "Pending for me" tab without a second round-trip.
+    // Stamp "does this ARC need the current user's action?" so the listing can
+    // both offer a "Pending for me" tab and highlight rows — without a second
+    // round-trip. Action = an approval waiting on me (tech/committee/amendment)
+    // OR an open evaluation window I'm an evaluator for.
     const rows = Array.isArray(result.data) ? result.data : [];
     if (rows.length > 0 && req.user?.id) {
       const pendingIds = new Set(
         await arcModel.getPendingForUserArcIds(rows.map((r) => r.id), req.user.id)
       );
-      rows.forEach((r) => { r.pending_for_user = pendingIds.has(Number(r.id)); });
+      const evalIds = await computeArcEvalActionIds(req, rows);
+      rows.forEach((r) => {
+        const approval = pendingIds.has(Number(r.id));
+        const techEval = evalIds.has(Number(r.id)) && (r.status === 'tech_eval_in_progress' || r.status === 'tech_eval_rejected');
+        const commEval = evalIds.has(Number(r.id)) && r.status === 'comm_eval_in_progress';
+        r.action_required = approval || techEval || commEval;
+        r.pending_for_user = r.action_required; // the "Pending for me" tab tracks the same signal
+        r.action_label = approval ? 'Approval needed'
+          : techEval ? 'Technical evaluation'
+          : commEval ? 'Commercial evaluation'
+          : null;
+      });
     } else {
-      rows.forEach((r) => { r.pending_for_user = false; });
+      rows.forEach((r) => { r.pending_for_user = false; r.action_required = false; r.action_label = null; });
     }
     return ok(res, result);
   } catch (err) {

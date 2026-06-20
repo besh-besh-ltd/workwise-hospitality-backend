@@ -211,7 +211,38 @@ const negotiationModel = {
    * Stored timestamps are UTC-naive (timestamp without time zone), so compare
    * end_date against now() converted to UTC.
    */
-  getNegotiationRfqList: async ({ companyId, hotelId = null }) => {
+  // Of the given RFQ ids, which have a negotiation approval waiting on the user
+  // (current-step pending approver). NEGOTIATION instances key on the round id
+  // (→ round.rfq_id); NEGOTIATION_QUOTE instances key on the rfq_product id
+  // (→ product.rfq_id).
+  getPendingNegotiationRfqIds: async (rfqIds, userId) => {
+    if (!Array.isArray(rfqIds) || rfqIds.length === 0 || !userId) return [];
+    const rows = await db.any(
+      `SELECT DISTINCT rfq_id FROM (
+         SELECT nr.rfq_id
+           FROM tbl_approval_instances i
+           JOIN tbl_negotiation_rounds nr ON nr.id = i.entity_id
+           JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type = 'NEGOTIATION' AND i.status = 'PENDING'
+            AND nr.rfq_id = ANY($1::int[])
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+         UNION
+         SELECT rp.rfq_id
+           FROM tbl_approval_instances i
+           JOIN tbl_rfq_products rp ON rp.id = i.entity_id
+           JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type = 'NEGOTIATION_QUOTE' AND i.status = 'PENDING'
+            AND rp.rfq_id = ANY($1::int[])
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+       ) t`,
+      [rfqIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.rfq_id));
+  },
+
+  getNegotiationRfqList: async ({ companyIds = null, hotelId = null }) => {
     return db.any(
       `WITH neg AS (
          SELECT nr.rfq_id,
@@ -277,10 +308,10 @@ const negotiationModel = {
              JOIN tbl_users u ON u.id = vid.vendor_id
             WHERE nr2.rfq_id = rfq.id
          ) vend ON TRUE
-        WHERE rfq.hospitality_company_id = $1
+        WHERE ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
           AND ($2::int IS NULL OR rfq.hotel_id = $2)
         ORDER BY lr.created_at DESC`,
-      [companyId, hotelId]
+      [companyIds, hotelId]
     );
   },
 

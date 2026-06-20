@@ -14,7 +14,7 @@ import {
   resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
-import { resolveHospitalityCompanyId } from '../../helper/arc_v2/resolveHospitalityCompany.js';
+import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
 // Parse date strings as UTC when no timezone suffix is present
 const parseAsUTC = (d) => {
@@ -2741,35 +2741,101 @@ const NegotiationController = {
    */
   listNegotiationRfqs: async (req, res) => {
     try {
-      // Resolve company scope the same robust way the ARC buyer list does:
-      // query param → X-Hospitality-Company header → req.user → the user's
-      // company mapping in the DB. Works whether or not the FE has surfaced
-      // the BU picker yet.
-      const companyId = await resolveHospitalityCompanyId(req);
+      // Scope to ALL the user's companies (super admin → null = all) so multi-
+      // company users see their negotiations; the in-page BU facet narrows.
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const rows = await negotiationModel.getNegotiationRfqList({ companyIds });
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
 
-      if (!companyId) {
-        return res.status(400).json({
-          status: 2,
-          message: 'Hospitality company context is required'
-        });
+  // Server-authoritative listing — search / facet / sort / paginate + a
+  // "Pending for me" tab, all server-side. Mirrors rfqController.getRfqListView.
+  getNegotiationListView: async (req, res) => {
+    try {
+      const userId = req.user?.id;
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const body = req.body || {};
+      const BUCKETS = ['pending', 'active', 'awaiting', 'completed', 'cancelled'];
+      const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      const search = (body.search || '').toString().trim().toLowerCase() || null;
+      const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
+      const page = Number(body.page) > 0 ? Number(body.page) : 1;
+      const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
+      const f = body.filters || {};
+      const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+      const filters = {
+        status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
+        productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+      };
+
+      // 1. fetch the full scoped set.
+      const rows = await negotiationModel.getNegotiationRfqList({ companyIds });
+
+      // 2. bucket + pending-for-me stamping.
+      const NEG_BUCKET = { pending_approval: 'pending', active: 'active', awaiting_decision: 'awaiting', completed: 'completed', cancelled: 'cancelled' };
+      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRfqIds(rows.map((r) => r.rfq_id), userId) : []);
+      for (const r of rows) {
+        r._bucket = NEG_BUCKET[r.neg_status] || 'pending';
+        r._isMyAction = pendingIds.has(Number(r.rfq_id));
+        r.action_required = r._isMyAction;
+        r.action_label = r._isMyAction ? 'Approval needed' : null;
       }
 
-      // Hotel scope is optional. Prefer the validated context set by
-      // attachHospitalityContext(); else fall back to the raw header.
-      const rawHotel =
-        req.hospitalityContext?.hotelId ??
-        req.headers['x-hospitality-hotel'] ??
-        req.headers['x-hospitality-hotel-id'] ??
-        req.query.hotel_id;
-      const hotelNum = rawHotel != null && rawHotel !== '' ? Number(rawHotel) : null;
-      const hotelId = Number.isFinite(hotelNum) ? hotelNum : null;
+      const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
 
-      const rows = await negotiationModel.getNegotiationRfqList({ companyId, hotelId });
+      // 3. tab counts.
+      const tab_counts = { all: rows.length, for_me: 0, pending: 0, active: 0, awaiting: 0, completed: 0, cancelled: 0 };
+      for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
 
-      return res.status(200).json({
-        status: 1,
-        data: rows
+      // 4. tab scope.
+      const tabRows = tab === 'all' ? rows
+        : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
+        : rows.filter((r) => r._bucket === tab);
+
+      // 5. facets over tab scope.
+      const fm = { status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
+      const STATUS_LABEL = { pending: 'Pending approval', active: 'Active', awaiting: 'Awaiting decision', completed: 'Completed', cancelled: 'Cancelled' };
+      for (const r of tabRows) {
+        bump(fm.status, r._bucket, STATUS_LABEL[r._bucket] || r._bucket);
+        if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+        if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
+        for (const n of parseArr(r.item_names)) if (n) bump(fm.productId, String(n), String(n));
+        for (const v of parseArr(r.vendors)) if (v && v.id != null) bump(fm.vendorId, String(v.id), v.name || `Vendor ${v.id}`);
+      }
+      const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
+      const facets = { status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
+
+      // 6. apply facet + search filters.
+      const filtered = tabRows.filter((r) => {
+        if (filters.status.length && !filters.status.includes(r._bucket)) return false;
+        if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+        if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
+        if (filters.productId.length && !parseArr(r.item_names).map(String).some((n) => filters.productId.includes(n))) return false;
+        if (filters.vendorId.length && !parseArr(r.vendors).some((v) => v && filters.vendorId.includes(String(v.id)))) return false;
+        if (search) {
+          const hay = `${r.title || ''} ${r.rfq_no || ''} ${r.hotel_name || ''} ${r.department_title || ''}`.toLowerCase();
+          if (!hay.includes(search)) return false;
+        }
+        return true;
       });
+
+      // 7. sort.
+      const ORDER = { pending: 0, active: 1, awaiting: 2, completed: 3, cancelled: 4 };
+      const ts = (r) => new Date(r.latest_round_created_at || 0).getTime();
+      if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
+      else if (sort === 'status') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
+      else filtered.sort((a, b) => ts(b) - ts(a));
+
+      // 8. paginate.
+      const total = filtered.length;
+      const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

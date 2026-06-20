@@ -13,6 +13,7 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 // Listing + dashboard counts (read-only — buyer roles).
 r.get('/',             passportSignIn, acl([2, 8]), arcController.list);
+r.post('/list-view',   passportSignIn, acl([2, 8]), arcController.getArcListView);
 r.get('/kpis',         passportSignIn, acl([2, 8]), arcController.dashboardCounts);
 
 // Department / sub-category pickers for the wizard.

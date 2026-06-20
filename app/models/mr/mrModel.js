@@ -170,7 +170,7 @@ const mrModel = {
   },
 
   list: async ({
-    hospitality_company_id,
+    hospitality_company_ids = null, // number[] (scope) | null (super admin = all)
     hotel_ids = null,
     department_ids = null,
     raised_by = null,
@@ -179,9 +179,15 @@ const mrModel = {
     limit = 20,
   }, txContext = null) => {
     const runner = txContext || db;
-    const conditions = ['m.hospitality_company_id = $1'];
-    const args = [hospitality_company_id];
-    let p = 2;
+    // null = no company filter (super admin); an array (incl. empty) scopes to
+    // exactly those companies — empty array deliberately matches nothing.
+    const conditions = [];
+    const args = [];
+    let p = 1;
+    if (hospitality_company_ids !== null) {
+      conditions.push(`m.hospitality_company_id = ANY($${p++}::int[])`);
+      args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       conditions.push(`m.hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
@@ -201,7 +207,7 @@ const mrModel = {
     }
     args.push(limit);
     args.push((page - 1) * limit);
-    const where = `WHERE ${conditions.join(' AND ')}`;
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     // Per-row aggregates (item value, vendors, products, categories) come from a
     // LATERAL over the MR's items + their contract/ARC — powers the faceted
     // All-MRs listing without N+1 round-trips.
@@ -249,6 +255,27 @@ const mrModel = {
       runner.one(`SELECT COUNT(*)::int AS c FROM tbl_material_requisition m ${where}`, args.slice(0, args.length - 2)),
     ]);
     return { data: rows, total: count.c, page, limit };
+  },
+
+  // Of the given MR ids, which currently have an MR approval waiting on the
+  // user (current-step pending approver). Mirrors arcModel.getPendingForUserArcIds.
+  getPendingMrIds: async (mrIds, userId, txContext = null) => {
+    if (!Array.isArray(mrIds) || mrIds.length === 0 || !userId) return [];
+    const rows = await (txContext || db).any(
+      `SELECT DISTINCT i.entity_id AS mr_id
+         FROM tbl_approval_instances i
+         JOIN tbl_approval_instance_steps s
+           ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+         JOIN tbl_approval_step_approvers sa
+           ON sa.approval_instance_step_id = s.id
+        WHERE i.entity_type = 'MR'
+          AND i.status = 'PENDING'
+          AND i.entity_id = ANY($1::int[])
+          AND sa.approver_user_id = $2
+          AND sa.status = 'PENDING'`,
+      [mrIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.mr_id));
   },
 
   dashboardCounts: async ({ hospitality_company_id, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {

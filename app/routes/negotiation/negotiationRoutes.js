@@ -20,6 +20,14 @@ NegotiationRoutes.get(
   hospitalityMiddleware.attachHospitalityContext(),
   negotiationController.listNegotiationRfqs
 );
+// Server-authoritative listing (search / facet / sort / paginate + Pending-for-me).
+NegotiationRoutes.post(
+  '/list-view',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.attachHospitalityContext(),
+  negotiationController.getNegotiationListView
+);
 
 // Create negotiation round
 NegotiationRoutes.post(
