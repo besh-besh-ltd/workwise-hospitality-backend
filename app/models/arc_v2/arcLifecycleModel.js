@@ -112,24 +112,30 @@ async function gatherFacts(runner, arc, userId) {
   );
 
   // A vendor is "fully scored" when they hold a buyer-marked response for
-  // EVERY clause across the whole ARC.
+  // EVERY clause across the whole ARC, AND every MANDATORY clause additionally
+  // carries a non-null mandatory_passed verdict (a half-judged mandatory clause
+  // must NOT make the stage look ready — two-envelope mandatory gate).
   const scoring = await runner.one(
     `WITH arc_clauses AS (
-       SELECT c.id
+       SELECT c.id, c.is_mandatory
          FROM tbl_arc_item_tech_evaluation_clauses c
          JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
          JOIN tbl_arc_item i ON i.id = te.arc_item_id
         WHERE i.arc_id = $1
      ),
      per_vendor AS (
-       SELECT r.vendor_id, COUNT(*) FILTER (WHERE r.buyer_marks IS NOT NULL)::int AS scored
+       SELECT r.vendor_id,
+              COUNT(*) FILTER (WHERE r.buyer_marks IS NOT NULL)::int AS scored,
+              -- mandatory clauses still awaiting a pass/fail verdict
+              COUNT(*) FILTER (WHERE c.is_mandatory = TRUE AND r.mandatory_passed IS NULL)::int AS mandatory_unjudged
          FROM tbl_arc_item_tech_evaluation_vendors_response r
-        WHERE r.arc_item_tech_evaluation_clauses_id IN (SELECT id FROM arc_clauses)
+         JOIN arc_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
         GROUP BY r.vendor_id
      )
      SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
             COUNT(*)::int AS vendors_in_play,
             COUNT(*) FILTER (WHERE scored = (SELECT COUNT(*) FROM arc_clauses)
+                               AND mandatory_unjudged = 0
                                AND (SELECT COUNT(*) FROM arc_clauses) > 0)::int AS vendors_fully_scored
        FROM per_vendor`,
     [arcId]

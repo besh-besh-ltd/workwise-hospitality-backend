@@ -10,8 +10,8 @@
 // ArcId resolution (first match wins):
 //   · req.params.arcId / req.params.id          (e.g. /:arcId/comm-eval)
 //   · req.params.itemId   → tbl_arc_item        (e.g. /items/:itemId/tech-eval)
-//   · req.body.clause_id  → clause → eval → item (POST /tech-eval/response)
 //   · req.body.response_id → response join chain (POST /tech-eval/score)
+//   · req.params.fileId   → evidence file → ARC (GET /tech-eval/evidence/:fileId)
 //
 // Super admins (user_type 8) bypass. The approval decide endpoints do NOT use
 // this middleware — the approval engine itself validates the caller is the
@@ -19,6 +19,7 @@
 
 import db from '../config/dbConn.js';
 import arcLifecycleModel from '../models/arc_v2/arcLifecycleModel.js';
+import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
 import rbacModel from '../models/rbacModel.js';
 import { logger } from '../util/logger.js';
 
@@ -27,10 +28,15 @@ async function resolveArcId(req) {
   if (direct) return direct;
   const itemId = Number(req.params?.itemId);
   if (itemId) return arcLifecycleModel.getArcIdForItem(itemId);
-  const clauseId = Number(req.body?.clause_id);
-  if (clauseId) return arcLifecycleModel.getArcIdForClause(clauseId);
   const responseId = Number(req.body?.response_id);
   if (responseId) return arcLifecycleModel.getArcIdForResponse(responseId);
+  // Evaluator evidence proxy: GET /tech-eval/evidence/:fileId → resolve the
+  // ARC that owns the evidence file so its tech permission can be checked.
+  const fileId = Number(req.params?.fileId);
+  if (fileId) {
+    const row = await arcEvalModel.getResponseFileWithScope(fileId);
+    return row ? Number(row.arc_id) : null;
+  }
   return null;
 }
 

@@ -33,10 +33,11 @@ const arcEvalModel = {
   addClause: async (techEvalId, clause, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_item_tech_evaluation_clauses
-         (arc_item_tech_evaluation_id, clause_text, weightage, clause_type)
-       VALUES ($1, $2, $3, $4)
+         (arc_item_tech_evaluation_id, clause_text, weightage, clause_type, is_mandatory)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [techEvalId, clause.clause_text, clause.weightage, clause.clause_type || null]
+      [techEvalId, clause.clause_text, clause.weightage, clause.clause_type || null,
+       clause.is_mandatory === true]
     );
   },
 
@@ -53,7 +54,42 @@ const arcEvalModel = {
     );
   },
 
-  upsertVendorResponse: async (clauseId, vendorId, response, txContext = null) => {
+  // NOTE: the buyer-records-vendor-response path was REMOVED (RESOLVED DECISION
+  // 2 — two-envelope flow). Vendors now self-author their responses via
+  // `saveVendorTechResponse`; the buyer ONLY scores via `scoreVendorResponse`.
+
+  // mandatory_passed: pass an explicit boolean / null to set the per-clause
+  // mandatory verdict; omit (undefined) to leave the existing value untouched.
+  scoreVendorResponse: async (responseId, { buyer_id, buyer_marks, buyer_remark = null, mandatory_passed = undefined }, txContext = null) => {
+    if (mandatory_passed === undefined) {
+      return (txContext || db).one(
+        `UPDATE tbl_arc_item_tech_evaluation_vendors_response
+           SET buyer_id        = $2,
+               buyer_marks     = $3,
+               buyer_remark    = $4,
+               score_timestamp = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [responseId, buyer_id, buyer_marks, buyer_remark]
+      );
+    }
+    return (txContext || db).one(
+      `UPDATE tbl_arc_item_tech_evaluation_vendors_response
+         SET buyer_id         = $2,
+             buyer_marks      = $3,
+             buyer_remark     = $4,
+             mandatory_passed = $5,
+             score_timestamp  = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING *`,
+      [responseId, buyer_id, buyer_marks, buyer_remark, mandatory_passed]
+    );
+  },
+
+  // ── Vendor-authored technical envelope (two-envelope flow) ──────────────
+  // Vendor writes ONLY vendor_response (idempotent upsert keyed by the table's
+  // UNIQUE(clause_id, vendor_id)). Never touches buyer_marks / mandatory_passed.
+  saveVendorTechResponse: async (clauseId, vendorId, vendorResponse, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_item_tech_evaluation_vendors_response
          (arc_item_tech_evaluation_clauses_id, vendor_id, vendor_response)
@@ -61,26 +97,173 @@ const arcEvalModel = {
        ON CONFLICT (arc_item_tech_evaluation_clauses_id, vendor_id) DO UPDATE
          SET vendor_response = EXCLUDED.vendor_response
        RETURNING *`,
-      [clauseId, vendorId, response]
+      [clauseId, vendorId, vendorResponse ?? null]
     );
   },
 
-  scoreVendorResponse: async (responseId, { buyer_id, buyer_marks, buyer_remark = null }, txContext = null) => {
+  // Ensure a response row exists for (clause, vendor) so evidence files can
+  // attach to it. Returns the row; does NOT clobber an existing vendor_response.
+  ensureVendorResponseRow: async (clauseId, vendorId, txContext = null) => {
     return (txContext || db).one(
-      `UPDATE tbl_arc_item_tech_evaluation_vendors_response
-         SET buyer_id        = $2,
-             buyer_marks     = $3,
-             buyer_remark    = $4,
-             score_timestamp = CURRENT_TIMESTAMP
-       WHERE id = $1
+      `INSERT INTO tbl_arc_item_tech_evaluation_vendors_response
+         (arc_item_tech_evaluation_clauses_id, vendor_id)
+       VALUES ($1, $2)
+       ON CONFLICT (arc_item_tech_evaluation_clauses_id, vendor_id) DO UPDATE
+         SET arc_item_tech_evaluation_clauses_id = EXCLUDED.arc_item_tech_evaluation_clauses_id
        RETURNING *`,
-      [responseId, buyer_id, buyer_marks, buyer_remark]
+      [clauseId, vendorId]
     );
+  },
+
+  // Subset of `clauseIds` that genuinely belong to the given ARC. Callers use
+  // it to reject cross-ARC clause ids before writing anything.
+  clauseIdsBelongToArc: async (arcId, clauseIds, txContext = null) => {
+    if (!Array.isArray(clauseIds) || clauseIds.length === 0) return [];
+    const rows = await (txContext || db).any(
+      `SELECT c.id
+         FROM tbl_arc_item_tech_evaluation_clauses c
+         JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+         JOIN tbl_arc_item i ON i.id = te.arc_item_id
+        WHERE i.arc_id = $1 AND c.id IN ($2:csv)`,
+      [arcId, clauseIds.map(Number)]
+    );
+    return rows.map((r) => Number(r.id));
+  },
+
+  // The vendor's own draft responses + evidence files for one ARC, grouped per
+  // item × clause. NEVER returns buyer_marks / mandatory_passed / other vendors'
+  // rows — vendor isolation is enforced by the WHERE r.vendor_id filter.
+  getVendorTechEnvelope: async (arcId, vendorId, txContext = null) => {
+    const runner = txContext || db;
+    const clauses = await runner.any(
+      `SELECT i.id AS arc_item_id, te.minimum_passing_score,
+              c.id AS clause_id, c.clause_text, c.clause_type, c.weightage, c.is_mandatory,
+              r.id AS response_id, r.vendor_response
+         FROM tbl_arc_item i
+         JOIN tbl_arc_item_tech_evaluation te ON te.arc_item_id = i.id
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.arc_item_tech_evaluation_id = te.id
+         LEFT JOIN tbl_arc_item_tech_evaluation_vendors_response r
+                ON r.arc_item_tech_evaluation_clauses_id = c.id AND r.vendor_id = $2
+        WHERE i.arc_id = $1
+        ORDER BY i.id, c.id`,
+      [arcId, vendorId]
+    );
+    const responseIds = clauses.map((c) => c.response_id).filter((x) => x != null);
+    let filesByResponse = {};
+    if (responseIds.length > 0) {
+      const files = await runner.any(
+        `SELECT id AS file_id, arc_item_tech_evaluation_vendors_response_id AS response_id, file_url, created_at
+           FROM tbl_arc_item_tech_evaluation_vendors_response_files
+          WHERE arc_item_tech_evaluation_vendors_response_id IN ($1:csv)
+          ORDER BY id`,
+        [responseIds]
+      );
+      filesByResponse = files.reduce((acc, f) => {
+        const k = Number(f.response_id);
+        (acc[k] = acc[k] || []).push(f);
+        return acc;
+      }, {});
+    }
+    return { clauses, filesByResponse };
+  },
+
+  // ── Vendor evidence files (multiple per clause allowed) ─────────────────
+  addVendorResponseFile: async (responseId, fileUrl, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_item_tech_evaluation_vendors_response_files
+         (arc_item_tech_evaluation_vendors_response_id, file_url)
+       VALUES ($1, $2)
+       RETURNING *`,
+      [responseId, fileUrl]
+    );
+  },
+
+  listVendorResponseFiles: async (responseId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT id AS file_id, file_url, created_at
+         FROM tbl_arc_item_tech_evaluation_vendors_response_files
+        WHERE arc_item_tech_evaluation_vendors_response_id = $1
+        ORDER BY id`,
+      [responseId]
+    );
+  },
+
+  // Ownership-checked fetch of a single evidence file: returns the file with
+  // its owning vendor_id + arc_id so the controller can verify the caller owns
+  // it (vendor) or holds the ARC tech permission (evaluator) before serving.
+  getResponseFileWithScope: async (fileId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT f.id AS file_id, f.file_url, f.arc_item_tech_evaluation_vendors_response_id AS response_id,
+              r.vendor_id, i.arc_id
+         FROM tbl_arc_item_tech_evaluation_vendors_response_files f
+         JOIN tbl_arc_item_tech_evaluation_vendors_response r ON r.id = f.arc_item_tech_evaluation_vendors_response_id
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+         JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+         JOIN tbl_arc_item i ON i.id = te.arc_item_id
+        WHERE f.id = $1`,
+      [fileId]
+    );
+  },
+
+  // Delete an evidence file ONLY if it belongs to (response of) this vendor.
+  // Returns the deleted row or null when it isn't the vendor's file.
+  deleteVendorResponseFile: async (fileId, vendorId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `DELETE FROM tbl_arc_item_tech_evaluation_vendors_response_files f
+         USING tbl_arc_item_tech_evaluation_vendors_response r
+        WHERE f.id = $1
+          AND r.id = f.arc_item_tech_evaluation_vendors_response_id
+          AND r.vendor_id = $2
+        RETURNING f.id, f.file_url`,
+      [fileId, vendorId]
+    );
+  },
+
+  // ── Technical-envelope seal (rides tbl_arc_quote, one row per arc×vendor) ──
+  getQuote: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT * FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+      [arcId, vendorId]
+    );
+  },
+
+  // Seal the technical envelope. Idempotent: only stamps if not already sealed.
+  sealTechEnvelope: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_quote (arc_id, vendor_id, tech_submitted_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (arc_id, vendor_id) DO UPDATE
+         SET tech_submitted_at = COALESCE(tbl_arc_quote.tech_submitted_at, CURRENT_TIMESTAMP),
+             updated_at        = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [arcId, vendorId]
+    );
+  },
+
+  // Does THIS ARC require a technical envelope at all? (any item has a clause)
+  arcHasTechClauses: async (arcId, txContext = null) => {
+    const row = await (txContext || db).oneOrNone(
+      `SELECT 1
+         FROM tbl_arc_item i
+         JOIN tbl_arc_item_tech_evaluation te ON te.arc_item_id = i.id
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.arc_item_tech_evaluation_id = te.id
+        WHERE i.arc_id = $1
+        LIMIT 1`,
+      [arcId]
+    );
+    return !!row;
   },
 
   /**
    * Compute per-vendor calculated_score for an item.
-   * Returns: [{ vendor_id, calculated_score, qualifies }]
+   * Returns: [{ vendor_id, calculated_score, qualifies, mandatory_failed }]
+   *
+   * Mandatory gate (RESOLVED DECISION 3): a mandatory clause counts toward the
+   * weighted total AND acts as a hard gate. A vendor with a passing weighted
+   * score is STILL not_qualified if ANY mandatory clause for the item is failed
+   * (mandatory_passed = FALSE) OR not-yet-judged (mandatory_passed IS NULL).
+   * `mandatory_failed` is surfaced so the UI / cleared_vendors can explain why a
+   * vendor with a passing weighted score is not_qualified.
    */
   computeItemScores: async (arcItemId, round = 1, txContext = null) => {
     const runner = txContext || db;
@@ -103,13 +286,40 @@ const arcEvalModel = {
              ON c.id = r.arc_item_tech_evaluation_clauses_id
           WHERE c.arc_item_tech_evaluation_id = $1
           GROUP BY r.vendor_id
+       ),
+       -- Vendors who fail the mandatory gate. CLAUSE-DRIVEN (not response-
+       -- driven): a vendor fails if ANY mandatory clause for the item lacks a
+       -- PASSING response from them — which covers a FALSE verdict, a NULL
+       -- (not-yet-judged) verdict, AND no response row at all (a vendor who
+       -- skipped the mandatory clause but accrued marks elsewhere must NOT slip
+       -- through on a diluted weighted score). Anchored to per_vendor so only
+       -- vendors actually in play are considered.
+       mandatory_fail AS (
+         SELECT pv.vendor_id
+           FROM per_vendor pv
+          WHERE EXISTS (
+            SELECT 1
+              FROM tbl_arc_item_tech_evaluation_clauses c
+             WHERE c.arc_item_tech_evaluation_id = $1
+               AND c.is_mandatory = TRUE
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM tbl_arc_item_tech_evaluation_vendors_response r
+                  WHERE r.arc_item_tech_evaluation_clauses_id = c.id
+                    AND r.vendor_id = pv.vendor_id
+                    AND r.mandatory_passed = TRUE
+               )
+          )
        )
        SELECT pv.vendor_id,
               CASE WHEN t.total_weight IS NULL OR t.total_weight = 0
                    THEN 0::numeric
                    ELSE ROUND((pv.earned / t.total_weight) * 100, 2)
               END AS calculated_score,
+              (pv.vendor_id IN (SELECT vendor_id FROM mandatory_fail)) AS mandatory_failed,
               CASE WHEN t.total_weight IS NULL OR t.total_weight = 0
+                   THEN FALSE
+                   WHEN pv.vendor_id IN (SELECT vendor_id FROM mandatory_fail)
                    THEN FALSE
                    ELSE (ROUND((pv.earned / t.total_weight) * 100, 2) >= $2)
               END AS qualifies
@@ -123,18 +333,24 @@ const arcEvalModel = {
     const runner = txContext || db;
     const inserted = [];
     for (const r of rows) {
+      // Explain a non-qualification that's driven by the mandatory gate rather
+      // than a low weighted score (audit trail + UI hint).
+      const rejectMessage = r.qualifies
+        ? null
+        : (r.mandatory_failed ? 'Failed mandatory clause(s)' : null);
       inserted.push(await runner.one(
         `INSERT INTO tbl_arc_item_tech_evaluation_cleared_vendors
            (arc_item_tech_evaluation_id, vendor_id, calculated_score, status,
-            evaluation_round, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
+            evaluation_round, created_by, reject_message)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (arc_item_tech_evaluation_id, vendor_id, evaluation_round) DO UPDATE
            SET calculated_score = EXCLUDED.calculated_score,
-               status           = EXCLUDED.status
+               status           = EXCLUDED.status,
+               reject_message   = EXCLUDED.reject_message
          RETURNING *`,
         [techEvalId, r.vendor_id, r.calculated_score,
          r.qualifies ? 'qualified' : 'not_qualified',
-         r.evaluation_round || 1, r.created_by || null]
+         r.evaluation_round || 1, r.created_by || null, rejectMessage]
       ));
     }
     return inserted;
