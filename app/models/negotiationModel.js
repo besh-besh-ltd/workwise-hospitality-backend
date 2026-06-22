@@ -242,6 +242,25 @@ const negotiationModel = {
     return rows.map((r) => Number(r.rfq_id));
   },
 
+  // Per-ROUND equivalent of getPendingNegotiationRfqIds: round ids whose
+  // NEGOTIATION approval instance (entity_id = round.id) is PENDING with the
+  // current user a pending approver at the current step. (No NEGOTIATION_QUOTE
+  // union — those are product-level, not a round.)
+  getPendingNegotiationRoundIds: async (roundIds, userId) => {
+    if (!Array.isArray(roundIds) || roundIds.length === 0 || !userId) return [];
+    const rows = await db.any(
+      `SELECT DISTINCT i.entity_id AS round_id
+         FROM tbl_approval_instances i
+         JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+         JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+        WHERE i.entity_type = 'NEGOTIATION' AND i.status = 'PENDING'
+          AND i.entity_id = ANY($1::int[])
+          AND sa.approver_user_id = $2 AND sa.status = 'PENDING'`,
+      [roundIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.round_id));
+  },
+
   getNegotiationRfqList: async ({ companyIds = null, hotelId = null }) => {
     return db.any(
       `WITH neg AS (
@@ -311,6 +330,78 @@ const negotiationModel = {
         WHERE ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
           AND ($2::int IS NULL OR rfq.hotel_id = $2)
         ORDER BY lr.created_at DESC`,
+      [companyIds, hotelId]
+    );
+  },
+
+  // Round-level list: ONE ROW PER negotiation round (an RFQ with 6 rounds yields
+  // 6 rows). Mirrors getNegotiationRfqList's status CASE, scope WHERE and facet
+  // columns, but everything is per-round. Per-round products honour both legacy
+  // (rfq_product_id) and multi-product (products JSONB) shapes.
+  getNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+    return db.any(
+      `SELECT nr.id                 AS round_id,
+              nr.round_number,
+              nr.created_at         AS round_created_at,
+              COUNT(*) OVER (PARTITION BY nr.rfq_id)::int AS total_rounds,
+              rfq.id                AS rfq_id,
+              rfq.rfq_no,
+              rfq.title,
+              rfq.is_tender,
+              rfq.hotel_id,
+              h.name                AS hotel_name,
+              rfq.department_id,
+              d.title               AS department_title,
+              nr.status             AS round_status,
+              nr.end_date,
+              nr.approved_at,
+              nr.published_at,
+              nr.closed_at,
+              COALESCE(array_length(nr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN nr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN nr.status = 'ACTIVE'
+                     AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN nr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN nr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN nr.status = 'COMPLETED' THEN 'completed'
+                WHEN nr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
+         LEFT JOIN tbl_department d ON d.id = rfq.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = nr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT COALESCE(PV.name, P.name))
+                    FILTER (WHERE COALESCE(PV.name, P.name) IS NOT NULL) AS item_names
+             FROM tbl_rfq_products rp
+             LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+             LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.id = nr.rfq_product_id
+               OR rp.id IN (
+                 SELECT (p_->>'rfq_product_id')::int
+                 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                 WHERE p_->>'rfq_product_id' IS NOT NULL
+               )
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM unnest(COALESCE(nr.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+         ) vend ON TRUE
+        WHERE nr.rfq_id IS NOT NULL
+          AND ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
+          AND ($2::int IS NULL OR rfq.hotel_id = $2)
+        ORDER BY nr.created_at DESC`,
       [companyIds, hotelId]
     );
   },

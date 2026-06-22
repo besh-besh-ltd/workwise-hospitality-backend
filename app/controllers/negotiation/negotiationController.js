@@ -2768,19 +2768,20 @@ const NegotiationController = {
       const f = body.filters || {};
       const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
       const filters = {
+        rfqId: asStrArr(f.rfqId),
         status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
         productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
       };
 
-      // 1. fetch the full scoped set.
-      const rows = await negotiationModel.getNegotiationRfqList({ companyIds });
+      // 1. fetch the full scoped set — ONE ROW PER ROUND.
+      const rows = await negotiationModel.getNegotiationRoundList({ companyIds });
 
-      // 2. bucket + pending-for-me stamping.
+      // 2. bucket + pending-for-me stamping (per round).
       const NEG_BUCKET = { pending_approval: 'pending', active: 'active', awaiting_decision: 'awaiting', completed: 'completed', cancelled: 'cancelled' };
-      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRfqIds(rows.map((r) => r.rfq_id), userId) : []);
+      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId) : []);
       for (const r of rows) {
         r._bucket = NEG_BUCKET[r.neg_status] || 'pending';
-        r._isMyAction = pendingIds.has(Number(r.rfq_id));
+        r._isMyAction = pendingIds.has(Number(r.round_id));
         r.action_required = r._isMyAction;
         r.action_label = r._isMyAction ? 'Approval needed' : null;
       }
@@ -2797,10 +2798,11 @@ const NegotiationController = {
         : rows.filter((r) => r._bucket === tab);
 
       // 5. facets over tab scope.
-      const fm = { status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      const fm = { rfqId: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
       const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
       const STATUS_LABEL = { pending: 'Pending approval', active: 'Active', awaiting: 'Awaiting decision', completed: 'Completed', cancelled: 'Cancelled' };
       for (const r of tabRows) {
+        if (r.rfq_id != null) bump(fm.rfqId, String(r.rfq_id), `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
         bump(fm.status, r._bucket, STATUS_LABEL[r._bucket] || r._bucket);
         if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
         if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
@@ -2808,10 +2810,11 @@ const NegotiationController = {
         for (const v of parseArr(r.vendors)) if (v && v.id != null) bump(fm.vendorId, String(v.id), v.name || `Vendor ${v.id}`);
       }
       const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
-      const facets = { status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
+      const facets = { rfqId: toFacet(fm.rfqId), status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
 
       // 6. apply facet + search filters.
       const filtered = tabRows.filter((r) => {
+        if (filters.rfqId.length && !filters.rfqId.includes(String(r.rfq_id))) return false;
         if (filters.status.length && !filters.status.includes(r._bucket)) return false;
         if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
         if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
@@ -2826,7 +2829,7 @@ const NegotiationController = {
 
       // 7. sort.
       const ORDER = { pending: 0, active: 1, awaiting: 2, completed: 3, cancelled: 4 };
-      const ts = (r) => new Date(r.latest_round_created_at || 0).getTime();
+      const ts = (r) => new Date(r.round_created_at || 0).getTime();
       if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
       else if (sort === 'status') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
       else filtered.sort((a, b) => ts(b) - ts(a));
