@@ -64,8 +64,8 @@ export const getPODetails = async (req, res) => {
         let detail = null;
         if (!req.user.is_token_user && req.user.id > 0) {
           try {
-            const scope = deriveScope(req);
-            if (scope.hospitalityCompanyId || scope.companyId) {
+            const scope = await deriveScope(req);
+            if (scope.hospitalityCompanyIds === null || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0) || scope.companyId) {
               detail = await getPODetailFull(po_id, scope);
             }
           } catch (augErr) {

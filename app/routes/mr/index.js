@@ -17,6 +17,11 @@ MrRoutes.get( '/approval-preview',       passportSignIn, acl([2, 8]), mrControll
 // Search contracted items (picker).
 MrRoutes.get( '/search-contracted-items', passportSignIn, acl([2, 8]), mrController.searchContractedItems);
 
+// Create-form pickers — user's accessible hotels + their mapped departments.
+// (Registered BEFORE the dynamic `/:id` so the static paths aren't swallowed.)
+MrRoutes.get( '/form/hotels',            passportSignIn, acl([2, 8]), mrController.formHotels);
+MrRoutes.get( '/form/departments',       passportSignIn, acl([2, 8]), mrController.formDepartments);
+
 // Detail + mutations.
 MrRoutes.get( '/:id',                    passportSignIn, acl([2, 8]), mrController.getById);
 MrRoutes.post('/',                       passportSignIn, acl([2, 8]), mrController.createDraft);

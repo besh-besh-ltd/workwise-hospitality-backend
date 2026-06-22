@@ -34,6 +34,7 @@ export const ARC_EVENT_TYPES = Object.freeze({
   VENDOR_INVITED: 'vendor_invited',
   VENDOR_VIEWED: 'vendor_viewed',
   VENDOR_SUBMITTED: 'vendor_submitted',
+  VENDOR_TECH_SUBMITTED: 'vendor_tech_submitted',
   VENDOR_WITHDREW: 'vendor_withdrew',
   VENDOR_DECLINED: 'vendor_declined',
   // Tech eval

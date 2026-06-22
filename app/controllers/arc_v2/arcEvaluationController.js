@@ -11,6 +11,7 @@ import {
   findBestMatchingPolicyTx,
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
+import axios from 'axios';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -80,30 +81,40 @@ export async function setupTechEval(req, res) {
   }
 }
 
-export async function recordVendorResponse(req, res) {
-  try {
-    const { clause_id, vendor_id, response } = req.body || {};
-    if (!clause_id || !vendor_id) return bad(res, 400, 'clause_id and vendor_id are required');
-    const arcId = await arcLifecycleModel.getArcIdForClause(clause_id);
-    if (!arcId) return bad(res, 404, 'Clause not found', 2);
-    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
-    const row = await arcEvalModel.upsertVendorResponse(clause_id, vendor_id, response || null);
-    return ok(res, { response: row });
-  } catch (err) {
-    return fail(res, err, '[evalController.recordVendorResponse]');
-  }
-}
+// NOTE: the buyer-records-vendor-response endpoint (recordVendorResponse /
+// POST /tech-eval/response) was REMOVED — RESOLVED DECISION 2. Vendors now
+// self-author their technical responses + evidence via the vendor portal
+// (two-envelope flow); the buyer ONLY scores vendor-submitted responses below.
 
 export async function scoreResponse(req, res) {
   try {
     const userId = req.user?.id;
-    const { response_id, buyer_marks, buyer_remark } = req.body || {};
+    const { response_id, buyer_marks, buyer_remark, mandatory_passed } = req.body || {};
     if (!response_id || buyer_marks == null) return bad(res, 400, 'response_id and buyer_marks are required');
     const arcId = await arcLifecycleModel.getArcIdForResponse(response_id);
     if (!arcId) return bad(res, 404, 'Response not found', 2);
     await arcLifecycleModel.assertStageWritable(arcId, 'technical');
+    // Is the clause behind this response mandatory? Mandatory clauses REQUIRE a
+    // pass/fail verdict; non-mandatory clauses force the verdict to NULL so a
+    // stray client-supplied value never gates a non-gated clause.
+    const clause = await db.oneOrNone(
+      `SELECT c.is_mandatory
+         FROM tbl_arc_item_tech_evaluation_vendors_response r
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+        WHERE r.id = $1`,
+      [response_id]
+    );
+    let verdict; // undefined → leave untouched
+    if (clause?.is_mandatory) {
+      if (typeof mandatory_passed !== 'boolean') {
+        return bad(res, 400, 'mandatory_passed (true/false) is required for a mandatory clause');
+      }
+      verdict = mandatory_passed;
+    } else {
+      verdict = null; // ignore/clear any value on a non-mandatory clause
+    }
     const row = await arcEvalModel.scoreVendorResponse(response_id, {
-      buyer_id: userId, buyer_marks, buyer_remark,
+      buyer_id: userId, buyer_marks, buyer_remark, mandatory_passed: verdict,
     });
     return ok(res, { response: row });
   } catch (err) {
@@ -116,19 +127,29 @@ export async function getTechEvalForItem(req, res) {
     const arcItemId = Number(req.params.itemId);
     const te = await db.oneOrNone(`SELECT * FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [arcItemId]);
     if (!te) return ok(res, { tech_evaluation: null, clauses: [], scores: [], responses: [] });
+    // listClauses does SELECT * so is_mandatory comes along once the column
+    // exists — no change needed there.
     const clauses = await arcEvalModel.listClauses(te.id);
     const scores = await arcEvalModel.computeItemScores(arcItemId);
     // Per-(clause × vendor) response rows — the scoring matrix binds inputs
     // to response_id, so the cells need these (scores alone are per-vendor
-    // aggregates).
+    // aggregates). vendor_response is now VENDOR-authored (two-envelope flow);
+    // the buyer scores it read-only. mandatory_passed carries the gate verdict.
     const responses = await db.any(
       `SELECT r.id AS response_id,
               r.arc_item_tech_evaluation_clauses_id AS clause_id,
               r.vendor_id, u.name AS vendor_name,
-              r.vendor_response, r.buyer_marks, r.buyer_remark, r.score_timestamp
+              r.vendor_response, r.buyer_marks, r.buyer_remark,
+              r.mandatory_passed, r.score_timestamp,
+              COALESCE(f.files, '[]'::json) AS files
          FROM tbl_arc_item_tech_evaluation_vendors_response r
          JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
          LEFT JOIN tbl_users u ON u.id = r.vendor_id
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object('file_id', vf.id, 'file_url', vf.file_url) ORDER BY vf.id) AS files
+             FROM tbl_arc_item_tech_evaluation_vendors_response_files vf
+            WHERE vf.arc_item_tech_evaluation_vendors_response_id = r.id
+         ) f ON TRUE
         WHERE c.arc_item_tech_evaluation_id = $1
         ORDER BY r.vendor_id, c.id`,
       [te.id]
@@ -136,6 +157,33 @@ export async function getTechEvalForItem(req, res) {
     return ok(res, { tech_evaluation: te, clauses, scores, responses });
   } catch (err) {
     logger.error({ err }, '[evalController.getTechEvalForItem]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// GET /v1/arc-v2/evaluation/tech-eval/evidence/:fileId
+//   Evaluator-side evidence proxy. The requireArcPermission(TECH_READ) gate
+//   already verified the caller holds the ARC's tech-read permission (scoped
+//   to the file's ARC, resolved in the middleware). We stream the bytes
+//   server-side so the raw S3 URL never reaches the browser.
+// ============================================================
+export async function getTechEvidenceFile(req, res) {
+  try {
+    const fileId = Number(req.params.fileId);
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'Evidence file not found', 2);
+    // Ownership/permission already enforced by requireArcPermission on the ARC
+    // that owns this file. Fetch the bytes server-side and stream them back.
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="evidence-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[evalController.getTechEvidenceFile]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
@@ -311,7 +359,7 @@ export async function decideTechEval(req, res) {
           const responseId = Number(m.response_id);
           if (!responseId) continue;
           const current = await t.oneOrNone(
-            `SELECT r.*, i.id AS arc_item_id
+            `SELECT r.*, i.id AS arc_item_id, c.is_mandatory
                FROM tbl_arc_item_tech_evaluation_vendors_response r
                JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
                JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
@@ -327,6 +375,16 @@ export async function decideTechEval(req, res) {
           }
           if (m.buyer_remark !== undefined && String(m.buyer_remark ?? '') !== String(current.buyer_remark ?? '')) {
             diffs.push({ field: 'buyer_remark', before: current.buyer_remark, after: m.buyer_remark ?? null });
+          }
+          // Mandatory verdict amend — only meaningful on a mandatory clause.
+          // A boolean flip (incl. judging a previously-NULL verdict) is recorded.
+          if (current.is_mandatory && m.mandatory_passed !== undefined
+              && (m.mandatory_passed === null ? null : !!m.mandatory_passed) !== current.mandatory_passed) {
+            diffs.push({
+              field: 'mandatory_passed',
+              before: current.mandatory_passed,
+              after: m.mandatory_passed === null ? null : !!m.mandatory_passed,
+            });
           }
           if (diffs.length === 0) continue;
 
@@ -345,6 +403,10 @@ export async function decideTechEval(req, res) {
             buyer_id: userId,
             buyer_marks: m.buyer_marks != null ? Number(m.buyer_marks) : current.buyer_marks,
             buyer_remark: m.buyer_remark !== undefined ? m.buyer_remark : current.buyer_remark,
+            // Only carry a verdict on mandatory clauses; non-mandatory stays NULL.
+            ...(current.is_mandatory && m.mandatory_passed !== undefined
+              ? { mandatory_passed: m.mandatory_passed === null ? null : !!m.mandatory_passed }
+              : {}),
           }, t);
           touchedItemIds.add(Number(current.arc_item_id));
         }

@@ -11218,6 +11218,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_clauses (
   clause_text                     TEXT NOT NULL,
   weightage                       NUMERIC(5,2) NOT NULL,
   clause_type                     VARCHAR(40),
+  is_mandatory                    BOOLEAN NOT NULL DEFAULT FALSE,
   created_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_item_tech_evaluation_clauses_eval
@@ -11238,6 +11239,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_vendors_response 
   buyer_id                                 INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
   buyer_marks                              NUMERIC(5,2),
   buyer_remark                             TEXT,
+  mandatory_passed                         BOOLEAN,
   score_timestamp                          TIMESTAMP WITHOUT TIME ZONE,
   created_at                               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (arc_item_tech_evaluation_clauses_id, vendor_id)
@@ -11291,6 +11293,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote (
   vendor_id       INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
   submitted_at    TIMESTAMP WITHOUT TIME ZONE,
   withdrawn_at    TIMESTAMP WITHOUT TIME ZONE,
+  tech_submitted_at TIMESTAMP WITHOUT TIME ZONE,
   payment_terms   VARCHAR(255),
   gstin_used      VARCHAR(20),
   created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,

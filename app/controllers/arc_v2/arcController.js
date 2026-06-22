@@ -613,6 +613,26 @@ export async function getDepartmentsForCategory(req, res) {
   }
 }
 
+// Departments the current user is mapped to in a given hotel (drives the ARC
+// create department picker — independent of the category→department mapping).
+export async function getDepartmentsForHotel(req, res) {
+  try {
+    const hotelId = Number(req.query.hotel_id);
+    const userId  = req.user?.id;
+    if (!hotelId || !userId) return bad(res, 400, 'hotel_id is required', 2);
+    // Super admins have no role-scope rows to derive from → every department.
+    if (Number(req.user?.user_type) === 8) {
+      const all = await db.any('SELECT id, title FROM tbl_department ORDER BY title');
+      return ok(res, { departments: all });
+    }
+    const departments = await arcModel.getDepartmentsForUserInHotel({ user_id: userId, hotel_id: hotelId });
+    return ok(res, { departments });
+  } catch (err) {
+    logger.error({ err }, '[arcController.getDepartmentsForHotel]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
 export async function getSubCategories(req, res) {
   try {
     const categoryId = Number(req.query.category_id);
@@ -648,15 +668,17 @@ export async function listRootCategories(req, res) {
 // Returns the user's accessible hotels for the BU picker.
 export async function listAccessibleHotels(req, res) {
   try {
-    const hcId = await resolveHospitalityCompanyId(req);
-    if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
+    // A picker must show hotels across ALL the user's companies — otherwise a
+    // multi-company user can't select (and so can't act on) a hotel in any
+    // company but their lowest-id one. Super admin (null) → all companies.
+    const companyIds = await resolveHospitalityCompanyScope(req);
     const rows = await db.any(
       `SELECT id, hospitality_company_id, name, city, keys
          FROM tbl_hospitality_company_hotels
-        WHERE hospitality_company_id = $1
+        WHERE ($1::int[] IS NULL OR hospitality_company_id = ANY($1::int[]))
           AND COALESCE(is_deleted, 0) = 0
         ORDER BY name`,
-      [hcId]
+      [companyIds && companyIds.length ? companyIds : (companyIds === null ? null : [])]
     );
     return ok(res, { hotels: rows });
   } catch (err) {
@@ -674,7 +696,12 @@ export async function searchProductVariants(req, res) {
       ? String(req.query.sub_category_ids).split(',').map(Number).filter(Boolean)
       : [];
     const search = req.query.q ? `%${String(req.query.q).toLowerCase()}%` : null;
-    const limit  = Math.min(Number(req.query.limit || 100), 500);
+    // Server-side pagination so the wizard's catalogue picker scales to
+    // categories with thousands of variants (ENGINEERING ~4k) — the client
+    // loads one page at a time.
+    const limit  = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+    const page   = Math.max(1, Number(req.query.page) || 1);
+    const offset = (page - 1) * limit;
 
     const conds  = ['COALESCE(pv.status, 1) = 1'];
     const args   = [categoryId];
@@ -687,22 +714,29 @@ export async function searchProductVariants(req, res) {
       conds.push(`(LOWER(pv.name) LIKE $${p} OR LOWER(pv.slug) LIKE $${p})`);
       args.push(search); p++;
     }
-    args.push(limit);
+    const limitIdx = p; args.push(limit); p++;
+    const offsetIdx = p; args.push(offset); p++;
 
+    // tbl_product_variant exposes hsn_code (not hsn) and carries no unit column
+    // — uom is set per-item by the ARC creator, not on the catalogue variant —
+    // so we return it as null. (The previous query referenced pv.hsn / pv.unit /
+    // tbl_units.title, none of which exist, so it 500'd on every call and the
+    // wizard's Items step silently showed "No items match".) COUNT(*) OVER()
+    // returns the full pre-pagination total for the "Load more" affordance.
     const rows = await db.any(
-      `SELECT pv.id, pv.name, pv.slug, pv.hsn,
-              (SELECT u.title FROM tbl_units u
-                 WHERE LOWER(u.title) = LOWER(COALESCE(pv.unit, ''))
-                 LIMIT 1) AS uom
+      `SELECT pv.id, pv.name, pv.slug, pv.hsn_code AS hsn, NULL::text AS uom,
+              COUNT(*) OVER()::int AS total_count
          FROM tbl_product_variant pv
          JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
         WHERE pc.category_id = $1
           AND ${conds.join(' AND ')}
         ORDER BY pv.name
-        LIMIT $${p}`,
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       args
     );
-    return ok(res, { variants: rows });
+    const total = rows.length ? Number(rows[0].total_count) : 0;
+    const variants = rows.map(({ total_count, ...r }) => r);
+    return ok(res, { variants, total, page, limit });
   } catch (err) {
     logger.error({ err }, '[arcController.searchProductVariants]');
     return bad(res, 500, err.message || 'Internal error', 3);

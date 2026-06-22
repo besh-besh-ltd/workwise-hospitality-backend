@@ -8,6 +8,7 @@
 // ============================================================================
 
 import { logError } from "../../helper/common.js";
+import { resolveHospitalityCompanyScope } from "../../helper/arc_v2/resolveHospitalityCompany.js";
 import {
   getPOList,
   getDashboardKpis,
@@ -28,15 +29,16 @@ import {
 // `companyId` (req.user fallback for legacy non-hospitality POs) so the model
 // can scope POs through their RFQ's hospitality_company_id when present.
 // ---------------------------------------------------------------------------
-function deriveScope(req) {
-  const headerCompany =
-    req.headers["x-company-id"] ||
-    req.headers["x-hospitality-company"] ||
-    req.headers["x-hospitality-company-id"];
+async function deriveScope(req) {
+  // Company scope spans ALL the user's mapped hospitality companies (super admin
+  // → null = all), so a multi-company user sees their whole portfolio rather than
+  // just the BU currently selected in the header. The dashboard narrows by the
+  // explicit hotel/department facets below, NOT by the global BU selection —
+  // consistent with the MR / ARC / Negotiation listings.
+  const hospitalityCompanyIds = await resolveHospitalityCompanyScope(req);
 
-  const hospitalityCompanyId = headerCompany ? parseInt(headerCompany, 10) : null;
-
-  // tbl_company id fallback for non-hospitality POs (po.company_id).
+  // tbl_company id fallback for legacy non-hospitality POs (po.company_id) —
+  // used only when the user has no hospitality mappings (empty scope).
   const userCompanyId = req.user && req.user.company_id ? parseInt(req.user.company_id, 10) : null;
 
   let hotelIds = [];
@@ -58,7 +60,9 @@ function deriveScope(req) {
 
   return {
     userId: req.user.id,
-    hospitalityCompanyId: hospitalityCompanyId && hospitalityCompanyId > 0 ? hospitalityCompanyId : null,
+    // null = super admin (all companies); [] = no hospitality mappings (legacy
+    // fallback to po.company_id); [...] = scope to exactly these companies.
+    hospitalityCompanyIds,
     companyId: userCompanyId,
     hotelIds,
     departmentId,
@@ -66,8 +70,11 @@ function deriveScope(req) {
 }
 
 // Guard: a buyer must always resolve to SOME tenant scope; otherwise refuse.
+// null = super admin (all); a non-empty company array; or a legacy company id.
 function hasUsableScope(scope) {
-  return !!(scope.hospitalityCompanyId || scope.companyId);
+  return scope.hospitalityCompanyIds === null
+    || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0)
+    || !!scope.companyId;
 }
 
 // ===========================================================================
@@ -75,7 +82,7 @@ function hasUsableScope(scope) {
 // ===========================================================================
 export const listPOs = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
@@ -93,7 +100,7 @@ export const listPOs = async (req, res) => {
 // ===========================================================================
 export const dashboardKpis = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
@@ -110,7 +117,7 @@ export const dashboardKpis = async (req, res) => {
 // ===========================================================================
 export const awaitingPOs = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
@@ -128,7 +135,7 @@ export const awaitingPOs = async (req, res) => {
 // ===========================================================================
 export const poDetailFull = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
@@ -149,7 +156,7 @@ export const poDetailFull = async (req, res) => {
 // ===========================================================================
 export const tracking = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
@@ -167,7 +174,7 @@ export const tracking = async (req, res) => {
 // ===========================================================================
 export const analytics = async (req, res) => {
   try {
-    const scope = deriveScope(req);
+    const scope = await deriveScope(req);
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }

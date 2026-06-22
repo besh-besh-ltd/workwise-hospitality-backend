@@ -132,6 +132,20 @@ describe("MR flow — search → create → submit → call-off", () => {
     expect(hit).toBeUndefined();
   });
 
+  test("form/hotels returns the buyer's accessible hotels; form/departments their mapped depts", async () => {
+    const h = await buyerClient.get("/api/v1/mr/form/hotels");
+    expect(h.status).toBe(200);
+    expect(h.body.data.hotels.some((x) => Number(x.id) === HOTEL)).toBe(true);
+
+    const d = await buyerClient.get(`/api/v1/mr/form/departments?hotel_id=${HOTEL}`);
+    expect(d.status).toBe(200);
+    expect(d.body.data.departments.some((x) => Number(x.id) === DEPT_PROC)).toBe(true);
+
+    // A hotel the buyer can't access → 403 (no cross-tenant enumeration).
+    const denied = await buyerClient.get(`/api/v1/mr/form/departments?hotel_id=${IDS.hotels.B1}`);
+    expect(denied.status).toBe(403);
+  });
+
   test("creates an MR draft with a contracted item then submits it", async () => {
     const createRes = await buyerClient.post("/api/v1/mr").send({
       title: "Restock beverages",
@@ -349,10 +363,12 @@ describe("MR flow — search → create → submit → call-off", () => {
     const co = await db.oneOrNone(
       `SELECT po_id FROM tbl_arc_callof_po ORDER BY id DESC LIMIT 1`);
     expect(co).toBeTruthy();
-    // Same buyer but a mismatched hospitality-company header -> no leak.
-    const res = await buyerClient
-      .get(`/api/v1/po/detail/${co.po_id}`)
-      .set("x-hospitality-company", String(HC + 99999));
+    // PO scope is derived from the user's OWN company mappings (spoof-proof),
+    // not a client header. A buyer mapped to a DIFFERENT hospitality company
+    // (B, not A) must not see company A's call-off PO. companyB_admin is mapped
+    // only to hospitality B, so its scope excludes A → 404 (no existence leak).
+    const otherClient = await httpClient(IDS.users.companyB_admin);
+    const res = await otherClient.get(`/api/v1/po/detail/${co.po_id}`);
     expect(res.status).toBe(404);
   });
 

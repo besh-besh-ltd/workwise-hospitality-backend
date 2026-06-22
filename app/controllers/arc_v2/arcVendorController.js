@@ -3,7 +3,13 @@ import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import axios from 'axios';
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 /**
  * ARC v2 — Vendor-side controller.
@@ -105,7 +111,7 @@ function rangeFloor(range) {
 // deliberately excluded; rows naming a different vendor are filtered in SQL.
 const VENDOR_SAFE_EVENTS = [
   'floated', 'submission_closed', 'deadline_extended',
-  'vendor_submitted', 'vendor_withdrew', 'vendor_declined',
+  'vendor_submitted', 'vendor_tech_submitted', 'vendor_withdrew', 'vendor_declined',
   'contract_generated', 'contract_awaiting_acceptance', 'contract_signed',
   'contract_active', 'contract_declined',
   'amendment_requested', 'amendment_approved', 'amendment_rejected',
@@ -317,12 +323,43 @@ export async function getRequestDetail(req, res) {
       [arcId, vendorId]
     );
     const lines = quote ? await arcEvalModel.listQuoteLines(quote.id) : [];
+    // Lightweight technical-envelope status so the vendor page can show whether
+    // a technical envelope is required, sealed, and how many clauses are drafted
+    // — without the full clause payload (that comes from the dedicated GET).
+    const techRequired = await arcEvalModel.arcHasTechClauses(arcId);
+    let tech_envelope = null;
+    if (techRequired) {
+      const counts = await db.one(
+        `WITH arc_clauses AS (
+           SELECT c.id
+             FROM tbl_arc_item_tech_evaluation_clauses c
+             JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+             JOIN tbl_arc_item i ON i.id = te.arc_item_id
+            WHERE i.arc_id = $1
+         )
+         SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
+                (SELECT COUNT(*)::int
+                   FROM tbl_arc_item_tech_evaluation_vendors_response r
+                  WHERE r.vendor_id = $2
+                    AND r.arc_item_tech_evaluation_clauses_id IN (SELECT id FROM arc_clauses)
+                    AND r.vendor_response IS NOT NULL) AS clauses_answered`,
+        [arcId, vendorId]
+      );
+      tech_envelope = {
+        required: true,
+        tech_submitted_at: quote?.tech_submitted_at || null,
+        clauses_total: counts.clauses_total,
+        clauses_answered: counts.clauses_answered,
+      };
+    } else {
+      tech_envelope = { required: false, tech_submitted_at: null, clauses_total: 0, clauses_answered: 0 };
+    }
     // Mark invitation viewed if not yet (silent best-effort).
     if (invitation && invitation.status === 'invited') {
       await arcModel.recordVendorResponse(arcId, vendorId, 'viewed');
       await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.VENDOR_VIEWED, actorId: vendorId, payload: {} });
     }
-    return ok(res, { arc, items, invitation, quote, lines });
+    return ok(res, { arc, items, invitation, quote, lines, tech_envelope });
   } catch (err) {
     logger.error({ err }, '[vendorController.getRequestDetail]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -394,6 +431,15 @@ export async function submitQuote(req, res) {
       [arc_id, vendorId]
     );
     if (!quote) return bad(res, 400, 'No draft quote to submit');
+    // HARD BLOCK (RESOLVED DECISION 1) — strict two-step. When this ARC requires
+    // technical responses (has clauses configured), the vendor MUST seal their
+    // technical envelope before the commercial quote can be submitted. The seal
+    // marker is tech_submitted_at on the same arc_quote row.
+    if (await arcEvalModel.arcHasTechClauses(arc_id)) {
+      if (!quote.tech_submitted_at) {
+        return bad(res, 409, 'Submit your technical envelope before submitting the commercial quote');
+      }
+    }
     // H3 — completeness: at least one line, each with a valid non-negative rate.
     const quoteLines = await arcEvalModel.listQuoteLines(quote.id);
     if (quoteLines.length === 0) return bad(res, 400, 'Quote has no line items');
@@ -438,4 +484,287 @@ export async function withdrawQuote(req, res) {
     logger.error({ err }, '[vendorController.withdrawQuote]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
+}
+
+// ============================================================
+// Technical envelope (two-envelope flow) — vendor self-submission
+//
+// SECURITY: every endpoint below derives the vendor scope from req.user.id
+// (never the body). A vendor may ONLY touch an ARC they are invited to and
+// ONLY their OWN responses/files. Clause text is visible only to invited
+// vendors within the open submission window.
+// ============================================================
+
+const TECH_EVIDENCE_MAX_BYTES = 15 * 1024 * 1024; // 15 MB
+const TECH_EVIDENCE_MIME = new Set([
+  'application/pdf',
+  'image/jpeg', 'image/jpg', 'image/png',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+const TECH_EVIDENCE_EXT = new Set(['.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx']);
+
+/**
+ * Shared scope guard for every tech-envelope write/read. Resolves the ARC,
+ * verifies the caller is invited, and (for writes) that the submission window
+ * is open and the envelope is not already sealed. Returns
+ * { arc, quote } on success or { error: {status, message} } to surface.
+ */
+async function loadTechEnvelopeScope(arcId, vendorId, { forWrite = false } = {}) {
+  if (!vendorId) return { error: { status: 401, message: 'Unauthorized' } };
+  if (!arcId) return { error: { status: 400, message: 'arc_id is required' } };
+  const arc = await arcModel.getById(arcId);
+  if (!arc) return { error: { status: 404, message: 'ARC not found', code: 2 } };
+  // Invitation is the authority — never widen access from a client id.
+  if (!(await vendorInvitedToArc(arcId, vendorId))) {
+    return { error: { status: 403, message: 'You were not invited to this rate contract' } };
+  }
+  const quote = await arcEvalModel.getQuote(arcId, vendorId);
+  if (forWrite) {
+    if (!['floated', 'submission_closed'].includes(arc.status)) {
+      return { error: { status: 409, message: `Rate contract is not open for technical responses (status=${arc.status})` } };
+    }
+    if (arc.submission_end_at && new Date(arc.submission_end_at) < new Date()) {
+      return { error: { status: 409, message: 'Submission deadline has passed' } };
+    }
+    if (quote?.tech_submitted_at) {
+      return { error: { status: 409, message: 'Technical envelope already submitted' } };
+    }
+  }
+  return { arc, quote };
+}
+
+// GET /vendor/requests/:arcId/tech-clauses
+// Returns per-item clauses + this vendor's own draft responses + uploaded
+// files + the seal marker. NEVER returns buyer_marks / mandatory verdicts /
+// other vendors' rows.
+export async function getTechClausesForVendor(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const arcId = Number(req.params.arcId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (!(await vendorInvitedToArc(arcId, vendorId))) {
+      return bad(res, 403, 'You were not invited to this rate contract');
+    }
+    const quote = await arcEvalModel.getQuote(arcId, vendorId);
+    const { clauses, filesByResponse } = await arcEvalModel.getVendorTechEnvelope(arcId, vendorId);
+
+    // Group clauses by item.
+    const itemsMap = new Map();
+    for (const c of clauses) {
+      const k = Number(c.arc_item_id);
+      if (!itemsMap.has(k)) {
+        itemsMap.set(k, { arc_item_id: k, minimum_passing_score: c.minimum_passing_score, clauses: [] });
+      }
+      itemsMap.get(k).clauses.push({
+        clause_id: Number(c.clause_id),
+        clause_text: c.clause_text,
+        clause_type: c.clause_type,
+        weightage: c.weightage,
+        is_mandatory: !!c.is_mandatory,
+        vendor_response: c.vendor_response ?? null,
+        files: (filesByResponse[Number(c.response_id)] || []).map((f) => ({
+          file_id: Number(f.file_id),
+          // Vendor-scoped, ownership-checked proxy URL — NOT the raw S3 url.
+          url: `/arc-v2/vendor/tech-envelope/file/${f.file_id}`,
+        })),
+      });
+    }
+    return ok(res, {
+      tech_submitted_at: quote?.tech_submitted_at || null,
+      window_open: ['floated', 'submission_closed'].includes(arc.status)
+        && !(arc.submission_end_at && new Date(arc.submission_end_at) < new Date()),
+      items: [...itemsMap.values()],
+    });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.getTechClausesForVendor]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/tech-envelope/draft  body: { arc_id, responses:[{clause_id, vendor_response}] }
+export async function saveTechEnvelopeDraft(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const { arc_id, responses } = req.body || {};
+    const arcId = Number(arc_id);
+    const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    if (!Array.isArray(responses) || responses.length === 0) {
+      return bad(res, 400, 'responses[] is required');
+    }
+    const clauseIds = responses.map((r) => Number(r.clause_id)).filter(Boolean);
+    if (clauseIds.length === 0) return bad(res, 400, 'Each response needs a clause_id');
+    // Cross-ARC clause ids are rejected outright (never trust client ids).
+    const valid = new Set(await arcEvalModel.clauseIdsBelongToArc(arcId, clauseIds));
+    for (const cid of clauseIds) {
+      if (!valid.has(Number(cid))) {
+        return bad(res, 400, 'A response references a clause that does not belong to this rate contract');
+      }
+    }
+    const saved = await db.tx(async (t) => {
+      let n = 0;
+      for (const r of responses) {
+        // Vendor isolation: ALWAYS scoped to req.user.id.
+        await arcEvalModel.saveVendorTechResponse(Number(r.clause_id), vendorId, r.vendor_response ?? null, t);
+        n += 1;
+      }
+      return n;
+    });
+    return ok(res, { saved });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.saveTechEnvelopeDraft]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/tech-envelope/clause/:clauseId/file  (multipart, field 'file')
+export async function uploadTechEvidence(req, res) {
+  let tmpPath = null;
+  try {
+    const vendorId = req.user?.id;
+    const clauseId = Number(req.params.clauseId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!clauseId) return bad(res, 400, 'clauseId is required');
+    if (!req.file) return bad(res, 400, 'A file is required (field name: file)');
+
+    // Resolve the ARC from the clause and run the full write-scope guard.
+    const arcId = await arcLifecycleModelGetArcIdForClause(clauseId);
+    if (!arcId) return bad(res, 404, 'Clause not found', 2);
+    const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    // Clause must belong to THIS ARC (defensive — getArcIdForClause already
+    // bound it, but re-verify rather than trust the chain).
+    const valid = await arcEvalModel.clauseIdsBelongToArc(arcId, [clauseId]);
+    if (valid.length === 0) return bad(res, 400, 'Clause does not belong to this rate contract');
+
+    // File validation — size + MIME + extension allow-list.
+    const ext = path.extname(req.file.originalname || '').toLowerCase();
+    if (req.file.size > TECH_EVIDENCE_MAX_BYTES) {
+      return bad(res, 400, 'File exceeds the 15 MB limit');
+    }
+    if (!TECH_EVIDENCE_MIME.has(req.file.mimetype) && !TECH_EVIDENCE_EXT.has(ext)) {
+      return bad(res, 400, 'Unsupported file type — allowed: pdf, jpg, png, doc, docx');
+    }
+
+    // Persist the buffer to a temp file and upload to S3 under a tech-evidence
+    // prefix. The DB stores only the S3 url; access is served through the
+    // ownership-checked proxy (never a raw public link in the UI).
+    const safeExt = TECH_EVIDENCE_EXT.has(ext) ? ext : '.bin';
+    tmpPath = path.join(os.tmpdir(), `arc-tech-evidence-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${safeExt}`);
+    fs.writeFileSync(tmpPath, req.file.buffer);
+    const s3Key = `arc-tech-evidence/${arcId}/${vendorId}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}${safeExt}`;
+    const up = await uploadToS3(tmpPath, s3Key);
+    if (!up?.ok || !up?.url) return bad(res, 502, 'File upload failed — please retry', 3);
+
+    const file = await db.tx(async (t) => {
+      // Ensure a response row exists so the file can attach (vendor-scoped).
+      const row = await arcEvalModel.ensureVendorResponseRow(clauseId, vendorId, t);
+      return arcEvalModel.addVendorResponseFile(row.id, up.url, t);
+    });
+    return ok(res, {
+      file: {
+        file_id: Number(file.id),
+        url: `/arc-v2/vendor/tech-envelope/file/${file.id}`,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.uploadTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  } finally {
+    try { if (tmpPath && fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) { /* swallow */ }
+  }
+}
+
+// DELETE /vendor/tech-envelope/file/:fileId  (own file only, before seal)
+export async function deleteTechEvidence(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const fileId = Number(req.params.fileId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    // Resolve owner + ARC; verify ownership and that the envelope isn't sealed.
+    const file = await arcEvalModel.getResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'File not found', 2);
+    if (Number(file.vendor_id) !== Number(vendorId)) {
+      return bad(res, 403, 'You can only remove your own evidence files');
+    }
+    const scope = await loadTechEnvelopeScope(Number(file.arc_id), vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    const deleted = await arcEvalModel.deleteVendorResponseFile(fileId, vendorId);
+    if (!deleted) return bad(res, 404, 'File not found', 2);
+    return ok(res, { deleted: { file_id: Number(deleted.id) } });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.deleteTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// GET /vendor/tech-envelope/file/:fileId  — vendor downloads their OWN evidence.
+// Ownership-checked server-side proxy (no raw S3 URL). A vendor can ONLY fetch
+// a file attached to their own response row (file.vendor_id === req.user.id).
+export async function getOwnTechEvidence(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const fileId = Number(req.params.fileId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'File not found', 2);
+    if (Number(file.vendor_id) !== Number(vendorId)) {
+      return bad(res, 403, 'You can only access your own evidence files');
+    }
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="evidence-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[vendorController.getOwnTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/tech-envelope/submit  body: { arc_id }
+export async function submitTechEnvelope(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const arcId = Number(req.body?.arc_id);
+    const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    // There must be a technical envelope to seal (the ARC has clauses).
+    if (!(await arcEvalModel.arcHasTechClauses(arcId))) {
+      return bad(res, 400, 'This rate contract has no technical clauses to submit');
+    }
+    const result = await db.tx(async (t) => {
+      const sealed = await arcEvalModel.sealTechEnvelope(arcId, vendorId, t);
+      await logArcEvent({
+        arcId, eventType: ARC_EVENT_TYPES.VENDOR_TECH_SUBMITTED,
+        actorId: vendorId, payload: { vendor_id: vendorId }, txContext: t,
+      });
+      return sealed;
+    });
+    return ok(res, { tech_submitted_at: result.tech_submitted_at }, 'Technical envelope submitted');
+  } catch (err) {
+    logger.error({ err }, '[vendorController.submitTechEnvelope]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// Thin wrapper so the upload handler can resolve the ARC from a clause without
+// importing the lifecycle model at module top (kept local to the tech-envelope
+// block). Uses the eval model's own ownership-safe join chain.
+async function arcLifecycleModelGetArcIdForClause(clauseId) {
+  const row = await db.oneOrNone(
+    `SELECT i.arc_id
+       FROM tbl_arc_item_tech_evaluation_clauses c
+       JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+       JOIN tbl_arc_item i ON i.id = te.arc_item_id
+      WHERE c.id = $1`,
+    [clauseId]
+  );
+  return row ? Number(row.arc_id) : null;
 }

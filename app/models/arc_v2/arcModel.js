@@ -507,6 +507,36 @@ const arcModel = {
     );
   },
 
+  // All departments the user is mapped to in a given hotel — derived from their
+  // role scopes, NOT the category→department mapping. A hotel/company-wide scope
+  // (department_id IS NULL) grants every department; otherwise just the
+  // specifically-scoped ones. Mirrors rbacModel.getDepartmentsForUserScope but
+  // permission-agnostic (ARC create is role-gated via acl(), not a fine-grained
+  // permission), so the picker shows the user's full department access.
+  getDepartmentsForUserInHotel: async ({ user_id, hotel_id }, txContext = null) => {
+    return (txContext || db).any(
+      `WITH hotel_company AS (
+         SELECT hospitality_company_id
+           FROM tbl_hospitality_company_hotels
+          WHERE id = $2 AND COALESCE(is_deleted, 0) = 0
+          LIMIT 1
+       ),
+       user_scopes AS (
+         SELECT DISTINCT urs.department_id
+           FROM tbl_user_role_scopes urs
+          WHERE urs.user_id = $1
+            AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
+            AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
+       )
+       SELECT d.id, d.title
+         FROM tbl_department d
+        WHERE EXISTS (SELECT 1 FROM user_scopes WHERE department_id IS NULL)
+           OR d.id IN (SELECT department_id FROM user_scopes WHERE department_id IS NOT NULL)
+        ORDER BY d.title`,
+      [user_id, hotel_id]
+    );
+  },
+
   // ============================================================
   // Vendor eligibility for ARC (category-based — mirrors RFQ's variant-based
   // helper but joins through tbl_product_categories at category granularity).

@@ -261,7 +261,7 @@ const negotiationModel = {
     return rows.map((r) => Number(r.round_id));
   },
 
-  getNegotiationRfqList: async ({ companyIds = null, hotelId = null }) => {
+  getNegotiationRfqList: async ({ companyIds = null, hotelIds = null }) => {
     return db.any(
       `WITH neg AS (
          SELECT nr.rfq_id,
@@ -328,9 +328,9 @@ const negotiationModel = {
             WHERE nr2.rfq_id = rfq.id
          ) vend ON TRUE
         WHERE ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
-          AND ($2::int IS NULL OR rfq.hotel_id = $2)
+          AND ($2::int[] IS NULL OR rfq.hotel_id = ANY($2::int[]))
         ORDER BY lr.created_at DESC`,
-      [companyIds, hotelId]
+      [companyIds, hotelIds]
     );
   },
 

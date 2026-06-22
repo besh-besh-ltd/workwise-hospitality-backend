@@ -18,6 +18,7 @@ r.get('/kpis',         passportSignIn, acl([2, 8]), arcController.dashboardCount
 
 // Department / sub-category pickers for the wizard.
 r.get('/category-departments', passportSignIn, acl([2, 8]), arcController.getDepartmentsForCategory);
+r.get('/hotel-departments',    passportSignIn, acl([2, 8]), arcController.getDepartmentsForHotel);
 r.get('/sub-categories',       passportSignIn, acl([2, 8]), arcController.getSubCategories);
 
 // Catalogue pickers for the create wizard.
