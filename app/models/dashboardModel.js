@@ -293,11 +293,16 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
     params
   );
 
+  // Item 5 (D): exclude draft and cancelled POs to match total_spend's basis
+  // (total_spend already filters po.status NOT IN ('draft','cancelled')).
+  // This ensures pos_issued and the SpendBreakupModal's "across N purchase
+  // orders" subtitle are drawn from the same PO population.
   const posIssuedQuery = db.one(
     `SELECT COUNT(*) as count
      FROM tbl_rfq_purchase_order po
      JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3 ${hf}`,
+     WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
+     AND po.status NOT IN ('draft', 'cancelled') ${hf}`,
     params
   );
 
@@ -1110,8 +1115,20 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
        s.step_order,
        i.created_at,
        ROUND(EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 3600) as waiting_hours,
-       CASE WHEN i.entity_type IN ('RFQ', 'TENDER') THEN r.title ELSE NULL END as entity_title,
-       CASE WHEN i.entity_type IN ('RFQ', 'TENDER') THEN r.rfq_no ELSE NULL END as entity_rfq_no,
+       -- Resolve the owning RFQ id for all RFQ-family types.
+       -- RFQ/TENDER: entity_id IS the rfq id.
+       -- TECHNICAL/NEGOTIATION/NEGOTIATION_QUOTE/PO: rfq_id is stored in
+       -- metadata->>'rfq_id'; fall back to entity_id if missing/non-numeric.
+       CASE
+         WHEN i.entity_type IN ('RFQ','TENDER') THEN i.entity_id
+         WHEN i.entity_type IN ('TECHNICAL','NEGOTIATION','NEGOTIATION_QUOTE','PO')
+           THEN COALESCE(NULLIF(i.metadata->>'rfq_id','')::int, i.entity_id)
+         ELSE NULL
+       END as rfq_ref_id,
+       -- entity_title and entity_rfq_no are now populated for ALL RFQ-family
+       -- types via the LEFT JOIN on rfq_ref_id below.
+       r.title as entity_title,
+       r.rfq_no as entity_rfq_no,
        -- ARC enrichment: resolve the parent rate-contract id + number for the
        -- ARC_* entity types so the Action Centre can deep-link to the right
        -- stage tab. ARC_TECH/ARC_COMMITTEE.entity_id IS the arc id; an
@@ -1129,7 +1146,16 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
      FROM tbl_approval_instances i
      JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
      JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     LEFT JOIN tbl_rfq r ON i.entity_type IN ('RFQ','TENDER') AND r.id = i.entity_id
+     -- Join tbl_rfq on the resolved rfq_ref_id (covers RFQ/TENDER/TECHNICAL/
+     -- NEGOTIATION/NEGOTIATION_QUOTE/PO in one shot; non-RFQ rows get NULL).
+     LEFT JOIN tbl_rfq r ON r.id = (
+       CASE
+         WHEN i.entity_type IN ('RFQ','TENDER') THEN i.entity_id
+         WHEN i.entity_type IN ('TECHNICAL','NEGOTIATION','NEGOTIATION_QUOTE','PO')
+           THEN COALESCE(NULLIF(i.metadata->>'rfq_id','')::int, i.entity_id)
+         ELSE NULL
+       END
+     )
      LEFT JOIN tbl_arc_amendment amd  ON i.entity_type = 'ARC_AMENDMENT' AND amd.id = i.entity_id
      LEFT JOIN tbl_arc_contract amdc  ON amdc.id = amd.arc_contract_id
      LEFT JOIN tbl_arc ac ON
@@ -2313,12 +2339,17 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
 
   // 3. Bid passed, zero real quotes — *the* signal that vendors aren't biting.
   //    Drives critical mode; surfaced even when only 1 hits.
+  //    NOTE: status = 1 (open) only, matching RFQ_STUCK_COMMERCIAL in the list-view
+  //    so the banner count and the "Ended · No Quotes" filtered list agree.
+  //    The banner is scoped to r.created_by = me whereas the list-view is scoped to
+  //    all RFQs visible to the buyer, so the banner count is a subset of the list —
+  //    this is intentional (banner = "your" RFQs; list = "all you can see").
   const closedNoQuotesP = db.one(
     `SELECT COUNT(*)::INTEGER AS count
        FROM tbl_rfq r
       WHERE r.created_by = $2
         AND r.is_published = 1
-        AND r.status IN (1, 2)
+        AND r.status = 1
         AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
         AND r.bid_end_date::timestamp < NOW()
         ${hasDates

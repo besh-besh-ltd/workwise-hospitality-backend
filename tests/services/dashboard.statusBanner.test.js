@@ -129,12 +129,15 @@ describe("GET /dashboard-v2/buyer-status-banner — mode escalates with state", 
   });
 
   it("critical: a published RFQ ended with zero real quotes (no regrets) within 14 days", async () => {
+    // Item 2d: banner now requires status=1 (open) to match RFQ_STUCK_COMMERCIAL.
+    // A closed (status=2) zero-quote RFQ no longer counts; use status=1 with
+    // an expired bid window (the RFQ_STUCK_COMMERCIAL / "stuck" shape).
     const { rfq_id } = await makeRfqVisibleToDashboard(db, {
       createdBy: IDS.users.a1_proc_buyer,
       hospitality: IDS.hospitality.A,
       hotel: IDS.hotels.A1,
       is_published: 1,
-      status: 2, // closed — bid window already ended
+      status: 1, // open (status=2 excluded after Item 2d fix)
       bid_end_date: offsetString(-2 * 86400_000), // 2 days ago
       title: "Ended without quotes",
     });
@@ -218,13 +221,15 @@ describe("GET /dashboard-v2/buyer-status-banner — mode escalates with state", 
 
 describe("GET /dashboard-v2/buyer-status-banner — respects selected date range", () => {
   it("excludes a closed-no-quotes RFQ whose bid_end falls outside the range", async () => {
-    // RFQ closed without quotes, bid ended ~3 days ago (i.e. in 2026).
+    // RFQ open without quotes, bid ended ~3 days ago (i.e. in 2026).
+    // Item 2d: banner requires status=1; use status=1 so the wide-range assertion
+    // still validates the date-window scoping logic (unchanged).
     const { rfq_id } = await makeRfqVisibleToDashboard(db, {
       createdBy: IDS.users.a1_proc_buyer,
       hospitality: IDS.hospitality.A,
       hotel: IDS.hotels.A1,
       is_published: 1,
-      status: 2,
+      status: 1,
       bid_end_date: offsetString(-3 * 86400_000),
       title: "Out-of-range closed-no-quotes",
     });
@@ -280,5 +285,64 @@ describe("GET /dashboard-v2/buyer-status-banner — scope", () => {
     expect(
       d.soonest_closing == null || d.soonest_closing.id !== rfq_id
     ).toBe(true);
+  });
+});
+
+describe("GET /dashboard-v2/buyer-status-banner — Item 2d: closed_no_quotes requires status=1 (open)", () => {
+  it("does NOT count a status=2 (closed) zero-quote RFQ in closed_no_quotes", async () => {
+    // Before: capture baseline (other seeded rows may already exist).
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await client
+      .get(ENDPOINT)
+      .query({ hotel_ids: String(IDS.hotels.A1), start_date: "2020-01-01", end_date: "2999-01-01" });
+    expect(before.status).toBe(200);
+    const baselineCount = before.body.data.counts.closed_no_quotes;
+
+    // Seed a status=2 (closed), published RFQ with bid_end in the past and
+    // no quotes — this is exactly the shape that used to count before the fix.
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 2, // CLOSED — should now be excluded
+      bid_end_date: offsetString(-1 * 86400_000), // 1 day ago
+      title: "Closed (status=2) zero-quote — must not count",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await client
+      .get(ENDPOINT)
+      .query({ hotel_ids: String(IDS.hotels.A1), start_date: "2020-01-01", end_date: "2999-01-01" });
+    expect(after.status).toBe(200);
+    // Count must NOT have increased — status=2 RFQs are excluded after Item 2d.
+    expect(after.body.data.counts.closed_no_quotes).toBe(baselineCount);
+  });
+
+  it("DOES count a status=1 (open) zero-quote RFQ with expired bid window in closed_no_quotes", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await client
+      .get(ENDPOINT)
+      .query({ hotel_ids: String(IDS.hotels.A1), start_date: "2020-01-01", end_date: "2999-01-01" });
+    expect(before.status).toBe(200);
+    const baselineCount = before.body.data.counts.closed_no_quotes;
+
+    // Seed a status=1 (open), published RFQ with bid_end in the past, no quotes.
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1, // OPEN — should still count (RFQ_STUCK_COMMERCIAL shape)
+      bid_end_date: offsetString(-1 * 86400_000), // 1 day ago
+      title: "Open (status=1) zero-quote expired bid — must count",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await client
+      .get(ENDPOINT)
+      .query({ hotel_ids: String(IDS.hotels.A1), start_date: "2020-01-01", end_date: "2999-01-01" });
+    expect(after.status).toBe(200);
+    expect(after.body.data.counts.closed_no_quotes).toBeGreaterThanOrEqual(baselineCount + 1);
   });
 });

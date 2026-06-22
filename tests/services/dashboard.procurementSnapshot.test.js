@@ -92,6 +92,81 @@ describe("GET /dashboard-v2/procurement-snapshot — RFQ state counts (Sr 234)",
   });
 });
 
+describe("GET /dashboard-v2/procurement-snapshot — pos_issued excludes draft/cancelled (Item 5 D)", () => {
+  it("does not count a draft PO in pos_issued but counts a non-draft PO", async () => {
+    const before = await fetchSnapshot();
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      title: "pos_issued filter RFQ",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const { rfq_product_id } = await addProductToRfq(db, rfq_id);
+
+    // Seed a DRAFT PO — must NOT count in pos_issued.
+    const { po_id: draftPoId } = await makePO(db, {
+      rfq_id,
+      rfq_product_id,
+      vendor_user_id: IDS.users.vendor_alpha,
+      company_id: IDS.companies.A,
+      status: "draft",
+    });
+    inserted.poIds.push(draftPoId);
+
+    const afterDraft = await fetchSnapshot();
+    // Draft PO must NOT bump pos_issued.
+    expect(afterDraft.pos_issued - before.pos_issued).toBe(0);
+
+    // Seed an APPROVED PO — must count in pos_issued.
+    const { rfq_product_id: rfq_product_id2 } = await addProductToRfq(db, rfq_id);
+    const { po_id: approvedPoId } = await makePO(db, {
+      rfq_id,
+      rfq_product_id: rfq_product_id2,
+      vendor_user_id: IDS.users.vendor_alpha,
+      company_id: IDS.companies.A,
+      status: "approved",
+    });
+    inserted.poIds.push(approvedPoId);
+
+    const afterApproved = await fetchSnapshot();
+    expect(afterApproved.pos_issued - before.pos_issued).toBe(1);
+  });
+
+  it("does not count a cancelled PO in pos_issued", async () => {
+    const before = await fetchSnapshot();
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      title: "pos_issued cancelled filter RFQ",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const { rfq_product_id } = await addProductToRfq(db, rfq_id);
+
+    // Seed a CANCELLED PO — must NOT count in pos_issued.
+    const { po_id: cancelledPoId } = await makePO(db, {
+      rfq_id,
+      rfq_product_id,
+      vendor_user_id: IDS.users.vendor_alpha,
+      company_id: IDS.companies.A,
+      status: "cancelled",
+    });
+    inserted.poIds.push(cancelledPoId);
+
+    const after = await fetchSnapshot();
+    expect(after.pos_issued - before.pos_issued).toBe(0);
+  });
+});
+
 describe("GET /dashboard-v2/procurement-snapshot — spend breakup (Sr 235)", () => {
   it("splits approved PO spend into base, GST and total (GST from charges_meta)", async () => {
     const before = await fetchSnapshot();
