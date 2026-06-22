@@ -11281,6 +11281,24 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_evaluation_rounds (
   UNIQUE (arc_id, round_number)
 );
 
+--
+-- ARC v2 — Blind technical evaluation (anti-favoritism).
+-- Mirrored from migrations/20260622100000_arc_vendor_alias.sql.
+-- Stable per-ARC alias index per vendor, assigned by tech-envelope
+-- first-submission order (NOT vendor_id ascending). Keyed on
+-- (arc_id, vendor_id) only — round-safe; identical for evaluator and approver.
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_vendor_alias (
+  id          BIGSERIAL PRIMARY KEY,
+  arc_id      BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id   INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  alias_index INTEGER NOT NULL,           -- 0-based; label = letterFor(alias_index)
+  created_at  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, vendor_id),
+  UNIQUE (arc_id, alias_index)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_vendor_alias_arc ON public.tbl_arc_vendor_alias (arc_id);
+
 
 --
 -- ARC v2 §4.4 — vendor quotes + commercial evaluation.

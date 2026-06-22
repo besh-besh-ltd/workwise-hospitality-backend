@@ -71,6 +71,20 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
       [clauseId, vendorId, vendorResponse])).id);
   }
 
+  // BLIND EVAL: the tech matrix no longer carries the real vendor_id (it's
+  // redacted to a per-ARC alias). To assert per-vendor scores we map a real
+  // vendor_id → its stable alias_index via tbl_arc_vendor_alias, then locate the
+  // score row by `vendor_alias_key` (= alias_index). Call AFTER a tech-eval GET
+  // (aliases are assigned lazily on first read).
+  async function aliasKeyFor(theArcId, vendorId) {
+    const row = await db.oneOrNone(
+      `SELECT alias_index FROM tbl_arc_vendor_alias WHERE arc_id = $1 AND vendor_id = $2`,
+      [theArcId, vendorId]);
+    return row ? Number(row.alias_index) : null;
+  }
+  const scoreForVendor = (scores, aliasKey) =>
+    scores.find((s) => Number(s.vendor_alias_key) === aliasKey);
+
   beforeAll(async () => {
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = ANY($1::int[])`,
       [[BUYER, APPROVER, NOPERM_BUYER]]);
@@ -236,10 +250,10 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
 
     // computeItemScores surfaces mandatory_failed so the UI can explain it.
     const matrix = await buyerClient.get(`${E}/items/${itemId}/tech-eval`);
-    const sA = matrix.body.data.scores.find((s) => Number(s.vendor_id) === VENDOR_A);
+    const sA = scoreForVendor(matrix.body.data.scores, await aliasKeyFor(arcId, VENDOR_A));
     expect(sA.mandatory_failed).toBe(true);
     expect(sA.qualifies).toBe(false);
-    const sB = matrix.body.data.scores.find((s) => Number(s.vendor_id) === VENDOR_B);
+    const sB = scoreForVendor(matrix.body.data.scores, await aliasKeyFor(arcId, VENDOR_B));
     expect(sB.mandatory_failed).toBe(false);
     expect(sB.qualifies).toBe(true);
   });
@@ -321,7 +335,7 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
           WHERE id = $1`, [uRespM]);
 
       const matrix = await buyerClient.get(`${E}/items/${uItemId}/tech-eval`);
-      const s = matrix.body.data.scores.find((x) => Number(x.vendor_id) === VENDOR_A);
+      const s = scoreForVendor(matrix.body.data.scores, await aliasKeyFor(uArcId, VENDOR_A));
       // 100% weighted, but the mandatory verdict is NULL → not-yet-passing → not qualified.
       expect(Number(s.calculated_score)).toBe(100);
       expect(s.mandatory_failed).toBe(true);
@@ -366,7 +380,7 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
       await buyerClient.post(`${E}/tech-eval/score`).send({ response_id: nRespW, buyer_marks: 70 });
 
       const matrix = await buyerClient.get(`${E}/items/${nItemId}/tech-eval`);
-      const s = matrix.body.data.scores.find((x) => Number(x.vendor_id) === VENDOR_A);
+      const s = scoreForVendor(matrix.body.data.scores, await aliasKeyFor(nArcId, VENDOR_A));
       // Score passes the threshold, but the vendor never submitted the mandatory
       // clause at all → the gate must still disqualify them (the fixed blind spot).
       expect(Number(s.calculated_score)).toBe(70);
@@ -386,7 +400,8 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
     // Pass: 8/10 = 80% >= 60.
     await buyerClient.post(`${E}/tech-eval/score`).send({ response_id: woRespA, buyer_marks: 8 });
     let scores = (await buyerClient.get(`${E}/items/${woItemId}/tech-eval`)).body.data.scores;
-    let s = scores.find((x) => Number(x.vendor_id) === VENDOR_A);
+    const woKeyA = await aliasKeyFor(woArcId, VENDOR_A);
+    let s = scoreForVendor(scores, woKeyA);
     expect(Number(s.calculated_score)).toBe(80);
     expect(s.mandatory_failed).toBe(false);
     expect(s.qualifies).toBe(true);
@@ -394,7 +409,7 @@ describe("ARC v2 — mandatory pass/fail gate + scoring math", () => {
     // Fail: 4/10 = 40% < 60.
     await buyerClient.post(`${E}/tech-eval/score`).send({ response_id: woRespA, buyer_marks: 4 });
     scores = (await buyerClient.get(`${E}/items/${woItemId}/tech-eval`)).body.data.scores;
-    s = scores.find((x) => Number(x.vendor_id) === VENDOR_A);
+    s = scoreForVendor(scores, woKeyA);
     expect(Number(s.calculated_score)).toBe(40);
     expect(s.qualifies).toBe(false);
     expect(s.mandatory_failed).toBe(false); // disqualified by SCORE, not the gate

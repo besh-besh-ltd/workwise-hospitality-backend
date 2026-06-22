@@ -1,5 +1,10 @@
 import db from '../../config/dbConn.js';
 
+// Advisory-lock namespace (first key of the two-int pg_advisory_xact_lock) used
+// to serialize per-ARC vendor-alias assignment. Arbitrary fixed int4, scoped to
+// this concern so it can't clash with locks used elsewhere. Second key = arcId.
+const ARC_ALIAS_LOCK_NS = 0x41435641; // "ACVA" — fits signed int4
+
 /**
  * ARC v2 — Technical + Commercial evaluation model.
  *
@@ -382,6 +387,120 @@ const arcEvalModel = {
       if (r.vendor_id != null) map[k].push(Number(r.vendor_id));
     });
     return map;
+  },
+
+  // ============================================================
+  // Blind technical evaluation — per-ARC vendor aliases
+  // ============================================================
+
+  // Pure base-26 BIJECTIVE label: 0→"Vendor A", 1→"Vendor B", … 25→"Vendor Z",
+  // 26→"Vendor AA", 27→"Vendor AB", … Never derived from the real vendor name;
+  // the only input is the small non-identity alias_index.
+  aliasLabel: (index) => {
+    let n = Number(index);
+    if (!Number.isFinite(n) || n < 0) n = 0;
+    let s = '';
+    n += 1; // shift to 1-based for bijective base-26
+    while (n > 0) {
+      const rem = (n - 1) % 26;
+      s = String.fromCharCode(65 + rem) + s;
+      n = Math.floor((n - 1) / 26);
+    }
+    return `Vendor ${s}`;
+  },
+
+  /**
+   * Lazy, idempotent, race-safe alias assignment for an ARC. Returns
+   *   Map<vendor_id(Number), { alias_index, alias_label }>
+   * covering EVERY technically-participating vendor (those with a tech response
+   * row OR a sealed tech envelope). Safe to call on every tech read.
+   *
+   * Assignment order for vendors lacking an alias: tech-envelope first-submission
+   * time ASC (NULLS LAST), then vendor_id ASC as a deterministic tiebreak — NOT
+   * vendor_id ascending overall, so the alias does not trivially reverse to a
+   * real identity. New indices continue from MAX(alias_index)+1 so a vendor that
+   * appears in a later round keeps existing letters intact (round-safe).
+   */
+  getOrAssignAliases: async (arcId, txContext = null) => {
+    const buildMap = (rows) => {
+      const map = new Map();
+      for (const r of rows) {
+        const idx = Number(r.alias_index);
+        map.set(Number(r.vendor_id), { alias_index: idx, alias_label: arcEvalModel.aliasLabel(idx) });
+      }
+      return map;
+    };
+
+    // The read-compute-insert section, serialized per ARC by a transaction-
+    // scoped advisory lock. WHY the lock (M1): the ON CONFLICT(arc_id,vendor_id)
+    // guard below only catches a SAME-vendor double-insert — it does NOT catch
+    // two DIFFERENT new vendors arriving concurrently and both computing the
+    // same nextIndex, which would collide on UNIQUE(arc_id, alias_index) and
+    // raise a unique-violation (transient 500). pg_advisory_xact_lock makes the
+    // first assigner finish (and commit its indices) before the second reads,
+    // so indices never collide. The lock auto-releases at commit.
+    const run = async (t) => {
+      // .one — SELECT pg_advisory_xact_lock(...) returns exactly one (void) row.
+      await t.one('SELECT pg_advisory_xact_lock($1, $2)', [ARC_ALIAS_LOCK_NS, Number(arcId)]);
+
+      // 1. Existing aliases (after acquiring the lock, so we see a prior
+      //    assigner's committed rows).
+      let existing = await t.any(
+        `SELECT vendor_id, alias_index FROM tbl_arc_vendor_alias WHERE arc_id = $1`,
+        [arcId]
+      );
+      const have = new Set(existing.map((r) => Number(r.vendor_id)));
+
+      // 2. Tech-participating vendors lacking an alias: DISTINCT vendor_ids with
+      //    a response row (clauses→te→item→arc) UNION those with a sealed tech
+      //    envelope on tbl_arc_quote. Carry tech_submitted_at for ordering.
+      const pending = await t.any(
+        `WITH participants AS (
+           SELECT DISTINCT r.vendor_id
+             FROM tbl_arc_item_tech_evaluation_vendors_response r
+             JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+             JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+             JOIN tbl_arc_item i ON i.id = te.arc_item_id
+            WHERE i.arc_id = $1
+           UNION
+           SELECT DISTINCT q.vendor_id
+             FROM tbl_arc_quote q
+            WHERE q.arc_id = $1 AND q.tech_submitted_at IS NOT NULL
+         )
+         SELECT p.vendor_id, q.tech_submitted_at
+           FROM participants p
+           LEFT JOIN tbl_arc_quote q ON q.arc_id = $1 AND q.vendor_id = p.vendor_id
+          ORDER BY q.tech_submitted_at ASC NULLS LAST, p.vendor_id ASC`,
+        [arcId]
+      );
+      const toAssign = pending.filter((r) => !have.has(Number(r.vendor_id)));
+
+      // 3/4. Assign sequential indices from the current max. The lock guarantees
+      //      we're the only assigner, so the index sequence can't collide.
+      if (toAssign.length > 0) {
+        let nextIndex = existing.reduce((mx, r) => Math.max(mx, Number(r.alias_index) + 1), 0);
+        for (const row of toAssign) {
+          await t.none(
+            `INSERT INTO tbl_arc_vendor_alias (arc_id, vendor_id, alias_index)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (arc_id, vendor_id) DO NOTHING`,
+            [arcId, Number(row.vendor_id), nextIndex]
+          );
+          nextIndex += 1;
+        }
+        existing = await t.any(
+          `SELECT vendor_id, alias_index FROM tbl_arc_vendor_alias WHERE arc_id = $1`,
+          [arcId]
+        );
+      }
+
+      return buildMap(existing);
+    };
+
+    // Advisory xact locks must run inside a transaction to be transaction-
+    // scoped. When the caller already supplies a tx, reuse it; otherwise open a
+    // short transaction just for the critical section.
+    return txContext ? run(txContext) : db.tx(run);
   },
 
   // ============================================================

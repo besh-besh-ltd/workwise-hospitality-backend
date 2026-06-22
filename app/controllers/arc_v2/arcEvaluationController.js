@@ -28,6 +28,23 @@ import axios from 'axios';
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
+// ── Blind technical evaluation (anti-favoritism) ──────────────────────────
+// Every TECHNICAL-phase buyer-facing response must emit ONLY the per-ARC alias
+// — never the real vendor name/email/company/avatar/initials/vendor_id. The
+// alias is resolved server-side from tbl_arc_vendor_alias via
+// arcEvalModel.getOrAssignAliases(arcId). The reveal happens only at the
+// COMMERCIAL stage (getCommEval and downstream), which is left untouched.
+//
+// Returns { vendor_alias_key, vendor_alias } for a real vendor_id; falls back
+// to a synthetic label keyed on the id WITHOUT ever exposing the id itself, so
+// even an un-aliased vendor (should not happen after getOrAssignAliases) cannot
+// leak its real identity through the JSON.
+function aliasFields(vendorId, aliasMap) {
+  const a = aliasMap && aliasMap.get(Number(vendorId));
+  if (a) return { vendor_alias_key: a.alias_index, vendor_alias: a.alias_label };
+  return { vendor_alias_key: null, vendor_alias: arcEvalModel.aliasLabel(0) };
+}
+
 // Shared catch: lifecycle guards throw {httpStatus:409, code:'STAGE_IMMUTABLE'};
 // everything else is a 500.
 function fail(res, err, tag) {
@@ -116,7 +133,12 @@ export async function scoreResponse(req, res) {
     const row = await arcEvalModel.scoreVendorResponse(response_id, {
       buyer_id: userId, buyer_marks, buyer_remark, mandatory_passed: verdict,
     });
-    return ok(res, { response: row });
+    // BLIND EVAL: the model row carries the real vendor_id — strip it and emit
+    // the stable per-ARC alias instead. The FE keys the echo on response_id +
+    // alias_key, so no real identity is needed (or sent).
+    const aliasMap = await arcEvalModel.getOrAssignAliases(arcId);
+    const { vendor_id, ...rest } = row;
+    return ok(res, { response: { ...rest, ...aliasFields(vendor_id, aliasMap) } });
   } catch (err) {
     return fail(res, err, '[evalController.scoreResponse]');
   }
@@ -127,33 +149,55 @@ export async function getTechEvalForItem(req, res) {
     const arcItemId = Number(req.params.itemId);
     const te = await db.oneOrNone(`SELECT * FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [arcItemId]);
     if (!te) return ok(res, { tech_evaluation: null, clauses: [], scores: [], responses: [] });
+    // BLIND EVAL: resolve the ARC and its stable per-vendor aliases. Every
+    // vendor in play here gets an alias (this read is alias-assigning + safe to
+    // call repeatedly), so identity is replaced before anything leaves the box.
+    const arcId = await arcLifecycleModel.getArcIdForItem(arcItemId);
+    const aliasMap = arcId ? await arcEvalModel.getOrAssignAliases(arcId) : new Map();
     // listClauses does SELECT * so is_mandatory comes along once the column
     // exists — no change needed there.
     const clauses = await arcEvalModel.listClauses(te.id);
-    const scores = await arcEvalModel.computeItemScores(arcItemId);
+    // computeItemScores returns real vendor_id (server-internal) — remap to the
+    // alias and DROP vendor_id before it reaches the browser.
+    const rawScores = await arcEvalModel.computeItemScores(arcItemId);
+    const scores = rawScores.map((s) => {
+      const { vendor_id, ...rest } = s;
+      return { ...aliasFields(vendor_id, aliasMap), ...rest };
+    });
     // Per-(clause × vendor) response rows — the scoring matrix binds inputs
     // to response_id, so the cells need these (scores alone are per-vendor
     // aggregates). vendor_response is now VENDOR-authored (two-envelope flow);
     // the buyer scores it read-only. mandatory_passed carries the gate verdict.
-    const responses = await db.any(
+    //
+    // BLIND EVAL: NO LEFT JOIN tbl_users / no vendor_name; vendor_id is selected
+    // internally ONLY for alias mapping + grouping and is NEVER emitted. files
+    // drop file_url (the S3 key could embed a vendor-identifying path) — only
+    // file_id (the evidence-proxy handle) survives. ORDER BY is keyed off the
+    // stable alias rows (via the alias join) and response_id, NOT r.vendor_id,
+    // so the matrix column order does not leak vendor_id order.
+    const rawResponses = await db.any(
       `SELECT r.id AS response_id,
               r.arc_item_tech_evaluation_clauses_id AS clause_id,
-              r.vendor_id, u.name AS vendor_name,
+              r.vendor_id,
               r.vendor_response, r.buyer_marks, r.buyer_remark,
               r.mandatory_passed, r.score_timestamp,
               COALESCE(f.files, '[]'::json) AS files
          FROM tbl_arc_item_tech_evaluation_vendors_response r
          JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
-         LEFT JOIN tbl_users u ON u.id = r.vendor_id
+         LEFT JOIN tbl_arc_vendor_alias a ON a.arc_id = $2 AND a.vendor_id = r.vendor_id
          LEFT JOIN LATERAL (
-           SELECT json_agg(json_build_object('file_id', vf.id, 'file_url', vf.file_url) ORDER BY vf.id) AS files
+           SELECT json_agg(json_build_object('file_id', vf.id) ORDER BY vf.id) AS files
              FROM tbl_arc_item_tech_evaluation_vendors_response_files vf
             WHERE vf.arc_item_tech_evaluation_vendors_response_id = r.id
          ) f ON TRUE
         WHERE c.arc_item_tech_evaluation_id = $1
-        ORDER BY r.vendor_id, c.id`,
-      [te.id]
+        ORDER BY a.alias_index NULLS LAST, r.id`,
+      [te.id, arcId]
     );
+    const responses = rawResponses.map((row) => {
+      const { vendor_id, ...rest } = row;
+      return { ...rest, ...aliasFields(vendor_id, aliasMap) };
+    });
     return ok(res, { tech_evaluation: te, clauses, scores, responses });
   } catch (err) {
     logger.error({ err }, '[evalController.getTechEvalForItem]');
@@ -443,11 +487,18 @@ export async function decideTechEval(req, res) {
     });
 
     const approval = await getApprovalInstanceDetails(instance.id, userId).catch(() => null);
-    // Fresh per-item scores for the touched items (UI refresh without refetch-all).
+    // BLIND EVAL: the approver stays blind too. Fresh per-item scores for the
+    // touched items (UI refresh without refetch-all), with the real vendor_id
+    // remapped to the stable per-ARC alias and dropped. `amended[]` is already
+    // response_id-scoped (no identity); `approval` is the buyer approver chain.
+    const aliasMap = await arcEvalModel.getOrAssignAliases(arcId);
     const scores = [];
     for (const itemId of touchedItemIds) {
       const itemScores = await arcEvalModel.computeItemScores(itemId, 1);
-      for (const s of itemScores) scores.push({ arc_item_id: itemId, ...s });
+      for (const s of itemScores) {
+        const { vendor_id, ...rest } = s;
+        scores.push({ arc_item_id: itemId, ...aliasFields(vendor_id, aliasMap), ...rest });
+      }
     }
     return ok(res, { result, approval, amended, scores });
   } catch (err) {
