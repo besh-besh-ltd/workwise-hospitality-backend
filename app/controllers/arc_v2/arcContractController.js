@@ -1,6 +1,6 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
-import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcEvalModel, { normalizeArcCharges } from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
 import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
@@ -8,6 +8,7 @@ import arcAmendmentDocumentModel from '../../models/arc_v2/arcAmendmentDocumentM
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
@@ -56,19 +57,44 @@ function amountInWords(value) {
   return out.trim() + ' Rupees Only';
 }
 
-// Sum freight/charges from a contract line's charges blob (pct or absolute).
-function lineFreight(l) {
-  let frt = 0;
+// Phase 2 — engine-based per-line pricing for the contract document.
+// Replaces the legacy lineFreight() which used the old {value,type:'pct'|'absolute'}
+// shape. Now routes through pricingEngine.calculateLineTotal (same engine the
+// vendor's quote preview uses) so the document totals always match the stored quote.
+// Returns { base, base_tax, chargesTotal, allIn, chargesDisplay } where:
+//   allIn = base + base_tax + chargesTotal  (engine `total`)
+//   chargesDisplay = ₹ string for non-zero aggregate freight/charges
+function lineEngineOut(l) {
   let charges = l.charges;
-  if (typeof charges === 'string') { try { charges = JSON.parse(charges); } catch (_) { charges = []; } }
-  if (!Array.isArray(charges)) charges = [];
-  const rate = Number(l.unit_rate || 0);
-  for (const c of charges) {
-    if (!c) continue;
-    const v = Number(c.value || 0);
-    frt += c.type === 'pct' ? (rate * v) / 100 : v;
+  if (typeof charges === 'string') { try { charges = JSON.parse(charges); } catch (_) { charges = null; } }
+  const canonicalCharges = normalizeArcCharges(charges);
+  const engineInput = {
+    unit_price:    Number(l.unit_rate || 0),
+    quantity:      1,          // contract doc shows per-unit; qty handled in the row value column
+    tax:           Number(l.gst_pct || 0),
+    tax_mode:      'percentage',
+    other_charges: canonicalCharges.map((c) => ({
+      name:        c.name ?? null,
+      amount:      Number(c.amount ?? 0),
+      amount_mode: (c.amount_mode === 'percentage' || c.amount_mode === '%') ? 'percentage' : 'absolute',
+      tax:         (c.tax !== null && c.tax !== undefined && c.tax !== '') ? Number(c.tax) : null,
+      tax_mode:    (c.tax_mode === 'percentage' || c.tax_mode === '%') ? 'percentage' : 'absolute',
+    })),
+  };
+  const out = pricingEngine.calculateLineTotal(engineInput);
+  const chargesTotal = out.charges_total;
+  // Build a human-readable display for the charges column.
+  let chargesDisplay = '';
+  if (chargesTotal > 0 && out.charges.length > 0) {
+    chargesDisplay = out.charges.map((c) => `${c.name || 'Charge'}: ₹${Number(c.amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`).join(', ');
   }
-  return Math.round(frt * 100) / 100;
+  return {
+    base:           out.base,
+    base_tax:       out.base_tax,
+    chargesTotal,
+    allIn:          out.total,  // base + base_tax + all charges (incl. charge taxes)
+    chargesDisplay,
+  };
 }
 
 /**
@@ -96,18 +122,21 @@ function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signed
   let grand = 0;
   const rows = lines.map((l, i) => {
     const basic = Number(l.unit_rate || 0);
-    const frt = lineFreight(l);
-    const allIn = basic + frt;
+    // Phase 2 — engine-computed per-unit all-in price (base + base_tax + charges).
+    const engine = lineEngineOut(l);
+    const frtDisplay = engine.chargesTotal > 0 ? inr(engine.chargesTotal) : '—';
+    // all-in per unit = engine.allIn (base + tax + charges at qty=1)
+    const allInPerUnit = engine.allIn;
     const qty = Number(l.committed_qty || 0);
-    const value = allIn * qty;
+    const value = allInPerUnit * qty;
     grand += value;
     return `<tr>
       <td class="c">${i + 1}</td>
-      <td>${esc(l.variant_name || ('Item #' + l.arc_item_id))}<div class="sub">${esc(l.variant_slug || l.arc_item_id)}</div></td>
+      <td>${esc(l.variant_name || ('Item #' + l.arc_item_id))}<div class="sub">${esc(l.variant_slug || l.arc_item_id)}</div>${engine.chargesDisplay ? `<div class="sub" style="color:#888;font-size:11px">${esc(engine.chargesDisplay)}</div>` : ''}</td>
       <td class="c">${esc(l.uom || '—')}</td>
       <td class="r">${inr(basic)}</td>
-      <td class="r">${frt > 0 ? inr(frt) : '—'}</td>
-      <td class="r"><strong>${inr(allIn)}</strong></td>
+      <td class="r">${frtDisplay}</td>
+      <td class="r"><strong>${inr(allInPerUnit)}</strong></td>
       <td class="r">${Number(l.gst_pct ?? 0)}%</td>
       <td class="r">${qty.toLocaleString('en-IN')}</td>
       <td class="r"><strong>${inr(value)}</strong></td>

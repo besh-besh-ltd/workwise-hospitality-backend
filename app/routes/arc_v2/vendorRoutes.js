@@ -21,6 +21,10 @@ const techEvidenceUpload = multer({
 r.get( '/dashboard',                      passportSignIn, acl([3]), vendorController.getVendorDashboard);
 r.get( '/requests',                       passportSignIn, acl([3]), vendorController.listRequests);
 r.get( '/requests/:arcId',                passportSignIn, acl([3]), vendorController.getRequestDetail);
+r.get( '/requests/:arcId/lifecycle',      passportSignIn, acl([3]), vendorController.getRequestLifecycle);
+r.post('/quote/accept-terms',             passportSignIn, acl([3]), vendorController.acceptTerms);
+// Phase 2 — engine-driven stateless preview (qty server-derived; never persists).
+r.post('/quote/preview',                  passportSignIn, acl([3]), vendorController.previewQuote);
 r.post('/quote/draft',                    passportSignIn, acl([3]), vendorController.saveQuoteDraft);
 r.post('/quote/submit',                   passportSignIn, acl([3]), vendorController.submitQuote);
 r.post('/quote/withdraw',                 passportSignIn, acl([3]), vendorController.withdrawQuote);

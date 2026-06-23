@@ -7,6 +7,13 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { sendMail } from '../../helper/common.js';
+import {
+  createApprovalInstance,
+  findBestMatchingPolicyTx,
+  cancelApprovalInstance,
+  getApprovalInstanceDetails,
+} from '../../models/generalModel.js';
+import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 
 /**
  * ARC v2 — Buyer-side controller for the ARC root entity.
@@ -91,6 +98,61 @@ async function notifyVendorsOfFloat(arc, invitations, actorId) {
   }
 }
 
+/**
+ * Float an ARC live: resolve + persist the vendor panel, flip to 'floated',
+ * and return the data needed to notify vendors. This is the reusable extraction
+ * of today's publish side-effects, called by the post-approval hook (and never
+ * directly by publish, which now only creates the approval instance).
+ *
+ * It does NOT do auth, status-gating, or window validation (those belong to
+ * publish). It RE-CHECKS the vendor panel at call time (RESOLVED 6) — if empty,
+ * it returns { floated:false, reason:'no_vendors' } WITHOUT flipping; the caller
+ * decides what to do (the approval hook flips to publish_rejected). It NEVER
+ * notifies vendors itself — when a txContext is passed the notify must run after
+ * the outer commit, so floatArc returns _notifyArc/_actorId and the CALLER fires
+ * notifyVendorsOfFloat post-commit (RESOLVED 7).
+ *
+ * @returns { floated:true, arc, invitations, _notifyArc, _actorId }
+ *        | { floated:false, reason:'no_vendors' }
+ */
+async function floatArc(arcId, actorId, { txContext = null } = {}) {
+  const runner = txContext || db;
+  const arc = await arcModel.getById(arcId, runner);
+  if (!arc) return { floated: false, reason: 'arc_not_found' };
+
+  // Resolve the vendor panel (same logic as today's publish): "open" resolves
+  // eligible vendors for (category, hotel); "invitation" uses the rows set at
+  // createDraft.
+  let vendorIds;
+  if (arc.eligibility_type === 'open') {
+    const eligible = await arcModel.getEligibleVendorsForCategory(
+      { category_id: arc.category_id, hotel_id: arc.hotel_id }, runner);
+    vendorIds = eligible.map((v) => Number(v.id));
+  } else {
+    const inv = await arcModel.listInvitations(arcId, runner);
+    vendorIds = inv.map((i) => Number(i.vendor_id));
+  }
+  if (vendorIds.length === 0) return { floated: false, reason: 'no_vendors' };
+
+  const items = await arcModel.listItems(arcId, runner);
+
+  const doFloat = async (t) => {
+    const updated = await arcModel.setStatus(arcId, 'floated', {}, t);
+    if (arc.eligibility_type === 'open') await arcModel.setInvitations(arcId, vendorIds, t);
+    const invitations = await arcModel.listInvitations(arcId, t);
+    await logArcEvent({
+      arcId, eventType: ARC_EVENT_TYPES.PUBLISHED, actorId,
+      payload: { item_count: items.length, vendor_count: invitations.length }, txContext: t,
+    });
+    return { updated, invitations };
+  };
+
+  // Honour an outer tx if given (the post-approval hook supplies one); else open
+  // our own. Vendor notify is ALWAYS deferred to the caller (post-commit).
+  const res = txContext ? await doFloat(txContext) : await db.tx(doFloat);
+  return { floated: true, arc: res.updated, invitations: res.invitations, _notifyArc: arc, _actorId: actorId };
+}
+
 export async function createDraft(req, res) {
   try {
     const userId = req.user?.id;
@@ -170,7 +232,11 @@ export async function updateDraft(req, res) {
     const body = req.body || {};
     const existing = await arcModel.getById(id);
     if (!existing) return bad(res, 404, 'ARC not found', 2);
-    if (existing.status !== 'draft') return bad(res, 409, 'Only drafts can be edited');
+    // A publish-rejected ARC is editable again (RESOLVED 4): the creator revises
+    // and re-publishes (which spawns a fresh approval instance).
+    if (!['draft','publish_rejected'].includes(existing.status)) {
+      return bad(res, 409, 'Only drafts can be edited');
+    }
     const updated = await arcModel.updateDraft(id, body);
     return ok(res, { arc: updated }, 'ARC draft updated');
   } catch (err) {
@@ -189,7 +255,10 @@ export async function publish(req, res) {
     if (!(await userCanAccessHotel(req, arc.hotel_id))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
-    if (arc.status !== 'draft') return bad(res, 409, `Cannot publish ARC in status ${arc.status}`);
+    // Publishable from a fresh draft OR a previously-rejected publish (RESOLVED 4).
+    if (!['draft','publish_rejected'].includes(arc.status)) {
+      return bad(res, 409, `Cannot publish ARC in status ${arc.status}`);
+    }
     // Server-side completeness + window validation (audit M1). The wizard
     // surfaces these earlier — this is the fail-safe.
     const missing = [];
@@ -233,29 +302,217 @@ export async function publish(req, res) {
       return bad(res, 400, 'No eligible vendors to invite — cannot float this rate contract to nobody');
     }
 
+    // Publish no longer floats directly. It resolves the ARC's approval policy
+    // (matched as entity_type 'ARC'), creates an ARC_PUBLISH approval instance,
+    // and parks the ARC in pending_publish_approval. The ARC goes live ONLY when
+    // the instance reaches APPROVED — the registered hook (handleArcPublishApproval)
+    // calls floatArc. No policy → hard 400; the ARC stays draft/publish_rejected.
     const result = await db.tx(async (t) => {
-      const updated = await arcModel.setStatus(id, 'floated', {}, t);
-      // Persist the vendor snapshot (audit C3). For "open" this writes the
-      // resolved set; "invitation" already has its rows. Either way the ARC
-      // becomes visible in those vendors' portals (which key off invitations).
-      if (arc.eligibility_type === 'open') {
-        await arcModel.setInvitations(id, vendorIds, t);
+      const policy = await findBestMatchingPolicyTx({
+        entity_type:            'ARC',
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+      }, t);
+      if (!policy) {
+        const err = new Error('No approval policy configured to publish a rate contract in this scope. Configure an ARC approval policy (Settings → Approvals) for this company/hotel/department, then publish again.');
+        err.httpStatus = 400;
+        throw err;
       }
-      const invitations = await arcModel.listInvitations(id, t);
+      const engineResult = await createApprovalInstance({
+        entity_type:            'ARC_PUBLISH',
+        entity_id:              id,
+        hospitality_company_id: arc.hospitality_company_id,
+        hotel_id:               arc.hotel_id,
+        department_id:          arc.department_id,
+        process_id:             arc.process_id,
+        approval_policy_id:     policy.id,
+        initiated_by:           userId,
+        metadata:               { item_count: items.length, vendor_count: vendorIds.length, eligibility_type: arc.eligibility_type },
+        txContext:              t,
+      });
+      const instanceRow = engineResult?.instance || engineResult;
+      if (!instanceRow?.id) throw new Error('Approval engine did not return an instance id');
+      await arcModel.setStatus(id, 'pending_publish_approval', {}, t);
       await logArcEvent({
-        arcId: id, eventType: ARC_EVENT_TYPES.PUBLISHED,
-        actorId: userId, payload: { item_count: items.length, vendor_count: invitations.length },
+        arcId: id, eventType: ARC_EVENT_TYPES.PUBLISH_SUBMITTED,
+        actorId: userId, payload: { approval_instance_id: instanceRow.id, vendor_count: vendorIds.length },
         txContext: t,
       });
-      return { updated, invitations };
+      return { approval_instance_id: instanceRow.id, auto_approved: engineResult.autoApproved === true };
     });
 
-    // Notify tagged vendors AFTER commit (audit C2) — best-effort, never blocks.
-    await notifyVendorsOfFloat(arc, result.invitations, userId);
+    // Auto-approve: the engine births the instance APPROVED when the publisher
+    // is the (sole/ANY) configured approver, so executeApprovalAction never runs.
+    // Dispatch the post-approval hook here so the ARC floats in the same request.
+    if (result.auto_approved) {
+      await dispatchPostApprovalAction(result.approval_instance_id, userId, {
+        status: 'APPROVED', comment: 'Auto-approved — publisher is the configured approver',
+      });
+      const arcNow = await arcModel.getById(id);
+      const didFloat = arcNow?.status === 'floated';
+      // vendor_count parity with the (former) direct-float response, so callers
+      // that show "floated to N vendors" keep working on the auto-approve path.
+      const floatedInvites = didFloat ? await arcModel.listInvitations(id) : [];
+      return ok(res, {
+        arc: arcNow,
+        approval_instance_id: result.approval_instance_id,
+        floated: didFloat,
+        vendor_count: floatedInvites.length,
+      }, didFloat ? 'ARC floated' : 'ARC publish auto-approved but could not float');
+    }
 
-    return ok(res, { arc: result.updated, vendor_count: result.invitations.length }, 'ARC floated');
+    return ok(res, {
+      arc: { ...arc, status: 'pending_publish_approval' },
+      approval_instance_id: result.approval_instance_id,
+      floated: false,
+    }, 'Submitted for publish approval');
   } catch (err) {
+    // A no-policy (or any pre-mapped) failure surfaces its actionable message
+    // with the intended HTTP status; the throw rolled the tx back so the ARC
+    // stays draft/publish_rejected.
+    if (err.httpStatus) return bad(res, err.httpStatus, err.message);
     logger.error({ err }, '[arcController.publish]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// Publish-approval post-action hooks (registered in approvalActionService
+// under entity_type ARC_PUBLISH). Mirror the ARC_TECH/ARC_COMMITTEE hooks.
+// ============================================================
+
+/**
+ * APPROVED → float the ARC live. floatArc RE-CHECKS the vendor panel at
+ * approval time; if empty (eligibility changed since publish) we do NOT float
+ * to nobody — the ARC is parked as publish_rejected instead. Vendor
+ * notifications fire ONLY here, AFTER the commit, and only when we floated.
+ */
+export async function handleArcPublishApproval(approvalInstanceId, approverUserId, options = {}) {
+  try {
+    const arcId = options.instance?.entity_id;
+    if (!arcId) return;
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return;
+    // Idempotency: only act while still pending. Auto-approve + a later generic
+    // action could both fire; the second is a no-op.
+    if (arc.status !== 'pending_publish_approval') return;
+
+    let floatResult;
+    await db.tx(async (t) => {
+      floatResult = await floatArc(arcId, approverUserId, { txContext: t });
+      if (!floatResult.floated) {
+        // Empty panel at approval time — never float to nobody; park rejected.
+        await arcModel.setStatus(arcId, 'publish_rejected', { closed_reason: 'No eligible vendors at approval time' }, t);
+        await logArcEvent({
+          arcId, eventType: ARC_EVENT_TYPES.PUBLISH_REJECTED, actorId: approverUserId,
+          payload: { reason: 'no_vendors_at_approval', approval_instance_id: approvalInstanceId }, txContext: t,
+        });
+      }
+    });
+    // Vendor notify AFTER commit (only when we actually floated).
+    if (floatResult?.floated) {
+      await notifyVendorsOfFloat(floatResult._notifyArc, floatResult.invitations, floatResult._actorId);
+    } else {
+      logger.warn({ arcId, approvalInstanceId }, '[arcController.handleArcPublishApproval] empty panel at approval — parked publish_rejected');
+    }
+  } catch (err) {
+    logger.error({ err, approvalInstanceId }, '[arcController.handleArcPublishApproval]');
+  }
+}
+
+/** REJECTED → not live; the creator may revise + re-publish (fresh instance). */
+export async function handleArcPublishRejection(approvalInstanceId, approverUserId, options = {}) {
+  try {
+    const arcId = options.instance?.entity_id;
+    if (!arcId) return;
+    const reason = options.comment || '';
+    await db.tx(async (t) => {
+      await arcModel.setStatus(arcId, 'publish_rejected', { closed_reason: reason || null }, t);
+      await logArcEvent({
+        arcId, eventType: ARC_EVENT_TYPES.PUBLISH_REJECTED, actorId: approverUserId,
+        payload: { reason, approval_instance_id: approvalInstanceId }, txContext: t,
+      });
+    });
+  } catch (err) {
+    logger.error({ err, approvalInstanceId }, '[arcController.handleArcPublishRejection]');
+  }
+}
+
+// ============================================================
+// POST /v1/arc-v2/:id/publish-approval/decide
+//   Body: { decision:'approve'|'reject', comment? }
+//   Engine-gated: executeApprovalAction validates the caller is the current
+//   pending approver and fires the ARC_PUBLISH hooks on the terminal state.
+//   Mirrors decideCommittee / decideTechEval.
+// ============================================================
+export async function publishApprovalDecide(req, res) {
+  try {
+    const arcId    = Number(req.params.id);
+    const userId   = req.user?.id;
+    const decision = String(req.body?.decision || '').trim();
+    const comment  = req.body?.comment ? String(req.body.comment) : null;
+
+    if (!arcId)  return bad(res, 400, 'id is required');
+    if (!userId) return bad(res, 401, 'Authentication required');
+    if (decision !== 'approve' && decision !== 'reject') {
+      return bad(res, 400, "decision must be 'approve' or 'reject'");
+    }
+    if (decision === 'reject' && !comment) {
+      return bad(res, 400, 'A reason (comment) is required when rejecting');
+    }
+
+    const instance = await db.oneOrNone(
+      `SELECT * FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_PUBLISH' AND entity_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [arcId]
+    );
+    if (!instance) return bad(res, 404, 'No publish-approval instance for this ARC', 2);
+    if (instance.status !== 'PENDING') {
+      return bad(res, 400, `Publish approval is already ${instance.status} — no further actions allowed`);
+    }
+
+    const result = await executeApprovalAction({
+      approval_instance_id: instance.id,
+      approver_user_id:     userId,
+      action:               decision.toUpperCase(),
+      comment,
+    });
+    const approval = await getApprovalInstanceDetails(instance.id, userId).catch(() => null);
+    return ok(res, { result, approval });
+  } catch (err) {
+    logger.error({ err }, '[arcController.publishApprovalDecide]');
+    const msg = err.message || 'Internal error';
+    const code = /not authorized|not an approver|already acted|already (approved|rejected)|not found|no pending step/i.test(msg) ? 400 : 500;
+    return bad(res, code, msg, code === 500 ? 3 : 0);
+  }
+}
+
+// ============================================================
+// GET /v1/arc-v2/:id/publish-approval
+//   Latest ARC_PUBLISH instance chain detail (or null) so the Overview can
+//   render the approver matrix. Mirrors committee's getCommitteeView approval
+//   block / tech's getTechEvalApproval.
+// ============================================================
+export async function getPublishApproval(req, res) {
+  try {
+    const arcId = Number(req.params.id);
+    const instance = await db.oneOrNone(
+      `SELECT * FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_PUBLISH' AND entity_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [arcId]
+    );
+    if (!instance) return ok(res, { approval: null });
+    const approval = await getApprovalInstanceDetails(instance.id, req.user?.id || null).catch((detailErr) => {
+      logger.warn({ detailErr, instanceId: instance.id }, '[arcController.getPublishApproval] detail load failed');
+      return null;
+    });
+    return ok(res, { approval });
+  } catch (err) {
+    logger.error({ err }, '[arcController.getPublishApproval]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
@@ -267,9 +524,25 @@ export async function withdraw(req, res) {
     const arc = await arcModel.getById(id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     if (arc.created_by !== userId) return bad(res, 403, 'Only the creator can withdraw');
-    if (!['floated','submission_closed'].includes(arc.status)) {
+    if (!['floated','submission_closed','pending_publish_approval'].includes(arc.status)) {
       return bad(res, 409, `Cannot withdraw ARC in status ${arc.status}`);
     }
+
+    // A pending publish approval must cancel its PENDING ARC_PUBLISH instance
+    // before returning to draft. cancelApprovalInstance opens its OWN tx (it is
+    // not txContext-aware), so cancel BEFORE the status-flip tx below.
+    if (arc.status === 'pending_publish_approval') {
+      const inst = await db.oneOrNone(
+        `SELECT id FROM tbl_approval_instances
+          WHERE entity_type = 'ARC_PUBLISH' AND entity_id = $1 AND status = 'PENDING'
+          ORDER BY created_at DESC LIMIT 1`,
+        [id]
+      );
+      if (inst) {
+        await cancelApprovalInstance(inst.id, userId, 'Publish withdrawn by creator');
+      }
+    }
+
     return db.tx(async (t) => {
       const updated = await arcModel.setStatus(id, 'draft', {}, t);
       await logArcEvent({
@@ -311,7 +584,7 @@ export async function terminate(req, res) {
 // Fine-grained ARC status → display bucket (mirrors the FE statusBucket so the
 // server-side list view groups/filters identically to the old client logic).
 function arcStatusBucket(s) {
-  if (!s || s === 'draft') return 'draft';
+  if (!s || s === 'draft' || s === 'pending_publish_approval' || s === 'publish_rejected') return 'draft';
   if (s === 'floated' || s === 'submission_closed') return 'floated';
   if (['tech_eval_in_progress', 'tech_eval_approved', 'tech_eval_rejected', 'comm_eval_in_progress'].includes(s)) return 'eval';
   if (['comm_eval_finalized', 'committee_review', 'committee_sent_back'].includes(s)) return 'committee';

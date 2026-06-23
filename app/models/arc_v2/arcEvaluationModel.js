@@ -5,6 +5,30 @@ import db from '../../config/dbConn.js';
 // this concern so it can't clash with locks used elsewhere. Second key = arcId.
 const ARC_ALIAS_LOCK_NS = 0x41435641; // "ACVA" — fits signed int4
 
+// Phase 2 — back-compat normalizer for ARC quote line charges.
+// Pre-Phase-2 rows stored charges as a single number (the freight value) or as
+// a legacy { value, type } object. Post-Phase-2 they are canonical engine charge
+// arrays. On read, any row that doesn't carry an array is normalised to one.
+// Exported so controllers and the preview endpoint can share it.
+export function normalizeArcCharges(rawCharges) {
+  if (Array.isArray(rawCharges)) return rawCharges; // already canonical
+  if (rawCharges === null || rawCharges === undefined || rawCharges === '') return [];
+  const n = Number(rawCharges);
+  if (Number.isFinite(n) && n > 0) {
+    // Legacy: single numeric freight value stored directly.
+    return [{ name: 'Freight', amount: n, amount_mode: 'absolute', tax: null }];
+  }
+  if (typeof rawCharges === 'object' && rawCharges !== null) {
+    // Legacy: { value, type:'pct'|'absolute' } shape used by lineFreight().
+    const v = Number(rawCharges.value || 0);
+    if (v > 0) {
+      const mode = rawCharges.type === 'pct' ? 'percentage' : 'absolute';
+      return [{ name: 'Freight', amount: v, amount_mode: mode, tax: null }];
+    }
+  }
+  return [];
+}
+
 /**
  * ARC v2 — Technical + Commercial evaluation model.
  *
@@ -157,7 +181,7 @@ const arcEvalModel = {
     let filesByResponse = {};
     if (responseIds.length > 0) {
       const files = await runner.any(
-        `SELECT id AS file_id, arc_item_tech_evaluation_vendors_response_id AS response_id, file_url, created_at
+        `SELECT id AS file_id, arc_item_tech_evaluation_vendors_response_id AS response_id, file_url, original_name, created_at
            FROM tbl_arc_item_tech_evaluation_vendors_response_files
           WHERE arc_item_tech_evaluation_vendors_response_id IN ($1:csv)
           ORDER BY id`,
@@ -173,13 +197,13 @@ const arcEvalModel = {
   },
 
   // ── Vendor evidence files (multiple per clause allowed) ─────────────────
-  addVendorResponseFile: async (responseId, fileUrl, txContext = null) => {
+  addVendorResponseFile: async (responseId, fileUrl, originalName = null, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_item_tech_evaluation_vendors_response_files
-         (arc_item_tech_evaluation_vendors_response_id, file_url)
-       VALUES ($1, $2)
+         (arc_item_tech_evaluation_vendors_response_id, file_url, original_name)
+       VALUES ($1, $2, $3)
        RETURNING *`,
-      [responseId, fileUrl]
+      [responseId, fileUrl, originalName || null]
     );
   },
 
@@ -659,7 +683,61 @@ const arcEvalModel = {
   // Vendor quotes (the inputs to commercial eval)
   // ============================================================
 
+  // Phase 1 §3 — persist T&C acceptance (idempotent: COALESCE keeps first timestamp).
+  acceptTerms: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_quote (arc_id, vendor_id, terms_accepted_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (arc_id, vendor_id) DO UPDATE
+         SET terms_accepted_at = COALESCE(tbl_arc_quote.terms_accepted_at, CURRENT_TIMESTAMP),
+             updated_at        = CURRENT_TIMESTAMP
+       RETURNING terms_accepted_at`,
+      [arcId, vendorId]
+    );
+  },
+
+  // Phase 1 §B — count clauses vs answered for the seal-gate guard.
+  // Extracted from getRequestDetail so the seal endpoint can reuse it.
+  techEnvelopeCounts: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `WITH arc_clauses AS (
+         SELECT c.id
+           FROM tbl_arc_item_tech_evaluation_clauses c
+           JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+           JOIN tbl_arc_item i ON i.id = te.arc_item_id
+          WHERE i.arc_id = $1
+       )
+       SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
+              (SELECT COUNT(*)::int
+                 FROM tbl_arc_item_tech_evaluation_vendors_response r
+                WHERE r.vendor_id = $2
+                  AND r.arc_item_tech_evaluation_clauses_id IN (SELECT id FROM arc_clauses)
+                  AND r.vendor_response IS NOT NULL
+                  AND r.vendor_response <> '') AS clauses_answered`,
+      [arcId, vendorId]
+    );
+  },
+
   upsertQuote: async (arcId, vendorId, fields, txContext = null) => {
+    // Phase 2 — quote_pricing JSONB (engine document totals) stored on submit.
+    // If the caller provides quote_pricing, persist it; otherwise leave the
+    // existing column untouched (COALESCE keeps the last stored value).
+    const hasQuotePricing = fields.quote_pricing !== undefined;
+    if (hasQuotePricing) {
+      return (txContext || db).one(
+        `INSERT INTO tbl_arc_quote
+           (arc_id, vendor_id, payment_terms, gstin_used, quote_pricing)
+         VALUES ($1, $2, $3, $4, $5::jsonb)
+         ON CONFLICT (arc_id, vendor_id) DO UPDATE
+           SET payment_terms = EXCLUDED.payment_terms,
+               gstin_used    = EXCLUDED.gstin_used,
+               quote_pricing = EXCLUDED.quote_pricing,
+               updated_at    = CURRENT_TIMESTAMP
+         RETURNING *`,
+        [arcId, vendorId, fields.payment_terms || null, fields.gstin_used || null,
+         JSON.stringify(fields.quote_pricing)]
+      );
+    }
     return (txContext || db).one(
       `INSERT INTO tbl_arc_quote
          (arc_id, vendor_id, payment_terms, gstin_used)
@@ -675,7 +753,7 @@ const arcEvalModel = {
 
   submitQuote: async (arcQuoteId, txContext = null) => {
     return (txContext || db).one(
-      `UPDATE tbl_arc_quote SET submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      `UPDATE tbl_arc_quote SET submitted_at = CURRENT_TIMESTAMP, withdrawn_at = NULL, updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
        RETURNING *`,
       [arcQuoteId]
@@ -684,6 +762,30 @@ const arcEvalModel = {
 
   upsertQuoteLine: async (arcQuoteId, line, txContext = null) => {
     const runner = txContext || db;
+    // Phase 2 — line_pricing JSONB (engine output per line) stored alongside charges.
+    // Present on save/submit (engine-computed by controller); absent on legacy rows.
+    const hasLinePricing = line.line_pricing !== undefined;
+    if (hasLinePricing) {
+      return runner.one(
+        `INSERT INTO tbl_arc_quote_line
+           (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes, line_pricing)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb)
+         ON CONFLICT (arc_quote_id, arc_item_id) DO UPDATE
+           SET rate           = EXCLUDED.rate,
+               gst_pct        = EXCLUDED.gst_pct,
+               charges        = EXCLUDED.charges,
+               lead_time_days = EXCLUDED.lead_time_days,
+               moq            = EXCLUDED.moq,
+               validity_notes = EXCLUDED.validity_notes,
+               line_pricing   = EXCLUDED.line_pricing,
+               updated_at     = CURRENT_TIMESTAMP
+         RETURNING *`,
+        [arcQuoteId, line.arc_item_id, line.rate ?? null, line.gst_pct ?? null,
+         JSON.stringify(line.charges || []),
+         line.lead_time_days ?? null, line.moq ?? null, line.validity_notes ?? null,
+         JSON.stringify(line.line_pricing)]
+      );
+    }
     return runner.one(
       `INSERT INTO tbl_arc_quote_line
          (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes)
@@ -715,7 +817,8 @@ const arcEvalModel = {
     return (txContext || db).any(
       `SELECT q.id AS quote_id, q.vendor_id, u.name AS vendor_name, q.submitted_at,
               ql.id AS quote_line_id, ql.arc_item_id, ql.rate, ql.gst_pct, ql.charges,
-              ql.lead_time_days, ql.moq
+              ql.lead_time_days, ql.moq,
+              ql.line_pricing
          FROM tbl_arc_quote q
          JOIN tbl_arc_quote_line ql ON ql.arc_quote_id = q.id
          LEFT JOIN tbl_users u ON u.id = q.vendor_id
@@ -723,6 +826,199 @@ const arcEvalModel = {
         ORDER BY ql.arc_item_id, ql.rate`,
       [arcId]
     );
+  },
+
+  // ── Vendor lifecycle projection ──────────────────────────────────────────
+  // Returns a vendor-safe lifecycle view. Strips all buyer-internal counts
+  // (vendors_in_play, vendors_fully_scored, items_allocated, approval objects)
+  // and other-vendor data. Computes default_stage from the vendor's own facts.
+  projectVendorLifecycle: async (lifecycle, arcId, vendorId) => {
+    const { arc, current_status } = lifecycle;
+
+    // Gather vendor-specific facts (all vendor-scoped).
+    const quote = await arcEvalModel.getQuote(arcId, vendorId);
+    const hasTechClauses = await arcEvalModel.arcHasTechClauses(arcId);
+    const vendorContract = await db.oneOrNone(
+      `SELECT status FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`,
+      [arcId, vendorId]
+    );
+
+    const windowOpen =
+      arc.status === 'floated' &&
+      arc.submission_end_at &&
+      new Date(arc.submission_end_at) > new Date();
+
+    // Phase 1 §3 — T&C gate derived from persisted timestamp.
+    const termsAccepted = !!quote?.terms_accepted_at;
+
+    const techSealed = !!quote?.tech_submitted_at;
+    // Withdrawn wins over submitted: a vendor who submitted then withdrew should be
+    // treated as withdrawn (actionable / can re-quote), NOT as "quote submitted".
+    const quoteWithdrawn = !!quote?.withdrawn_at;
+    const quoteSubmitted = !!quote?.submitted_at && !quote?.withdrawn_at;
+
+    // Vendor labels for each stage key.
+    const VENDOR_LABELS = {
+      overview:   'Tender & terms',
+      technical:  'Technical envelope',
+      commercial: 'Your quote',
+      awarding:   'Award & sign',
+      active:     'Active contract',
+    };
+
+    const stages = lifecycle.stages.map((s) => {
+      // Derive vendor_action and vendor-framed state/reason.
+      let vendor_action = 'none';
+      let vendorState = s.state;
+      let vendorReason = s.reason;
+
+      if (s.key === 'overview') {
+        if (termsAccepted) {
+          vendorState = 'complete';
+          vendorReason = 'terms_accepted';
+        } else if (windowOpen) {
+          vendorState = 'active';
+          vendorReason = 'awaiting_terms';
+          vendor_action = 'accept_terms';
+        } else {
+          vendorReason = 'window_closed';
+        }
+      }
+
+      if (s.key === 'technical') {
+        if (s.state === 'skipped' || !hasTechClauses) {
+          vendorState = 'skipped';
+          vendorReason = 'no_tech_required';
+        } else if (!termsAccepted) {
+          // Phase 1 §3 — tech is locked until terms accepted.
+          vendorState = 'locked';
+          vendorReason = 'terms_required';
+        } else if (techSealed) {
+          vendorState = 'complete';
+          vendorReason = 'envelope_sealed';
+        } else if (windowOpen) {
+          vendorState = 'active';
+          vendorReason = 'awaiting_response';
+          vendor_action = 'submit_tech';
+        } else {
+          vendorState = 'complete';
+          vendorReason = 'window_closed';
+        }
+      }
+
+      if (s.key === 'commercial') {
+        if (!termsAccepted) {
+          // Phase 1 §3 — commercial locked until terms accepted.
+          vendorState = 'locked';
+          vendorReason = 'terms_required';
+        } else if (hasTechClauses && !techSealed) {
+          vendorState = 'locked';
+          vendorReason = 'tech_required';
+        } else if (quoteSubmitted) {
+          vendorState = 'complete';
+          vendorReason = 'quote_submitted';
+        } else if (quoteWithdrawn && windowOpen) {
+          vendorState = 'active';
+          vendorReason = 'withdrawn_reopen';
+          vendor_action = 'submit_quote';
+        } else if (windowOpen) {
+          vendorState = 'active';
+          vendorReason = 'window_open';
+          vendor_action = 'submit_quote';
+        } else {
+          // Window closed and no quote submitted — locked/past for this vendor.
+          vendorState = 'locked';
+          vendorReason = 'no_quote_submitted';
+        }
+      }
+
+      if (s.key === 'awarding') {
+        const vc = vendorContract?.status;
+        if (vc && ['generated', 'awaiting_acceptance'].includes(vc)) {
+          vendorState = 'active';
+          vendorReason = 'awaiting_sign';
+          vendor_action = 'sign_contract';
+        } else if (vc && ['active', 'expiring_soon', 'expired', 'terminated', 'declined'].includes(vc)) {
+          vendorState = 'complete';
+          vendorReason = vc;
+        } else if (['complete', 'active'].includes(s.state) && !vendorContract) {
+          // ARC moved past committee with no contract for this vendor → not awarded.
+          vendorState = 'complete';
+          vendorReason = 'not_awarded';
+        } else {
+          vendorState = 'locked';
+          vendorReason = 'awaiting_decision';
+        }
+      }
+
+      if (s.key === 'active') {
+        const vc = vendorContract?.status;
+        if (vc && ['active', 'expiring_soon'].includes(vc)) {
+          vendorState = 'active';
+          vendorReason = 'live';
+        } else if (vc && ['expired', 'terminated', 'declined'].includes(vc)) {
+          vendorState = 'ended';
+          vendorReason = vc;
+        } else {
+          vendorState = 'locked';
+          vendorReason = 'not_active';
+        }
+      }
+
+      // Strip all buyer-internal fields; return only vendor-safe subset.
+      return {
+        key: s.key,
+        label: VENDOR_LABELS[s.key] || s.label,
+        state: vendorState,
+        reason: vendorReason,
+        vendor_action,
+        // Vendor-visible window facts for overview + T&C acceptance.
+        ...(s.key === 'overview'
+          ? { window: s.window, terms_accepted_at: quote?.terms_accepted_at || null }
+          : {}),
+        // Vendor-visible tech facts (no scoring data).
+        ...(s.key === 'technical' ? { tech_submitted_at: quote?.tech_submitted_at || null } : {}),
+        // Vendor-visible commercial facts (no allocation data).
+        ...(s.key === 'commercial'
+          ? { submitted_at: quote?.submitted_at || null, withdrawn_at: quote?.withdrawn_at || null }
+          : {}),
+      };
+    });
+
+    // Compute vendor default_stage from the vendor's own facts.
+    // Phase 1 §3 — overview-first: until terms accepted, always land on overview.
+    let default_stage = 'overview';
+    const contractStatus = vendorContract?.status;
+    if (contractStatus && ['generated', 'awaiting_acceptance'].includes(contractStatus)) {
+      default_stage = 'awarding';
+    } else if (contractStatus && ['active', 'expiring_soon'].includes(contractStatus)) {
+      default_stage = 'active';
+    } else if (!termsAccepted) {
+      default_stage = 'overview';
+    } else if (hasTechClauses && !techSealed) {
+      default_stage = 'technical';
+    } else if (windowOpen || quoteSubmitted) {
+      default_stage = 'commercial';
+    }
+
+    return {
+      arc: {
+        id: arc.id,
+        arc_number: arc.arc_number,
+        title: arc.title,
+        status: current_status,
+        category_title: arc.category_title,
+        hotel_name: arc.hotel_name,
+        hotel_code: arc.hotel_code,
+        submission_start_at: arc.submission_start_at,
+        submission_end_at: arc.submission_end_at,
+        contract_start_at: arc.contract_start_at,
+        contract_end_at: arc.contract_end_at,
+      },
+      current_status,
+      default_stage,
+      stages,
+    };
   },
 };
 

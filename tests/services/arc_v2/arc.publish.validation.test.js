@@ -10,13 +10,16 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
 
 describe("ARC v2 — publish validation (M1 + M2)", () => {
   const BUYER = IDS.users.a1_proc_buyer;
+  const HC    = IDS.hospitality.A;
   const HOTEL = IDS.hotels.A1;
   const DEPT = IDS.departments.proc;
   const CATEGORY = TEST_CATEGORIES.beverages;
   const VARIANT_ID = 1;
+  const PUBLISH_POLICY_ID = 64925; // auto-approve ARC policy so the control case floats
   const D = (days) => new Date(Date.now() + days * 86400_000).toISOString();
   let client;
   const createdArcIds = [];
@@ -53,9 +56,17 @@ describe("ARC v2 — publish validation (M1 + M2)", () => {
       [[IDS.users.vendor_alpha, IDS.users.vendor_beta, IDS.users.vendor_gamma]]
     );
     client = await httpClient(BUYER);
+    // Auto-approve ARC publish policy so the valid "control" case floats; the
+    // M1/M2 cases 400 on window/panel validation BEFORE policy resolution, so
+    // they're unaffected by the policy's presence.
+    await seedAutoApproveArcPolicy({
+      policyId: PUBLISH_POLICY_ID, hospitalityCompanyId: HC, hotelId: HOTEL,
+      departmentId: null, processId: null, createdBy: BUYER, approver: BUYER,
+    });
   });
 
   afterAll(async () => {
+    await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: createdArcIds });
     if (createdArcIds.length) {
       await db.none(`DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = ANY($1::text[])`, [createdArcIds.map(String)]);
       await db.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = ANY($1::int[])`, [createdArcIds]);

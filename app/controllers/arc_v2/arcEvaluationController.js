@@ -547,6 +547,9 @@ export async function getCommEval(req, res) {
           quote_id: q.quote_id, vendor_id: q.vendor_id, vendor_name: q.vendor_name,
           submitted_at: q.submitted_at, quote_line_id: q.quote_line_id, arc_item_id: q.arc_item_id,
           rate: null, gst_pct: null, charges: null, lead_time_days: null, moq: null,
+          // Phase 2 — null out engine output for technically-disqualified vendors
+          // so the commercial evaluator never sees their pricing.
+          line_pricing: null,
           technically_disqualified: true,
         };
       }

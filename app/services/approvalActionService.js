@@ -75,6 +75,15 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval),
     REJECTED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeRejection),
   },
+  // ARC publish-approval gate. The INSTANCE entity_type is ARC_PUBLISH (its
+  // policy is matched as plain 'ARC'). Registering ARC_PUBLISH — and NOT bare
+  // 'ARC' — is the collision guard: a legacy tender 'ARC' instance reaching a
+  // terminal state finds no registry entry and no-ops, so it can never mis-fire
+  // the publish float/reject hooks.
+  ARC_PUBLISH: {
+    APPROVED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishRejection),
+  },
   ARC_AMENDMENT: {
     APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval),
     REJECTED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentRejection),

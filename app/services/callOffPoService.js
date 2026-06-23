@@ -4,6 +4,39 @@ import { resolveCurrentPrice } from './arcPricingResolver.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { sendMail } from '../helper/common.js';
+import pricingEngine from './pricingEngine.js';
+import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
+
+// Phase 2 — run the pricing engine for a contract line at a given quantity.
+// Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
+// two can't diverge. The engine adds ABSOLUTE other_charges ONCE per line and
+// applies percentage charges/taxes on the line subtotal (base = unit_rate × qty)
+// — identical to how poTemplatePricing reconstructs the PO, so the stored
+// total_price matches the template exactly (no qty-scaling of absolutes,
+// no double-tax).
+function computeLineEngineOut(pricingResult, quantity) {
+  const { unit_rate, gst_pct, charges } = pricingResult;
+  const canonicalCharges = normalizeArcCharges(charges);
+  return pricingEngine.calculateLineTotal({
+    unit_price:    Number(unit_rate || 0),
+    quantity:      Number(quantity || 0),
+    tax:           Number(gst_pct || 0),
+    tax_mode:      'percentage',
+    other_charges: canonicalCharges.map((c) => ({
+      name:        c.name ?? null,
+      amount:      Number(c.amount ?? 0),
+      amount_mode: (c.amount_mode === 'percentage' || c.amount_mode === '%') ? 'percentage' : 'absolute',
+      tax:         (c.tax !== null && c.tax !== undefined && c.tax !== '') ? Number(c.tax) : null,
+      tax_mode:    (c.tax_mode === 'percentage' || c.tax_mode === '%') ? 'percentage' : 'absolute',
+    })),
+  });
+}
+
+// Per-unit landed price (qty=1) — base + per-unit charges + taxes. Display/back-compat
+// only; the authoritative LINE total below always uses the real quantity.
+function computeAllInUnitPrice(pricingResult) {
+  return computeLineEngineOut(pricingResult, 1).total;
+}
 
 /**
  * Call-off PO Service
@@ -79,8 +112,13 @@ async function buildCallOffBuckets(mrId, txContext) {
       e.code = 'INVALID_PRICE';
       throw e;
     }
-    const lineValue = Number(pricing.unit_rate) * Number(it.quantity);
-    return { ...it, pricing, lineValue };
+    // Phase 2 — LINE total via the engine at the REAL quantity. Absolute charges
+    // are added once (not × qty) and percentage charges/taxes apply on the line
+    // subtotal, so total_price reconciles with poTemplatePricing. (allInUnitPrice
+    // is the qty=1 per-unit landed price, kept for display/back-compat only.)
+    const lineValue = computeLineEngineOut(pricing, it.quantity).total;
+    const allInUnitPrice = computeAllInUnitPrice(pricing);
+    return { ...it, pricing, lineValue, allInUnitPrice };
   }));
 
   // Group by arc_contract_id (one PO per vendor contract within this MR).
@@ -140,7 +178,10 @@ async function buildCallOffBuckets(mrId, txContext) {
  */
 async function insertCallOffPoHeader(group, mrId, txContext) {
   const runner = txContext || db;
-  const firstLineRate = Number(group.items[0]?.pricing?.unit_rate || 0);
+  // Header unit_price is the first line's BASE rate — the same convention as
+  // RFQ POs (unit_price = base; tax/charges live in the line's charges_meta).
+  const firstItem = group.items[0];
+  const firstLineRate = Number(firstItem && firstItem.pricing && firstItem.pricing.unit_rate || 0);
   const totalQty = group.items.reduce((s, it) => s + Number(it.quantity), 0);
 
   const po = await runner.one(
@@ -184,13 +225,26 @@ async function insertCallOffPoHeader(group, mrId, txContext) {
 async function writeCallOffPoLines(po, group, txContext) {
   const runner = txContext || db;
   for (const it of group.items) {
+    // RFQ PO convention: unit_price = BASE rate; tax/charges live in charges_meta
+    // so the detail/template can re-derive the all-in total WITHOUT double-counting.
+    // total_price = engine all-in line total (base + base_tax + charges + charge_taxes) × qty.
+    // Storing all-in as unit_price would cause double-application of tax when the
+    // template re-runs: engine(unit_price=allIn, tax=gst%) = allIn × (1 + gst%) ≠ lineValue.
+    const canonicalCharges = normalizeArcCharges(it.pricing.charges);
+    const chargesMeta = {
+      tax:           Number(it.pricing.gst_pct || 0),
+      tax_mode:      'percentage',
+      other_charges: canonicalCharges,
+    };
     await runner.none(
       `INSERT INTO tbl_purchase_order_product
          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price,
           charges_meta, total_price, product_variant_id, arc_contract_line_id)
-       VALUES ($1, NULL, NULL, $2, $3, $4, NULL, $5, $6, $7)`,
+       VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8)`,
+      // unit_price = BASE rate; charges_meta carries GST + per-unit charges in the
+      // same shape as RFQ POs; total_price = allInUnitPrice × qty (the engine landing cost).
       [po.id, it.quantity, it.uom || null, Number(it.pricing.unit_rate),
-       it.lineValue, it.product_variant_id, it.arc_contract_line_id]
+       chargesMeta, it.lineValue, it.product_variant_id, it.arc_contract_line_id]
     );
   }
 }
@@ -214,6 +268,10 @@ async function recordCallOffAndUpdateConsumption(po, group, txContext) {
         it.arc_contract_line_id,
         it.quantity,
         it.pricing.applied_amendment_id,
+        // price_applied records the contracted BASE unit rate (the rate the call-off
+        // was issued at). Tax/charges are PO-level and live in charges_meta; the
+        // all-in landed cost is reconstructable from unit_rate + charges_meta, matching
+        // how the RFQ PO convention stores and reconstructs per-line totals.
         it.pricing.unit_rate,
       ]
     );

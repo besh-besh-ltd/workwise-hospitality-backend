@@ -9,6 +9,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
 
 describe("ARC v2 — create → publish → detail flow", () => {
   const BUYER = IDS.users.a1_proc_buyer;
@@ -18,7 +19,9 @@ describe("ARC v2 — create → publish → detail flow", () => {
   const PROC  = IDS.processes.A_P1;
   const CATEGORY = TEST_CATEGORIES.beverages;
   const VARIANT_ID = 1; // '7 UP PEPSI 1.5 LTR' — seeded in seed_reference.sql
+  const PUBLISH_POLICY_ID = 64924; // auto-approve ARC policy so publish floats
   let client;
+  let publishedArcId; // the ARC that goes through the publish gate (for cleanup)
 
   beforeAll(async () => {
     // Seed the category → department mapping so the wizard's department
@@ -42,9 +45,16 @@ describe("ARC v2 — create → publish → detail flow", () => {
     // dependency).
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [IDS.users.vendor_alpha]);
     client = await httpClient(BUYER);
+    // Auto-approve ARC publish policy so /publish floats immediately (pre-gate intent).
+    await seedAutoApproveArcPolicy({
+      policyId: PUBLISH_POLICY_ID, hospitalityCompanyId: HC, hotelId: HOTEL,
+      departmentId: null, processId: PROC, createdBy: BUYER, approver: BUYER,
+    });
   });
 
   afterAll(async () => {
+    // Remove the publish-approval instance (FK to the policy) before the policy + arcs.
+    await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: [publishedArcId] });
     await db.none(`DELETE FROM tbl_arc_event_log WHERE 1=1`);
     await db.none(`DELETE FROM tbl_arc WHERE 1=1`);
     await db.none(
@@ -118,6 +128,7 @@ describe("ARC v2 — create → publish → detail flow", () => {
     });
     expect(createRes.status).toBe(200);
     const arcId = createRes.body.data.arc.id;
+    publishedArcId = arcId; // tracked for publish-instance cleanup in afterAll
     const pubRes = await client.post(`/api/v1/arc-v2/${arcId}/publish`).send({});
     expect(pubRes.status).toBe(200);
     expect(pubRes.body.data.arc.status).toBe("floated");

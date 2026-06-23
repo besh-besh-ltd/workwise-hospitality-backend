@@ -17,14 +17,17 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
 
 describe("ARC v2 — publish tags + notifies eligible vendors (C3 + C2)", () => {
   const BUYER = IDS.users.a1_proc_buyer;
+  const HC    = IDS.hospitality.A;
   const HOTEL = IDS.hotels.A1;
   const DEPT = IDS.departments.proc;
   const PROC = IDS.processes.A_P1;
   const CATEGORY = TEST_CATEGORIES.beverages;
   const VARIANT_ID = 1;
+  const PUBLISH_POLICY_ID = 64921; // auto-approve ARC policy so publish floats
 
   const EXPECTED = [IDS.users.vendor_alpha, IDS.users.vendor_beta, IDS.users.vendor_gamma]
     .map(Number).sort((a, b) => a - b);
@@ -45,6 +48,13 @@ describe("ARC v2 — publish tags + notifies eligible vendors (C3 + C2)", () => 
       [[IDS.users.vendor_alpha, IDS.users.vendor_beta, IDS.users.vendor_gamma]]
     );
     buyerClient = await httpClient(BUYER);
+
+    // Auto-approve ARC publish policy (the publisher is the sole approver) so
+    // POST /publish floats immediately — preserving this suite's pre-gate intent.
+    await seedAutoApproveArcPolicy({
+      policyId: PUBLISH_POLICY_ID, hospitalityCompanyId: HC, hotelId: HOTEL,
+      departmentId: null, processId: PROC, createdBy: BUYER, approver: BUYER,
+    });
 
     const today = new Date();
     const createRes = await buyerClient.post("/api/v1/arc-v2").send({
@@ -67,6 +77,7 @@ describe("ARC v2 — publish tags + notifies eligible vendors (C3 + C2)", () => 
   });
 
   afterAll(async () => {
+    await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: [arcId] });
     if (arcId) {
       await db.none(`DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = $1`, [String(arcId)]);
       await db.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = $1`, [arcId]);

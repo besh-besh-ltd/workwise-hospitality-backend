@@ -107,7 +107,7 @@ const arcModel = {
     values.push(id);
     return runner.one(
       `UPDATE tbl_arc SET ${setParts.join(', ')}
-        WHERE id = $${p} AND status = 'draft'
+        WHERE id = $${p} AND status IN ('draft','publish_rejected')
        RETURNING *`,
       values
     );
@@ -293,7 +293,7 @@ const arcModel = {
              ON s.approval_instance_id = ai.id AND s.step_order = ai.current_step
            JOIN tbl_approval_step_approvers sa
              ON sa.approval_instance_step_id = s.id
-          WHERE ai.entity_type IN ('ARC_TECH','ARC_COMMITTEE')
+          WHERE ai.entity_type IN ('ARC_TECH','ARC_COMMITTEE','ARC_PUBLISH')
             AND ai.status = 'PENDING'
             AND ai.entity_id = ANY($1::int[])
             AND sa.approver_user_id = $2
@@ -563,7 +563,7 @@ const arcModel = {
 };
 
 const STATUS_GROUPS = {
-  drafts:   ['draft'],
+  drafts:   ['draft','pending_publish_approval','publish_rejected'],
   ongoing:  ['floated','submission_closed',
              'tech_eval_in_progress','tech_eval_approved','tech_eval_rejected',
              'comm_eval_in_progress','comm_eval_finalized',

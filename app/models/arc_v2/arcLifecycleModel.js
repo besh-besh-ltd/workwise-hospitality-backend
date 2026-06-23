@@ -177,9 +177,10 @@ async function gatherFacts(runner, arc, userId) {
     [arcId]
   ).then((r) => (r ? r.c : 0)).catch(() => 0);
 
-  const [techApproval, committeeApproval] = await Promise.all([
+  const [techApproval, committeeApproval, publishApproval] = await Promise.all([
     loadInstance(runner, 'ARC_TECH', arcId, userId),
     loadInstance(runner, 'ARC_COMMITTEE', arcId, userId),
+    loadInstance(runner, 'ARC_PUBLISH', arcId, userId),
   ]);
 
   return {
@@ -200,26 +201,37 @@ async function gatherFacts(runner, arc, userId) {
     clarifications_open: clarificationsOpen,
     techApproval,
     committeeApproval,
+    publishApproval,
   };
 }
 
 /** Pure rules — facts in, stages out. Exported for unit-level reuse. */
 export function deriveStages(arc, f) {
+  // Pre-float, not-yet-live statuses behave like draft for the window: the ARC
+  // never floated, so the window is NOT closed and downstream stages stay locked.
+  const PRE_FLOAT = ['draft', 'pending_publish_approval', 'publish_rejected'];
   const windowClosed =
-    !['draft', 'floated'].includes(arc.status) ||
+    !([...PRE_FLOAT, 'floated'].includes(arc.status)) ||
     (arc.status === 'floated' && arc.submission_end_at && new Date(arc.submission_end_at) < new Date());
 
   // ── overview ──
   const overview = {
     key: 'overview', label: STAGE_LABEL.overview,
     state: windowClosed ? 'complete' : 'active',
-    reason: windowClosed ? 'window_closed' : (arc.status === 'draft' ? 'draft' : 'window_open'),
+    reason:
+      arc.status === 'pending_publish_approval' ? 'pending_publish_approval'
+      : arc.status === 'publish_rejected'        ? 'publish_rejected'
+      : windowClosed ? 'window_closed'
+      : (arc.status === 'draft' ? 'draft' : 'window_open'),
     counts: { invited: f.invited, submitted: f.submitted, declined: f.declined },
     window: {
       submission_start_at: arc.submission_start_at,
       submission_end_at: arc.submission_end_at,
       closed: windowClosed,
     },
+    // Surface the publish-approval chain on the overview stage so the FE can
+    // render the approver matrix + approve/reject for the current approver.
+    publish_approval: f.publishApproval || null,
   };
 
   // ── technical ──

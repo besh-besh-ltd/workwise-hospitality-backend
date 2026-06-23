@@ -12,6 +12,10 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   'NEGOTIATION_QUOTE': 'quote-compare',
   'PO': 'awarding',
   'ARC': 'arc',
+  // ARC_PUBLISH is the publish-approval gate INSTANCE type; its policy is
+  // authored as plain 'ARC', so ROLE-source approver steps resolve against the
+  // same 'arc' permission resource (USER-source steps bypass this map).
+  'ARC_PUBLISH': 'arc',
   // MR is the call-off/demand path — role approvers resolve against the same
   // 'awarding' permission as POs (USER-source steps bypass this map).
   'MR': 'awarding',

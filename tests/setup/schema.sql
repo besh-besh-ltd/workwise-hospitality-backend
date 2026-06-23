@@ -11134,7 +11134,8 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc (
   created_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT tbl_arc_status_chk           CHECK (status IN (
-    'draft','floated','submission_closed',
+    'draft','pending_publish_approval','publish_rejected',
+    'floated','submission_closed',
     'tech_eval_in_progress','tech_eval_approved','tech_eval_rejected',
     'comm_eval_in_progress','comm_eval_finalized',
     'committee_review','committee_approved','committee_sent_back','committee_rejected',
@@ -11251,6 +11252,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_vendors_response_
   id                                                  BIGSERIAL PRIMARY KEY,
   arc_item_tech_evaluation_vendors_response_id        BIGINT NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_vendors_response(id) ON DELETE CASCADE,
   file_url                                            TEXT NOT NULL,
+  original_name                                       TEXT,
   created_at                                          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -11312,8 +11314,10 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote (
   submitted_at    TIMESTAMP WITHOUT TIME ZONE,
   withdrawn_at    TIMESTAMP WITHOUT TIME ZONE,
   tech_submitted_at TIMESTAMP WITHOUT TIME ZONE,
+  terms_accepted_at TIMESTAMP WITHOUT TIME ZONE,
   payment_terms   VARCHAR(255),
   gstin_used      VARCHAR(20),
+  quote_pricing   JSONB,
   created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (arc_id, vendor_id)
@@ -11331,6 +11335,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line (
   lead_time_days  INTEGER,
   moq             NUMERIC(15,2),
   validity_notes  TEXT,
+  line_pricing    JSONB,
   created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (arc_quote_id, arc_item_id)

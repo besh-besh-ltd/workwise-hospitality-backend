@@ -1131,10 +1131,10 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
        r.rfq_no as entity_rfq_no,
        -- ARC enrichment: resolve the parent rate-contract id + number for the
        -- ARC_* entity types so the Action Centre can deep-link to the right
-       -- stage tab. ARC_TECH/ARC_COMMITTEE.entity_id IS the arc id; an
-       -- amendment's entity_id is the amendment id → hop through its contract.
+       -- stage tab. ARC_TECH/ARC_COMMITTEE/ARC_PUBLISH.entity_id IS the arc id;
+       -- an amendment's entity_id is the amendment id → hop through its contract.
        CASE
-         WHEN i.entity_type IN ('ARC_TECH','ARC_COMMITTEE') THEN i.entity_id
+         WHEN i.entity_type IN ('ARC_TECH','ARC_COMMITTEE','ARC_PUBLISH') THEN i.entity_id
          WHEN i.entity_type = 'ARC_AMENDMENT' THEN amdc.arc_id
          ELSE NULL
        END as arc_id,
@@ -1159,7 +1159,7 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
      LEFT JOIN tbl_arc_amendment amd  ON i.entity_type = 'ARC_AMENDMENT' AND amd.id = i.entity_id
      LEFT JOIN tbl_arc_contract amdc  ON amdc.id = amd.arc_contract_id
      LEFT JOIN tbl_arc ac ON
-       (i.entity_type IN ('ARC_TECH','ARC_COMMITTEE') AND ac.id = i.entity_id)
+       (i.entity_type IN ('ARC_TECH','ARC_COMMITTEE','ARC_PUBLISH') AND ac.id = i.entity_id)
        OR (i.entity_type = 'ARC_AMENDMENT' AND ac.id = amdc.arc_id)
      LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = i.hotel_id
      WHERE i.status = 'PENDING'

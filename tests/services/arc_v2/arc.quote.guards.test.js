@@ -14,14 +14,17 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
 
 describe("ARC v2 — vendor quote guards (H1 / H2 / H3)", () => {
   const BUYER = IDS.users.a1_proc_buyer;
+  const HC    = IDS.hospitality.A;
   const HOTEL = IDS.hotels.A1;
   const DEPT = IDS.departments.proc;
   const PROC = IDS.processes.A_P1;
   const CATEGORY = TEST_CATEGORIES.beverages;
   const VARIANT_ID = 1;
+  const PUBLISH_POLICY_ID = 64922; // auto-approve ARC policy so publish floats
 
   let buyerClient, alpha, gamma, epsilon;
   let openArcId, openItemId; // future deadline
@@ -70,6 +73,12 @@ describe("ARC v2 — vendor quote guards (H1 / H2 / H3)", () => {
     gamma   = await httpClient(IDS.users.vendor_gamma);
     epsilon = await httpClient(IDS.users.vendor_epsilon);
 
+    // Auto-approve ARC publish policy so /publish floats immediately (pre-gate intent).
+    await seedAutoApproveArcPolicy({
+      policyId: PUBLISH_POLICY_ID, hospitalityCompanyId: HC, hotelId: HOTEL,
+      departmentId: null, processId: null, createdBy: BUYER, approver: BUYER,
+    });
+
     ({ id: openArcId, itemId: openItemId } = await createAndPublish({ title: "Quote guards · open" }));
     ({ id: pastArcId, itemId: pastItemId } = await createAndPublish({ title: "Quote guards · past deadline" }));
     // Backdate the second ARC's submission window so its deadline has passed.
@@ -80,6 +89,7 @@ describe("ARC v2 — vendor quote guards (H1 / H2 / H3)", () => {
   });
 
   afterAll(async () => {
+    await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: createdArcIds });
     if (createdArcIds.length) {
       await db.none(`DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = ANY($1::text[])`, [createdArcIds.map(String)]);
       await db.none(`DELETE FROM tbl_arc_quote_line WHERE arc_quote_id IN (SELECT id FROM tbl_arc_quote WHERE arc_id = ANY($1::int[]))`, [createdArcIds]);

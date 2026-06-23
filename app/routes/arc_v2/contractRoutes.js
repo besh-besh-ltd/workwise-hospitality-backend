@@ -31,6 +31,8 @@ r.get('/eligible-vendors', passportSignIn, acl([2, 8]), arcController.listEligib
 r.get('/:id',                  passportSignIn, acl([2, 8]), arcController.getById);
 r.get('/:id/lifecycle',        passportSignIn, acl([2, 8]), arcController.getLifecycle);
 r.get('/:id/active-summary',   passportSignIn, acl([2, 8]), arcContractController.getActiveSummary);
+// Publish-approval chain detail (latest ARC_PUBLISH instance, or null).
+r.get('/:id/publish-approval', passportSignIn, acl([2, 8]), arcController.getPublishApproval);
 // Bundle of the contracted vendor's uploaded compliance docs (GST/PAN/cheque…).
 r.get('/contracts/:contractId/vendor-documents', passportSignIn, acl([2, 8]), arcContractController.getVendorDocumentsBundle);
 
@@ -39,6 +41,8 @@ r.post('/',                    passportSignIn, acl([2, 8]), arcController.create
 r.patch('/:id',                passportSignIn, acl([2, 8]), arcController.updateDraft);
 r.post('/:id/publish',         passportSignIn, acl([2, 8]), arcController.publish);
 r.post('/:id/withdraw',        passportSignIn, acl([2, 8]), arcController.withdraw);
+// Publish-approval decide (approve/reject). Engine-gated inside the controller.
+r.post('/:id/publish-approval/decide', passportSignIn, acl([2, 8]), arcController.publishApprovalDecide);
 r.post('/:id/terminate',       passportSignIn, acl([2, 8]), arcController.terminate);
 
 export default r;

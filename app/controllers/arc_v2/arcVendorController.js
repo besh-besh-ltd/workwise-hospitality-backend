@@ -1,15 +1,50 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
-import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcEvalModel, { normalizeArcCharges } from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
+import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
+// ── Phase 2 — pricing engine helpers ────────────────────────────────────────
+
+// Map the FE display tokens ('%' / '₹') to the engine's canonical mode strings.
+// The FE sends either token; the engine and DB always store 'percentage'/'absolute'.
+function toEngineMode(mode) {
+  if (mode === '%' || mode === 'percentage') return 'percentage';
+  if (mode === '₹' || mode === 'absolute') return 'absolute';
+  return 'percentage'; // safe default (legacy behaviour)
+}
+
+// Build a canonical engine line input from a vendor's quote line + ARC item
+// quantity. The server RE-DERIVES quantity from tbl_arc_item (committed_qty ??
+// indicative_qty) — never trusts client qty for the authoritative stored total.
+function buildEngineLineInput(line, arcItem) {
+  const quantity = Number(arcItem.committed_qty ?? arcItem.indicative_qty ?? 0);
+  const other_charges = normalizeArcCharges(line.charges).map((c) => ({
+    name:        c.name ?? null,
+    amount:      Number(c.amount ?? 0),
+    amount_mode: toEngineMode(c.amount_mode),
+    tax:         c.tax !== null && c.tax !== undefined && c.tax !== '' ? Number(c.tax) : null,
+    tax_mode:    toEngineMode(c.tax_mode),
+    slug:        c.slug ?? undefined,
+    comment:     c.comment ?? undefined,
+  }));
+  return {
+    unit_price:    Number(line.rate ?? 0),
+    quantity,
+    tax:           Number(line.gst_pct ?? 0),
+    tax_mode:      toEngineMode(line.gst_mode ?? '%'),
+    other_charges,
+  };
+}
 
 /**
  * ARC v2 — Vendor-side controller.
@@ -25,6 +60,13 @@ import path from 'path';
 
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
+
+// Pre-live ARC statuses that must NEVER be exposed to vendors. The list/dashboard
+// queries already exclude them (no invitation rows until float), but the detail
+// and lifecycle read paths gate on an invitation row — so a leftover invitation
+// could otherwise leak a non-live ARC. Defence-in-depth: 404 (do not reveal
+// existence) BEFORE any invitation lookup.
+const NOT_LIVE_TO_VENDOR = ['draft', 'pending_publish_approval', 'publish_rejected'];
 
 // ── Quote eligibility + validation guards (audit H1 / H3) ──────────────────
 
@@ -313,6 +355,7 @@ export async function getRequestDetail(req, res) {
     const arcId = Number(req.params.arcId);
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
     const items = await arcModel.listItems(arcId);
     const invitation = await db.oneOrNone(
       `SELECT * FROM tbl_arc_invitation WHERE arc_id = $1 AND vendor_id = $2`,
@@ -329,22 +372,8 @@ export async function getRequestDetail(req, res) {
     const techRequired = await arcEvalModel.arcHasTechClauses(arcId);
     let tech_envelope = null;
     if (techRequired) {
-      const counts = await db.one(
-        `WITH arc_clauses AS (
-           SELECT c.id
-             FROM tbl_arc_item_tech_evaluation_clauses c
-             JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
-             JOIN tbl_arc_item i ON i.id = te.arc_item_id
-            WHERE i.arc_id = $1
-         )
-         SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
-                (SELECT COUNT(*)::int
-                   FROM tbl_arc_item_tech_evaluation_vendors_response r
-                  WHERE r.vendor_id = $2
-                    AND r.arc_item_tech_evaluation_clauses_id IN (SELECT id FROM arc_clauses)
-                    AND r.vendor_response IS NOT NULL) AS clauses_answered`,
-        [arcId, vendorId]
-      );
+      // Phase 1 §B — reuse extracted model method (also used by seal guard).
+      const counts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
       tech_envelope = {
         required: true,
         tech_submitted_at: quote?.tech_submitted_at || null,
@@ -362,6 +391,88 @@ export async function getRequestDetail(req, res) {
     return ok(res, { arc, items, invitation, quote, lines, tech_envelope });
   } catch (err) {
     logger.error({ err }, '[vendorController.getRequestDetail]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/quote/accept-terms  body: { arc_id }
+// Phase 1 §3 — persist the T&C acceptance timestamp. Idempotent.
+export async function acceptTerms(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const arcId = Number(req.body?.arc_id);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!arcId) return bad(res, 400, 'arc_id is required');
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    if (!['floated', 'submission_closed'].includes(arc.status)) {
+      return bad(res, 409, `Rate contract is not open for new responses (status=${arc.status})`);
+    }
+    if (arc.submission_end_at && new Date(arc.submission_end_at) < new Date()) {
+      return bad(res, 409, 'Submission deadline has passed');
+    }
+    if (!(await vendorInvitedToArc(arcId, vendorId))) {
+      return bad(res, 403, 'You were not invited to this rate contract');
+    }
+    const result = await arcEvalModel.acceptTerms(arcId, vendorId);
+    return ok(res, { terms_accepted_at: result.terms_accepted_at }, 'Terms accepted');
+  } catch (err) {
+    logger.error({ err }, '[vendorController.acceptTerms]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/quote/preview  body: { arc_id, lines: [...], global_charges?: [...] }
+// Phase 2 — engine-driven stateless preview. Server re-derives qty from
+// tbl_arc_item (never trusts client qty). Returns authoritative per-line
+// engine output + document totals. Does NOT persist anything.
+export async function previewQuote(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const { arc_id, lines = [], global_charges = [] } = req.body || {};
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!arc_id) return bad(res, 400, 'arc_id is required');
+    const arc = await arcModel.getById(arc_id);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    // Must be an invited vendor (H1 — never trust client vendor ids).
+    if (!(await vendorInvitedToArc(arc_id, vendorId))) {
+      return bad(res, 403, 'You were not invited to this rate contract');
+    }
+    // Load items to derive quantities server-side.
+    const arcItems = await arcModel.listItems(arc_id);
+    const itemById = Object.fromEntries(arcItems.map((i) => [Number(i.id), i]));
+    // Build engine input for each line. Lines referencing unknown items are skipped.
+    const engineLines = [];
+    const lineMap = []; // keep order for the response
+    for (const line of (lines || [])) {
+      const arcItem = itemById[Number(line.arc_item_id)];
+      if (!arcItem) continue; // unknown item — skip silently (cross-ARC tamper)
+      const input = buildEngineLineInput(line, arcItem);
+      engineLines.push(input);
+      lineMap.push({ arc_item_id: Number(line.arc_item_id), input });
+    }
+    // Run the engine (pure, no I/O).
+    const result = pricingEngine.calculateDocumentTotals(engineLines, global_charges || []);
+    // Shape the per-line response: attach arc_item_id for the FE to correlate.
+    const linesOut = result.lines.map((l, idx) => ({
+      arc_item_id:   lineMap[idx]?.arc_item_id ?? null,
+      base:          l.base,
+      base_tax:      l.base_tax,
+      charges:       l.charges,
+      charges_total: l.charges_total,
+      total:         l.total,
+    }));
+    return ok(res, {
+      lines:               linesOut,
+      grand_subtotal:      result.grand_subtotal,
+      global_charges:      result.global_charges,
+      global_charges_total: result.global_charges_total,
+      grand_total:         result.grand_total,
+    });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.previewQuote]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
@@ -394,11 +505,54 @@ export async function saveQuoteDraft(req, res) {
         return bad(res, 400, 'A quote line references an item that does not belong to this rate contract');
       }
     }
+    // Phase 2 — compute engine output (server-authoritative). Qty re-derived from
+    // tbl_arc_item; never stored from client totals. Partial drafts (missing rate)
+    // get a 0-valued engine output (engine returns {base:0,...,total:0} when
+    // unit_price is 0 or missing), which is fine for a draft.
+    const arcItemsForEngine = await arcModel.listItems(arc_id);
+    const itemByIdForEngine = Object.fromEntries(arcItemsForEngine.map((i) => [Number(i.id), i]));
+    const engineLineInputs = (lines || []).map((line) => {
+      const arcItem = itemByIdForEngine[Number(line.arc_item_id)];
+      if (!arcItem) return null;
+      return { arcItemId: Number(line.arc_item_id), input: buildEngineLineInput(line, arcItem) };
+    }).filter(Boolean);
+    const engineInputsOnly = engineLineInputs.map((x) => x.input);
+    const engineResult = pricingEngine.calculateDocumentTotals(engineInputsOnly, []);
+    // Map engine line output back to arc_item_id.
+    const engineLineByItemId = {};
+    engineLineInputs.forEach((x, idx) => {
+      engineLineByItemId[x.arcItemId] = engineResult.lines[idx];
+    });
+    const quotePricing = {
+      grand_subtotal:      engineResult.grand_subtotal,
+      global_charges:      engineResult.global_charges,
+      global_charges_total: engineResult.global_charges_total,
+      grand_total:         engineResult.grand_total,
+    };
+
     return db.tx(async (t) => {
-      const quote = await arcEvalModel.upsertQuote(arc_id, vendorId, { payment_terms, gstin_used }, t);
+      const quote = await arcEvalModel.upsertQuote(arc_id, vendorId,
+        { payment_terms, gstin_used, quote_pricing: quotePricing }, t);
       const upserted = [];
       for (const line of (lines || [])) {
-        upserted.push(await arcEvalModel.upsertQuoteLine(quote.id, line, t));
+        const engineLineOut = engineLineByItemId[Number(line.arc_item_id)];
+        const linePricing = engineLineOut
+          ? { base: engineLineOut.base, base_tax: engineLineOut.base_tax,
+              charges: engineLineOut.charges, charges_total: engineLineOut.charges_total,
+              total: engineLineOut.total }
+          : undefined;
+        // Normalize charges to engine-canonical array before persisting.
+        const canonicalCharges = normalizeArcCharges(line.charges).map((c) => ({
+          name:        c.name ?? null,
+          amount:      Number(c.amount ?? 0),
+          amount_mode: toEngineMode(c.amount_mode),
+          tax:         c.tax !== null && c.tax !== undefined && c.tax !== '' ? Number(c.tax) : null,
+          tax_mode:    toEngineMode(c.tax_mode),
+          ...(c.slug !== undefined ? { slug: c.slug } : {}),
+          ...(c.comment !== undefined && c.comment !== null ? { comment: c.comment } : {}),
+        }));
+        upserted.push(await arcEvalModel.upsertQuoteLine(quote.id,
+          { ...line, charges: canonicalCharges, line_pricing: linePricing }, t));
       }
       return ok(res, { quote, lines: upserted });
     });
@@ -445,7 +599,48 @@ export async function submitQuote(req, res) {
     if (quoteLines.length === 0) return bad(res, 400, 'Quote has no line items');
     const submitLineErr = validateSubmittedLines(quoteLines);
     if (submitLineErr) return bad(res, 400, submitLineErr);
+
+    // Phase 2 — recompute engine output on submit (authoritative). Qty from DB, not client.
+    const arcItemsForSubmit = await arcModel.listItems(arc_id);
+    const itemByIdForSubmit = Object.fromEntries(arcItemsForSubmit.map((i) => [Number(i.id), i]));
+    const submitEngineInputs = quoteLines.map((ql) => {
+      const arcItem = itemByIdForSubmit[Number(ql.arc_item_id)];
+      if (!arcItem) return null;
+      // quoteLines come from DB — charges are already canonical engine arrays after draft-save.
+      return { arcItemId: Number(ql.arc_item_id), input: buildEngineLineInput(ql, arcItem) };
+    }).filter(Boolean);
+    const submitEngineResult = pricingEngine.calculateDocumentTotals(
+      submitEngineInputs.map((x) => x.input), []
+    );
+    const submitQuotePricing = {
+      grand_subtotal:       submitEngineResult.grand_subtotal,
+      global_charges:       submitEngineResult.global_charges,
+      global_charges_total: submitEngineResult.global_charges_total,
+      grand_total:          submitEngineResult.grand_total,
+    };
+    const submitLineByItemId = {};
+    submitEngineInputs.forEach((x, idx) => {
+      submitLineByItemId[x.arcItemId] = submitEngineResult.lines[idx];
+    });
+
     return db.tx(async (t) => {
+      // Store authoritative quote_pricing on submit.
+      await t.none(
+        `UPDATE tbl_arc_quote SET quote_pricing = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [JSON.stringify(submitQuotePricing), quote.id]
+      );
+      // Store authoritative line_pricing per line.
+      for (const ql of quoteLines) {
+        const engineLineOut = submitLineByItemId[Number(ql.arc_item_id)];
+        if (!engineLineOut) continue;
+        const lp = { base: engineLineOut.base, base_tax: engineLineOut.base_tax,
+                     charges: engineLineOut.charges, charges_total: engineLineOut.charges_total,
+                     total: engineLineOut.total };
+        await t.none(
+          `UPDATE tbl_arc_quote_line SET line_pricing = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [JSON.stringify(lp), ql.id]
+        );
+      }
       const updated = await arcEvalModel.submitQuote(quote.id, t);
       await arcModel.recordVendorResponse(arc_id, vendorId, 'submitted', t);
       await logArcEvent({
@@ -545,6 +740,7 @@ export async function getTechClausesForVendor(req, res) {
     if (!vendorId) return bad(res, 401, 'Unauthorized');
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
     if (!(await vendorInvitedToArc(arcId, vendorId))) {
       return bad(res, 403, 'You were not invited to this rate contract');
     }
@@ -569,6 +765,7 @@ export async function getTechClausesForVendor(req, res) {
           file_id: Number(f.file_id),
           // Vendor-scoped, ownership-checked proxy URL — NOT the raw S3 url.
           url: `/arc-v2/vendor/tech-envelope/file/${f.file_id}`,
+          original_name: f.original_name || null,
         })),
       });
     }
@@ -659,15 +856,18 @@ export async function uploadTechEvidence(req, res) {
     const up = await uploadToS3(tmpPath, s3Key);
     if (!up?.ok || !up?.url) return bad(res, 502, 'File upload failed — please retry', 3);
 
+    // Sanitise the original filename to a safe length (never changes validation).
+    const sanitisedOriginalName = (req.file.originalname || "").slice(0, 255) || null;
     const file = await db.tx(async (t) => {
       // Ensure a response row exists so the file can attach (vendor-scoped).
       const row = await arcEvalModel.ensureVendorResponseRow(clauseId, vendorId, t);
-      return arcEvalModel.addVendorResponseFile(row.id, up.url, t);
+      return arcEvalModel.addVendorResponseFile(row.id, up.url, sanitisedOriginalName, t);
     });
     return ok(res, {
       file: {
         file_id: Number(file.id),
         url: `/arc-v2/vendor/tech-envelope/file/${file.id}`,
+        original_name: file.original_name || null,
       },
     });
   } catch (err) {
@@ -739,6 +939,13 @@ export async function submitTechEnvelope(req, res) {
     if (!(await arcEvalModel.arcHasTechClauses(arcId))) {
       return bad(res, 400, 'This rate contract has no technical clauses to submit');
     }
+    // Phase 1 §B — server-side completeness guard (defence-in-depth; FE gate is primary).
+    const counts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
+    if (counts.clauses_total > 0 && counts.clauses_answered < counts.clauses_total) {
+      return bad(res, 409,
+        `Respond to all clauses before sealing — ${counts.clauses_answered} of ${counts.clauses_total} answered`
+      );
+    }
     const result = await db.tx(async (t) => {
       const sealed = await arcEvalModel.sealTechEnvelope(arcId, vendorId, t);
       await logArcEvent({
@@ -767,4 +974,30 @@ async function arcLifecycleModelGetArcIdForClause(clauseId) {
     [clauseId]
   );
   return row ? Number(row.arc_id) : null;
+}
+
+// GET /vendor/requests/:arcId/lifecycle
+// Server-computed stages projected for the vendor's role. Scope is derived
+// from req.user.id; the vendor must be invited; NO buyer-internal counts or
+// other-vendor data is returned.
+export async function getRequestLifecycle(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const arcId = Number(req.params.arcId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    // Never expose a pre-live ARC's lifecycle (404, do not reveal existence) —
+    // even if a stale invitation row exists.
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    if (!(await vendorInvitedToArc(arcId, vendorId)))
+      return bad(res, 403, 'You were not invited to this rate contract');
+    const lifecycle = await arcLifecycleModel.computeLifecycle(arcId, { lazyFlip: true });
+    if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
+    const projected = await arcEvalModel.projectVendorLifecycle(lifecycle, arcId, vendorId);
+    return ok(res, projected);
+  } catch (err) {
+    logger.error({ err }, '[vendorController.getRequestLifecycle]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
 }

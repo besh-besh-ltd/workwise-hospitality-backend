@@ -24,6 +24,10 @@ import { logger } from '../util/logger.js';
 export const ARC_EVENT_TYPES = Object.freeze({
   // Creation & lifecycle
   CREATED: 'created',
+  // Publish approval gate (buyer-internal — NOT vendor-safe)
+  PUBLISH_SUBMITTED: 'publish_submitted',
+  PUBLISH_APPROVED:  'publish_approved',
+  PUBLISH_REJECTED:  'publish_rejected',
   PUBLISHED: 'floated',
   EXTENDED: 'deadline_extended',
   WITHDRAWN: 'withdrawn',
