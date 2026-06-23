@@ -782,6 +782,7 @@ export async function getPODetailFull(po_id, scope) {
       unit_price: Number(it.unit_price) || 0,
       gst,
       amount: Number(it.total_price) || 0,
+      charges_meta: Object.keys(cm).length ? cm : null,
     };
   });
 
@@ -1075,6 +1076,7 @@ export async function getPODetailFull(po_id, scope) {
     },
     items: mappedItems,
     pricing,
+    global_charges: po.global_charges ?? null,
     tech_eval, // per-product clause marks + % + approver (see buildTechEval)
     comparison,
     docs,
