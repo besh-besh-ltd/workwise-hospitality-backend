@@ -17,6 +17,42 @@ const STATUS_GROUPS_MR = {
   cancelled:   ['rejected','cancelled'],
 };
 
+/**
+ * The MR read-scope MATRIX predicate — the security core of the dashboard.
+ *
+ * An MR is readable iff there EXISTS a role-scope row for the user that covers
+ * its exact (company × hotel × department) cell, with NULL = "all" at each axis.
+ * This is a strict per-row matrix: a user granted (A1, Procurement) +
+ * (A2, Engineering) sees ONLY those two cells — NOT Procurement@A2 or
+ * Engineering@A1 — which two independent `hotel_ids`/`department_ids` ANY()
+ * arrays would wrongly over-show.
+ *
+ * Mirrors the RFQ buyer-listing role-scope EXISTS subquery in
+ * `app/models/rfqModel.js` `getAllBuyerRfq` (the "Permission filter: only RFQs
+ * the user has read access for" clause, ~rfqModel.js:3889). RFQ ties its matrix
+ * to a boq/rfq `read` permission via tbl_role_permissions/tbl_permissions; MR
+ * has no `mr.read` permission key (membership/role-scope based throughout the
+ * module — see userCanAccessHotel / hotelDepartmentsForUser), so we mirror the
+ * SAME (company, hotel-NULL-or-eq, dept-NULL-or-eq) shape WITHOUT the permission
+ * JOIN. Pure role-scope membership.
+ *
+ * Returns a SQL boolean expression string referencing the given table `alias`'s
+ * `hospitality_company_id`, `hotel_id`, `department_id` columns. The userId is
+ * inlined as an integer literal (caller passes a server-derived req.user.id —
+ * NEVER client input). No bind param is consumed so it composes freely with the
+ * positional `$n` args the callers already build.
+ */
+function scopeMatrixPredicate(userId, alias) {
+  const uid = Number(userId);
+  return `EXISTS (
+        SELECT 1 FROM tbl_user_role_scopes _urs_mr
+         WHERE _urs_mr.user_id = ${uid}
+           AND _urs_mr.company_id = ${alias}.hospitality_company_id
+           AND (_urs_mr.hotel_id IS NULL OR _urs_mr.hotel_id = ${alias}.hotel_id)
+           AND (_urs_mr.department_id IS NULL OR _urs_mr.department_id = ${alias}.department_id)
+      )`;
+}
+
 const mrModel = {
   createDraft: async (data, txContext = null) => {
     const runner = txContext || db;
@@ -228,9 +264,12 @@ const mrModel = {
 
   list: async ({
     hospitality_company_ids = null, // number[] (scope) | null (super admin = all)
-    hotel_ids = null,
+    hotel_ids = null,               // client FILTER (intersected w/ scope upstream): null = no filter; array (incl. []) = exactly these
     department_ids = null,
     raised_by = null,
+    created_from = null,            // inclusive lower bound on m.created_at (ISO date/ts) | null
+    created_to = null,              // EXCLUSIVE upper bound on m.created_at | null
+    scope_user_id = null,           // server-derived req.user.id → applies the role-scope matrix; null = no matrix (super admin)
     statusGroup = 'all',
     page = 1,
     limit = 20,
@@ -245,14 +284,24 @@ const mrModel = {
       conditions.push(`m.hospitality_company_id = ANY($${p++}::int[])`);
       args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
     }
-    if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+    // Read-scope matrix (the security core): only MR cells the user's role
+    // scopes cover. null scope_user_id = super admin / unrestricted.
+    if (scope_user_id != null) {
+      conditions.push(scopeMatrixPredicate(scope_user_id, 'm'));
+    }
+    // Client BU/dept FILTERS — already intersected with the scope upstream, so
+    // they can only narrow. null = no filter; an array (incl. []) = exactly
+    // these (empty deliberately matches nothing).
+    if (hotel_ids !== null) {
       conditions.push(`m.hotel_id = ANY($${p++}::int[])`);
-      args.push(hotel_ids);
+      args.push(Array.isArray(hotel_ids) ? hotel_ids : []);
     }
-    if (Array.isArray(department_ids) && department_ids.length > 0) {
+    if (department_ids !== null) {
       conditions.push(`m.department_id = ANY($${p++}::int[])`);
-      args.push(department_ids);
+      args.push(Array.isArray(department_ids) ? department_ids : []);
     }
+    if (created_from) { conditions.push(`m.created_at >= $${p++}`); args.push(created_from); }
+    if (created_to)   { conditions.push(`m.created_at <  $${p++}`); args.push(created_to); }
     if (raised_by) {
       conditions.push(`m.raised_by = $${p++}`);
       args.push(raised_by);
@@ -335,7 +384,7 @@ const mrModel = {
     return rows.map((r) => Number(r.mr_id));
   },
 
-  dashboardCounts: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
+  dashboardCounts: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null, created_from = null, created_to = null, scope_user_id = null }, txContext = null) => {
     const runner = txContext || db;
     const conditions = [];
     const args = [];
@@ -344,14 +393,21 @@ const mrModel = {
       conditions.push(`hospitality_company_id = ANY($${p++}::int[])`);
       args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
     }
-    if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+    // Read-scope matrix — table queried directly (no alias), so reference the
+    // base table name in the EXISTS correlation.
+    if (scope_user_id != null) {
+      conditions.push(scopeMatrixPredicate(scope_user_id, 'tbl_material_requisition'));
+    }
+    if (hotel_ids !== null) {
       conditions.push(`hotel_id = ANY($${p++}::int[])`);
-      args.push(hotel_ids);
+      args.push(Array.isArray(hotel_ids) ? hotel_ids : []);
     }
-    if (Array.isArray(department_ids) && department_ids.length > 0) {
+    if (department_ids !== null) {
       conditions.push(`department_id = ANY($${p++}::int[])`);
-      args.push(department_ids);
+      args.push(Array.isArray(department_ids) ? department_ids : []);
     }
+    if (created_from) { conditions.push(`created_at >= $${p++}`); args.push(created_from); }
+    if (created_to)   { conditions.push(`created_at <  $${p++}`); args.push(created_to); }
     if (raised_by) {
       conditions.push(`raised_by = $${p++}`);
       args.push(raised_by);
@@ -377,7 +433,7 @@ const mrModel = {
    * breakdowns by department / hotel / urgency / month, top requesters, and a
    * recent-MR feed. All scoped by the same filters as list/dashboardCounts.
    */
-  analytics: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null }, txContext = null) => {
+  analytics: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null, raised_by = null, created_from = null, created_to = null, scope_user_id = null }, txContext = null) => {
     const runner = txContext || db;
     const conditions = [];
     const args = [];
@@ -386,8 +442,15 @@ const mrModel = {
       conditions.push(`m.hospitality_company_id = ANY($${p++}::int[])`);
       args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
     }
-    if (Array.isArray(hotel_ids) && hotel_ids.length > 0) { conditions.push(`m.hotel_id = ANY($${p++}::int[])`); args.push(hotel_ids); }
-    if (Array.isArray(department_ids) && department_ids.length > 0) { conditions.push(`m.department_id = ANY($${p++}::int[])`); args.push(department_ids); }
+    // Read-scope matrix (security core) — every analytics sub-query aliases the
+    // MR table as `m`, so the predicate composes into all of them via ${where}.
+    if (scope_user_id != null) {
+      conditions.push(scopeMatrixPredicate(scope_user_id, 'm'));
+    }
+    if (hotel_ids !== null) { conditions.push(`m.hotel_id = ANY($${p++}::int[])`); args.push(Array.isArray(hotel_ids) ? hotel_ids : []); }
+    if (department_ids !== null) { conditions.push(`m.department_id = ANY($${p++}::int[])`); args.push(Array.isArray(department_ids) ? department_ids : []); }
+    if (created_from) { conditions.push(`m.created_at >= $${p++}`); args.push(created_from); }
+    if (created_to)   { conditions.push(`m.created_at <  $${p++}`); args.push(created_to); }
     if (raised_by) { conditions.push(`m.raised_by = $${p++}`); args.push(raised_by); }
     // 'WHERE TRUE' fallback so the `${where} AND …` queries below stay valid
     // when there's no company filter (super admin).
@@ -508,7 +571,70 @@ const mrModel = {
       args
     );
   },
+
+  /**
+   * Scoped Business-Unit (hotel) options for the dashboard filter bar — the
+   * hotels covered by the user's role-scope matrix, derived from the SAME
+   * source as the read scope so the dropdown can never offer an out-of-scope BU.
+   *
+   * A role-scope row with hotel_id IS NULL = "all hotels under that company",
+   * so it expands to every (non-deleted) hotel under company_id. A row with a
+   * concrete hotel_id contributes just that hotel. isSuperAdmin = all hotels.
+   */
+  scopedHotelOptions: async (userId, { isSuperAdmin = false } = {}, txContext = null) => {
+    const runner = txContext || db;
+    if (isSuperAdmin) {
+      return runner.any(
+        `SELECT id, name, city, hospitality_company_id
+           FROM tbl_hospitality_company_hotels
+          WHERE is_deleted = 0
+          ORDER BY name`
+      );
+    }
+    return runner.any(
+      `SELECT DISTINCT h.id, h.name, h.city, h.hospitality_company_id
+         FROM tbl_hospitality_company_hotels h
+         JOIN tbl_user_role_scopes urs
+           ON urs.company_id = h.hospitality_company_id
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = h.id)
+        WHERE urs.user_id = $1
+          AND h.is_deleted = 0
+        ORDER BY h.name`,
+      [userId]
+    );
+  },
+
+  /**
+   * Scoped Department options for the dashboard filter bar — departments
+   * covered by the user's role-scope matrix. A role-scope row with
+   * department_id IS NULL = "all departments" (under that company/hotel cell),
+   * so it expands to every department. A row with a concrete department_id
+   * contributes just that department. isSuperAdmin = all departments.
+   */
+  scopedDepartmentOptions: async (userId, { isSuperAdmin = false } = {}, txContext = null) => {
+    const runner = txContext || db;
+    if (isSuperAdmin) {
+      return runner.any(`SELECT id, title FROM tbl_department ORDER BY title`);
+    }
+    return runner.any(
+      `WITH has_all AS (
+         SELECT EXISTS (
+           SELECT 1 FROM tbl_user_role_scopes urs
+            WHERE urs.user_id = $1 AND urs.department_id IS NULL
+         ) AS all_depts
+       )
+       SELECT d.id, d.title
+         FROM tbl_department d
+        WHERE (SELECT all_depts FROM has_all) = true
+           OR d.id IN (
+             SELECT urs.department_id FROM tbl_user_role_scopes urs
+              WHERE urs.user_id = $1 AND urs.department_id IS NOT NULL
+           )
+        ORDER BY d.title`,
+      [userId]
+    );
+  },
 };
 
 export default mrModel;
-export { STATUS_GROUPS_MR };
+export { STATUS_GROUPS_MR, scopeMatrixPredicate };

@@ -95,6 +95,71 @@ function validateMrItemAgainstLine(item, line, mr) {
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
+// Super admin (user_type 8) reads everything — unrestricted by the scope matrix.
+function isSuperAdmin(req) { return Number(req.user?.user_type) === 8; }
+
+// Parse a CSV string or array of ids → distinct positive number[] | null.
+// null = "client supplied no filter on this axis" (→ full scope, no narrowing).
+// An empty/garbage value also yields null (treated as "no filter"), so a client
+// can never accidentally scope to nothing by sending junk — only the matrix
+// decides what's visible.
+function parseIntArray(v) {
+  if (v == null) return null;
+  const raw = Array.isArray(v) ? v : String(v).split(',');
+  const out = [];
+  for (const x of raw) {
+    const n = Number(x);
+    if (Number.isFinite(n) && n > 0 && !out.includes(n)) out.push(n);
+  }
+  return out.length ? out : null;
+}
+
+// Accept an ISO calendar date "YYYY-MM-DD"; return it, else null (never throw).
+function parseISODate(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+// FE sends an INCLUSIVE created_to (YYYY-MM-DD). The model uses a `<` upper
+// bound, so convert the inclusive end-of-day to the exclusive next-day boundary.
+function exclusiveDateUpper(isoDate) {
+  if (!isoDate) return null;
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Single source of truth for the read scope + filters every MR read endpoint
+ * uses. Derives the (company × hotel × department) scope from req.user — NEVER
+ * trusting the client to widen — and folds in the optional client BU/dept/date
+ * FILTERS (which can only narrow within the matrix). Returns the params the
+ * model methods (list / dashboardCounts / analytics) accept.
+ *
+ *   companyIds      number[] | null   server-derived company scope (null = super admin)
+ *   scope_user_id   number   | null   userId → role-scope matrix (null = super admin, unrestricted)
+ *   hotel_ids       number[] | null   client BU filter (null = none)
+ *   department_ids  number[] | null   client dept filter (null = none)
+ *   created_from    ISO date | null   inclusive lower bound on created_at
+ *   created_to      ISO date | null   EXCLUSIVE upper bound on created_at
+ *
+ * The matrix EXISTS predicate is the upper bound; the client hotel/dept arrays
+ * are ANDed on top, so a requested out-of-scope hotel/dept matches nothing
+ * (cannot widen). Source: { hotel_ids, department_ids, created_from, created_to }
+ * read from query (GET) or body (list-view POST).
+ */
+async function deriveScopeParams(req, source) {
+  const companyIds = await resolveHospitalityCompanyScope(req); // null = super admin
+  const scope_user_id = isSuperAdmin(req) ? null : (req.user?.id ?? -1);
+  const hotel_ids = parseIntArray(source.hotel_ids);
+  const department_ids = parseIntArray(source.department_ids);
+  const created_from = parseISODate(source.created_from);
+  const created_to = exclusiveDateUpper(parseISODate(source.created_to));
+  return { companyIds, scope_user_id, hotel_ids, department_ids, created_from, created_to };
+}
+
 function generateMrNumber(now = new Date()) {
   const yyyy = now.getFullYear();
   // Wide, time-seeded suffix to avoid collisions on the UNIQUE mr_number
@@ -374,9 +439,6 @@ export async function approvalPreview(req, res) {
 export async function getMrListView(req, res) {
   try {
     const userId = req.user?.id;
-    // Scope to ALL the user's companies (super admin → null = all) so multi-
-    // company users see their MRs; the in-page Business Unit facet narrows.
-    const companyIds = await resolveHospitalityCompanyScope(req);
     const body = req.body || {};
     const tab = ['all', 'for_me', 'drafts', 'pending', 'approved', 'po_released', 'cancelled'].includes(body.tab) ? body.tab : 'all';
     const search = (body.search || '').toString().trim().toLowerCase() || null;
@@ -385,17 +447,36 @@ export async function getMrListView(req, res) {
     const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
     const f = body.filters || {};
     const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+    // Accept an ISO calendar date "YYYY-MM-DD"; ignore anything else (never throw).
+    const asISODate = (v) => {
+      if (typeof v !== 'string') return null;
+      const s = v.trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+    };
     const filters = {
       status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
       categoryId: asStrArr(f.categoryId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
       urgency: asStrArr(f.urgency),
+      dateFrom: asISODate(f.dateFrom),
+      dateTo: asISODate(f.dateTo),
     };
-    const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids.map(Number) : null;
+    // Derive the read-scope matrix + intersected client BU/dept/date filters
+    // (single source of truth shared with analytics/counts/list). The matrix is
+    // applied IN SQL, so the fetched set already excludes out-of-scope cells —
+    // the in-JS facet filters below can only narrow within it, never widen.
+    const scope = await deriveScopeParams(req, {
+      hotel_ids: body.hotel_ids,
+      department_ids: body.department_ids,
+      // Date window comes from the listing's own FY/custom facet (filters.dateFrom/To),
+      // applied in JS below — do NOT also push it into the SQL fetch here.
+    });
 
     // 1. fetch the full scoped set (big cap so faceting is complete).
     const { data: allRows } = await mrModel.list({
-      hospitality_company_ids: companyIds,
-      hotel_ids: hotel_ids && hotel_ids.length ? hotel_ids : null,
+      hospitality_company_ids: scope.companyIds,
+      scope_user_id: scope.scope_user_id,
+      hotel_ids: scope.hotel_ids,
+      department_ids: scope.department_ids,
       statusGroup: 'all', page: 1, limit: 1000,
     });
     const rows = Array.isArray(allRows) ? allRows : [];
@@ -448,6 +529,10 @@ export async function getMrListView(req, res) {
       categoryId: toFacet(fm.categoryId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId), urgency: toFacet(fm.urgency),
     };
 
+    // FY / custom-range window (epoch ms). Inclusive of both calendar days.
+    const fromMs = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`).getTime() : null;
+    const toMs = filters.dateTo ? (new Date(`${filters.dateTo}T00:00:00`).getTime() + 86400000) : null; // exclusive upper
+
     // 6. apply facet + search filters.
     const filtered = tabRows.filter((r) => {
       if (filters.status.length && !filters.status.includes(r._bucket)) return false;
@@ -460,6 +545,12 @@ export async function getMrListView(req, res) {
       if (search) {
         const hay = `${r.title || ''} ${r.mr_number || ''} ${r.hotel_name || ''} ${r.department_name || ''} ${r.raised_by_name || ''}`.toLowerCase();
         if (!hay.includes(search)) return false;
+      }
+      // FY / custom creation-date window (server-authoritative; AND with other facets).
+      if (fromMs != null || toMs != null) {
+        const c = new Date(r.created_at || 0).getTime();
+        if (fromMs != null && c < fromMs) return false;
+        if (toMs != null && c >= toMs) return false;
       }
       return true;
     });
@@ -497,14 +588,17 @@ export async function getMrListView(req, res) {
 
 export async function list(req, res) {
   try {
-    const { hospitality_company_id, hotel_ids, department_ids, statusGroup, raised_by, page, limit } = req.query;
-    // Scope to ALL the user's companies (super admin → null = all), consistent
-    // with the ARC + list-view listings — fixes multi-company users seeing none.
-    const companyIds = await resolveHospitalityCompanyScope(req);
+    const { statusGroup, raised_by, page, limit } = req.query;
+    // Scope to ALL the user's companies (super admin → null = all) + the
+    // role-scope matrix (security core); client BU/dept/date params only narrow.
+    const scope = await deriveScopeParams(req, req.query);
     const result = await mrModel.list({
-      hospitality_company_ids: companyIds,
-      hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
-      department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
+      hospitality_company_ids: scope.companyIds,
+      scope_user_id:  scope.scope_user_id,
+      hotel_ids:      scope.hotel_ids,
+      department_ids: scope.department_ids,
+      created_from:   scope.created_from,
+      created_to:     scope.created_to,
       raised_by:      raised_by ? Number(raised_by) : null,
       statusGroup: statusGroup || 'all',
       page:  Number(page || 1),
@@ -519,13 +613,15 @@ export async function list(req, res) {
 
 export async function dashboardCounts(req, res) {
   try {
-    const { hospitality_company_id, hotel_ids, department_ids, raised_by } = req.query;
-    const companyIds = await resolveHospitalityCompanyScope(req);
+    const scope = await deriveScopeParams(req, req.query);
     const counts = await mrModel.dashboardCounts({
-      hospitality_company_ids: companyIds,
-      hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
-      department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
-      raised_by:      raised_by ? Number(raised_by) : null,
+      hospitality_company_ids: scope.companyIds,
+      scope_user_id:  scope.scope_user_id,
+      hotel_ids:      scope.hotel_ids,
+      department_ids: scope.department_ids,
+      created_from:   scope.created_from,
+      created_to:     scope.created_to,
+      raised_by:      req.query.raised_by ? Number(req.query.raised_by) : null,
     });
     return ok(res, { counts });
   } catch (err) {
@@ -536,17 +632,40 @@ export async function dashboardCounts(req, res) {
 
 export async function analytics(req, res) {
   try {
-    const { hotel_ids, department_ids, raised_by } = req.query;
-    const companyIds = await resolveHospitalityCompanyScope(req);
+    const scope = await deriveScopeParams(req, req.query);
     const data = await mrModel.analytics({
-      hospitality_company_ids: companyIds,
-      hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
-      department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
-      raised_by:      raised_by ? Number(raised_by) : null,
+      hospitality_company_ids: scope.companyIds,
+      scope_user_id:  scope.scope_user_id,
+      hotel_ids:      scope.hotel_ids,
+      department_ids: scope.department_ids,
+      created_from:   scope.created_from,
+      created_to:     scope.created_to,
+      raised_by:      req.query.raised_by ? Number(req.query.raised_by) : null,
     });
     return ok(res, data);
   } catch (err) {
     logger.error({ err }, '[mrController.analytics]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+/**
+ * GET /v1/mr/dashboard/filter-options — the scoped Business-Unit (hotel) +
+ * Department option lists that populate the dashboard filter bar. Derived from
+ * the SAME role-scope matrix as the analytics scope (single source of truth),
+ * so the dropdowns can only ever offer choices the user can actually read.
+ * Super admin (user_type 8) gets all hotels + all departments.
+ */
+export async function dashboardFilterOptions(req, res) {
+  try {
+    const superAdmin = isSuperAdmin(req);
+    const [hotels, departments] = await Promise.all([
+      mrModel.scopedHotelOptions(req.user.id, { isSuperAdmin: superAdmin }),
+      mrModel.scopedDepartmentOptions(req.user.id, { isSuperAdmin: superAdmin }),
+    ]);
+    return ok(res, { hotels, departments });
+  } catch (err) {
+    logger.error({ err }, '[mrController.dashboardFilterOptions]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }

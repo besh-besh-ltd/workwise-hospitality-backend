@@ -38,6 +38,9 @@ async function nextRfqNo(t) {
  * @param {0|1} [opts.is_tender]
  * @param {string} [opts.bid_end_date] - text; default 7 days hence
  * @param {string} [opts.title]
+ * @param {string} [opts.timestamp] - ISO timestamp string for the RFQ creation date
+ *   (e.g. "2026-04-01T00:00:00"); default is now(). TEST-ONLY — allows placing
+ *   RFQs in a specific Financial Year without post-insert UPDATEs.
  */
 export async function makeRFQ(t, opts) {
   if (!opts || !opts.createdBy) {
@@ -65,6 +68,11 @@ export async function makeRFQ(t, opts) {
     opts.vendor_clarification_date ??
     new Date(Date.now() + 5 * 86400_000).toISOString().replace("T", " ").slice(0, 19);
 
+  // Allow callers to specify a custom timestamp (for FY-filter tests). When
+  // provided it must be an ISO string. The SQL literal `now()` is used when
+  // the caller passes nothing so that the default behaviour is unchanged.
+  const timestampExpr = opts.timestamp ? `$22::timestamptz` : `now()`;
+
   const row = await t.one(
     `INSERT INTO tbl_rfq (
        rfq_no, comment, company_name, response_email, contact_name,
@@ -73,7 +81,7 @@ export async function makeRFQ(t, opts) {
        hospitality_company_id, hotel_id, department_id, process_id,
        is_tender, tender_publish_date, vendor_clarification_date, title, rfq_type
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(),
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, ${timestampExpr},
              $13,$14,$15,$16,$17,$18,$19,$20,$21)
      RETURNING id, rfq_no`,
     [
@@ -98,6 +106,10 @@ export async function makeRFQ(t, opts) {
       vendorClarificationDate,
       title,
       opts.rfq_type ?? "RFQ",
+      // $22 is only bound when opts.timestamp is provided; pg-promise ignores
+      // extra params beyond the highest $N referenced in the SQL, so it is safe
+      // to always push it into the array.
+      opts.timestamp ?? null,
     ]
   );
 

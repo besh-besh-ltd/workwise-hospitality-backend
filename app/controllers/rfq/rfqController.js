@@ -7932,9 +7932,17 @@ const rfqController = {
       const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
       const f = body.filters || {};
       const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+      // Accept an ISO calendar date "YYYY-MM-DD"; ignore anything else (never throw).
+      const asISODate = (v) => {
+        if (typeof v !== 'string') return null;
+        const s = v.trim();
+        return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+      };
       const filters = {
         status: asStrArr(f.status), buId: asStrArr(f.buId), categoryId: asStrArr(f.categoryId),
         departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+        dateFrom: asISODate(f.dateFrom),
+        dateTo: asISODate(f.dateTo),
       };
       const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
 
@@ -8050,6 +8058,10 @@ const rfqController = {
         departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId),
       };
 
+      // FY / custom-range window (epoch ms). Inclusive of both calendar days.
+      const fromMs = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`).getTime() : null;
+      const toMs = filters.dateTo ? (new Date(`${filters.dateTo}T00:00:00`).getTime() + 86400000) : null; // exclusive upper
+
       // 6. apply facet selections (OR within a facet, AND across facets).
       const filtered = tabRows.filter((r) => {
         if (filters.status.length && !filters.status.includes(r._statusKey)) return false;
@@ -8058,6 +8070,12 @@ const rfqController = {
         if (filters.categoryId.length && !categoryPairs(r).some((c) => filters.categoryId.includes(c.id))) return false;
         if (filters.productId.length && !productPairs(r).some((p) => filters.productId.includes(p.id))) return false;
         if (filters.vendorId.length && !vendorPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
+        // FY / custom creation-date window (server-authoritative; AND with other facets).
+        if (fromMs != null || toMs != null) {
+          const c = new Date(r.timestamp || 0).getTime();
+          if (fromMs != null && c < fromMs) return false;
+          if (toMs != null && c >= toMs) return false;
+        }
         return true;
       });
 

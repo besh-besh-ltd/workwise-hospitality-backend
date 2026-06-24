@@ -613,9 +613,17 @@ export async function getArcListView(req, res) {
     const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
     const f = body.filters || {};
     const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+    // Accept an ISO calendar date "YYYY-MM-DD"; ignore anything else (never throw).
+    const asISODate = (v) => {
+      if (typeof v !== 'string') return null;
+      const s = v.trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+    };
     const filters = {
       status: asStrArr(f.status), buId: asStrArr(f.buId), categoryId: asStrArr(f.categoryId),
       departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+      dateFrom: asISODate(f.dateFrom),
+      dateTo: asISODate(f.dateTo),
     };
 
     // 1. fetch the full scoped set (big cap so faceting is complete).
@@ -674,6 +682,10 @@ export async function getArcListView(req, res) {
       departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId),
     };
 
+    // FY / custom-range window (epoch ms). Inclusive of both calendar days.
+    const fromMs = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`).getTime() : null;
+    const toMs = filters.dateTo ? (new Date(`${filters.dateTo}T00:00:00`).getTime() + 86400000) : null; // exclusive upper
+
     // 6. facet + search filtering.
     const filtered = tabRows.filter((r) => {
       if (filters.status.length && !filters.status.includes(r._bucket)) return false;
@@ -685,6 +697,12 @@ export async function getArcListView(req, res) {
       if (search) {
         const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${r.hotel_name || ''}`.toLowerCase();
         if (!hay.includes(search)) return false;
+      }
+      // FY / custom creation-date window (server-authoritative; AND with other facets).
+      if (fromMs != null || toMs != null) {
+        const c = new Date(r.created_at || 0).getTime();
+        if (fromMs != null && c < fromMs) return false;
+        if (toMs != null && c >= toMs) return false;
       }
       return true;
     });

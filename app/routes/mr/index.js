@@ -12,6 +12,9 @@ MrRoutes.get( '/',                       passportSignIn, acl([2, 8]), mrControll
 MrRoutes.post('/list-view',              passportSignIn, acl([2, 8]), mrController.getMrListView);
 MrRoutes.get( '/kpis',                   passportSignIn, acl([2, 8]), mrController.dashboardCounts);
 MrRoutes.get( '/analytics',              passportSignIn, acl([2, 8]), mrController.analytics);
+// Scoped BU + Department options for the dashboard header filters (same
+// role-scope matrix as analytics). Static path — registered BEFORE `/:id`.
+MrRoutes.get( '/dashboard/filter-options', passportSignIn, acl([2, 8]), mrController.dashboardFilterOptions);
 MrRoutes.get( '/approval-preview',       passportSignIn, acl([2, 8]), mrController.approvalPreview);
 
 // Search contracted items (picker).
