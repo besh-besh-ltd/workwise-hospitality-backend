@@ -480,7 +480,7 @@ export async function previewQuote(req, res) {
 export async function saveQuoteDraft(req, res) {
   try {
     const vendorId = req.user?.id;
-    const { arc_id, payment_terms, gstin_used, lines } = req.body || {};
+    const { arc_id, payment_terms, gstin_used, lines, global_charges = [] } = req.body || {};
     if (!arc_id) return bad(res, 400, 'arc_id is required');
     const arc = await arcModel.getById(arc_id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
@@ -517,17 +517,37 @@ export async function saveQuoteDraft(req, res) {
       return { arcItemId: Number(line.arc_item_id), input: buildEngineLineInput(line, arcItem) };
     }).filter(Boolean);
     const engineInputsOnly = engineLineInputs.map((x) => x.input);
-    const engineResult = pricingEngine.calculateDocumentTotals(engineInputsOnly, []);
+    // Normalize and canonicalize global_charges from the request body.
+    const canonicalGlobalCharges = normalizeArcCharges(global_charges).map((c) => {
+      // Document-level charge tax lives on the engine's additional_tax/_mode keys
+      // (normalizeGlobalCharge reads ONLY those — per-line `tax` is ignored at the
+      // document level). Accept either input key for robustness; emit additional_tax.
+      const gtax = c.additional_tax ?? c.tax;
+      const gtaxMode = c.additional_tax_mode ?? c.tax_mode;
+      return {
+        name:                c.name ?? null,
+        amount:              Number(c.amount ?? 0),
+        amount_mode:         toEngineMode(c.amount_mode),
+        additional_tax:      (gtax !== null && gtax !== undefined && gtax !== '') ? Number(gtax) : null,
+        additional_tax_mode: toEngineMode(gtaxMode),
+        ...(c.comment !== undefined && c.comment !== null ? { comment: c.comment } : {}),
+      };
+    });
+    const engineResult = pricingEngine.calculateDocumentTotals(engineInputsOnly, canonicalGlobalCharges);
     // Map engine line output back to arc_item_id.
     const engineLineByItemId = {};
     engineLineInputs.forEach((x, idx) => {
       engineLineByItemId[x.arcItemId] = engineResult.lines[idx];
     });
     const quotePricing = {
-      grand_subtotal:      engineResult.grand_subtotal,
-      global_charges:      engineResult.global_charges,
+      grand_subtotal:       engineResult.grand_subtotal,
+      global_charges:       engineResult.global_charges,
       global_charges_total: engineResult.global_charges_total,
-      grand_total:         engineResult.grand_total,
+      grand_total:          engineResult.grand_total,
+      // Persist the raw canonical global_charges INPUT so the vendor UI can
+      // reload it on revisit (no dedicated column — stored inside quote_pricing
+      // JSONB under global_charges_input; OQ-3 resolved default).
+      global_charges_input: canonicalGlobalCharges,
     };
 
     return db.tx(async (t) => {
@@ -609,14 +629,21 @@ export async function submitQuote(req, res) {
       // quoteLines come from DB — charges are already canonical engine arrays after draft-save.
       return { arcItemId: Number(ql.arc_item_id), input: buildEngineLineInput(ql, arcItem) };
     }).filter(Boolean);
+    // Reload persisted global_charges_input from the saved draft (quote row
+    // already fetched above). On submit we NEVER accept global_charges from the
+    // client body — recompute from what was saved on draft (idempotent + secure).
+    const persistedGlobalCharges = Array.isArray(quote.quote_pricing?.global_charges_input)
+      ? quote.quote_pricing.global_charges_input : [];
     const submitEngineResult = pricingEngine.calculateDocumentTotals(
-      submitEngineInputs.map((x) => x.input), []
+      submitEngineInputs.map((x) => x.input), persistedGlobalCharges
     );
     const submitQuotePricing = {
       grand_subtotal:       submitEngineResult.grand_subtotal,
       global_charges:       submitEngineResult.global_charges,
       global_charges_total: submitEngineResult.global_charges_total,
       grand_total:          submitEngineResult.grand_total,
+      // Carry forward the raw input so post-submit reload can still hydrate the UI.
+      global_charges_input: persistedGlobalCharges,
     };
     const submitLineByItemId = {};
     submitEngineInputs.forEach((x, idx) => {

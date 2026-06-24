@@ -11,10 +11,13 @@
 //   §P4. Non-invited vendor → 403 on preview (scope from req.user).
 //   §P5. Buyer comm-eval / quote list carries line_pricing for the vendor;
 //        stays nulled for a technically-disqualified vendor (redaction).
+//   §G1. Global charges (document-level) round-trip: preview / save-draft /
+//        reload / submit all correctly carry and recompute global_charges.
 //
 // Not tested here (not HTTP-observable):
 //   - FE-only server-preview wiring, per-charge-tax UI, charges modal
 //   - Buyer-FE visual display, global-charge UI (Phase-2 remainder)
+//   - Buyer CommercialStage ranking/L1 display (pure FE, no HTTP surface)
 //
 // Pattern: direct SQL seeding, real HTTP via httpClient, real Postgres.
 // No mocks. Follows arc.vendor.phase1.test.js conventions.
@@ -520,5 +523,449 @@ describe("ARC v2 — Phase 2: server-authoritative quote pricing", () => {
     await db.none(`DELETE FROM tbl_arc_item_tech_evaluation_cleared_vendors WHERE arc_item_tech_evaluation_id = $1`, [te.id]);
     await db.none(`DELETE FROM tbl_arc_item_tech_evaluation_clauses WHERE arc_item_tech_evaluation_id = $1`, [te.id]);
     await db.none(`DELETE FROM tbl_arc_item_tech_evaluation WHERE id = $1`, [te.id]);
+  });
+
+  // ── §G: Global charges round-trip ────────────────────────────────────────────
+  //
+  // A separate ARC is seeded for this group so the global-charge draft does not
+  // collide with the submitted quote from §P3 (same vendor, same ARC would just
+  // upsert, but it could confuse ordering assertions).
+
+  describe("§G: global charges round-trip", () => {
+    let gcArcId, gcItemId;
+    const GC_ITEM_QTY = 200;
+
+    // A simple absolute global charge of ₹1000 with no additional tax.
+    const GLOBAL_CHARGE = {
+      name:        "Logistics",
+      amount:      1000,
+      amount_mode: "absolute",
+      tax:         null,
+      tax_mode:    "percentage",
+    };
+
+    // Canonical engine shape as saveQuoteDraft normalises and stores it.
+    // (previewQuote passes raw to the engine; saveQuoteDraft normalises via
+    //  normalizeArcCharges → canonical mapping → calculateDocumentTotals.)
+    const CANONICAL_GLOBAL_CHARGE = {
+      name:        "Logistics",
+      amount:      1000,
+      amount_mode: "absolute",
+      tax:         null,
+      tax_mode:    "percentage",
+    };
+
+    // Base quote line (no per-line charges).
+    const BASE_LINE_OVERRIDES = { rate: 80, gst_pct: 5, gst_mode: '%', charges: [] };
+
+    beforeAll(async () => {
+      ({ arcId: gcArcId, itemId: gcItemId } = await seedArc({
+        number:        "ARC-PH2-GLOBAL-CHG",
+        title:         "Phase 2 global-charge round-trip",
+        inviteVendors: [VENDOR_A],
+      }));
+      // Override the item qty via a direct UPDATE — seedArc always uses ITEM_QTY.
+      await db.none(
+        `UPDATE tbl_arc_item SET indicative_qty = $1 WHERE id = $2`,
+        [GC_ITEM_QTY, gcItemId]
+      );
+      // Accept terms so alpha can save a draft.
+      await acceptTerms(alphaClient, gcArcId);
+    });
+
+    // G1 — Preview with non-empty global_charges: grand_total includes them.
+    test("G1: preview with global charges → grand_total > grand_subtotal by exactly global_charges_total", async () => {
+      const line = {
+        arc_item_id: gcItemId,
+        rate:        80,
+        gst_pct:     5,
+        gst_mode:    '%',
+        charges:     [],
+      };
+
+      const res = await alphaClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id:         gcArcId,
+        lines:          [line],
+        global_charges: [GLOBAL_CHARGE],
+      });
+      expect(res.status).toBe(200);
+
+      const data = res.body.data;
+      expect(data).toHaveProperty("grand_total");
+      expect(data).toHaveProperty("grand_subtotal");
+      expect(data).toHaveProperty("global_charges_total");
+      expect(data).toHaveProperty("global_charges");
+
+      // Engine verification: server re-derives qty from DB (GC_ITEM_QTY=200).
+      // The engine's normalizeGlobalCharge maps { amount, amount_mode } directly;
+      // 'absolute' mode → applyChargeMode(1000, 'absolute', subtotal) = 1000.
+      const expectedResult = pricingEngine.calculateDocumentTotals(
+        [{
+          unit_price:    80,
+          quantity:      GC_ITEM_QTY,
+          tax:           5,
+          tax_mode:      "percentage",
+          other_charges: [],
+        }],
+        [GLOBAL_CHARGE]
+      );
+
+      expect(data.grand_subtotal).toBe(expectedResult.grand_subtotal);
+      expect(data.global_charges_total).toBe(expectedResult.global_charges_total);
+      expect(data.grand_total).toBe(expectedResult.grand_total);
+
+      // global_charges_total must be positive (absolute ₹1000).
+      expect(data.global_charges_total).toBeGreaterThan(0);
+      // grand_total = grand_subtotal + global_charges_total (exact).
+      expect(data.grand_total).toBe(
+        Math.round((data.grand_subtotal + data.global_charges_total) * 100) / 100
+      );
+    });
+
+    // G1b — Preview without global_charges is unchanged baseline.
+    test("G1b: preview without global_charges → grand_total === grand_subtotal", async () => {
+      const line = {
+        arc_item_id: gcItemId,
+        rate:        80,
+        gst_pct:     5,
+        gst_mode:    '%',
+        charges:     [],
+      };
+
+      const resNo = await alphaClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id: gcArcId,
+        lines:  [line],
+        // no global_charges
+      });
+      expect(resNo.status).toBe(200);
+      expect(resNo.body.data.global_charges_total).toBe(0);
+      expect(resNo.body.data.grand_total).toBe(resNo.body.data.grand_subtotal);
+
+      const resWith = await alphaClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id:         gcArcId,
+        lines:          [line],
+        global_charges: [GLOBAL_CHARGE],
+      });
+      expect(resWith.status).toBe(200);
+
+      // Adding ₹1000 absolute charge must increase grand_total by exactly 1000.
+      const diff = Math.round(
+        (resWith.body.data.grand_total - resNo.body.data.grand_total) * 100
+      ) / 100;
+      expect(diff).toBe(1000);
+    });
+
+    // G2 — Save-draft persists global_charges_input in quote_pricing JSONB.
+    test("G2: save-draft with global_charges → tbl_arc_quote.quote_pricing.global_charges_input is persisted", async () => {
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id:         gcArcId,
+        payment_terms:  null,
+        gstin_used:     null,
+        lines:          [{
+          arc_item_id: gcItemId,
+          ...BASE_LINE_OVERRIDES,
+        }],
+        global_charges: [GLOBAL_CHARGE],
+      });
+      expect(draftRes.status).toBe(200);
+
+      // Verify directly in DB.
+      const dbQuote = await db.oneOrNone(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+        [gcArcId, VENDOR_A]
+      );
+      expect(dbQuote).not.toBeNull();
+
+      const qp = typeof dbQuote.quote_pricing === 'string'
+        ? JSON.parse(dbQuote.quote_pricing)
+        : dbQuote.quote_pricing;
+
+      expect(qp).toHaveProperty("global_charges_input");
+      expect(Array.isArray(qp.global_charges_input)).toBe(true);
+      expect(qp.global_charges_input.length).toBeGreaterThan(0);
+
+      // The stored charge must match the canonical form of what was sent.
+      const stored = qp.global_charges_input[0];
+      expect(stored.name).toBe(CANONICAL_GLOBAL_CHARGE.name);
+      expect(Number(stored.amount)).toBe(CANONICAL_GLOBAL_CHARGE.amount);
+      expect(stored.amount_mode).toBe(CANONICAL_GLOBAL_CHARGE.amount_mode);
+
+      // grand_total in quote_pricing must reflect the global charge.
+      const expectedDoc = pricingEngine.calculateDocumentTotals(
+        [{
+          unit_price:    80,
+          quantity:      GC_ITEM_QTY,
+          tax:           5,
+          tax_mode:      "percentage",
+          other_charges: [],
+        }],
+        [GLOBAL_CHARGE]
+      );
+      expect(Number(qp.grand_total)).toBe(expectedDoc.grand_total);
+      expect(Number(qp.global_charges_total)).toBe(expectedDoc.global_charges_total);
+    });
+
+    // G3 — Reload (GET request-detail) returns global_charges_input.
+    test("G3: getRequestDetail returns quote_pricing.global_charges_input populated", async () => {
+      const res = await alphaClient.get(`${VENDOR_BASE}/requests/${gcArcId}`);
+      expect(res.status).toBe(200);
+
+      const { quote } = res.body.data;
+      expect(quote).toBeDefined();
+      expect(quote.quote_pricing).not.toBeNull();
+
+      const qp = typeof quote.quote_pricing === 'string'
+        ? JSON.parse(quote.quote_pricing)
+        : quote.quote_pricing;
+
+      expect(qp).toHaveProperty("global_charges_input");
+      expect(Array.isArray(qp.global_charges_input)).toBe(true);
+      expect(qp.global_charges_input.length).toBeGreaterThan(0);
+
+      const stored = qp.global_charges_input[0];
+      expect(stored.name).toBe(CANONICAL_GLOBAL_CHARGE.name);
+      expect(Number(stored.amount)).toBe(CANONICAL_GLOBAL_CHARGE.amount);
+    });
+
+    // G4 — Submit recomputes from persisted input; inflated client total cannot
+    // change grand_total; global_charges_input survives through submit.
+    test("G4: submit recomputes global charges from persisted input; survives submit", async () => {
+      // Submit the draft (with global charges already saved in G2).
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({
+        arc_id: gcArcId,
+      });
+      expect(submitRes.status).toBe(200);
+      expect(submitRes.body.data.quote.submitted_at).toBeTruthy();
+
+      // Fetch persisted quote_pricing after submit.
+      const dbQuote = await db.oneOrNone(
+        `SELECT quote_pricing, submitted_at FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+        [gcArcId, VENDOR_A]
+      );
+      expect(dbQuote).not.toBeNull();
+      expect(dbQuote.submitted_at).not.toBeNull();
+
+      const qp = typeof dbQuote.quote_pricing === 'string'
+        ? JSON.parse(dbQuote.quote_pricing)
+        : dbQuote.quote_pricing;
+
+      // global_charges_input must survive submit.
+      expect(qp).toHaveProperty("global_charges_input");
+      expect(Array.isArray(qp.global_charges_input)).toBe(true);
+      expect(qp.global_charges_input.length).toBeGreaterThan(0);
+
+      // grand_total must be engine-recomputed from persisted input (not client-supplied).
+      const expectedDoc = pricingEngine.calculateDocumentTotals(
+        [{
+          unit_price:    80,
+          quantity:      GC_ITEM_QTY,
+          tax:           5,
+          tax_mode:      "percentage",
+          other_charges: [],
+        }],
+        [GLOBAL_CHARGE]
+      );
+      expect(Number(qp.grand_total)).toBe(expectedDoc.grand_total);
+      expect(Number(qp.global_charges_total)).toBe(expectedDoc.global_charges_total);
+
+      // Verify grand_total > grand_subtotal by exactly global_charges_total.
+      const gtDiff = Math.round(
+        (Number(qp.grand_total) - Number(qp.grand_subtotal)) * 100
+      ) / 100;
+      expect(gtDiff).toBe(Number(qp.global_charges_total));
+    });
+
+    // G5 — Non-invited vendor (epsilon) → 403 on preview even with global charges
+    //       (already covered for basic preview in P4; this confirms the global-charge
+    //       body doesn't bypass the invitation gate).
+    test("G5: non-invited vendor gets 403 on preview even with global_charges in body", async () => {
+      // Epsilon was NOT invited to the original arcId (only VENDOR_A and VENDOR_B were
+      // seeded there). Use that ARC to confirm the invitation gate still blocks epsilon
+      // even when global_charges are present in the body.
+      const res = await epsilonClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id:         arcId, // epsilon NOT invited to the main arcId
+        lines:          [{ arc_item_id: itemId, rate: 80, gst_pct: 5, gst_mode: '%', charges: [] }],
+        global_charges: [GLOBAL_CHARGE],
+      });
+      expect(res.status).toBe(403);
+    });
+
+    // G7 — REGRESSION: global-charge with tax must add amount+tax to grand_total.
+    //
+    // Bug: the engine's normalizeGlobalCharge reads ONLY `additional_tax` /
+    // `additional_tax_mode`; the old FE/controller emitted `tax`/`tax_mode` for
+    // document-level charges, so the tax was silently dropped (charge was counted
+    // at 5000, not 5900 for an 18% taxed charge).
+    //
+    // Fix: the FE now emits `additional_tax`/`additional_tax_mode` for global
+    // charges (matching the engine key). The controller's canonicalGlobalCharges
+    // mapper accepts either form (additional_tax ?? tax) for robustness.
+    //
+    // Expected (fixed):  global_charges_total = 5900, grand_total = GS + 5900
+    // Buggy (old):       global_charges_total = 5000, grand_total = GS + 5000
+    test("G7: taxed global charge (18%) adds amount+tax (5900) NOT just amount (5000)", async () => {
+      // Fresh ARC — gcArcId is already submitted (G4); use a new one for this draft.
+      const { arcId: gcTaxArcId, itemId: gcTaxItemId } = await seedArc({
+        number:        "ARC-PH2-GC-TAX",
+        title:         "Phase 2 global-charge taxed regression",
+        inviteVendors: [VENDOR_A],
+      });
+      await db.none(
+        `UPDATE tbl_arc_item SET indicative_qty = $1 WHERE id = $2`,
+        [GC_ITEM_QTY, gcTaxItemId]
+      );
+      await acceptTerms(alphaClient, gcTaxArcId);
+
+      // The FE now emits additional_tax/additional_tax_mode for global charges.
+      // This is the shape that the fixed FE sends (matching the engine's key).
+      const TAXED_GLOBAL_CHARGE = {
+        name:                "Logistics",
+        amount:              5000,
+        amount_mode:         "absolute",
+        additional_tax:      18,
+        additional_tax_mode: "percentage",
+      };
+
+      // ── PART A: Preview ──────────────────────────────────────────────────
+      // previewQuote passes global_charges raw to the engine (no remapping);
+      // the engine's normalizeGlobalCharge reads additional_tax, so we MUST
+      // send additional_tax here for the tax to be applied.
+
+      // Independently computed expected values:
+      //   base         = 80 * 200        = 16 000
+      //   base_tax     = 5% of 16 000    =    800
+      //   grand_subtotal                 = 16 800
+      //   charge amount = 5000 (absolute)
+      //   charge tax    = 18% of 5000    =    900
+      //   global_charges_total           =  5 900   ← was 5 000 before fix
+      //   grand_total  = 16 800 + 5 900  = 22 700
+      const EXPECTED_GC_TOTAL   = 5900;
+      const EXPECTED_BUGGY_TOTAL = 5000; // what the old code would produce
+      const EXPECTED_GRAND_SUBTOTAL = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 80, quantity: GC_ITEM_QTY, tax: 5, tax_mode: 'percentage', other_charges: [] }],
+        []
+      ).grand_subtotal;
+      const EXPECTED_GRAND_TOTAL = EXPECTED_GRAND_SUBTOTAL + EXPECTED_GC_TOTAL;
+
+      const previewRes = await alphaClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id:         gcTaxArcId,
+        lines:          [{
+          arc_item_id: gcTaxItemId,
+          rate:        80,
+          gst_pct:     5,
+          gst_mode:    '%',
+          charges:     [],
+        }],
+        global_charges: [TAXED_GLOBAL_CHARGE],
+      });
+      expect(previewRes.status).toBe(200);
+
+      const data = previewRes.body.data;
+      // The taxed global charge must appear in global_charges output.
+      expect(Array.isArray(data.global_charges)).toBe(true);
+      expect(data.global_charges.length).toBeGreaterThan(0);
+
+      // additional_tax on the engine output must be non-zero (18% of 5000 = 900).
+      const gcOut = data.global_charges[0];
+      expect(Number(gcOut.additional_tax)).toBe(900);
+      expect(Number(gcOut.subtotal)).toBe(5900);
+
+      // global_charges_total must include the charge tax (5900, NOT 5000).
+      expect(data.global_charges_total).toBe(EXPECTED_GC_TOTAL);
+      expect(data.global_charges_total).not.toBe(EXPECTED_BUGGY_TOTAL);
+
+      // grand_total = grand_subtotal + global_charges_total (exact arithmetic).
+      expect(data.grand_total).toBe(EXPECTED_GRAND_TOTAL);
+      expect(data.grand_total).toBe(
+        Math.round((data.grand_subtotal + data.global_charges_total) * 100) / 100
+      );
+
+      // ── PART B: Save-draft → reload round-trip ───────────────────────────
+      // saveQuoteDraft's canonicalGlobalCharges mapper accepts additional_tax
+      // (and also the old `tax` key for robustness). Verify the persisted
+      // quote_pricing reflects amount+tax (5900) and that global_charges_input
+      // carries additional_tax.
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id:         gcTaxArcId,
+        payment_terms:  null,
+        gstin_used:     null,
+        lines:          [{
+          arc_item_id: gcTaxItemId,
+          rate:        80,
+          gst_pct:     5,
+          gst_mode:    '%',
+          charges:     [],
+        }],
+        global_charges: [TAXED_GLOBAL_CHARGE],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const dbQuote = await db.oneOrNone(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+        [gcTaxArcId, VENDOR_A]
+      );
+      expect(dbQuote).not.toBeNull();
+
+      const qp = typeof dbQuote.quote_pricing === 'string'
+        ? JSON.parse(dbQuote.quote_pricing)
+        : dbQuote.quote_pricing;
+
+      // Persisted grand_total must reflect amount+tax (22700), NOT amount-only (21800).
+      expect(Number(qp.grand_total)).toBe(EXPECTED_GRAND_TOTAL);
+      expect(Number(qp.global_charges_total)).toBe(EXPECTED_GC_TOTAL);
+
+      // global_charges_input must carry the additional_tax field.
+      expect(Array.isArray(qp.global_charges_input)).toBe(true);
+      expect(qp.global_charges_input.length).toBeGreaterThan(0);
+      const storedCharge = qp.global_charges_input[0];
+      // The canonical form uses additional_tax (not tax).
+      expect(Number(storedCharge.additional_tax)).toBe(18);
+      expect(storedCharge.additional_tax_mode).toBe('percentage');
+    });
+
+    // G6 — Empty global_charges is a no-op (back-compat).
+    test("G6: save-draft with empty global_charges → global_charges_input is [] and grand_total unchanged", async () => {
+      // We need a fresh ARC (or to undo the submit on gcArc). Use a new one.
+      const { arcId: gcEmptyArcId, itemId: gcEmptyItemId } = await seedArc({
+        number:        "ARC-PH2-GC-EMPTY",
+        title:         "Phase 2 global-charge empty back-compat",
+        inviteVendors: [VENDOR_A],
+      });
+      await db.none(
+        `UPDATE tbl_arc_item SET indicative_qty = $1 WHERE id = $2`,
+        [GC_ITEM_QTY, gcEmptyItemId]
+      );
+      await acceptTerms(alphaClient, gcEmptyArcId);
+
+      // Save with explicit empty array.
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id:         gcEmptyArcId,
+        payment_terms:  null,
+        gstin_used:     null,
+        lines:          [{
+          arc_item_id: gcEmptyItemId,
+          rate:        80,
+          gst_pct:     5,
+          gst_mode:    '%',
+          charges:     [],
+        }],
+        global_charges: [],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const dbQuote = await db.oneOrNone(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+        [gcEmptyArcId, VENDOR_A]
+      );
+      const qp = typeof dbQuote.quote_pricing === 'string'
+        ? JSON.parse(dbQuote.quote_pricing)
+        : dbQuote.quote_pricing;
+
+      expect(Array.isArray(qp.global_charges_input)).toBe(true);
+      expect(qp.global_charges_input.length).toBe(0);
+      // With no global charges, grand_total === grand_subtotal.
+      expect(Number(qp.grand_total)).toBe(Number(qp.grand_subtotal));
+    });
   });
 });
