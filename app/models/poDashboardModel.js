@@ -689,6 +689,8 @@ export async function getPODetailFull(po_id, scope) {
             VC.gstin AS vendor_gstin,
             INI.name AS initiator_name,
             tai.status AS instance_status, tai.completed_at AS instance_completed_at,
+            tai.created_at AS instance_created_at,
+            po.auto_initiated,
             arc.arc_number, arc.title AS arc_title, arc.id AS arc_id,
             mr.mr_number AS source_mr_number
      FROM tbl_rfq_purchase_order po
@@ -1159,7 +1161,38 @@ async function buildAuditTrail(po, docRows = []) {
     when: iso(po.created_at),
   });
 
-  // ---- 2) Internal approval steps ----
+  // ---- 2) PO initiated ----
+  // Marks the moment the buyer pushed the draft into the approval/vendor
+  // pipeline (via the Force Initiate button or the legacy initiate flow).
+  // Reliable signal: an approval_instance was created OR the PO status has
+  // moved past `draft` (covers the non-hospitality legacy path where no
+  // approval instance is created). `cancelled` is excluded because a PO
+  // cancelled before initiation never went through this step.
+  const initiated = !!po.approval_instance_id ||
+    !["draft", "cancelled"].includes(status);
+  // `by` switches to "System" when the auto-initiate batch ran this PO,
+  // so the audit trail distinguishes system-driven initiation from a
+  // Force Initiate click. `auto_initiated` is the column flipped to TRUE
+  // inside autoInitiateRFQPOs after initiatePurchaseOrder succeeds.
+  const initiatedBy = po.auto_initiated ? "System" : (po.initiator_name || null);
+  workflow.push({
+    step: ++stepCounter,
+    status: initiated ? "done" : "pending",
+    title: "PO initiated",
+    by: initiatedBy,
+    when: iso(po.instance_created_at),
+    policy: null,
+  });
+  if (initiated && po.instance_created_at) {
+    activity.push({
+      type: "initiated",
+      who: initiatedBy || "System",
+      msg: `initiated purchase order ${po.po_number}`,
+      when: iso(po.instance_created_at),
+    });
+  }
+
+  // ---- 3) Internal approval steps ----
   let approvalComplete = false;
   let approvalRejected = false;
   if (po.approval_instance_id) {
