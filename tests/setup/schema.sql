@@ -11125,6 +11125,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc (
   technical_response_required     BOOLEAN NOT NULL DEFAULT FALSE,
   sample_required                 BOOLEAN NOT NULL DEFAULT FALSE,
   eligibility_type                VARCHAR(20) NOT NULL DEFAULT 'open',
+  type                            VARCHAR(20) DEFAULT 'product',
   escalation_clause_json          JSONB DEFAULT '{}'::jsonb,
   payment_terms_expected          VARCHAR(255),
   delivery_expected               VARCHAR(255),
@@ -11159,6 +11160,8 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_item (
   indicative_qty      NUMERIC(15,2) NOT NULL,
   uom                 VARCHAR(50),
   spec_attachment_id  INTEGER,
+  -- migrations/20260626100100_arc_manual_doc_and_hsn.sql — India GST HSN code.
+  hsn                 TEXT,
   created_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (arc_id, product_variant_id)
@@ -11405,6 +11408,10 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_contract (
   vendor_id                INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
   document_s3_url          TEXT,
   document_hash            VARCHAR(128),
+  -- migrations/20260626100100_arc_manual_doc_and_hsn.sql — distinguishes a hand-keyed
+  -- already-signed historical PDF ('manual_upload') from a system-generated one ('generated')
+  -- so the historical-active path is never re-rendered/overwritten.
+  document_source          VARCHAR(20) NOT NULL DEFAULT 'generated',
   status                   VARCHAR(40) NOT NULL DEFAULT 'generated',
   generated_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   awaiting_until           TIMESTAMP WITHOUT TIME ZONE,
@@ -11416,7 +11423,8 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_contract (
   UNIQUE (arc_id, vendor_id),
   CONSTRAINT tbl_arc_contract_status_chk CHECK (status IN (
     'generated','awaiting_acceptance','clarification','active','expiring_soon','expired','terminated','declined'
-  ))
+  )),
+  CONSTRAINT chk_tbl_arc_contract_document_source CHECK (document_source IN ('generated','manual_upload'))
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_arc     ON public.tbl_arc_contract (arc_id);
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_vendor  ON public.tbl_arc_contract (vendor_id);
@@ -11454,6 +11462,36 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_signature_otp (
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_signature_otp_contract
   ON public.tbl_arc_contract_signature_otp (arc_contract_id);
+
+
+--
+-- ARC v2 — Manual / backfill data-entry provenance.
+-- Mirrored from migrations/20260626100000_arc_manual_entry.sql. Records that an
+-- ARC was hand-keyed by the purchase team (not produced by the live wizard/
+-- vendor flow), the target stage it was landed at, and a snapshot of the
+-- committee outcome (backfill has no live approval instance). One row per ARC.
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_manual_entry (
+  id                     BIGSERIAL PRIMARY KEY,
+  arc_id                 BIGINT      NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  is_manual              BOOLEAN     NOT NULL DEFAULT TRUE,
+  target_stage           VARCHAR(20) NOT NULL,   -- draft|floated|evaluation|sig_pending|active|ended
+  eligibility_overridden BOOLEAN     NOT NULL DEFAULT FALSE,
+  committee_decision     VARCHAR(20),            -- approved|rejected (NULL pre-committee)
+  committee_decided_at   TIMESTAMP WITHOUT TIME ZONE,
+  committee_decided_by   INTEGER REFERENCES public.tbl_users(id),
+  committee_comment      TEXT,
+  entered_by             INTEGER     NOT NULL REFERENCES public.tbl_users(id),
+  entry_notes            TEXT,
+  created_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_arc_manual_entry_arc UNIQUE (arc_id),
+  CONSTRAINT chk_arc_manual_entry_target_stage
+    CHECK (target_stage IN ('draft','floated','evaluation','sig_pending','active','ended')),
+  CONSTRAINT chk_arc_manual_entry_decision
+    CHECK (committee_decision IS NULL OR committee_decision IN ('approved','rejected'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_manual_entry_arc ON public.tbl_arc_manual_entry(arc_id);
 
 
 --
