@@ -48,6 +48,7 @@ import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
+import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -10571,6 +10572,23 @@ const rfqController = {
         logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
 
+        // Auto-initiate: if draftPurchaseOrder reported the RFQ is now
+        // fully awarded (every line finalized + no pending NEGOTIATION_QUOTE
+        // approvals), batch-initiate every draft PO spawned by this RFQ
+        // now that the finalize transaction has committed. Wrapped in
+        // try/catch so a failure here never breaks the finalize response.
+        let auto_initiate_summary = null;
+        if (response.result?.should_auto_initiate && response.result?.rfq_id) {
+          try {
+            auto_initiate_summary = await autoInitiateRFQPOs(
+              response.result.rfq_id,
+              req.user.id
+            );
+          } catch (e) {
+            logError('[finalize] auto-initiate batch failed', e);
+          }
+        }
+
         // If NEGOTIATION_QUOTE approval is pending, return appropriate message
         if (response.negotiationQuoteApprovalPending) {
           return res.status(200).json({
@@ -10578,7 +10596,8 @@ const rfqController = {
             message: 'Vendor finalized! Approval is required before Purchase Order can be created.',
             data: response.result,
             isRefinalized: response.reFinalized,
-            approvalPending: true
+            approvalPending: true,
+            auto_initiate_summary
           });
         }
 
@@ -10586,7 +10605,8 @@ const rfqController = {
           status: 1,
           message: 'A Purchase Order has been drafted successfully',
           data: response.result,
-          isRefinalized: response.reFinalized
+          isRefinalized: response.reFinalized,
+          auto_initiate_summary
         });
       } else {
         res
