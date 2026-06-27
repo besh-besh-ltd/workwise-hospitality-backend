@@ -408,8 +408,18 @@ export async function saveSection(req, res) {
             }
             let row;
             if (it.id) {
+              // SEC-1 (cross-tenant IDOR): the per-item update / raw HSN update /
+              // history-snapshot writes below all key on the CLIENT-supplied
+              // it.id. Verify IN-TX that this item actually belongs to THIS arc
+              // before touching it — otherwise a user who owns draft ARC-A could
+              // overwrite another tenant's item (qty/uom/spec/hsn/history) by
+              // passing that foreign item's id. Reject any non-owned id (every
+              // sibling branch already scopes by arc_id; this path must too).
+              const owned = await t.oneOrNone(
+                `SELECT id FROM tbl_arc_item WHERE id = $1 AND arc_id = $2`, [Number(it.id), arcId]);
+              if (!owned) throw Object.assign(new Error(`item ${it.id} does not belong to this ARC`), { httpStatus: 400 });
               row = await arcModel.updateItem(Number(it.id), it, t);
-              if (it.hsn !== undefined) await t.none(`UPDATE tbl_arc_item SET hsn = $1 WHERE id = $2`, [it.hsn, Number(it.id)]);
+              if (it.hsn !== undefined) await t.none(`UPDATE tbl_arc_item SET hsn = $1 WHERE id = $2 AND arc_id = $3`, [it.hsn, Number(it.id), arcId]);
             } else {
               row = await arcManualEntryModel.addItem(arcId, it, t);
             }
