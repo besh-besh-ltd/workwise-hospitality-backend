@@ -4,6 +4,7 @@ import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import {
   createApprovalInstance,
@@ -320,6 +321,8 @@ export async function submitTechEval(req, res) {
         status: 'APPROVED', comment: 'Auto-approved — submitter is the configured approver',
       });
     }
+    // Notify creator (in-app) post-commit
+    await notifyArcEvent({ arcId: Number(req.params.arcId), eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId, payload: {} });
     // respond after commit — never inside the tx
     return ok(res, result);
   } catch (err) {
@@ -614,12 +617,14 @@ export async function saveAllocation(req, res) {
       // First commercial action advances the ARC's raw status — the hero
       // chip and list deep-links read it, so it must not linger on
       // tech_eval_approved (or submission_closed when technical was skipped).
+      let commEvalJustOpened = false;
       if (['tech_eval_approved', 'submission_closed'].includes(lifecycle.arc.status)) {
         await arcModel.setStatus(arcId, 'comm_eval_in_progress', {}, t);
         await logArcEvent({
           arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_OPENED,
           actorId: userId, payload: {}, txContext: t,
         });
+        commEvalJustOpened = true;
       }
       const inserted = await arcEvalModel.setItemAwards(comm.id, item_id, allocations, t);
       await arcEvalModel.appendCommEvalHistory(
@@ -629,11 +634,16 @@ export async function saveAllocation(req, res) {
         arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_ALLOCATION_UPDATED,
         actorId: userId, payload: { item_id, vendor_count: allocations.length }, txContext: t,
       });
-      return { __data: { comm_evaluation: comm, awards: inserted } };
+      return { __data: { comm_evaluation: comm, awards: inserted }, __commEvalOpened: commEvalJustOpened };
     });
     // respond after commit — a response sent inside the tx races the
     // caller's next request against uncommitted state
-    if (result && result.__data) return ok(res, result.__data);
+    if (result && result.__data) {
+      if (result.__commEvalOpened) {
+        await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_OPENED, actorId: userId, payload: {} });
+      }
+      return ok(res, result.__data);
+    }
     return result;
   } catch (err) {
     return fail(res, err, '[evalController.saveAllocation]');
@@ -740,6 +750,8 @@ export async function finalizeCommEval(req, res) {
           status: 'APPROVED', comment: 'Auto-approved — finalizer is the configured committee approver',
         });
       }
+      // Notify creator (BOTH email) post-commit
+      await notifyArcEvent({ arcId: Number(req.params.arcId), eventType: ARC_EVENT_TYPES.COMM_EVAL_FINALIZED, actorId: userId, payload: {} });
       return ok(res, result.__data, 'Commercial evaluation finalized');
     }
     return result;
@@ -788,7 +800,10 @@ export async function sendBackCommEval(req, res) {
       return { __data: { comm_evaluation: updated } };
     });
     // respond after commit — never inside the tx
-    if (result && result.__data) return ok(res, result.__data, 'Sent back');
+    if (result && result.__data) {
+      await notifyArcEvent({ arcId: Number(req.params.arcId), eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK, actorId: userId, payload: { reason: req.body?.reason } });
+      return ok(res, result.__data, 'Sent back');
+    }
     return result;
   } catch (err) {
     return fail(res, err, '[evalController.sendBackCommEval]');
@@ -898,7 +913,7 @@ async function resolveClarification(req, res, mode) {
         });
         reapprove = { instanceId: instanceRow.id, autoApproved: engineResult.autoApproved === true };
       }
-      return { __data: { clarification: updated, open_remaining: remainingOpen }, __reapprove: reapprove };
+      return { __data: { clarification: updated, open_remaining: remainingOpen }, __reapprove: reapprove, __vendorId: cl.vendor_id };
     });
     if (result && result.__data) {
       // Auto-approved committee (initiator is the configured approver): fire the
@@ -908,6 +923,12 @@ async function resolveClarification(req, res, mode) {
           status: 'APPROVED', comment: 'Auto-approved — clarification re-award',
         });
       }
+      // Notify the event vendor (clarification revised/upheld) — BOTH email
+      // Per spec edge-case §9: when both clarification_revised and contract_reissued
+      // fire in the same handler, suppress contract_reissued to avoid double-notifying.
+      const clarifyEvent = mode === 'revise' ? ARC_EVENT_TYPES.CLARIFICATION_REVISED : ARC_EVENT_TYPES.CLARIFICATION_UPHELD;
+      await notifyArcEvent({ arcId, eventType: clarifyEvent, actorId: userId, payload: { vendorId: result.__vendorId } });
+      // Only fire contract_reissued separately when it fires independently (not here)
       return ok(res, result.__data, mode === 'revise' ? 'Term revised' : 'Original term upheld');
     }
     return result;
@@ -936,6 +957,8 @@ export async function handleArcTechPostApproval(approvalInstanceId, approverUser
         txContext: t,
       });
     });
+    // Notify comm evaluators + creator (BOTH email); tech evaluators in-app only — post-commit
+    await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_APPROVED, actorId: approverUserId, payload: {} });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[evalController.handleArcTechPostApproval]');
   }
@@ -954,6 +977,8 @@ export async function handleArcTechRejection(approvalInstanceId, approverUserId,
         txContext: t,
       });
     });
+    // Notify tech evaluators + creator (BOTH email) post-commit
+    await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_REJECTED, actorId: approverUserId, payload: {} });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[evalController.handleArcTechRejection]');
   }

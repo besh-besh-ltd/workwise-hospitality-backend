@@ -45,6 +45,7 @@ const arcModel = {
       payment_terms_expected = null,
       delivery_expected = null,
       penalty_clause = null,
+      type = 'product',
       created_by,
     } = data;
     return runner.one(
@@ -55,7 +56,7 @@ const arcModel = {
           submission_start_at, submission_end_at, contract_start_at, contract_end_at,
           technical_response_required, sample_required, eligibility_type,
           escalation_clause_json, payment_terms_expected, delivery_expected, penalty_clause,
-          created_by)
+          type, created_by)
        VALUES
          ($1, $2, $3, $4, $5::jsonb,
           $6, $7, $8, $9,
@@ -63,7 +64,7 @@ const arcModel = {
           $10, $11, $12, $13,
           $14, $15, $16,
           $17::jsonb, $18, $19, $20,
-          $21)
+          $21, $22)
        RETURNING *`,
       [
         arc_number, title, description, category_id, JSON.stringify(sub_category_ids),
@@ -71,7 +72,7 @@ const arcModel = {
         submission_start_at, submission_end_at, contract_start_at, contract_end_at,
         technical_response_required, sample_required, eligibility_type,
         JSON.stringify(escalation_clause_json || {}), payment_terms_expected, delivery_expected, penalty_clause,
-        created_by,
+        type ?? 'product', created_by,
       ]
     );
   },
@@ -84,6 +85,7 @@ const arcModel = {
       'submission_start_at','submission_end_at','contract_start_at','contract_end_at',
       'technical_response_required','sample_required','eligibility_type',
       'escalation_clause_json','payment_terms_expected','delivery_expected','penalty_clause',
+      'type',
     ];
     const setParts = [];
     const values = [];
@@ -405,6 +407,52 @@ const arcModel = {
         ORDER BY ai.id`,
       [arcId]
     );
+  },
+
+  /**
+   * Per-item tech-eval CONFIG for every item of an ARC, keyed by arc_item_id —
+   * powers the create-wizard's Tech step on draft resume (one round-trip instead
+   * of N per-item GETs). Returns ONLY the buyer-authored configuration
+   * (minimum_passing_score + clauses); it deliberately excludes vendor
+   * responses/scores/aliases (those belong to the blind-eval read path, not to
+   * rehydrating a draft's setup). Items with no tech-eval row are simply absent
+   * from the map — the FE defaults those to "tech ON, no clauses yet".
+   */
+  listTechEvalForArc: async (arcId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT te.arc_item_id,
+              te.minimum_passing_score,
+              c.id            AS clause_id,
+              c.clause_text,
+              c.weightage,
+              c.clause_type,
+              c.is_mandatory
+         FROM tbl_arc_item_tech_evaluation te
+         JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
+         LEFT JOIN tbl_arc_item_tech_evaluation_clauses c
+                ON c.arc_item_tech_evaluation_id = te.id
+        WHERE ai.arc_id = $1
+        ORDER BY te.arc_item_id, c.id`,
+      [arcId]
+    );
+    // Fold the flat (item × clause) rows into { [arc_item_id]: { minimum_passing_score, clauses[] } }.
+    const byItem = {};
+    for (const r of rows) {
+      const key = String(r.arc_item_id);
+      if (!byItem[key]) {
+        byItem[key] = { minimum_passing_score: r.minimum_passing_score, clauses: [] };
+      }
+      if (r.clause_id != null) {
+        byItem[key].clauses.push({
+          id: r.clause_id,
+          clause_text: r.clause_text,
+          weightage: r.weightage,
+          clause_type: r.clause_type,
+          is_mandatory: r.is_mandatory,
+        });
+      }
+    }
+    return byItem;
   },
 
   // ============================================================

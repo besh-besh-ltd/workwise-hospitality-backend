@@ -28,6 +28,12 @@ r.post('/quote/preview',                  passportSignIn, acl([3]), vendorContro
 r.post('/quote/draft',                    passportSignIn, acl([3]), vendorController.saveQuoteDraft);
 r.post('/quote/submit',                   passportSignIn, acl([3]), vendorController.submitQuote);
 r.post('/quote/withdraw',                 passportSignIn, acl([3]), vendorController.withdrawQuote);
+// Download the vendor's OWN submitted quote as a comprehensive tabular PDF
+// (streamed; vendorId derived from req.user, never the client).
+r.get( '/quote/:arcId/pdf',               passportSignIn, acl([3]), vendorController.downloadQuotePdf);
+// Version history of the vendor's OWN quote submissions (newest-first, vendor-
+// isolated — vendorId from req.user, never the client).
+r.get( '/quote/:arcId/history',           passportSignIn, acl([3]), vendorController.getQuoteHistory);
 
 // Technical envelope (two-envelope flow) — vendor self-submits clause
 // responses + evidence, sealed before the commercial quote (hard two-step).

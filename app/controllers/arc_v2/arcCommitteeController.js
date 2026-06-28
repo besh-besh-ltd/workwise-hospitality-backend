@@ -2,6 +2,7 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { generateContractsForArc, generateContractPdfsForArc } from './arcContractController.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
@@ -150,6 +151,15 @@ export async function handleArcCommitteeApproval(approvalInstanceId, approverUse
     // Render + upload the draft PDFs AFTER the approval tx commits — slow
     // Puppeteer/S3 work must never hold the transaction open or fail approval.
     await generateContractPdfsForArc(arcId);
+    // Notify creator + comm evaluators of committee decision (BOTH email)
+    await notifyArcEvent({
+      arcId, eventType: ARC_EVENT_TYPES.COMMITTEE_DECISION,
+      actorId: approverUserId, payload: { decision: 'approved', approval_instance_id: approvalInstanceId },
+    });
+    // Notify creator that contracts were generated (in-app only)
+    await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.CONTRACT_GENERATED, actorId: approverUserId, payload: {} });
+    // Notify awarded vendors they must sign (BOTH email) — contract_awaiting_acceptance
+    await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE, actorId: approverUserId, payload: {} });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[committeeController.handleArcCommitteeApproval]');
   }
@@ -171,6 +181,11 @@ export async function handleArcCommitteeRejection(approvalInstanceId, approverUs
         actorId: approverUserId, payload: { decision: 'rejected', reason, approval_instance_id: approvalInstanceId },
         txContext: t,
       });
+    });
+    // Notify creator + comm evaluators of committee rejection (BOTH email)
+    await notifyArcEvent({
+      arcId, eventType: ARC_EVENT_TYPES.COMMITTEE_DECISION,
+      actorId: approverUserId, payload: { decision: 'rejected', reason },
     });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[committeeController.handleArcCommitteeRejection]');

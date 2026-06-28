@@ -4,6 +4,8 @@ import { logError, sendMail } from './app/helper/common.js';
 import { logger } from './app/util/logger.js';
 import { sendNotification } from './app/services/notificationService.js';
 import { generateEmailTemplate } from './app/helper/notificationEmailLayout.js';
+import { runArcExpirySweep } from './app/services/arcExpiryService.js';
+import { runArcSubmissionCloseSweep } from './app/services/arcSubmissionCloseService.js';
 import Moment from 'moment';
 
 // Mark all expired hospitality vendor subscriptions
@@ -121,6 +123,17 @@ try {
   for (const [date, label] of intervals) {
     expireHospitalityVendorNotification(date.format('YYYY-MM-DD'), label);
   }
+
+  // ARC rate-contract expiry sweep — flips contracts past contract_end_at to
+  // 'expired' and fires expiring_soon / expired notifications (creator + awarded
+  // vendors). Rides this same daily schedule. Fire-and-forget + self-contained
+  // error handling, matching the subscription helpers above.
+  runArcExpirySweep().catch((err) => logError('ARC expiry sweep failed:', err));
+
+  // ARC submission-close sweep — flips floated ARCs past submission_end_at to
+  // 'submission_closed' and notifies the buyer (creator + next-stage evaluators)
+  // to begin evaluation, plus an info notice to invited vendors.
+  runArcSubmissionCloseSweep().catch((err) => logError('ARC submission-close sweep failed:', err));
 } catch (err) {
   sendMail({
     from: Config.webmasterMail,

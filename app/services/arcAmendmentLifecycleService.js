@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import db from '../config/dbConn.js';
 import { logger } from '../util/logger.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
+import { notifyArcEvent } from './arcNotificationService.js';
 
 /**
  * ARC Amendment Lifecycle
@@ -82,6 +83,10 @@ export async function applyAmendmentApprovalEffects(amendmentId, { actorId = nul
       payload: { amendment_id: am.id, amendment_type: 'term', new_end_date: newEnd },
       txContext,
     });
+    // Notify post-commit only when we own the runner (no outer tx)
+    if (!txContext) {
+      await notifyArcEvent({ arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_LIVE, actorId, payload: { vendorId: am.requested_by ?? null } });
+    }
     return { ...row, arc_id: am.arc_id };
   }
 
@@ -106,12 +111,18 @@ export async function applyAmendmentApprovalEffects(amendmentId, { actorId = nul
       payload: { amendment_id: am.id, amendment_type: am.amendment_type, amendment_from: from, amendment_to: to },
       txContext,
     });
+    if (!txContext) {
+      await notifyArcEvent({ arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_LIVE, actorId, payload: { vendorId: am.requested_by ?? null } });
+    }
   } else if (next === 'ended') {
     await logArcEvent({
       arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_ENDED, actorId,
       payload: { amendment_id: am.id, amendment_type: am.amendment_type, amendment_to: to },
       txContext,
     });
+    if (!txContext) {
+      await notifyArcEvent({ arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_ENDED, actorId, payload: { vendorId: am.requested_by ?? null } });
+    }
   }
   return { ...row, arc_id: am.arc_id };
 }
@@ -133,7 +144,7 @@ export async function runAmendmentLifecycleTick(asOf = new Date()) {
         AND am.status = 'approved'
         AND am.amendment_from <= $1::date
         AND (am.amendment_to IS NULL OR am.amendment_to >= $1::date)
-      RETURNING am.id, am.amendment_type, am.amendment_from, am.amendment_to, c.arc_id`,
+      RETURNING am.id, am.amendment_type, am.amendment_from, am.amendment_to, c.arc_id, am.requested_by AS vendor_id`,
     [day]
   );
   for (const row of activated) {
@@ -141,6 +152,7 @@ export async function runAmendmentLifecycleTick(asOf = new Date()) {
       arcId: row.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_LIVE,
       payload: { amendment_id: row.id, amendment_type: row.amendment_type, via: 'lifecycle_cron' },
     });
+    await notifyArcEvent({ arcId: row.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_LIVE, actorId: null, payload: { vendorId: row.vendor_id } });
   }
 
   // live → ended after the window closes. Also sweeps approved rows whose
@@ -153,7 +165,7 @@ export async function runAmendmentLifecycleTick(asOf = new Date()) {
         AND am.status IN ('live', 'approved')
         AND am.amendment_to IS NOT NULL
         AND am.amendment_to < $1::date
-      RETURNING am.id, am.amendment_type, am.amendment_to, c.arc_id`,
+      RETURNING am.id, am.amendment_type, am.amendment_to, c.arc_id, am.requested_by AS vendor_id`,
     [day]
   );
   for (const row of ended) {
@@ -161,6 +173,7 @@ export async function runAmendmentLifecycleTick(asOf = new Date()) {
       arcId: row.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_ENDED,
       payload: { amendment_id: row.id, amendment_type: row.amendment_type, via: 'lifecycle_cron' },
     });
+    await notifyArcEvent({ arcId: row.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_ENDED, actorId: null, payload: { vendorId: row.vendor_id } });
   }
 
   if (activated.length || ended.length) {

@@ -4,6 +4,7 @@ import {
 } from '../../models/generalModel.js';
 import { logError } from '../../helper/common.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
+import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
 
@@ -46,9 +47,10 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
 
     if (metadata.po_payload && metadata.po_user) {
       // Path A: PO payload stored by rfqController.finalize
+      let txResult = null;
       await db.tx(async (t) => {
         const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
-        await draftPO(authPayload, metadata.po_user, t);
+        txResult = await draftPO(authPayload, metadata.po_user, t);
 
         const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
         await recordLifecycleEvent({
@@ -67,6 +69,16 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
           txContext: t
         });
       });
+      // Post-commit auto-initiate. The approver's action just landed the
+      // final piece of the award puzzle; if the RFQ is now fully
+      // awarded, batch-initiate all its draft POs.
+      if (txResult?.should_auto_initiate && txResult?.rfq_id) {
+        try {
+          await autoInitiateRFQPOs(txResult.rfq_id, approver_user_id);
+        } catch (e) {
+          logError('[negotiationQuotePostApproval] auto-initiate batch failed', e);
+        }
+      }
     } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0 && metadata.is_tender !== 1) {
       // Path B: Negotiation flow — construct PO from selected quotes
       const rfqProductId = metadata.rfq_product_id || instance.entity_id;
@@ -74,6 +86,7 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       const rfqData = rfq[0];
 
       if (rfqData) {
+        let lastDraftResult = null;
         await db.tx(async (t) => {
           // Get the finalization submitter (who initiated the NEGOTIATION_QUOTE approval)
           const poCreator = await t.oneOrNone('SELECT id, company_id FROM tbl_users WHERE id = $1', [instance.initiated_by]);
@@ -110,7 +123,7 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
                   const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
                   const totalValue = quantity * negotiationPrice;
 
-                  await draftPO({
+                  lastDraftResult = await draftPO({
                     rfq_id: metadata.rfq_id,
                     project_id: rfqData.project_id,
                     total_value: totalValue,
@@ -155,6 +168,14 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
             txContext: t
           });
         });
+        // Post-commit auto-initiate for the legacy negotiation flow.
+        if (lastDraftResult?.should_auto_initiate && lastDraftResult?.rfq_id) {
+          try {
+            await autoInitiateRFQPOs(lastDraftResult.rfq_id, approver_user_id);
+          } catch (e) {
+            logError('[negotiationQuotePostApproval] auto-initiate batch failed', e);
+          }
+        }
       }
     }
   } catch (negQuoteError) {

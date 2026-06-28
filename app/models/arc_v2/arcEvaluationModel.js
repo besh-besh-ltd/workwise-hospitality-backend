@@ -760,6 +760,46 @@ const arcEvalModel = {
     );
   },
 
+  // Archive an immutable snapshot of ONE submission into tbl_arc_quote_version.
+  // version_no = (count of existing versions for this arc_quote_id) + 1, computed
+  // inside the caller's transaction so concurrent re-submits can't collide on a
+  // number (the submit path already serializes per arc×vendor on the unique row).
+  // `lines` is a JSON array [{arc_item_id, rate, gst_pct, charges, line_pricing}];
+  // `quotePricing` is the engine document-totals object. Together they make the
+  // version a COMPLETE record of what was submitted.
+  archiveQuoteVersion: async ({ arcQuoteId, arcId, vendorId, quotePricing, lines }, txContext = null) => {
+    const runner = txContext || db;
+    const { version_no } = await runner.one(
+      `SELECT COUNT(*)::int + 1 AS version_no
+         FROM tbl_arc_quote_version WHERE arc_quote_id = $1`,
+      [arcQuoteId]
+    );
+    return runner.one(
+      `INSERT INTO tbl_arc_quote_version
+         (arc_quote_id, arc_id, vendor_id, version_no, quote_pricing, lines, submitted_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, NOW())
+       RETURNING *`,
+      [arcQuoteId, arcId, vendorId, version_no,
+       JSON.stringify(quotePricing || {}), JSON.stringify(lines || [])]
+    );
+  },
+
+  // Vendor-isolated version history for one ARC, newest-first. Returns a compact
+  // shape for the "Past quotes" panel — never another vendor's rows (the WHERE
+  // vendor_id filter is the isolation boundary; callers pass req.user.id).
+  listQuoteVersions: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT version_no,
+              submitted_at,
+              quote_pricing->>'grand_total'                      AS grand_total,
+              jsonb_array_length(COALESCE(lines, '[]'::jsonb))   AS line_count
+         FROM tbl_arc_quote_version
+        WHERE arc_id = $1 AND vendor_id = $2
+        ORDER BY version_no DESC`,
+      [arcId, vendorId]
+    );
+  },
+
   upsertQuoteLine: async (arcQuoteId, line, txContext = null) => {
     const runner = txContext || db;
     // Phase 2 — line_pricing JSONB (engine output per line) stored alongside charges.
