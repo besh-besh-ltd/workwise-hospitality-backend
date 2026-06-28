@@ -5,6 +5,7 @@ import { applyAmendmentApprovalEffects } from '../../services/arcAmendmentLifecy
 import { voidAmendmentOnDecline, renderAndStoreAddendumPdf } from '../../services/arcAddendumService.js';
 import { loadContractDocContext } from './arcContractController.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 
 /**
  * ARC v2 — Addendum re-signing controller (vendor portal).
@@ -44,6 +45,11 @@ export async function requestAddendumOtp(req, res) {
     await logArcEvent({
       arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
       actorId: vendorUserId, payload: { addendum_document_id: id, expires_at: expiresAt },
+    });
+    // In-app OTP confirmation to the vendor (no email — OTP is its own channel)
+    await notifyArcEvent({
+      arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
+      actorId: null, payload: { vendorId: vendorUserId },
     });
     const expose = process.env.NODE_ENV !== 'production';
     return ok(res, { otp_expires_at: expiresAt, dev_code: expose ? code : undefined });
@@ -95,6 +101,21 @@ export async function verifyAddendumOtp(req, res) {
       return signedDoc;
     });
     // respond AFTER the commit
+    // Notify creator + comm evaluators (BOTH email); vendor in-app confirmation
+    await notifyArcEvent({
+      arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.ADDENDUM_SIGNED,
+      actorId: vendorUserId, payload: { vendorId: vendorUserId },
+    });
+    // Fire amendment_live / amendment_ended based on what applyAmendmentApprovalEffects did
+    const amStatus = await db.oneOrNone(
+      `SELECT am.status, am.requested_by AS vendor_id
+         FROM tbl_arc_amendment am WHERE am.id = $1`, [doc.arc_amendment_id]
+    );
+    if (amStatus?.status === 'live') {
+      await notifyArcEvent({ arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_LIVE, actorId: vendorUserId, payload: { vendorId: amStatus.vendor_id } });
+    } else if (amStatus?.status === 'ended') {
+      await notifyArcEvent({ arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_ENDED, actorId: vendorUserId, payload: { vendorId: amStatus.vendor_id } });
+    }
     return ok(res, { addendum: updated }, 'Addendum signed');
   } catch (err) {
     logger.error({ err }, '[arcAddendum.verifyAddendumOtp]');
@@ -114,6 +135,10 @@ export async function declineAddendum(req, res) {
     if (doc.status !== 'awaiting_signature') return bad(res, 409, `Addendum not awaiting signature (status=${doc.status})`);
     const voided = await db.tx(async (t) => voidAmendmentOnDecline(doc.arc_amendment_id, reason, { actorId: vendorUserId, txContext: t }));
     // respond AFTER the commit
+    // Notify creator that vendor declined to sign (amendment_sign_declined — BOTH email to creator)
+    await notifyArcEvent({ arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_SIGN_DECLINED, actorId: vendorUserId, payload: {} });
+    // Notify vendor + creator that amendment was voided (BOTH email)
+    await notifyArcEvent({ arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_VOIDED, actorId: vendorUserId, payload: { vendorId: vendorUserId } });
     return ok(res, { amendment: voided }, 'Addendum declined');
   } catch (err) {
     logger.error({ err }, '[arcAddendum.declineAddendum]');

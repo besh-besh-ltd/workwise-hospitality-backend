@@ -3,6 +3,7 @@ import arcModel from '../../models/arc_v2/arcModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
@@ -198,6 +199,9 @@ export async function createDraft(req, res) {
       payment_terms_expected: body.payment_terms_expected,
       delivery_expected: body.delivery_expected,
       penalty_clause: body.penalty_clause,
+      // product vs service — collected by the wizard's Basics step (defaults to
+      // 'product' so resume can rehydrate it). Stored on tbl_arc.type.
+      type: body.type || 'product',
       created_by: userId,
     };
     return db.tx(async (t) => {
@@ -414,6 +418,20 @@ export async function handleArcPublishApproval(approvalInstanceId, approverUserI
     // Vendor notify AFTER commit (only when we actually floated).
     if (floatResult?.floated) {
       await notifyVendorsOfFloat(floatResult._notifyArc, floatResult.invitations, floatResult._actorId);
+      // Notify creator that their ARC is live (publish_approved = creator BOTH).
+      await notifyArcEvent({
+        arcId,
+        eventType: ARC_EVENT_TYPES.PUBLISH_APPROVED,
+        actorId: approverUserId,
+        payload: { approval_instance_id: approvalInstanceId },
+      });
+      // Also send creator in-app "your rate contract is live" (floated event).
+      await notifyArcEvent({
+        arcId,
+        eventType: ARC_EVENT_TYPES.PUBLISHED,
+        actorId: approverUserId,
+        payload: {},
+      });
     } else {
       logger.warn({ arcId, approvalInstanceId }, '[arcController.handleArcPublishApproval] empty panel at approval — parked publish_rejected');
     }
@@ -434,6 +452,13 @@ export async function handleArcPublishRejection(approvalInstanceId, approverUser
         arcId, eventType: ARC_EVENT_TYPES.PUBLISH_REJECTED, actorId: approverUserId,
         payload: { reason, approval_instance_id: approvalInstanceId }, txContext: t,
       });
+    });
+    // Notify creator — post-commit
+    await notifyArcEvent({
+      arcId,
+      eventType: ARC_EVENT_TYPES.PUBLISH_REJECTED,
+      actorId: approverUserId,
+      payload: { reason },
     });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[arcController.handleArcPublishRejection]');
@@ -543,15 +568,17 @@ export async function withdraw(req, res) {
       }
     }
 
-    return db.tx(async (t) => {
+    await db.tx(async (t) => {
       const updated = await arcModel.setStatus(id, 'draft', {}, t);
       await logArcEvent({
         arcId: id, eventType: ARC_EVENT_TYPES.WITHDRAWN,
         actorId: userId, payload: { previous_status: arc.status },
         txContext: t,
       });
-      return ok(res, { arc: updated }, 'ARC withdrawn back to draft');
+      ok(res, { arc: updated }, 'ARC withdrawn back to draft');
     });
+    // Notify invited vendors post-commit
+    await notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.WITHDRAWN, actorId: userId, payload: {} });
   } catch (err) {
     logger.error({ err }, '[arcController.withdraw]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -566,15 +593,17 @@ export async function terminate(req, res) {
     if (!reason) return bad(res, 400, 'reason is required');
     const arc = await arcModel.getById(id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    return db.tx(async (t) => {
+    await db.tx(async (t) => {
       const updated = await arcModel.setStatus(id, 'terminated', { closed_reason: reason }, t);
       await logArcEvent({
         arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED,
         actorId: userId, payload: { reason, previous_status: arc.status },
         txContext: t,
       });
-      return ok(res, { arc: updated }, 'ARC terminated');
+      ok(res, { arc: updated }, 'ARC terminated');
     });
+    // Notify awarded vendors (or invited if none) post-commit
+    await notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED, actorId: userId, payload: {} });
   } catch (err) {
     logger.error({ err }, '[arcController.terminate]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -811,10 +840,25 @@ export async function getById(req, res) {
     const id = Number(req.params.id);
     const arc = await arcModel.getById(id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    const [items, invitations] = await Promise.all([
+    // Tenant scope: the detail payload carries commercial + tech-eval config
+    // (clauses/weights/min-pass), so it must not be cross-tenant readable.
+    // Mirror createDraft/publish — derive access from req.user (super-admin
+    // bypass), never trust the id alone. A valid policy approver is always
+    // hotel/company-mapped, so they retain read access.
+    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
+    const [items, invitations, techEvalByItem] = await Promise.all([
       arcModel.listItems(id),
       arcModel.listInvitations(id),
+      arcModel.listTechEvalForArc(id),
     ]);
+    // Attach the per-item tech-eval CONFIG (min-pass + clauses) so the create
+    // wizard's Tech step rehydrates from this single round-trip on draft resume.
+    // Additive: items[].tech_eval is null when no config exists for that item.
+    for (const it of items) {
+      it.tech_eval = techEvalByItem[String(it.id)] || null;
+    }
     return ok(res, { arc, items, invitations });
   } catch (err) {
     logger.error({ err }, '[arcController.getById]');

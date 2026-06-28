@@ -2,6 +2,8 @@ import { logger } from '../../util/logger.js';
 import db from '../../config/dbConn.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import { prepareAddendumForSignature } from '../../services/arcAddendumService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
+import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import {
   createApprovalInstance,
   submitApprovalAction,
@@ -236,8 +238,21 @@ export async function requestAmendment(req, res) {
     const refreshed = await refreshChainCache(result.amendment_id, result.instance_id, userId);
     if (refreshed.engineStatus === 'approved') {
       await prepareAddendumForSignature(result.amendment_id, { actorId: userId });
+      // Notify vendor that addendum awaits signature (BOTH email). actorId is
+      // null here (not userId): the requester IS the vendor, and this event's
+      // sole audience is that vendor — passing actorId:userId would self-suppress
+      // and the vendor would never be told to sign. (Mirrors requestOtp.)
+      await notifyArcEvent({
+        arcId: result.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_AWAITING_SIGNATURE,
+        actorId: null, payload: { vendorId: userId },
+      });
     }
     const row = await arcAmendmentModel.getById(result.amendment_id);
+    // Notify creator + comm evaluators of the amendment request (BOTH email)
+    await notifyArcEvent({
+      arcId: result.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_REQUESTED,
+      actorId: userId, payload: { vendorId: userId },
+    });
     // The requester is the vendor — return the anonymised (level-only) view.
     return ok(res, { amendment: arcAmendmentModel.vendorView(row), arc_id: result.arc_id });
   } catch (err) {
@@ -379,6 +394,34 @@ export async function reviewAmendment(req, res) {
     const refreshed = await refreshChainCache(amendmentId, am.approval_instance_id, userId);
     if (refreshed.engineStatus === 'approved') {
       await prepareAddendumForSignature(amendmentId, { actorId: userId });
+      // Notify the vendor their amendment was approved + addendum awaits signature
+      const arcCtx = await db.oneOrNone(
+        `SELECT c.arc_id, am.requested_by AS vendor_id
+           FROM tbl_arc_amendment am JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+          WHERE am.id = $1`, [amendmentId]
+      );
+      if (arcCtx) {
+        await notifyArcEvent({
+          arcId: arcCtx.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_APPROVED,
+          actorId: userId, payload: { vendorId: arcCtx.vendor_id },
+        });
+        await notifyArcEvent({
+          arcId: arcCtx.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_AWAITING_SIGNATURE,
+          actorId: userId, payload: { vendorId: arcCtx.vendor_id },
+        });
+      }
+    } else if (refreshed.engineStatus === 'rejected') {
+      const arcCtx = await db.oneOrNone(
+        `SELECT c.arc_id, am.requested_by AS vendor_id
+           FROM tbl_arc_amendment am JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+          WHERE am.id = $1`, [amendmentId]
+      );
+      if (arcCtx) {
+        await notifyArcEvent({
+          arcId: arcCtx.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_REJECTED,
+          actorId: userId, payload: { vendorId: arcCtx.vendor_id },
+        });
+      }
     }
     const row = await arcAmendmentModel.getById(amendmentId);
     return ok(res, { amendment: row });
@@ -400,7 +443,10 @@ export async function reviewAmendment(req, res) {
 export async function handleArcAmendmentApproval(approvalInstanceId, approverUserId, options = {}) {
   try {
     const am = await db.oneOrNone(
-      `SELECT id FROM public.tbl_arc_amendment WHERE approval_instance_id = $1`,
+      `SELECT am.id, c.arc_id, am.requested_by AS vendor_id
+         FROM public.tbl_arc_amendment am
+         JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+        WHERE am.approval_instance_id = $1`,
       [approvalInstanceId]
     );
     if (!am) {
@@ -409,6 +455,15 @@ export async function handleArcAmendmentApproval(approvalInstanceId, approverUse
     }
     await refreshChainCache(am.id, approvalInstanceId, approverUserId);
     await prepareAddendumForSignature(am.id, { actorId: approverUserId });
+    // Notify the vendor their amendment was approved + addendum awaits signature (BOTH email)
+    await notifyArcEvent({
+      arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_APPROVED,
+      actorId: approverUserId, payload: { vendorId: am.vendor_id },
+    });
+    await notifyArcEvent({
+      arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_AWAITING_SIGNATURE,
+      actorId: approverUserId, payload: { vendorId: am.vendor_id },
+    });
     logger.info({ approvalInstanceId, amendmentId: am.id },
       '[amendmentController.handleArcAmendmentApproval] amendment approved via central engine — addendum awaiting vendor signature');
   } catch (err) {
@@ -419,7 +474,10 @@ export async function handleArcAmendmentApproval(approvalInstanceId, approverUse
 export async function handleArcAmendmentRejection(approvalInstanceId, approverUserId, options = {}) {
   try {
     const am = await db.oneOrNone(
-      `SELECT id FROM public.tbl_arc_amendment WHERE approval_instance_id = $1`,
+      `SELECT am.id, c.arc_id, am.requested_by AS vendor_id
+         FROM public.tbl_arc_amendment am
+         JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+        WHERE am.approval_instance_id = $1`,
       [approvalInstanceId]
     );
     if (!am) {
@@ -427,6 +485,11 @@ export async function handleArcAmendmentRejection(approvalInstanceId, approverUs
       return;
     }
     await refreshChainCache(am.id, approvalInstanceId, approverUserId);
+    // Notify the vendor their amendment was rejected (BOTH email)
+    await notifyArcEvent({
+      arcId: am.arc_id, eventType: ARC_EVENT_TYPES.AMENDMENT_REJECTED,
+      actorId: approverUserId, payload: { vendorId: am.vendor_id },
+    });
     logger.info({ approvalInstanceId, amendmentId: am.id },
       '[amendmentController.handleArcAmendmentRejection] amendment rejected via central engine');
   } catch (err) {

@@ -11355,6 +11355,22 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line_history (
   changed_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Mirror of migration 20260627100000_arc_quote_version.sql — every vendor quote
+-- submission is archived here (append-only audit ledger; no FKs by design).
+CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_version (
+  id            BIGSERIAL PRIMARY KEY,
+  arc_quote_id  BIGINT  NOT NULL,
+  arc_id        BIGINT  NOT NULL,
+  vendor_id     INTEGER NOT NULL,
+  version_no    INTEGER NOT NULL,
+  quote_pricing JSONB,
+  lines         JSONB,
+  submitted_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+  created_at    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_version_lookup
+  ON public.tbl_arc_quote_version (arc_id, vendor_id, version_no);
+
 CREATE TABLE IF NOT EXISTS public.tbl_arc_comm_evaluation (
   id                     BIGSERIAL PRIMARY KEY,
   arc_id                 BIGINT  NOT NULL UNIQUE REFERENCES public.tbl_arc(id) ON DELETE CASCADE,

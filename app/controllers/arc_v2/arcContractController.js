@@ -6,6 +6,7 @@ import arcContractClarificationModel from '../../models/arc_v2/arcContractClarif
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import arcAmendmentDocumentModel from '../../models/arc_v2/arcAmendmentDocumentModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
 import pricingEngine from '../../services/pricingEngine.js';
@@ -586,6 +587,11 @@ export async function requestOtp(req, res) {
       arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
       actorId: vendorUserId, payload: { contract_id: id, expires_at: expiresAt },
     });
+    // In-app OTP confirmation to the vendor (not email — OTP is its own channel)
+    await notifyArcEvent({
+      arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
+      actorId: null, payload: { vendorId: vendorUserId },
+    });
     // The OTP would normally be sent via SMS + email helpers. For now return it
     // in dev only (the SMS/email helpers expect tenant SMTP/SMS config).
     const exposeInPayload = process.env.NODE_ENV !== 'production';
@@ -650,18 +656,28 @@ export async function verifyOtp(req, res) {
         `SELECT COUNT(*)::int AS c FROM tbl_arc_contract WHERE arc_id = $1 AND status != 'active'`,
         [contract.arc_id]
       );
+      let allSigned = false;
       if (remaining.c === 0) {
         await arcModel.setStatus(contract.arc_id, 'contract_active', {}, t);
         await logArcEvent({
           arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_ACTIVE,
           actorId: vendorUserId, payload: {}, txContext: t,
         });
+        allSigned = true;
       }
-      return row;
+      return { row, allSigned };
     });
     // respond AFTER the commit — never inside db.tx, or the caller can read
     // pre-commit state on its next request (raced the signed→active flip).
-    return ok(res, { contract: updated }, 'Contract signed');
+    // Notify creator + comm evaluators (BOTH email) + vendor in-app
+    await notifyArcEvent({
+      arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_SIGNED,
+      actorId: vendorUserId, payload: { vendorId: vendorUserId },
+    });
+    if (updated.allSigned) {
+      await notifyArcEvent({ arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_ACTIVE, actorId: vendorUserId, payload: {} });
+    }
+    return ok(res, { contract: updated.row }, 'Contract signed');
   } catch (err) {
     logger.error({ err }, '[contractController.verifyOtp]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -676,14 +692,16 @@ export async function declineContract(req, res) {
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     if (contract.vendor_id !== vendorUserId) return bad(res, 403, 'Not the contracted vendor');
-    return db.tx(async (t) => {
+    await db.tx(async (t) => {
       const updated = await arcContractModel.setStatus(id, 'declined', { terminated_reason: reason }, t);
       await logArcEvent({
         arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED,
         actorId: vendorUserId, payload: { contract_id: id, reason }, txContext: t,
       });
-      return ok(res, { contract: updated }, 'Contract declined');
+      ok(res, { contract: updated }, 'Contract declined');
     });
+    // Notify creator + comm evaluators (BOTH email) post-commit
+    await notifyArcEvent({ arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED, actorId: vendorUserId, payload: {} });
   } catch (err) {
     logger.error({ err }, '[contractController.declineContract]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -767,6 +785,8 @@ export async function requestClarification(req, res) {
       return { clarifications: created, round };
     });
 
+    // Notify creator + comm evaluators (BOTH email) post-commit
+    await notifyArcEvent({ arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CLARIFICATION_REQUESTED, actorId: vendorUserId, payload: {} });
     return ok(res, result, 'Clarification raised — routed to the commercial evaluator');
   } catch (err) {
     logger.error({ err }, '[contractController.requestClarification]');
