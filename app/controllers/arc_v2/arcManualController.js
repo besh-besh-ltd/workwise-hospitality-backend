@@ -160,6 +160,35 @@ async function userExists(userId, runner = db) {
   return !!row;
 }
 
+// SEC-3/SEC-4 — is this vendor subscription-eligible for the ARC's scope? Mirrors
+// the eligibility predicate used by listAllVendors / the live float: an active OR
+// lapsed (expired) subscription to the ARC's hotel OR category. Used to gate
+// vendor picks (and quotes) unless the caller explicitly overrides eligibility.
+async function vendorEligibleForScope(vendorId, hotelId, categoryId, runner = db) {
+  const row = await runner.oneOrNone(
+    `SELECT EXISTS (
+       SELECT 1 FROM tbl_vendor_hotel_category_subscription vhcs
+        WHERE vhcs.vendor_id = $1
+          AND vhcs.status IN ('active','expired')
+          AND ((vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
+            OR (vhcs.item_type = 'category' AND vhcs.item_id = $3))
+     ) AS ok`,
+    [vendorId, hotelId, categoryId]);
+  return !!row?.ok;
+}
+
+// SEC-2 — is this user allowed to be recorded as a decider on THIS ARC? Must be a
+// real user whose accessible hotels include the ARC's hotel (super-admin bypass).
+// Prevents falsifying the committee approver with an out-of-scope / arbitrary id.
+async function userInArcScope(userId, arc, runner = db) {
+  if (userId == null) return false;
+  const u = await runner.oneOrNone(`SELECT user_type FROM tbl_users WHERE id = $1`, [userId]);
+  if (!u) return false;
+  if (Number(u.user_type) === 8) return true;
+  const accessible = await rbacModel.getAllAccessibleHotelIds(userId);
+  return accessible.map(Number).includes(Number(arc.hotel_id));
+}
+
 // =============================================================================
 // §6.1 — all-vendors (override toggle)
 // =============================================================================
@@ -400,16 +429,32 @@ export async function saveSection(req, res) {
         case 'vendors': {
           // body.vendors = [{ vendor_id, eligibility_overridden? }]
           const vendors = Array.isArray(body.vendors) ? body.vendors : [];
+          // SEC-3/SEC-4 — every picked vendor must be subscription-eligible for the
+          // ARC's hotel×category, UNLESS the caller explicitly overrides eligibility.
+          // The override is determined server-side and recorded authoritatively
+          // (never trusted as an audit-clean default).
+          const overrideRequested = body.override === true
+            || vendors.some((v) => v.eligibility_overridden)
+            || !!verified.manual.eligibility_overridden;
+          let anyOverridden = false;
           for (const v of vendors) {
             const vid = Number(v.vendor_id);
             if (!(await vendorExists(vid, t))) throw Object.assign(new Error(`vendor ${vid} is not a valid active vendor`), { httpStatus: 400 });
+            const eligible = await vendorEligibleForScope(vid, arc.hotel_id, arc.category_id, t);
+            if (!eligible) {
+              if (!overrideRequested) {
+                throw Object.assign(new Error(`vendor ${vid} is not subscribed to this business unit / category — enable "show all vendors / override eligibility" to add it`), { httpStatus: 400 });
+              }
+              anyOverridden = true;
+            }
           }
           // Replace the invitation set with exactly the picked vendors.
           await t.none(`DELETE FROM tbl_arc_invitation WHERE arc_id = $1`, [arcId]);
           for (const v of vendors) {
             await arcManualEntryModel.addInvitation(arcId, Number(v.vendor_id), { status: 'submitted' }, t);
           }
-          if (vendors.some((v) => v.eligibility_overridden)) {
+          // Record the override flag ONLY when a non-eligible vendor was actually added.
+          if (anyOverridden) {
             await arcManualEntryModel.update(arcId, { eligibility_overridden: true }, t);
           }
           break;
@@ -459,6 +504,10 @@ export async function saveSection(req, res) {
           for (const q of quotes) {
             const vid = Number(q.vendor_id);
             if (!(await vendorExists(vid, t))) throw Object.assign(new Error(`vendor ${vid} is not a valid active vendor`), { httpStatus: 400 });
+            // SEC-3 — a quote may only come from an eligible vendor (or one added under override).
+            if (!verified.manual.eligibility_overridden && !(await vendorEligibleForScope(vid, arc.hotel_id, arc.category_id, t))) {
+              throw Object.assign(new Error(`vendor ${vid} is not subscribed to this business unit / category`), { httpStatus: 400 });
+            }
             const quote = await arcManualEntryModel.addQuote(arcId, vid, {
               submitted_at: q.submitted_at ? toDate(q.submitted_at) : null,
               payment_terms: q.payment_terms ?? null,
@@ -527,7 +576,8 @@ export async function saveSection(req, res) {
             if (body.committee_decided_at !== undefined) mePatch.committee_decided_at = body.committee_decided_at ? toDate(body.committee_decided_at) : null;
             if (body.committee_decided_by !== undefined) {
               const decidedBy = body.committee_decided_by == null ? null : Number(body.committee_decided_by);
-              if (decidedBy != null && !(await userExists(decidedBy, t))) throw Object.assign(new Error('committee_decided_by is not a valid user'), { httpStatus: 400 });
+              // SEC-2 — the decider must be a user WITH ACCESS to this ARC (not just any user).
+              if (decidedBy != null && !(await userInArcScope(decidedBy, arc, t))) throw Object.assign(new Error('committee_decided_by must be a user with access to this ARC'), { httpStatus: 400 });
               mePatch.committee_decided_by = decidedBy;
             }
             if (body.committee_comment !== undefined) mePatch.committee_comment = body.committee_comment;
@@ -727,6 +777,15 @@ export async function finalize(req, res) {
     if (effRank >= STAGE_RANK.floated && invitations.length === 0) {
       return bad(res, 400, 'at least one vendor is required from the Floated stage onward');
     }
+    // SEC-4 — re-assert every invited vendor is subscription-eligible (unless the
+    // ARC was explicitly marked override) so a finalized record is scope-clean.
+    if (effRank >= STAGE_RANK.floated && !verified.manual.eligibility_overridden) {
+      for (const inv of invitations) {
+        if (!(await vendorEligibleForScope(inv.vendor_id, verified.arc.hotel_id, verified.arc.category_id))) {
+          return bad(res, 400, `vendor ${inv.vendor_id} is not subscribed to this business unit / category`);
+        }
+      }
+    }
 
     // Awards (G) required for S3+ (and S5 if awarded). Load award rows.
     const comm = await db.oneOrNone(`SELECT * FROM tbl_arc_comm_evaluation WHERE arc_id = $1`, [arcId]);
@@ -768,6 +827,12 @@ export async function finalize(req, res) {
             field: `awards.item.${a.arc_item_id}`,
           });
         }
+      }
+      // SEC-2 — the effective committee decider must be a user within the ARC's
+      // scope. Guards the finalize-body path that bypasses the approvals section.
+      const decidedBy = manual.committee_decided_by ?? (body.committee_decided_by != null ? Number(body.committee_decided_by) : null);
+      if (decidedBy != null && !(await userInArcScope(decidedBy, verified.arc))) {
+        return bad(res, 400, 'committee_decided_by must be a user with access to this ARC');
       }
     }
 
