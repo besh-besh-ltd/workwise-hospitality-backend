@@ -155,6 +155,16 @@ export async function getTechEvalForItem(req, res) {
     // call repeatedly), so identity is replaced before anything leaves the box.
     const arcId = await arcLifecycleModel.getArcIdForItem(arcItemId);
     const aliasMap = arcId ? await arcEvalModel.getOrAssignAliases(arcId) : new Map();
+    // Which vendors have actually submitted a COMMERCIAL quote (not just a
+    // technical envelope)? The buyer can hide tech-only vendors who will never
+    // reach the commercial stage, so the technical evaluator's time isn't spent
+    // scoring vendors who won't be considered. Per-vendor flag, alias-safe.
+    const quotedRows = arcId ? await db.any(
+      `SELECT vendor_id FROM tbl_arc_quote
+        WHERE arc_id = $1 AND submitted_at IS NOT NULL AND withdrawn_at IS NULL`,
+      [arcId]
+    ) : [];
+    const quotedSet = new Set(quotedRows.map((r) => Number(r.vendor_id)));
     // listClauses does SELECT * so is_mandatory comes along once the column
     // exists — no change needed there.
     const clauses = await arcEvalModel.listClauses(te.id);
@@ -163,7 +173,7 @@ export async function getTechEvalForItem(req, res) {
     const rawScores = await arcEvalModel.computeItemScores(arcItemId);
     const scores = rawScores.map((s) => {
       const { vendor_id, ...rest } = s;
-      return { ...aliasFields(vendor_id, aliasMap), ...rest };
+      return { ...aliasFields(vendor_id, aliasMap), ...rest, has_submitted_quote: quotedSet.has(Number(vendor_id)) };
     });
     // Per-(clause × vendor) response rows — the scoring matrix binds inputs
     // to response_id, so the cells need these (scores alone are per-vendor
@@ -197,7 +207,7 @@ export async function getTechEvalForItem(req, res) {
     );
     const responses = rawResponses.map((row) => {
       const { vendor_id, ...rest } = row;
-      return { ...rest, ...aliasFields(vendor_id, aliasMap) };
+      return { ...rest, ...aliasFields(vendor_id, aliasMap), has_submitted_quote: quotedSet.has(Number(vendor_id)) };
     });
     return ok(res, { tech_evaluation: te, clauses, scores, responses });
   } catch (err) {
