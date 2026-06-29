@@ -1044,11 +1044,13 @@ export async function submitTechEnvelope(req, res) {
     const arcId = Number(req.body?.arc_id);
     const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
     if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
-    // There must be a technical envelope to seal (the ARC has clauses).
-    if (!(await arcEvalModel.arcHasTechClauses(arcId))) {
-      return bad(res, 400, 'This rate contract has no technical clauses to submit');
-    }
-    // Phase 1 §B — server-side completeness guard (defence-in-depth; FE gate is primary).
+    // Completeness guard (defence-in-depth; FE gate is primary) — applies ONLY
+    // when the envelope actually has clauses. An EMPTY technical envelope (no
+    // clauses configured for any item) is trivially complete and MUST be
+    // sealable: otherwise a vendor whose ARC is flagged tech-required but has no
+    // clauses gets stuck on the technical stage with nothing to answer and no
+    // way to reach the commercial quote (the commercial-submit gate still needs
+    // this seal when the ARC is tech-required).
     const counts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
     if (counts.clauses_total > 0 && counts.clauses_answered < counts.clauses_total) {
       return bad(res, 409,
