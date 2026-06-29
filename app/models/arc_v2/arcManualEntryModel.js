@@ -66,15 +66,21 @@ const arcManualEntryModel = {
     const allowed = [
       'target_stage', 'eligibility_overridden',
       'committee_decision', 'committee_decided_at', 'committee_decided_by', 'committee_comment',
-      'entry_notes',
+      'entry_notes', 'backdated_dates',
     ];
     const setParts = [];
     const values = [];
     let p = 1;
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(patch, key)) {
-        setParts.push(`${key} = $${p++}`);
-        values.push(patch[key]);
+        if (key === 'backdated_dates') {
+          // JSONB column — stringify + cast (the column has no implicit text→jsonb cast).
+          setParts.push(`backdated_dates = $${p++}::jsonb`);
+          values.push(JSON.stringify(patch[key] && typeof patch[key] === 'object' ? patch[key] : {}));
+        } else {
+          setParts.push(`${key} = $${p++}`);
+          values.push(patch[key]);
+        }
       }
     }
     if (setParts.length === 0) {

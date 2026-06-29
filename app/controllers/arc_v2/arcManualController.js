@@ -81,10 +81,14 @@ function toDate(v) {
 // ---- date-chain validation (spec §3 / §9.7) ---------------------------------
 // Validates the full backdated chain for the chosen target stage. Returns an
 // array of human-readable errors (empty = valid). Future timestamps are rejected.
-function validateDateChain(stage, dates) {
+function validateDateChain(stage, dates, wasAwarded = true) {
   const errs = [];
   const now = Date.now();
-  const rank = STAGE_RANK[stage];
+  let rank = STAGE_RANK[stage];
+  // closed_no_award / not-awarded ended ARCs carry no contract or award, so they
+  // only need created_at (+ no-future) — not the window/contract/comm/generated
+  // chain (spec §2.3¹ / SC-4).
+  if (stage === 'ended' && !wasAwarded) rank = STAGE_RANK.draft;
 
   const g = (k) => {
     const raw = dates[k];
@@ -327,6 +331,17 @@ export async function patchDraft(req, res) {
       }
       if (provenance.eligibility_overridden !== undefined) mePatch.eligibility_overridden = !!provenance.eligibility_overridden;
       if (provenance.entry_notes !== undefined) mePatch.entry_notes = provenance.entry_notes;
+      // SC-5 — persist the backdated date chain on the draft (restored on resume).
+      if (provenance.backdated_dates !== undefined) {
+        mePatch.backdated_dates = provenance.backdated_dates && typeof provenance.backdated_dates === 'object' ? provenance.backdated_dates : {};
+      }
+      const newCreated = provenance.created_at ?? provenance.backdated_dates?.created_at;
+      if (newCreated != null && newCreated !== '') {
+        const cd = toDate(newCreated);
+        if (cd === undefined) throw Object.assign(new Error('created_at is not a valid date'), { httpStatus: 400 });
+        if (cd && cd.getTime() > Date.now()) throw Object.assign(new Error('created_at cannot be in the future'), { httpStatus: 400 });
+        if (cd) { await t.none(`UPDATE tbl_arc SET created_at = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [cd, arcId]); saved.push('created_at'); }
+      }
       if (Object.keys(mePatch).length) {
         await arcManualEntryModel.update(arcId, mePatch, t);
         saved.push('provenance');
@@ -564,6 +579,19 @@ async function applyHeaderScopeProvenance(arcId, body, req, t) {
   }
   if (provenance.eligibility_overridden !== undefined) mePatch.eligibility_overridden = !!provenance.eligibility_overridden;
   if (provenance.entry_notes !== undefined) mePatch.entry_notes = provenance.entry_notes;
+  // SC-5 — persist the backdated date chain (+ S5 ended controls) on the draft
+  // so Save-draft → resume restores them. These have no column on a draft ARC.
+  if (provenance.backdated_dates !== undefined) {
+    mePatch.backdated_dates = provenance.backdated_dates && typeof provenance.backdated_dates === 'object' ? provenance.backdated_dates : {};
+  }
+  // Keep the ARC's authoritative created_at in sync when edited via provenance.
+  const newCreated = provenance.created_at ?? provenance.backdated_dates?.created_at;
+  if (newCreated != null && newCreated !== '') {
+    const cd = toDate(newCreated);
+    if (cd === undefined) throw Object.assign(new Error('created_at is not a valid date'), { httpStatus: 400 });
+    if (cd && cd.getTime() > Date.now()) throw Object.assign(new Error('created_at cannot be in the future'), { httpStatus: 400 });
+    if (cd) await t.none(`UPDATE tbl_arc SET created_at = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [cd, arcId]);
+  }
   if (Object.keys(mePatch).length) await arcManualEntryModel.update(arcId, mePatch, t);
 }
 
@@ -659,11 +687,9 @@ export async function finalize(req, res) {
       signed_by_vendor_at: body.signed_by_vendor_at,
     };
 
-    // ---- §6.5.2 full server-side validation for the chosen target_stage ----
-    const dateErrs = validateDateChain(stage, dates);
-    if (dateErrs.length) return res.status(400).json({ status: 0, message: dateErrs[0], errors: dateErrs });
-
-    // Ended sub-status.
+    // ---- §6.5.2 ended sub-status + awardedness FIRST (date validation depends
+    // on it: a closed_no_award / not-awarded ARC has no contract or award and so
+    // must NOT be forced to supply the contract/award date chain — §2.3¹/SC-4).
     let endedStatus = null;
     if (stage === 'ended') {
       endedStatus = body.ended_sub_status;
@@ -676,6 +702,15 @@ export async function finalize(req, res) {
     }
     const wasAwarded = stage === 'ended' ? (endedStatus !== 'closed_no_award' && body.was_awarded !== false) : true;
 
+    // ---- full server-side date-chain validation for the chosen target_stage ----
+    const dateErrs = validateDateChain(stage, dates, wasAwarded);
+    if (dateErrs.length) return res.status(400).json({ status: 0, message: dateErrs[0], errors: dateErrs });
+
+    // Effective requirement rank: a not-awarded ended ARC (closed_no_award) needs
+    // no items / vendors / window / contract data — collapse it to the draft
+    // baseline (spec §2.3¹). Awarded ended ARCs keep the full chain.
+    const effRank = (stage === 'ended' && !wasAwarded) ? STAGE_RANK.draft : rank;
+
     // Load the staged graph.
     const items = await arcModel.listItems(arcId);
     const invitations = await arcModel.listInvitations(arcId);
@@ -685,11 +720,11 @@ export async function finalize(req, res) {
         WHERE q.arc_id = $1`, [arcId]);
 
     // Items required for S0+ (warn at S0; block leaving evaluation+).
-    if (rank >= STAGE_RANK.floated && items.length === 0) {
+    if (effRank >= STAGE_RANK.floated && items.length === 0) {
       return bad(res, 400, 'at least one line item is required to leave Draft');
     }
     // Vendors required from D (floated+).
-    if (rank >= STAGE_RANK.floated && invitations.length === 0) {
+    if (effRank >= STAGE_RANK.floated && invitations.length === 0) {
       return bad(res, 400, 'at least one vendor is required from the Floated stage onward');
     }
 
@@ -720,6 +755,20 @@ export async function finalize(req, res) {
       if (!['approved', 'rejected'].includes(manual.committee_decision || body.committee_decision)) {
         return bad(res, 400, 'committee_decision (approved/rejected) is required from the Sig-pending stage onward');
       }
+      // BE-6 — every awarded line must carry a real (> 0) rate. Without this, a
+      // null/zero quote rate would materialize a contract line at unit_rate 0 —
+      // a fabricated money value that feeds call-off PO consumption.
+      const rateByLine = new Map(allQuoteLines.map((q) => [Number(q.quote_line_id), q.rate]));
+      for (const a of awards) {
+        const rate = rateByLine.get(Number(a.awarded_quote_line_id));
+        if (rate == null || Number(rate) <= 0) {
+          return res.status(400).json({
+            status: 0,
+            message: `awarded item ${a.arc_item_id}: the awarded vendor's quote rate must be greater than 0`,
+            field: `awards.item.${a.arc_item_id}`,
+          });
+        }
+      }
     }
 
     // Uploaded documents (from §6.4) — keyed by vendor, latest wins.
@@ -739,12 +788,12 @@ export async function finalize(req, res) {
       }
     }
 
-    const finalStatus = persistedStatusFor(stage, endedStatus);
+    const finalStatus = persistedStatusFor(stage, endedStatus, verified.arc);
 
     // ---- §6.5.3 write the graph atomically with BACKDATED timestamps ----
     const result = await db.tx(async (t) => {
       // S1+: backdate window + floated event + invitations invited_at.
-      if (rank >= STAGE_RANK.floated) {
+      if (effRank >= STAGE_RANK.floated) {
         await t.none(
           `UPDATE tbl_arc SET submission_start_at = $2, submission_end_at = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
           [arcId, new Date(dates.submission_start_at), new Date(dates.submission_end_at)]);
@@ -757,14 +806,14 @@ export async function finalize(req, res) {
         }, t);
       }
       // S3+: contract window.
-      if (rank >= STAGE_RANK.sig_pending) {
+      if (effRank >= STAGE_RANK.sig_pending) {
         await t.none(
           `UPDATE tbl_arc SET contract_start_at = $2, contract_end_at = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
           [arcId, new Date(dates.contract_start_at), new Date(dates.contract_end_at)]);
       }
 
       // S2+: stamp quote submitted_at if not already set, within window.
-      if (rank >= STAGE_RANK.evaluation) {
+      if (effRank >= STAGE_RANK.evaluation) {
         await t.none(
           `UPDATE tbl_arc_quote SET submitted_at = COALESCE(submitted_at, $2), updated_at = CURRENT_TIMESTAMP
             WHERE arc_id = $1 AND submitted_at IS NULL`,
@@ -893,11 +942,13 @@ export async function finalize(req, res) {
 }
 
 // Map the target stage (+ended sub-status) to the persisted tbl_arc.status (§2.2).
-function persistedStatusFor(stage, endedStatus) {
+function persistedStatusFor(stage, endedStatus, arc = {}) {
   switch (stage) {
     case 'draft': return 'draft';
     case 'floated': return 'floated';
-    case 'evaluation': return 'comm_eval_in_progress';
+    // SC-3 — when a technical response is required, the evaluation stage is the
+    // technical envelope; otherwise it is the commercial one.
+    case 'evaluation': return arc.technical_response_required ? 'tech_eval_in_progress' : 'comm_eval_in_progress';
     case 'sig_pending': return 'awaiting_vendor_acceptance';
     case 'active': return 'contract_active';
     case 'ended': return endedStatus; // expired | terminated | closed_no_award

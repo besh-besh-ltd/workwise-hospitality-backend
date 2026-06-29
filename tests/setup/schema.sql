@@ -11499,6 +11499,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_manual_entry (
   committee_comment      TEXT,
   entered_by             INTEGER     NOT NULL REFERENCES public.tbl_users(id),
   entry_notes            TEXT,
+  backdated_dates        JSONB       NOT NULL DEFAULT '{}'::jsonb,
   created_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_arc_manual_entry_arc UNIQUE (arc_id),
