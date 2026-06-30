@@ -201,7 +201,14 @@ const arcModel = {
                 COALESCE(line_agg.total_consumed_value, 0)::numeric AS consumed_value,
                 COALESCE(co_agg.call_off_count, 0)::int AS call_off_count,
                 COALESCE(amend_agg.requested_amendments, 0)::int AS requested_amendments,
-                COALESCE(amend_agg.active_amendments, 0)::int AS active_amendments
+                COALESCE(amend_agg.active_amendments, 0)::int AS active_amendments,
+                -- DECISION-3: derived chip — true when a non-terminal ARC round is live
+                EXISTS(
+                  SELECT 1 FROM tbl_negotiation_rounds nr
+                   WHERE nr.source_type = 'ARC' AND nr.source_id = a.id
+                     AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+                     AND nr.end_date > NOW()
+                ) AS negotiation_in_progress
            FROM tbl_arc a
            LEFT JOIN tbl_users u ON u.id = a.created_by
            LEFT JOIN tbl_category cat ON cat.id = a.category_id

@@ -76,6 +76,14 @@ export const ARC_EVENT_TYPES = Object.freeze({
   ADDENDUM_SIGNED: 'addendum_signed',
   AMENDMENT_SIGN_DECLINED: 'amendment_sign_declined',
   AMENDMENT_VOIDED: 'amendment_voided',
+  // Negotiation rounds (ARC v2 commercial evaluation)
+  NEGOTIATION_ROUND_CREATED:  'negotiation_round_created',
+  NEGOTIATION_ROUND_STARTED:  'negotiation_round_started',
+  NEGOTIATION_QUOTE_RECEIVED: 'negotiation_quote_received',
+  NEGOTIATION_ROUND_ENDED:    'negotiation_round_ended',
+  NEGOTIATION_ROUND_EXPIRED:  'negotiation_round_expired',
+  NEGOTIATION_ROUND_REJECTED: 'negotiation_round_rejected',
+  NEGOTIATION_ROUND_CLOSED:   'negotiation_round_closed',
   // Expiry / renewal
   EXPIRING_SOON: 'expiring_soon',
   EXPIRED: 'expired',

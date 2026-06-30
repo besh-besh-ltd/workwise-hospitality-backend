@@ -17,6 +17,7 @@ import { logError } from './common.js';
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
 const negotiationRoundCronRegistry = new Map();
+const arcNegotiationRoundCronRegistry = new Map();
 
 export const scheduleMilestoneReminder = async (milestone) => {
   const { id, due_date, reminder_users } = milestone;
@@ -1119,5 +1120,180 @@ export const rescheduleAllNegotiationRoundExpirations = async () => {
     }
   } catch (err) {
     logError('[Negotiation Expiry] Failed to reschedule round expirations on startup', err);
+  }
+};
+// ============================================================================
+// ARC NEGOTIATION ROUND EXPIRY (mirrors lines 900-1123 above, ARC-flavored)
+//
+// The RFQ accessors (negotiationModel.getRoundWithContext, etc.) INNER JOIN
+// tbl_rfq on nr.rfq_id, so ARC rounds (rfq_id NULL) are silently dropped.
+// ARC uses its own model accessors that JOIN tbl_arc instead.
+// ============================================================================
+
+/**
+ * Core handler: processes an ARC negotiation round when its end_date is reached.
+ * Re-fetches from DB to handle concurrent status changes (idempotent).
+ */
+const handleArcNegotiationRoundExpiration = async (roundId) => {
+  try {
+    // Lazy import to avoid circular dependency at module load time.
+    const { default: arcNegotiationModel } = await import('../models/arc_v2/arcNegotiationModel.js');
+    const { logArcEvent, ARC_EVENT_TYPES } = await import('../services/arcEventLogService.js');
+    const { notifyArcEvent } = await import('../services/arcNotificationService.js');
+
+    const round = await arcNegotiationModel.getRoundWithArcContext(roundId);
+    if (!round) {
+      logger.info(`[ARC Neg Expiry] Round ${roundId} not found, skipping.`);
+      return;
+    }
+
+    if (round.status === 'PENDING_APPROVAL') {
+      logger.info(`[ARC Neg Expiry] Expiring PENDING_APPROVAL round ${roundId} for ARC #${round.arc_number}`);
+
+      await db.tx(async (t) => {
+        await t.none(
+          `UPDATE tbl_negotiation_rounds SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [roundId]
+        );
+        // Cancel pending approval instances (entity_type = ARC_NEGOTIATION)
+        await t.none(
+          `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW()
+           WHERE entity_type = 'ARC_NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
+          [roundId]
+        );
+        // Cancel pending approval steps
+        await t.none(
+          `UPDATE tbl_approval_instance_steps SET status = 'CANCELLED', completed_at = NOW()
+           WHERE approval_instance_id IN (
+             SELECT id FROM tbl_approval_instances
+             WHERE entity_type = 'ARC_NEGOTIATION' AND entity_id = $1 AND status = 'CANCELLED'
+           ) AND status = 'PENDING'`,
+          [roundId]
+        );
+        await logArcEvent({
+          arcId: round.arc_id,
+          eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_EXPIRED,
+          actorId: null,
+          payload:  { round_id: roundId, round_number: round.round_number },
+          txContext: t,
+        });
+      });
+
+      await notifyArcEvent({
+        arcId:     round.arc_id,
+        eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_EXPIRED,
+        actorId:   null,
+        payload:   { round_id: roundId },
+      });
+
+      logger.info(`[ARC Neg Expiry] Round ${roundId} expired successfully.`);
+
+    } else if (round.status === 'ACTIVE') {
+      logger.info(`[ARC Neg Expiry] Ending ACTIVE round ${roundId} for ARC #${round.arc_number}`);
+
+      await db.tx(async (t) => {
+        await t.none(
+          `UPDATE tbl_negotiation_rounds SET status = 'ENDED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [roundId]
+        );
+        await logArcEvent({
+          arcId: round.arc_id,
+          eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_ENDED,
+          actorId: null,
+          payload:  { round_id: roundId, round_number: round.round_number },
+          txContext: t,
+        });
+      });
+
+      await notifyArcEvent({
+        arcId:     round.arc_id,
+        eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_ENDED,
+        actorId:   null,
+        payload:   { round_id: roundId },
+      });
+
+      logger.info(`[ARC Neg Expiry] Round ${roundId} ended successfully.`);
+
+    } else {
+      logger.info(`[ARC Neg Expiry] Round ${roundId} is already '${round.status}', skipping.`);
+    }
+  } catch (err) {
+    logError(`[ARC Neg Expiry] Error processing round ${roundId}`, err);
+  }
+};
+
+/**
+ * Schedule a one-time cron job to fire at the exact end_date of an ARC
+ * negotiation round. Stored in arcNegotiationRoundCronRegistry.
+ * @param {Object} round - Must have { id, end_date }
+ */
+export const scheduleArcNegotiationRoundExpiration = (round) => {
+  const { id: roundId, end_date } = round;
+
+  removeArcNegotiationRoundExpiration(roundId);
+
+  const endDate = new Date(
+    typeof end_date === 'string' && !end_date.includes('+') && !end_date.includes('Z')
+      ? end_date.replace(' ', 'T') + 'Z'
+      : end_date
+  );
+
+  if (isNaN(endDate.getTime()) || endDate <= new Date()) {
+    logger.debug(`[ARC Neg Expiry] Round ${roundId} end_date is in the past or invalid, skipping schedule.`);
+    return;
+  }
+
+  const cronExpression = `${endDate.getMinutes()} ${endDate.getHours()} ${endDate.getDate()} ${endDate.getMonth() + 1} *`;
+
+  const job = cron.schedule(cronExpression, async () => {
+    logger.info(`[ARC Neg Expiry] Cron fired for round ${roundId}`);
+    await handleArcNegotiationRoundExpiration(roundId);
+    job.stop();
+    arcNegotiationRoundCronRegistry.delete(roundId);
+  });
+
+  arcNegotiationRoundCronRegistry.set(roundId, job);
+  logger.info(`[ARC Neg Expiry] Scheduled round ${roundId} to expire at ${endDate.toISOString()}`);
+};
+
+/**
+ * Remove a scheduled ARC negotiation expiration job.
+ * Call when a round is manually closed or rejected before end_date.
+ * @param {number} roundId
+ */
+export const removeArcNegotiationRoundExpiration = (roundId) => {
+  const job = arcNegotiationRoundCronRegistry.get(roundId);
+  if (job) {
+    job.stop();
+    arcNegotiationRoundCronRegistry.delete(roundId);
+    logger.info(`[ARC Neg Expiry] Removed scheduled expiration for round ${roundId}`);
+  }
+};
+
+/**
+ * On server startup: reschedule ARC negotiation expiration jobs for all future
+ * rounds and immediately process any that expired during downtime.
+ * Must NOT touch the RFQ reschedule path (different model accessors).
+ */
+export const rescheduleAllArcNegotiationRoundExpirations = async () => {
+  try {
+    const { default: arcNegotiationModel } = await import('../models/arc_v2/arcNegotiationModel.js');
+
+    const futureRounds = await arcNegotiationModel.getArcRoundsForReschedule();
+    for (const round of futureRounds) {
+      scheduleArcNegotiationRoundExpiration(round);
+    }
+    logger.info(`[ARC Neg Expiry] Rescheduled ${futureRounds.length} future ARC round(s).`);
+
+    const expiredRounds = await arcNegotiationModel.getExpiredArcRoundsDuringDowntime();
+    for (const round of expiredRounds) {
+      logger.info(`[ARC Neg Expiry] Processing round ${round.id} that expired during downtime.`);
+      await handleArcNegotiationRoundExpiration(round.id);
+    }
+    if (expiredRounds.length > 0) {
+      logger.info(`[ARC Neg Expiry] Processed ${expiredRounds.length} ARC round(s) that expired during downtime.`);
+    }
+  } catch (err) {
+    logError('[ARC Neg Expiry] Failed to reschedule ARC round expirations on startup', err);
   }
 };

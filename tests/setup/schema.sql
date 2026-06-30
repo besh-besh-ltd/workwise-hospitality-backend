@@ -2225,6 +2225,7 @@ CREATE TABLE public.tbl_negotiation_round_quotes (
     negotiation_round_id integer NOT NULL,
     vendor_id integer NOT NULL,
     rfq_product_id integer,
+    arc_item_id bigint,
     quoted_price numeric(15,2),
     previous_price numeric(15,2),
     submitted_at timestamp without time zone,
@@ -2275,6 +2276,8 @@ CREATE TABLE public.tbl_negotiation_rounds (
     vendor_approvals jsonb DEFAULT '[]'::jsonb,
     source_type character varying(20) DEFAULT 'RFQ'::character varying NOT NULL,
     source_id integer NOT NULL,
+    arc_item_id bigint,
+    products jsonb,
     CONSTRAINT tbl_negotiation_rounds_source_type_chk CHECK (((source_type)::text = ANY ((ARRAY['RFQ'::character varying, 'ARC'::character varying])::text[])))
 );
 
@@ -4645,7 +4648,8 @@ CREATE TABLE public.tbl_rfq_purchase_order (
     global_charges jsonb DEFAULT '[]'::jsonb NOT NULL,
     arc_contract_id bigint,
     source_mr_id bigint,
-    is_call_off boolean DEFAULT false NOT NULL
+    is_call_off boolean DEFAULT false NOT NULL,
+    auto_initiated boolean DEFAULT false NOT NULL
 );
 
 
@@ -9292,6 +9296,17 @@ CREATE INDEX idx_round_quotes_vendor_id ON public.tbl_negotiation_round_quotes U
 
 
 --
+-- Name: uq_neg_round_quote_arc_item; Type: INDEX; Schema: public; Owner: -
+-- Partial unique index: one quote per (round, vendor, ARC item). Excludes RFQ
+-- rows (arc_item_id IS NULL) so the existing RFQ path is unaffected.
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_neg_round_quote_arc_item
+  ON public.tbl_negotiation_round_quotes (negotiation_round_id, vendor_id, arc_item_id)
+  WHERE arc_item_id IS NOT NULL;
+
+
+--
 -- Name: idx_rpv_rfqid_variant_userid; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11329,19 +11344,22 @@ CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_arc     ON public.tbl_arc_quote (ar
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_vendor  ON public.tbl_arc_quote (vendor_id);
 
 CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line (
-  id              BIGSERIAL PRIMARY KEY,
-  arc_quote_id    BIGINT  NOT NULL REFERENCES public.tbl_arc_quote(id) ON DELETE CASCADE,
-  arc_item_id     BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
-  rate            NUMERIC(15,2),
-  gst_pct         NUMERIC(5,2),
-  charges         JSONB DEFAULT '[]'::jsonb,
-  lead_time_days  INTEGER,
-  moq             NUMERIC(15,2),
-  validity_notes  TEXT,
-  line_pricing    JSONB,
-  created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  updated_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE (arc_quote_id, arc_item_id)
+  id                   BIGSERIAL PRIMARY KEY,
+  arc_quote_id         BIGINT  NOT NULL REFERENCES public.tbl_arc_quote(id) ON DELETE CASCADE,
+  arc_item_id          BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  rate                 NUMERIC(15,2),
+  gst_pct              NUMERIC(5,2),
+  charges              JSONB DEFAULT '[]'::jsonb,
+  lead_time_days       INTEGER,
+  moq                  NUMERIC(15,2),
+  validity_notes       TEXT,
+  line_pricing         JSONB,
+  rate_source          VARCHAR(16) NOT NULL DEFAULT 'LANDED',
+  negotiated_round_id  BIGINT,
+  created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_quote_id, arc_item_id),
+  CONSTRAINT tbl_arc_quote_line_rate_source_chk CHECK (rate_source IN ('LANDED', 'NEGOTIATED'))
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_line_item  ON public.tbl_arc_quote_line (arc_item_id);
 

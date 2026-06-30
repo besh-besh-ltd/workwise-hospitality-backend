@@ -852,16 +852,35 @@ const arcEvalModel = {
     );
   },
 
-  /** Returns all quote lines for a given ARC, joined with vendor + item info. */
+  /** Returns all quote lines for a given ARC, joined with vendor + item info.
+   *  Includes rate_source + negotiated_round_id so the commercial matrix can
+   *  tag NEGOTIATED rates (DECISION-1). ORDER BY ql.rate is unchanged so
+   *  L-rank reflects the (possibly negotiated) live rate automatically.
+   *  Also LEFT JOINs the latest round_quote previous_price so the matrix can
+   *  show "was ₹X → now ₹Y" provenance on NEGOTIATED lines.
+   */
   listAllQuotesForArc: async (arcId, txContext = null) => {
     return (txContext || db).any(
       `SELECT q.id AS quote_id, q.vendor_id, u.name AS vendor_name, q.submitted_at,
               ql.id AS quote_line_id, ql.arc_item_id, ql.rate, ql.gst_pct, ql.charges,
               ql.lead_time_days, ql.moq,
-              ql.line_pricing
+              ql.line_pricing,
+              ql.rate_source,
+              ql.negotiated_round_id,
+              prev.previous_price AS pre_negotiation_rate
          FROM tbl_arc_quote q
          JOIN tbl_arc_quote_line ql ON ql.arc_quote_id = q.id
          LEFT JOIN tbl_users u ON u.id = q.vendor_id
+         -- Latest round-quote row for this line to surface before/after rates
+         LEFT JOIN LATERAL (
+           SELECT nrq.previous_price
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = ql.negotiated_round_id
+              AND nrq.vendor_id = q.vendor_id
+              AND nrq.arc_item_id = ql.arc_item_id
+            ORDER BY nrq.id DESC
+            LIMIT 1
+         ) prev ON ql.rate_source = 'NEGOTIATED'
         WHERE q.arc_id = $1 AND q.submitted_at IS NOT NULL AND q.withdrawn_at IS NULL
         ORDER BY ql.arc_item_id, ql.rate`,
       [arcId]

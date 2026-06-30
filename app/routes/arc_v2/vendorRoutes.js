@@ -3,6 +3,7 @@ import multer from 'multer';
 import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
 import * as vendorController from '../../controllers/arc_v2/arcVendorController.js';
+import * as negotiationController from '../../controllers/arc_v2/arcNegotiationController.js';
 import * as contractController from '../../controllers/arc_v2/arcContractController.js';
 import * as amendmentController from '../../controllers/arc_v2/arcAmendmentController.js';
 import * as addendumController from '../../controllers/arc_v2/arcAddendumController.js';
@@ -54,6 +55,10 @@ r.get( '/addendums',                      passportSignIn, acl([3]), addendumCont
 r.post('/addendums/:id/otp/request',      passportSignIn, acl([3]), addendumController.requestAddendumOtp);
 r.post('/addendums/:id/otp/verify',       passportSignIn, acl([3]), addendumController.verifyAddendumOtp);
 r.post('/addendums/:id/decline',          passportSignIn, acl([3]), addendumController.declineAddendum);
+
+// ARC Negotiation (vendor side).
+r.get( '/requests/:arcId/negotiation',             passportSignIn, acl([3]), negotiationController.listVendorRounds);
+r.post('/negotiation/rounds/:roundId/quote',       passportSignIn, acl([3]), negotiationController.submitVendorQuote);
 
 // Contract acceptance + active list.
 r.get( '/pending-acceptance',                       passportSignIn, acl([3]), contractController.getPendingAcceptance);

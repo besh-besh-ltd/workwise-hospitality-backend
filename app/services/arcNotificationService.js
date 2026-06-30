@@ -478,6 +478,74 @@ const EVENT_CONFIG = {
     url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
   },
 
+  // ── ARC Negotiation rounds ────────────────────────────────────────────────
+  // STARTED and QUOTE_RECEIVED use recipientsOverride at the call site so no
+  // audience token is needed — the override bypasses the audience resolver.
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_CREATED]: {
+    audiences:    [AUDIENCE.COMM_EVALUATORS, AUDIENCE.CREATOR],
+    email:        false,
+    vendorFacing: false,
+    title:        'Negotiation round pending approval',
+    body:         (arc, payload) => `A negotiation round (#${payload?.round_number ?? ''}) for ${arc.title} (${arc.arc_number}) is pending your approval.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED]: {
+    // recipientsOverride supplied by caller (targeted vendors only)
+    audiences:    [],
+    email:        true,
+    vendorFacing: true,
+    title:        'Negotiation round active — submit your revised rate',
+    body:         (arc, payload) => `A negotiation round is now active on ${arc.title} (${arc.arc_number}). Please submit a revised rate before the deadline.`,
+    url:          (arc) => `${VENDOR_BASE}/requests/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_QUOTE_RECEIVED]: {
+    audiences:    [AUDIENCE.COMM_EVALUATORS, AUDIENCE.CREATOR],
+    email:        true,
+    vendorFacing: false,
+    title:        'Vendor submitted a revised rate',
+    body:         (arc, payload) => `A vendor submitted a revised rate for ${arc.title} (${arc.arc_number})${payload?.arc_item_id ? ` (item ${payload.arc_item_id})` : ''}.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_ENDED]: {
+    audiences:    [AUDIENCE.COMM_EVALUATORS, AUDIENCE.CREATOR],
+    email:        true,
+    vendorFacing: false,
+    title:        'Negotiation round ended',
+    body:         (arc, payload) => `A negotiation round has ended for ${arc.title} (${arc.arc_number}). Review the revised rates.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_EXPIRED]: {
+    audiences:    [AUDIENCE.CREATOR],
+    email:        false,
+    vendorFacing: false,
+    title:        'Negotiation round expired without approval',
+    body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) expired before it could be approved.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_REJECTED]: {
+    audiences:    [AUDIENCE.CREATOR],
+    email:        false,
+    vendorFacing: false,
+    title:        'Negotiation round rejected',
+    body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) was rejected.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
+  [ARC_EVENT_TYPES.NEGOTIATION_ROUND_CLOSED]: {
+    audiences:    [AUDIENCE.COMM_EVALUATORS],
+    email:        false,
+    vendorFacing: false,
+    title:        'Negotiation round closed',
+    body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) was closed by the evaluator.`,
+    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+  },
+
   // ── Call-off ──────────────────────────────────────────────────────────────
 
   [ARC_EVENT_TYPES.CALL_OFF_RELEASED]: {

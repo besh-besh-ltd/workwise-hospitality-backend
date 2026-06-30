@@ -3,6 +3,7 @@ import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
 import { requireArcPermission } from '../../middleware/arcPermission.js';
 import * as evalController from '../../controllers/arc_v2/arcEvaluationController.js';
+import * as negotiationController from '../../controllers/arc_v2/arcNegotiationController.js';
 
 const r = Router();
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
@@ -40,5 +41,14 @@ r.post('/:arcId/comm-eval/send-back',       passportSignIn, acl([2, 8]), COMM_WR
 // Vendor-clarification resolution — scoped field revise / uphold.
 r.post('/:arcId/comm-eval/clarification/:clarificationId/revise', passportSignIn, acl([2, 8]), COMM_WRITE, evalController.reviseClarification);
 r.post('/:arcId/comm-eval/clarification/:clarificationId/uphold', passportSignIn, acl([2, 8]), COMM_WRITE, evalController.upholdClarification);
+
+// ARC Negotiation (buyer side).
+// Create/close require COMM_WRITE; approve/reject are engine-gated (acl[2,8] only).
+r.post('/:arcId/comm-eval/negotiation/rounds',                                  passportSignIn, acl([2, 8]), COMM_WRITE, negotiationController.createRound);
+r.get( '/:arcId/comm-eval/negotiation/rounds',                                  passportSignIn, acl([2, 8]), COMM_READ,  negotiationController.listRounds);
+r.get( '/:arcId/comm-eval/negotiation/rounds/:roundId/quotes',                  passportSignIn, acl([2, 8]), COMM_READ,  negotiationController.getRoundQuotes);
+r.post('/:arcId/comm-eval/negotiation/rounds/:roundId/approve',                 passportSignIn, acl([2, 8]),             negotiationController.approveRound);
+r.post('/:arcId/comm-eval/negotiation/rounds/:roundId/reject',                  passportSignIn, acl([2, 8]),             negotiationController.rejectRound);
+r.post('/:arcId/comm-eval/negotiation/rounds/:roundId/close',                   passportSignIn, acl([2, 8]), COMM_WRITE, negotiationController.closeRound);
 
 export default r;

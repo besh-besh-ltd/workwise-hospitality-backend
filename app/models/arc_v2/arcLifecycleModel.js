@@ -183,6 +183,19 @@ async function gatherFacts(runner, arc, userId) {
     loadInstance(runner, 'ARC_PUBLISH', arcId, userId),
   ]);
 
+  // DECISION-3: derived boolean — true when a non-terminal ARC round exists
+  // (PENDING_APPROVAL or ACTIVE with end_date in the future). Raw tbl_arc.status
+  // stays unchanged; this is surfaced on the commercial stage only.
+  const negRow = await runner.oneOrNone(
+    `SELECT 1 FROM tbl_negotiation_rounds
+      WHERE source_type = 'ARC' AND source_id = $1
+        AND status IN ('PENDING_APPROVAL', 'ACTIVE')
+        AND end_date > NOW()
+      LIMIT 1`,
+    [arcId]
+  );
+  const negotiationInProgress = !!negRow;
+
   return {
     invited: invites.invited,
     declined: invites.declined,
@@ -202,6 +215,7 @@ async function gatherFacts(runner, arc, userId) {
     techApproval,
     committeeApproval,
     publishApproval,
+    negotiationInProgress,
   };
 }
 
@@ -303,6 +317,9 @@ export function deriveStages(arc, f) {
     ...commercial,
     counts: { items_total: f.items_total, items_allocated: f.items_allocated },
     clarifications_open: f.clarifications_open,
+    // DECISION-3: expose the derived negotiation flag so the FE can render the
+    // "Negotiation in progress" amber chip on the commercial stage.
+    negotiation_in_progress: f.negotiationInProgress || false,
     comm_evaluation: f.comm
       ? { id: Number(f.comm.id), status: f.comm.status, finalized_at: f.comm.finalized_at }
       : null,

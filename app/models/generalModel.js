@@ -19,6 +19,16 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // MR is the call-off/demand path — role approvers resolve against the same
   // 'awarding' permission as POs (USER-source steps bypass this map).
   'MR': 'awarding',
+  // ARC_NEGOTIATION: ROLE-source approver steps resolve against arc-comm
+  // read+approve perms (same as ARC_COMMITTEE). Without this entry, ROLE steps
+  // would fall back to 'arc_negotiation', which has no permission rows and
+  // would silently drop all role-based approvers.
+  'ARC_NEGOTIATION': 'arc-comm',
+  // NOTE (latent gap, out of scope here): ARC_TECH and ARC_COMMITTEE are wired
+  // in postActionRegistry but are NOT mapped here, so their ROLE-source approver
+  // steps fall back to entity_type.toLowerCase() which has no permission rows and
+  // silently drops those approvers. This is a pre-existing gap — verify production
+  // ARC_TECH/ARC_COMMITTEE policies before adding mappings here.
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
