@@ -5,6 +5,7 @@ import { notifyArcEvent } from './arcNotificationService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import arcModel from '../models/arc_v2/arcModel.js';
 import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
+import { arcMomentIst, nowIst } from '../helper/arcTime.js';
 
 /**
  * ARC submission-close sweep — the time-driven trigger for `submission_closed`.
@@ -30,11 +31,20 @@ import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
 const VENDOR_BASE = '/dashboard/vendor/rate-contracts';
 
 /**
- * @param {{ now?: Date }} [opts]
+ * @param {{ now?: Date|null }} [opts]
+ *   now — injectable clock for tests (a JS Date interpreted as IST wall-clock
+ *   via arcMomentIst); omit for production (uses real IST now).
  * @returns {Promise<{ closed: number }>}
  */
-export async function runArcSubmissionCloseSweep({ now = new Date() } = {}) {
+export async function runArcSubmissionCloseSweep({ now = null } = {}) {
   const summary = { closed: 0 };
+
+  // Convert to IST wall-clock naive string.  The stored `submission_end_at`
+  // column holds IST wall-clock as `timestamp without time zone`, so the correct
+  // comparison is naive-vs-naive in IST — not naive-vs-UTC-Date.
+  const nowIstStr = now != null
+    ? arcMomentIst(now).format('YYYY-MM-DD HH:mm:ss')
+    : nowIst().format('YYYY-MM-DD HH:mm:ss');
 
   let due = [];
   try {
@@ -44,7 +54,7 @@ export async function runArcSubmissionCloseSweep({ now = new Date() } = {}) {
           AND submission_end_at IS NOT NULL
           AND submission_end_at < $1
         ORDER BY id`,
-      [now]
+      [nowIstStr]
     );
   } catch (err) {
     logger.error({ err }, '[arcSubmissionClose] failed to query closable ARCs');

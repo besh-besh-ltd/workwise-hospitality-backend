@@ -1,4 +1,5 @@
 import db from '../../config/dbConn.js';
+import { windowClosed } from '../../helper/arcTime.js';
 
 // Advisory-lock namespace (first key of the two-int pg_advisory_xact_lock) used
 // to serialize per-ARC vendor-alias assignment. Arbitrary fixed int4, scoped to
@@ -904,8 +905,7 @@ const arcEvalModel = {
 
     const windowOpen =
       arc.status === 'floated' &&
-      arc.submission_end_at &&
-      new Date(arc.submission_end_at) > new Date();
+      !windowClosed(arc);
 
     // Phase 1 §3 — T&C gate derived from persisted timestamp.
     const termsAccepted = !!quote?.terms_accepted_at;

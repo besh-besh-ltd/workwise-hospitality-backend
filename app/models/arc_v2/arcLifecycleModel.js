@@ -1,6 +1,7 @@
 import db from '../../config/dbConn.js';
 import arcModel from './arcModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { windowClosed as windowClosedIst } from '../../helper/arcTime.js';
 
 /**
  * ARC v2 — Lifecycle stage state machine.
@@ -226,7 +227,7 @@ export function deriveStages(arc, f) {
   const PRE_FLOAT = ['draft', 'pending_publish_approval', 'publish_rejected'];
   const windowClosed =
     !([...PRE_FLOAT, 'floated'].includes(arc.status)) ||
-    (arc.status === 'floated' && arc.submission_end_at && new Date(arc.submission_end_at) < new Date());
+    (arc.status === 'floated' && windowClosedIst(arc));
 
   // ── overview ──
   const overview = {
@@ -404,8 +405,7 @@ const arcLifecycleModel = {
     if (
       lazyFlip &&
       arc.status === 'floated' &&
-      arc.submission_end_at &&
-      new Date(arc.submission_end_at) < new Date()
+      windowClosedIst(arc)
     ) {
       await arcModel.setStatus(arcId, 'submission_closed', {}, txContext);
       await logArcEvent({

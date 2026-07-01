@@ -8,6 +8,7 @@ import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
 import pricingEngine from '../../services/pricingEngine.js';
+import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
@@ -71,13 +72,11 @@ function bad(res, status, message, code = 0) { return res.status(status).json({ 
 // Returns an error { status, message } when the window is NOT open right now,
 // else null. Both boundaries are enforced symmetrically.
 function submissionWindowGate(arc) {
-  const now = new Date();
-  if (arc.submission_start_at && new Date(arc.submission_start_at) > now) {
-    const opens = new Date(arc.submission_start_at)
-      .toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+  if (windowNotOpen(arc)) {
+    const opens = arcMomentIst(arc.submission_start_at).format('DD MMM YYYY, HH:mm');
     return { status: 409, message: `Submission window has not opened yet (opens ${opens})` };
   }
-  if (arc.submission_end_at && new Date(arc.submission_end_at) < now) {
+  if (windowClosed(arc)) {
     return { status: 409, message: 'Submission deadline has passed' };
   }
   return null;
@@ -734,7 +733,7 @@ export async function withdrawQuote(req, res) {
     const { arc_id } = req.body || {};
     const arc = await arcModel.getById(arc_id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    if (arc.submission_end_at && new Date(arc.submission_end_at) < new Date()) {
+    if (windowClosed(arc)) {
       return bad(res, 409, 'Submission deadline has passed — cannot withdraw');
     }
     const quote = await db.oneOrNone(

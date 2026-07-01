@@ -8,6 +8,7 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { sendMail } from '../../helper/common.js';
+import { arcMomentIst, windowClosed } from '../../helper/arcTime.js';
 import {
   createApprovalInstance,
   findBestMatchingPolicyTx,
@@ -68,7 +69,7 @@ async function userCanAccessHotel(req, hotelId) {
 async function notifyVendorsOfFloat(arc, invitations, actorId) {
   const vendorIds = invitations.map((i) => Number(i.vendor_id)).filter(Boolean);
   if (vendorIds.length === 0) return;
-  const deadline = arc.submission_end_at ? new Date(arc.submission_end_at).toDateString() : null;
+  const deadline = arc.submission_end_at ? arcMomentIst(arc.submission_end_at).format('DD MMM YYYY') : null;
   try {
     await dispatchNotification({
       userIds: vendorIds,
@@ -282,7 +283,7 @@ export async function publish(req, res) {
         new Date(arc.contract_start_at) >= new Date(arc.contract_end_at)) {
       missing.push('contract_start_at < contract_end_at');
     }
-    if (arc.submission_end_at && new Date(arc.submission_end_at) <= new Date()) {
+    if (windowClosed(arc)) {
       missing.push('submission_end_at must be in the future');
     }
     const items = await arcModel.listItems(id);
