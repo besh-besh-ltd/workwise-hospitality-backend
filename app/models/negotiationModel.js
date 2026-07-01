@@ -243,9 +243,11 @@ const negotiationModel = {
   },
 
   // Per-ROUND equivalent of getPendingNegotiationRfqIds: round ids whose
-  // NEGOTIATION approval instance (entity_id = round.id) is PENDING with the
-  // current user a pending approver at the current step. (No NEGOTIATION_QUOTE
-  // union — those are product-level, not a round.)
+  // NEGOTIATION or ARC_NEGOTIATION approval instance (entity_id = round.id) is
+  // PENDING with the current user a pending approver at the current step.
+  // (No NEGOTIATION_QUOTE union — those are product-level, not a round.)
+  // Both entity types share the tbl_negotiation_rounds.id sequence, so no
+  // double-count is possible — each round id maps to exactly one entity_type.
   getPendingNegotiationRoundIds: async (roundIds, userId) => {
     if (!Array.isArray(roundIds) || roundIds.length === 0 || !userId) return [];
     const rows = await db.any(
@@ -253,7 +255,7 @@ const negotiationModel = {
          FROM tbl_approval_instances i
          JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
          JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-        WHERE i.entity_type = 'NEGOTIATION' AND i.status = 'PENDING'
+        WHERE i.entity_type IN ('NEGOTIATION','ARC_NEGOTIATION') AND i.status = 'PENDING'
           AND i.entity_id = ANY($1::int[])
           AND sa.approver_user_id = $2 AND sa.status = 'PENDING'`,
       [roundIds.map(Number), Number(userId)]
@@ -370,7 +372,10 @@ const negotiationModel = {
               END AS neg_status,
               COALESCE(q.quotes_received, 0)::int AS quotes_received,
               COALESCE(items.item_names, '[]'::json) AS item_names,
-              COALESCE(vend.vendors, '[]'::jsonb) AS vendors
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors,
+              'RFQ'::text AS source_type,
+              NULL::int   AS arc_id,
+              NULL::text  AS arc_number
          FROM tbl_negotiation_rounds nr
          JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
          LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
@@ -401,6 +406,79 @@ const negotiationModel = {
         WHERE nr.rfq_id IS NOT NULL
           AND ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
           AND ($2::int IS NULL OR rfq.hotel_id = $2)
+        ORDER BY nr.created_at DESC`,
+      [companyIds, hotelId]
+    );
+  },
+
+  // ARC negotiation round list: one row per ARC negotiation round, shaped to the
+  // EXACT same column contract as getNegotiationRoundList so the controller's
+  // bucket/facet/sort/paginate logic works over the concatenated array unchanged.
+  // Scoped to a.hospitality_company_id = ANY(companyIds) — same guard as the RFQ branch.
+  getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+    return db.any(
+      `SELECT nr.id                 AS round_id,
+              nr.round_number,
+              nr.created_at         AS round_created_at,
+              COUNT(*) OVER (PARTITION BY nr.source_id)::int AS total_rounds,
+              NULL::int             AS rfq_id,
+              a.arc_number          AS rfq_no,
+              a.title               AS title,
+              0                     AS is_tender,
+              a.hotel_id,
+              h.name                AS hotel_name,
+              a.department_id,
+              d.title               AS department_title,
+              nr.status             AS round_status,
+              nr.end_date,
+              nr.approved_at,
+              nr.published_at,
+              nr.closed_at,
+              COALESCE(array_length(nr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN nr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN nr.status = 'ACTIVE'
+                     AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN nr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN nr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN nr.status = 'COMPLETED' THEN 'completed'
+                WHEN nr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors,
+              'ARC'::text           AS source_type,
+              a.id                  AS arc_id,
+              a.arc_number          AS arc_number
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_arc a ON a.id = nr.source_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+         LEFT JOIN tbl_department d ON d.id = a.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.arc_item_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = nr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT pv.name) FILTER (WHERE pv.name IS NOT NULL) AS item_names
+             FROM tbl_arc_item ai
+             LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+            WHERE ai.id = nr.arc_item_id
+               OR ai.id IN (
+                 SELECT (p_->>'arc_item_id')::int
+                   FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                  WHERE p_->>'arc_item_id' IS NOT NULL
+               )
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM unnest(COALESCE(nr.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+         ) vend ON TRUE
+        WHERE nr.source_type = 'ARC'
+          AND ($1::int[] IS NULL OR a.hospitality_company_id = ANY($1::int[]))
+          AND ($2::int IS NULL OR a.hotel_id = $2)
         ORDER BY nr.created_at DESC`,
       [companyIds, hotelId]
     );

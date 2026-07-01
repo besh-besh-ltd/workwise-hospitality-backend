@@ -2761,6 +2761,7 @@ const NegotiationController = {
       const body = req.body || {};
       const BUCKETS = ['pending', 'active', 'awaiting', 'completed', 'cancelled'];
       const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      const source = ['all', 'RFQ', 'ARC'].includes(body.source) ? body.source : 'all';
       const search = (body.search || '').toString().trim().toLowerCase() || null;
       const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
@@ -2774,7 +2775,15 @@ const NegotiationController = {
       };
 
       // 1. fetch the full scoped set — ONE ROW PER ROUND.
-      const rows = await negotiationModel.getNegotiationRoundList({ companyIds });
+      // Always fetch both branches so source_counts reflects the full union totals.
+      const [rfqRows, arcRows] = await Promise.all([
+        negotiationModel.getNegotiationRoundList({ companyIds }),
+        negotiationModel.getArcNegotiationRoundList({ companyIds }),
+      ]);
+      const allRows = [...rfqRows, ...arcRows];
+      const source_counts = { all: allRows.length, RFQ: rfqRows.length, ARC: arcRows.length };
+      // Narrow to the requested source AFTER computing counts.
+      const rows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
 
       // 2. bucket + pending-for-me stamping (per round).
       const NEG_BUCKET = { pending_approval: 'pending', active: 'active', awaiting_decision: 'awaiting', completed: 'completed', cancelled: 'cancelled' };
@@ -2838,7 +2847,7 @@ const NegotiationController = {
       const total = filtered.length;
       const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
 
-      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit } });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);
