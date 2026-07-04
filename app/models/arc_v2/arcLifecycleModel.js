@@ -2,6 +2,7 @@ import db from '../../config/dbConn.js';
 import arcModel from './arcModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { windowClosed as windowClosedIst } from '../../helper/arcTime.js';
+import rbacModel from '../rbacModel.js';
 
 /**
  * ARC v2 — Lifecycle stage state machine.
@@ -31,6 +32,49 @@ const STAGE_LABEL = {
   commercial: 'Commercial',
   awarding:   'Awarding',
   active:     'Contract Active',
+};
+
+const STAGE_FLOW = {
+  overview:   {
+    action_taker_role: 'Buyer (creator)',
+    evaluator_perm: null,
+    approver_source: 'publishApproval',
+    approver_role: 'Publish approver',
+    next_stage: 'technical',
+    note: 'Floats the ARC; invited vendors then submit sealed bids.',
+  },
+  technical:  {
+    action_taker_role: 'Technical evaluator',
+    evaluator_perm: ['arc-tech', 'evaluate'],
+    approver_source: 'techApproval',
+    approver_role: 'Technical approver',
+    next_stage: 'commercial',
+    note: 'Scores each vendor per clause, submits for approval.',
+  },
+  commercial: {
+    action_taker_role: 'Commercial evaluator',
+    evaluator_perm: ['arc-comm', 'evaluate'],
+    approver_source: 'committeeApproval',
+    approver_role: 'Award committee',
+    next_stage: 'awarding',
+    note: 'Allocates awards and finalizes; committee ratifies at Awarding.',
+  },
+  awarding:   {
+    action_taker_role: 'Commercial evaluator',
+    evaluator_perm: ['arc-comm', 'evaluate'],
+    approver_source: 'committeeApproval',
+    approver_role: 'Award committee',
+    next_stage: 'active',
+    note: 'Sends award proposals to the committee for approval.',
+  },
+  active:     {
+    action_taker_role: 'Awarded vendor',
+    evaluator_perm: null,
+    approver_source: null,
+    approver_role: null,
+    next_stage: null,
+    note: 'Vendor signs to activate; then contract is live.',
+  },
 };
 
 const ENDED_STATUSES  = ['expired', 'terminated', 'closed_no_award'];
@@ -83,6 +127,166 @@ async function loadInstance(runner, entityType, arcId, userId) {
     completed_at: instance.completed_at,
     can_user_approve: canUserApprove,
   };
+}
+
+/** Load current-step approvers for a pending approval instance. Returns step metadata + people[]. */
+async function loadCurrentApprovers(runner, instanceId, currentStep) {
+  const rows = await runner.any(
+    `SELECT s.step_order, s.decision_rule, s.status AS step_status,
+            (SELECT COUNT(*)::int FROM tbl_approval_instance_steps WHERE approval_instance_id = $1) AS total_steps,
+            sa.approver_user_id AS user_id, sa.status,
+            u.name, u.designation, u.email, u.mobile,
+            (SELECT d.title FROM tbl_user_department ud
+               JOIN tbl_department d ON d.id = ud.department_id
+              WHERE ud.user_id = u.id ORDER BY ud.id DESC LIMIT 1) AS department
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+       JOIN tbl_users u ON u.id = sa.approver_user_id
+      WHERE s.approval_instance_id = $1 AND s.step_order = $2`,
+    [instanceId, currentStep]
+  );
+  if (!rows || rows.length === 0) {
+    return { step_order: currentStep, total_steps: 1, decision_rule: 'ANY', people: [] };
+  }
+  const first = rows[0];
+  return {
+    step_order: Number(first.step_order),
+    total_steps: Number(first.total_steps),
+    decision_rule: first.decision_rule || 'ANY',
+    people: rows.map((r) => ({
+      user_id: Number(r.user_id),
+      name: r.name,
+      designation: r.designation || null,
+      department: r.department || null,
+      email: r.email,
+      mobile: r.mobile || null,
+      status: r.status,
+    })),
+  };
+}
+
+function fmtStep(cur) {
+  const rule = cur.decision_rule === 'ALL' ? ' · all must approve' : ' · any one approves';
+  return `Level ${cur.step_order} of ${cur.total_steps}${rule}`;
+}
+
+/** Get users who have the given module permission in the ARC's hotel+dept scope. */
+async function resolveEvaluators(arc, evaluatorPerm) {
+  if (!evaluatorPerm || !evaluatorPerm.length || !arc.hotel_id) return [];
+  try {
+    const rows = await rbacModel.getUsersWithModuleActionsForHotels(
+      [arc.hotel_id],
+      evaluatorPerm[0],
+      [evaluatorPerm[1]],
+      arc.department_id || null
+    );
+    return (rows || []).map((r) => ({ user_id: Number(r.id), name: r.name, email: r.email }));
+  } catch {
+    return [];
+  }
+}
+
+function deriveContact(stage, approver, evaluators) {
+  // Pending approval → contact the first pending approver
+  if (approver?.status === 'PENDING' && approver.people && approver.people.length > 0) {
+    const pendingPeople = approver.people.filter((p) => p.status === 'PENDING');
+    const people = pendingPeople.length > 0 ? pendingPeople : approver.people;
+    const first = people[0];
+    return {
+      name: first.name,
+      role: approver.role,
+      email: first.email,
+      mobile: first.mobile || null,
+      plus: people.length > 1 ? people.length - 1 : undefined,
+    };
+  }
+  // Active/partial stage and evaluators exist → contact the first evaluator
+  if (['active', 'partial'].includes(stage.state) && evaluators.length > 0) {
+    const first = evaluators[0];
+    return {
+      name: first.name,
+      role: STAGE_FLOW[stage.key]?.action_taker_role || 'Evaluator',
+      email: first.email,
+      mobile: first.mobile || null,
+    };
+  }
+  return null;
+}
+
+/** Attach read-only flow + actors to each stage (only when withActors=true on the GET endpoint). */
+async function attachStageActors(stages, arc, facts, { userId } = {}) {
+  for (const stage of stages) {
+    const sf = STAGE_FLOW[stage.key];
+    if (!sf) continue;
+
+    stage.flow = {
+      action_taker_role: sf.action_taker_role,
+      approver_role: sf.approver_role,
+      note: sf.note,
+      next_stage: sf.next_stage,
+    };
+
+    // Evaluators (people who can take the action)
+    const evaluators = sf.evaluator_perm
+      ? await resolveEvaluators(arc, sf.evaluator_perm)
+      : [];
+
+    // Approver — a skipped stage has no approval instance, so it has no approver.
+    let approver = null;
+    if (sf.approver_source && stage.state !== 'skipped') {
+      const inst = facts[sf.approver_source] || null;
+      if (!inst) {
+        approver = {
+          role: sf.approver_role,
+          status: 'NONE',
+          step_label: null,
+          people: [],
+          can_user_approve: false,
+          unassigned: true,
+        };
+      } else if (inst.status === 'PENDING') {
+        const cur = await loadCurrentApprovers(
+          facts._runner,
+          inst.instance_id,
+          inst.current_step
+        );
+        approver = {
+          role: sf.approver_role,
+          status: 'PENDING',
+          step_label: fmtStep(cur),
+          people: cur.people,
+          can_user_approve: !!inst.can_user_approve,
+          unassigned: cur.people.length === 0,
+        };
+      } else {
+        // APPROVED or REJECTED
+        approver = {
+          role: sf.approver_role,
+          status: inst.status,
+          step_label: null,
+          people: [],
+          can_user_approve: false,
+          unassigned: false,
+        };
+      }
+    }
+
+    // Contact: who to reach to unblock this stage right now
+    const contact = deriveContact(stage, approver, evaluators);
+
+    stage.actors = {
+      action_taker: {
+        role: sf.action_taker_role,
+        people: evaluators,
+        note: sf.note,
+      },
+      approver,
+      next_stage: sf.next_stage
+        ? { key: sf.next_stage, label: STAGE_LABEL[sf.next_stage] }
+        : null,
+      contact,
+    };
+  }
 }
 
 /** All the facts the state rules need, in a handful of queries. */
@@ -217,6 +421,7 @@ async function gatherFacts(runner, arc, userId) {
     committeeApproval,
     publishApproval,
     negotiationInProgress,
+    _runner: runner,
   };
 }
 
@@ -387,7 +592,7 @@ const arcLifecycleModel = {
    * floated→submission_closed once the window has passed — idempotent,
    * event-logged, never run from write-path guards.
    */
-  computeLifecycle: async (arcId, { userId = null, lazyFlip = false, txContext = null } = {}) => {
+  computeLifecycle: async (arcId, { userId = null, lazyFlip = false, txContext = null, withActors = false } = {}) => {
     const runner = txContext || db;
     let arc = await runner.oneOrNone(
       `SELECT a.*, cat.title AS category_title, h.name AS hotel_name,
@@ -420,6 +625,9 @@ const arcLifecycleModel = {
 
     const facts = await gatherFacts(runner, arc, userId);
     const { stages, default_stage } = deriveStages(arc, facts);
+    if (withActors) {
+      await attachStageActors(stages, arc, facts, { userId });
+    }
     return {
       arc,
       current_status: arc.status,

@@ -33,6 +33,8 @@ const BUYER  = IDS.users.a1_proc_buyer;
 const TECH_APPROVER = IDS.users.a1_proc_techApp;
 const COMMITTEE_APPROVER = IDS.users.a1_proc_finance;
 const READER = IDS.users.a1_eng_buyer; // gets a seeded arc-tech.read scope
+// Cross-tenant user: mapped only to Hospitality B (hotels B1/B2), never to A1.
+const CROSS_TENANT = IDS.users.companyB_admin;
 const VENDOR_A = IDS.users.vendor_alpha;
 const VENDOR_B = IDS.users.vendor_beta;
 const CATEGORY = TEST_CATEGORIES.beverages;
@@ -47,17 +49,20 @@ const READER_SCOPE_ID   = 95001;
 const stageOf = (body, key) => body.data.stages.find((s) => s.key === key);
 
 describe("ARC lifecycle — stage state machine end-to-end", () => {
-  let buyerClient, techApproverClient, committeeApproverClient, readerClient;
+  let buyerClient, techApproverClient, committeeApproverClient, readerClient, crossTenantClient;
   let arcId, skipArcId, endedArcId;
   let itemIds = [], clauseIds = [], responseIdsA = [], responseIdsB = [];
 
   beforeAll(async () => {
-    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id IN ($1,$2,$3,$4)`,
-      [BUYER, TECH_APPROVER, COMMITTEE_APPROVER, READER]);
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id IN ($1,$2,$3,$4,$5)`,
+      [BUYER, TECH_APPROVER, COMMITTEE_APPROVER, READER, CROSS_TENANT]);
+    // Seed mobile for TECH_APPROVER so contact.mobile is non-null in actors payload.
+    await db.none(`UPDATE tbl_users SET mobile = $1 WHERE id = $2`, ['+919812345678', TECH_APPROVER]);
     buyerClient = await httpClient(BUYER);
     techApproverClient = await httpClient(TECH_APPROVER);
     committeeApproverClient = await httpClient(COMMITTEE_APPROVER);
     readerClient = await httpClient(READER);
+    crossTenantClient = await httpClient(CROSS_TENANT);
     // BUYER drives the gated evaluation endpoints (requireArcPermission).
     await seedArcEvalPerms(db, [BUYER]);
 
@@ -203,6 +208,8 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     await db.none(`DELETE FROM tbl_role_permissions WHERE role_id = $1`, [READER_ROLE_ID]);
     await db.none(`DELETE FROM tbl_roles WHERE id = $1`, [READER_ROLE_ID]);
     await db.none(`DELETE FROM tbl_permissions WHERE id = $1`, [PERM_TECH_READ_ID]);
+    // Reset seeded mobile on TECH_APPROVER.
+    await db.none(`UPDATE tbl_users SET mobile = NULL WHERE id = $1`, [TECH_APPROVER]);
     await cleanupArcEvalPerms(db, [BUYER]);
     await db.none(`DELETE FROM tbl_arc_contract_line WHERE arc_contract_id IN (SELECT id FROM tbl_arc_contract WHERE arc_id = ANY($1::bigint[]))`, [arcIds]);
     await db.none(`DELETE FROM tbl_arc_contract WHERE arc_id = ANY($1::bigint[])`, [arcIds]);
@@ -221,6 +228,19 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(res.body.data.default_stage).toBe("overview");
     expect(stageOf(res.body, "overview").counts.invited).toBe(2);
     expect(stageOf(res.body, "overview").counts.submitted).toBe(2);
+
+    // NEW: actors/flow — locked stage (commercial still locked at this point).
+    const commercial1 = stageOf(res.body, "commercial");
+    expect(commercial1.flow).toBeDefined();
+    expect(commercial1.flow.next_stage).toBe("awarding");
+    expect(commercial1.flow.action_taker_role).toBe("Commercial evaluator");
+    expect(commercial1.actors).toBeDefined();
+    expect(commercial1.actors.contact).toBeNull();
+    // Technical locked: flow present, no contact
+    const technical1 = stageOf(res.body, "technical");
+    expect(technical1.flow).toBeDefined();
+    expect(technical1.flow.next_stage).toBe("commercial");
+    expect(technical1.actors.contact).toBeNull();
   });
 
   test("2. window passed: GET lazily flips status and technical activates", async () => {
@@ -299,6 +319,56 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
 
     const asApprover = await techApproverClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
     expect(stageOf(asApprover.body, "technical").approval.can_user_approve).toBe(true);
+
+    // NEW: actors/flow assertions — technical stage pending
+    const techFlow = stageOf(asBuyer.body, "technical").flow;
+    const techActors = stageOf(asBuyer.body, "technical").actors;
+
+    // flow correctness: next_stage, roles
+    expect(techFlow.next_stage).toBe("commercial");
+    expect(techFlow.action_taker_role).toBe("Technical evaluator");
+    expect(techFlow.approver_role).toBe("Technical approver");
+
+    // approver resolved — PENDING instance, people includes TECH_APPROVER
+    expect(techActors.approver.status).toBe("PENDING");
+    expect(techActors.approver.step_label).toBe("Level 1 of 1 · all must approve");
+    const approverUserIds = techActors.approver.people.map((p) => p.user_id);
+    expect(approverUserIds).toContain(TECH_APPROVER);
+    const techAppPerson = techActors.approver.people.find((p) => p.user_id === TECH_APPROVER);
+    expect(techAppPerson.name).toBeTruthy();
+    expect(techAppPerson.email).toBeTruthy();
+
+    // contact — seeded mobile '+919812345678' must appear
+    expect(techActors.contact).not.toBeNull();
+    expect(techActors.contact.mobile).toBe("+919812345678");
+    expect(techActors.contact.name).toBeTruthy();
+    expect(techActors.contact.email).toBeTruthy();
+    expect(techActors.contact.role).toBe("Technical approver");
+
+    // action_taker resolved (BUYER has arc-tech.evaluate in this hotel/dept)
+    expect(techActors.action_taker.people.length).toBeGreaterThan(0);
+
+    // next_stage object
+    expect(techActors.next_stage).toMatchObject({ key: "commercial" });
+
+    // can_user_approve gating: BUYER → false (already confirmed via approval block above)
+    expect(techActors.approver.can_user_approve).toBe(false);
+
+    // can_user_approve: TECH_APPROVER → true (uses asApprover already fetched above)
+    const techActorsApprover = stageOf(asApprover.body, "technical").actors;
+    expect(techActorsApprover.approver.can_user_approve).toBe(true);
+
+    // can_user_approve: READER → false (different dept, not an approver)
+    const asReaderLifecycle = await readerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(stageOf(asReaderLifecycle.body, "technical").actors.approver.can_user_approve).toBe(false);
+
+    // scope isolation: READER (a1_eng_buyer, Engineering dept) must NOT appear
+    // in either approver.people or action_taker.people (ARC scoped to Procurement dept)
+    const allActorIds = [
+      ...techActors.approver.people.map((p) => p.user_id),
+      ...techActors.action_taker.people.map((p) => p.user_id),
+    ];
+    expect(allActorIds).not.toContain(READER);
 
     // Re-submit while pending is blocked.
     const again = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/tech-eval/submit`).send({});
@@ -402,6 +472,16 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
 
     const asCommittee = await committeeApproverClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
     expect(stageOf(asCommittee.body, "awarding").approval.can_user_approve).toBe(true);
+
+    // NEW: awarding actors/flow assertions
+    const awardingFlow = stageOf(res.body, "awarding").flow;
+    const awardingActors = stageOf(res.body, "awarding").actors;
+    expect(awardingFlow.next_stage).toBe("active");
+    expect(awardingActors.approver.status).toBe("PENDING");
+    expect(awardingActors.approver.people.map((p) => p.user_id)).toContain(COMMITTEE_APPROVER);
+    // NULL-safe mobile: COMMITTEE_APPROVER has no mobile seeded → contact.mobile null
+    expect(awardingActors.contact).not.toBeNull();
+    expect(awardingActors.contact.mobile).toBeNull();
   });
 
   test("8. committee approval completes awarding and activates the contract stage", async () => {
@@ -415,6 +495,13 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(stageOf(res.body, "active")).toMatchObject({ state: "active", reason: "awaiting_vendor_acceptance" });
     expect(stageOf(res.body, "active").counts.contracts_total).toBe(1);
     expect(res.body.data.default_stage).toBe("active");
+
+    // NEW: active stage is terminal — approver null, next_stage null, contact null
+    const activeActors = stageOf(res.body, "active").actors;
+    const activeFlow = stageOf(res.body, "active").flow;
+    expect(activeActors.approver).toBeNull();
+    expect(activeFlow.next_stage).toBeNull();
+    expect(activeActors.contact).toBeNull();
   });
 
   test("9. zero clauses → technical skipped, commercial opens directly", async () => {
@@ -422,6 +509,11 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(stageOf(res.body, "technical")).toMatchObject({ state: "skipped", reason: "no_clauses_configured" });
     expect(stageOf(res.body, "commercial")).toMatchObject({ state: "active" });
     expect(res.body.data.default_stage).toBe("commercial");
+
+    // NEW: skipped technical — flow present, approver null (no ARC_TECH instance ever spawned)
+    const skipTech = stageOf(res.body, "technical");
+    expect(skipTech.flow.next_stage).toBe("commercial");
+    expect(skipTech.actors.approver).toBeNull();
   });
 
   test("10. terminated ARC → active stage ended and is the default", async () => {
@@ -463,5 +555,19 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     // Tech approver has no module roles whatsoever → tech read denied too.
     const approverDenied = await techApproverClient.get(`/api/v1/arc-v2/evaluation/items/${itemIds[0]}/tech-eval`);
     expect(approverDenied.status).toBe(403);
+  });
+
+  test("13. cross-tenant caller receives 403 on GET lifecycle (P0 tenant guard)", async () => {
+    // CROSS_TENANT (companyB_admin) is mapped only to Hospitality B / Hotels B1+B2.
+    // The ARC belongs to Hotel A1 under Hospitality A — entirely different tenant.
+    // Before the fix this returned 200 and leaked approver/evaluator PII.
+    const denied = await crossTenantClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(denied.status).toBe(403);
+    expect(denied.body.message).toMatch(/do not have access/i);
+
+    // Sanity: the in-scope buyer still gets 200.
+    const allowed = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.data.arc).toBeDefined();
   });
 });

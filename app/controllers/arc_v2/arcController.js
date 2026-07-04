@@ -886,8 +886,13 @@ export async function getLifecycle(req, res) {
   try {
     const id = Number(req.params.id);
     const userId = req.user?.id;
-    const lifecycle = await arcLifecycleModel.computeLifecycle(id, { userId, lazyFlip: true });
+    const lifecycle = await arcLifecycleModel.computeLifecycle(id, { userId, lazyFlip: true, withActors: true });
     if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
+    // Tenant guard — the lifecycle now carries approver/evaluator PII (names,
+    // emails, mobiles), so it must not be cross-tenant readable. Mirror getById.
+    if (!(await userCanAccessHotel(req, lifecycle.arc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
 
     // Caller's ARC permissions in THIS ARC's scope. Super admin sees all.
     let permissions;
