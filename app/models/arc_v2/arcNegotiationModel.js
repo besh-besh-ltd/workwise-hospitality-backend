@@ -82,16 +82,40 @@ const arcNegotiationModel = {
   },
 
   /** All rounds for an ARC with item-name decoration (item-level and arc-level). */
-  getRoundsForArc: async (arcId, txContext = null) => {
+  getRoundsForArc: async (arcId, userId = null, txContext = null) => {
     return (txContext || db).any(
       `SELECT nr.*,
-              pv.name AS arc_item_name
+              pv.name AS arc_item_name,
+              -- The approve/reject action belongs to the round's ARC_NEGOTIATION
+              -- approval instance's CURRENT-step PENDING approver — NOT to anyone
+              -- holding the arc-comm.evaluate permission. Surface can_user_approve
+              -- (+ the pending approver's name) so the FE gates the button on the
+              -- real approver, mirroring arcLifecycleModel.loadInstance and the
+              -- engine check in executeApprovalAction.
+              (nr.status = 'PENDING_APPROVAL' AND COALESCE(appr.is_me, false)) AS can_user_approve,
+              appr.pending_approver
          FROM tbl_negotiation_rounds nr
          LEFT JOIN tbl_arc_item ai ON ai.id = nr.arc_item_id
          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+         LEFT JOIN LATERAL (
+           SELECT id AS instance_id, current_step
+             FROM tbl_approval_instances
+            WHERE entity_type = 'ARC_NEGOTIATION' AND entity_id = nr.id
+            ORDER BY created_at DESC
+            LIMIT 1
+         ) inst ON true
+         LEFT JOIN LATERAL (
+           SELECT bool_or(sa.approver_user_id = $2 AND sa.status = 'PENDING') AS is_me,
+                  MIN(CASE WHEN sa.status = 'PENDING' THEN u.name END) AS pending_approver
+             FROM tbl_approval_instance_steps s
+             JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+             JOIN tbl_users u ON u.id = sa.approver_user_id
+            WHERE s.approval_instance_id = inst.instance_id
+              AND s.step_order = inst.current_step
+         ) appr ON true
         WHERE nr.source_type = 'ARC' AND nr.source_id = $1
         ORDER BY nr.round_number DESC`,
-      [arcId]
+      [arcId, userId]
     );
   },
 

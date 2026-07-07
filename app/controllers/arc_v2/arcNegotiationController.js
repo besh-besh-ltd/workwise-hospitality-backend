@@ -392,7 +392,10 @@ export async function rejectRound(req, res) {
 export async function listRounds(req, res) {
   try {
     const arcId = Number(req.params.arcId);
-    const rounds = await arcNegotiationModel.getRoundsForArc(arcId);
+    const userId = req.user?.id;
+    // Pass userId so each round carries can_user_approve (the REAL approver check),
+    // not just the arc-comm.evaluate permission the FE previously fell back to.
+    const rounds = await arcNegotiationModel.getRoundsForArc(arcId, userId);
 
     // Compute effective status (lazy-flip)
     const enriched = rounds.map((r) => {
