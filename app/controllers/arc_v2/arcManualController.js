@@ -11,6 +11,7 @@ import { dispatch as dispatchNotification } from '../../services/notificationSer
 import { sendMail } from '../../helper/common.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
+import { financialYearOf, currentFinancialYearIst } from '../../helper/financialYear.js';
 
 /**
  * ARC v2 — Manual / backfill data-entry controller (spec §6).
@@ -42,13 +43,6 @@ function ok(res, data, message = 'success') {
 }
 function bad(res, status, message, code = 0) {
   return res.status(status).json({ status: code, message });
-}
-
-function generateArcNumber(now = new Date()) {
-  const yyyy = now.getFullYear();
-  const stamp = now.getTime().toString(36).toUpperCase();
-  const rand = Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0');
-  return `ARC-${yyyy}-${stamp}${rand}`;
 }
 
 // Authorization: may this caller act on the given hotel? Super-admin (user_type 8)
@@ -254,20 +248,28 @@ export async function createDraft(req, res) {
       return bad(res, 403, 'You do not have access to this hotel');
     }
 
-    // arc_number: blank → server-generated; supplied → respected but UNIQUE-checked.
-    let arcNumber = typeof header.arc_number === 'string' ? header.arc_number.trim() : '';
-    if (arcNumber) {
-      const existing = await arcModel.getByNumber(arcNumber);
-      if (existing) return bad(res, 409, `ARC number ${arcNumber} already exists`, 0);
-    } else {
-      arcNumber = generateArcNumber();
-    }
-
+    // Resolve provenance.created_at first — it drives BOTH the backdated row
+    // and (below) which FY the auto-generated serial belongs to.
     const createdAt = body.provenance?.created_at ? toDate(body.provenance.created_at) : null;
     if (createdAt === undefined) return bad(res, 400, 'provenance.created_at is not a valid date');
     if (createdAt && createdAt.getTime() > Date.now()) return bad(res, 400, 'provenance.created_at cannot be in the future');
 
+    // arc_number: blank → server-generated (FY-formatted, minted inside the tx
+    // below); supplied → respected as-is but UNIQUE-checked here.
+    let arcNumber = typeof header.arc_number === 'string' ? header.arc_number.trim() : '';
+    if (arcNumber) {
+      const existing = await arcModel.getByNumber(arcNumber);
+      if (existing) return bad(res, 409, `ARC number ${arcNumber} already exists`, 0);
+    }
+
     const result = await db.tx(async (t) => {
+      if (!arcNumber) {
+        // Use the backdated created_at's FY when supplied (so a historical
+        // backfill lands in its true FY), else today's IST FY — minted inside
+        // this tx via the same atomic per-FY upsert as the live create path.
+        const fy = createdAt ? financialYearOf(createdAt) : currentFinancialYearIst();
+        arcNumber = await arcModel.nextArcNumber(fy, t);
+      }
       const arc = await arcManualEntryModel.createBackdatedDraft({
         arc_number: arcNumber,
         title,

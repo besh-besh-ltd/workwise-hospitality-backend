@@ -1,5 +1,6 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
+import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
@@ -8,7 +9,8 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { sendMail } from '../../helper/common.js';
-import { arcMomentIst, windowClosed } from '../../helper/arcTime.js';
+import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/arcTime.js';
+import { currentFinancialYearIst } from '../../helper/financialYear.js';
 import {
   createApprovalInstance,
   findBestMatchingPolicyTx,
@@ -42,15 +44,6 @@ function bad(res, status, message, code = 0) {
   return res.status(status).json({ status: code, message });
 }
 
-function generateArcNumber(now = new Date()) {
-  const yyyy = now.getFullYear();
-  // Wide, time-seeded suffix to avoid collisions on the UNIQUE arc_number
-  // (audit L1) — the old 4-digit random had only ~9000 values/year.
-  const stamp = now.getTime().toString(36).toUpperCase();
-  const rand = Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0');
-  return `ARC-${yyyy}-${stamp}${rand}`;
-}
-
 // Authorization: may this caller act on the given hotel? Super admin
 // (user_type 8) bypasses; everyone else must have the hotel in their
 // accessible set. Scope is derived from the entity's hotel_id — never trusted
@@ -66,7 +59,13 @@ async function userCanAccessHotel(req, hotelId) {
 // and post-commit: a notification/email failure must NEVER roll back or block
 // the float. In-app/push/socket goes via notificationService.dispatch; email
 // is fire-and-forget on top.
-async function notifyVendorsOfFloat(arc, invitations, actorId) {
+//
+// Exported (Sr 27 / Option C) so the ARC submission-open sweep
+// (arcSubmissionOpenService.js) can fire this EXACT same notification later,
+// for an ARC that floated with a future submission_start_at — one notify
+// implementation, two callers (immediate float below, or the deferred sweep),
+// never a parallel copy.
+export async function notifyVendorsOfFloat(arc, invitations, actorId) {
   const vendorIds = invitations.map((i) => Number(i.vendor_id)).filter(Boolean);
   if (vendorIds.length === 0) return;
   const deadline = arc.submission_end_at ? arcMomentIst(arc.submission_end_at).format('DD MMM YYYY') : null;
@@ -177,8 +176,8 @@ export async function createDraft(req, res) {
       return bad(res, 403, 'You do not have access to this hotel');
     }
     const data = {
-      // Always server-generated — never trust a client-supplied arc_number (L1).
-      arc_number: generateArcNumber(),
+      // arc_number is minted below, INSIDE the tx (FY-scoped atomic upsert) —
+      // never trust a client-supplied arc_number (L1).
       title,
       description: body.description,
       category_id: body.category_id,
@@ -206,7 +205,11 @@ export async function createDraft(req, res) {
       created_by: userId,
     };
     return db.tx(async (t) => {
-      const arc = await arcModel.createDraft(data, t);
+      // Mint the FY-scoped serial inside the tx that creates the ARC row, so a
+      // rollback never leaves the per-FY counter bumped without a matching ARC
+      // (skipped serial on rollback is fine; a duplicate would not be).
+      const arcNumber = await arcModel.nextArcNumber(currentFinancialYearIst(), t);
+      const arc = await arcModel.createDraft({ ...data, arc_number: arcNumber }, t);
       // Seed items if any were provided up-front (multi-step wizard might add them later via PATCH).
       const items = Array.isArray(body.items) ? body.items : [];
       const createdItems = [];
@@ -242,8 +245,83 @@ export async function updateDraft(req, res) {
     if (!['draft','publish_rejected'].includes(existing.status)) {
       return bad(res, 409, 'Only drafts can be edited');
     }
-    const updated = await arcModel.updateDraft(id, body);
-    return ok(res, { arc: updated }, 'ARC draft updated');
+    // Security-first (audit C4 pattern — mirrors createDraft/publish/getById):
+    // reload-and-verify the draft belongs to a hotel the caller can act on
+    // before mutating it. Without this the :id path param alone would let any
+    // authenticated buyer PATCH (and now, with the item/invitation persistence
+    // below, meaningfully mutate) another tenant's draft ARC.
+    if (!(await userCanAccessHotel(req, existing.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract');
+    }
+
+    // GROUP D (Sr 17/20 fix): updateDraft previously only whitelisted scalar
+    // columns (see arcModel.updateDraft), so re-saving a RESUMED draft silently
+    // dropped item / vendor-invitation edits — a data-loss trap for the new
+    // "Save draft & exit" round-trip. Reconcile the item set and invitation
+    // list here too, mirroring how createDraft seeds them, all inside one tx.
+    const result = await db.tx(async (t) => {
+      const updated = await arcModel.updateDraft(id, body, t);
+
+      // Item set — delete/update/insert so add, edit (spec/qty/uom), and
+      // remove of items on a resumed draft all persist. Only reconciled when
+      // the caller actually sent an `items` array, so a scalar-only PATCH
+      // (e.g. `{ type: 'service' }`) never touches — let alone wipes — it.
+      let items = await arcModel.listItems(id, t);
+      if (Array.isArray(body.items)) {
+        const incoming = body.items.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
+        const byVariant = new Map(items.map((it) => [Number(it.product_variant_id), it]));
+        const keepVariantIds = new Set(incoming.map((it) => Number(it.product_variant_id)));
+        // Drop items the wizard no longer has selected. tbl_arc_item_tech_evaluation
+        // (and its clauses) cascade-delete with the item, so no orphaned rows.
+        for (const existingItem of items) {
+          if (!keepVariantIds.has(Number(existingItem.product_variant_id))) {
+            await arcModel.removeItem(existingItem.id, t);
+          }
+        }
+        const nextItems = [];
+        for (const it of incoming) {
+          const match = byVariant.get(Number(it.product_variant_id));
+          nextItems.push(match
+            ? await arcModel.updateItem(match.id, {
+                spec_text: it.spec_text || '',
+                indicative_qty: it.indicative_qty,
+                uom: it.uom || null,
+              }, t)
+            : await arcModel.addItem(id, it, t));
+        }
+        items = nextItems;
+      }
+
+      // Vendor invitations — same delete-and-replace `setInvitations` createDraft
+      // uses, so invitation-only eligibility edits on a resumed draft persist too.
+      if (Array.isArray(body.invited_vendor_ids)) {
+        await arcModel.setInvitations(id, body.invited_vendor_ids, t);
+      }
+
+      // Tech-eval teardown (review P2): reconcile which items still require a
+      // technical envelope. `tech_item_variant_ids` is the FE's current set of
+      // tech-ON items (with clauses) for this save — mirrored from what it's
+      // about to (re)persist via persistTechEval/setupTechEval right after this
+      // call. Only runs when the caller explicitly sent the array (same gating
+      // as items/invited_vendor_ids above), so a caller that never sends it
+      // (e.g. a scalar-only PATCH, or an older client) never wipes existing
+      // config. Any item in the reconciled `items` list whose variant is NOT
+      // in the keep-set had its tech-eval toggled off — tear its
+      // tbl_arc_item_tech_evaluation row (+ clauses) down so vendors are no
+      // longer asked to seal an envelope / be tech-scored for it.
+      if (Array.isArray(body.tech_item_variant_ids)) {
+        const keepVariantIds = new Set(body.tech_item_variant_ids.map(Number));
+        for (const it of items) {
+          if (!keepVariantIds.has(Number(it.product_variant_id))) {
+            await arcEvalModel.deleteTechEvalForItem(it.id, t);
+          }
+        }
+      }
+
+      return { updated, items };
+    });
+
+    return ok(res, { arc: result.updated, items: result.items }, 'ARC draft updated');
   } catch (err) {
     logger.error({ err }, '[arcController.updateDraft]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -418,7 +496,19 @@ export async function handleArcPublishApproval(approvalInstanceId, approverUserI
     });
     // Vendor notify AFTER commit (only when we actually floated).
     if (floatResult?.floated) {
-      await notifyVendorsOfFloat(floatResult._notifyArc, floatResult.invitations, floatResult._actorId);
+      // Sr 27 (Option C): defer the vendor "it's open for quotes" notification
+      // when the submission window has not started yet — a vendor must not be
+      // told a rate contract is open before submission_start_at. The ARC
+      // submission-open sweep (arcSubmissionOpenService.js) fires this exact
+      // notification (+ logs SUBMISSION_OPENED) once the start passes.
+      // Immediate float (no start, or start already <= now) still notifies
+      // right away, same as before this change, and is marked notified here.
+      if (!windowNotOpen(floatResult._notifyArc)) {
+        await notifyVendorsOfFloat(floatResult._notifyArc, floatResult.invitations, floatResult._actorId);
+        await logArcEvent({
+          arcId, eventType: ARC_EVENT_TYPES.SUBMISSION_OPENED, actorId: floatResult._actorId, payload: {},
+        });
+      }
       // Notify creator that their ARC is live (publish_approved = creator BOTH).
       await notifyArcEvent({
         arcId,
@@ -594,6 +684,13 @@ export async function terminate(req, res) {
     if (!reason) return bad(res, 400, 'reason is required');
     const arc = await arcModel.getById(id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
+    // Security-first (audit C4 pattern — mirrors createDraft/updateDraft/publish):
+    // reload-and-verify the ARC belongs to a hotel the caller can act on before
+    // mutating it. Without this the :id path param alone would let any
+    // authenticated buyer terminate another tenant's rate contract (IDOR).
+    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract');
+    }
     await db.tx(async (t) => {
       const updated = await arcModel.setStatus(id, 'terminated', { closed_reason: reason }, t);
       await logArcEvent({
@@ -607,6 +704,109 @@ export async function terminate(req, res) {
     await notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED, actorId: userId, payload: {} });
   } catch (err) {
     logger.error({ err }, '[arcController.terminate]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// POST /:id/extend-submission — buyer "Extend submission deadline" (Sr 40).
+// Lets the creator (or an authorized arc-comm evaluator) push the submission
+// window out AFTER it has passed — pre-evaluation only. Reopens a
+// 'submission_closed' ARC back to 'floated' so submitQuote's status + window
+// guards (arcVendorController.js:617/:621) both pass again, and re-notifies
+// every invited vendor (email + in-app), mirroring the float notify.
+// ============================================================
+export async function extendSubmission(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const userId = req.user?.id;
+    if (!id) return bad(res, 400, 'id is required');
+    if (!userId) return bad(res, 401, 'Authentication required');
+
+    const arc = await arcModel.getById(id);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+
+    // Tenant guard — reload-and-verify, never trust the :id param alone
+    // (security-first; mirrors getById/publish/terminate).
+    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
+
+    // Authorization: the ORIGINAL CREATOR may always extend their own ARC
+    // (even if they hold no arc-comm.* module role); otherwise the caller
+    // must hold arc-comm.evaluate or arc.admin in THIS ARC's own hotel/
+    // department scope — resolved server-side, never trusted from the client
+    // (same lookup getLifecycle/requireArcPermission use).
+    const isCreator = Number(arc.created_by) === Number(userId);
+    const isSuperAdmin = Number(req.user?.user_type) === 8;
+    let authorized = isCreator || isSuperAdmin;
+    if (!authorized && arc.hotel_id != null) {
+      const rows = await rbacModel.getUserPermissionsForHotels(
+        userId, [arc.hotel_id], null, arc.department_id || null
+      );
+      const held = new Set((rows || []).map((r) => `${r.resource}.${r.action}`));
+      authorized = held.has('arc-comm.evaluate') || held.has('arc.admin');
+    }
+    if (!authorized) {
+      return bad(res, 403, 'Only the creator or an authorized commercial evaluator can extend the submission deadline', 3);
+    }
+
+    // Status gate — pre-evaluation only (user-confirmed scope). Blocks
+    // tech_eval_*, comm_eval_*, committee/award, and every later status.
+    if (!['floated', 'submission_closed'].includes(arc.status)) {
+      return bad(res, 409, `Deadline can only be extended before evaluation begins (current status: ${arc.status})`);
+    }
+
+    // Validation — parse as IST wall-clock (arcMomentIst; never new Date(),
+    // which would shift the boundary on a UTC production runtime) and
+    // require strictly future relative to IST now.
+    const raw = req.body?.submission_end_at;
+    if (raw == null || typeof raw !== 'string' || !raw.trim()) {
+      return bad(res, 400, 'submission_end_at is required');
+    }
+    const newEnd = arcMomentIst(raw);
+    if (!newEnd || !newEnd.isValid()) {
+      return bad(res, 400, 'submission_end_at is not a valid date/time');
+    }
+    if (!newEnd.isAfter(nowIst())) {
+      return bad(res, 400, 'New deadline must be in the future');
+    }
+    // Extend-only: the new deadline must be LATER than the current one. This action
+    // extends/re-opens the window — it must never silently SHORTEN it and cut off
+    // vendors who were relying on the original deadline.
+    const curEnd = arc.submission_end_at ? arcMomentIst(arc.submission_end_at) : null;
+    if (curEnd && curEnd.isValid() && !newEnd.isAfter(curEnd)) {
+      return bad(res, 400, 'The new deadline must be later than the current deadline — you can only extend the submission window, not shorten it');
+    }
+
+    const previousStatus = arc.status;
+    const previousEnd = arc.submission_end_at;
+    const reopened = previousStatus === 'submission_closed';
+
+    let updatedArc;
+    await db.tx(async (t) => {
+      // Persist the raw wall-clock string VERBATIM — same IST-naive
+      // convention as createDraft/updateDraft; no new Date() round-trip.
+      updatedArc = await arcModel.extendSubmissionWindow(id, raw, { reopen: reopened }, t);
+      await logArcEvent({
+        arcId: id, eventType: ARC_EVENT_TYPES.EXTENDED, actorId: userId,
+        payload: { previous_end: previousEnd, new_end: raw, reopened, previous_status: previousStatus },
+        txContext: t,
+      });
+    });
+
+    // Post-commit, best-effort: re-notify every invited vendor (email + in-app)
+    // via the existing central fan-out (mirrors the float notify — audit C2
+    // pattern). A dispatch failure must never undo the extension.
+    await notifyArcEvent({
+      arcId: id, eventType: ARC_EVENT_TYPES.EXTENDED, actorId: userId,
+      payload: { newDeadline: newEnd.format('DD MMM YYYY, hh:mm A') },
+    });
+    // Respond AFTER commit (was inside the tx before).
+    return ok(res, { arc: updatedArc },
+      reopened ? 'Submission deadline extended — the window is open again' : 'Submission deadline extended');
+  } catch (err) {
+    logger.error({ err }, '[arcController.extendSubmission]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
@@ -1064,12 +1264,19 @@ export async function searchProductVariants(req, res) {
     // tbl_units.title, none of which exist, so it 500'd on every call and the
     // wizard's Items step silently showed "No items match".) COUNT(*) OVER()
     // returns the full pre-pagination total for the "Load more" affordance.
+    // Sr 7 root cause: a JOIN tbl_product_categories pc ON pc.product_id =
+    // pv.product_id WHERE pc.category_id = $1 multiplies a variant once per
+    // matching tbl_product_categories row — a product mapped more than once
+    // to the same category (the known duplicate-mapping situation) yielded
+    // duplicate rows and an inflated COUNT(*) OVER() total. EXISTS (mirroring
+    // the sub-cat clause above) makes the category filter non-multiplying so
+    // each variant appears once and the total is correct.
     const rows = await db.any(
       `SELECT pv.id, pv.name, pv.slug, pv.hsn_code AS hsn, NULL::text AS uom,
               COUNT(*) OVER()::int AS total_count
          FROM tbl_product_variant pv
-         JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
-        WHERE pc.category_id = $1
+        WHERE EXISTS (SELECT 1 FROM tbl_product_categories pc
+                      WHERE pc.product_id = pv.product_id AND pc.category_id = $1)
           AND ${conds.join(' AND ')}
         ORDER BY pv.name
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,

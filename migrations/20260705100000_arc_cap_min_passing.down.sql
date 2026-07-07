@@ -1,0 +1,5 @@
+-- Rollback: 20260705100000_arc_cap_min_passing
+-- No-op — this migration is a one-time DATA CLEANUP (UPDATE), not a schema
+-- change. The pre-cap values it corrected (e.g. 500) are NOT recoverable —
+-- there is no shadow/history column capturing the original stale value.
+-- Nothing to reverse.

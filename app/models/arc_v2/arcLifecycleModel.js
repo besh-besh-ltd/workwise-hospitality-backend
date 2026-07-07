@@ -3,6 +3,7 @@ import arcModel from './arcModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { windowClosed as windowClosedIst } from '../../helper/arcTime.js';
 import rbacModel from '../rbacModel.js';
+import arcEvalModel from './arcEvaluationModel.js';
 
 /**
  * ARC v2 — Lifecycle stage state machine.
@@ -320,6 +321,13 @@ async function gatherFacts(runner, arc, userId) {
   // EVERY clause across the whole ARC, AND every MANDATORY clause additionally
   // carries a non-null mandatory_passed verdict (a half-judged mandatory clause
   // must NOT make the stage look ready — two-envelope mandatory gate).
+  //
+  // Sr 54 — scoped to the in-eval shortlist: an 'on_hold' vendor is excluded
+  // so the "Submit evaluation" gate doesn't wait forever on a vendor who will
+  // never be scored. A vendor with NO shortlist row at all (shortlist not yet
+  // computed, or the vendor is otherwise untracked by it) is kept — the LEFT
+  // JOIN + `ts.id IS NULL` clause fails open, preserving pre-Sr54 behaviour
+  // whenever the shortlist doesn't apply.
   const scoring = await runner.one(
     `WITH arc_clauses AS (
        SELECT c.id, c.is_mandatory
@@ -335,6 +343,8 @@ async function gatherFacts(runner, arc, userId) {
               COUNT(*) FILTER (WHERE c.is_mandatory = TRUE AND r.mandatory_passed IS NULL)::int AS mandatory_unjudged
          FROM tbl_arc_item_tech_evaluation_vendors_response r
          JOIN arc_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+         LEFT JOIN tbl_arc_tech_shortlist ts ON ts.arc_id = $1 AND ts.vendor_id = r.vendor_id
+        WHERE ts.id IS NULL OR ts.status <> 'on_hold'
         GROUP BY r.vendor_id
      )
      SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
@@ -345,6 +355,13 @@ async function gatherFacts(runner, arc, userId) {
        FROM per_vendor`,
     [arcId]
   );
+
+  // Sr 54 — total participating / on-hold counts for the FE indicator, read
+  // straight off the shortlist table (populated at submission-close or lazily
+  // on first tech-eval read). Absent shortlist (technical skipped, or not yet
+  // computed) → both 0, which the FE only renders when on_hold > 0.
+  const shortlistRows = await arcEvalModel.getShortlist(arcId, runner);
+  const shortlistCounts = arcEvalModel.shortlistCounts(shortlistRows);
 
   const cleared = await runner.one(
     `SELECT COUNT(*)::int AS total,
@@ -410,6 +427,8 @@ async function gatherFacts(runner, arc, userId) {
     clauses_total: tech.clauses_total,
     vendors_in_play: scoring.vendors_in_play,
     vendors_fully_scored: scoring.vendors_fully_scored,
+    // Sr 54 — { total_participating, in_evaluation, on_hold }.
+    shortlistCounts,
     cleared_total: cleared.total,
     qualified_vendors: cleared.qualified,
     comm,
@@ -463,6 +482,11 @@ export function deriveStages(arc, f) {
     vendors_in_play: f.vendors_in_play,
     vendors_fully_scored: f.vendors_fully_scored,
     qualified_vendors: f.qualified_vendors,
+    // Sr 54 — total participating / on-hold, for the FE "Evaluating N of M"
+    // indicator on the timeline hero (0/0 when the shortlist hasn't been
+    // computed yet, e.g. technical skipped or window still open).
+    total_participating: f.shortlistCounts.total_participating,
+    on_hold: f.shortlistCounts.on_hold,
   };
   if (!windowClosed) {
     technical = { state: 'locked', reason: 'window_open' };

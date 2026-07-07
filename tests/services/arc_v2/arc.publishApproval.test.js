@@ -61,6 +61,15 @@ const BASE = "/api/v1/arc-v2";
 
 // Seed a complete, publishable invitation-type draft ARC with one item and a
 // pre-seeded invitation for vendor_alpha. Returns the arc id.
+//
+// submission_start_at is seeded already-open (NOW() - 1 hour), not in the
+// future: this suite exercises the ARC_PUBLISH approval gate itself (pending →
+// approved/rejected → floated), which is orthogonal to submission-window
+// timing. Sr 27 (Option C) hides a floated ARC from vendors + defers its float
+// notification while submission_start_at is still future — cases 3 and 6 below
+// assert immediate vendor visibility right after floating, so the window must
+// already be open for those assertions to hold. The hidden-until-open /
+// deferred-notification behavior itself is covered by arc.submissionOpen.test.js.
 async function seedDraftArc(arcNumber, { hotel = HOTEL, status = "draft" } = {}) {
   const arc = await db.one(
     `INSERT INTO tbl_arc
@@ -69,7 +78,7 @@ async function seedDraftArc(arcNumber, { hotel = HOTEL, status = "draft" } = {})
         submission_start_at, submission_end_at, contract_start_at, contract_end_at,
         payment_terms_expected, created_by)
      VALUES ($1, 'Publish-approval fixture', $2, $3, $4, $5, $6, $7, 'invitation',
-             NOW() + INTERVAL '1 day', NOW() + INTERVAL '7 days',
+             NOW() - INTERVAL '1 hour', NOW() + INTERVAL '7 days',
              NOW() + INTERVAL '14 days', NOW() + INTERVAL '200 days',
              'Net 30', $8) RETURNING id`,
     [arcNumber, CATEGORY, HC, hotel, DEPT, PROC, status, BUYER]

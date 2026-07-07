@@ -44,5 +44,10 @@ r.post('/:id/withdraw',        passportSignIn, acl([2, 8]), arcController.withdr
 // Publish-approval decide (approve/reject). Engine-gated inside the controller.
 r.post('/:id/publish-approval/decide', passportSignIn, acl([2, 8]), arcController.publishApprovalDecide);
 r.post('/:id/terminate',       passportSignIn, acl([2, 8]), arcController.terminate);
+// Sr 40 — buyer "Extend submission deadline" (pre-evaluation only). Auth is
+// creator-or-arc-comm, enforced INSIDE the controller (not requireArcPermission
+// at the route layer) so the original creator is never blocked for lacking an
+// arc-comm.* module role — see arcController.extendSubmission.
+r.post('/:id/extend-submission', passportSignIn, acl([2, 8]), arcController.extendSubmission);
 
 export default r;

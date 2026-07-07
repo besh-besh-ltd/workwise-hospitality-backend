@@ -129,7 +129,7 @@ describe("ARC lifecycle — stage immutability + send-back unlock", () => {
     // award — blocked too.
     const lateClauses = await buyerClient
       .post(`/api/v1/arc-v2/evaluation/items/${itemId}/tech-eval`)
-      .send({ minimum_passing_score: 60, clauses: [{ clause_text: "late", weightage: 5 }] });
+      .send({ minimum_passing_score: 60, clauses: [{ clause_text: "late", weightage: 100 }] });
     expect(lateClauses.status).toBe(409);
     expect(lateClauses.body.code).toBe("STAGE_IMMUTABLE");
   });

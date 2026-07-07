@@ -541,6 +541,34 @@ describe("ARC v2 — blind technical evaluation (anti-favoritism)", () => {
       `INSERT INTO tbl_arc_item_tech_evaluation_vendors_response
          (arc_item_tech_evaluation_clauses_id, vendor_id, vendor_response)
        VALUES ($1, $2, 'gamma answer') RETURNING id`, [clause1, GAMMA])).id);
+    // Sr 54 (GROUP K) — the technical-evaluation set is now gated to the
+    // commercial-ranked shortlist: a vendor with a sealed tech envelope but NO
+    // commercial quote is unrankable and is correctly EXCLUDED from tech-eval
+    // (see arc.techShortlist.test.js). Gamma must be a COMPLETE, rankable bid
+    // (tech envelope + commercial quote) to re-enter the shortlist here, same
+    // as alpha/beta's seeding above — this is a seed fix, not a loosening of
+    // the blind-alias assertion below (gamma's real name must still never leak).
+    await db.none(
+      `INSERT INTO tbl_arc_quote (arc_id, vendor_id, submitted_at, tech_submitted_at)
+       VALUES ($1, $2, NOW(), NOW())
+       ON CONFLICT (arc_id, vendor_id) DO UPDATE SET tech_submitted_at = EXCLUDED.tech_submitted_at`,
+      [arcId, GAMMA]);
+    const gammaQuote = await db.one(`SELECT id FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`, [arcId, GAMMA]);
+    for (const it of [itemId1, itemId2]) {
+      await db.none(
+        `INSERT INTO tbl_arc_quote_line (arc_quote_id, arc_item_id, rate, gst_pct)
+         VALUES ($1, $2, $3, 5) ON CONFLICT (arc_quote_id, arc_item_id) DO NOTHING`,
+        [gammaQuote.id, it, 92]);
+    }
+    // The shortlist was already computed+persisted (alpha+beta only) by the
+    // very first getTechEvalForItem call earlier in this file (Sr 54's lazy
+    // backstop only computes ONCE per ARC — ensureShortlist is a no-op once
+    // any row exists, by design, since in real usage all commercial quotes are
+    // sealed before submission closes and the shortlist is ever read). Gamma's
+    // quote above simulates a bid that's now complete; clear the stale
+    // 2-vendor snapshot so the upcoming read recomputes fresh over all 3
+    // complete bids (alpha, beta, gamma — all <=5, so all end up in_eval).
+    await db.none(`DELETE FROM tbl_arc_tech_shortlist WHERE arc_id = $1`, [arcId]);
     try {
       // Reading the matrix assigns gamma an alias.
       const res = await buyerClient.get(`${E}/items/${itemId1}/tech-eval`);

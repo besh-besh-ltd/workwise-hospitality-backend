@@ -108,6 +108,98 @@ describe("ARC v2 — create-wizard pickers (departments / variants / hotels)", (
     expect(res.status).toBe(400);
   });
 
+  // ── variants: duplicate category-mapping (Sr 7 regression) ─────────────
+  // Root cause (arcController.js searchProductVariants): the category filter
+  // used `JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+  // WHERE pc.category_id = $1`. A product with MORE THAN ONE
+  // tbl_product_categories row for the SAME category (the known duplicate-
+  // mapping class — cf. MEMORY "RFQ369 category re-sync") multiplies that
+  // product's variant once per matching mapping row, and inflates the
+  // `COUNT(*) OVER()` total along with it. The fix swaps the JOIN for an
+  // EXISTS (mirroring the sub-cat clause), which is non-multiplying.
+  //
+  // We seed an ISOLATED category + 2 products + 2 variants (not shared
+  // reference data) so this test is self-contained and cannot pollute /
+  // be polluted by other suites: variantDup's product is mapped to the
+  // category TWICE (the bug condition); variantSingle's product is mapped
+  // once (a normal control case in the same category).
+  describe("variants: duplicate category-mapping (Sr 7 regression)", () => {
+    const TOKEN = "SR7DUP" + String(Date.now()).slice(-6);
+    const seeded = { categoryId: null, productDupId: null, productSingleId: null, variantDupId: null, variantSingleId: null };
+
+    beforeAll(async () => {
+      const u = IDS.users.a1_proc_buyer;
+      const cat = await db.one(
+        `INSERT INTO tbl_category (title, parent_id, created_by, slug) VALUES ($1, NULL, $2, $3) RETURNING id`,
+        [`${TOKEN} Category`, u, `${TOKEN}-cat`]
+      );
+      seeded.categoryId = cat.id;
+
+      const productDup = await db.one(
+        `INSERT INTO tbl_product (name, slug, added_by) VALUES ($1, $2, $3) RETURNING id`,
+        [`${TOKEN} Dup Product`, `${TOKEN}-dup-product`, u]
+      );
+      seeded.productDupId = productDup.id;
+      const variantDup = await db.one(
+        `INSERT INTO tbl_product_variant (name, slug, added_by, product_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [`${TOKEN} Dup Variant`, `${TOKEN}-dup-variant`, u, productDup.id]
+      );
+      seeded.variantDupId = variantDup.id;
+      // TWO tbl_product_categories rows for the SAME (product, category) pair
+      // — this is the exact duplicate-mapping condition the JOIN multiplied.
+      await db.none(
+        `INSERT INTO tbl_product_categories (product_id, category_id, category_name) VALUES ($1, $2, $3)`,
+        [productDup.id, cat.id, `${TOKEN} Category`]
+      );
+      await db.none(
+        `INSERT INTO tbl_product_categories (product_id, category_id, category_name) VALUES ($1, $2, $3)`,
+        [productDup.id, cat.id, `${TOKEN} Category`]
+      );
+
+      const productSingle = await db.one(
+        `INSERT INTO tbl_product (name, slug, added_by) VALUES ($1, $2, $3) RETURNING id`,
+        [`${TOKEN} Single Product`, `${TOKEN}-single-product`, u]
+      );
+      seeded.productSingleId = productSingle.id;
+      const variantSingle = await db.one(
+        `INSERT INTO tbl_product_variant (name, slug, added_by, product_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [`${TOKEN} Single Variant`, `${TOKEN}-single-variant`, u, productSingle.id]
+      );
+      seeded.variantSingleId = variantSingle.id;
+      await db.none(
+        `INSERT INTO tbl_product_categories (product_id, category_id, category_name) VALUES ($1, $2, $3)`,
+        [productSingle.id, cat.id, `${TOKEN} Category`]
+      );
+    });
+
+    afterAll(async () => {
+      if (seeded.productDupId) await db.none(`DELETE FROM tbl_product_categories WHERE product_id = $1`, [seeded.productDupId]);
+      if (seeded.productSingleId) await db.none(`DELETE FROM tbl_product_categories WHERE product_id = $1`, [seeded.productSingleId]);
+      if (seeded.variantDupId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.variantDupId]);
+      if (seeded.variantSingleId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.variantSingleId]);
+      if (seeded.productDupId) await db.none(`DELETE FROM tbl_product WHERE id = $1`, [seeded.productDupId]);
+      if (seeded.productSingleId) await db.none(`DELETE FROM tbl_product WHERE id = $1`, [seeded.productSingleId]);
+      if (seeded.categoryId) await db.none(`DELETE FROM tbl_category WHERE id = $1`, [seeded.categoryId]);
+    });
+
+    test("a double-mapped product's variant is returned ONCE, not once per mapping row", async () => {
+      const res = await buyerClient.get(`/api/v1/arc-v2/variants?category_id=${seeded.categoryId}`);
+      expect(res.status).toBe(200);
+      const variants = res.body.data.variants;
+      const ids = variants.map((v) => v.id);
+
+      // Exactly the 2 distinct variants in this isolated category — the
+      // double-mapped product's variant must NOT appear twice.
+      expect(ids.sort()).toEqual([seeded.variantDupId, seeded.variantSingleId].sort());
+      // No duplicate ids anywhere in the response.
+      expect(new Set(ids).size).toBe(ids.length);
+
+      // COUNT(*) OVER() must equal the distinct-variant count (2), not the
+      // pre-EXISTS row count (3: dup-variant×2 + single-variant×1).
+      expect(res.body.data.total).toBe(2);
+    });
+  });
+
   // ── hotels (BU picker — must NOT collapse to one company) ───────────────
   test("hotels: a single-company user sees only their company's hotels", async () => {
     const res = await buyerClient.get(`/api/v1/arc-v2/hotels`);

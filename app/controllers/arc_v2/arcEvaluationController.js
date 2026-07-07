@@ -76,6 +76,41 @@ export async function setupTechEval(req, res) {
   try {
     const arcItemId = Number(req.params.itemId);
     const { minimum_passing_score, clauses = [] } = req.body || {};
+
+    // ── Value validation (security-first — never trust the client; the FE
+    // gate can be bypassed by resuming a draft and jumping straight to
+    // Review/Submit, so this is the authoritative backstop). Sr 13/44/45/46 +
+    // the in-scope slice of Sr 15 (per-item clause weights must sum to 100 —
+    // the ARC tech-eval model IS per-item, see arcEvaluationModel.computeItemScores;
+    // a single ARC-wide clause set is a separate, deferred scoring-model change).
+    const mps = Number(minimum_passing_score);
+    if (
+      minimum_passing_score === undefined || minimum_passing_score === null || minimum_passing_score === ''
+      || !Number.isFinite(mps) || !Number.isInteger(mps)
+    ) {
+      return bad(res, 400, 'A valid minimum passing score (1–100) is required.');
+    }
+    if (mps < 1)   return bad(res, 400, 'Minimum passing score must be at least 1%.');
+    if (mps > 100) return bad(res, 400, 'Minimum passing score cannot exceed 100%.');
+
+    if (!Array.isArray(clauses) || clauses.length === 0) {
+      return bad(res, 400, 'At least one clause is required.');
+    }
+    let weightSum = 0;
+    for (let i = 0; i < clauses.length; i++) {
+      const c = clauses[i] || {};
+      const text = typeof c.clause_text === 'string' ? c.clause_text.trim() : '';
+      if (!text) return bad(res, 400, `Clause ${i + 1} requires non-empty clause text.`);
+      const w = Number(c.weightage);
+      if (!Number.isFinite(w) || !Number.isInteger(w) || w < 1 || w > 100) {
+        return bad(res, 400, `Clause ${i + 1} weightage must be a whole number between 1 and 100.`);
+      }
+      weightSum += w;
+    }
+    if (weightSum !== 100) {
+      return bad(res, 400, `Clause weightage must total exactly 100 (got ${weightSum}).`);
+    }
+
     // Immutable once technical is approved; also blocked once commercial is
     // finalized (configuring clauses then would un-skip technical under a
     // locked award).
@@ -87,6 +122,12 @@ export async function setupTechEval(req, res) {
     // the caller's next request against an uncommitted transaction.
     const result = await db.tx(async (t) => {
       const te = await arcEvalModel.upsertTechEval(arcItemId, { minimum_passing_score }, t);
+      // Replace-semantics (GROUP D): clear any previously configured clauses
+      // before inserting the submitted set, so a second call for the same item
+      // (Save-draft → resume → edit clauses → Save-draft again) REPLACES rather
+      // than accumulates duplicate clause rows. A no-op the first time (nothing
+      // to clear yet), so today's single-call flow is unaffected.
+      await arcEvalModel.clearClauses(te.id, t);
       const inserted = [];
       for (const c of clauses) {
         inserted.push(await arcEvalModel.addClause(te.id, c, t));
@@ -165,16 +206,31 @@ export async function getTechEvalForItem(req, res) {
       [arcId]
     ) : [];
     const quotedSet = new Set(quotedRows.map((r) => Number(r.vendor_id)));
+
+    // Sr 54 — commercial-ranked shortlist gate (blind-preserving, OQ1=A):
+    // only the top-5 (by whole-ARC commercial rank) vendors are technically
+    // evaluated; the rest are held. Lazy backstop — computes it here if the
+    // submission-close hook hasn't run yet (manual-entry ARCs, lazy-flip
+    // path). `gateActive` stays false (fail-open, unfiltered) only in the
+    // edge case where literally nobody has a rankable commercial quote yet.
+    const shortlistRows = arcId ? await arcEvalModel.ensureShortlist(arcId) : [];
+    const inEvalIds = arcEvalModel.shortlistVendorIds(shortlistRows);
+    const gateActive = shortlistRows.length > 0;
+    const shortlistCounts = arcEvalModel.shortlistCounts(shortlistRows);
+
     // listClauses does SELECT * so is_mandatory comes along once the column
     // exists — no change needed there.
     const clauses = await arcEvalModel.listClauses(te.id);
     // computeItemScores returns real vendor_id (server-internal) — remap to the
-    // alias and DROP vendor_id before it reaches the browser.
+    // alias and DROP vendor_id before it reaches the browser. Gated to the
+    // in-eval shortlist: on-hold vendors are never surfaced to the evaluator.
     const rawScores = await arcEvalModel.computeItemScores(arcItemId);
-    const scores = rawScores.map((s) => {
-      const { vendor_id, ...rest } = s;
-      return { ...aliasFields(vendor_id, aliasMap), ...rest, has_submitted_quote: quotedSet.has(Number(vendor_id)) };
-    });
+    const scores = rawScores
+      .filter((s) => !gateActive || inEvalIds.has(Number(s.vendor_id)))
+      .map((s) => {
+        const { vendor_id, ...rest } = s;
+        return { ...aliasFields(vendor_id, aliasMap), ...rest, has_submitted_quote: quotedSet.has(Number(vendor_id)) };
+      });
     // Per-(clause × vendor) response rows — the scoring matrix binds inputs
     // to response_id, so the cells need these (scores alone are per-vendor
     // aggregates). vendor_response is now VENDOR-authored (two-envelope flow);
@@ -205,11 +261,15 @@ export async function getTechEvalForItem(req, res) {
         ORDER BY a.alias_index NULLS LAST, r.id`,
       [te.id, arcId]
     );
-    const responses = rawResponses.map((row) => {
-      const { vendor_id, ...rest } = row;
-      return { ...rest, ...aliasFields(vendor_id, aliasMap), has_submitted_quote: quotedSet.has(Number(vendor_id)) };
-    });
-    return ok(res, { tech_evaluation: te, clauses, scores, responses });
+    const responses = rawResponses
+      .filter((row) => !gateActive || inEvalIds.has(Number(row.vendor_id)))
+      .map((row) => {
+        const { vendor_id, ...rest } = row;
+        return { ...rest, ...aliasFields(vendor_id, aliasMap), has_submitted_quote: quotedSet.has(Number(vendor_id)) };
+      });
+    // Sr 54 — membership + counts ONLY (blind-preserving): the evaluator never
+    // sees prices, basket totals, rank numbers, or on-hold vendor identities.
+    return ok(res, { tech_evaluation: te, clauses, scores, responses, shortlist: shortlistCounts });
   } catch (err) {
     logger.error({ err }, '[evalController.getTechEvalForItem]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -264,20 +324,41 @@ export async function submitTechEval(req, res) {
 
     const result = await db.tx(async (t) => {
       const items = await arcModel.listItems(arcId, t);
+      // Sr 54 — gate qualification recording to the in-eval shortlist. Lazy
+      // backstop: ensures the shortlist exists even if the submission-close
+      // hook hasn't run yet. `gateActive` fails open (no filtering) only when
+      // literally nobody has a rankable commercial quote yet.
+      const shortlistRows = await arcEvalModel.ensureShortlist(arcId, {}, t);
+      const inEvalIds = arcEvalModel.shortlistVendorIds(shortlistRows);
+      const gateActive = shortlistRows.length > 0;
+
       const techEvalIds = [];
       for (const item of items) {
         const scores = await arcEvalModel.computeItemScores(item.id, 1, t);
+        const gatedScores = gateActive ? scores.filter((s) => inEvalIds.has(Number(s.vendor_id))) : scores;
         const te = await t.oneOrNone(
           `SELECT id FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [item.id]
         );
         if (te) techEvalIds.push(te.id);
-        if (te && scores.length > 0) {
+        if (te && gatedScores.length > 0) {
           await arcEvalModel.recordClearedVendors(
             te.id,
-            scores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
+            gatedScores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
             t
           );
         }
+      }
+
+      // Sr 54 (OQ4=Automatic) — a shortlisted vendor who just ended up
+      // not_qualified auto-promotes the next held vendor (by commercial rank)
+      // into evaluation. Idempotent; logged for audit (buyer-internal, never
+      // surfaced to the tech-eval payload).
+      const promotions = await arcEvalModel.reconcileShortlistPromotions(arcId, { userId }, t);
+      for (const p of promotions) {
+        await logArcEvent({
+          arcId, eventType: ARC_EVENT_TYPES.TECH_SHORTLIST_PROMOTED, actorId: userId,
+          payload: { vendor_id: p.vendor_id, commercial_rank: p.commercial_rank }, txContext: t,
+        });
       }
 
       // Route through the central engine (entity_type ARC_TECH, fallback
@@ -321,7 +402,7 @@ export async function submitTechEval(req, res) {
         arcId, eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId,
         payload: { approval_instance_id: instanceRow.id }, txContext: t,
       });
-      return { ok: true, approval_instance_id: instanceRow.id, auto_approved: engineResult.autoApproved === true };
+      return { ok: true, approval_instance_id: instanceRow.id, auto_approved: engineResult.autoApproved === true, promotions };
     });
     // The engine auto-approves when the submitter is also the (only/ANY)
     // approver — the instance is born APPROVED and executeApprovalAction
@@ -333,6 +414,19 @@ export async function submitTechEval(req, res) {
     }
     // Notify creator (in-app) post-commit
     await notifyArcEvent({ arcId: Number(req.params.arcId), eventType: ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED, actorId: userId, payload: {} });
+    // Sr 54 — notify tech evaluators of any auto-promotion(s), post-commit.
+    // Blind-preserving (OQ1): the evaluator learns THAT a vendor was promoted, never
+    // its commercial_rank / basket_total.
+    for (const p of result.promotions || []) {
+      await notifyArcEvent({
+        arcId, eventType: ARC_EVENT_TYPES.TECH_SHORTLIST_PROMOTED, actorId: userId,
+        payload: { vendor_id: p.vendor_id },
+      });
+    }
+    // Redact the shortlist rows before responding — the evaluator response may report
+    // THAT N vendors were promoted, but never their rank/basket/order. The promoted
+    // vendor's ALIAS surfaces via the next getTechEvalForItem, not here.
+    result.promotions = (result.promotions || []).map((p) => ({ status: p.status }));
     // respond after commit — never inside the tx
     return ok(res, result);
   } catch (err) {
@@ -410,6 +504,7 @@ export async function decideTechEval(req, res) {
     let engineComment = comment;
     const amended = [];
     const touchedItemIds = new Set();
+    let shortlistPromotions = [];
     if (decision === 'approve' && amendMarks.length > 0) {
       await db.tx(async (t) => {
         for (const m of amendMarks) {
@@ -468,20 +563,38 @@ export async function decideTechEval(req, res) {
           touchedItemIds.add(Number(current.arc_item_id));
         }
 
+        // Sr 54 — gate qualification recording to the in-eval shortlist, same
+        // as submitTechEval (an on-hold vendor's response can never be
+        // recorded into cleared_vendors even via a direct amend call).
+        const shortlistRows = await arcEvalModel.ensureShortlist(arcId, {}, t);
+        const inEvalIds = arcEvalModel.shortlistVendorIds(shortlistRows);
+        const gateActive = shortlistRows.length > 0;
+
         // Recompute qualification for every touched item so the approved
         // record reflects the amended marks.
         for (const itemId of touchedItemIds) {
           const scores = await arcEvalModel.computeItemScores(itemId, 1, t);
+          const gatedScores = gateActive ? scores.filter((s) => inEvalIds.has(Number(s.vendor_id))) : scores;
           const te = await t.oneOrNone(
             `SELECT id FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`, [itemId]
           );
-          if (te && scores.length > 0) {
+          if (te && gatedScores.length > 0) {
             await arcEvalModel.recordClearedVendors(
               te.id,
-              scores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
+              gatedScores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
               t
             );
           }
+        }
+
+        // Sr 54 (OQ4=Automatic) — an amended verdict can flip a shortlisted
+        // vendor to not_qualified; auto-promote the next held vendor.
+        shortlistPromotions = await arcEvalModel.reconcileShortlistPromotions(arcId, { userId }, t);
+        for (const p of shortlistPromotions) {
+          await logArcEvent({
+            arcId, eventType: ARC_EVENT_TYPES.TECH_SHORTLIST_PROMOTED, actorId: userId,
+            payload: { vendor_id: p.vendor_id, commercial_rank: p.commercial_rank }, txContext: t,
+          });
         }
       });
       if (amended.length > 0) {
@@ -499,16 +612,32 @@ export async function decideTechEval(req, res) {
       comment:              engineComment,
     });
 
+    // Sr 54 — notify tech evaluators of any auto-promotion(s) triggered by
+    // this amend, post-commit (the amend tx already committed above).
+    // Blind-preserving (OQ1): evaluator learns THAT a vendor was promoted, never its rank.
+    for (const p of shortlistPromotions) {
+      await notifyArcEvent({
+        arcId, eventType: ARC_EVENT_TYPES.TECH_SHORTLIST_PROMOTED, actorId: userId,
+        payload: { vendor_id: p.vendor_id },
+      });
+    }
+
     const approval = await getApprovalInstanceDetails(instance.id, userId).catch(() => null);
     // BLIND EVAL: the approver stays blind too. Fresh per-item scores for the
     // touched items (UI refresh without refetch-all), with the real vendor_id
     // remapped to the stable per-ARC alias and dropped. `amended[]` is already
     // response_id-scoped (no identity); `approval` is the buyer approver chain.
     const aliasMap = await arcEvalModel.getOrAssignAliases(arcId);
+    // Sr 54 — same shortlist gate as getTechEvalForItem: an on-hold vendor's
+    // score never reaches the approver either.
+    const shortlistRowsOut = await arcEvalModel.getShortlist(arcId);
+    const inEvalIdsOut = arcEvalModel.shortlistVendorIds(shortlistRowsOut);
+    const gateActiveOut = shortlistRowsOut.length > 0;
     const scores = [];
     for (const itemId of touchedItemIds) {
       const itemScores = await arcEvalModel.computeItemScores(itemId, 1);
       for (const s of itemScores) {
+        if (gateActiveOut && !inEvalIdsOut.has(Number(s.vendor_id))) continue;
         const { vendor_id, ...rest } = s;
         scores.push({ arc_item_id: itemId, ...aliasFields(vendor_id, aliasMap), ...rest });
       }

@@ -137,11 +137,19 @@ function validateDraftLines(lines) {
 }
 
 // H3 — at submit time every line must carry a valid non-negative rate.
+// Sr 52 — AND a valid GST %: blank/null/"" is a hard block on submit (never
+// silently treated as 0%), but an EXPLICIT 0 is a valid zero-GST line and must
+// pass. Draft-save stays tolerant (validateDraftLines, above) — this guard is
+// submit-time only, and is the authoritative check (never trust the FE gate).
 function validateSubmittedLines(lines) {
   for (const line of lines) {
     const r = Number(line.rate);
     if (line.rate == null || !Number.isFinite(r) || r < 0) {
       return 'Every line item must have a valid non-negative rate before submitting';
+    }
+    const gstRaw = line.gst_pct;
+    if (gstRaw == null || gstRaw === '' || !Number.isFinite(Number(gstRaw)) || Number(gstRaw) < 0) {
+      return 'Every line item must have a valid GST % (enter 0 if no GST applies) before submitting';
     }
   }
   return null;
@@ -212,6 +220,13 @@ export async function getVendorDashboard(req, res) {
            LEFT JOIN tbl_arc_quote q ON q.arc_id = a.id AND q.vendor_id = $1
            LEFT JOIN tbl_arc_contract c ON c.arc_id = a.id AND c.vendor_id = $1
           WHERE i.vendor_id = $1
+            -- Sr 27 (Option C): a floated-but-not-yet-open ARC (submission_start_at
+            -- still in the IST future) must not be counted, surfaced in
+            -- needs_action, or become the next_action CTA — same visibility
+            -- rule as listRequests.
+            AND (a.status <> 'floated'
+                 OR a.submission_start_at IS NULL
+                 OR a.submission_start_at <= (NOW() AT TIME ZONE 'Asia/Kolkata'))
           ORDER BY a.submission_end_at DESC NULLS LAST`,
         [vendorId]
       ),
@@ -275,6 +290,13 @@ export async function getVendorDashboard(req, res) {
                 )
             AND e.event_type = ANY($2::varchar[])
             AND (e.payload->>'vendor_id' IS NULL OR (e.payload->>'vendor_id')::bigint = $1)
+            -- Sr 27 (Option C): a floated-but-not-yet-open ARC's events (esp.
+            -- its own 'floated' row) must not appear in the vendor's activity
+            -- feed before the window opens — same visibility rule as
+            -- listRequests / the invites query above.
+            AND (a.status <> 'floated'
+                 OR a.submission_start_at IS NULL
+                 OR a.submission_start_at <= (NOW() AT TIME ZONE 'Asia/Kolkata'))
           ORDER BY e.at DESC
           LIMIT 8`,
         [vendorId, VENDOR_SAFE_EVENTS]
@@ -365,6 +387,14 @@ export async function listRequests(req, res) {
          JOIN tbl_arc_invitation i ON i.arc_id = a.id AND i.vendor_id = $1
          LEFT JOIN tbl_arc_quote q ON q.arc_id = a.id AND q.vendor_id = $1
         WHERE a.status IN ('floated','submission_closed','tech_eval_in_progress','comm_eval_in_progress','committee_review','committee_approved','awaiting_vendor_acceptance','contract_active')
+          -- Sr 27 (Option C): a floated-but-not-yet-open ARC (submission_start_at
+          -- still in the IST future) must not appear in the vendor's list. Scoped
+          -- to status='floated' — every later status necessarily has a past
+          -- start (start < end by publish validation, and later statuses only
+          -- happen once end has passed) — so this can never hide those.
+          AND (a.status <> 'floated'
+               OR a.submission_start_at IS NULL
+               OR a.submission_start_at <= (NOW() AT TIME ZONE 'Asia/Kolkata'))
         ORDER BY a.submission_end_at`,
       [vendorId]
     );
@@ -382,6 +412,32 @@ export async function getRequestDetail(req, res) {
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    // Sr 27 (Option C): a floated ARC whose submission window has not opened
+    // yet must not be readable by vendors — hide it the same as a non-live ARC.
+    // Post-start behaviour (and every other status) is unchanged.
+    if (arc.status === 'floated' && windowNotOpen(arc)) return bad(res, 404, 'ARC not found', 2);
+    // Access-control: mirror getRequestLifecycle — a vendor may only read the
+    // detail of an ARC they were invited to (open-market ARCs auto-invite eligible
+    // vendors, so this is the universal gate). Without it a non-invited vendor
+    // could read an invitation-only ARC's scope/items/tech envelope by direct id.
+    if (!(await vendorInvitedToArc(arcId, vendorId)))
+      return bad(res, 403, 'You were not invited to this rate contract');
+    // Sr 33: bare getById carries only FK ints (hotel_id/category_id/department_id),
+    // no resolved display names — enrich with the same join used by the
+    // quote-PDF path (see getVendorQuotePdf, ~line 1464) so the FE "Buyer &
+    // Scope" / "Key terms" cards can render hotel/BU + category names.
+    const names = await db.oneOrNone(
+      `SELECT cat.title AS category_title,
+              h.name AS hotel_name, h.city AS hotel_city,
+              d.title AS department_title
+         FROM tbl_arc a
+         LEFT JOIN tbl_category cat ON cat.id = a.category_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+         LEFT JOIN tbl_department d ON d.id = a.department_id
+        WHERE a.id = $1`,
+      [arcId]
+    );
+    if (names) Object.assign(arc, names);
     const items = await arcModel.listItems(arcId);
     const invitation = await db.oneOrNone(
       `SELECT * FROM tbl_arc_invitation WHERE arc_id = $1 AND vendor_id = $2`,
@@ -575,7 +631,9 @@ export async function saveQuoteDraft(req, res) {
       global_charges_input: canonicalGlobalCharges,
     };
 
-    return db.tx(async (t) => {
+    // Respond AFTER commit — never send the HTTP response inside the tx callback
+    // (a commit that fails after res.json would leave the client falsely "saved").
+    const result = await db.tx(async (t) => {
       const quote = await arcEvalModel.upsertQuote(arc_id, vendorId,
         { payment_terms, gstin_used, quote_pricing: quotePricing }, t);
       const upserted = [];
@@ -599,8 +657,9 @@ export async function saveQuoteDraft(req, res) {
         upserted.push(await arcEvalModel.upsertQuoteLine(quote.id,
           { ...line, charges: canonicalCharges, line_pricing: linePricing }, t));
       }
-      return ok(res, { quote, lines: upserted });
+      return { quote, lines: upserted };
     });
+    return ok(res, { quote: result.quote, lines: result.lines });
   } catch (err) {
     logger.error({ err }, '[vendorController.saveQuoteDraft]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -677,7 +736,8 @@ export async function submitQuote(req, res) {
       submitLineByItemId[x.arcItemId] = submitEngineResult.lines[idx];
     });
 
-    return db.tx(async (t) => {
+    // Respond AFTER commit — never send the HTTP response inside the tx callback.
+    const result = await db.tx(async (t) => {
       // Store authoritative quote_pricing on submit.
       await t.none(
         `UPDATE tbl_arc_quote SET quote_pricing = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
@@ -717,10 +777,13 @@ export async function submitQuote(req, res) {
         arcId: arc_id, eventType: ARC_EVENT_TYPES.VENDOR_SUBMITTED,
         actorId: vendorId, payload: { quote_id: quote.id }, txContext: t,
       });
-      return ok(res, { quote: updated }, 'Quote submitted');
+      return { quote: updated };
     });
-    // Notify creator + comm evaluators post-commit (in-app only)
+    // Notify creator + comm evaluators post-commit (in-app only). Previously this
+    // was unreachable (it sat after `return db.tx(...)`), so buyers were never
+    // told a vendor had submitted — now it fires after the commit succeeds.
     await notifyArcEvent({ arcId: arc_id, eventType: ARC_EVENT_TYPES.VENDOR_SUBMITTED, actorId: vendorId, payload: {} });
+    return ok(res, { quote: result.quote }, 'Quote submitted');
   } catch (err) {
     logger.error({ err }, '[vendorController.submitQuote]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -850,6 +913,10 @@ export async function getTechClausesForVendor(req, res) {
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    // Sr 27 (Option C): tech clauses are readable only once the submission
+    // window has opened — a floated-but-future-start ARC 404s here too, so a
+    // vendor cannot read the technical-evaluation questions before start.
+    if (arc.status === 'floated' && windowNotOpen(arc)) return bad(res, 404, 'ARC not found', 2);
     if (!(await vendorInvitedToArc(arcId, vendorId))) {
       return bad(res, 403, 'You were not invited to this rate contract');
     }
@@ -1102,6 +1169,10 @@ export async function getRequestLifecycle(req, res) {
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     if (NOT_LIVE_TO_VENDOR.includes(arc.status)) return bad(res, 404, 'ARC not found', 2);
+    // Sr 27 (Option C): a floated ARC whose submission window has not opened
+    // yet must not be readable by vendors — hide it the same as the
+    // detail/tech-clauses reads (same guard, same 404 shape).
+    if (arc.status === 'floated' && windowNotOpen(arc)) return bad(res, 404, 'ARC not found', 2);
     if (!(await vendorInvitedToArc(arcId, vendorId)))
       return bad(res, 403, 'You were not invited to this rate contract');
     const lifecycle = await arcLifecycleModel.computeLifecycle(arcId, { lazyFlip: true });
@@ -1125,10 +1196,11 @@ export async function getRequestLifecycle(req, res) {
 
 // HTML-escape every dynamic value before interpolation (injection / broken markup).
 const htmlEsc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// Money formatters. `money` mirrors the FE quote page's fmtN (Math.round + en-IN
-// grouping) so the PDF's totals — esp. GRAND TOTAL — match exactly what the
-// vendor saw on screen. `rate` keeps 2dp for the unit price column.
-const money = (n) => '₹' + (Math.round(Number(n) || 0)).toLocaleString('en-IN');
+// Money formatters. `money` mirrors the FE quote page's fmtN (Sr 53 — 2-decimal
+// en-IN grouping, NOT whole-rupee rounding) so the PDF's totals — esp. GRAND
+// TOTAL — match exactly what the vendor saw on screen (and what the engine
+// persisted). `rate2` keeps 2dp for the unit price column.
+const money = (n) => '₹' + (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate2 = (n) => '₹' + (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const qty0  = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const dtFull = (d) => (d ? new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—');

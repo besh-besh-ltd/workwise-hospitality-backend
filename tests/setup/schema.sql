@@ -11319,6 +11319,31 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_vendor_alias (
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_vendor_alias_arc ON public.tbl_arc_vendor_alias (arc_id);
 
+--
+-- Sr 54 — commercial-ranked technical-evaluation shortlist.
+-- Mirrored from migrations/20260706100000_arc_tech_shortlist.sql.
+-- Whole-ARC per-vendor rank by sealed commercial basket total, computed at
+-- submission-close; gates who the tech evaluator actually scores. status:
+-- 'in_eval' (top-5) | 'on_hold' (rest) | 'promoted' (auto-backfilled on an
+-- in_eval vendor's not_qualified verdict). commercial_rank/basket_total are
+-- system-only — never exposed to the tech evaluator (blind-preserving).
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_shortlist (
+  id                BIGSERIAL PRIMARY KEY,
+  arc_id            BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id         INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  commercial_rank   INTEGER NOT NULL,
+  basket_total      NUMERIC(18,2),
+  status            VARCHAR(16) NOT NULL DEFAULT 'on_hold',
+  promoted_at       TIMESTAMP WITHOUT TIME ZONE,
+  promoted_by       INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT arc_tech_shortlist_status_chk CHECK (status IN ('in_eval', 'on_hold', 'promoted'))
+);
+CREATE INDEX IF NOT EXISTS idx_arc_tech_shortlist_arc ON public.tbl_arc_tech_shortlist (arc_id);
+
 
 --
 -- ARC v2 §4.4 — vendor quotes + commercial evaluation.
@@ -11804,3 +11829,10 @@ CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_arc
   ON public.tbl_arc_contract_clarification (arc_id);
 CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_contract
   ON public.tbl_arc_contract_clarification (arc_contract_id, status);
+
+-- Mirrored from migrations/20260701100000_arc_number_seq.sql — atomic per-FY
+-- counter backing the `ARC-<FY>-<seq>` contract-serial format.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_number_seq (
+  fy        VARCHAR(9) PRIMARY KEY,   -- Indian FY label, e.g. '2026-27'
+  last_seq  INTEGER NOT NULL
+);

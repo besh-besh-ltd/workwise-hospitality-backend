@@ -63,6 +63,11 @@ export async function runArcSubmissionCloseSweep({ now = null } = {}) {
 
   for (const { id: arcId } of due) {
     try {
+      // Which evaluation comes next? Mirror the lifecycle: technical iff the ARC
+      // has tech clauses, else commercial. Computed up front so both the status
+      // flip's tx and the post-commit notify agree (single source of truth).
+      const hasTechClauses = await arcEvalModel.arcHasTechClauses(arcId);
+
       await db.tx(async (t) => {
         await t.none(
           `UPDATE tbl_arc SET status = 'submission_closed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -71,13 +76,18 @@ export async function runArcSubmissionCloseSweep({ now = null } = {}) {
         await logArcEvent({
           arcId, eventType: ARC_EVENT_TYPES.SUBMISSION_CLOSED, actorId: null, payload: {}, txContext: t,
         });
+        // Sr 54 — compute the commercial-ranked technical-evaluation shortlist
+        // now, while both envelopes are freshly sealed (system-only ranking;
+        // never exposed to the tech evaluator beyond membership + counts).
+        // Only meaningful when the ARC actually gates on technical — when
+        // technical is skipped everyone proceeds straight to commercial.
+        if (hasTechClauses) {
+          await arcEvalModel.computeAndStoreShortlist(arcId, {}, t);
+        }
       });
       summary.closed += 1;
 
-      // Which evaluation comes next? Mirror the lifecycle: technical iff the ARC
-      // has tech clauses, else commercial. Pass it so the buyer message and the
-      // NEXT_STAGE_EVALUATORS audience stay in lockstep (single source of truth).
-      const nextStage = (await arcEvalModel.arcHasTechClauses(arcId)) ? 'technical' : 'commercial';
+      const nextStage = hasTechClauses ? 'technical' : 'commercial';
 
       // BUYER: creator + next-stage evaluators (post-commit).
       await notifyArcEvent({

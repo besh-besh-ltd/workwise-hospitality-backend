@@ -128,12 +128,66 @@ const arcModel = {
     );
   },
 
+  /**
+   * Sr 40 — buyer "Extend submission deadline". Persists the new
+   * submission_end_at VERBATIM (no Date() round-trip): the column is
+   * `timestamp without time zone` storing IST wall-clock, same convention as
+   * createDraft/updateDraft (see arcTime.js). When `reopen` is true (the ARC
+   * had already flipped to 'submission_closed') also flips status back to
+   * 'floated' in the same UPDATE so submitQuote's `status === 'floated'` +
+   * open-window guard both pass again for the vendor.
+   */
+  extendSubmissionWindow: async (id, submissionEndAt, { reopen = false } = {}, txContext = null) => {
+    const runner = txContext || db;
+    const cols = ['submission_end_at = $1', 'updated_at = CURRENT_TIMESTAMP'];
+    const args = [submissionEndAt];
+    let p = 2;
+    if (reopen) {
+      cols.push(`status = $${p++}`);
+      args.push('floated');
+    }
+    args.push(id);
+    return runner.one(
+      `UPDATE tbl_arc SET ${cols.join(', ')} WHERE id = $${p} RETURNING *`,
+      args
+    );
+  },
+
   getById: async (id, txContext = null) => {
     return (txContext || db).oneOrNone(`SELECT * FROM tbl_arc WHERE id = $1`, [id]);
   },
 
   getByNumber: async (arcNumber, txContext = null) => {
     return (txContext || db).oneOrNone(`SELECT * FROM tbl_arc WHERE arc_number = $1`, [arcNumber]);
+  },
+
+  /**
+   * Mint the next per-FY ARC contract serial: `ARC-<fy>-<0001>`.
+   *
+   * Race-safe via a single atomic `INSERT … ON CONFLICT … DO UPDATE …
+   * RETURNING` upsert against tbl_arc_number_seq — no MAX+1 (never copy the
+   * RFQ rfqModel.getLastRfQNumber pattern, which is race-prone), no explicit
+   * locking. A new FY inserts a fresh counter row starting at 1, so the
+   * sequence resets automatically per FY.
+   *
+   * MUST be called with the SAME tx that will insert the tbl_arc row (pass
+   * `t` from the caller's `db.tx`), so a rollback never leaves the counter
+   * bumped while the ARC itself was not created — a skipped serial number on
+   * rollback is an acceptable gap, a duplicated one is not. UNIQUE(arc_number)
+   * on tbl_arc remains the last-line-of-defence.
+   *
+   * @param {string} fy - Indian FY label, e.g. "2026-27" (see helper/financialYear.js)
+   * @param {*} [txContext] - tx runner; falls back to the plain `db` if omitted
+   */
+  nextArcNumber: async (fy, txContext = null) => {
+    const runner = txContext || db;
+    const { last_seq } = await runner.one(
+      `INSERT INTO tbl_arc_number_seq (fy, last_seq) VALUES ($1, 1)
+       ON CONFLICT (fy) DO UPDATE SET last_seq = tbl_arc_number_seq.last_seq + 1
+       RETURNING last_seq`,
+      [fy]
+    );
+    return `ARC-${fy}-${String(last_seq).padStart(4, '0')}`;
   },
 
   /**
@@ -501,7 +555,9 @@ const arcModel = {
 
   listInvitations: async (arcId, txContext = null) => {
     return (txContext || db).any(
-      `SELECT i.*, u.name AS vendor_name, u.email AS vendor_email, u.mobile AS vendor_mobile
+      `SELECT i.*, u.name AS vendor_name,
+              u.organization_name AS vendor_company,
+              u.email AS vendor_email, u.mobile AS vendor_mobile
          FROM tbl_arc_invitation i
          LEFT JOIN tbl_users u ON u.id = i.vendor_id
         WHERE i.arc_id = $1

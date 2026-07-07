@@ -6,6 +6,10 @@ import { windowClosed } from '../../helper/arcTime.js';
 // this concern so it can't clash with locks used elsewhere. Second key = arcId.
 const ARC_ALIAS_LOCK_NS = 0x41435641; // "ACVA" — fits signed int4
 
+// Sr 54 — fixed technical-evaluation shortlist size (user-confirmed: fixed 5,
+// not a per-ARC configurable column).
+const TECH_SHORTLIST_SIZE = 5;
+
 // Phase 2 — back-compat normalizer for ARC quote line charges.
 // Pre-Phase-2 rows stored charges as a single number (the freight value) or as
 // a legacy { value, type } object. Post-Phase-2 they are canonical engine charge
@@ -73,6 +77,40 @@ const arcEvalModel = {
 
   removeClause: async (clauseId, txContext = null) => {
     return (txContext || db).none(`DELETE FROM tbl_arc_item_tech_evaluation_clauses WHERE id = $1`, [clauseId]);
+  },
+
+  // Bulk delete — lets a caller replace an item's whole clause set in one shot
+  // (delete-then-reinsert) instead of diffing row-by-row. Used by setupTechEval
+  // so a second call for the same arc_item (e.g. GROUP D Save-draft → resume →
+  // edit clauses → Save-draft again) REPLACES the clause set rather than
+  // accumulating duplicate rows alongside the stale ones.
+  clearClauses: async (techEvalId, txContext = null) => {
+    return (txContext || db).none(
+      `DELETE FROM tbl_arc_item_tech_evaluation_clauses WHERE arc_item_tech_evaluation_id = $1`,
+      [techEvalId]
+    );
+  },
+
+  // GROUP D P2 review fix — teardown for an item whose tech-eval was toggled
+  // OFF (or retracted) on a later save. Without this, `updateDraft`'s item
+  // reconciliation only ever adds/replaces tech-eval config (via setupTechEval
+  // called from persistTechEval on the FE); an item that HAD tech-eval
+  // configured and is later saved as not requiring it kept its stale
+  // tbl_arc_item_tech_evaluation row — still forcing vendors to seal a
+  // technical envelope / be tech-scored for that item. clearClauses first
+  // (explicit, mirrors the setupTechEval idempotency fix) then the row itself;
+  // arc_item_tech_evaluation_clauses is ON DELETE CASCADE from this row anyway,
+  // so this is belt-and-suspenders, not load-bearing. No-op if no row exists.
+  deleteTechEvalForItem: async (arcItemId, txContext = null) => {
+    const runner = txContext || db;
+    const te = await runner.oneOrNone(
+      `SELECT id FROM tbl_arc_item_tech_evaluation WHERE arc_item_id = $1`,
+      [arcItemId]
+    );
+    if (!te) return null;
+    await arcEvalModel.clearClauses(te.id, txContext);
+    await runner.none(`DELETE FROM tbl_arc_item_tech_evaluation WHERE id = $1`, [te.id]);
+    return te.id;
   },
 
   listClauses: async (techEvalId, txContext = null) => {
@@ -415,6 +453,212 @@ const arcEvalModel = {
   },
 
   // ============================================================
+  // Sr 54 — commercial-ranked technical-evaluation shortlist
+  // ============================================================
+  //
+  // Blind-preserving (OQ1=A): the SYSTEM ranks sealed commercial quotes; the
+  // tech evaluator is exposed ONLY to shortlist membership (in_eval vendor
+  // aliases) + aggregate counts — never prices, basket totals, rank numbers,
+  // or intra-shortlist order. Whole-ARC granularity (OQ2=A): one rank per
+  // vendor across their entire basket. Fixed size = 5 (not configurable).
+
+  // Server port of the FE landed-cost preference (CommercialStage.js's
+  // engineLanded/landedRate, ~L79-121): engine `line_pricing.total` when
+  // present (Phase-2 rows, written on every quote save/submit), else legacy
+  // rate + raw charges — the SAME `Number(charges)` coercion the FE fallback
+  // carries for pre-Phase-2 rows (documented, rare; not "fixed" here so the
+  // shortlist and the eventual L1 award keep agreeing on the same math).
+  // `includeCharges` mirrors the FE's default-ON toggle.
+  landedUnitPrice: (line, includeCharges = true) => {
+    if (!line || line.rate == null) return null;
+    const lp = line.line_pricing;
+    if (lp && lp.total != null) {
+      return includeCharges
+        ? Number(lp.total)
+        : Number(lp.base || 0) + Number(lp.base_tax || 0);
+    }
+    const rate = Number(line.rate);
+    if (!Number.isFinite(rate)) return null;
+    if (!includeCharges) return rate;
+    const charges = Number(line.charges);
+    return rate + (Number.isFinite(charges) ? charges : 0);
+  },
+
+  // Whole-ARC commercial basket total per vendor: SUM(landed-unit-price ×
+  // item.indicative_qty) across every sealed quote line the vendor submitted
+  // — same definition as the FE's vendorTotal (CommercialStage.js:310-322) so
+  // the shortlist and the eventual L1 award agree. Only vendors with a
+  // submitted, non-withdrawn commercial quote appear — a vendor who sealed a
+  // technical envelope but never submitted a commercial quote is unrankable
+  // (OQ5) and is simply absent from the returned list.
+  computeVendorBasketTotals: async (arcId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT q.vendor_id, q.submitted_at,
+              ql.rate, ql.charges, ql.line_pricing, i.indicative_qty
+         FROM tbl_arc_quote q
+         JOIN tbl_arc_quote_line ql ON ql.arc_quote_id = q.id
+         JOIN tbl_arc_item i ON i.id = ql.arc_item_id
+        WHERE q.arc_id = $1 AND q.submitted_at IS NOT NULL AND q.withdrawn_at IS NULL`,
+      [arcId]
+    );
+    const byVendor = new Map();
+    for (const r of rows) {
+      const vid = Number(r.vendor_id);
+      if (!byVendor.has(vid)) {
+        byVendor.set(vid, { vendor_id: vid, submitted_at: r.submitted_at, basket_total: 0 });
+      }
+      const unit = arcEvalModel.landedUnitPrice(r, true);
+      if (unit != null) {
+        byVendor.get(vid).basket_total += unit * Number(r.indicative_qty || 0);
+      }
+    }
+    return [...byVendor.values()];
+  },
+
+  // Rank responding (rankable) vendors ascending by whole-ARC basket total and
+  // split top-N ('in_eval') vs the rest ('on_hold'). Deterministic tiebreak at
+  // the N/N+1 boundary: earlier commercial submitted_at, then vendor_id (OQ5).
+  // ≤ size participants → everyone 'in_eval', none 'on_hold' — CRITICAL
+  // backward-compat: existing low-vendor ARCs/tests are unaffected.
+  //
+  // Idempotent + promotion-safe: re-running (lazy backstop, repeated calls)
+  // never demotes a vendor already 'in_eval'/'promoted' back to 'on_hold' —
+  // the ON CONFLICT clause keeps the stored status once it's active, only
+  // refreshing rank/basket_total (both system-only, never surfaced to the
+  // evaluator).
+  computeAndStoreShortlist: async (arcId, { size = TECH_SHORTLIST_SIZE } = {}, txContext = null) => {
+    const runner = txContext || db;
+    const totals = await arcEvalModel.computeVendorBasketTotals(arcId, runner);
+    totals.sort((a, b) => {
+      if (a.basket_total !== b.basket_total) return a.basket_total - b.basket_total;
+      const at = a.submitted_at ? new Date(a.submitted_at).getTime() : Infinity;
+      const bt = b.submitted_at ? new Date(b.submitted_at).getTime() : Infinity;
+      if (at !== bt) return at - bt;
+      return a.vendor_id - b.vendor_id;
+    });
+    for (let i = 0; i < totals.length; i++) {
+      const v = totals[i];
+      const rank = i + 1;
+      const status = rank <= size ? 'in_eval' : 'on_hold';
+      await runner.none(
+        `INSERT INTO tbl_arc_tech_shortlist (arc_id, vendor_id, commercial_rank, basket_total, status)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (arc_id, vendor_id) DO UPDATE
+           SET commercial_rank = EXCLUDED.commercial_rank,
+               basket_total    = EXCLUDED.basket_total,
+               updated_at      = CURRENT_TIMESTAMP,
+               status = CASE WHEN tbl_arc_tech_shortlist.status IN ('in_eval', 'promoted')
+                              THEN tbl_arc_tech_shortlist.status
+                              ELSE EXCLUDED.status END`,
+        [arcId, v.vendor_id, rank, v.basket_total, status]
+      );
+    }
+    return arcEvalModel.getShortlist(arcId, runner);
+  },
+
+  // Compute-if-missing backstop for callers that can't guarantee the
+  // submission-close hook already ran (manual-entry ARCs, the lifecycle lazy
+  // flip path). A no-op re-read once rows exist for the ARC.
+  ensureShortlist: async (arcId, opts = {}, txContext = null) => {
+    const runner = txContext || db;
+    const existing = await runner.any(`SELECT 1 FROM tbl_arc_tech_shortlist WHERE arc_id = $1 LIMIT 1`, [arcId]);
+    if (existing.length > 0) return arcEvalModel.getShortlist(arcId, runner);
+    return arcEvalModel.computeAndStoreShortlist(arcId, opts, runner);
+  },
+
+  getShortlist: async (arcId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT * FROM tbl_arc_tech_shortlist WHERE arc_id = $1 ORDER BY commercial_rank ASC`,
+      [arcId]
+    );
+  },
+
+  // Membership + counts ONLY — never rank/basket_total (blind-preserving,
+  // OQ1=A). "in evaluation" = status IN ('in_eval','promoted').
+  shortlistCounts: (rows) => {
+    const on_hold = rows.filter((r) => r.status === 'on_hold').length;
+    const in_evaluation = rows.length - on_hold;
+    return { total_participating: rows.length, in_evaluation, on_hold };
+  },
+
+  shortlistVendorIds: (rows) => new Set(
+    rows.filter((r) => r.status !== 'on_hold').map((r) => Number(r.vendor_id))
+  ),
+
+  // Vendors whose PERSISTED per-item cleared-vendor rows (the record written
+  // by recordClearedVendors at submit / amend-approve — NOT the live/
+  // provisional computeItemScores a still-scoring evaluator sees) show
+  // 'not_qualified' on every item they were judged for, and 'qualified' on
+  // none — i.e. failed technical evaluation outright for the ARC.
+  arcLevelDisqualifiedVendorIds: async (arcId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `WITH cv AS (
+         SELECT cv.vendor_id, cv.status
+           FROM tbl_arc_item_tech_evaluation_cleared_vendors cv
+           JOIN tbl_arc_item_tech_evaluation te ON te.id = cv.arc_item_tech_evaluation_id
+           JOIN tbl_arc_item i ON i.id = te.arc_item_id
+          WHERE i.arc_id = $1 AND cv.evaluation_round = te.current_round
+       )
+       SELECT vendor_id
+         FROM cv
+        GROUP BY vendor_id
+       HAVING COUNT(*) FILTER (WHERE status = 'qualified') = 0
+          AND COUNT(*) FILTER (WHERE status = 'not_qualified') > 0`,
+      [arcId]
+    );
+    return new Set(rows.map((r) => Number(r.vendor_id)));
+  },
+
+  // Take the lowest-rank 'on_hold' vendor and mark it 'promoted' (now
+  // scorable). Returns null when no held vendor remains.
+  promoteNextHeld: async (arcId, { userId = null } = {}, txContext = null) => {
+    const runner = txContext || db;
+    const held = await runner.oneOrNone(
+      `SELECT * FROM tbl_arc_tech_shortlist
+        WHERE arc_id = $1 AND status = 'on_hold'
+        ORDER BY commercial_rank ASC
+        LIMIT 1
+        FOR UPDATE`,
+      [arcId]
+    );
+    if (!held) return null;
+    return runner.one(
+      `UPDATE tbl_arc_tech_shortlist
+          SET status = 'promoted', promoted_at = CURRENT_TIMESTAMP, promoted_by = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING *`,
+      [held.id, userId]
+    );
+  },
+
+  // Automatic promotion (Sr 54, OQ4=Automatic): reconciles the number of
+  // 'promoted' vendors against the number of currently in-eval vendors
+  // ('in_eval' or already 'promoted') that have ended up ARC-level
+  // not-qualified. Idempotent / recompute-safe — calling it again with no new
+  // failures promotes nobody a second time; a second distinct failure (or a
+  // promoted vendor who also later fails) opens exactly one more seat.
+  // MUST be called inside the same tx that just persisted cleared-vendor rows
+  // (submitTechEval; decideTechEval's amend-then-approve path).
+  reconcileShortlistPromotions: async (arcId, { userId = null } = {}, txContext = null) => {
+    const runner = txContext || db;
+    const disqualified = await arcEvalModel.arcLevelDisqualifiedVendorIds(arcId, runner);
+    if (disqualified.size === 0) return [];
+    const shortlist = await arcEvalModel.getShortlist(arcId, runner);
+    const activeDisqualifiedCount = shortlist.filter(
+      (r) => r.status !== 'on_hold' && disqualified.has(Number(r.vendor_id))
+    ).length;
+    const alreadyPromoted = shortlist.filter((r) => r.status === 'promoted').length;
+    const needed = activeDisqualifiedCount - alreadyPromoted;
+    const promotions = [];
+    for (let i = 0; i < needed; i++) {
+      const promoted = await arcEvalModel.promoteNextHeld(arcId, { userId }, runner);
+      if (!promoted) break; // ran out of held vendors
+      promotions.push(promoted);
+    }
+    return promotions;
+  },
+
+  // ============================================================
   // Blind technical evaluation — per-ARC vendor aliases
   // ============================================================
 
@@ -685,12 +929,16 @@ const arcEvalModel = {
   // ============================================================
 
   // Phase 1 §3 — persist T&C acceptance (idempotent: COALESCE keeps first timestamp).
+  // Sr 36 — stored wall-clock must be IST (naive column), matching every other
+  // ARC window timestamp (submission_start_at, etc.), NOT the DB session's raw
+  // CURRENT_TIMESTAMP (UTC on prod) — otherwise the vendor sees an acceptance
+  // time ~5.5h off. `updated_at` stays on CURRENT_TIMESTAMP (not read as IST).
   acceptTerms: async (arcId, vendorId, txContext = null) => {
     return (txContext || db).one(
       `INSERT INTO tbl_arc_quote (arc_id, vendor_id, terms_accepted_at)
-       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       VALUES ($1, $2, (NOW() AT TIME ZONE 'Asia/Kolkata'))
        ON CONFLICT (arc_id, vendor_id) DO UPDATE
-         SET terms_accepted_at = COALESCE(tbl_arc_quote.terms_accepted_at, CURRENT_TIMESTAMP),
+         SET terms_accepted_at = COALESCE(tbl_arc_quote.terms_accepted_at, (NOW() AT TIME ZONE 'Asia/Kolkata')),
              updated_at        = CURRENT_TIMESTAMP
        RETURNING terms_accepted_at`,
       [arcId, vendorId]

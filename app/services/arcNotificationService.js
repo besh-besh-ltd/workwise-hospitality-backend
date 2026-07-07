@@ -70,12 +70,15 @@ const EVENT_CONFIG = {
     url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
   },
 
+  // Sr 47 (Cap 2, Path A) — the mechanics are still the publish-reject path
+  // (same event type/status, unchanged), only the copy is softened to read
+  // as a send-back for revision rather than a hard kill.
   [ARC_EVENT_TYPES.PUBLISH_REJECTED]: {
     audiences:    [AUDIENCE.CREATOR],
     email:        true,
     vendorFacing: false,
-    title:        'Rate contract publish rejected',
-    body:         (arc, payload) => `Publishing of ${arc.title} (${arc.arc_number}) was rejected.${payload.reason ? ' Reason: ' + payload.reason : ''}`,
+    title:        'Changes requested on your rate contract',
+    body:         (arc, payload) => `The approver requested changes before publishing ${arc.title} (${arc.arc_number}).${payload.reason ? ' Note: ' + payload.reason : ''} Revise and re-publish to send it back for approval.`,
     url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
   },
 
@@ -227,6 +230,18 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical evaluation rejected',
     body:         (arc) => `Technical evaluation for ${arc.title} (${arc.arc_number}) was rejected and needs rework.`,
+    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+  },
+
+  // Sr 54 — a held vendor was auto-promoted into evaluation because one of
+  // the in-eval vendors ended up not_qualified. Tech evaluators only — the
+  // copy stays blind (no vendor identity/price), same as the on-screen banner.
+  [ARC_EVENT_TYPES.TECH_SHORTLIST_PROMOTED]: {
+    audiences:    [AUDIENCE.TECH_EVALUATORS],
+    email:        true,
+    vendorFacing: false,
+    title:        'A held vendor was moved into technical evaluation',
+    body:         (arc) => `A shortlisted vendor did not qualify on ${arc.title} (${arc.arc_number}) — the next vendor in commercial rank was automatically moved into evaluation.`,
     url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
   },
 

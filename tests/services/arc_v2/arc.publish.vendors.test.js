@@ -64,7 +64,13 @@ describe("ARC v2 — publish tags + notifies eligible vendors (C3 + C2)", () => 
       department_id: DEPT,
       process_id: PROC,
       eligibility_type: "open",
-      submission_start_at: new Date(today.getTime() + 1 * 86400_000).toISOString(),
+      // Sr 27 (Option C): a floated ARC now hides from vendors + defers its
+      // notification while submission_start_at is in the future. This suite's
+      // purpose (C3 vendor tagging + C2 float notification) is orthogonal to
+      // window timing, so the window is seeded already-open (start in the
+      // past) — the notification-deferral / hidden-until-open behavior itself
+      // is covered by arc.submissionOpen.test.js.
+      submission_start_at: new Date(today.getTime() - 1 * 3600_000).toISOString(),
       submission_end_at:   new Date(today.getTime() + 7 * 86400_000).toISOString(),
       contract_start_at:   new Date(today.getTime() + 14 * 86400_000).toISOString(),
       contract_end_at:     new Date(today.getTime() + 200 * 86400_000).toISOString(),

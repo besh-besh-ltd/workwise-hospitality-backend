@@ -34,6 +34,13 @@ export const ARC_EVENT_TYPES = Object.freeze({
   TERMINATED: 'terminated',
   CLOSED_NO_AWARD: 'closed_no_award',
   SUBMISSION_CLOSED: 'submission_closed',
+  // Sr 27 (Option C) — deferred float notification. Logged the moment the
+  // vendor "it's open for quotes" notification is actually SENT: either right
+  // away at float time (submission_start_at already <= now / absent), or later
+  // by the submission-open sweep once submission_start_at passes. Doubles as
+  // the idempotency marker so the sweep never double-sends (see
+  // arcSubmissionOpenService.js) — no new column needed.
+  SUBMISSION_OPENED: 'submission_opened',
   // Vendor invitation & response
   VENDOR_INVITED: 'vendor_invited',
   VENDOR_VIEWED: 'vendor_viewed',
@@ -47,6 +54,10 @@ export const ARC_EVENT_TYPES = Object.freeze({
   TECH_EVAL_SUBMITTED: 'tech_eval_submitted',
   TECH_EVAL_APPROVED: 'tech_eval_approved',
   TECH_EVAL_REJECTED: 'tech_eval_rejected',
+  // Sr 54 — commercial-ranked technical-evaluation shortlist: an on-hold
+  // vendor was auto-promoted into evaluation because an in-eval vendor ended
+  // up not_qualified.
+  TECH_SHORTLIST_PROMOTED: 'tech_shortlist_promoted',
   // Commercial eval + committee
   COMM_EVAL_OPENED: 'comm_eval_opened',
   COMM_EVAL_ALLOCATION_UPDATED: 'comm_eval_allocation_updated',
