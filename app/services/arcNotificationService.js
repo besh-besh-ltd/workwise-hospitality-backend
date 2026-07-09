@@ -274,6 +274,15 @@ const EVENT_CONFIG = {
     url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
   },
 
+  [ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK_TO_TECH]: {
+    audiences:    [AUDIENCE.TECH_EVALUATORS, AUDIENCE.CREATOR],
+    email:        true,
+    vendorFacing: false,
+    title:        'Sent back to technical evaluation',
+    body:         (arc, payload) => `Commercial evaluation for ${arc.title} (${arc.arc_number}) was sent back to technical evaluation for re-assessment.${payload.reason ? ' Reason: ' + payload.reason : ''}`,
+    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+  },
+
   [ARC_EVENT_TYPES.COMMITTEE_DECISION]: {
     audiences:    [AUDIENCE.CREATOR, AUDIENCE.COMM_EVALUATORS],
     email:        true,

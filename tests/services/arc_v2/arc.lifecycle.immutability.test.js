@@ -6,11 +6,11 @@
 //      finalized) allocations remain editable.
 //   2. After finalize: saveAllocation → 409, finalize again → 409,
 //      setupTechEval → 409 (can't un-skip technical under a locked award).
-//   3. Evaluator send-back: cancels the PENDING committee instance,
-//      re-opens commercial (writes work again), and a re-finalize spawns
-//      a FRESH committee instance.
-//   4. After the committee APPROVES, send-back itself 409s — the award is
-//      contractually locked.
+//   3. send-back-to-tech is refused (400) here because technical was SKIPPED
+//      (no clauses) — there is no upstream stage to bounce to, so the finalized
+//      award is left untouched.
+//   4. After the committee APPROVES, send-back-to-tech itself 409s — the award
+//      is contractually locked (the committee guard fires before the tech check).
 
 import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
@@ -134,43 +134,37 @@ describe("ARC lifecycle — stage immutability + send-back unlock", () => {
     expect(lateClauses.body.code).toBe("STAGE_IMMUTABLE");
   });
 
-  test("evaluator send-back cancels the pending committee vote and re-opens commercial", async () => {
+  test("send-back-to-tech is refused (400) when technical was skipped — the finalized award is untouched", async () => {
     const pendingBefore = await db.one(
       `SELECT id, status FROM tbl_approval_instances
         WHERE entity_type = 'ARC_COMMITTEE' AND entity_id = $1
         ORDER BY created_at DESC LIMIT 1`, [arcId]);
     expect(pendingBefore.status).toBe("PENDING");
 
+    // Technical was skipped (no clauses) — nothing to send it back to.
     const sendBack = await buyerClient
-      .post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/send-back`)
+      .post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/send-back-to-tech`)
       .send({ reason: "Split needs rebalancing" });
-    expect(sendBack.status).toBe(200);
+    expect(sendBack.status).toBe(400);
+    expect(sendBack.body.message).toMatch(/Technical evaluation was not performed/i);
 
-    const cancelled = await db.one(
-      `SELECT status FROM tbl_approval_instances WHERE id = $1`, [pendingBefore.id]);
-    expect(cancelled.status).toBe("CANCELLED");
-
-    // Commercial editable again; lifecycle reflects sent_back.
-    expect((await allocate()).status).toBe(200);
-    const lifecycle = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
-    const commercial = lifecycle.body.data.stages.find((s) => s.key === "commercial");
-    expect(commercial.state).toBe("partial");
-    expect(commercial.reason).toBe("sent_back");
-
-    // Re-finalize spawns a FRESH committee instance.
-    const reFinalize = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
-    expect(reFinalize.status).toBe(200);
-    expect(Number(reFinalize.body.data.approval_instance_id)).not.toBe(Number(pendingBefore.id));
+    // The finalized award is left intact — committee still pending, nothing cancelled.
+    const untouched = await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [pendingBefore.id]);
+    expect(untouched.status).toBe("PENDING");
+    const commercial = (await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`))
+      .body.data.stages.find((s) => s.key === "commercial");
+    expect(commercial.state).toBe("complete");
   });
 
-  test("after committee approval the award is contractually locked — even send-back 409s", async () => {
+  test("after committee approval the award is contractually locked — even send-back-to-tech 409s", async () => {
     const decide = await committeeClient
       .post(`/api/v1/arc-v2/committee/${arcId}/decide`)
       .send({ decision: "approve", comment: "Locked in" });
     expect(decide.status).toBe(200);
 
+    // Committee-approved guard fires before the tech-applies check → 409, not 400.
     const sendBack = await buyerClient
-      .post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/send-back`)
+      .post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/send-back-to-tech`)
       .send({ reason: "too late" });
     expect(sendBack.status).toBe(409);
     expect(sendBack.body.code).toBe("STAGE_IMMUTABLE");

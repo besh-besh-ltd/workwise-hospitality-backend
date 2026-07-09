@@ -899,11 +899,22 @@ export async function finalizeCommEval(req, res) {
   }
 }
 
-export async function sendBackCommEval(req, res) {
+// Commercial evaluator bounces the ARC UPSTREAM to technical evaluation. Use when
+// the qualified-vendor set is wrong (a vendor wrongly disqualified/qualified, a
+// clause mis-scored) — the commercial evaluator cannot fix that here, so it goes
+// back to the people who own it. Mirrors the committee→commercial send-back:
+// technical reopens for the tech evaluator to re-score, re-submit re-runs the tech
+// approval, and on re-approval the flow returns to commercial — where the existing
+// qualified-set guards (saveAllocation / finalizeCommEval) drop any award to a
+// now-disqualified vendor. Award allocation is preserved across the round-trip.
+export async function sendBackCommEvalToTech(req, res) {
   try {
     const arcId = Number(req.params.arcId);
     const userId = req.user?.id;
     const reason = req.body?.reason;
+    if (!reason || !String(reason).trim()) {
+      return bad(res, 400, 'A reason is required to send back to technical evaluation.');
+    }
     const result = await db.tx(async (t) => {
       const comm = await arcEvalModel.getCommEval(arcId, t);
       if (!comm) return bad(res, 404, 'comm eval not found', 2);
@@ -921,31 +932,61 @@ export async function sendBackCommEval(req, res) {
           message: 'The committee has already approved — contracts are generated and the award is immutable',
         });
       }
+
+      // Nothing to send back to when technical never applied (no clauses on any
+      // item) — enforce the same "hide the button" rule server-side.
+      const clauseCount = await t.one(
+        `SELECT COUNT(*)::int AS n
+           FROM tbl_arc_item_tech_evaluation_clauses c
+           JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+           JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
+          WHERE ai.arc_id = $1`,
+        [arcId]
+      );
+      if (clauseCount.n === 0) {
+        return bad(res, 400, 'Technical evaluation was not performed for this contract — there is nothing to send it back to.');
+      }
+
       // A PENDING committee vote becomes moot when the evaluator pulls the
       // proposal back — cancel it so a later re-finalize can spawn a fresh one.
       if (committee?.status === 'PENDING') {
-        await t.none(
-          `UPDATE tbl_approval_instances
-              SET status = 'CANCELLED', completed_at = NOW()
-            WHERE id = $1`,
-          [committee.id]
-        );
+        await t.none(`UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1`, [committee.id]);
       }
 
+      // Reopen technical: supersede the settled ARC_TECH approval so the stage is
+      // no longer 'complete' (loadInstance reads the latest instance by created_at).
+      // The tech evaluator re-scores and re-submits, which spawns a FRESH ARC_TECH
+      // round (submitTechEval only blocks on a PENDING one).
+      const techInst = await t.oneOrNone(
+        `SELECT id, status FROM tbl_approval_instances
+          WHERE entity_type = 'ARC_TECH' AND entity_id = $1
+          ORDER BY created_at DESC LIMIT 1`,
+        [arcId]
+      );
+      if (techInst && techInst.status !== 'CANCELLED') {
+        await t.none(`UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1`, [techInst.id]);
+      }
+
+      // Park commercial (status sent_back → lifecycle shows locked/sent_back_to_tech,
+      // awards kept) and reopen technical.
       const updated = await arcEvalModel.setCommEvalStatus(comm.id, 'sent_back', {}, t);
-      await arcModel.setStatus(arcId, 'comm_eval_in_progress', {}, t);
-      await arcEvalModel.appendCommEvalHistory(comm.id, 'sent_back', { reason, cancelled_instance_id: committee?.status === 'PENDING' ? committee.id : null }, userId, t);
-      await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK, actorId: userId, payload: { reason }, txContext: t });
+      await arcModel.setStatus(arcId, 'tech_eval_in_progress', {}, t);
+      await arcEvalModel.appendCommEvalHistory(
+        comm.id, 'sent_back_to_tech',
+        { reason, cancelled_tech_instance_id: techInst?.id || null, cancelled_committee_instance_id: committee?.status === 'PENDING' ? committee.id : null },
+        userId, t
+      );
+      await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK_TO_TECH, actorId: userId, payload: { reason }, txContext: t });
       return { __data: { comm_evaluation: updated } };
     });
     // respond after commit — never inside the tx
     if (result && result.__data) {
-      await notifyArcEvent({ arcId: Number(req.params.arcId), eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK, actorId: userId, payload: { reason: req.body?.reason } });
-      return ok(res, result.__data, 'Sent back');
+      await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK_TO_TECH, actorId: userId, payload: { reason } });
+      return ok(res, result.__data, 'Sent back to technical evaluation');
     }
     return result;
   } catch (err) {
-    return fail(res, err, '[evalController.sendBackCommEval]');
+    return fail(res, err, '[evalController.sendBackCommEvalToTech]');
   }
 }
 

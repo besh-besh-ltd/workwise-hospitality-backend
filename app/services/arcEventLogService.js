@@ -63,6 +63,9 @@ export const ARC_EVENT_TYPES = Object.freeze({
   COMM_EVAL_ALLOCATION_UPDATED: 'comm_eval_allocation_updated',
   COMM_EVAL_FINALIZED: 'comm_eval_finalized',
   COMM_EVAL_SENT_BACK: 'comm_eval_sent_back',
+  // Commercial evaluator bounces the ARC upstream to technical evaluation when the
+  // qualified-vendor set is wrong (mirrors the committee→commercial send-back).
+  COMM_EVAL_SENT_BACK_TO_TECH: 'comm_eval_sent_back_to_tech',
   COMMITTEE_DECISION: 'committee_decision',
   // Contract
   CONTRACT_GENERATED: 'contract_generated',

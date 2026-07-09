@@ -499,12 +499,19 @@ export function deriveStages(arc, f) {
       state: 'partial',
       reason: f.techApproval?.status === 'PENDING' ? 'awaiting_approval'
         : arc.status === 'tech_eval_rejected' ? 'approval_rejected'
+        // Reopened by a commercial→technical send-back: a comm eval exists AND was
+        // parked to sent_back while technical is no longer complete. (The
+        // committee→commercial send-back also sets comm.status='sent_back' but
+        // leaves technical APPROVED, so it never reaches this partial branch.)
+        : (f.comm && f.comm.status === 'sent_back') ? 'reopened_from_commercial'
         : 'scoring_partial',
     };
   } else {
     technical = {
       state: 'active',
-      reason: arc.status === 'tech_eval_rejected' ? 'approval_rejected' : 'scoring_in_progress',
+      reason: arc.status === 'tech_eval_rejected' ? 'approval_rejected'
+        : (f.comm && f.comm.status === 'sent_back') ? 'reopened_from_commercial'
+        : 'scoring_in_progress',
     };
   }
   technical = {
@@ -520,7 +527,12 @@ export function deriveStages(arc, f) {
   let commercial;
   const techUnlocksCommercial = ['complete', 'skipped'].includes(technical.state);
   if (!techUnlocksCommercial) {
-    commercial = { state: 'locked', reason: 'technical_incomplete' };
+    // Distinguish "never reached commercial yet" from "the evaluator sent it back
+    // to technical" — the latter parks the comm eval at sent_back with awards kept.
+    commercial = {
+      state: 'locked',
+      reason: (f.comm && f.comm.status === 'sent_back') ? 'sent_back_to_tech' : 'technical_incomplete',
+    };
   } else if (f.comm?.status === 'finalized') {
     commercial = { state: 'complete', reason: 'finalized' };
   } else if (f.items_total > 0 && f.items_allocated === f.items_total) {
