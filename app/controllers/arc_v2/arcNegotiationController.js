@@ -98,6 +98,24 @@ export async function createRound(req, res) {
       return bad(res, 400, 'Only one arc-level entry is permitted per round submission');
     }
 
+    // Validate field-keyed targets shape (Phase-1: base_price, payment_terms,
+    // <charge slug>). A vendor target may carry legacy `target_rate`, a rich
+    // `fields[]`, or neither; when fields[] is present it must be a well-formed
+    // array so the persisted products JSONB is trustworthy for the apply step.
+    for (const entry of entries) {
+      for (const vt of (entry.vendor_targets || [])) {
+        if (vt.fields === undefined || vt.fields === null) continue;
+        if (!Array.isArray(vt.fields)) {
+          return bad(res, 400, 'vendor_targets[].fields must be an array');
+        }
+        for (const f of vt.fields) {
+          if (!f || typeof f.name !== 'string' || !f.name.trim()) {
+            return bad(res, 400, 'Each negotiation target field must have a name');
+          }
+        }
+      }
+    }
+
     const result = await db.tx(async (t) => {
       // Reload ARC — scope source of truth (NEVER from body)
       const arc = await arcModel.getById(arcId, t);
@@ -198,16 +216,21 @@ export async function createRound(req, res) {
         return bad(res, 400, 'No approval policy configured for ARC negotiation in this scope.');
       }
 
-      // ── Determine persistence shape ──
-      const isMultiShape = entries.length > 1 || arcLevelEntries.length > 0;
-      const singleItemId = !isMultiShape ? Number(entries[0].arc_item_id) : null;
-      const productsJson = isMultiShape
-        ? entries.map((e) =>
-            e.is_arc_level
-              ? { is_arc_level: true, vendor_targets: e.vendor_targets }
-              : { arc_item_id: Number(e.arc_item_id), vendor_targets: e.vendor_targets }
-          )
+      // ── Persistence shape ──
+      // Persist vendor_targets (INCLUDING field-keyed `fields[]`) for EVERY round
+      // so per-vendor negotiation targets are never dropped. The legacy single-item
+      // path stored products=null and lost them. arc_item_id stays set for a single
+      // non-arc-level entry (back-compat display + arc_item_name JOIN); every read
+      // path branches on arc_item_id FIRST (controller:502, FE scopeLabel), so a
+      // single-item round that also carries products still renders as single-item.
+      const singleItemId = (entries.length === 1 && !entries[0].is_arc_level)
+        ? Number(entries[0].arc_item_id)
         : null;
+      const productsJson = entries.map((e) =>
+        e.is_arc_level
+          ? { is_arc_level: true, vendor_targets: e.vendor_targets }
+          : { arc_item_id: Number(e.arc_item_id), vendor_targets: e.vendor_targets }
+      );
 
       const roundNumber = await arcNegotiationModel.getNextRoundNumber(arcId, t);
 
@@ -532,14 +555,29 @@ export async function listVendorRounds(req, res) {
           [arcId, vendorId, itemId]
         );
         const quote = await arcNegotiationModel.getExistingRoundQuote(r.id, vendorId, itemId);
-        // target_rate for this vendor from round vendor_targets
+        // Per-vendor targets for this item from the round's vendor_targets. Surface
+        // BOTH the legacy scalar `target_rate` AND the field-keyed `fields[]`
+        // (base_price, named charges, payment_terms, tax demands) so the vendor
+        // sees exactly what the buyer is negotiating, not just a single rate.
         let targetRate = null;
+        let targetFields = null;
         if (r.products) {
           const prods = typeof r.products === 'string' ? JSON.parse(r.products) : r.products;
           for (const p of prods) {
             if (p.is_arc_level || Number(p.arc_item_id) === itemId) {
               const vt = (p.vendor_targets || []).find((v) => Number(v.vendor_id) === Number(vendorId));
-              if (vt?.target_rate !== undefined) targetRate = vt.target_rate;
+              if (vt) {
+                if (vt.target_rate !== undefined) targetRate = vt.target_rate;
+                if (Array.isArray(vt.fields) && vt.fields.length) {
+                  targetFields = vt.fields;
+                  // Back-compat: when no scalar target_rate, derive it from a
+                  // base_price field so existing FE that reads target_rate still works.
+                  if (targetRate == null) {
+                    const bp = vt.fields.find((f) => f.name === 'base_price');
+                    if (bp && bp.target != null) targetRate = bp.target;
+                  }
+                }
+              }
             }
           }
         }
@@ -552,6 +590,7 @@ export async function listVendorRounds(req, res) {
           is_active:          isActive,
           is_expired:         effectiveStatus === 'ENDED' || effectiveStatus === 'EXPIRED',
           target_rate:        targetRate,
+          target_fields:      targetFields,
           deadline:           r.end_date,
         };
       }));
