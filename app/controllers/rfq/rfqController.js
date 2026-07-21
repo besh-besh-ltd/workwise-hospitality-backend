@@ -44,6 +44,13 @@ import {
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import {
+  assertUserHasScope,
+  assertCanReadParentRfq,
+  AuthorizationError,
+  NoApprovalPolicyError,
+  sendScopeError
+} from '../../services/authorizationService.js';
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
@@ -2229,6 +2236,19 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     }
   }
 
+  // ABAC: 4-axis scope check (company / hotel / department / process). Only
+  // fires for hospitality RFQs — non-hospitality RFQs skip approval entirely
+  // (see startApprovalForRfq) and don't carry a process_id.
+  if (hospitality_company_id) {
+    const resource = Number(is_tender) === 1 ? 'boq' : 'rfq';
+    await assertUserHasScope(user_id, `${resource}.create`, {
+      hospitality_company_id,
+      hotel_id: hotel_id || null,
+      department_id: department_id || null,
+      process_id: process_id || null,
+    });
+  }
+
   const globalFilters = filters?.global;
 
   const rfqFilters = [];
@@ -3446,31 +3466,29 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   // Create the approval instance for tracking. createApprovalInstance handles
   // the "creator is final approver" auto-approval case end-to-end, including
   // persisting per-step + per-approver rows so the lifecycle UI can render
-  // the audit trail. Previously this site short-circuited via
-  // checkIfUserIsFinalApprover and inserted only the parent instance row,
-  // leaving zero tbl_approval_instance_steps / tbl_approval_step_approvers
-  // rows and producing the "No approval steps configured" lifecycle bug.
-  let result;
-  try {
-    result = await createApprovalInstance({
-      entity_type: entityType,
-      entity_id: rfqId,
-      hospitality_company_id: rfq.hospitality_company_id,
-      hotel_id: rfq.hotel_id,
-      department_id: rfq.department_id,
-      process_id: rfq.process_id,
-      initiated_by: userId,
-      metadata: {
-        rfq_number: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        company_name: rfq.company_name
-      },
-      txContext  // Pass transaction context to createApprovalInstance
-    });
-  } catch (approvalError) {
-    logger.warn(`[Approval] Could not create approval instance for ${entityType} ${rfqId}: ${approvalError.message}. Proceeding to publish anyway.`);
-    result = null;
-  }
+  // the audit trail.
+  //
+  // Missing-policy is a HARD FAIL — the previous silent catch let RFQs
+  // publish without approval tracking when no policy matched
+  // (company, hotel, dept, process). Now the error propagates as
+  // NoApprovalPolicyError so the controller returns 400
+  // NO_APPROVAL_POLICY_FOR_PROCESS and the UI can prompt the admin to
+  // configure a policy.
+  const result = await createApprovalInstance({
+    entity_type: entityType,
+    entity_id: rfqId,
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
+    process_id: rfq.process_id,
+    initiated_by: userId,
+    metadata: {
+      rfq_number: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      company_name: rfq.company_name
+    },
+    txContext  // Pass transaction context to createApprovalInstance
+  });
 
   // Set RFQ to READY_TO_PUBLISH (4). Publishing proceeds whether approval
   // auto-completed (creator was the final approver in every resolved step)
@@ -5164,6 +5182,12 @@ const rfqController = {
       }
     } catch (error) {
       logError(error);
+
+      // Typed errors from authorizationService → structured 4xx with code
+      if (error instanceof AuthorizationError || error instanceof NoApprovalPolicyError) {
+        return sendScopeError(res, error);
+      }
+
       return res
         .status(400)
         .json({
@@ -7362,6 +7386,18 @@ const rfqController = {
         return res.status(200).json({ status: 0, message: 'Invalid RFQ ID' });
       }
 
+      // Defense-in-depth: deny direct-URL access to RFQs outside the user's
+      // (company × hotel × dept × process) scope. List endpoints already
+      // hide out-of-scope rows; this catches the case where a user knows
+      // the id and bypasses the list.
+      if (userId) {
+        try { await assertCanReadParentRfq(userId, rfqId); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const data = await rfqModel.getLifecycleSummary(rfqId, userId);
 
       if (!data || !data.current_stage) {
@@ -9105,9 +9141,20 @@ const rfqController = {
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { TA_Vendors, no_freight, rfq_product_id, pageSource, include_negotiation } = req.query;
-    const { id, company_id } = req.user;
+    const { id, company_id, user_type } = req.user;
 
     try {
+      // Defense-in-depth: scope-check the parent RFQ. Skip for vendor
+      // user_type (they reach quotes via a different surface and have no
+      // tbl_user_role_scopes rows).
+      if (Number(user_type) !== 3) {
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
       let rfQItem;
 
@@ -9187,6 +9234,17 @@ const rfqController = {
     const { id, company_id, user_type, vendor_id } = req.user;
 
     try {
+      // Defense-in-depth: scope-check the parent RFQ. Skip for vendor
+      // user_type (they reach Quote Compare via a different surface and have
+      // no tbl_user_role_scopes rows).
+      if (Number(user_type) !== 3) {
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
       let products;
 
@@ -16562,12 +16620,29 @@ getClauses: async (req, res) => {
   getTechEvalStatus: async (req, res) => {
     try {
       const { rfq_product_id } = req.params;
+      const userId = req.user?.id;
 
       if (!rfq_product_id) {
         return res.status(400).json({
           status: 0,
           message: 'rfq_product_id is required'
         });
+      }
+
+      // Defense-in-depth: resolve the parent RFQ from rfq_product_id and
+      // scope-check before exposing tech-eval state.
+      if (userId) {
+        const parent = await db.oneOrNone(
+          `SELECT rfq_id FROM tbl_rfq_products WHERE id = $1`,
+          [parseInt(rfq_product_id)]
+        );
+        if (parent?.rfq_id) {
+          try { await assertCanReadParentRfq(userId, parent.rfq_id); }
+          catch (e) {
+            if (e instanceof AuthorizationError) return sendScopeError(res, e);
+            throw e;
+          }
+        }
       }
 
       const status = await rfqModel.getTechEvalStatusByProductId(parseInt(rfq_product_id));

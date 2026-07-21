@@ -55,6 +55,59 @@ const generatePassword = (password) => {
   return hash;
 };
 
+/**
+ * Validate that every process_id in a role-scope payload belongs to the parent
+ * (buyer) company of the row's hospitality_company_id. Throws a structured
+ * Error if any pair is mismatched or the process is inactive.
+ *
+ * tbl_approval_processes.company_id references tbl_company (the parent buyer
+ * company), while role-scope rows carry hospitality_company_id (which points
+ * to tbl_hospitality_companies). Bridge via tbl_hospitality_companies.buyer_company_id.
+ */
+const validateRoleScopeProcesses = async (rolesArray) => {
+  if (!Array.isArray(rolesArray)) return;
+  const pairs = rolesArray
+    .filter(r => r && r.process_id != null && r.process_id !== 0 && r.company_id)
+    .map(r => ({ process_id: Number(r.process_id), hospitality_company_id: Number(r.company_id) }));
+  if (pairs.length === 0) return;
+
+  const procIds = [...new Set(pairs.map(p => p.process_id))];
+  const hcIds = [...new Set(pairs.map(p => p.hospitality_company_id))];
+
+  const [hcCompanies, processes] = await Promise.all([
+    db.any(
+      `SELECT id, buyer_company_id FROM tbl_hospitality_companies WHERE id = ANY($1::int[])`,
+      [hcIds]
+    ),
+    db.any(
+      `SELECT id, company_id, is_active FROM tbl_approval_processes WHERE id = ANY($1::int[])`,
+      [procIds]
+    ),
+  ]);
+
+  const buyerByHc = new Map(hcCompanies.map(r => [Number(r.id), Number(r.buyer_company_id)]));
+  const procByPid = new Map(processes.map(r => [Number(r.id), r]));
+
+  for (const { process_id, hospitality_company_id } of pairs) {
+    const buyer = buyerByHc.get(hospitality_company_id);
+    const proc = procByPid.get(process_id);
+    if (!buyer) {
+      throw new Error(`Invalid hospitality_company_id ${hospitality_company_id} in role scope`);
+    }
+    if (!proc) {
+      throw new Error(`Process ${process_id} not found`);
+    }
+    if (!proc.is_active) {
+      throw new Error(`Process ${process_id} is inactive and cannot be assigned`);
+    }
+    if (Number(proc.company_id) !== buyer) {
+      throw new Error(
+        `Process ${process_id} does not belong to the parent company of hospitality company ${hospitality_company_id}`
+      );
+    }
+  }
+};
+
 try {
   webpush.setVapidDetails(
     process.env.WEB_PUSH_CONTACT,
@@ -859,9 +912,11 @@ create_buyer_company_users: async (req, res, next) => {
         role_id: r.role_id,
         company_id: r.company_id || companyID,
         hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
+        department_id: r.department_id || null,
+        process_id: r.process_id || null
       }));
 
+      await validateRoleScopeProcesses(roleScopes);
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
 
@@ -1925,7 +1980,8 @@ update_user_detail: async (req, res, next) => {
           `SELECT role_id,
                   COALESCE(company_id, 0)    AS company_id,
                   COALESCE(hotel_id, 0)      AS hotel_id,
-                  COALESCE(department_id, 0) AS department_id
+                  COALESCE(department_id, 0) AS department_id,
+                  COALESCE(process_id, 0)    AS process_id
            FROM tbl_user_role_scopes WHERE user_id = $1`,
           [targetUserId]
         ),
@@ -1948,10 +2004,11 @@ update_user_detail: async (req, res, next) => {
             company_id: r.company_id || loggedInUser.company_id || 0,
             hotel_id: r.hotel_id || 0,
             department_id: r.department_id || 0,
+            process_id: r.process_id || 0,
           }))
         : null;
 
-      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}`;
+      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}|${s.process_id || 0}`;
       const oldScopeKeySet = new Set(oldRoleScopes.map(scopeKey));
       const newScopeKeySet = newRoleScopes ? new Set(newRoleScopes.map(scopeKey)) : null;
 
@@ -2096,9 +2153,14 @@ update_user_detail: async (req, res, next) => {
             role_id: r.role_id,
             company_id: r.company_id || loggedInUser.company_id,
             hotel_id: r.hotel_id || null,
-            department_id: r.department_id || null
+            department_id: r.department_id || null,
+            process_id: r.process_id || null
           }))
         : null;
+
+      if (hasRoleUpdate) {
+        await validateRoleScopeProcesses(roleScopes);
+      }
 
       if (hasRoleUpdate) {
         logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);

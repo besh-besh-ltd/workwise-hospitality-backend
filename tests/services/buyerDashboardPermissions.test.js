@@ -156,11 +156,19 @@ async function getDashboardPerms(userId, hotelIds) {
   return res;
 }
 
+// Shape A: permissions.dashboard = { actions: [...], scope: {...} }.
+// Legacy: permissions.dashboard = [...]. Widgets live in `actions` either way
+// (dashboard grants are not process-scoped). Extract the flat widget list.
+function dashActions(res) {
+  const d = res.body?.data?.permissions?.dashboard;
+  return Array.isArray(d) ? d : (d?.actions || []);
+}
+
 describe("Role-aware buyer dashboard — permission resolution", () => {
   it("RFQ creator in Hotel A1 sees only their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_buyer, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.RFQ_CREATOR));
     // Negative: should NOT see persona widgets they weren't granted.
     expect(perms).not.toContain("my_tech_approvals_pending");
@@ -171,7 +179,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("Technical Evaluator in Hotel A1 sees only their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_techEval, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.TECH_EVAL));
     expect(perms).not.toContain("my_drafts");
     expect(perms).not.toContain("my_commercial_approvals_pending");
@@ -180,7 +188,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("Technical Approver sees their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_techApp, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.TECH_APP));
     expect(perms).not.toContain("my_drafts");
     expect(perms).not.toContain("my_tech_evals_pending");
@@ -189,7 +197,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("Commercial Evaluator (N1) sees their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_commEval, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.COMM_EVAL));
     expect(perms).not.toContain("my_tech_evals_pending");
   });
@@ -197,7 +205,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("Commercial Approver sees their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_commApp, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.COMM_APP));
     expect(perms).not.toContain("savings_pipeline");
   });
@@ -205,7 +213,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("Awarding P1 user sees their persona's widgets", async () => {
     const res = await getDashboardPerms(IDS.users.a1_proc_poApp, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.AWARDING));
     expect(perms).not.toContain("my_drafts");
     expect(perms).not.toContain("my_quote_compares");
@@ -216,7 +224,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // to CEO — so their dashboard permission list should be empty in B1.
     const res = await getDashboardPerms(IDS.users.companyB_admin, [IDS.hotels.B1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual([]);
   });
 
@@ -226,7 +234,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // an empty dashboard array — they have no widget grant in that BU.
     const res = await getDashboardPerms(IDS.users.a1_proc_buyer, [IDS.hotels.A3]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     // urs.hotel_id IS NULL → also matches; a1_proc_buyer has hotel_id=A1,
     // not NULL, so A3 filter returns nothing.
     expect(perms).toEqual([]);
@@ -237,7 +245,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // Selecting [A1, A2] should include the RFQ Creator persona widgets.
     const res = await getDashboardPerms(IDS.users.multiHotel, [IDS.hotels.A1, IDS.hotels.A2]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.RFQ_CREATOR));
   });
 
@@ -245,7 +253,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // dualRole = TENDER_CREATOR in A1 + TECH_EVAL in A2.
     const res = await getDashboardPerms(IDS.users.dualRole, [IDS.hotels.A1, IDS.hotels.A2]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     // RFQ Creator widgets (from A1) AND Tech Evaluator widgets (from A2)
     expect(perms).toEqual(expect.arrayContaining(PRESETS.RFQ_CREATOR));
     expect(perms).toEqual(expect.arrayContaining(PRESETS.TECH_EVAL));
@@ -255,7 +263,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // Same user, A1 only → should see RFQ Creator persona widgets, NOT Tech Evaluator.
     const res = await getDashboardPerms(IDS.users.dualRole, [IDS.hotels.A1]);
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.RFQ_CREATOR));
     // Tech-eval widgets should NOT appear (only granted in A2).
     expect(perms).not.toContain("my_tech_evals_pending");
@@ -268,13 +276,13 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
     // hotel from either company should resolve through to those grants.
     const resA = await getDashboardPerms(IDS.users.crossCompany, [IDS.hotels.A1]);
     expect(resA.status).toBe(200);
-    expect(resA.body?.data?.permissions?.dashboard || []).toEqual(
+    expect(dashActions(resA)).toEqual(
       expect.arrayContaining(PRESETS.RFQ_CREATOR)
     );
 
     const resB = await getDashboardPerms(IDS.users.crossCompany, [IDS.hotels.B1]);
     expect(resB.status).toBe(200);
-    expect(resB.body?.data?.permissions?.dashboard || []).toEqual(
+    expect(dashActions(resB)).toEqual(
       expect.arrayContaining(PRESETS.RFQ_CREATOR)
     );
   });
@@ -282,7 +290,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   it("permissions live update — revoking a role-permission removes the widget on the next call", async () => {
     // Snapshot: RFQ creator has my_drafts grant via TENDER_CREATOR role.
     const before = await getDashboardPerms(IDS.users.a1_proc_buyer, [IDS.hotels.A1]);
-    expect(before.body?.data?.permissions?.dashboard || []).toContain("my_drafts");
+    expect(dashActions(before)).toContain("my_drafts");
 
     // Revoke just that single permission.
     const perm = await db.one(
@@ -295,7 +303,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
 
     try {
       const after = await getDashboardPerms(IDS.users.a1_proc_buyer, [IDS.hotels.A1]);
-      const perms = after.body?.data?.permissions?.dashboard || [];
+      const perms = dashActions(after);
       expect(perms).not.toContain("my_drafts");
       // Sibling widgets in the same persona bundle should still be present.
       expect(perms).toContain("my_active_rfqs");
@@ -324,7 +332,7 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
       .post("/api/v1/rbac/me/permissions/bulk")
       .send({ key: "dashboard", hotel_ids: [] });
     expect(res.status).toBe(200);
-    const perms = res.body?.data?.permissions?.dashboard || [];
+    const perms = dashActions(res);
     expect(perms).toEqual(expect.arrayContaining(PRESETS.RFQ_CREATOR));
     // Meta should signal the expansion happened so the FE can render an
     // "(All Business Units)" hint if it wants.

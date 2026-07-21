@@ -3879,6 +3879,7 @@ LIMIT 2;
                 OR _urs.department_id = RFQ.department_id
                 OR _urs.department_id IS NULL
               )
+              AND (_urs.process_id IS NULL OR _urs.process_id = RFQ.process_id)
           ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
@@ -3908,6 +3909,7 @@ LIMIT 2;
             OR _urs2.department_id = RFQ.department_id
             OR _urs2.department_id IS NULL
           )
+          AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -5462,6 +5464,7 @@ LIMIT 2;
               OR _urs2.department_id = RFQ.department_id
               OR _urs2.department_id IS NULL
             )
+            AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -5673,6 +5676,7 @@ LIMIT 2;
                 OR _urs.department_id = RFQ.department_id
                 OR _urs.department_id IS NULL
               )
+              AND (_urs.process_id IS NULL OR _urs.process_id = RFQ.process_id)
           ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
@@ -5705,6 +5709,7 @@ LIMIT 2;
             OR _urs2.department_id = RFQ.department_id
             OR _urs2.department_id IS NULL
           )
+          AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
@@ -5775,6 +5780,7 @@ LIMIT 2;
               OR _urs2.department_id = RFQ.department_id
               OR _urs2.department_id IS NULL
             )
+            AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
@@ -12408,6 +12414,7 @@ ORDER BY m.created_at;
               OR _urs2.department_id = RFQ.department_id
               OR _urs2.department_id IS NULL
             )
+            AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
         )
         OR EXISTS (
           SELECT 1
@@ -12421,6 +12428,7 @@ ORDER BY m.created_at;
               OR _urs3.department_id = RFQ.department_id
               OR _urs3.department_id IS NULL
             )
+            AND (_urs3.process_id IS NULL OR _urs3.process_id = RFQ.process_id)
           JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
           JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
           WHERE rhm.rfq_id = RFQ.id
@@ -12486,6 +12494,7 @@ ORDER BY m.created_at;
                 OR _urs2.department_id = RFQ.department_id
                 OR _urs2.department_id IS NULL
               )
+              AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
           )
           OR EXISTS (
             SELECT 1
@@ -12499,6 +12508,7 @@ ORDER BY m.created_at;
                 OR _urs3.department_id = RFQ.department_id
                 OR _urs3.department_id IS NULL
               )
+              AND (_urs3.process_id IS NULL OR _urs3.process_id = RFQ.process_id)
             JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
             JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
             WHERE rhm.rfq_id = RFQ.id

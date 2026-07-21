@@ -36,6 +36,7 @@ import s3Client from "../config/s3config.js";
 import fs from "fs";
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
+import { NoApprovalPolicyError } from '../services/authorizationService.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -1852,14 +1853,20 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  * @param {number} hospitality_company_id - Hospitality Company ID for scoping
  * @param {number|null} hotel_id - Hotel ID for scoping (optional)
  * @param {number|null} department_id - Department ID for filtering (optional)
+ * @param {number|null} process_id - Process ID for filtering (optional). NULL =
+ *   "any process applies" (legacy / no-process entity). When a specific process
+ *   is supplied, only users whose role scope covers that process (or is the NULL
+ *   wildcard) qualify as approvers.
  * @returns {Array<number>} Array of user IDs
  */
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
     if (department_id) {
-      // Validate company/hotel access + user has role scope covering this department
+      // Validate company/hotel access + user has role scope covering this
+      // department AND process. Process filter is permissive when not provided
+      // (process_id arg NULL = "any process applies" e.g. legacy paths).
       const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
       const hasDeptScope = await t.oneOrNone(`
         SELECT 1 FROM tbl_user_role_scopes urs
@@ -1867,24 +1874,36 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           AND urs.company_id = $2
           AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
           AND (urs.department_id IS NULL OR urs.department_id = $4)
+          AND ($5::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $5)
         LIMIT 1
-      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id]);
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id, process_id]);
       if (hasCompanyAccess && hasDeptScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     } else {
-      // No department filter: just validate company/hotel access
+      // No department filter: just validate company/hotel access + process scope
       const hasAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      if (hasAccess) {
+      const hasProcessScope = process_id == null
+        ? true
+        : !!(await t.oneOrNone(`
+            SELECT 1 FROM tbl_user_role_scopes urs
+            WHERE urs.user_id = $1
+              AND urs.company_id = $2
+              AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+              AND (urs.process_id IS NULL OR urs.process_id = $4)
+            LIMIT 1
+          `, [step.approver_source_id, hospitality_company_id, hotel_id, process_id]));
+      if (hasAccess && hasProcessScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     }
   } else if (step.approver_source_type === 'ROLE') {
-    // A user qualifies if their role scope covers this department:
+    // A user qualifies if their role scope covers this department AND process:
     //   1. role grant is explicitly scoped to this department, OR
     //   2. role grant is unrestricted (urs.department_id IS NULL) = all-department access
+    // Process axis: NULL = wildcard; otherwise must match the instance's process_id.
     const deptClause = department_id
       ? `AND (urs.department_id = $5 OR urs.department_id IS NULL)`
       : '';
@@ -1896,6 +1915,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
        AND urs.role_id = $1
        AND urs.company_id = $2
        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+       AND ($6::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $6)
        ${deptClause}
       JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
       WHERE u.status = 1
@@ -1905,7 +1925,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           OR (hum.hospitality_hotel_id = $3)
           OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
         )
-    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
+    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id, process_id]);
     userIds.push(...users.map(u => u.id));
   } else if (step.approver_source_type === 'DEPARTMENT') {
     // DEPARTMENT type: always resolve to users in the specified department
@@ -2080,7 +2100,10 @@ export async function createApprovalInstance({
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
-        throw new Error(`No approval policy found for ${entity_type} in this scope`);
+        throw new NoApprovalPolicyError(
+          `No approval policy found for ${entity_type} in this scope`,
+          { entity_type, hospitality_company_id, hotel_id, department_id, process_id }
+        );
       }
     }
 
@@ -2113,8 +2136,9 @@ export async function createApprovalInstance({
         if (!hasBoth) continue;
       }
 
-      // Resolve approvers for this step
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by);
+      // Resolve approvers for this step (pass process_id so the user's process
+      // scope is honored when picking who qualifies).
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
 
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {

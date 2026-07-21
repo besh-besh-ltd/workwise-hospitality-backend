@@ -536,8 +536,10 @@ describe("Vendor quote → drafted PO: other_charges MUST round-trip into charge
     //   totalPrice    = 49225 (no PO-level global charges)
     const data = await buildPOTemplateData(poId);
     expect(parseFloat(data.basicAmount)).toBe(25000);
-    expect(parseFloat(data.totalCharges)).toBe(15000);
-    expect(parseFloat(data.gstAmount)).toBe(9225);
+    // Post-2026-06-19: charge tax (1725) is attributed to totalCharges, not
+    // gstAmount. Grand total (totalSubtotal = 49225) is unchanged.
+    expect(parseFloat(data.totalCharges)).toBe(16725);
+    expect(parseFloat(data.gstAmount)).toBe(7500);
     expect(parseFloat(data.totalSubtotal)).toBe(49225);
     expect(parseFloat(data.totalPrice)).toBe(49225);
 
@@ -921,8 +923,10 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
 
     // Top-level rollup.
     expect(parseFloat(data.basicAmount)).toBe(5000);
-    expect(parseFloat(data.totalCharges)).toBe(150);
-    expect(parseFloat(data.gstAmount)).toBe(927);
+    // Post-2026-06-19: inherited charge tax (27) is attributed to totalCharges
+    // (150 + 27 = 177); gstAmount holds base tax only (900). Grand total intact.
+    expect(parseFloat(data.totalCharges)).toBe(177);
+    expect(parseFloat(data.gstAmount)).toBe(900);
     expect(parseFloat(data.totalSubtotal)).toBe(6077);
     expect(parseFloat(data.totalPrice)).toBe(6077);
 
@@ -930,7 +934,9 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
     const item = data.items[0];
     expect(parseFloat(item.basic_amount)).toBe(5000);
     expect(parseFloat(item.subtotal)).toBe(6077);
-    expect(parseFloat(item.tax_amount)).toBe(927);
+    // Post-2026-06-19: per-line tax_amount = base tax only (900); charge tax (27)
+    // lives in the charge amount. subtotal (6077) is unchanged.
+    expect(parseFloat(item.tax_amount)).toBe(900);
 
     // Per-charge breakdown — tax INHERITED 18% from item.tax for both.
     const cdByName = Object.fromEntries(item.charge_details.map((c) => [c.name, c]));
@@ -1009,8 +1015,10 @@ describe("buildPOTemplateData — STRICT money path: every Rupee in the PO PDF (
     const data = await buildPOTemplateData(scenario.po_id);
 
     expect(parseFloat(data.basicAmount)).toBe(5000);
-    expect(parseFloat(data.totalCharges)).toBe(700);
-    expect(parseFloat(data.gstAmount)).toBe(714);
+    // Post-2026-06-19: charge tax (114) is attributed to totalCharges (700 +
+    // 114 = 814); gstAmount holds base tax only (600). Grand total intact.
+    expect(parseFloat(data.totalCharges)).toBe(814);
+    expect(parseFloat(data.gstAmount)).toBe(600);
     expect(parseFloat(data.totalSubtotal)).toBe(6414);
     expect(parseFloat(data.totalPrice)).toBe(6414);
 

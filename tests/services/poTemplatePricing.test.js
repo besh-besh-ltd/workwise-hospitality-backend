@@ -56,12 +56,15 @@ describe("buildPOTemplatePricing", () => {
     ];
 
     const out = buildPOTemplatePricing(items, "gst");
-    // totalCharges = sum of charge AMOUNTS only (excluding their tax)
-    // Freight 2500 + Insurance 12500 = 15000
-    expect(Number(out.totalCharges)).toBe(15000);
-    // gstAmount = base_tax + sum of per-charge tax = 7500 + 225 + 1500 = 9225
-    expect(Number(out.gstAmount)).toBe(9225);
-    // basicAmount + totalCharges + gstAmount = totalSubtotal
+    // Post the 2026-06-19 "accurate totals" engine change, charge TAX is
+    // attributed to totalCharges (not gstAmount): totalCharges = charge base +
+    // charge tax = (2500 + 12500) + (225 + 1500) = 16725; gstAmount holds the
+    // BASE tax only (7500). The grand total is unchanged (basic + totalCharges
+    // + gstAmount = totalSubtotal), so PO PDF money is correct — only the
+    // internal split moved.
+    expect(Number(out.totalCharges)).toBe(16725);
+    expect(Number(out.gstAmount)).toBe(7500);
+    // basicAmount + totalCharges + gstAmount = totalSubtotal (grand total intact)
     expect(
       Number(out.basicAmount) + Number(out.totalCharges) + Number(out.gstAmount)
     ).toBeCloseTo(Number(out.totalSubtotal), 2);
@@ -151,11 +154,13 @@ describe("buildPOTemplatePricing", () => {
     expect(Number(out.totalSubtotal)).toBe(1475);
     expect(Number(out.totalPrice)).toBe(1475);
     // Both Freight and Packaging end up in charge_details, summed into totalCharges.
-    expect(Number(out.totalCharges)).toBe(250);
-    expect(Number(out.gstAmount)).toBe(225); // 180 + 9 + 36
+    // Post-2026-06-19: charge tax (9 + 36 = 45) is attributed to totalCharges
+    // (250 + 45 = 295); gstAmount holds the base tax only (180).
+    expect(Number(out.totalCharges)).toBe(295);
+    expect(Number(out.gstAmount)).toBe(180);
   });
 
-  it("computes per-row tax_amount = base_tax + sum of charge taxes", () => {
+  it("computes per-row tax_amount = base tax only (charge tax lives in the charge amount)", () => {
     const items = [
       {
         unit_price: 100,
@@ -168,7 +173,8 @@ describe("buildPOTemplatePricing", () => {
       },
     ];
     const out = buildPOTemplatePricing(items, "gst");
-    // base_tax = 120, freight tax = 6, sum = 126
-    expect(Number(out.items[0].tax_amount)).toBe(126);
+    // Post-2026-06-19: per-row tax_amount holds the BASE tax only (120);
+    // charge tax (freight 6) is attributed into the charge amount, not tax_amount.
+    expect(Number(out.items[0].tax_amount)).toBe(120);
   });
 });

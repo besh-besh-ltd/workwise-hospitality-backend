@@ -10,6 +10,13 @@ import hospitalityModel from "../../models/hospitalityModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../../util/constants.js";
 import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
 import rbacModel from "../../models/rbacModel.js";
+import {
+  assertUserHasScope,
+  assertCanReadParentRfq,
+  AuthorizationError,
+  NoApprovalPolicyError,
+  sendScopeError
+} from "../../services/authorizationService.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 import pricingEngine from "../../services/pricingEngine.js";
 import { getPODetailFull } from "../../models/poDashboardModel.js";
@@ -35,6 +42,13 @@ export const getPOByRFQ = async (req, res) => {
         const { page = 1, limit = 10, ...filters } = req.query;
         const { id, user_type } = req.user;
 
+        // Defense-in-depth: scope-check the parent RFQ before listing POs.
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+            if (e instanceof AuthorizationError) return sendScopeError(res, e);
+            throw e;
+        }
+
         const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
 
         return res.json(result);
@@ -53,6 +67,22 @@ export const getPODetails = async (req, res) => {
     try {
         const { po_id } = req.params;
         const { id } = req.user;
+
+        // Defense-in-depth: resolve parent RFQ from po_id, then scope-check.
+        // Skip when invoked via the GRN token path (req.user.id absent).
+        if (id) {
+            const parent = await db.oneOrNone(
+                `SELECT rfq_id FROM tbl_rfq_purchase_order WHERE id = $1`,
+                [po_id]
+            );
+            if (parent?.rfq_id) {
+                try { await assertCanReadParentRfq(id, parent.rfq_id); }
+                catch (e) {
+                    if (e instanceof AuthorizationError) return sendScopeError(res, e);
+                    throw e;
+                }
+            }
+        }
 
         const result = await getPODetailsById(po_id, id);
 
