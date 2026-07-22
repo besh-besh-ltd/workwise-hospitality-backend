@@ -151,6 +151,45 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
     expect(allocs).toEqual([600, 400]);
   });
 
+  // Amount/qty-mode (client feedback #2): the FE now lets buyers type quantities
+  // directly (e.g. 700 + 300 of 1000) with allocated_share_pct as a derived
+  // display companion. This proves that payload shape is accepted/rejected
+  // IDENTICALLY to percentage-mode — qty is the sole server invariant, the pct
+  // companion is stored but never sum-validated.
+  test("accepts an amount-derived split (qty typed directly) with a derived allocated_share_pct", async () => {
+    const res = await client.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: itemId,
+      allocations: [
+        { awarded_vendor_id: VENDOR_A, awarded_quote_line_id: quoteLineA, allocated_qty: 700, allocated_share_pct: 70, l_rank: 'L1', is_l1_default: false, awarded_quote_snapshot: { rate: 90 } },
+        { awarded_vendor_id: VENDOR_B, awarded_quote_line_id: quoteLineB, allocated_qty: 300, allocated_share_pct: 30, l_rank: 'L2', is_l1_default: false, awarded_quote_snapshot: { rate: 95 } },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.awards.length).toBe(2);
+    const byVendor = Object.fromEntries(res.body.data.awards.map(a => [Number(a.awarded_vendor_id), a]));
+    expect(Number(byVendor[VENDOR_A].allocated_qty)).toBe(700);
+    expect(Number(byVendor[VENDOR_B].allocated_qty)).toBe(300);
+    // qty must still reconcile exactly to indicative_qty (1000)
+    const total = res.body.data.awards.reduce((s, a) => s + Number(a.allocated_qty), 0);
+    expect(total).toBe(1000);
+    // the derived pct companion is persisted (nullable display, not sum-validated)
+    expect(Number(byVendor[VENDOR_A].allocated_share_pct)).toBe(70);
+    expect(Number(byVendor[VENDOR_B].allocated_share_pct)).toBe(30);
+  });
+
+  test("rejects an amount-derived split whose quantities don't sum to indicative_qty", async () => {
+    const res = await client.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
+      item_id: itemId,
+      allocations: [
+        // 700 + 299 = 999 ≠ 1000 — pct companion is well-formed (70/30) but qty is short.
+        { awarded_vendor_id: VENDOR_A, awarded_quote_line_id: quoteLineA, allocated_qty: 700, allocated_share_pct: 70, l_rank: 'L1', is_l1_default: false, awarded_quote_snapshot: { rate: 90 } },
+        { awarded_vendor_id: VENDOR_B, awarded_quote_line_id: quoteLineB, allocated_qty: 299, allocated_share_pct: 30, l_rank: 'L2', is_l1_default: false, awarded_quote_snapshot: { rate: 95 } },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/must equal indicative_qty/);
+  });
+
   test("rejects finalize when allocations are missing for any item", async () => {
     // Add a second item (different variant) with no allocations — finalize should reject.
     const SECOND_VARIANT_ID = 3; // 'PEPSI 600 ML' — also seeded.
