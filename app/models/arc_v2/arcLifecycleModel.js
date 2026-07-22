@@ -328,21 +328,49 @@ async function gatherFacts(runner, arc, userId) {
   // computed, or the vendor is otherwise untracked by it) is kept — the LEFT
   // JOIN + `ts.id IS NULL` clause fails open, preserving pre-Sr54 behaviour
   // whenever the shortlist doesn't apply.
+  // F2 — the scoring facts count BOTH the per-item clause set AND the ARC-wide
+  // (universal) clause set, so a universal-only (or mixed) ARC reports accurate
+  // "Evaluating N of M / ready to submit" + partial/awaiting_approval states.
+  // A `src` discriminator ('item' | 'universal') keeps the two id namespaces
+  // separate on the clause↔response join (an item clause id and a universal
+  // clause id may collide numerically). Item-only ARCs: the universal UNION
+  // branches return no rows, so behaviour is byte-for-byte unchanged.
   const scoring = await runner.one(
     `WITH arc_clauses AS (
-       SELECT c.id, c.is_mandatory
+       SELECT c.id AS clause_id, 'item'::text AS src, c.is_mandatory
          FROM tbl_arc_item_tech_evaluation_clauses c
          JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
          JOIN tbl_arc_item i ON i.id = te.arc_item_id
         WHERE i.arc_id = $1
+       UNION ALL
+       SELECT uc.id AS clause_id, 'universal'::text AS src, uc.is_mandatory
+         FROM tbl_arc_universal_tech_evaluation_clauses uc
+         JOIN tbl_arc_universal_tech_evaluation ute ON ute.id = uc.arc_universal_tech_evaluation_id
+        WHERE ute.arc_id = $1
+     ),
+     arc_responses AS (
+       SELECT r.vendor_id, r.arc_item_tech_evaluation_clauses_id AS clause_id, 'item'::text AS src,
+              r.buyer_marks, r.mandatory_passed
+         FROM tbl_arc_item_tech_evaluation_vendors_response r
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+         JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+         JOIN tbl_arc_item i ON i.id = te.arc_item_id
+        WHERE i.arc_id = $1
+       UNION ALL
+       SELECT ur.vendor_id, ur.arc_universal_tech_evaluation_clauses_id AS clause_id, 'universal'::text AS src,
+              ur.buyer_marks, ur.mandatory_passed
+         FROM tbl_arc_universal_tech_evaluation_vendors_response ur
+         JOIN tbl_arc_universal_tech_evaluation_clauses uc ON uc.id = ur.arc_universal_tech_evaluation_clauses_id
+         JOIN tbl_arc_universal_tech_evaluation ute ON ute.id = uc.arc_universal_tech_evaluation_id
+        WHERE ute.arc_id = $1
      ),
      per_vendor AS (
        SELECT r.vendor_id,
               COUNT(*) FILTER (WHERE r.buyer_marks IS NOT NULL)::int AS scored,
               -- mandatory clauses still awaiting a pass/fail verdict
               COUNT(*) FILTER (WHERE c.is_mandatory = TRUE AND r.mandatory_passed IS NULL)::int AS mandatory_unjudged
-         FROM tbl_arc_item_tech_evaluation_vendors_response r
-         JOIN arc_clauses c ON c.id = r.arc_item_tech_evaluation_clauses_id
+         FROM arc_responses r
+         JOIN arc_clauses c ON c.clause_id = r.clause_id AND c.src = r.src
          LEFT JOIN tbl_arc_tech_shortlist ts ON ts.arc_id = $1 AND ts.vendor_id = r.vendor_id
         WHERE ts.id IS NULL OR ts.status <> 'on_hold'
         GROUP BY r.vendor_id
@@ -355,6 +383,13 @@ async function gatherFacts(runner, arc, userId) {
        FROM per_vendor`,
     [arcId]
   );
+
+  // Single source of truth for "does this ARC require a technical stage?" —
+  // item OR universal clauses. `arcHasTechClauses` was updated for universal
+  // (spec §6); the item-only `tech.clauses_total` above still drives the
+  // display counts, but the skip predicate MUST key off this so a universal-
+  // only ARC is NOT skipped (which would defeat the universal knockout).
+  const hasTechClauses = await arcEvalModel.arcHasTechClauses(arcId, runner);
 
   // Sr 54 — total participating / on-hold counts for the FE indicator, read
   // straight off the shortlist table (populated at submission-close or lazily
@@ -425,6 +460,8 @@ async function gatherFacts(runner, arc, userId) {
     items_total: tech.items_total,
     items_with_clauses: tech.items_with_clauses,
     clauses_total: tech.clauses_total,
+    // item OR universal — the skip predicate keys off this (not item-only clauses_total).
+    has_tech_clauses: hasTechClauses,
     vendors_in_play: scoring.vendors_in_play,
     vendors_fully_scored: scoring.vendors_fully_scored,
     // Sr 54 — { total_participating, in_evaluation, on_hold }.
@@ -490,7 +527,10 @@ export function deriveStages(arc, f) {
   };
   if (!windowClosed) {
     technical = { state: 'locked', reason: 'window_open' };
-  } else if (f.clauses_total === 0) {
+  } else if (!f.has_tech_clauses) {
+    // Item OR universal — a universal-only ARC (no item clauses but universal
+    // clauses present) must NOT be skipped, else its knockout is never computed
+    // and awarding opens without the shared ARC_TECH approval.
     technical = { state: 'skipped', reason: 'no_clauses_configured' };
   } else if (f.techApproval?.status === 'APPROVED') {
     technical = { state: 'complete', reason: 'approved' };

@@ -28,13 +28,25 @@ async function resolveArcId(req) {
   if (direct) return direct;
   const itemId = Number(req.params?.itemId);
   if (itemId) return arcLifecycleModel.getArcIdForItem(itemId);
+  // Universal (ARC-wide) tech-eval routes carry no :arcId. Their response/file
+  // ids live in the SEPARATE universal tables, so resolve them there — item and
+  // universal id spaces are independent, so we route by the request path to
+  // avoid a numeric collision checking permission against the wrong ARC.
+  const isUniversal = /universal-tech-eval/.test(req.originalUrl || '');
   const responseId = Number(req.body?.response_id);
-  if (responseId) return arcLifecycleModel.getArcIdForResponse(responseId);
-  // Evaluator evidence proxy: GET /tech-eval/evidence/:fileId → resolve the
-  // ARC that owns the evidence file so its tech permission can be checked.
+  if (responseId) {
+    return isUniversal
+      ? arcEvalModel.arcIdForUniversalResponse(responseId)
+      : arcLifecycleModel.getArcIdForResponse(responseId);
+  }
+  // Evaluator evidence proxy: GET /tech-eval/evidence/:fileId (or the universal
+  // equivalent) → resolve the ARC that owns the evidence file so its tech
+  // permission can be checked.
   const fileId = Number(req.params?.fileId);
   if (fileId) {
-    const row = await arcEvalModel.getResponseFileWithScope(fileId);
+    const row = isUniversal
+      ? await arcEvalModel.getUniversalResponseFileWithScope(fileId)
+      : await arcEvalModel.getResponseFileWithScope(fileId);
     return row ? Number(row.arc_id) : null;
   }
   return null;

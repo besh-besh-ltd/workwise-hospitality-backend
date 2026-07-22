@@ -23,6 +23,16 @@ r.post('/items/:itemId/tech-eval',          passportSignIn, acl([2, 8]), TECH_WR
 r.get( '/items/:itemId/tech-eval',          passportSignIn, acl([2, 8]), TECH_READ,  evalController.getTechEvalForItem);
 r.post('/tech-eval/score',                  passportSignIn, acl([2, 8]), TECH_WRITE, evalController.scoreResponse);
 r.post('/:arcId/tech-eval/submit',          passportSignIn, acl([2, 8]), TECH_WRITE, evalController.submitTechEval);
+
+// Universal (ARC-wide) technical clauses — a SECOND, separate configurator that
+// rides the SAME ARC_TECH approval instance (no separate submit/approve route;
+// submit is the shared /:arcId/tech-eval/submit above). Same guards as item
+// tech-eval. /score + /evidence carry no :arcId — the controller resolves the
+// ARC from the response/file, exactly like /tech-eval/score + /evidence.
+r.post('/:arcId/universal-tech-eval',           passportSignIn, acl([2, 8]), TECH_WRITE, evalController.setupUniversalTechEval);
+r.get( '/:arcId/universal-tech-eval',           passportSignIn, acl([2, 8]), TECH_READ,  evalController.getUniversalTechEval);
+r.post('/universal-tech-eval/score',            passportSignIn, acl([2, 8]), TECH_WRITE, evalController.scoreUniversalResponse);
+r.get( '/universal-tech-eval/evidence/:fileId', passportSignIn, acl([2, 8]), TECH_READ,  evalController.getUniversalTechEvidenceFile);
 // Evaluator-side evidence file proxy — ownership/permission-checked stream of
 // a vendor's uploaded evidence (no raw public S3 URL). TECH_READ gates it.
 r.get( '/tech-eval/evidence/:fileId',       passportSignIn, acl([2, 8]), TECH_READ,  evalController.getTechEvidenceFile);

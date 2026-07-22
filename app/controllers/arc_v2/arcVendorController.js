@@ -455,15 +455,21 @@ export async function getRequestDetail(req, res) {
     let tech_envelope = null;
     if (techRequired) {
       // Phase 1 §B — reuse extracted model method (also used by seal guard).
+      // §6.1 — fold universal totals in: clauses_total/clauses_answered are the
+      // COMBINED (item + universal) counts so the single seal reflects both, and
+      // distinct universal_* fields let the FE render a separate universal section.
       const counts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
+      const univCounts = await arcEvalModel.universalEnvelopeCounts(arcId, vendorId);
       tech_envelope = {
         required: true,
         tech_submitted_at: quote?.tech_submitted_at || null,
-        clauses_total: counts.clauses_total,
-        clauses_answered: counts.clauses_answered,
+        clauses_total: counts.clauses_total + univCounts.clauses_total,
+        clauses_answered: counts.clauses_answered + univCounts.clauses_answered,
+        universal_clauses_total: univCounts.clauses_total,
+        universal_clauses_answered: univCounts.clauses_answered,
       };
     } else {
-      tech_envelope = { required: false, tech_submitted_at: null, clauses_total: 0, clauses_answered: 0 };
+      tech_envelope = { required: false, tech_submitted_at: null, clauses_total: 0, clauses_answered: 0, universal_clauses_total: 0, universal_clauses_answered: 0 };
     }
     // Mark invitation viewed if not yet (silent best-effort).
     if (invitation && invitation.status === 'invited') {
@@ -945,10 +951,37 @@ export async function getTechClausesForVendor(req, res) {
         })),
       });
     }
+    // §7.4 — universal (ARC-wide) clauses returned as a SEPARATE `universal`
+    // key so the FE can render a distinct "universally configured" section.
+    // Item logic above is untouched. NEVER returns buyer_marks / verdicts /
+    // other vendors' rows (getVendorUniversalEnvelope is vendor-isolated).
+    const { clauses: univClauses, filesByResponse: univFiles } =
+      await arcEvalModel.getVendorUniversalEnvelope(arcId, vendorId);
+    let universal = null;
+    if (univClauses.length > 0) {
+      universal = {
+        minimum_passing_score: univClauses[0].minimum_passing_score,
+        clauses: univClauses.map((c) => ({
+          clause_id: Number(c.clause_id),
+          clause_text: c.clause_text,
+          clause_type: c.clause_type,
+          weightage: c.weightage,
+          is_mandatory: !!c.is_mandatory,
+          vendor_response: c.vendor_response ?? null,
+          files: (univFiles[Number(c.response_id)] || []).map((f) => ({
+            file_id: Number(f.file_id),
+            // Vendor-scoped, ownership-checked proxy URL — NOT the raw S3 url.
+            url: `/arc-v2/vendor/universal-tech-envelope/file/${f.file_id}`,
+            original_name: f.original_name || null,
+          })),
+        })),
+      };
+    }
     return ok(res, {
       tech_submitted_at: quote?.tech_submitted_at || null,
       window_open: submissionWindowOpen(arc),
       items: [...itemsMap.values()],
+      universal,
     });
   } catch (err) {
     logger.error({ err }, '[vendorController.getTechClausesForVendor]');
@@ -1117,10 +1150,16 @@ export async function submitTechEnvelope(req, res) {
     // clauses gets stuck on the technical stage with nothing to answer and no
     // way to reach the commercial quote (the commercial-submit gate still needs
     // this seal when the ARC is tech-required).
-    const counts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
-    if (counts.clauses_total > 0 && counts.clauses_answered < counts.clauses_total) {
+    // §6.1 — ONE seal covers BOTH envelopes: require ALL clauses answered across
+    // item AND universal. An empty universal envelope (no universal clauses) is
+    // trivially complete (0 of 0), so tech-only ARCs are unaffected.
+    const itemCounts = await arcEvalModel.techEnvelopeCounts(arcId, vendorId);
+    const univCounts = await arcEvalModel.universalEnvelopeCounts(arcId, vendorId);
+    const clausesTotal = itemCounts.clauses_total + univCounts.clauses_total;
+    const clausesAnswered = itemCounts.clauses_answered + univCounts.clauses_answered;
+    if (clausesTotal > 0 && clausesAnswered < clausesTotal) {
       return bad(res, 409,
-        `Respond to all clauses before sealing — ${counts.clauses_answered} of ${counts.clauses_total} answered`
+        `Respond to all clauses before sealing — ${clausesAnswered} of ${clausesTotal} answered`
       );
     }
     const result = await db.tx(async (t) => {
@@ -1153,6 +1192,168 @@ async function arcLifecycleModelGetArcIdForClause(clauseId) {
     [clauseId]
   );
   return row ? Number(row.arc_id) : null;
+}
+
+// ============================================================
+// Universal (ARC-wide) technical envelope — vendor self-submission (§7.2)
+//
+// Parallel to the per-item tech-envelope handlers above, targeting the
+// universal model helpers. SAME security posture: scope from req.user.id,
+// invitation + window + not-sealed gated via loadTechEnvelopeScope, clause ids
+// validated via universalClauseIdsBelongToArc, vendor isolation always by
+// req.user.id. ONE seal (tbl_arc_quote.tech_submitted_at) covers both envelopes;
+// there is no separate universal submit — it rides submitTechEnvelope.
+// ============================================================
+
+// Resolve the ARC from a universal clause (analog of arcLifecycleModelGetArcIdForClause).
+async function getArcIdForUniversalClause(clauseId) {
+  const row = await db.oneOrNone(
+    `SELECT te.arc_id
+       FROM tbl_arc_universal_tech_evaluation_clauses c
+       JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+      WHERE c.id = $1`,
+    [clauseId]
+  );
+  return row ? Number(row.arc_id) : null;
+}
+
+// POST /vendor/universal-tech-envelope/draft  body: { arc_id, responses:[{clause_id, vendor_response}] }
+export async function saveUniversalTechEnvelopeDraft(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const { arc_id, responses } = req.body || {};
+    const arcId = Number(arc_id);
+    const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    if (!Array.isArray(responses) || responses.length === 0) {
+      return bad(res, 400, 'responses[] is required');
+    }
+    const clauseIds = responses.map((r) => Number(r.clause_id)).filter(Boolean);
+    if (clauseIds.length === 0) return bad(res, 400, 'Each response needs a clause_id');
+    // Cross-ARC universal clause ids are rejected outright (never trust client ids).
+    const valid = new Set(await arcEvalModel.universalClauseIdsBelongToArc(arcId, clauseIds));
+    for (const cid of clauseIds) {
+      if (!valid.has(Number(cid))) {
+        return bad(res, 400, 'A response references a clause that does not belong to this rate contract');
+      }
+    }
+    const saved = await db.tx(async (t) => {
+      let n = 0;
+      for (const r of responses) {
+        // Vendor isolation: ALWAYS scoped to req.user.id.
+        await arcEvalModel.saveUniversalVendorResponse(Number(r.clause_id), vendorId, r.vendor_response ?? null, t);
+        n += 1;
+      }
+      return n;
+    });
+    return ok(res, { saved });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.saveUniversalTechEnvelopeDraft]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// POST /vendor/universal-tech-envelope/clause/:clauseId/file  (multipart, field 'file')
+export async function uploadUniversalTechEvidence(req, res) {
+  let tmpPath = null;
+  try {
+    const vendorId = req.user?.id;
+    const clauseId = Number(req.params.clauseId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!clauseId) return bad(res, 400, 'clauseId is required');
+    if (!req.file) return bad(res, 400, 'A file is required (field name: file)');
+
+    // Resolve the ARC from the universal clause and run the full write-scope guard.
+    const arcId = await getArcIdForUniversalClause(clauseId);
+    if (!arcId) return bad(res, 404, 'Clause not found', 2);
+    const scope = await loadTechEnvelopeScope(arcId, vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    // Clause must belong to THIS ARC (defensive — re-verify rather than trust the chain).
+    const valid = await arcEvalModel.universalClauseIdsBelongToArc(arcId, [clauseId]);
+    if (valid.length === 0) return bad(res, 400, 'Clause does not belong to this rate contract');
+
+    // File validation — size + MIME + extension allow-list (same as item upload).
+    const ext = path.extname(req.file.originalname || '').toLowerCase();
+    if (req.file.size > TECH_EVIDENCE_MAX_BYTES) {
+      return bad(res, 400, 'File exceeds the 15 MB limit');
+    }
+    if (!TECH_EVIDENCE_MIME.has(req.file.mimetype) && !TECH_EVIDENCE_EXT.has(ext)) {
+      return bad(res, 400, 'Unsupported file type — allowed: pdf, jpg, png, doc, docx');
+    }
+
+    const safeExt = TECH_EVIDENCE_EXT.has(ext) ? ext : '.bin';
+    tmpPath = path.join(os.tmpdir(), `arc-univ-tech-evidence-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${safeExt}`);
+    fs.writeFileSync(tmpPath, req.file.buffer);
+    const s3Key = `arc-tech-evidence/${arcId}/${vendorId}/universal-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${safeExt}`;
+    const up = await uploadToS3(tmpPath, s3Key);
+    if (!up?.ok || !up?.url) return bad(res, 502, 'File upload failed — please retry', 3);
+
+    const sanitisedOriginalName = (req.file.originalname || "").slice(0, 255) || null;
+    const file = await db.tx(async (t) => {
+      // Ensure a response row exists so the file can attach (vendor-scoped).
+      const row = await arcEvalModel.ensureUniversalVendorResponseRow(clauseId, vendorId, t);
+      return arcEvalModel.addUniversalResponseFile(row.id, up.url, sanitisedOriginalName, t);
+    });
+    return ok(res, {
+      file: {
+        file_id: Number(file.id),
+        url: `/arc-v2/vendor/universal-tech-envelope/file/${file.id}`,
+        original_name: file.original_name || null,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.uploadUniversalTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  } finally {
+    try { if (tmpPath && fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) { /* swallow */ }
+  }
+}
+
+// GET /vendor/universal-tech-envelope/file/:fileId — vendor downloads their OWN evidence.
+export async function getOwnUniversalTechEvidence(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const fileId = Number(req.params.fileId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getUniversalResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'File not found', 2);
+    if (Number(file.vendor_id) !== Number(vendorId)) {
+      return bad(res, 403, 'You can only access your own evidence files');
+    }
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="evidence-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[vendorController.getOwnUniversalTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// DELETE /vendor/universal-tech-envelope/file/:fileId  (own file only, before seal)
+export async function deleteUniversalTechEvidence(req, res) {
+  try {
+    const vendorId = req.user?.id;
+    const fileId = Number(req.params.fileId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getUniversalResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'File not found', 2);
+    if (Number(file.vendor_id) !== Number(vendorId)) {
+      return bad(res, 403, 'You can only remove your own evidence files');
+    }
+    const scope = await loadTechEnvelopeScope(Number(file.arc_id), vendorId, { forWrite: true });
+    if (scope.error) return bad(res, scope.error.status, scope.error.message, scope.error.code ?? 0);
+    const deleted = await arcEvalModel.deleteUniversalResponseFile(fileId, vendorId);
+    if (!deleted) return bad(res, 404, 'File not found', 2);
+    return ok(res, { deleted: { file_id: Number(deleted.id) } });
+  } catch (err) {
+    logger.error({ err }, '[vendorController.deleteUniversalTechEvidence]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
 }
 
 // GET /vendor/requests/:arcId/lifecycle

@@ -134,6 +134,10 @@ export async function createRound(req, res) {
       // ── Validate entries ──
       // For product entries: verify arc_item_id belongs to this ARC
       const allVendorIds = new Set();
+      // §5.4 — universal (ARC-wide) knockout set, fetched once. A universally-
+      // failed vendor is not an eligible negotiation target on ANY entry
+      // (item-scoped OR arc-level).
+      const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, t);
       for (const entry of entries) {
         if (entry.is_arc_level) {
           if (!Array.isArray(entry.vendor_targets) || entry.vendor_targets.length === 0) {
@@ -151,6 +155,10 @@ export async function createRound(req, res) {
             );
             if (!quote) {
               return bad(res, 400, `Vendor ${vendorId} has no submitted quote for this ARC`);
+            }
+            // §5.4 — arc-level: reject universally-failed vendor targets.
+            if (universallyFailed.has(vendorId)) {
+              return bad(res, 400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
             }
           }
         } else {
@@ -185,6 +193,12 @@ export async function createRound(req, res) {
               [arcId, vendorId, arcItemId]
             );
             if (!line) return bad(res, 400, `Vendor ${vendorId} has no submitted quote line for item ${arcItemId}`);
+            // §5.4 — universal knockout: excluded from EVERY item, incl.
+            // clause-less ones. Checked BEFORE the per-item qualification so a
+            // globally-failed vendor gets the accurate ARC-wide reason.
+            if (universallyFailed.has(vendorId)) {
+              return bad(res, 400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
+            }
             // technical qualification (if clauses exist for this item)
             const allowed = qualifiedMap[arcItemId];
             if (allowed && !allowed.includes(vendorId)) {

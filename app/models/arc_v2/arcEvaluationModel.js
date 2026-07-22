@@ -308,7 +308,11 @@ const arcEvalModel = {
     );
   },
 
-  // Does THIS ARC require a technical envelope at all? (any item has a clause)
+  // Does THIS ARC require a technical envelope at all? (any item has a clause
+  // OR the ARC-wide "universal" configurator has a clause). With universal
+  // clauses an ARC can require technical even with zero item clauses, so this
+  // predicate is item OR universal — every caller (submission-close routing,
+  // vendor tech_envelope summary/hard-gate, lifecycle) inherits the change.
   arcHasTechClauses: async (arcId, txContext = null) => {
     const row = await (txContext || db).oneOrNone(
       `SELECT 1
@@ -316,6 +320,11 @@ const arcEvalModel = {
          JOIN tbl_arc_item_tech_evaluation te ON te.arc_item_id = i.id
          JOIN tbl_arc_item_tech_evaluation_clauses c ON c.arc_item_tech_evaluation_id = te.id
         WHERE i.arc_id = $1
+        UNION ALL
+        SELECT 1
+         FROM tbl_arc_universal_tech_evaluation ute
+         JOIN tbl_arc_universal_tech_evaluation_clauses uc ON uc.arc_universal_tech_evaluation_id = ute.id
+        WHERE ute.arc_id = $1
         LIMIT 1`,
       [arcId]
     );
@@ -443,13 +452,402 @@ const arcEvalModel = {
         GROUP BY i.id, cv.vendor_id`,
       [arcId]
     );
+    // Universal (ARC-wide) knockout — §5.5 belt-and-braces: a vendor who failed
+    // the universal clauses is dropped from EVERY clause-bearing item's list
+    // here, so the five callers reading this map inherit the knockout. NOTE this
+    // alone is NOT sufficient (it omits clause-less items, which never appear in
+    // this map) — the explicit per-caller universal exclusion (§5.1–5.4) covers
+    // those; both layers are kept.
+    const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, runner);
     const map = {};
     rows.forEach((r) => {
       const k = Number(r.item_id);
       if (!map[k]) map[k] = [];
-      if (r.vendor_id != null) map[k].push(Number(r.vendor_id));
+      if (r.vendor_id != null && !universallyFailed.has(Number(r.vendor_id))) map[k].push(Number(r.vendor_id));
     });
     return map;
+  },
+
+  // ============================================================
+  // Universal (ARC-wide) technical evaluation — parallel to the per-item family
+  // above, keyed on arc_id (ONE owner row per ARC). Purely additive: item
+  // clauses are untouched. A vendor who FAILS the universal clauses is knocked
+  // out of the ENTIRE ARC (see universallyFailedVendorIds — the knockout set).
+  // Scoring + mandatory-gate logic are identical to the item family; approval
+  // rides the SAME ARC_TECH instance (no separate entity/stage).
+  // ============================================================
+
+  // Copy of upsertTechEval, keyed on arc_id.
+  upsertUniversalTechEval: async (arcId, { minimum_passing_score = 0, current_round = 1 } = {}, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_universal_tech_evaluation
+         (arc_id, minimum_passing_score, current_round)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (arc_id) DO UPDATE
+         SET minimum_passing_score = EXCLUDED.minimum_passing_score,
+             current_round         = EXCLUDED.current_round,
+             updated_at            = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [arcId, minimum_passing_score, current_round]
+    );
+  },
+
+  // Copy of addClause, over universal clauses.
+  addUniversalClause: async (univEvalId, clause, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_universal_tech_evaluation_clauses
+         (arc_universal_tech_evaluation_id, clause_text, weightage, clause_type, is_mandatory)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [univEvalId, clause.clause_text, clause.weightage, clause.clause_type || null,
+       clause.is_mandatory === true]
+    );
+  },
+
+  // Copy of clearClauses — replace-semantics for the universal clause set.
+  clearUniversalClauses: async (univEvalId, txContext = null) => {
+    return (txContext || db).none(
+      `DELETE FROM tbl_arc_universal_tech_evaluation_clauses WHERE arc_universal_tech_evaluation_id = $1`,
+      [univEvalId]
+    );
+  },
+
+  // Copy of deleteTechEvalForItem — teardown when universal is toggled OFF;
+  // resolves the owner by arc_id. No-op if no owner exists.
+  deleteUniversalTechEval: async (arcId, txContext = null) => {
+    const runner = txContext || db;
+    const te = await runner.oneOrNone(
+      `SELECT id FROM tbl_arc_universal_tech_evaluation WHERE arc_id = $1`,
+      [arcId]
+    );
+    if (!te) return null;
+    await arcEvalModel.clearUniversalClauses(te.id, txContext);
+    await runner.none(`DELETE FROM tbl_arc_universal_tech_evaluation WHERE id = $1`, [te.id]);
+    return te.id;
+  },
+
+  // Copy of listClauses, over universal clauses.
+  listUniversalClauses: async (univEvalId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT * FROM tbl_arc_universal_tech_evaluation_clauses
+        WHERE arc_universal_tech_evaluation_id = $1
+        ORDER BY id`,
+      [univEvalId]
+    );
+  },
+
+  // Copy of saveVendorTechResponse — vendor writes ONLY vendor_response.
+  saveUniversalVendorResponse: async (clauseId, vendorId, vendorResponse, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_universal_tech_evaluation_vendors_response
+         (arc_universal_tech_evaluation_clauses_id, vendor_id, vendor_response)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (arc_universal_tech_evaluation_clauses_id, vendor_id) DO UPDATE
+         SET vendor_response = EXCLUDED.vendor_response
+       RETURNING *`,
+      [clauseId, vendorId, vendorResponse ?? null]
+    );
+  },
+
+  // Copy of ensureVendorResponseRow — ensure a response row so evidence can attach.
+  ensureUniversalVendorResponseRow: async (clauseId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_universal_tech_evaluation_vendors_response
+         (arc_universal_tech_evaluation_clauses_id, vendor_id)
+       VALUES ($1, $2)
+       ON CONFLICT (arc_universal_tech_evaluation_clauses_id, vendor_id) DO UPDATE
+         SET arc_universal_tech_evaluation_clauses_id = EXCLUDED.arc_universal_tech_evaluation_clauses_id
+       RETURNING *`,
+      [clauseId, vendorId]
+    );
+  },
+
+  // Copy of clauseIdsBelongToArc — JOIN universal clauses→owner WHERE owner.arc_id=$1.
+  // Callers use it to reject cross-ARC clause ids before writing anything.
+  universalClauseIdsBelongToArc: async (arcId, clauseIds, txContext = null) => {
+    if (!Array.isArray(clauseIds) || clauseIds.length === 0) return [];
+    const rows = await (txContext || db).any(
+      `SELECT c.id
+         FROM tbl_arc_universal_tech_evaluation_clauses c
+         JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+        WHERE te.arc_id = $1 AND c.id IN ($2:csv)`,
+      [arcId, clauseIds.map(Number)]
+    );
+    return rows.map((r) => Number(r.id));
+  },
+
+  // Copy of scoreVendorResponse, over the universal response table.
+  scoreUniversalVendorResponse: async (responseId, { buyer_id, buyer_marks, buyer_remark = null, mandatory_passed = undefined }, txContext = null) => {
+    if (mandatory_passed === undefined) {
+      return (txContext || db).one(
+        `UPDATE tbl_arc_universal_tech_evaluation_vendors_response
+           SET buyer_id        = $2,
+               buyer_marks     = $3,
+               buyer_remark    = $4,
+               score_timestamp = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [responseId, buyer_id, buyer_marks, buyer_remark]
+      );
+    }
+    return (txContext || db).one(
+      `UPDATE tbl_arc_universal_tech_evaluation_vendors_response
+         SET buyer_id         = $2,
+             buyer_marks      = $3,
+             buyer_remark     = $4,
+             mandatory_passed = $5,
+             score_timestamp  = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING *`,
+      [responseId, buyer_id, buyer_marks, buyer_remark, mandatory_passed]
+    );
+  },
+
+  // Copy of getVendorTechEnvelope — the vendor's own universal draft responses +
+  // evidence files. NO item join (universal is ARC-level); clauses carry the
+  // owner's minimum_passing_score. NEVER returns buyer_marks / other vendors' rows.
+  getVendorUniversalEnvelope: async (arcId, vendorId, txContext = null) => {
+    const runner = txContext || db;
+    const clauses = await runner.any(
+      `SELECT te.minimum_passing_score,
+              c.id AS clause_id, c.clause_text, c.clause_type, c.weightage, c.is_mandatory,
+              r.id AS response_id, r.vendor_response
+         FROM tbl_arc_universal_tech_evaluation te
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.arc_universal_tech_evaluation_id = te.id
+         LEFT JOIN tbl_arc_universal_tech_evaluation_vendors_response r
+                ON r.arc_universal_tech_evaluation_clauses_id = c.id AND r.vendor_id = $2
+        WHERE te.arc_id = $1
+        ORDER BY c.id`,
+      [arcId, vendorId]
+    );
+    const responseIds = clauses.map((c) => c.response_id).filter((x) => x != null);
+    let filesByResponse = {};
+    if (responseIds.length > 0) {
+      const files = await runner.any(
+        `SELECT id AS file_id, arc_universal_tech_evaluation_vendors_response_id AS response_id, file_url, original_name, created_at
+           FROM tbl_arc_universal_tech_evaluation_vendors_response_files
+          WHERE arc_universal_tech_evaluation_vendors_response_id IN ($1:csv)
+          ORDER BY id`,
+        [responseIds]
+      );
+      filesByResponse = files.reduce((acc, f) => {
+        const k = Number(f.response_id);
+        (acc[k] = acc[k] || []).push(f);
+        return acc;
+      }, {});
+    }
+    return { clauses, filesByResponse };
+  },
+
+  // Copy of addVendorResponseFile, over universal response files.
+  addUniversalResponseFile: async (responseId, fileUrl, originalName = null, txContext = null) => {
+    return (txContext || db).one(
+      `INSERT INTO tbl_arc_universal_tech_evaluation_vendors_response_files
+         (arc_universal_tech_evaluation_vendors_response_id, file_url, original_name)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [responseId, fileUrl, originalName || null]
+    );
+  },
+
+  // Copy of listVendorResponseFiles, over universal response files.
+  listUniversalResponseFiles: async (responseId, txContext = null) => {
+    return (txContext || db).any(
+      `SELECT id AS file_id, file_url, created_at
+         FROM tbl_arc_universal_tech_evaluation_vendors_response_files
+        WHERE arc_universal_tech_evaluation_vendors_response_id = $1
+        ORDER BY id`,
+      [responseId]
+    );
+  },
+
+  // Resolve the ARC id that owns a universal response row (join clause→owner).
+  // Analog of arcLifecycleModel.getArcIdForResponse for the universal tables —
+  // used by the permission middleware + scoreUniversalResponse controller to
+  // scope the /universal-tech-eval/score route (no :arcId in the path).
+  arcIdForUniversalResponse: async (responseId, txContext = null) => {
+    const row = await (txContext || db).oneOrNone(
+      `SELECT te.arc_id
+         FROM tbl_arc_universal_tech_evaluation_vendors_response r
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = r.arc_universal_tech_evaluation_clauses_id
+         JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+        WHERE r.id = $1`,
+      [responseId]
+    );
+    return row ? Number(row.arc_id) : null;
+  },
+
+  // Copy of getResponseFileWithScope — returns file_url, response_id, vendor_id,
+  // arc_id so the controller can verify ownership (vendor) or ARC tech permission.
+  getUniversalResponseFileWithScope: async (fileId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT f.id AS file_id, f.file_url, f.arc_universal_tech_evaluation_vendors_response_id AS response_id,
+              r.vendor_id, te.arc_id
+         FROM tbl_arc_universal_tech_evaluation_vendors_response_files f
+         JOIN tbl_arc_universal_tech_evaluation_vendors_response r ON r.id = f.arc_universal_tech_evaluation_vendors_response_id
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = r.arc_universal_tech_evaluation_clauses_id
+         JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+        WHERE f.id = $1`,
+      [fileId]
+    );
+  },
+
+  // Copy of deleteVendorResponseFile — delete ONLY if it's this vendor's file.
+  deleteUniversalResponseFile: async (fileId, vendorId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `DELETE FROM tbl_arc_universal_tech_evaluation_vendors_response_files f
+         USING tbl_arc_universal_tech_evaluation_vendors_response r
+        WHERE f.id = $1
+          AND r.id = f.arc_universal_tech_evaluation_vendors_response_id
+          AND r.vendor_id = $2
+        RETURNING f.id, f.file_url`,
+      [fileId, vendorId]
+    );
+  },
+
+  // Copy of arcHasTechClauses (universal branch only) — does THIS ARC have any
+  // universal clauses? Used by the seal counts + submit fold.
+  arcHasUniversalTechClauses: async (arcId, txContext = null) => {
+    const row = await (txContext || db).oneOrNone(
+      `SELECT 1
+         FROM tbl_arc_universal_tech_evaluation te
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.arc_universal_tech_evaluation_id = te.id
+        WHERE te.arc_id = $1
+        LIMIT 1`,
+      [arcId]
+    );
+    return !!row;
+  },
+
+  // Copy of computeItemScores — per-vendor weighted score for the ARC-wide
+  // universal clause set. Anchored on the universal owner row for arcId. Same
+  // weighted total ÷ SUM(weightage) × 100 ≥ minimum_passing_score, same
+  // mandatory hard-gate. Returns [{ vendor_id, calculated_score, qualifies, mandatory_failed }].
+  computeUniversalScores: async (arcId, round = 1, txContext = null) => {
+    const runner = txContext || db;
+    const te = await runner.oneOrNone(
+      `SELECT * FROM tbl_arc_universal_tech_evaluation WHERE arc_id = $1`,
+      [arcId]
+    );
+    if (!te) return [];
+    return runner.any(
+      `WITH totals AS (
+         SELECT SUM(weightage)::numeric AS total_weight
+           FROM tbl_arc_universal_tech_evaluation_clauses
+          WHERE arc_universal_tech_evaluation_id = $1
+       ),
+       per_vendor AS (
+         SELECT r.vendor_id,
+                SUM(COALESCE(r.buyer_marks, 0))::numeric AS earned
+           FROM tbl_arc_universal_tech_evaluation_vendors_response r
+           JOIN tbl_arc_universal_tech_evaluation_clauses c
+             ON c.id = r.arc_universal_tech_evaluation_clauses_id
+          WHERE c.arc_universal_tech_evaluation_id = $1
+          GROUP BY r.vendor_id
+       ),
+       -- Mandatory gate — clause-driven (a vendor fails if ANY mandatory
+       -- universal clause lacks a PASSING response from them), same as
+       -- computeItemScores.
+       mandatory_fail AS (
+         SELECT pv.vendor_id
+           FROM per_vendor pv
+          WHERE EXISTS (
+            SELECT 1
+              FROM tbl_arc_universal_tech_evaluation_clauses c
+             WHERE c.arc_universal_tech_evaluation_id = $1
+               AND c.is_mandatory = TRUE
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM tbl_arc_universal_tech_evaluation_vendors_response r
+                  WHERE r.arc_universal_tech_evaluation_clauses_id = c.id
+                    AND r.vendor_id = pv.vendor_id
+                    AND r.mandatory_passed = TRUE
+               )
+          )
+       )
+       SELECT pv.vendor_id,
+              CASE WHEN t.total_weight IS NULL OR t.total_weight = 0
+                   THEN 0::numeric
+                   ELSE ROUND((pv.earned / t.total_weight) * 100, 2)
+              END AS calculated_score,
+              (pv.vendor_id IN (SELECT vendor_id FROM mandatory_fail)) AS mandatory_failed,
+              CASE WHEN t.total_weight IS NULL OR t.total_weight = 0
+                   THEN FALSE
+                   WHEN pv.vendor_id IN (SELECT vendor_id FROM mandatory_fail)
+                   THEN FALSE
+                   ELSE (ROUND((pv.earned / t.total_weight) * 100, 2) >= $2)
+              END AS qualifies
+         FROM per_vendor pv
+        CROSS JOIN totals t`,
+      [te.id, te.minimum_passing_score]
+    );
+  },
+
+  // Copy of recordClearedVendors — persist the universal pass/fail verdict per
+  // vendor per round. ON CONFLICT (univEvalId, vendor_id, round).
+  recordUniversalClearedVendors: async (univEvalId, rows, txContext = null) => {
+    const runner = txContext || db;
+    const inserted = [];
+    for (const r of rows) {
+      const rejectMessage = r.qualifies
+        ? null
+        : (r.mandatory_failed ? 'Failed mandatory clause(s)' : null);
+      inserted.push(await runner.one(
+        `INSERT INTO tbl_arc_universal_tech_evaluation_cleared_vendors
+           (arc_universal_tech_evaluation_id, vendor_id, calculated_score, status,
+            evaluation_round, created_by, reject_message)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (arc_universal_tech_evaluation_id, vendor_id, evaluation_round) DO UPDATE
+           SET calculated_score = EXCLUDED.calculated_score,
+               status           = EXCLUDED.status,
+               reject_message   = EXCLUDED.reject_message
+         RETURNING *`,
+        [univEvalId, r.vendor_id, r.calculated_score,
+         r.qualifies ? 'qualified' : 'not_qualified',
+         r.evaluation_round || 1, r.created_by || null, rejectMessage]
+      ));
+    }
+    return inserted;
+  },
+
+  // Copy of techEnvelopeCounts, over the universal tables — clauses vs answered
+  // for the (combined) seal-gate guard.
+  universalEnvelopeCounts: async (arcId, vendorId, txContext = null) => {
+    return (txContext || db).one(
+      `WITH arc_clauses AS (
+         SELECT c.id
+           FROM tbl_arc_universal_tech_evaluation_clauses c
+           JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+          WHERE te.arc_id = $1
+       )
+       SELECT (SELECT COUNT(*)::int FROM arc_clauses) AS clauses_total,
+              (SELECT COUNT(*)::int
+                 FROM tbl_arc_universal_tech_evaluation_vendors_response r
+                WHERE r.vendor_id = $2
+                  AND r.arc_universal_tech_evaluation_clauses_id IN (SELECT id FROM arc_clauses)
+                  AND r.vendor_response IS NOT NULL
+                  AND r.vendor_response <> '') AS clauses_answered`,
+      [arcId, vendorId]
+    );
+  },
+
+  // THE KNOCKOUT SET. Vendors whose PERSISTED universal cleared row (written by
+  // recordUniversalClearedVendors at submit / amend-approve) at the owner's
+  // current_round is 'not_qualified'. One universal eval per ARC ⇒ one row per
+  // vendor per round, so this is a simple status filter. Returns an empty Set
+  // when no universal owner/clauses exist (no rows) — the primary regression
+  // guarantee: a zero-universal ARC behaves exactly as before at every caller.
+  universallyFailedVendorIds: async (arcId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT cv.vendor_id
+         FROM tbl_arc_universal_tech_evaluation_cleared_vendors cv
+         JOIN tbl_arc_universal_tech_evaluation te ON te.id = cv.arc_universal_tech_evaluation_id
+        WHERE te.arc_id = $1
+          AND cv.evaluation_round = te.current_round
+          AND cv.status = 'not_qualified'`,
+      [arcId]
+    );
+    return new Set(rows.map((r) => Number(r.vendor_id)));
   },
 
   // ============================================================
@@ -641,7 +1039,14 @@ const arcEvalModel = {
   // (submitTechEval; decideTechEval's amend-then-approve path).
   reconcileShortlistPromotions: async (arcId, { userId = null } = {}, txContext = null) => {
     const runner = txContext || db;
-    const disqualified = await arcEvalModel.arcLevelDisqualifiedVendorIds(arcId, runner);
+    // §5.6 / OQ4 — the disqualified set is item-level ARC failures UNION the
+    // universal (ARC-wide) knockout set (both at their current round). A
+    // universally-failed in_eval vendor opens a seat so the next held vendor is
+    // promoted, exactly as an item-level ARC failure does. Both sets are fresh
+    // because item + universal cleared rows are written in the same submit tx.
+    const itemDisqualified = await arcEvalModel.arcLevelDisqualifiedVendorIds(arcId, runner);
+    const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, runner);
+    const disqualified = new Set([...itemDisqualified, ...universallyFailed]);
     if (disqualified.size === 0) return [];
     const shortlist = await arcEvalModel.getShortlist(arcId, runner);
     const activeDisqualifiedCount = shortlist.filter(

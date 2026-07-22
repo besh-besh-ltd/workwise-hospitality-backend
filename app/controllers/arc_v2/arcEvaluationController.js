@@ -303,6 +303,202 @@ export async function getTechEvidenceFile(req, res) {
   }
 }
 
+// ============================================================
+// UNIVERSAL (ARC-wide) TECH EVAL endpoints
+//   A SECOND, separate technical-clause configurator that applies to the whole
+//   ARC. Storage + UI stay separate from the per-item family; the approval
+//   workflow is SHARED (rides the existing ARC_TECH instance — see
+//   submitTechEval / decideTechEval below). A vendor who fails universal is
+//   knocked out of the ENTIRE ARC (enforced at the commercial/award/negotiation
+//   surfaces via arcEvalModel.universallyFailedVendorIds).
+// ============================================================
+
+export async function setupUniversalTechEval(req, res) {
+  try {
+    const arcId = Number(req.params.arcId);
+    const { minimum_passing_score, clauses = [] } = req.body || {};
+
+    // ── Value validation — identical to setupTechEval (security-first; the FE
+    // gate can be bypassed). min-pass 1–100 integer; ≥1 clause; each clause
+    // non-empty text + integer weight 1–100; weights must sum to exactly 100.
+    const mps = Number(minimum_passing_score);
+    if (
+      minimum_passing_score === undefined || minimum_passing_score === null || minimum_passing_score === ''
+      || !Number.isFinite(mps) || !Number.isInteger(mps)
+    ) {
+      return bad(res, 400, 'A valid minimum passing score (1–100) is required.');
+    }
+    if (mps < 1)   return bad(res, 400, 'Minimum passing score must be at least 1%.');
+    if (mps > 100) return bad(res, 400, 'Minimum passing score cannot exceed 100%.');
+
+    if (!Array.isArray(clauses) || clauses.length === 0) {
+      return bad(res, 400, 'At least one clause is required.');
+    }
+    let weightSum = 0;
+    for (let i = 0; i < clauses.length; i++) {
+      const c = clauses[i] || {};
+      const text = typeof c.clause_text === 'string' ? c.clause_text.trim() : '';
+      if (!text) return bad(res, 400, `Clause ${i + 1} requires non-empty clause text.`);
+      const w = Number(c.weightage);
+      if (!Number.isFinite(w) || !Number.isInteger(w) || w < 1 || w > 100) {
+        return bad(res, 400, `Clause ${i + 1} weightage must be a whole number between 1 and 100.`);
+      }
+      weightSum += w;
+    }
+    if (weightSum !== 100) {
+      return bad(res, 400, `Clause weightage must total exactly 100 (got ${weightSum}).`);
+    }
+
+    // Reload the ARC to verify tenant scope (never trust the client) + 404.
+    // requireArcPermission(TECH_WRITE) already scoped the caller to :arcId.
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    // Immutable once technical is approved; also blocked once commercial is
+    // finalized (same guards as setupTechEval).
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
+    await arcLifecycleModel.assertStageWritable(arcId, 'commercial');
+    // Respond only AFTER the tx commits.
+    const result = await db.tx(async (t) => {
+      const te = await arcEvalModel.upsertUniversalTechEval(arcId, { minimum_passing_score }, t);
+      // Replace-semantics: clear the previous clause set before inserting the
+      // submitted set (Save-draft → resume → edit → Save-draft again).
+      await arcEvalModel.clearUniversalClauses(te.id, t);
+      const inserted = [];
+      for (const c of clauses) {
+        inserted.push(await arcEvalModel.addUniversalClause(te.id, c, t));
+      }
+      return { tech_evaluation: te, clauses: inserted };
+    });
+    return ok(res, result);
+  } catch (err) {
+    return fail(res, err, '[evalController.setupUniversalTechEval]');
+  }
+}
+
+export async function getUniversalTechEval(req, res) {
+  try {
+    const arcId = Number(req.params.arcId);
+    const te = await db.oneOrNone(`SELECT * FROM tbl_arc_universal_tech_evaluation WHERE arc_id = $1`, [arcId]);
+    // No universal owner ⇒ nothing configured. Return empty shells so a
+    // zero-universal ARC renders no universal section (regression guarantee).
+    if (!te) return ok(res, { tech_evaluation: null, clauses: [], scores: [], responses: [] });
+    // BLIND EVAL: same stable per-ARC aliases as the item read.
+    const aliasMap = await arcEvalModel.getOrAssignAliases(arcId);
+    const quotedRows = await db.any(
+      `SELECT vendor_id FROM tbl_arc_quote
+        WHERE arc_id = $1 AND submitted_at IS NOT NULL AND withdrawn_at IS NULL`,
+      [arcId]
+    );
+    const quotedSet = new Set(quotedRows.map((r) => Number(r.vendor_id)));
+
+    // Sr 54 — same commercial-ranked shortlist gate as getTechEvalForItem.
+    const shortlistRows = await arcEvalModel.ensureShortlist(arcId);
+    const inEvalIds = arcEvalModel.shortlistVendorIds(shortlistRows);
+    const gateActive = shortlistRows.length > 0;
+    const shortlistCounts = arcEvalModel.shortlistCounts(shortlistRows);
+
+    const clauses = await arcEvalModel.listUniversalClauses(te.id);
+    const rawScores = await arcEvalModel.computeUniversalScores(arcId);
+    const scores = rawScores
+      .filter((s) => !gateActive || inEvalIds.has(Number(s.vendor_id)))
+      .map((s) => {
+        const { vendor_id, ...rest } = s;
+        return { ...aliasFields(vendor_id, aliasMap), ...rest, has_submitted_quote: quotedSet.has(Number(vendor_id)) };
+      });
+    // Per-(clause × vendor) response rows — alias only, no vendor_id, files as
+    // { file_id } only (same blind rules as getTechEvalForItem).
+    const rawResponses = await db.any(
+      `SELECT r.id AS response_id,
+              r.arc_universal_tech_evaluation_clauses_id AS clause_id,
+              r.vendor_id,
+              r.vendor_response, r.buyer_marks, r.buyer_remark,
+              r.mandatory_passed, r.score_timestamp,
+              COALESCE(f.files, '[]'::json) AS files
+         FROM tbl_arc_universal_tech_evaluation_vendors_response r
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = r.arc_universal_tech_evaluation_clauses_id
+         LEFT JOIN tbl_arc_vendor_alias a ON a.arc_id = $2 AND a.vendor_id = r.vendor_id
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object('file_id', vf.id) ORDER BY vf.id) AS files
+             FROM tbl_arc_universal_tech_evaluation_vendors_response_files vf
+            WHERE vf.arc_universal_tech_evaluation_vendors_response_id = r.id
+         ) f ON TRUE
+        WHERE c.arc_universal_tech_evaluation_id = $1
+        ORDER BY a.alias_index NULLS LAST, r.id`,
+      [te.id, arcId]
+    );
+    const responses = rawResponses
+      .filter((row) => !gateActive || inEvalIds.has(Number(row.vendor_id)))
+      .map((row) => {
+        const { vendor_id, ...rest } = row;
+        return { ...rest, ...aliasFields(vendor_id, aliasMap), has_submitted_quote: quotedSet.has(Number(vendor_id)) };
+      });
+    return ok(res, { tech_evaluation: te, clauses, scores, responses, shortlist: shortlistCounts });
+  } catch (err) {
+    logger.error({ err }, '[evalController.getUniversalTechEval]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export async function scoreUniversalResponse(req, res) {
+  try {
+    const userId = req.user?.id;
+    const { response_id, buyer_marks, buyer_remark, mandatory_passed } = req.body || {};
+    if (!response_id || buyer_marks == null) return bad(res, 400, 'response_id and buyer_marks are required');
+    // Resolve the ARC from the universal response row (join owner); the perm
+    // middleware scoped the caller to this same ARC on this route.
+    const arcId = await arcEvalModel.arcIdForUniversalResponse(response_id);
+    if (!arcId) return bad(res, 404, 'Response not found', 2);
+    await arcLifecycleModel.assertStageWritable(arcId, 'technical');
+    // Mandatory clauses REQUIRE a pass/fail verdict; non-mandatory force NULL.
+    const clause = await db.oneOrNone(
+      `SELECT c.is_mandatory
+         FROM tbl_arc_universal_tech_evaluation_vendors_response r
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = r.arc_universal_tech_evaluation_clauses_id
+        WHERE r.id = $1`,
+      [response_id]
+    );
+    let verdict;
+    if (clause?.is_mandatory) {
+      if (typeof mandatory_passed !== 'boolean') {
+        return bad(res, 400, 'mandatory_passed (true/false) is required for a mandatory clause');
+      }
+      verdict = mandatory_passed;
+    } else {
+      verdict = null;
+    }
+    const row = await arcEvalModel.scoreUniversalVendorResponse(response_id, {
+      buyer_id: userId, buyer_marks, buyer_remark, mandatory_passed: verdict,
+    });
+    // BLIND EVAL: strip the real vendor_id, emit the stable per-ARC alias.
+    const aliasMap = await arcEvalModel.getOrAssignAliases(arcId);
+    const { vendor_id, ...rest } = row;
+    return ok(res, { response: { ...rest, ...aliasFields(vendor_id, aliasMap) } });
+  } catch (err) {
+    return fail(res, err, '[evalController.scoreUniversalResponse]');
+  }
+}
+
+// GET /v1/arc-v2/evaluation/universal-tech-eval/evidence/:fileId
+//   Evaluator-side evidence proxy over the universal response files. TECH_READ
+//   already scope-gated (perm middleware resolved the file's ARC).
+export async function getUniversalTechEvidenceFile(req, res) {
+  try {
+    const fileId = Number(req.params.fileId);
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getUniversalResponseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'Evidence file not found', 2);
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="evidence-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[evalController.getUniversalTechEvidenceFile]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
 export async function submitTechEval(req, res) {
   try {
     const arcId = Number(req.params.arcId);
@@ -344,6 +540,34 @@ export async function submitTechEval(req, res) {
           await arcEvalModel.recordClearedVendors(
             te.id,
             gatedScores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
+            t
+          );
+        }
+      }
+
+      // Universal (ARC-wide) clauses ride the SAME ARC_TECH instance — NO new
+      // approval. Record the universal cleared-vendor verdict now, at the same
+      // lifecycle moment as the per-item rows, gated to the same in-eval
+      // shortlist. reconcileShortlistPromotions (below) then unions the
+      // universal knockout set when opening seats.
+      if (await arcEvalModel.arcHasUniversalTechClauses(arcId, t)) {
+        const univScores = await arcEvalModel.computeUniversalScores(arcId, 1, t);
+        const gatedUnivScores = gateActive
+          ? univScores.filter((s) => inEvalIds.has(Number(s.vendor_id)))
+          : univScores;
+        // Ensure the owner (it already exists since arcHasUniversalTechClauses
+        // is true); preserve its configured min-pass / round — never clobber.
+        const existingOwner = await t.oneOrNone(
+          `SELECT * FROM tbl_arc_universal_tech_evaluation WHERE arc_id = $1`, [arcId]
+        );
+        const univOwner = await arcEvalModel.upsertUniversalTechEval(arcId, {
+          minimum_passing_score: existingOwner ? existingOwner.minimum_passing_score : 0,
+          current_round:         existingOwner ? existingOwner.current_round : 1,
+        }, t);
+        if (gatedUnivScores.length > 0) {
+          await arcEvalModel.recordUniversalClearedVendors(
+            univOwner.id,
+            gatedUnivScores.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
             t
           );
         }
@@ -480,6 +704,10 @@ export async function decideTechEval(req, res) {
     const decision = String(req.body?.decision || '').trim();
     const comment  = req.body?.comment ? String(req.body.comment) : null;
     const amendMarks = Array.isArray(req.body?.amend?.marks) ? req.body.amend.marks : [];
+    // Universal (ARC-wide) amend marks — same item shape {response_id,
+    // buyer_marks, buyer_remark, mandatory_passed}, resolved against the
+    // universal response tables. Optional; the universal amend UI may be deferred.
+    const universalAmendMarks = Array.isArray(req.body?.amend?.universal_marks) ? req.body.amend.universal_marks : [];
 
     if (!userId) return bad(res, 401, 'Authentication required');
     if (decision !== 'approve' && decision !== 'reject') {
@@ -503,9 +731,11 @@ export async function decideTechEval(req, res) {
     // ── amend-then-approve: apply edited marks + record diffs ──
     let engineComment = comment;
     const amended = [];
+    const universalAmended = [];
     const touchedItemIds = new Set();
+    let universalTouched = false;
     let shortlistPromotions = [];
-    if (decision === 'approve' && amendMarks.length > 0) {
+    if (decision === 'approve' && (amendMarks.length > 0 || universalAmendMarks.length > 0)) {
       await db.tx(async (t) => {
         for (const m of amendMarks) {
           const responseId = Number(m.response_id);
@@ -563,6 +793,55 @@ export async function decideTechEval(req, res) {
           touchedItemIds.add(Number(current.arc_item_id));
         }
 
+        // Universal (ARC-wide) amend marks — same edit-then-approve shape,
+        // resolved against the universal response tables. NOTE the audit diffs
+        // are NOT written to tbl_arc_tech_eval_edit_history (its response_id has
+        // a hard FK to the ITEM response table); the universal diffs are folded
+        // into the approval comment instead. The functional verdict IS persisted
+        // via recordUniversalClearedVendors below.
+        for (const m of universalAmendMarks) {
+          const responseId = Number(m.response_id);
+          if (!responseId) continue;
+          const current = await t.oneOrNone(
+            `SELECT r.*, c.is_mandatory
+               FROM tbl_arc_universal_tech_evaluation_vendors_response r
+               JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = r.arc_universal_tech_evaluation_clauses_id
+               JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+              WHERE r.id = $1 AND te.arc_id = $2`,
+            [responseId, arcId]
+          );
+          if (!current) continue;
+
+          const diffs = [];
+          if (m.buyer_marks != null && Number(m.buyer_marks) !== Number(current.buyer_marks)) {
+            diffs.push({ field: 'buyer_marks', before: current.buyer_marks, after: Number(m.buyer_marks) });
+          }
+          if (m.buyer_remark !== undefined && String(m.buyer_remark ?? '') !== String(current.buyer_remark ?? '')) {
+            diffs.push({ field: 'buyer_remark', before: current.buyer_remark, after: m.buyer_remark ?? null });
+          }
+          if (current.is_mandatory && m.mandatory_passed !== undefined
+              && (m.mandatory_passed === null ? null : !!m.mandatory_passed) !== current.mandatory_passed) {
+            diffs.push({
+              field: 'mandatory_passed',
+              before: current.mandatory_passed,
+              after: m.mandatory_passed === null ? null : !!m.mandatory_passed,
+            });
+          }
+          if (diffs.length === 0) continue;
+          for (const d of diffs) {
+            universalAmended.push({ response_id: responseId, field_changed: d.field, before_value: d.before ?? null, after_value: d.after ?? null });
+          }
+          await arcEvalModel.scoreUniversalVendorResponse(responseId, {
+            buyer_id: userId,
+            buyer_marks: m.buyer_marks != null ? Number(m.buyer_marks) : current.buyer_marks,
+            buyer_remark: m.buyer_remark !== undefined ? m.buyer_remark : current.buyer_remark,
+            ...(current.is_mandatory && m.mandatory_passed !== undefined
+              ? { mandatory_passed: m.mandatory_passed === null ? null : !!m.mandatory_passed }
+              : {}),
+          }, t);
+          universalTouched = true;
+        }
+
         // Sr 54 — gate qualification recording to the in-eval shortlist, same
         // as submitTechEval (an on-hold vendor's response can never be
         // recorded into cleared_vendors even via a direct amend call).
@@ -587,8 +866,25 @@ export async function decideTechEval(req, res) {
           }
         }
 
-        // Sr 54 (OQ4=Automatic) — an amended verdict can flip a shortlisted
-        // vendor to not_qualified; auto-promote the next held vendor.
+        // Universal — re-record the post-amend universal verdict so the knockout
+        // set reflects the amended marks (same gate as the item recompute).
+        if (universalTouched) {
+          const univScores = await arcEvalModel.computeUniversalScores(arcId, 1, t);
+          const gatedUniv = gateActive ? univScores.filter((s) => inEvalIds.has(Number(s.vendor_id))) : univScores;
+          const univOwner = await t.oneOrNone(
+            `SELECT id FROM tbl_arc_universal_tech_evaluation WHERE arc_id = $1`, [arcId]
+          );
+          if (univOwner && gatedUniv.length > 0) {
+            await arcEvalModel.recordUniversalClearedVendors(
+              univOwner.id,
+              gatedUniv.map(s => ({ ...s, created_by: userId, evaluation_round: 1 })),
+              t
+            );
+          }
+        }
+
+        // Sr 54 (OQ4=Automatic) — an amended verdict (item OR universal) can flip
+        // a shortlisted vendor to not_qualified; auto-promote the next held vendor.
         shortlistPromotions = await arcEvalModel.reconcileShortlistPromotions(arcId, { userId }, t);
         for (const p of shortlistPromotions) {
           await logArcEvent({
@@ -597,9 +893,11 @@ export async function decideTechEval(req, res) {
           });
         }
       });
-      if (amended.length > 0) {
+      if (amended.length > 0 || universalAmended.length > 0) {
         const summary = amended
           .map((d) => `response ${d.response_id} ${d.field_changed}: ${JSON.stringify(d.before_value)} → ${JSON.stringify(d.after_value)}`)
+          .concat(universalAmended
+            .map((d) => `universal response ${d.response_id} ${d.field_changed}: ${JSON.stringify(d.before_value)} → ${JSON.stringify(d.after_value)}`))
           .join('; ');
         engineComment = `[Edited before approval] ${summary}${comment ? ` — ${comment}` : ''}`;
       }
@@ -678,13 +976,19 @@ export async function getCommEval(req, res) {
     const awards = comm ? await arcEvalModel.listAwards(comm.id) : [];
     // item_id → qualified vendor ids (only items WITH technical clauses).
     const qualified_by_item = await arcEvalModel.qualifiedVendorsByItem(arcId);
+    // §5.1 — universal (ARC-wide) knockout set. A universally-failed vendor is
+    // redacted on EVERY item (incl. clause-less items, which qualified_by_item
+    // omits entirely — so this explicit set is required, not just qualified_by_item).
+    const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId);
     // REDACTION: the technical committee deemed these vendor × item pairs
     // unfit — their commercial terms must never reach the commercial
     // evaluator's browser. Strip pricing server-side, keep the line as a
     // marker so the matrix can show a locked cell.
     const redacted = quotes.map((q) => {
       const allowed = qualified_by_item[Number(q.arc_item_id)];
-      if (allowed && !allowed.includes(Number(q.vendor_id))) {
+      const itemDisq = allowed && !allowed.includes(Number(q.vendor_id));
+      const univDisq = universallyFailed.has(Number(q.vendor_id));
+      if (itemDisq || univDisq) {
         return {
           quote_id: q.quote_id, vendor_id: q.vendor_id, vendor_name: q.vendor_name,
           submitted_at: q.submitted_at, quote_line_id: q.quote_line_id, arc_item_id: q.arc_item_id,
@@ -693,6 +997,8 @@ export async function getCommEval(req, res) {
           // so the commercial evaluator never sees their pricing.
           line_pricing: null,
           technically_disqualified: true,
+          // Distinct marker so the FE can label the ARC-wide reason.
+          ...(univDisq ? { universally_disqualified: true } : {}),
         };
       }
       return q;
@@ -742,6 +1048,15 @@ export async function saveAllocation(req, res) {
         const target = Number(item.indicative_qty);
         if (Math.abs(sum - target) > 1e-6) {
           return bad(res, 400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
+        }
+        // §5.2 — universal (ARC-wide) knockout applies to EVERY item, incl.
+        // clause-less ones. Check it FIRST so a globally-failed vendor gets the
+        // accurate ARC-wide reason even on clause-bearing items (otherwise the
+        // per-item check below would mask it with a less-precise message).
+        const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, t);
+        const univFailedAlloc = allocations.find((a) => universallyFailed.has(Number(a.awarded_vendor_id)));
+        if (univFailedAlloc) {
+          return bad(res, 400, `Vendor ${univFailedAlloc.awarded_vendor_id} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
         }
         const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
         const allowed = qualifiedMap[Number(item_id)];
@@ -825,8 +1140,18 @@ export async function finalizeCommEval(req, res) {
         return bad(res, 400, `Allocation incomplete for ${itemsMissing.length} item(s)`);
       }
       // Defense against stale awards saved before a technical re-evaluation:
-      // every awarded vendor must still be qualified for their item.
+      // every awarded vendor must still be qualified for their item AND must not
+      // have failed the ARC-wide (universal) technical clauses (§5.3 — covers
+      // clause-less items, where `allowed` is undefined).
       const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
+      const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, t);
+      // Universal (ARC-wide) failure takes precedence so the reason is accurate
+      // even on clause-bearing items (§5.3 — covers clause-less items too).
+      const univFailedAward = awards.find((a) => universallyFailed.has(Number(a.awarded_vendor_id)));
+      if (univFailedAward) {
+        return bad(res, 400,
+          `Vendor ${univFailedAward.awarded_vendor_id} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract — re-allocate before finalizing`);
+      }
       const staleAward = awards.find((a) => {
         const allowed = qualifiedMap[Number(a.arc_item_id)];
         return allowed && !allowed.includes(Number(a.awarded_vendor_id));
@@ -934,16 +1259,11 @@ export async function sendBackCommEvalToTech(req, res) {
       }
 
       // Nothing to send back to when technical never applied (no clauses on any
-      // item) — enforce the same "hide the button" rule server-side.
-      const clauseCount = await t.one(
-        `SELECT COUNT(*)::int AS n
-           FROM tbl_arc_item_tech_evaluation_clauses c
-           JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
-           JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
-          WHERE ai.arc_id = $1`,
-        [arcId]
-      );
-      if (clauseCount.n === 0) {
+      // item AND no universal clauses) — enforce the same "hide the button" rule
+      // server-side. Item OR universal, so a universal-only ARC's commercial can
+      // still be bounced back to technical.
+      const hasTechClauses = await arcEvalModel.arcHasTechClauses(arcId, t);
+      if (!hasTechClauses) {
         return bad(res, 400, 'Technical evaluation was not performed for this contract — there is nothing to send it back to.');
       }
 

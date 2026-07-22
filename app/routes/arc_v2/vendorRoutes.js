@@ -46,6 +46,17 @@ r.get( '/tech-envelope/file/:fileId',          passportSignIn, acl([3]), vendorC
 r.delete('/tech-envelope/file/:fileId',        passportSignIn, acl([3]), vendorController.deleteTechEvidence);
 r.post('/tech-envelope/submit',                passportSignIn, acl([3]), vendorController.submitTechEnvelope);
 
+// Universal (ARC-wide) technical envelope — the vendor's clause responses +
+// evidence for the SEPARATE universal configurator. Universal clauses are
+// returned inside the existing GET /requests/:arcId/tech-clauses response
+// (a `universal` key), and the seal rides the shared /tech-envelope/submit —
+// so only draft/upload/get/delete are needed here. Same acl([3]) + req.user
+// isolation as the item routes.
+r.post('/universal-tech-envelope/draft',                 passportSignIn, acl([3]), vendorController.saveUniversalTechEnvelopeDraft);
+r.post('/universal-tech-envelope/clause/:clauseId/file', passportSignIn, acl([3]), techEvidenceUpload.single('file'), vendorController.uploadUniversalTechEvidence);
+r.get( '/universal-tech-envelope/file/:fileId',          passportSignIn, acl([3]), vendorController.getOwnUniversalTechEvidence);
+r.delete('/universal-tech-envelope/file/:fileId',        passportSignIn, acl([3]), vendorController.deleteUniversalTechEvidence);
+
 // Amendments — vendor's own requests across every contract (My Amendments).
 r.get( '/amendments',                     passportSignIn, acl([3]), amendmentController.listVendorAmendments);
 
