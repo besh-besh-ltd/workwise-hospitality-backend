@@ -968,4 +968,574 @@ describe("ARC v2 — Phase 2: server-authoritative quote pricing", () => {
       expect(Number(qp.grand_total)).toBe(Number(qp.grand_subtotal));
     });
   });
+
+  // ===========================================================================
+  //  §MRP: MRP (tax-inclusive) quoting (spec .pipeline/spec.md §5, §8, §9)
+  //
+  //  Covers: draft persists the derived base into `rate` + audit columns;
+  //  submit RE-DERIVES from entered_mrp/mrp_discount/gst_pct even when the
+  //  stored `rate` column has gone stale/been tampered — never trusts `rate`
+  //  (buildEngineLineInput, §5a); the append-only version snapshot carries
+  //  the audit fields; a Traditional line is unaffected; a draft-time and a
+  //  submit-time validation failure.
+  // ===========================================================================
+
+  describe("§MRP: MRP (tax-inclusive) quoting — ARC vendor quote", () => {
+    test("draft: MRP line derives the exclusive base into `rate` (ignoring a garbage client rate) + persists audit columns + header", async () => {
+      const { arcId: mrpArcId, itemId: mrpItemId } = await seedArc({
+        number: "ARC-MRP-DRAFT", title: "MRP draft persists base + audit",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, mrpArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: mrpArcId,
+        pricing_method: "MRP",
+        lines: [{
+          arc_item_id: mrpItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          rate: 999999, // garbage — must be ignored/overwritten
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const dbQuote = await db.oneOrNone(
+        `SELECT pricing_method FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2`,
+        [mrpArcId, VENDOR_A]
+      );
+      expect(dbQuote.pricing_method).toBe("MRP");
+
+      const dbLine = await db.oneOrNone(
+        `SELECT ql.rate, ql.gst_pct, ql.pricing_method, ql.entered_mrp, ql.mrp_discount,
+                ql.mrp_discount_mode, ql.line_pricing
+           FROM tbl_arc_quote_line ql
+           JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2 AND ql.arc_item_id=$3`,
+        [mrpArcId, VENDOR_A, mrpItemId]
+      );
+      expect(dbLine).toBeDefined();
+      // base = 1180 / 1.18 = 1000 exactly — NOT the client's 999999.
+      expect(Number(dbLine.rate)).toBe(1000);
+      expect(dbLine.pricing_method).toBe("MRP");
+      expect(Number(dbLine.entered_mrp)).toBe(1180);
+      expect(dbLine.mrp_discount).toBeNull();
+      expect(dbLine.mrp_discount_mode).toBe("percentage");
+
+      const lp = typeof dbLine.line_pricing === 'string' ? JSON.parse(dbLine.line_pricing) : dbLine.line_pricing;
+      const expected = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      expect(Number(lp.total)).toBe(expected.lines[0].total);
+    });
+
+    test("submit: re-derives from entered_mrp/mrp_discount/gst_pct even when the stored `rate` column is tampered/stale — never trusts `rate`", async () => {
+      const { arcId: submitArcId, itemId: submitItemId } = await seedArc({
+        number: "ARC-MRP-SUBMIT", title: "MRP submit re-derives, ignores tampered rate",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, submitArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: submitArcId,
+        lines: [{
+          arc_item_id: submitItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      // Simulate a stale/tampered `rate` column directly in the DB — bypassing
+      // the API entirely. Submit must NOT trust this value; it must re-derive
+      // from the audit inputs (entered_mrp/mrp_discount/gst_pct), which are
+      // untouched by this direct SQL tamper.
+      await db.none(
+        `UPDATE tbl_arc_quote_line SET rate = 99999
+           WHERE arc_quote_id = (SELECT id FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2)
+             AND arc_item_id = $3`,
+        [submitArcId, VENDOR_A, submitItemId]
+      );
+      const tamperedCheck = await db.one(
+        `SELECT ql.rate FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id=ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`, [submitArcId, VENDOR_A]
+      );
+      expect(Number(tamperedCheck.rate)).toBe(99999); // tamper confirmed applied
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: submitArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbQuote = await db.one(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2`,
+        [submitArcId, VENDOR_A]
+      );
+      const qp = typeof dbQuote.quote_pricing === 'string' ? JSON.parse(dbQuote.quote_pricing) : dbQuote.quote_pricing;
+
+      const expectedFromAudit = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      const expectedFromTamperedRate = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 99999, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+
+      // Authoritative total is derived from entered_mrp (base=1000) — NOT from
+      // the tampered rate=99999 column.
+      expect(Number(qp.grand_total)).toBe(expectedFromAudit.grand_total);
+      expect(Number(qp.grand_total)).not.toBe(expectedFromTamperedRate.grand_total);
+
+      const dbLine = await db.one(
+        `SELECT line_pricing FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id=ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`, [submitArcId, VENDOR_A]
+      );
+      const lp = typeof dbLine.line_pricing === 'string' ? JSON.parse(dbLine.line_pricing) : dbLine.line_pricing;
+      expect(Number(lp.total)).toBe(expectedFromAudit.lines[0].total);
+
+      // Version ledger carries the audit fields (pure additive JSONB).
+      const version = await db.one(
+        `SELECT lines FROM tbl_arc_quote_version
+          WHERE arc_id=$1 AND vendor_id=$2 ORDER BY version_no DESC LIMIT 1`,
+        [submitArcId, VENDOR_A]
+      );
+      const versionLines = typeof version.lines === 'string' ? JSON.parse(version.lines) : version.lines;
+      expect(versionLines.length).toBe(1);
+      expect(versionLines[0].pricing_method).toBe("MRP");
+      expect(Number(versionLines[0].entered_mrp)).toBe(1180);
+      expect(Number(versionLines[0].line_pricing.total)).toBe(expectedFromAudit.lines[0].total);
+    });
+
+    // NOTE — non-discriminating on its own (kept for regression / documents
+    // submit-time safety-by-construction): `submitQuote` reloads lines from
+    // DB via `listQuoteLines` (`SELECT *`), and `tbl_arc_quote_line` has NO
+    // `gst_mode` column (confirmed in schema.sql). So `ql.gst_mode` is always
+    // `undefined` on the submit path regardless of the `buildEngineLineInput`
+    // MRP force — this test would pass even with that force deleted, because
+    // `toEngineMode(undefined ?? '%') → 'percentage'` anyway. The two tests
+    // immediately below isolate the actual guard-sensitive surfaces (preview
+    // and draft), where the client's raw `gst_mode` DOES flow into
+    // `buildEngineLineInput` — see the "DISCRIMINATING" tests.
+    test("submit: forces percentage GST on an MRP line even when the client sends gst_mode='₹' (absolute) — round-trip preserved, not a flat tax", async () => {
+      const { arcId: absArcId, itemId: absItemId } = await seedArc({
+        number: "ARC-MRP-ABS", title: "MRP submit forces percentage GST",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, absArcId);
+
+      // Client tampers: an MRP line submitted with an ABSOLUTE gst mode.
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: absArcId,
+        lines: [{
+          arc_item_id: absItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "₹",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: absArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbQuote = await db.one(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2`,
+        [absArcId, VENDOR_A]
+      );
+      const qp = typeof dbQuote.quote_pricing === 'string' ? JSON.parse(dbQuote.quote_pricing) : dbQuote.quote_pricing;
+
+      // The server must ignore the absolute gst_mode and treat GST as a percentage,
+      // so the authoritative total reproduces the entered MRP (base 1000 * 1.18) —
+      // NOT a flat ₹18/unit (which would give 1018/unit and undercharge the buyer).
+      const expectedPercentage = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      const expectedAbsolute = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: ITEM_QTY, tax: 18, tax_mode: 'absolute', other_charges: [] }], []
+      );
+      expect(Number(qp.grand_total)).toBe(expectedPercentage.grand_total);
+      expect(Number(qp.grand_total)).not.toBe(expectedAbsolute.grand_total);
+    });
+
+    // DISCRIMINATING — preview passes the raw client body straight into
+    // buildEngineLineInput (previewQuote L586: `buildEngineLineInput(line, arcItem)`
+    // where `line` IS the client-supplied object, unlike submit which reloads
+    // from DB). WITHOUT the `pricing_method === 'MRP' ? 'percentage' : …` force
+    // in buildEngineLineInput, this line's tax_mode would resolve via
+    // `toEngineMode(line.gst_mode ?? '%')` → `toEngineMode('₹')` → 'absolute',
+    // and the response total would be the absolute total (1000 + flat ₹18 =
+    // 1018). WITH the guard, tax_mode is forced to 'percentage' regardless of
+    // gst_mode, giving the percentage total (1000 * 1.18 = 1180). Item qty is
+    // overridden to 1 here so the numbers match the spec's worked example
+    // exactly (§0/§6a: "1180 vs 1018") — the engine's 'absolute' tax mode is
+    // a flat rupee amount on the LINE, not scaled per unit/qty, so at the
+    // suite's default qty=500 the two totals would be 590000 vs 500018, which
+    // is correct but obscures the per-unit intuition the spec states.
+    test("preview: forces percentage GST on an MRP line even when gst_mode='₹' — DISCRIMINATING (client body flows directly into buildEngineLineInput)", async () => {
+      const { arcId: pvArcId, itemId: pvItemId } = await seedArc({
+        number: "ARC-MRP-PREVIEW-ABS", title: "MRP preview forces percentage GST",
+        inviteVendors: [VENDOR_A],
+      });
+      await db.none(`UPDATE tbl_arc_item SET indicative_qty = 1 WHERE id = $1`, [pvItemId]);
+
+      const res = await alphaClient.post(`${VENDOR_BASE}/quote/preview`).send({
+        arc_id: pvArcId,
+        lines: [{
+          arc_item_id: pvItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "₹", // client tampers with an absolute GST mode
+          charges: [],
+        }],
+      });
+      expect(res.status).toBe(200);
+
+      const expectedPercentage = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: 1, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      const expectedAbsolute = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: 1, tax: 18, tax_mode: 'absolute', other_charges: [] }], []
+      );
+      // Without the guard: total would be 1018 (base 1000 + flat ₹18). With
+      // the guard: 1180 (base 1000 * 1.18).
+      expect(expectedAbsolute.lines[0].total).toBe(1018);
+      expect(expectedPercentage.lines[0].total).toBe(1180);
+
+      expect(res.body.data.lines[0].total).toBe(expectedPercentage.lines[0].total);
+      expect(res.body.data.lines[0].total).not.toBe(expectedAbsolute.lines[0].total);
+      expect(res.body.data.lines[0].total).toBe(1180);
+      expect(res.body.data.grand_total).toBe(expectedPercentage.grand_total);
+      expect(res.body.data.grand_total).not.toBe(expectedAbsolute.grand_total);
+    });
+
+    // DISCRIMINATING — saveQuoteDraft computes `line_pricing` via
+    // `engineLineByItemId`, which is built from `buildEngineLineInput(line, arcItem)`
+    // over the RAW request-body `lines` array (arcVendorController.js L648-652),
+    // BEFORE the line is persisted — i.e. the same client-supplied `gst_mode`
+    // used above flows into the stored `line_pricing.total`. WITHOUT the MRP
+    // force this persisted value would be the absolute total (1018); WITH it,
+    // it is the percentage total (1180). This directly exercises the
+    // draft-persistence surface the reviewer named as guard-sensitive. Qty is
+    // again overridden to 1 to match the spec's worked example precisely.
+    test("draft: persists line_pricing computed with percentage GST even when gst_mode='₹' — DISCRIMINATING (draft line_pricing is built from the raw request body pre-persist)", async () => {
+      const { arcId: dfArcId, itemId: dfItemId } = await seedArc({
+        number: "ARC-MRP-DRAFT-ABS", title: "MRP draft forces percentage GST",
+        inviteVendors: [VENDOR_A],
+      });
+      await db.none(`UPDATE tbl_arc_item SET indicative_qty = 1 WHERE id = $1`, [dfItemId]);
+      await acceptTerms(alphaClient, dfArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: dfArcId,
+        lines: [{
+          arc_item_id: dfItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "₹", // client tampers with an absolute GST mode
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const dbLine = await db.one(
+        `SELECT ql.line_pricing FROM tbl_arc_quote_line ql
+           JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`,
+        [dfArcId, VENDOR_A]
+      );
+      const lp = typeof dbLine.line_pricing === 'string' ? JSON.parse(dbLine.line_pricing) : dbLine.line_pricing;
+
+      const expectedPercentage = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: 1, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      const expectedAbsolute = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 1000, quantity: 1, tax: 18, tax_mode: 'absolute', other_charges: [] }], []
+      );
+      expect(Number(lp.total)).toBe(expectedPercentage.lines[0].total);
+      expect(Number(lp.total)).not.toBe(expectedAbsolute.lines[0].total);
+      // Spelled out numerically per the reviewer's exact wording: base 1000
+      // → 1180 (percentage) NOT 1018 (absolute flat ₹18), with qty=1 so the
+      // per-unit and line totals coincide.
+      expect(Number(lp.total)).toBe(1180);
+    });
+
+    // ── Gap 4: other_charges stay enabled and ADD ON TOP of the MRP-derived
+    // base — MRP only governs the goods price, not per-line charges. ──────
+    test("MRP line with an other_charge: derived base is unaffected by the charge, and the charge (+ its own tri-state tax) adds ON TOP", async () => {
+      const { arcId: chgArcId, itemId: chgItemId } = await seedArc({
+        number: "ARC-MRP-CHARGE", title: "MRP line with a freight charge on top",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, chgArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: chgArcId,
+        lines: [{
+          arc_item_id: chgItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "%",
+          charges: [
+            { name: "Freight", amount: 200, amount_mode: 'absolute', tax: 10, tax_mode: '%' },
+          ],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: chgArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbLine = await db.one(
+        `SELECT ql.rate, ql.line_pricing FROM tbl_arc_quote_line ql
+           JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`,
+        [chgArcId, VENDOR_A]
+      );
+      // The derived base (1180/1.18 = 1000) is stored into `rate` — the
+      // freight charge does NOT alter the MRP derivation.
+      expect(Number(dbLine.rate)).toBe(1000);
+
+      const lp = typeof dbLine.line_pricing === 'string' ? JSON.parse(dbLine.line_pricing) : dbLine.line_pricing;
+      const expected = pricingEngine.calculateDocumentTotals(
+        [{
+          unit_price: 1000, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage',
+          other_charges: [{ name: "Freight", amount: 200, amount_mode: 'absolute', tax: 10, tax_mode: 'percentage' }],
+        }], []
+      );
+      // Charge amount/tax are computed independently of the MRP base — the
+      // charge is a flat ₹200 with its own explicit 10% tax (₹20), NOT
+      // scaled or derived from the MRP/discount math.
+      expect(Number(lp.charges[0].amount)).toBe(200);
+      expect(Number(lp.charges[0].tax)).toBe(20);
+      expect(Number(lp.charges_total)).toBe(220);
+      expect(Number(lp.total)).toBe(expected.lines[0].total);
+      // total = base*(1+gst%) + charge(+its own tax) = 590000 (base+basetax) + 220.
+      expect(Number(lp.total)).toBe(590220);
+    });
+
+    // ── Gap 6: absolute (₹) discount, not just percentage ──────────────────
+    test("submit: an absolute (₹) MRP discount derives the correct base — MRP 1180 less ₹118 → net 1062 → base 900", async () => {
+      const { arcId: discArcId, itemId: discItemId } = await seedArc({
+        number: "ARC-MRP-DISC-ABS", title: "MRP absolute discount at submission",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, discArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: discArcId,
+        lines: [{
+          arc_item_id: discItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: 118, mrp_discount_mode: "absolute",
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: discArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbLine = await db.one(
+        `SELECT ql.rate, ql.mrp_discount, ql.mrp_discount_mode FROM tbl_arc_quote_line ql
+           JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`,
+        [discArcId, VENDOR_A]
+      );
+      // net = 1180 - 118 = 1062; base = 1062 / 1.18 = 900 exactly.
+      expect(Number(dbLine.rate)).toBe(900);
+      expect(Number(dbLine.mrp_discount)).toBe(118);
+      expect(dbLine.mrp_discount_mode).toBe("absolute");
+
+      const dbQuote = await db.one(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2`,
+        [discArcId, VENDOR_A]
+      );
+      const qp = typeof dbQuote.quote_pricing === 'string' ? JSON.parse(dbQuote.quote_pricing) : dbQuote.quote_pricing;
+      const expected = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 900, quantity: ITEM_QTY, tax: 18, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      expect(Number(qp.grand_total)).toBe(expected.grand_total);
+      // Per-unit sanity: base 900 * 1.18 = 1062 = the entered net (1180 - 118).
+      expect(Number(qp.grand_total)).toBe(900 * 1.18 * ITEM_QTY);
+    });
+
+    // ── Gap 7: gst=0 is a valid MRP line, not an error ─────────────────────
+    test("submit: an MRP line with gst_pct=0 → base equals the entered MRP exactly, total has no tax, not an error", async () => {
+      const { arcId: zeroArcId, itemId: zeroItemId } = await seedArc({
+        number: "ARC-MRP-GST0", title: "MRP with 0% GST",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, zeroArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: zeroArcId,
+        lines: [{
+          arc_item_id: zeroItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1000, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 0, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: zeroArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbLine = await db.one(
+        `SELECT ql.rate FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id = ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`,
+        [zeroArcId, VENDOR_A]
+      );
+      // gst=0 → nothing to extract → base === entered MRP exactly.
+      expect(Number(dbLine.rate)).toBe(1000);
+
+      const dbQuote = await db.one(
+        `SELECT quote_pricing FROM tbl_arc_quote WHERE arc_id=$1 AND vendor_id=$2`,
+        [zeroArcId, VENDOR_A]
+      );
+      const qp = typeof dbQuote.quote_pricing === 'string' ? JSON.parse(dbQuote.quote_pricing) : dbQuote.quote_pricing;
+      expect(Number(qp.grand_total)).toBe(1000 * ITEM_QTY);
+      expect(Number(qp.grand_subtotal)).toBe(Number(qp.grand_total)); // no tax → subtotal === total
+    });
+
+    // ── Gap 5 (ARC half): downstream buyer-side reader (comm-eval) — proves a
+    // stored MRP line is read IDENTICALLY to a Traditional line: `rate` +
+    // `gst_pct` (via listAllQuotesForArc, a plain `SELECT ql.rate, ql.gst_pct,
+    // ...` with no `pricing_method`/`entered_mrp` in the projection at all) and
+    // `line_pricing.total` carry the derived base/gst with zero MRP-awareness
+    // in the reader itself. ─────────────────────────────────────────────────
+    test("comm-eval (buyer-side reader) reads the derived rate/gst_pct/line_pricing for an MRP line exactly as it would a Traditional line", async () => {
+      const { arcId: ceArcId, itemId: ceItemId } = await seedArc({
+        number: "ARC-MRP-COMMEVAL", title: "MRP downstream reader parity — comm-eval",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, ceArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: ceArcId,
+        lines: [{
+          arc_item_id: ceItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1180, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(200);
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: ceArcId });
+      expect(submitRes.status).toBe(200);
+
+      const res = await commEvalClient.get(`${EVAL_BASE}/${ceArcId}/comm-eval`);
+      expect(res.status).toBe(200);
+      const { quotes } = res.body.data;
+      const row = quotes.find((q) => Number(q.vendor_id) === VENDOR_A && Number(q.arc_item_id) === ceItemId);
+      expect(row).toBeDefined();
+
+      // The reader (listAllQuotesForArc) selects `ql.rate`/`ql.gst_pct` with
+      // no reference to pricing_method/entered_mrp — it cannot distinguish
+      // this from a Traditional row. `rate` is the derived exclusive base
+      // (1000), and `gst_pct` is the entered 18 — the SAME shape a
+      // Traditional quote produces.
+      expect(Number(row.rate)).toBe(1000);
+      expect(Number(row.gst_pct)).toBe(18);
+
+      const lp = typeof row.line_pricing === 'string' ? JSON.parse(row.line_pricing) : row.line_pricing;
+      // line_pricing.total reproduces the entered MRP * qty (1180 * 500),
+      // read by the buyer with zero MRP-specific code.
+      expect(Number(lp.total)).toBe(1180 * ITEM_QTY);
+    });
+
+    test("Traditional line submit is unaffected — pricing_method defaults to 'TRADITIONAL', audit columns stay null", async () => {
+      const { arcId: tradArcId, itemId: tradItemId } = await seedArc({
+        number: "ARC-MRP-TRAD-CONTROL", title: "Traditional line unaffected by MRP feature",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, tradArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: tradArcId,
+        lines: [{ arc_item_id: tradItemId, rate: 90, gst_pct: 5, gst_mode: '%', charges: [] }],
+      });
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: tradArcId });
+      expect(submitRes.status).toBe(200);
+
+      const dbLine = await db.one(
+        `SELECT ql.rate, ql.pricing_method, ql.entered_mrp, ql.mrp_discount, ql.mrp_discount_mode, ql.line_pricing
+           FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id=ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`, [tradArcId, VENDOR_A]
+      );
+      expect(dbLine.pricing_method).toBe("TRADITIONAL");
+      expect(dbLine.entered_mrp).toBeNull();
+      expect(dbLine.mrp_discount).toBeNull();
+      expect(dbLine.mrp_discount_mode).toBeNull();
+      expect(Number(dbLine.rate)).toBe(90);
+
+      const lp = typeof dbLine.line_pricing === 'string' ? JSON.parse(dbLine.line_pricing) : dbLine.line_pricing;
+      const expected = pricingEngine.calculateDocumentTotals(
+        [{ unit_price: 90, quantity: ITEM_QTY, tax: 5, tax_mode: 'percentage', other_charges: [] }], []
+      );
+      expect(Number(lp.total)).toBe(expected.lines[0].total);
+    });
+
+    // ---- Failure cases ----
+
+    test("draft: rejects an MRP line with entered_mrp <= 0", async () => {
+      const { arcId: badArcId, itemId: badItemId } = await seedArc({
+        number: "ARC-MRP-BAD-MRP", title: "MRP draft rejects entered_mrp<=0",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, badArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: badArcId,
+        lines: [{
+          arc_item_id: badItemId,
+          pricing_method: "MRP",
+          entered_mrp: 0, mrp_discount: null, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      expect(draftRes.status).toBe(400);
+      expect(draftRes.body.message).toMatch(/positive number/i);
+
+      const dbLine = await db.oneOrNone(
+        `SELECT ql.id FROM tbl_arc_quote_line ql JOIN tbl_arc_quote q ON q.id=ql.arc_quote_id
+          WHERE q.arc_id=$1 AND q.vendor_id=$2`, [badArcId, VENDOR_A]
+      );
+      expect(dbLine).toBeNull(); // nothing persisted
+    });
+
+    test("submit: rejects a discount that zeroes the net (draft tolerates it, submit blocks it)", async () => {
+      const { arcId: discArcId, itemId: discItemId } = await seedArc({
+        number: "ARC-MRP-BAD-DISC", title: "MRP submit rejects zeroing discount",
+        inviteVendors: [VENDOR_A],
+      });
+      await acceptTerms(alphaClient, discArcId);
+
+      const draftRes = await alphaClient.post(`${VENDOR_BASE}/quote/draft`).send({
+        arc_id: discArcId,
+        lines: [{
+          arc_item_id: discItemId,
+          pricing_method: "MRP",
+          entered_mrp: 1000, mrp_discount: 100, mrp_discount_mode: "percentage",
+          gst_pct: 18, gst_mode: "%",
+          charges: [],
+        }],
+      });
+      // Draft-save is tolerant of the discount bound (only entered_mrp is
+      // validated on draft) — the "draft tolerant, submit strict" split.
+      expect(draftRes.status).toBe(200);
+
+      const submitRes = await alphaClient.post(`${VENDOR_BASE}/quote/submit`).send({ arc_id: discArcId });
+      expect(submitRes.status).toBe(400);
+      expect(submitRes.body.message).toMatch(/discount is invalid/i);
+    });
+  });
 });

@@ -3360,7 +3360,8 @@ CREATE TABLE public.tbl_quote_finalization (
     vendor_id integer NOT NULL,
     created_by integer NOT NULL,
     "timestamp" timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    variant integer
+    variant integer,
+    comment text
 );
 
 
@@ -3379,7 +3380,8 @@ CREATE TABLE public.tbl_quote_finalization_history (
     "timestamp" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     variant integer,
     changed_by integer NOT NULL,
-    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    comment text
 );
 
 
@@ -3458,7 +3460,11 @@ CREATE TABLE public.tbl_quote_item_history (
     freight_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     package_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     tax_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
-    other_charges jsonb DEFAULT '[]'::jsonb
+    other_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying,
+    entered_mrp numeric(15,2),
+    mrp_discount numeric(15,2),
+    mrp_discount_mode public.item_mode
 );
 
 
@@ -3519,7 +3525,12 @@ CREATE TABLE public.tbl_quote_items (
     freight_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     package_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     tax_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
-    other_charges jsonb DEFAULT '[]'::jsonb
+    other_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying NOT NULL,
+    entered_mrp numeric(15,2),
+    mrp_discount numeric(15,2),
+    mrp_discount_mode public.item_mode,
+    CONSTRAINT chk_tbl_quote_items_pricing_method CHECK (((pricing_method)::text = ANY ((ARRAY['TRADITIONAL'::character varying, 'MRP'::character varying])::text[])))
 );
 
 
@@ -3555,7 +3566,9 @@ CREATE TABLE public.tbl_quotes (
     payment_id integer,
     global_tax numeric DEFAULT 0,
     global_tax_mode character varying(20) DEFAULT 'percentage'::character varying,
-    global_charges jsonb DEFAULT '[]'::jsonb
+    global_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying NOT NULL,
+    CONSTRAINT chk_tbl_quotes_pricing_method CHECK (((pricing_method)::text = ANY ((ARRAY['TRADITIONAL'::character varying, 'MRP'::character varying])::text[])))
 );
 
 
@@ -11457,7 +11470,9 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote (
   quote_pricing   JSONB,
   created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE (arc_id, vendor_id)
+  pricing_method  VARCHAR(12) NOT NULL DEFAULT 'TRADITIONAL',
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT chk_tbl_arc_quote_pricing_method CHECK (pricing_method IN ('TRADITIONAL','MRP'))
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_arc     ON public.tbl_arc_quote (arc_id);
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_vendor  ON public.tbl_arc_quote (vendor_id);
@@ -11477,8 +11492,13 @@ CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line (
   negotiated_round_id  BIGINT,
   created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  pricing_method       VARCHAR(12) NOT NULL DEFAULT 'TRADITIONAL',
+  entered_mrp          NUMERIC(15,2),
+  mrp_discount         NUMERIC(15,2),
+  mrp_discount_mode    VARCHAR(12),
   UNIQUE (arc_quote_id, arc_item_id),
-  CONSTRAINT tbl_arc_quote_line_rate_source_chk CHECK (rate_source IN ('LANDED', 'NEGOTIATED'))
+  CONSTRAINT tbl_arc_quote_line_rate_source_chk CHECK (rate_source IN ('LANDED', 'NEGOTIATED')),
+  CONSTRAINT chk_tbl_arc_quote_line_pricing_method CHECK (pricing_method IN ('TRADITIONAL','MRP'))
 );
 CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_line_item  ON public.tbl_arc_quote_line (arc_item_id);
 

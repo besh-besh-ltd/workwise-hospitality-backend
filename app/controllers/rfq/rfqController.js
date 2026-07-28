@@ -71,7 +71,7 @@ import {
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
 } from '../../helper/quoteVisibility.js';
-import pricingEngine from '../../services/pricingEngine.js';
+import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
@@ -8687,10 +8687,72 @@ const rfqController = {
           }
         }
 
+        // MRP-mode per-product validation: only applies to a priced MRP line
+        // (not regret, entered_mrp present). Blank discount ⇒ net = MRP (no
+        // validation needed). entered_mrp must be > 0; gst must be finite and
+        // >= 0 (0 allowed = MRP with no embedded GST); discount must never
+        // zero/negative the net.
+        if (!req.body.is_regret) {
+          for (const product of products) {
+            if (product.pricing_method !== 'MRP') continue;
+            const hasEnteredMrp =
+              product.entered_mrp !== undefined &&
+              product.entered_mrp !== null &&
+              product.entered_mrp !== '';
+            if (!hasEnteredMrp) continue;
+
+            const productLabel = product.product_name || `Product ${product.product_id}`;
+            const mrpNum = Number(product.entered_mrp);
+            if (!Number.isFinite(mrpNum) || mrpNum <= 0) {
+              return res.status(400).json({ status: 0, message: `${productLabel}: MRP must be greater than 0` }).end();
+            }
+
+            const taxNum = Number(product.tax);
+            if (!Number.isFinite(taxNum) || taxNum < 0) {
+              return res.status(400).json({ status: 0, message: `${productLabel}: GST must be zero or greater` }).end();
+            }
+
+            const discRaw = product.mrp_discount;
+            if (discRaw !== undefined && discRaw !== null && discRaw !== '') {
+              const discNum = Number(discRaw);
+              const discMode = product.mrp_discount_mode;
+              if (!Number.isFinite(discNum) || discNum < 0) {
+                return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` }).end();
+              }
+              const discAmt = discMode === 'percentage' ? (mrpNum * discNum) / 100 : discNum;
+              if (mrpNum - discAmt <= 0) {
+                return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` }).end();
+              }
+            }
+          }
+        }
+
         // Enrich other_charges with slugs for each product
         for (const product of products) {
           if (product.other_charges) {
             product.other_charges = enrichCharges(product.other_charges);
+          }
+        }
+
+        // MRP mode: reverse-calculate the tax-exclusive base from the entered
+        // MRP + discount, and store it into the existing unit_price column so
+        // all downstream branch-selection / engine recompute /
+        // negotiation-round-quote logic below works unchanged.
+        for (const product of products) {
+          if (product.pricing_method === 'MRP') {
+            const { base } = deriveMrpLine({
+              mrp: product.entered_mrp, discount: product.mrp_discount,
+              discount_mode: product.mrp_discount_mode, gst_pct: product.tax,
+            });
+            product.unit_price = base;          // derived exclusive base into the existing column
+            // GST on an MRP line is ALWAYS a percentage extracted from within the price.
+            // deriveMrpLine() derives the base as inclusive/(1+gst/100); the engine must
+            // therefore re-add tax as a percentage too, or the stored total stops
+            // reproducing the entered MRP. Force it here (authoritative) — never trust a
+            // client-sent absolute tax_mode on an MRP line. product.tax stays the entered gst%.
+            product.tax_mode = 'percentage';
+          } else {
+            product.pricing_method = 'TRADITIONAL';
           }
         }
 
@@ -8707,7 +8769,8 @@ const rfqController = {
             regret_reason,
             payment_id: tenderPaymentId,
             gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null,
-            global_charges: JSON.stringify(enrichCharges(global_charges))
+            global_charges: JSON.stringify(enrichCharges(global_charges)),
+            pricing_method: req.body.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL'
           };
 
           // check quote is already exists or not
@@ -8720,6 +8783,10 @@ const rfqController = {
           if (alreadyExists.length > 0) {
             throw new Error('Quote is alredy present for this RFQ!');
           }
+
+          // Coerce blank ('' / undefined / null) MRP audit inputs to null so
+          // the numeric(15,2) columns never receive an empty string.
+          const numOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
 
           var quote_items_data = [];
           products.map(
@@ -8735,9 +8802,27 @@ const rfqController = {
               variant,
               document_files,
               tax_mode,
-              other_charges
+              other_charges,
+              pricing_method,
+              entered_mrp,
+              mrp_discount,
+              mrp_discount_mode
             }) => {
               const chargesJson = JSON.stringify(other_charges || []);
+              const isMrp = pricing_method === 'MRP';
+              const mrpAudit = isMrp
+                ? {
+                    pricing_method: 'MRP',
+                    entered_mrp: numOrNull(entered_mrp),
+                    mrp_discount: numOrNull(mrp_discount),
+                    mrp_discount_mode: mrp_discount_mode || null
+                  }
+                : {
+                    pricing_method: 'TRADITIONAL',
+                    entered_mrp: null,
+                    mrp_discount: null,
+                    mrp_discount_mode: null
+                  };
               if (unit_price != '') {
                 quote_items_data.push({
                   rfq_id,
@@ -8756,7 +8841,8 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  ...mrpAudit
                 });
               } else if (comment != '' || document_files?.length > 0) {
                 quote_items_data.push({
@@ -8776,7 +8862,8 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  ...mrpAudit
                 });
               } else if (is_regret) {
                 quote_items_data.push({
@@ -8796,7 +8883,11 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  pricing_method: 'TRADITIONAL',
+                  entered_mrp: null,
+                  mrp_discount: null,
+                  mrp_discount_mode: null
                 });
               }
             }
@@ -8858,7 +8949,11 @@ const rfqController = {
                 'freight_mode',
                 'package_mode',
                 'tax_mode',
-                'other_charges'
+                'other_charges',
+                'pricing_method',
+                'entered_mrp',
+                'mrp_discount',
+                'mrp_discount_mode'
               ];
               await rfqModel.insertArray(
                 quote_items_data,
@@ -8992,7 +9087,11 @@ const rfqController = {
               'freight_mode',
               'package_mode',
               'tax_mode',
-              'other_charges'
+              'other_charges',
+              'pricing_method',
+              'entered_mrp',
+              'mrp_discount',
+              'mrp_discount_mode'
             ];
             let quotes_items = await rfqModel.insertArray(
               quote_items_data,
@@ -9317,7 +9416,11 @@ const rfqController = {
   // freight=0 recomputes base totals (no_freight passthrough).
   getQuoteComparisonView: async (req, res, next) => {
     try {
-      const scope = deriveQcScope(req);
+      // deriveQcScope is async — it MUST be awaited (every other caller does).
+      // Without await, `scope` is a Promise: the model's tenant gate reads
+      // `undefined` (cross-tenant leak) and scope.userId is undefined (empty
+      // negotiation history). See quoteCompareViewModel tenant gate.
+      const scope = await deriveQcScope(req);
       // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
       const freightParam = req.query.freight;
       const noFreight =
@@ -10373,7 +10476,52 @@ const rfqController = {
                 if (rfqProduct) {
                   // Check for existing pending NEGOTIATION_QUOTE approval
                   const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfqProduct.id, t);
-                  const existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
+                  let existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
+
+                  // Wrong-vendor re-finalize guard (RFQ 493 / PO 138621): the
+                  // NEGOTIATION_QUOTE approval is keyed by rfq_product (product-
+                  // level), so an in-flight PENDING approval may belong to a
+                  // PREVIOUSLY finalized vendor. If the buyer is now finalizing a
+                  // DIFFERENT vendor, that stale approval carries a FROZEN
+                  // po_payload for the OLD vendor and would, once approved, draft
+                  // a PO for the WRONG recipient. Cancel it within THIS tx (so a
+                  // rollback undoes it — cancelApprovalInstance opens its own tx
+                  // and would break atomicity) and supersede the old vendor's
+                  // finalization row for this exact line, then fall through to
+                  // create a fresh approval for the vendor now being finalized.
+                  if (existingPending) {
+                    const pendingMeta = typeof existingPending.metadata === 'string'
+                      ? JSON.parse(existingPending.metadata)
+                      : (existingPending.metadata || {});
+                    const pendingVendorId = Number(pendingMeta.vendor_id);
+                    if (pendingVendorId && pendingVendorId !== Number(vendor_id)) {
+                      await t.none(
+                        `UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1 AND status='PENDING'`,
+                        [existingPending.id]
+                      );
+                      await t.none(
+                        `UPDATE tbl_approval_instance_steps SET status='CANCELLED', completed_at=NOW() WHERE approval_instance_id=$1 AND status='PENDING'`,
+                        [existingPending.id]
+                      );
+                      const staleFinals = await rfqModel.checkIfExists(
+                        'tbl_quote_finalization',
+                        `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND vendor_id=${pendingVendorId}`,
+                        t
+                      );
+                      for (const sf of staleFinals) {
+                        await rfqModel.insert('tbl_quote_finalization_history', {
+                          rfq_id: sf.rfq_id, rfq_no: sf.rfq_no,
+                          product_variant_id: sf.product_variant_id,
+                          vendor_id: sf.vendor_id, quote_id: sf.quote_id,
+                          created_by: sf.created_by, timestamp: sf.timestamp,
+                          variant: sf.variant, changed_by: req.user.id,
+                          comment: sf.comment || null,
+                        }, t);
+                        await rfqModel.delete('tbl_quote_finalization', { id: sf.id }, t);
+                      }
+                      existingPending = null; // create a fresh approval for the new vendor below
+                    }
+                  }
 
                   if (existingPending) {
                     const existingPendingState = await t.one(`
@@ -13896,6 +14044,44 @@ sendFollowUpEmails: async (req, res) => {
         return res.status(400).json({ status: 0, message: globalChargeErr });
       }
 
+      // MRP-mode per-product validation: only applies to a priced MRP line
+      // (entered_mrp present). Blank discount ⇒ net = MRP (no validation
+      // needed). entered_mrp must be > 0; gst must be finite and >= 0 (0
+      // allowed = MRP with no embedded GST); discount must never
+      // zero/negative the net.
+      for (const product of products) {
+        if (product.pricing_method !== 'MRP') continue;
+        const hasEnteredMrp =
+          product.entered_mrp !== undefined &&
+          product.entered_mrp !== null &&
+          product.entered_mrp !== '';
+        if (!hasEnteredMrp) continue;
+
+        const productLabel = product.product_name || `Product ${product.product_id}`;
+        const mrpNum = Number(product.entered_mrp);
+        if (!Number.isFinite(mrpNum) || mrpNum <= 0) {
+          return res.status(400).json({ status: 0, message: `${productLabel}: MRP must be greater than 0` });
+        }
+
+        const taxNum = Number(product.tax);
+        if (!Number.isFinite(taxNum) || taxNum < 0) {
+          return res.status(400).json({ status: 0, message: `${productLabel}: GST must be zero or greater` });
+        }
+
+        const discRaw = product.mrp_discount;
+        if (discRaw !== undefined && discRaw !== null && discRaw !== '') {
+          const discNum = Number(discRaw);
+          const discMode = product.mrp_discount_mode;
+          if (!Number.isFinite(discNum) || discNum < 0) {
+            return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` });
+          }
+          const discAmt = discMode === 'percentage' ? (mrpNum * discNum) / 100 : discNum;
+          if (mrpNum - discAmt <= 0) {
+            return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` });
+          }
+        }
+      }
+
       // Enrich other_charges with slugs for each product
       for (const product of products) {
         if (product.other_charges) {
@@ -13904,6 +14090,26 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       const enrichedGlobalCharges = enrichCharges(global_charges);
+
+      // MRP mode: reverse-calculate the tax-exclusive base from the entered
+      // MRP + discount, and store it into the existing unit_price field so
+      // all downstream logic below (engine recompute, model persistence)
+      // works unchanged.
+      for (const product of products) {
+        if (product.pricing_method === 'MRP') {
+          const { base } = deriveMrpLine({
+            mrp: product.entered_mrp, discount: product.mrp_discount,
+            discount_mode: product.mrp_discount_mode, gst_pct: product.tax,
+          });
+          product.unit_price = base;          // derived exclusive base into the existing field
+          // GST on an MRP line is ALWAYS a percentage extracted from within the price;
+          // force it so the engine re-adds tax as a percentage and the stored total
+          // reproduces the entered MRP (never trust a client absolute tax_mode here).
+          product.tax_mode = 'percentage';
+        } else {
+          product.pricing_method = 'TRADITIONAL';
+        }
+      }
 
       // Server-authoritative recompute: discard the client-supplied
       // total_price on each product and derive it from the pricing engine.
@@ -13944,7 +14150,8 @@ sendFollowUpEmails: async (req, res) => {
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment,
           gstin: newGstin,
-          global_charges: JSON.stringify(enrichedGlobalCharges)
+          global_charges: JSON.stringify(enrichedGlobalCharges),
+          pricing_method: req.body.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL'
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 

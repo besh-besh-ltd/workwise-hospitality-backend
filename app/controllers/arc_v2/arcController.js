@@ -691,17 +691,26 @@ export async function terminate(req, res) {
     if (!(await userCanAccessHotel(req, arc.hotel_id))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
-    await db.tx(async (t) => {
-      const updated = await arcModel.setStatus(id, 'terminated', { closed_reason: reason }, t);
+    // Respond-AFTER-commit: return the updated row from the tx and send the HTTP
+    // response only once the transaction has committed. Sending inside db.tx()
+    // races the commit — under connection-pool contention a follow-up read can
+    // miss the write (see arc.draft.persistence flake). Mirrors the verifyOtp /
+    // clarification respond-after-commit fixes.
+    const updated = await db.tx(async (t) => {
+      const u = await arcModel.setStatus(id, 'terminated', { closed_reason: reason }, t);
       await logArcEvent({
         arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED,
         actorId: userId, payload: { reason, previous_status: arc.status },
         txContext: t,
       });
-      ok(res, { arc: updated }, 'ARC terminated');
+      return u;
     });
-    // Notify awarded vendors (or invited if none) post-commit
-    await notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED, actorId: userId, payload: {} });
+    ok(res, { arc: updated }, 'ARC terminated');
+    // Notify awarded vendors (or invited if none) — best-effort, post-commit and
+    // post-response, so a notification failure can never affect the committed
+    // termination or the HTTP response.
+    notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.TERMINATED, actorId: userId, payload: {} })
+      .catch((e) => logger.error({ err: e }, '[arcController.terminate] notify failed'));
   } catch (err) {
     logger.error({ err }, '[arcController.terminate]');
     return bad(res, 500, err.message || 'Internal error', 3);

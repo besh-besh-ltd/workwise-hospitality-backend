@@ -17,6 +17,8 @@ import {
   pickLowestQuote,
   computeFreightAdvantage,
   normalizeChargesMeta,
+  deriveBaseFromInclusive,
+  deriveMrpLine,
 } from "../../app/services/pricingEngine.js";
 
 describe("pricingEngine.applyChargeMode", () => {
@@ -951,5 +953,137 @@ describe("pricingEngine — integration scenarios", () => {
     expect(out.grand_subtotal).toBe(2359);
     expect(out.global_charges_total).toBe(23.59);
     expect(out.grand_total).toBe(2382.59);
+  });
+});
+
+// ============================================================================
+// MRP (tax-inclusive) quoting — deriveBaseFromInclusive / deriveMrpLine
+// Spec: .pipeline/spec.md §1, §8, §9.
+// ============================================================================
+
+describe("pricingEngine.deriveBaseFromInclusive", () => {
+  it("extracts the tax-exclusive base from a GST-inclusive price", () => {
+    // base = 1180 / 1.18 = 1000 exactly.
+    expect(deriveBaseFromInclusive(1180, 18)).toBe(1000);
+  });
+
+  it("returns the inclusive price unchanged when gst is 0 (nothing to extract)", () => {
+    expect(deriveBaseFromInclusive(1000, 0)).toBe(1000);
+  });
+
+  it("returns the inclusive price unchanged when gst is blank/non-numeric (toNumber → 0)", () => {
+    expect(deriveBaseFromInclusive(1000, "")).toBe(1000);
+    expect(deriveBaseFromInclusive(1000, undefined)).toBe(1000);
+    expect(deriveBaseFromInclusive(1000, "not-a-number")).toBe(1000);
+  });
+
+  it("divide-by-≤0 guard: gst <= -100 (divisor <= 0) returns the inclusive unchanged, never Infinity/NaN", () => {
+    expect(deriveBaseFromInclusive(1000, -100)).toBe(1000);
+    expect(deriveBaseFromInclusive(1000, -150)).toBe(1000);
+  });
+
+  it("a small positive gst still divides normally (no guard interference)", () => {
+    // 118 / 1.18 = 100 exactly.
+    expect(deriveBaseFromInclusive(118, 18)).toBe(100);
+  });
+});
+
+describe("pricingEngine.deriveMrpLine", () => {
+  it("worked example (spec §0 / changes.md): mrp 1180 @ 18% GST, no discount → base 1000 exactly", () => {
+    const out = deriveMrpLine({ mrp: 1180, gst_pct: 18 });
+    expect(out.base).toBe(1000);
+    expect(out.net_inclusive).toBe(1180);
+    expect(out.gst_amount).toBe(180);
+    expect(out.discount_amount).toBe(0);
+  });
+
+  it("round-trip: feeding the derived base back into calculateLineTotal reproduces the entered MRP exactly", () => {
+    const { base } = deriveMrpLine({ mrp: 1180, gst_pct: 18 });
+    const engineOut = calculateLineTotal({
+      unit_price: base,
+      quantity: 1,
+      tax: 18,
+      tax_mode: "percentage",
+    });
+    expect(engineOut.total).toBe(1180);
+  });
+
+  it("fractional case round-trips within the accepted 0.01 tolerance (mrp 100 @ 18% → base 84.75 → total 100.01)", () => {
+    const { base } = deriveMrpLine({ mrp: 100, gst_pct: 18 });
+    expect(base).toBe(84.75);
+    const engineOut = calculateLineTotal({
+      unit_price: base,
+      quantity: 1,
+      tax: 18,
+      tax_mode: "percentage",
+    });
+    expect(engineOut.total).toBe(100.01);
+    expect(Math.abs(engineOut.total - 100)).toBeLessThanOrEqual(0.011); // spec's stated 0.01 tolerance, with float-repr slack
+  });
+
+  it("gst = 0 in MRP mode: base === net_inclusive, gst_amount = 0 (valid — not an error)", () => {
+    const out = deriveMrpLine({ mrp: 1000, gst_pct: 0 });
+    expect(out.base).toBe(1000);
+    expect(out.gst_amount).toBe(0);
+  });
+
+  it("gst blank/non-numeric → treated as 0 (base = net, nothing extracted)", () => {
+    expect(deriveMrpLine({ mrp: 1000, gst_pct: "" }).base).toBe(1000);
+    expect(deriveMrpLine({ mrp: 1000, gst_pct: undefined }).base).toBe(1000);
+  });
+
+  it("negative-gst divisor guard: gst <= -100 does not divide-by-≤0; base falls back to net_inclusive", () => {
+    const out = deriveMrpLine({ mrp: 1000, gst_pct: -150 });
+    expect(out.base).toBe(1000);
+    expect(Number.isFinite(out.base)).toBe(true);
+  });
+
+  it("percentage discount is applied to MRP BEFORE GST is extracted", () => {
+    // mrp 1180, 10% discount → net = 1062; base = 1062 / 1.18 = 900 exactly.
+    const out = deriveMrpLine({ mrp: 1180, discount: 10, discount_mode: "percentage", gst_pct: 18 });
+    expect(out.discount_amount).toBe(118);
+    expect(out.net_inclusive).toBe(1062);
+    expect(out.base).toBe(900);
+    expect(out.gst_amount).toBe(162);
+  });
+
+  it("absolute (₹) discount is applied to MRP before GST extraction", () => {
+    // mrp 1180, ₹180 absolute discount → net = 1000; base = 1000/1.18 = 847.46 (q2'd).
+    const out = deriveMrpLine({ mrp: 1180, discount: 180, discount_mode: "absolute", gst_pct: 18 });
+    expect(out.discount_amount).toBe(180);
+    expect(out.net_inclusive).toBe(1000);
+    expect(out.base).toBe(847.46);
+  });
+
+  it("blank discount ⇒ net = MRP (discount is optional)", () => {
+    const out = deriveMrpLine({ mrp: 1180, discount: "", discount_mode: "percentage", gst_pct: 18 });
+    expect(out.discount_amount).toBe(0);
+    expect(out.net_inclusive).toBe(1180);
+    expect(out.base).toBe(1000);
+  });
+
+  it("a discount >= 100% (percentage) floors the net at 0 — the caller (controller) is responsible for rejecting this before persisting", () => {
+    const out = deriveMrpLine({ mrp: 1180, discount: 100, discount_mode: "percentage", gst_pct: 18 });
+    expect(out.net_inclusive).toBe(0);
+    expect(out.base).toBe(0);
+  });
+
+  it("an absolute discount >= MRP floors the net at 0, never negative", () => {
+    const out = deriveMrpLine({ mrp: 1180, discount: 2000, discount_mode: "absolute", gst_pct: 18 });
+    expect(out.net_inclusive).toBe(0);
+    expect(out.base).toBe(0);
+    expect(out.base).toBeGreaterThanOrEqual(0);
+  });
+
+  it("base is quantised to 2dp exactly once (matches numeric(15,2) columns)", () => {
+    const out = deriveMrpLine({ mrp: 100, gst_pct: 18 });
+    // 100 / 1.18 = 84.745762711... → q2'd to 84.75.
+    expect(out.base).toBe(84.75);
+    expect(Number.isInteger(out.base * 100)).toBe(true); // no more than 2dp
+  });
+
+  it("empty/undefined input object defaults every field to 0", () => {
+    const out = deriveMrpLine();
+    expect(out).toEqual({ net_inclusive: 0, base: 0, gst_amount: 0, discount_amount: 0 });
   });
 });

@@ -129,7 +129,7 @@ describe("GET /vendor-dashboard/status-banner — mode escalates with state", ()
     expect(d.soonest_closing.id).toBe(rfqId);
   });
 
-  it("action_needed: a PO is sitting in acceptance_pending for this vendor", async () => {
+  it("win: a lone acceptance_pending PO is a positive win (Sr 335), not action_needed", async () => {
     // Seed published RFQ + product + PO awaiting acceptance by vendor_alpha.
     const r = await makeRfqVisibleToDashboard(db, {
       createdBy: IDS.users.a1_proc_buyer,
@@ -164,7 +164,11 @@ describe("GET /vendor-dashboard/status-banner — mode escalates with state", ()
     expect(res.status).toBe(200);
     const d = res.body.data;
     expect(d.counts.po_acceptance_pending).toBeGreaterThanOrEqual(1);
-    expect(["action_needed", "critical"]).toContain(d.mode);
+    // Sr 335: an awaiting-acceptance PO is a positive WIN (the vendor was awarded
+    // an order), not an amber warning. It escalates to action_needed only under
+    // time pressure (closing bid / open negotiation / expiring subscription),
+    // none of which are seeded here.
+    expect(d.mode).toBe("win");
   });
 
   it("includes a greeting with the user's first name", async () => {

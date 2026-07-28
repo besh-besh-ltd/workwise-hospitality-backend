@@ -2591,6 +2591,10 @@ WHERE NOT EXISTS (
     ), 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
     'global_comment', TQ.global_comment,
     'global_charges', TQ.global_charges,
+    -- MRP (tax-inclusive) quoting — quote-wide method (header convenience
+    -- column), so the vendor's own quote reload (SendQuoteWizard hydrate)
+    -- can seed pricingMethod.
+    'pricing_method', TQ.pricing_method,
 
     -- payment term list
     'payment_terms', COALESCE(
@@ -2624,6 +2628,13 @@ WHERE NOT EXISTS (
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
               'other_charges', TQI.other_charges,
+              -- MRP (tax-inclusive) quoting — per-line method + raw audit
+              -- inputs, so the vendor's own quote reload (SendQuoteWizard
+              -- hydrate, helpers.js buildInitialQuoteProducts) can seed them.
+              'pricing_method', TQI.pricing_method,
+              'entered_mrp', TQI.entered_mrp,
+              'mrp_discount', TQI.mrp_discount,
+              'mrp_discount_mode', TQI.mrp_discount_mode,
               'previous_document_files', (
                     SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
                     FROM tbl_quote_item_files QIF
@@ -8854,6 +8865,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   updateQuoteItemWithHistory: async (quoteId, product, quoteExists) => {
     return new Promise(async (resolve, reject) => {
       try {
+        // Coerce blank ('' / undefined / null) MRP audit inputs to null so
+        // the numeric(15,2) columns never receive an empty string.
+        const numOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
         // For existing product or not
         const existingProductQuery = `SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3`;
         let existingProductWithNoChange = false;
@@ -8906,8 +8920,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
             // Move existing quote to quote history table
             const insertHistoryQuery = `INSERT INTO tbl_quote_item_history
           (quote_item_id, rfq_id, product_variant_id, unit_price, package_price, tax, freight_price, total_price,
-           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, other_charges, timestamp)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`;
+           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, other_charges,
+           pricing_method, entered_mrp, mrp_discount, mrp_discount_mode, timestamp)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW())`;
             await db.query(insertHistoryQuery, [
               item.id,
               item.rfq_id,
@@ -8924,7 +8939,11 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               item.freight_mode,
               item.package_mode,
               item.tax_mode,
-              JSON.stringify(item.other_charges || [])
+              JSON.stringify(item.other_charges || []),
+              item.pricing_method || 'TRADITIONAL',
+              numOrNull(item.entered_mrp),
+              numOrNull(item.mrp_discount),
+              item.mrp_discount_mode || null
             ]);
 
             // Update existing item with new data
@@ -8932,10 +8951,12 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           unit_price = $1, package_price = $2, tax = $3, freight_price = $4,
           total_price = $5, comment = $6, delivery_period = $7,
           freight_mode = $8, package_mode = $9, tax_mode = $10,
-          other_charges = $11
-          WHERE id = $12 RETURNING *`;
+          other_charges = $11, pricing_method = $12, entered_mrp = $13,
+          mrp_discount = $14, mrp_discount_mode = $15
+          WHERE id = $16 RETURNING *`;
             const productPrice =
               product.unit_price != '' ? product.unit_price : 0;
+            const isMrp = product.pricing_method === 'MRP';
             updatedItem = await db.query(updateQuery, [
               productPrice,
               0,
@@ -8948,12 +8969,17 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               null,
               product.tax_mode,
               JSON.stringify(product.other_charges || []),
+              isMrp ? 'MRP' : 'TRADITIONAL',
+              isMrp ? numOrNull(product.entered_mrp) : null,
+              isMrp ? numOrNull(product.mrp_discount) : null,
+              isMrp ? (product.mrp_discount_mode || null) : null,
               item.id
             ]);
           } else {
             // for the new product whose quotes are updating either with the given unit price
             // or with the given comments (unit price = 0)
 
+            const isMrpNewItem = product.pricing_method === 'MRP';
             let quote_items_data = [
               {
                 rfq_id: quoteExists.rfq_id,
@@ -8973,7 +8999,11 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 freight_mode: null,
                 package_mode: null,
                 tax_mode: product.tax_mode,
-                other_charges: JSON.stringify(product.other_charges || [])
+                other_charges: JSON.stringify(product.other_charges || []),
+                pricing_method: isMrpNewItem ? 'MRP' : 'TRADITIONAL',
+                entered_mrp: isMrpNewItem ? numOrNull(product.entered_mrp) : null,
+                mrp_discount: isMrpNewItem ? numOrNull(product.mrp_discount) : null,
+                mrp_discount_mode: isMrpNewItem ? (product.mrp_discount_mode || null) : null
               }
             ];
 
@@ -9003,7 +9033,11 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'freight_mode',
               'package_mode',
               'tax_mode',
-              'other_charges'
+              'other_charges',
+              'pricing_method',
+              'entered_mrp',
+              'mrp_discount',
+              'mrp_discount_mode'
             ];
 
             let quotes_items = await rfqModel.insertArray(

@@ -574,6 +574,38 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
   };
 };
 
+// Reverse-calculate the tax-EXCLUSIVE base from a GST-INCLUSIVE price.
+//   base = inclusive / (1 + gst/100)
+// gstPct is a PERCENTAGE. gst <= 0 → base === inclusive (nothing to extract).
+// Defensive: if (1 + gst/100) <= 0 (gst <= -100), return the inclusive unchanged
+// (controller validation already rejects negative gst; this only guards divide-by-≤0).
+// Returns a RAW number — the caller quantises.
+export const deriveBaseFromInclusive = (inclusive, gstPct) => {
+  const inc = toNumber(inclusive);
+  const g = toNumber(gstPct);
+  const divisor = 1 + g / 100;
+  if (divisor <= 0) return inc;
+  return inc / divisor;
+};
+
+// Resolve raw MRP-mode inputs into the canonical exclusive line numbers.
+// discount is applied to MRP FIRST (percentage-of-MRP or absolute, via the
+// existing applyChargeMode), then GST is extracted from the net inclusive price.
+// Returns { net_inclusive, base, gst_amount, discount_amount } — base is
+// QUANTISED to 2dp (matches the numeric(15,2) columns and guarantees the value
+// stored == the value fed to the engine == the value any downstream reader
+// recomputes from, so persist-time and read-time totals never diverge). The
+// other fields are raw (for display + audit).
+export const deriveMrpLine = ({ mrp, discount, discount_mode, gst_pct } = {}) => {
+  const m = toNumber(mrp);
+  const discount_amount = applyChargeMode(discount, discount_mode, m); // % of MRP or absolute
+  const net_inclusive = Math.max(0, m - discount_amount);
+  const baseRaw = deriveBaseFromInclusive(net_inclusive, gst_pct);
+  const base = q2(baseRaw);
+  const gst_amount = net_inclusive - base;
+  return { net_inclusive, base, gst_amount, discount_amount };
+};
+
 export default {
   applyChargeMode,
   proportionalShare,
@@ -587,4 +619,6 @@ export default {
   computeFreightAdvantage,
   normalizeChargesMeta,
   normalizeGlobalCharge,
+  deriveBaseFromInclusive,
+  deriveMrpLine,
 };

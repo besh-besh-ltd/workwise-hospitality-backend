@@ -1377,31 +1377,37 @@ const arcEvalModel = {
     // If the caller provides quote_pricing, persist it; otherwise leave the
     // existing column untouched (COALESCE keeps the last stored value).
     const hasQuotePricing = fields.quote_pricing !== undefined;
+    // Header convenience column (MRP quoting) — quote-wide method, mirrored
+    // from the per-line pricing_method for reload + reporting. Defaults to
+    // 'TRADITIONAL' when the caller doesn't pass it.
+    const pricingMethod = fields.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL';
     if (hasQuotePricing) {
       return (txContext || db).one(
         `INSERT INTO tbl_arc_quote
-           (arc_id, vendor_id, payment_terms, gstin_used, quote_pricing)
-         VALUES ($1, $2, $3, $4, $5::jsonb)
+           (arc_id, vendor_id, payment_terms, gstin_used, quote_pricing, pricing_method)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6)
          ON CONFLICT (arc_id, vendor_id) DO UPDATE
            SET payment_terms = EXCLUDED.payment_terms,
                gstin_used    = EXCLUDED.gstin_used,
                quote_pricing = EXCLUDED.quote_pricing,
+               pricing_method = EXCLUDED.pricing_method,
                updated_at    = CURRENT_TIMESTAMP
          RETURNING *`,
         [arcId, vendorId, fields.payment_terms || null, fields.gstin_used || null,
-         JSON.stringify(fields.quote_pricing)]
+         JSON.stringify(fields.quote_pricing), pricingMethod]
       );
     }
     return (txContext || db).one(
       `INSERT INTO tbl_arc_quote
-         (arc_id, vendor_id, payment_terms, gstin_used)
-       VALUES ($1, $2, $3, $4)
+         (arc_id, vendor_id, payment_terms, gstin_used, pricing_method)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (arc_id, vendor_id) DO UPDATE
          SET payment_terms = EXCLUDED.payment_terms,
              gstin_used    = EXCLUDED.gstin_used,
+             pricing_method = EXCLUDED.pricing_method,
              updated_at    = CURRENT_TIMESTAMP
        RETURNING *`,
-      [arcId, vendorId, fields.payment_terms || null, fields.gstin_used || null]
+      [arcId, vendorId, fields.payment_terms || null, fields.gstin_used || null, pricingMethod]
     );
   },
 
@@ -1456,46 +1462,66 @@ const arcEvalModel = {
 
   upsertQuoteLine: async (arcQuoteId, line, txContext = null) => {
     const runner = txContext || db;
+    // MRP quoting — per-line method + raw audit inputs. Coerce blanks to null
+    // so the numeric(15,2) columns never receive an empty string; default
+    // pricing_method to 'TRADITIONAL' when absent.
+    const pricingMethod = line.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL';
+    const numOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
+    const enteredMrp = numOrNull(line.entered_mrp);
+    const mrpDiscount = numOrNull(line.mrp_discount);
+    const mrpDiscountMode = line.mrp_discount_mode || null;
     // Phase 2 — line_pricing JSONB (engine output per line) stored alongside charges.
     // Present on save/submit (engine-computed by controller); absent on legacy rows.
     const hasLinePricing = line.line_pricing !== undefined;
     if (hasLinePricing) {
       return runner.one(
         `INSERT INTO tbl_arc_quote_line
-           (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes, line_pricing)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb)
+           (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes, line_pricing,
+            pricing_method, entered_mrp, mrp_discount, mrp_discount_mode)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10, $11, $12, $13)
          ON CONFLICT (arc_quote_id, arc_item_id) DO UPDATE
-           SET rate           = EXCLUDED.rate,
-               gst_pct        = EXCLUDED.gst_pct,
-               charges        = EXCLUDED.charges,
-               lead_time_days = EXCLUDED.lead_time_days,
-               moq            = EXCLUDED.moq,
-               validity_notes = EXCLUDED.validity_notes,
-               line_pricing   = EXCLUDED.line_pricing,
-               updated_at     = CURRENT_TIMESTAMP
+           SET rate               = EXCLUDED.rate,
+               gst_pct            = EXCLUDED.gst_pct,
+               charges            = EXCLUDED.charges,
+               lead_time_days     = EXCLUDED.lead_time_days,
+               moq                = EXCLUDED.moq,
+               validity_notes     = EXCLUDED.validity_notes,
+               line_pricing       = EXCLUDED.line_pricing,
+               pricing_method     = EXCLUDED.pricing_method,
+               entered_mrp        = EXCLUDED.entered_mrp,
+               mrp_discount       = EXCLUDED.mrp_discount,
+               mrp_discount_mode  = EXCLUDED.mrp_discount_mode,
+               updated_at         = CURRENT_TIMESTAMP
          RETURNING *`,
         [arcQuoteId, line.arc_item_id, line.rate ?? null, line.gst_pct ?? null,
          JSON.stringify(line.charges || []),
          line.lead_time_days ?? null, line.moq ?? null, line.validity_notes ?? null,
-         JSON.stringify(line.line_pricing)]
+         JSON.stringify(line.line_pricing),
+         pricingMethod, enteredMrp, mrpDiscount, mrpDiscountMode]
       );
     }
     return runner.one(
       `INSERT INTO tbl_arc_quote_line
-         (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+         (arc_quote_id, arc_item_id, rate, gst_pct, charges, lead_time_days, moq, validity_notes,
+          pricing_method, entered_mrp, mrp_discount, mrp_discount_mode)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (arc_quote_id, arc_item_id) DO UPDATE
-         SET rate           = EXCLUDED.rate,
-             gst_pct        = EXCLUDED.gst_pct,
-             charges        = EXCLUDED.charges,
-             lead_time_days = EXCLUDED.lead_time_days,
-             moq            = EXCLUDED.moq,
-             validity_notes = EXCLUDED.validity_notes,
-             updated_at     = CURRENT_TIMESTAMP
+         SET rate               = EXCLUDED.rate,
+             gst_pct            = EXCLUDED.gst_pct,
+             charges            = EXCLUDED.charges,
+             lead_time_days     = EXCLUDED.lead_time_days,
+             moq                = EXCLUDED.moq,
+             validity_notes     = EXCLUDED.validity_notes,
+             pricing_method     = EXCLUDED.pricing_method,
+             entered_mrp        = EXCLUDED.entered_mrp,
+             mrp_discount       = EXCLUDED.mrp_discount,
+             mrp_discount_mode  = EXCLUDED.mrp_discount_mode,
+             updated_at         = CURRENT_TIMESTAMP
        RETURNING *`,
       [arcQuoteId, line.arc_item_id, line.rate ?? null, line.gst_pct ?? null,
        JSON.stringify(line.charges || []),
-       line.lead_time_days ?? null, line.moq ?? null, line.validity_notes ?? null]
+       line.lead_time_days ?? null, line.moq ?? null, line.validity_notes ?? null,
+       pricingMethod, enteredMrp, mrpDiscount, mrpDiscountMode]
     );
   },
 

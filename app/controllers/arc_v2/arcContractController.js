@@ -1,5 +1,6 @@
 import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
+import rbacModel from '../../models/rbacModel.js';
 import arcEvalModel, { normalizeArcCharges } from '../../models/arc_v2/arcEvaluationModel.js';
 import arcContractModel from '../../models/arc_v2/arcContractModel.js';
 import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
@@ -34,6 +35,17 @@ import path from 'path';
 
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
+
+// Authorization: may this caller read/act on the given hotel's ARC? Super admin
+// (user_type 8) bypasses; everyone else must have the hotel in their accessible
+// set. Scope is derived from the ARC's own hotel_id — never trusted from the
+// client (security-first; mirrors arcController.userCanAccessHotel).
+async function userCanAccessHotel(req, hotelId) {
+  if (Number(req.user?.user_type) === 8) return true;
+  if (!req.user?.id || !hotelId) return false;
+  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
+  return accessible.map(Number).includes(Number(hotelId));
+}
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -819,6 +831,13 @@ export async function getVendorDocumentsBundle(req, res) {
     const contractId = Number(req.params.contractId);
     const contract = await arcContractModel.getById(contractId);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
+    // Tenant isolation: this endpoint returns the vendor's KYC/bank documents
+    // (PAN/GST/MSME/FSSAI/cancelled-cheque). Gate on the contract's ARC hotel —
+    // never trust the contractId alone (sequential ids → trivially enumerable).
+    const contractArc = await arcModel.getById(contract.arc_id);
+    if (!contractArc || !(await userCanAccessHotel(req, contractArc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this contract', 3);
+    }
     const vendorId = contract.vendor_id;
 
     const docs = await db.any(
@@ -867,6 +886,12 @@ export async function getActiveSummary(req, res) {
     const arcId = Number(req.params.id);
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
+    // Tenant isolation: active-summary exposes contracts, call-off PO prices,
+    // amendment price changes, and buyer PII — gate on the ARC's own hotel_id
+    // (super-admin bypass), never trust the id alone.
+    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
 
     // Enrich ARC with display labels the active page needs in its hero.
     const [enrichedArc, contracts, events, callOffs, amendments, addendums] = await Promise.all([

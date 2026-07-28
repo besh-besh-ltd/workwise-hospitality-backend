@@ -180,7 +180,42 @@ function buildCellHistory(quote, merged, allRounds = [], rfqProductId = null, ve
     .filter((r) => Number.isFinite(r.start))
     .sort((a, b) => a.start - b.start);
 
-  if (relevant.length === 0) return [];
+  // No negotiation rounds recorded for this product+vendor: fall back to the
+  // quote's own revision trail (previous_quotes oldest→newest + current) as a
+  // sequential history — one entry per revision, numbered 1..N, each diffed
+  // against the original (first) revision. Without this, a vendor's quote-edit
+  // history never surfaces in the comparison unless a formal negotiation round
+  // was opened.
+  if (relevant.length === 0) {
+    return norms.map((n, idx) => {
+      const final = idx === norms.length - 1;
+      // Round-over-round: diff each revision against its immediate predecessor.
+      // positive delta => price dropped from the previous revision.
+      const prevN = idx > 0 ? norms[idx - 1] : null;
+      const delta =
+        prevN && n.unit_price != null && prevN.unit_price != null
+          ? prevN.unit_price - n.unit_price
+          : null;
+      return {
+        round: idx + 1,
+        price: n.unit_price ?? n.total_price,
+        total_price: n.total_price,
+        date: iso(n.timestamp),
+        note: n.comment || `Update ${idx + 1}`,
+        delta,
+        final,
+        breakdown: {
+          unit_price: n.unit_price,
+          total_price: n.total_price,
+          tax: n.tax,
+          tax_mode: n.tax_mode,
+          delivery_period: n.delivery_period,
+          quantity: n.quantity,
+        },
+        changes: prevN ? diffHistoryRows(prevN, n) : [],
+      };
+    });
+  }
   const firstStart = relevant[0].start;
 
   // Original quote = the vendor's quote as it stood BEFORE negotiation started
@@ -368,12 +403,16 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   );
   if (!rfq) return null;
 
-  // Tenant check: prefer the hospitality company id; never leak across tenants.
-  // When a hospitality scope is supplied it MUST match the RFQ's hospitality
-  // company. (Hotel/department are narrowing filters in the dashboards but the
-  // single-RFQ view only needs the company-level ownership gate.)
-  if (scope && scope.hospitalityCompanyId) {
-    if (Number(rfq.hospitality_company_id) !== Number(scope.hospitalityCompanyId)) {
+  // Tenant check: never leak across tenants. `scope.hospitalityCompanyIds` is
+  // the caller's mappings-derived company scope (from deriveScope), NOT a client
+  // header, so it can't be spoofed: null = super admin (all companies) → no gate;
+  // otherwise (a real user, array possibly empty) the RFQ's hospitality company
+  // MUST be in that set or we return null (controller → 404). (Hotel/department
+  // are narrowing filters in the dashboards; the single-RFQ view only needs the
+  // company-level ownership gate.)
+  if (scope && Array.isArray(scope.hospitalityCompanyIds)) {
+    const allowed = scope.hospitalityCompanyIds.map(Number);
+    if (!allowed.includes(Number(rfq.hospitality_company_id))) {
       return null;
     }
   }

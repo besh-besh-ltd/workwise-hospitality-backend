@@ -7,7 +7,7 @@ import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
-import pricingEngine from '../../services/pricingEngine.js';
+import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
 import axios from 'axios';
 import crypto from 'crypto';
@@ -26,9 +26,17 @@ function toEngineMode(mode) {
   return 'percentage'; // safe default (legacy behaviour)
 }
 
+// Coerce blank ('' / undefined / null) MRP audit inputs to null so the
+// numeric(15,2) columns never receive an empty string.
+const numOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
+
 // Build a canonical engine line input from a vendor's quote line + ARC item
 // quantity. The server RE-DERIVES quantity from tbl_arc_item (committed_qty ??
 // indicative_qty) — never trusts client qty for the authoritative stored total.
+// MRP-aware: when the line is pricing_method === 'MRP', the base is
+// re-derived from the AUDIT inputs (entered_mrp/mrp_discount/mrp_discount_mode)
+// — never from a stored/echoed `rate` — so this stays authoritative even if a
+// stale/tampered rate is present on the row.
 function buildEngineLineInput(line, arcItem) {
   const quantity = Number(arcItem.committed_qty ?? arcItem.indicative_qty ?? 0);
   const other_charges = normalizeArcCharges(line.charges).map((c) => ({
@@ -40,11 +48,22 @@ function buildEngineLineInput(line, arcItem) {
     slug:        c.slug ?? undefined,
     comment:     c.comment ?? undefined,
   }));
+  let unit_price = Number(line.rate ?? 0);
+  if (line.pricing_method === 'MRP') {
+    unit_price = deriveMrpLine({
+      mrp: line.entered_mrp, discount: line.mrp_discount,
+      discount_mode: line.mrp_discount_mode, gst_pct: line.gst_pct,
+    }).base;
+  }
   return {
-    unit_price:    Number(line.rate ?? 0),
+    unit_price,
     quantity,
     tax:           Number(line.gst_pct ?? 0),
-    tax_mode:      toEngineMode(line.gst_mode ?? '%'),
+    // GST on an MRP line is ALWAYS a percentage extracted from within the price;
+    // deriveMrpLine() derived the base as inclusive/(1+gst/100), so the engine must
+    // re-add tax as a percentage or the total stops reproducing the entered MRP.
+    // Force it — never trust a client-sent absolute gst_mode on an MRP line.
+    tax_mode:      line.pricing_method === 'MRP' ? 'percentage' : toEngineMode(line.gst_mode ?? '%'),
     other_charges,
   };
 }
@@ -120,11 +139,17 @@ async function vendorHasActiveSubscription(vendorId, arc) {
 }
 
 // H3 — any supplied rate/gst must be a non-negative number (draft tolerance:
-// a still-blank rate is allowed while drafting).
+// a still-blank rate is allowed while drafting). MRP-aware: for an MRP line,
+// entered_mrp is validated in place of rate (blank ok while drafting).
 function validateDraftLines(lines) {
   for (const line of (lines || [])) {
     if (line == null) continue;
-    if (line.rate != null) {
+    if (line.pricing_method === 'MRP') {
+      if (line.entered_mrp != null && line.entered_mrp !== '') {
+        const m = Number(line.entered_mrp);
+        if (!Number.isFinite(m) || m <= 0) return 'Each MRP must be a positive number';
+      }
+    } else if (line.rate != null) {
       const r = Number(line.rate);
       if (!Number.isFinite(r) || r < 0) return 'Each rate must be a non-negative number';
     }
@@ -141,15 +166,37 @@ function validateDraftLines(lines) {
 // silently treated as 0%), but an EXPLICIT 0 is a valid zero-GST line and must
 // pass. Draft-save stays tolerant (validateDraftLines, above) — this guard is
 // submit-time only, and is the authoritative check (never trust the FE gate).
+// MRP-aware: an MRP line is validated on entered_mrp instead of rate; a
+// Traditional line keeps the existing rate rule. Discount bounds (same rule
+// as RFQ §4b) are enforced here too — never persist a zero/negative net line.
 function validateSubmittedLines(lines) {
   for (const line of lines) {
-    const r = Number(line.rate);
-    if (line.rate == null || !Number.isFinite(r) || r < 0) {
-      return 'Every line item must have a valid non-negative rate before submitting';
-    }
-    const gstRaw = line.gst_pct;
-    if (gstRaw == null || gstRaw === '' || !Number.isFinite(Number(gstRaw)) || Number(gstRaw) < 0) {
-      return 'Every line item must have a valid GST % (enter 0 if no GST applies) before submitting';
+    const isMrp = line.pricing_method === 'MRP';
+    if (isMrp) {
+      const m = Number(line.entered_mrp);
+      if (line.entered_mrp == null || line.entered_mrp === '' || !Number.isFinite(m) || m <= 0) {
+        return 'Every MRP line must have an MRP greater than 0 before submitting';
+      }
+      const gstRaw = line.gst_pct;
+      if (gstRaw == null || gstRaw === '' || !Number.isFinite(Number(gstRaw)) || Number(gstRaw) < 0) {
+        return 'Every line item must have a valid GST % (enter 0 if no GST applies) before submitting';
+      }
+      const discRaw = line.mrp_discount;
+      if (discRaw !== undefined && discRaw !== null && discRaw !== '') {
+        const d = Number(discRaw);
+        if (!Number.isFinite(d) || d < 0) return 'Discount is invalid';
+        const discAmt = line.mrp_discount_mode === 'percentage' ? (m * d) / 100 : d;
+        if (m - discAmt <= 0) return 'Discount is invalid';
+      }
+    } else {
+      const r = Number(line.rate);
+      if (line.rate == null || !Number.isFinite(r) || r < 0) {
+        return 'Every line item must have a valid non-negative rate before submitting';
+      }
+      const gstRaw = line.gst_pct;
+      if (gstRaw == null || gstRaw === '' || !Number.isFinite(Number(gstRaw)) || Number(gstRaw) < 0) {
+        return 'Every line item must have a valid GST % (enter 0 if no GST applies) before submitting';
+      }
     }
   }
   return null;
@@ -641,7 +688,10 @@ export async function saveQuoteDraft(req, res) {
     // (a commit that fails after res.json would leave the client falsely "saved").
     const result = await db.tx(async (t) => {
       const quote = await arcEvalModel.upsertQuote(arc_id, vendorId,
-        { payment_terms, gstin_used, quote_pricing: quotePricing }, t);
+        {
+          payment_terms, gstin_used, quote_pricing: quotePricing,
+          pricing_method: req.body.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL',
+        }, t);
       const upserted = [];
       for (const line of (lines || [])) {
         const engineLineOut = engineLineByItemId[Number(line.arc_item_id)];
@@ -660,8 +710,29 @@ export async function saveQuoteDraft(req, res) {
           ...(c.slug !== undefined ? { slug: c.slug } : {}),
           ...(c.comment !== undefined && c.comment !== null ? { comment: c.comment } : {}),
         }));
+        // MRP mode: derive the exclusive base and persist it as `rate` (so
+        // tbl_arc_quote_line.rate holds the exclusive base, exactly like
+        // Traditional). buildEngineLineInput (used for line_pricing above via
+        // engineLineByItemId) already re-derives from the same audit inputs,
+        // so the stored line_pricing.total matches this derivedBase.
+        const isMrpLine = line.pricing_method === 'MRP';
+        const derivedBase = isMrpLine
+          ? deriveMrpLine({
+              mrp: line.entered_mrp, discount: line.mrp_discount,
+              discount_mode: line.mrp_discount_mode, gst_pct: line.gst_pct,
+            }).base
+          : null;
         upserted.push(await arcEvalModel.upsertQuoteLine(quote.id,
-          { ...line, charges: canonicalCharges, line_pricing: linePricing }, t));
+          {
+            ...line,
+            charges: canonicalCharges,
+            line_pricing: linePricing,
+            rate: isMrpLine ? derivedBase : line.rate,
+            pricing_method: isMrpLine ? 'MRP' : 'TRADITIONAL',
+            entered_mrp: isMrpLine ? numOrNull(line.entered_mrp) : null,
+            mrp_discount: isMrpLine ? numOrNull(line.mrp_discount) : null,
+            mrp_discount_mode: isMrpLine ? (line.mrp_discount_mode || null) : null,
+          }, t));
       }
       return { quote, lines: upserted };
     });
@@ -772,6 +843,10 @@ export async function submitQuote(req, res) {
         rate:         ql.rate,
         gst_pct:      ql.gst_pct,
         charges:      ql.charges,
+        pricing_method: ql.pricing_method,
+        entered_mrp: ql.entered_mrp,
+        mrp_discount: ql.mrp_discount,
+        mrp_discount_mode: ql.mrp_discount_mode,
         line_pricing: submitLineByItemId[Number(ql.arc_item_id)] || null,
       }));
       await arcEvalModel.archiveQuoteVersion({
