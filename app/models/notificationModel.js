@@ -158,6 +158,76 @@ const notificationModel = {
     });
   },
 
+  createForRecipient: async ({
+    sender_user_id,
+    recipient_user_id,
+    category,
+    type,
+    title,
+    message,
+    additional_data,
+    action_url
+  }) => {
+    return db.one(
+      `INSERT INTO tbl_notifications
+         (sender_user_id, recipient_user_id, type, title, message,
+          additional_data, category, action_url, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
+       RETURNING id, recipient_user_id, type, title, message,
+                 additional_data, category, action_url, is_read, created_at`,
+      [
+        sender_user_id || null,
+        recipient_user_id,
+        type || null,
+        title,
+        message,
+        additional_data ? JSON.stringify(additional_data) : null,
+        category || null,
+        action_url || null
+      ]
+    );
+  },
+
+  getByRecipient: async (recipient_user_id, limit, offset) => {
+    return db.any(
+      `SELECT id, sender_user_id, recipient_user_id, type, title, message,
+              additional_data, category, action_url, is_read, created_at
+         FROM tbl_notifications
+        WHERE recipient_user_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3`,
+      [recipient_user_id, limit, offset]
+    );
+  },
+
+  getUnreadCount: async (recipient_user_id) => {
+    const row = await db.oneOrNone(
+      `SELECT COUNT(*)::int AS count
+         FROM tbl_notifications
+        WHERE recipient_user_id = $1 AND (is_read = 0 OR is_read IS NULL)`,
+      [recipient_user_id]
+    );
+    return row ? row.count : 0;
+  },
+
+  markRead: async (notification_id, recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET is_read = 1, is_read_at = NOW()
+        WHERE id = $1 AND recipient_user_id = $2`,
+      [notification_id, recipient_user_id]
+    );
+  },
+
+  markAllRead: async (recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET is_read = 1, is_read_at = NOW()
+        WHERE recipient_user_id = $1 AND (is_read = 0 OR is_read IS NULL)`,
+      [recipient_user_id]
+    );
+  },
+
   user_email_exist: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_users where email = $1', [email])

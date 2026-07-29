@@ -3,6 +3,10 @@ import userModel from "../../models/userModel.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+
+const buildPoActionUrl = (rfq_id, po_id) =>
+  `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}`;
 
 export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0) => {
   return new Promise(async (resolve, reject) => {
@@ -133,6 +137,22 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
       }
 
       sendMail(recipients);
+
+      try {
+        const userIds = await resolveRecipientUserIds(userList);
+        await dispatchNotification({
+          userIds,
+          category: 'po',
+          type: `grn_reminder_${day}`,
+          title: `GRN reminder — PO #${po_number} (${subjectSuffix})`,
+          body: reminderTagLine,
+          data: { po_id, rfq_id, day },
+          actionUrl: buildPoActionUrl(rfq_id, po_id)
+        });
+      } catch (notifyErr) {
+        logError(`dispatch grn_reminder_${day} failed`, notifyErr);
+      }
+
       return resolve(true);
     } catch (err) {
       logError("Error sending GRN reminder:", err);
@@ -222,6 +242,22 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
       }
 
       sendMail(recipients);
+
+      try {
+        const userIds = await resolveRecipientUserIds(userList);
+        await dispatchNotification({
+          userIds,
+          category: 'po',
+          type: 'invoice_raised',
+          title: `Invoice raised for PO #${po_number}`,
+          body: `${vendorName} has submitted an invoice for your review.`,
+          data: { po_id, rfq_id, invoice_url: invoice_url || null },
+          actionUrl: buildPoActionUrl(rfq_id, po_id)
+        });
+      } catch (notifyErr) {
+        logError('dispatch invoice_raised failed', notifyErr);
+      }
+
       return resolve(true);
     } catch (err) {
       logError("Error sending invoice email:", err);
@@ -310,6 +346,22 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
       }
 
       sendMail(recipients);
+
+      try {
+        const userIds = await resolveRecipientUserIds(userList);
+        await dispatchNotification({
+          userIds,
+          category: 'po',
+          type: 'grn_marked',
+          title: `GRN marked for PO #${po_number}`,
+          body: `Goods Received Note has been uploaded for this Purchase Order.`,
+          data: { po_id, rfq_id, grn_document_url: grn_document_url || null },
+          actionUrl: buildPoActionUrl(rfq_id, po_id)
+        });
+      } catch (notifyErr) {
+        logError('dispatch grn_marked failed', notifyErr);
+      }
+
       return resolve(true);
     } catch (err) {
       logError("Error sending invoice email:", err);
@@ -427,6 +479,22 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
       }
 
       sendMail(recipients);
+
+      try {
+        const userIds = await resolveRecipientUserIds(userList);
+        await dispatchNotification({
+          userIds,
+          category: 'po',
+          type: 'po_dispatched',
+          title: `PO #${po_number} marked as Dispatched`,
+          body: `${vendorName} has dispatched the goods. Expected delivery: ${deliveryDateLabel}.`,
+          data: { po_id, rfq_id, delivery_date: deliveryDate ? deliveryDate.toISOString() : null },
+          actionUrl: buildPoActionUrl(rfq_id, po_id)
+        });
+      } catch (notifyErr) {
+        logError('dispatch po_dispatched failed', notifyErr);
+      }
+
       return resolve(true);
     } catch (err) {
       logError("Error sending dispatched email:", err);

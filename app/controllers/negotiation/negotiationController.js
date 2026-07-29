@@ -1,7 +1,7 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
-import negotiationModel from '../../models/negotiationModel.js';
+import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
@@ -14,6 +14,7 @@ import {
   resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
 // Parse date strings as UTC when no timezone suffix is present
 const parseAsUTC = (d) => {
@@ -95,12 +96,14 @@ const buildEmailContext = async (rfqData, round) => {
         vendorsLookup[row.id] = row.name;
       }
 
-      // Fetch each vendor's most recent quote_item for this rfq_product
-      // for the "Vendor Quoted → Target" comparison in the email.
-      if (round?.rfq_id && round?.rfq_product_id) {
-        const productVariantId = round.product_variant_id || null;
+      // Fetch each vendor's most recent quote_item per covered product for
+      // the "Vendor Quoted → Target" comparison in the email. Multi rounds
+      // cover several products; legacy rounds exactly one.
+      const coveredIds = getCoveredProductIds(round);
+      if (round?.rfq_id && coveredIds.length > 0) {
         const quoteRows = await db.any(
           `SELECT q.created_by AS vendor_id,
+                  rp.id AS rfq_product_id,
                   qi.unit_price, qi.quantity, qi.freight_price, qi.freight_mode,
                   qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
                   qi.delivery_period, qi.comment, qi.other_charges,
@@ -112,14 +115,22 @@ const buildEmailContext = async (rfqData, round) => {
                   ) AS payment_terms
            FROM tbl_quotes q
            JOIN tbl_quote_items qi ON qi.quote_id = q.id
+           JOIN tbl_rfq_products rp
+             ON rp.rfq_id = q.rfq_id
+             AND rp.product_variant_id = qi.product_variant_id
+             AND rp.id = ANY($3::int[])
            WHERE q.rfq_id = $1
              AND q.created_by IN ($2:csv)
-             AND ($3::int IS NULL OR qi.product_variant_id = $3)
            ORDER BY q."timestamp" DESC`,
-          [round.rfq_id, vendorIds, productVariantId]
+          [round.rfq_id, vendorIds, coveredIds]
         );
         for (const row of quoteRows) {
+          // Flat map (legacy consumers) keyed by vendor: first/latest row wins.
           if (!vendorQuotes[row.vendor_id]) vendorQuotes[row.vendor_id] = row;
+          // Per-product map for multi-product email sections.
+          if (!vendorQuotes[`${row.vendor_id}:${row.rfq_product_id}`]) {
+            vendorQuotes[`${row.vendor_id}:${row.rfq_product_id}`] = row;
+          }
         }
       }
     }
@@ -127,11 +138,20 @@ const buildEmailContext = async (rfqData, round) => {
     // Resolve display labels for all charge slugs referenced by this round's
     // negotiation_fields. tbl_charge_names maps slug -> human-readable name.
     const chargeSlugs = new Set();
-    for (const va of vendorApprovals) {
-      for (const f of (va.negotiation_fields || [])) {
+    const collectSlugs = (fields) => {
+      for (const f of (fields || [])) {
         if (f?.name && !NON_CHARGE_SYSTEM_SLUGS.has(f.name) && !/_mode$/.test(f.name)) {
           chargeSlugs.add(f.name);
         }
+      }
+    };
+    for (const va of vendorApprovals) {
+      collectSlugs(va.negotiation_fields);
+    }
+    // Multi rounds carry fields in products[].vendor_targets[].fields.
+    for (const p of (Array.isArray(round?.products) ? round.products : [])) {
+      for (const vt of (p?.vendor_targets || [])) {
+        collectSlugs(vt.fields);
       }
     }
     if (chargeSlugs.size > 0) {
@@ -305,21 +325,31 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  * Creates an approval instance for a negotiation round using the centralized approval engine.
  * Uses entity_type: 'NEGOTIATION' and entity_id: roundId (the negotiation round's own ID).
  */
-const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
+const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
   try {
+    // `scope` is either a legacy single product id (number) or
+    // { coveredProductIds: [], hasRfqLevel, isMultiProduct } for multi rounds.
+    const coveredProductIds = typeof scope === 'object' && scope !== null
+      ? (scope.coveredProductIds || [])
+      : (scope != null ? [scope] : []);
+    const hasRfqLevel = typeof scope === 'object' && scope !== null ? !!scope.hasRfqLevel : false;
+    const isMultiProduct = typeof scope === 'object' && scope !== null ? !!scope.isMultiProduct : false;
+
     // Resolve display names for the committee approval email in one round-trip.
     const t = txContext || db;
     const names = await t.oneOrNone(
       `SELECT
-         (SELECT COALESCE(PV.name, P.name)
+         (SELECT json_agg(COALESCE(PV.name, P.name) ORDER BY rp.id)
             FROM tbl_rfq_products rp
             LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
             LEFT JOIN tbl_product P ON P.id = PV.product_id
-            WHERE rp.id = $1) AS product_name,
+            WHERE rp.id = ANY($1::int[])) AS product_names,
          (SELECT name FROM tbl_hospitality_companies WHERE id = $2) AS company_name,
          (SELECT name FROM tbl_hospitality_company_hotels WHERE id = $3) AS hotel_name`,
-      [rfqProductId, rfqData.hospitality_company_id, rfqData.hotel_id || null]
+      [coveredProductIds, rfqData.hospitality_company_id, rfqData.hotel_id || null]
     );
+
+    const productNames = (names?.product_names || []).filter(Boolean);
 
     const result = await createApprovalInstance({
       entity_type: 'NEGOTIATION',
@@ -336,9 +366,15 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
         rfq_number: rfqData.rfq_no,
         rfq_title: rfqData.title || '',
         is_tender: rfqData.is_tender,
-        rfq_product_id: rfqProductId,
+        // Singular keys kept for legacy consumers (= first covered product).
+        rfq_product_id: coveredProductIds[0] ?? null,
+        product_name: productNames[0] || (hasRfqLevel ? 'RFQ-level terms' : ''),
+        // Multi-round metadata.
+        rfq_product_ids: coveredProductIds,
+        product_names: productNames,
+        is_multi_product: isMultiProduct,
+        has_rfq_level: hasRfqLevel,
         end_date: endDate || null,
-        product_name: names?.product_name || '',
         company_name: names?.company_name || '',
         hotel_name: names?.hotel_name || ''
       },
@@ -347,6 +383,12 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
 
     return result;
   } catch (error) {
+    // NoApprovalPolicyError already carries the right code/status/data —
+    // propagate it as-is so the controller can render a structured 4xx with
+    // NO_APPROVAL_POLICY_FOR_PROCESS instead of a generic 500.
+    if (error?.code === 'NO_APPROVAL_POLICY_FOR_PROCESS') {
+      throw error;
+    }
     if (error.message && error.message.includes('No approval policy found')) {
       throw new Error('No approval workflow found for NEGOTIATION. Please configure an approval policy before creating negotiation rounds.');
     }
@@ -399,6 +441,11 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
 
     return result;
   } catch (error) {
+    // NoApprovalPolicyError already carries the right code/status/data —
+    // propagate it as-is (structured 4xx NO_APPROVAL_POLICY_FOR_PROCESS).
+    if (error?.code === 'NO_APPROVAL_POLICY_FOR_PROCESS') {
+      throw error;
+    }
     // If no policy exists, throw error (don't auto-approve)
     if (error.message && error.message.includes('No approval policy found')) {
       throw new Error('No approval policy found for Quotes Approval. Please configure an approval policy before submitting quotes for approval.');
@@ -482,22 +529,69 @@ const NegotiationController = {
       const { rfq_id, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
       const user_id = req.user.id;
 
-      if (!rfq_id || !rfq_product_id || !end_date) {
+      // ── Normalize the request into a products[] array ──────────────────
+      // New shape: { rfq_id, end_date, products: [{rfq_product_id, vendor_targets}, ..., {is_rfq_level, vendor_targets}] }
+      // Legacy shape: { rfq_id, rfq_product_id, end_date, vendor_targets } → wrapped into one entry.
+      let entries = Array.isArray(req.body.products) ? req.body.products : null;
+      const isLegacyShape = !entries || entries.length === 0;
+      if (isLegacyShape) {
+        if (!rfq_id || !rfq_product_id || !end_date) {
+          return res.status(400).json({
+            status: 2,
+            message: 'rfq_id, rfq_product_id, and end_date are required'
+          });
+        }
+        entries = [{ rfq_product_id, vendor_targets }];
+      } else if (!rfq_id || !end_date) {
         return res.status(400).json({
           status: 2,
-          message: 'rfq_id, rfq_product_id, and end_date are required'
+          message: 'rfq_id and end_date are required'
         });
       }
 
-      // Validate vendor_targets
-      if (!vendor_targets || !Array.isArray(vendor_targets) || vendor_targets.length === 0) {
+      // Entry-level validation: ≤1 RFQ-level entry, valid + unique product ids,
+      // and every entry needs a non-empty vendor_targets array.
+      const rfqLevelEntries = entries.filter(p => p?.is_rfq_level === true);
+      if (rfqLevelEntries.length > 1) {
         return res.status(400).json({
           status: 2,
-          message: 'vendor_targets is required and must be a non-empty array'
+          message: 'At most one RFQ-level entry is allowed per round'
         });
       }
+      const productEntries = entries.filter(p => p?.is_rfq_level !== true);
+      const entryProductIds = productEntries.map(p => parseInt(p?.rfq_product_id));
+      if (entryProductIds.some(id => isNaN(id))) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Every product entry must carry a valid rfq_product_id'
+        });
+      }
+      if (new Set(entryProductIds).size !== entryProductIds.length) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Duplicate rfq_product_id entries are not allowed'
+        });
+      }
+      for (const entry of entries) {
+        if (!Array.isArray(entry?.vendor_targets) || entry.vendor_targets.length === 0) {
+          return res.status(400).json({
+            status: 2,
+            message: 'Every product entry must carry a non-empty vendor_targets array'
+          });
+        }
+      }
 
-      const parsedVendorIds = vendor_targets.map(v => parseInt(v.vendor_id)).filter(id => !isNaN(id));
+      // Union of vendor ids across all entries. Note: a field needs only a
+      // name — `target` is optional when the buyer raises a tax-only demand
+      // (`tax_demand`) on the field.
+      const vendorIdSet = new Set();
+      for (const entry of entries) {
+        for (const vt of entry.vendor_targets) {
+          const vid = parseInt(vt?.vendor_id);
+          if (!isNaN(vid)) vendorIdSet.add(vid);
+        }
+      }
+      const parsedVendorIds = [...vendorIdSet];
       if (parsedVendorIds.length === 0) {
         return res.status(400).json({
           status: 2,
@@ -540,50 +634,92 @@ const NegotiationController = {
         );
       }
 
-      // Check if product exists using model
-      const product = await rfqModel.getRfqProductById(rfq_product_id, rfq_id);
-      if (!product) {
-        return res.status(404).json({
-          status: 2,
-          message: 'Product not found in this RFQ'
-        });
+      // ── Per-entry validation: product exists + vendor eligibility ──────
+      // `allVendors` accumulates vendor rows for error-message naming.
+      const allVendors = [];
+      const seenVendorRows = new Set();
+      const collectVendors = (rows) => {
+        for (const v of rows) {
+          if (!seenVendorRows.has(v.id)) {
+            seenVendorRows.add(v.id);
+            allVendors.push(v);
+          }
+        }
+      };
+
+      for (const pid of entryProductIds) {
+        const product = await rfqModel.getRfqProductById(pid, rfq_id);
+        if (!product) {
+          return res.status(404).json({
+            status: 2,
+            message: `Product ${pid} not found in this RFQ`
+          });
+        }
+        const productVendors = await negotiationModel.getVendorsForProductWithStatus(rfq_id, pid);
+        collectVendors(productVendors);
+        const eligibleIds = new Set(productVendors.map(v => v.id));
+        const entry = productEntries.find(p => parseInt(p.rfq_product_id) === pid);
+        const entryVendorIds = entry.vendor_targets
+          .map(vt => parseInt(vt?.vendor_id))
+          .filter(id => !isNaN(id));
+        const notEligible = entryVendorIds.filter(id => !eligibleIds.has(id));
+        if (notEligible.length > 0) {
+          return res.status(400).json({
+            status: 2,
+            message: `The following vendor ID(s) are not part of product ${pid}: ${notEligible.join(', ')}`
+          });
+        }
       }
 
-      // Validate vendor eligibility
-      const allVendors = await negotiationModel.getVendorsForProductWithStatus(rfq_id, rfq_product_id);
-      const allVendorIds = new Set(allVendors.map(v => v.id));
-
-      const notEligible = parsedVendorIds.filter(id => !allVendorIds.has(id));
-      if (notEligible.length > 0) {
-        return res.status(400).json({
-          status: 2,
-          message: `The following vendor ID(s) are not part of this product: ${notEligible.join(', ')}`
-        });
+      // RFQ-level entry: vendors must at least belong to the RFQ (any product).
+      if (rfqLevelEntries.length === 1) {
+        const rfqVendors = await negotiationModel.getVendorsForRfq(rfq_id);
+        collectVendors(rfqVendors);
+        const rfqVendorIds = new Set(rfqVendors.map(v => v.id));
+        const entryVendorIds = rfqLevelEntries[0].vendor_targets
+          .map(vt => parseInt(vt?.vendor_id))
+          .filter(id => !isNaN(id));
+        const notEligible = entryVendorIds.filter(id => !rfqVendorIds.has(id));
+        if (notEligible.length > 0) {
+          return res.status(400).json({
+            status: 2,
+            message: `The following vendor ID(s) are not part of this RFQ: ${notEligible.join(', ')}`
+          });
+        }
       }
 
-      // Check for field-level overlap with active rounds
+      // ── Field-level overlap with active rounds ──────────────────────────
       const activeRounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, false);
-      const productActiveRounds = (activeRounds || []).filter(r => r.rfq_product_id === rfq_product_id);
+      const vendorNameOf = (vid) => {
+        const vendorInfo = allVendors.find(v => v.id === vid);
+        return vendorInfo?.organization_name || vendorInfo?.company_name || vendorInfo?.name || vid;
+      };
 
-      for (const vt of vendor_targets) {
-        const vid = parseInt(vt.vendor_id);
-        const newFields = (vt.fields || []).map(f => f.name);
-        if (newFields.length === 0) continue;
+      for (const entry of entries) {
+        const isRfqLevelEntry = entry?.is_rfq_level === true;
+        const pid = isRfqLevelEntry ? 'RFQ_LEVEL' : parseInt(entry.rfq_product_id);
+        const relevantRounds = (activeRounds || []).filter(r => {
+          if (isRfqLevelEntry) {
+            return Array.isArray(r.products) && r.products.some(p => p?.is_rfq_level === true);
+          }
+          return getCoveredProductIds(r).includes(pid);
+        });
 
-        for (const round of productActiveRounds) {
-          const vendorApproval = (round.vendor_approvals || []).find(va => va.vendor_id === vid);
-          if (!vendorApproval) continue;
+        for (const vt of entry.vendor_targets) {
+          const vid = parseInt(vt.vendor_id);
+          const newFields = (vt.fields || []).map(f => f?.name).filter(Boolean);
+          if (newFields.length === 0) continue;
 
-          const activeFields = (vendorApproval.negotiation_fields || []).map(f => f.name);
-          const overlappingFields = newFields.filter(f => activeFields.includes(f));
-
-          if (overlappingFields.length > 0) {
-            const vendorInfo = allVendors.find(v => v.id === vid);
-            const vendorName = vendorInfo?.organization_name || vendorInfo?.company_name || vendorInfo?.name || vid;
-            return res.status(400).json({
-              status: 2,
-              message: `${vendorName} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
-            });
+          for (const round of relevantRounds) {
+            if (!Array.isArray(round.vendor_ids) || !round.vendor_ids.includes(vid)) continue;
+            const activeFields = getVendorFieldsForProduct(round, vid, pid).map(f => f?.name).filter(Boolean);
+            const overlappingFields = newFields.filter(f => activeFields.includes(f));
+            if (overlappingFields.length > 0) {
+              return res.status(400).json({
+                status: 2,
+                message: `${vendorNameOf(vid)} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
+              });
+            }
           }
         }
       }
@@ -604,50 +740,89 @@ const NegotiationController = {
         });
       }
 
-      // Get next round number for this product
-      const round_number = await negotiationModel.getNextRoundNumber(rfq_id, rfq_product_id);
+      // Round numbering is per-RFQ for all new rounds (multi rounds have no
+      // single product to scope numbering to).
+      const round_number = await negotiationModel.getNextRoundNumberForRfq(rfq_id);
 
-      // Build vendor_approvals JSONB array with PENDING status and negotiation_fields per vendor
-      const vendorTargetsMap = new Map(vendor_targets.map(v => [parseInt(v.vendor_id), v.fields || []]));
-      const vendor_approvals = parsedVendorIds.map(vid => ({
-        vendor_id: vid,
-        status: 'PENDING',
-        remarks: null,
-        acted_by: null,
-        acted_at: null,
-        negotiation_fields: vendorTargetsMap.get(vid) || []
-      }));
+      // Persistence shape:
+      //  - single product entry → legacy columns (rfq_product_id +
+      //    vendor_approvals[].negotiation_fields, products NULL) so every
+      //    existing read path behaves identically;
+      //  - multiple entries or an RFQ-level entry → products JSONB,
+      //    rfq_product_id NULL, vendor_approvals as round-wide status only.
+      const isMultiShape = entries.length > 1 || rfqLevelEntries.length === 1;
+
+      let vendor_approvals;
+      let roundProducts = null;
+      let legacyProductId = null;
+      if (isMultiShape) {
+        vendor_approvals = parsedVendorIds.map(vid => ({
+          vendor_id: vid,
+          status: 'PENDING',
+          remarks: null,
+          acted_by: null,
+          acted_at: null
+        }));
+        roundProducts = entries.map(entry => entry?.is_rfq_level === true
+          ? { is_rfq_level: true, vendor_targets: entry.vendor_targets }
+          : { rfq_product_id: parseInt(entry.rfq_product_id), vendor_targets: entry.vendor_targets });
+      } else {
+        legacyProductId = entryProductIds[0];
+        const vendorTargetsMap = new Map(
+          entries[0].vendor_targets.map(v => [parseInt(v.vendor_id), v.fields || []])
+        );
+        vendor_approvals = parsedVendorIds.map(vid => ({
+          vendor_id: vid,
+          status: 'PENDING',
+          remarks: null,
+          acted_by: null,
+          acted_at: null,
+          negotiation_fields: vendorTargetsMap.get(vid) || []
+        }));
+      }
 
       // Create round in transaction
       const result = await db.tx(async (t) => {
         const round = await negotiationModel.createRound({
           rfq_id,
-          rfq_product_id,
+          rfq_product_id: legacyProductId,
           round_number,
           target_price: target_price || null,
           end_date,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
           vendor_ids: parsedVendorIds,
-          vendor_approvals
+          vendor_approvals,
+          products: roundProducts
         }, t);
 
-        // Cancel stale PENDING approval instances from previous expired/cancelled rounds
-        await t.none(
-          `UPDATE tbl_approval_instances
-           SET status = 'CANCELLED', completed_at = NOW()
-           WHERE entity_type = 'NEGOTIATION'
-             AND status = 'PENDING'
-             AND entity_id IN (
-               SELECT id FROM tbl_negotiation_rounds
-               WHERE rfq_product_id = $1 AND status IN ('EXPIRED', 'CANCELLED')
-             )`,
-          [rfq_product_id]
-        );
+        // Cancel stale PENDING approval instances from previous expired/
+        // cancelled rounds covering any of this round's products.
+        if (entryProductIds.length > 0) {
+          await t.none(
+            `UPDATE tbl_approval_instances
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE entity_type = 'NEGOTIATION'
+               AND status = 'PENDING'
+               AND entity_id IN (
+                 SELECT nr.id FROM tbl_negotiation_rounds nr
+                 WHERE nr.status IN ('EXPIRED', 'CANCELLED')
+                   AND (nr.rfq_product_id = ANY($1::int[]) OR EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                     WHERE (p_->>'rfq_product_id')::int = ANY($1::int[])
+                   ))
+               )`,
+            [entryProductIds]
+          );
+        }
 
         // Create approval instance using the centralized approval engine
         const approvalResult = await startApprovalForNegotiation(
-          rfq_product_id,
+          {
+            coveredProductIds: entryProductIds,
+            hasRfqLevel: rfqLevelEntries.length === 1,
+            isMultiProduct: isMultiShape
+          },
           round.id,
           round_number,
           rfq_id,
@@ -686,7 +861,9 @@ const NegotiationController = {
           metadata: {
             round_id: (updatedRound || round).id,
             round_number: round_number,
-            rfq_product_id: rfq_product_id,
+            rfq_product_id: legacyProductId ?? entryProductIds[0] ?? null,
+            rfq_product_ids: entryProductIds,
+            has_rfq_level: rfqLevelEntries.length === 1,
             target_price: target_price,
             status: (updatedRound || round).status,
             vendor_ids: parsedVendorIds
@@ -707,7 +884,12 @@ const NegotiationController = {
           const initiatorData = await userModel.getUserById(user_id);
           const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
           const roundWithContext = await negotiationModel.getRoundWithContext(result.id);
-          const productName = roundWithContext?.product_name || 'Product';
+          const productNames = (roundWithContext?.product_names || [])
+            .map(p => p?.product_name)
+            .filter(Boolean);
+          const productName = roundWithContext?.product_name
+            || productNames[0]
+            || (rfqLevelEntries.length === 1 ? 'RFQ-level terms' : 'Product');
 
           // Resolve company + business unit (hotel) names and vendor name lookup once
           const emailContext = await buildEmailContext(rfqData, roundWithContext || result);
@@ -718,6 +900,7 @@ const NegotiationController = {
               rfqNo: rfqData.rfq_no,
               rfqTitle: rfqData?.title || '',
               productName,
+              productNames,
               initiator,
               autoApproved: isAutoApproved,
               companyName: emailContext.companyName,
@@ -747,6 +930,7 @@ const NegotiationController = {
                 rfqNo: rfqData.rfq_no,
                 rfqTitle: rfqData?.title || '',
                 productName,
+                productNames,
                 initiator: evaluatorOnly[0],
                 commercialEvaluators: evaluatorOnly.slice(1),
                 companyName: emailContext.companyName,
@@ -764,6 +948,14 @@ const NegotiationController = {
               const vaByVendorId = Object.fromEntries(
                 (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
               );
+              // Multi rounds: per-vendor per-product fields live in products[].
+              const productsForVendor = (vid) => (Array.isArray(result.products) ? result.products : [])
+                .map(p => ({
+                  rfq_product_id: p?.rfq_product_id ?? null,
+                  is_rfq_level: p?.is_rfq_level === true,
+                  fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
+                }))
+                .filter(p => p.fields.length > 0);
               const vendorsWithTokens = await Promise.all(
                 vendors.map(async (v) => {
                   const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
@@ -773,6 +965,7 @@ const NegotiationController = {
                     email: v.email,
                     token: tokenRows?.[0]?.token || null,
                     negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
+                    products: productsForVendor(v.id),
                     quote: emailContext.vendorQuotes?.[v.id] || null
                   };
                 })
@@ -782,6 +975,7 @@ const NegotiationController = {
                 rfqNo: rfqData.rfq_no,
                 rfqTitle: rfqData?.title || '',
                 productName,
+                productNames,
                 buyerCompanyName: emailContext.companyName,
                 vendors: vendorsWithTokens,
                 companyName: emailContext.companyName,
@@ -835,12 +1029,13 @@ const NegotiationController = {
         })
       );
 
-      // Get all vendors per product with their active round status
+      // Get all vendors per product with their active round status (multi
+      // rounds cover several products — collect every covered id).
       const vendorsByProduct = {};
       if (rfq_product_id) {
         vendorsByProduct[rfq_product_id] = await negotiationModel.getVendorsForProductWithStatus(rfq_id, rfq_product_id);
       } else {
-        const productIds = [...new Set(rounds.map(r => r.rfq_product_id))];
+        const productIds = [...new Set(rounds.flatMap(r => getCoveredProductIds(r)))];
         await Promise.all(
           productIds.map(async (pid) => {
             vendorsByProduct[pid] = await negotiationModel.getVendorsForProductWithStatus(rfq_id, pid);
@@ -935,7 +1130,14 @@ const NegotiationController = {
           )
           .map(({ vendor_ids, ...r }) => ({
             ...r,
-            vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId)
+            vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId),
+            // Multi rounds: never leak other vendors' targets in products[].
+            products: Array.isArray(r.products)
+              ? r.products.map(p => ({
+                  ...p,
+                  vendor_targets: (p?.vendor_targets || []).filter(vt => Number(vt?.vendor_id) === Number(vendorId))
+                }))
+              : r.products
           }));
       }
 
@@ -1046,6 +1248,7 @@ const NegotiationController = {
                 rfqNo: rfqData.rfq_no,
                 rfqTitle: rfqData?.title || '',
                 productName: roundWithContext?.product_name || 'Product',
+                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
                 initiator,
                 commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
                 companyName: emailContext.companyName,
@@ -1063,6 +1266,15 @@ const NegotiationController = {
               const vaByVendorId = Object.fromEntries(
                 (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
               );
+              // Multi rounds: per-vendor per-product fields live in products[].
+              const roundForFields = roundWithContext || round;
+              const productsForVendor = (vid) => (Array.isArray(roundForFields?.products) ? roundForFields.products : [])
+                .map(p => ({
+                  rfq_product_id: p?.rfq_product_id ?? null,
+                  is_rfq_level: p?.is_rfq_level === true,
+                  fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
+                }))
+                .filter(p => p.fields.length > 0);
               const vendorsWithTokens = await Promise.all(
                 vendors.map(async (v) => {
                   const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
@@ -1072,6 +1284,7 @@ const NegotiationController = {
                     email: v.email,
                     token: tokenRows?.[0]?.token || null,
                     negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
+                    products: productsForVendor(v.id),
                     quote: emailContext.vendorQuotes?.[v.id] || null
                   };
                 })
@@ -1081,6 +1294,7 @@ const NegotiationController = {
                 rfqNo: rfqData.rfq_no,
                 rfqTitle: rfqData?.title || '',
                 productName: roundWithContext?.product_name || 'Product',
+                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
                 buyerCompanyName: emailContext.companyName,
                 vendors: vendorsWithTokens,
                 companyName: emailContext.companyName,
@@ -1227,6 +1441,7 @@ const NegotiationController = {
                     rfqNo: rfqData.rfq_no,
                     rfqTitle: rfqData?.title || '',
                     productName: roundWithContext?.product_name || 'Product',
+                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
                     initiator,
                     commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
                     companyName: emailContext.companyName,
@@ -1345,6 +1560,7 @@ const NegotiationController = {
             round_id: round_id,
             round_number: round.round_number,
             rfq_product_id: round.rfq_product_id,
+            rfq_product_ids: getCoveredProductIds(round),
             remarks: remarks
           }
         });
@@ -1677,6 +1893,16 @@ const NegotiationController = {
         });
       }
 
+      // The product must be covered by the round (multi rounds cover several
+      // products; legacy rounds exactly one).
+      const coveredIds = getCoveredProductIds(round);
+      if (!coveredIds.includes(Number(rfq_product_id))) {
+        return res.status(400).json({
+          status: 2,
+          message: 'This product is not part of the negotiation round.'
+        });
+      }
+
       // Check if round has expired
       const expirationCheck = await negotiationModel.isRoundExpired(round_id);
       if (expirationCheck.expired) {
@@ -1686,17 +1912,18 @@ const NegotiationController = {
         });
       }
 
-      // Check if vendor has already submitted a quote using model
+      // Check if vendor has already submitted a quote for THIS product —
+      // "once per round per product".
       const existingQuote = await negotiationModel.getExistingRoundQuote(
-        round_id, 
-        vendor_id, 
-        round.rfq_product_id
+        round_id,
+        vendor_id,
+        Number(rfq_product_id)
       );
 
       if (existingQuote) {
         return res.status(400).json({
           status: 2,
-          message: 'You have already submitted a quote for this negotiation round. Only one submission is allowed per round.'
+          message: 'You have already submitted a quote for this product in this negotiation round. Only one submission is allowed per round.'
         });
       }
 
@@ -1704,7 +1931,7 @@ const NegotiationController = {
       const quote = await negotiationModel.upsertRoundQuote({
         negotiation_round_id: round_id,
         vendor_id: vendor_id,
-        rfq_product_id: round.rfq_product_id,
+        rfq_product_id: Number(rfq_product_id),
         quoted_price: quoted_price,
         previous_price: previous_price || null
       });
@@ -2511,6 +2738,127 @@ const NegotiationController = {
         status: 1,
         data: bundle
       });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Buyer landing list — every RFQ in negotiation for the active hospitality
+   * company/hotel context, with an effective neg_status the frontend buckets
+   * into tabs. Scope comes from attachHospitalityContext() (company required,
+   * hotel optional).
+   */
+  listNegotiationRfqs: async (req, res) => {
+    try {
+      // Scope to ALL the user's companies (super admin → null = all) so multi-
+      // company users see their negotiations; the in-page BU facet narrows.
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const rows = await negotiationModel.getNegotiationRfqList({ companyIds });
+      return res.status(200).json({ status: 1, data: rows });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // Server-authoritative listing — search / facet / sort / paginate + a
+  // "Pending for me" tab, all server-side. Mirrors rfqController.getRfqListView.
+  getNegotiationListView: async (req, res) => {
+    try {
+      const userId = req.user?.id;
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const body = req.body || {};
+      const BUCKETS = ['pending', 'active', 'awaiting', 'completed', 'cancelled'];
+      const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      const source = ['all', 'RFQ', 'ARC'].includes(body.source) ? body.source : 'all';
+      const search = (body.search || '').toString().trim().toLowerCase() || null;
+      const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
+      const page = Number(body.page) > 0 ? Number(body.page) : 1;
+      const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
+      const f = body.filters || {};
+      const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+      const filters = {
+        rfqId: asStrArr(f.rfqId),
+        status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
+        productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+      };
+
+      // 1. fetch the full scoped set — ONE ROW PER ROUND.
+      // Always fetch both branches so source_counts reflects the full union totals.
+      const [rfqRows, arcRows] = await Promise.all([
+        negotiationModel.getNegotiationRoundList({ companyIds }),
+        negotiationModel.getArcNegotiationRoundList({ companyIds }),
+      ]);
+      const allRows = [...rfqRows, ...arcRows];
+      const source_counts = { all: allRows.length, RFQ: rfqRows.length, ARC: arcRows.length };
+      // Narrow to the requested source AFTER computing counts.
+      const rows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
+
+      // 2. bucket + pending-for-me stamping (per round).
+      const NEG_BUCKET = { pending_approval: 'pending', active: 'active', awaiting_decision: 'awaiting', completed: 'completed', cancelled: 'cancelled' };
+      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId) : []);
+      for (const r of rows) {
+        r._bucket = NEG_BUCKET[r.neg_status] || 'pending';
+        r._isMyAction = pendingIds.has(Number(r.round_id));
+        r.action_required = r._isMyAction;
+        r.action_label = r._isMyAction ? 'Approval needed' : null;
+      }
+
+      const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
+
+      // 3. tab counts.
+      const tab_counts = { all: rows.length, for_me: 0, pending: 0, active: 0, awaiting: 0, completed: 0, cancelled: 0 };
+      for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
+
+      // 4. tab scope.
+      const tabRows = tab === 'all' ? rows
+        : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
+        : rows.filter((r) => r._bucket === tab);
+
+      // 5. facets over tab scope.
+      const fm = { rfqId: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
+      const STATUS_LABEL = { pending: 'Pending approval', active: 'Active', awaiting: 'Awaiting decision', completed: 'Completed', cancelled: 'Cancelled' };
+      for (const r of tabRows) {
+        if (r.rfq_id != null) bump(fm.rfqId, String(r.rfq_id), `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
+        bump(fm.status, r._bucket, STATUS_LABEL[r._bucket] || r._bucket);
+        if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+        if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
+        for (const n of parseArr(r.item_names)) if (n) bump(fm.productId, String(n), String(n));
+        for (const v of parseArr(r.vendors)) if (v && v.id != null) bump(fm.vendorId, String(v.id), v.name || `Vendor ${v.id}`);
+      }
+      const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
+      const facets = { rfqId: toFacet(fm.rfqId), status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
+
+      // 6. apply facet + search filters.
+      const filtered = tabRows.filter((r) => {
+        if (filters.rfqId.length && !filters.rfqId.includes(String(r.rfq_id))) return false;
+        if (filters.status.length && !filters.status.includes(r._bucket)) return false;
+        if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+        if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
+        if (filters.productId.length && !parseArr(r.item_names).map(String).some((n) => filters.productId.includes(n))) return false;
+        if (filters.vendorId.length && !parseArr(r.vendors).some((v) => v && filters.vendorId.includes(String(v.id)))) return false;
+        if (search) {
+          const hay = `${r.title || ''} ${r.rfq_no || ''} ${r.hotel_name || ''} ${r.department_title || ''}`.toLowerCase();
+          if (!hay.includes(search)) return false;
+        }
+        return true;
+      });
+
+      // 7. sort.
+      const ORDER = { pending: 0, active: 1, awaiting: 2, completed: 3, cancelled: 4 };
+      const ts = (r) => new Date(r.round_created_at || 0).getTime();
+      if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
+      else if (sort === 'status') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
+      else filtered.sort((a, b) => ts(b) - ts(a));
+
+      // 8. paginate.
+      const total = filtered.length;
+      const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit } });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

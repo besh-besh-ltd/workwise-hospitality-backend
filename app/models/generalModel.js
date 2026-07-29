@@ -12,6 +12,23 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   'NEGOTIATION_QUOTE': 'quote-compare',
   'PO': 'awarding',
   'ARC': 'arc',
+  // ARC_PUBLISH is the publish-approval gate INSTANCE type; its policy is
+  // authored as plain 'ARC', so ROLE-source approver steps resolve against the
+  // same 'arc' permission resource (USER-source steps bypass this map).
+  'ARC_PUBLISH': 'arc',
+  // MR is the call-off/demand path — role approvers resolve against the same
+  // 'awarding' permission as POs (USER-source steps bypass this map).
+  'MR': 'awarding',
+  // ARC_NEGOTIATION: ROLE-source approver steps resolve against arc-comm
+  // read+approve perms (same as ARC_COMMITTEE). Without this entry, ROLE steps
+  // would fall back to 'arc_negotiation', which has no permission rows and
+  // would silently drop all role-based approvers.
+  'ARC_NEGOTIATION': 'arc-comm',
+  // NOTE (latent gap, out of scope here): ARC_TECH and ARC_COMMITTEE are wired
+  // in postActionRegistry but are NOT mapped here, so their ROLE-source approver
+  // steps fall back to entity_type.toLowerCase() which has no permission rows and
+  // silently drops those approvers. This is a pre-existing gap — verify production
+  // ARC_TECH/ARC_COMMITTEE policies before adding mappings here.
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -19,6 +36,7 @@ import s3Client from "../config/s3config.js";
 import fs from "fs";
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
+import { NoApprovalPolicyError } from '../services/authorizationService.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -1835,14 +1853,20 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  * @param {number} hospitality_company_id - Hospitality Company ID for scoping
  * @param {number|null} hotel_id - Hotel ID for scoping (optional)
  * @param {number|null} department_id - Department ID for filtering (optional)
+ * @param {number|null} process_id - Process ID for filtering (optional). NULL =
+ *   "any process applies" (legacy / no-process entity). When a specific process
+ *   is supplied, only users whose role scope covers that process (or is the NULL
+ *   wildcard) qualify as approvers.
  * @returns {Array<number>} Array of user IDs
  */
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
     if (department_id) {
-      // Validate company/hotel access + user has role scope covering this department
+      // Validate company/hotel access + user has role scope covering this
+      // department AND process. Process filter is permissive when not provided
+      // (process_id arg NULL = "any process applies" e.g. legacy paths).
       const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
       const hasDeptScope = await t.oneOrNone(`
         SELECT 1 FROM tbl_user_role_scopes urs
@@ -1850,24 +1874,36 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           AND urs.company_id = $2
           AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
           AND (urs.department_id IS NULL OR urs.department_id = $4)
+          AND ($5::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $5)
         LIMIT 1
-      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id]);
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id, process_id]);
       if (hasCompanyAccess && hasDeptScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     } else {
-      // No department filter: just validate company/hotel access
+      // No department filter: just validate company/hotel access + process scope
       const hasAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      if (hasAccess) {
+      const hasProcessScope = process_id == null
+        ? true
+        : !!(await t.oneOrNone(`
+            SELECT 1 FROM tbl_user_role_scopes urs
+            WHERE urs.user_id = $1
+              AND urs.company_id = $2
+              AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+              AND (urs.process_id IS NULL OR urs.process_id = $4)
+            LIMIT 1
+          `, [step.approver_source_id, hospitality_company_id, hotel_id, process_id]));
+      if (hasAccess && hasProcessScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     }
   } else if (step.approver_source_type === 'ROLE') {
-    // A user qualifies if their role scope covers this department:
+    // A user qualifies if their role scope covers this department AND process:
     //   1. role grant is explicitly scoped to this department, OR
     //   2. role grant is unrestricted (urs.department_id IS NULL) = all-department access
+    // Process axis: NULL = wildcard; otherwise must match the instance's process_id.
     const deptClause = department_id
       ? `AND (urs.department_id = $5 OR urs.department_id IS NULL)`
       : '';
@@ -1879,6 +1915,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
        AND urs.role_id = $1
        AND urs.company_id = $2
        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+       AND ($6::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $6)
        ${deptClause}
       JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
       WHERE u.status = 1
@@ -1888,7 +1925,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           OR (hum.hospitality_hotel_id = $3)
           OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
         )
-    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
+    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id, process_id]);
     userIds.push(...users.map(u => u.id));
   } else if (step.approver_source_type === 'DEPARTMENT') {
     // DEPARTMENT type: always resolve to users in the specified department
@@ -2028,7 +2065,10 @@ export async function createApprovalInstance({
     // because multiple rounds can exist per product and each needs its own approval.
     // For NEGOTIATION_QUOTE, allow re-approval because a vendor may reject a PO,
     // requiring re-finalization and a fresh approval cycle while preserving the old approved instance.
-    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE';
+    // ARC_COMMITTEE is the same shape: a vendor clarification on an awarded rate
+    // contract re-routes the (revised) award through a fresh awarding approval
+    // while the original approved instance stays in history.
+    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE' || entity_type === 'ARC_COMMITTEE';
     const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
 
     const existingInstance = await t.oneOrNone(`
@@ -2060,7 +2100,10 @@ export async function createApprovalInstance({
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
-        throw new Error(`No approval policy found for ${entity_type} in this scope`);
+        throw new NoApprovalPolicyError(
+          `No approval policy found for ${entity_type} in this scope`,
+          { entity_type, hospitality_company_id, hotel_id, department_id, process_id }
+        );
       }
     }
 
@@ -2093,8 +2136,9 @@ export async function createApprovalInstance({
         if (!hasBoth) continue;
       }
 
-      // Resolve approvers for this step
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by);
+      // Resolve approvers for this step (pass process_id so the user's process
+      // scope is honored when picking who qualifies).
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
 
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {
@@ -3353,15 +3397,30 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       removedFinalizations++;
     }
 
-    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id)
+    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id).
+    // Covered-product predicate: multi-product rounds (products JSONB) are
+    // matched too. NOTE: cancelling a multi-product round's approval affects
+    // EVERY product it covers — round-scoped approvals can't be partially
+    // cancelled. Logged loudly below so support can trace it.
     const negInstances = await t.any(`
       SELECT id, status FROM tbl_approval_instances
       WHERE entity_type = 'NEGOTIATION'
         AND entity_id IN (
-          SELECT id FROM tbl_negotiation_rounds WHERE rfq_product_id = $1
+          SELECT nr.id FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_product_id = $1 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $1
+          )
         )
         AND status IN ('PENDING', 'APPROVED')
     `, [rfq_product_id]);
+
+    if (negInstances.length > 0) {
+      console.warn(
+        `[sendback] Cancelling ${negInstances.length} NEGOTIATION approval instance(s) for product ${rfq_product_id}. ` +
+        `Multi-product rounds covering this product are cancelled for ALL their products.`
+      );
+    }
 
     for (const instance of negInstances) {
       if (instance.status === 'PENDING') {
@@ -3376,22 +3435,33 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       cancelledInstances++;
     }
 
-    // 4. Handle rounds based on target stage
+    // 4. Handle rounds based on target stage (covered-product predicate —
+    // multi-product rounds covering this product are affected as a whole).
     if (isEarlyStage) {
       // Early stage: Cancel ALL rounds (complete reset to before negotiation)
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'CANCELLED', closed_at = NOW()
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status != 'CANCELLED'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status != 'CANCELLED'
       `, [rfq_id, rfq_product_id]);
       cancelledRounds = result.rowCount;
     } else {
       // Mid stage (NEGOTIATION, QUOTE_FINALIZED, etc.): Keep rounds intact
       // Just make sure any ACTIVE rounds are marked as COMPLETED so new ones can be created
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'COMPLETED', closed_at = COALESCE(closed_at, NOW())
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status = 'ACTIVE'
       `, [rfq_id, rfq_product_id]);
       // Don't count these as "cancelled" - they're completed
     }

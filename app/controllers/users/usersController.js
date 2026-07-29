@@ -1,4 +1,5 @@
 import userModel from '../../models/userModel.js';
+import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import notificationModel from '../../models/notificationModel.js';
 import Config from '../../config/app.config.js';
 import {
@@ -27,6 +28,7 @@ import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from '../../services/notificationService.js';
 import JWT from 'jsonwebtoken';
 import xlsx from 'xlsx';
 //var FCM = new fcm(certPath);
@@ -51,6 +53,59 @@ const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
   return hash;
+};
+
+/**
+ * Validate that every process_id in a role-scope payload belongs to the parent
+ * (buyer) company of the row's hospitality_company_id. Throws a structured
+ * Error if any pair is mismatched or the process is inactive.
+ *
+ * tbl_approval_processes.company_id references tbl_company (the parent buyer
+ * company), while role-scope rows carry hospitality_company_id (which points
+ * to tbl_hospitality_companies). Bridge via tbl_hospitality_companies.buyer_company_id.
+ */
+const validateRoleScopeProcesses = async (rolesArray) => {
+  if (!Array.isArray(rolesArray)) return;
+  const pairs = rolesArray
+    .filter(r => r && r.process_id != null && r.process_id !== 0 && r.company_id)
+    .map(r => ({ process_id: Number(r.process_id), hospitality_company_id: Number(r.company_id) }));
+  if (pairs.length === 0) return;
+
+  const procIds = [...new Set(pairs.map(p => p.process_id))];
+  const hcIds = [...new Set(pairs.map(p => p.hospitality_company_id))];
+
+  const [hcCompanies, processes] = await Promise.all([
+    db.any(
+      `SELECT id, buyer_company_id FROM tbl_hospitality_companies WHERE id = ANY($1::int[])`,
+      [hcIds]
+    ),
+    db.any(
+      `SELECT id, company_id, is_active FROM tbl_approval_processes WHERE id = ANY($1::int[])`,
+      [procIds]
+    ),
+  ]);
+
+  const buyerByHc = new Map(hcCompanies.map(r => [Number(r.id), Number(r.buyer_company_id)]));
+  const procByPid = new Map(processes.map(r => [Number(r.id), r]));
+
+  for (const { process_id, hospitality_company_id } of pairs) {
+    const buyer = buyerByHc.get(hospitality_company_id);
+    const proc = procByPid.get(process_id);
+    if (!buyer) {
+      throw new Error(`Invalid hospitality_company_id ${hospitality_company_id} in role scope`);
+    }
+    if (!proc) {
+      throw new Error(`Process ${process_id} not found`);
+    }
+    if (!proc.is_active) {
+      throw new Error(`Process ${process_id} is inactive and cannot be assigned`);
+    }
+    if (Number(proc.company_id) !== buyer) {
+      throw new Error(
+        `Process ${process_id} does not belong to the parent company of hospitality company ${hospitality_company_id}`
+      );
+    }
+  }
 };
 
 try {
@@ -108,6 +163,23 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
 
         sendMail(mailRecipients);
 
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'buyer_account_created',
+              title: 'Welcome to Phileein Hospitality',
+              body: 'Your account has been created. Use the credentials emailed to you to log in.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch buyer_account_created failed', notifyErr);
+        }
+
         return accountLimitSaved
 }
 
@@ -141,6 +213,23 @@ const continueVendorCompanyRegistration = async (inputData, company_id)=>{
         }
 
         sendMail(mailRecipients);
+
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'vendor_company_registered',
+              title: 'Registration received',
+              body: 'Your account is under review. We will notify you once it is approved.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch vendor_company_registered failed', notifyErr);
+        }
 }
 
 
@@ -823,9 +912,11 @@ create_buyer_company_users: async (req, res, next) => {
         role_id: r.role_id,
         company_id: r.company_id || companyID,
         hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
+        department_id: r.department_id || null,
+        process_id: r.process_id || null
       }));
 
+      await validateRoleScopeProcesses(roleScopes);
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
 
@@ -1727,6 +1818,16 @@ get_company_users: async (req, res, next) => {
 
         sendMail(mailRecipients);
 
+        dispatchNotification({
+          userIds: [user_detail[0].id],
+          category: 'account',
+          type: 'forgot_password_otp_sent',
+          title: 'Password reset code sent',
+          body: 'Check your email for the verification code to reset your password.',
+          data: {},
+          actionUrl: verificationLink
+        }).catch((err) => logError('dispatch forgot_password_otp_sent failed', err));
+
         let updateOtp = {
           otp: otpseq,
           email: email
@@ -1879,7 +1980,8 @@ update_user_detail: async (req, res, next) => {
           `SELECT role_id,
                   COALESCE(company_id, 0)    AS company_id,
                   COALESCE(hotel_id, 0)      AS hotel_id,
-                  COALESCE(department_id, 0) AS department_id
+                  COALESCE(department_id, 0) AS department_id,
+                  COALESCE(process_id, 0)    AS process_id
            FROM tbl_user_role_scopes WHERE user_id = $1`,
           [targetUserId]
         ),
@@ -1902,10 +2004,11 @@ update_user_detail: async (req, res, next) => {
             company_id: r.company_id || loggedInUser.company_id || 0,
             hotel_id: r.hotel_id || 0,
             department_id: r.department_id || 0,
+            process_id: r.process_id || 0,
           }))
         : null;
 
-      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}`;
+      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}|${s.process_id || 0}`;
       const oldScopeKeySet = new Set(oldRoleScopes.map(scopeKey));
       const newScopeKeySet = newRoleScopes ? new Set(newRoleScopes.map(scopeKey)) : null;
 
@@ -2050,9 +2153,14 @@ update_user_detail: async (req, res, next) => {
             role_id: r.role_id,
             company_id: r.company_id || loggedInUser.company_id,
             hotel_id: r.hotel_id || null,
-            department_id: r.department_id || null
+            department_id: r.department_id || null,
+            process_id: r.process_id || null
           }))
         : null;
+
+      if (hasRoleUpdate) {
+        await validateRoleScopeProcesses(roleScopes);
+      }
 
       if (hasRoleUpdate) {
         logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);
@@ -3103,6 +3211,26 @@ publish_profile_reviews: async (req, res, next) => {
     }
   },
 
+
+  // Engagement metrics for the buyer-facing vendor dossier (RFQs participated,
+  // contracts awarded, POs released, business value) — scoped to the requesting
+  // buyer's own RFQs + hospitality companies so it never exposes other tenants'
+  // dealings with the vendor.
+  vendor_engagement: async (req, res, next) => {
+    try {
+      const vendorId = Number(req.params.vendor_id);
+      const buyerUserId = req.user?.id;
+      if (!vendorId || !buyerUserId) {
+        return res.status(400).json({ status: 2, message: 'Invalid request' }).end();
+      }
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const stats = await userModel.getVendorEngagementStats(vendorId, buyerUserId, companyIds);
+      return res.status(200).json({ status: 1, data: stats }).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
 
   hospitalitySubscriptionPayment: async (req, res, next) => {
     try {

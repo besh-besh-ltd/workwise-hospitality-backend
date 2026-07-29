@@ -104,11 +104,18 @@ const rbacModel = {
     const params = [];
     const placeholders = scopes.map((s) => {
       const base = params.length;
-      params.push(s.user_id, s.role_id, s.company_id, s.hotel_id || null, s.department_id || null);
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+      params.push(
+        s.user_id,
+        s.role_id,
+        s.company_id,
+        s.hotel_id || null,
+        s.department_id || null,
+        s.process_id || null
+      );
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
     });
     const run = (tx) => tx.none(
-      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
        VALUES ${placeholders.join(', ')}`,
       params
     );
@@ -120,7 +127,10 @@ const rbacModel = {
       `
       SELECT DISTINCT
         p.resource,
-        p.action
+        p.action,
+        urs.hotel_id,
+        urs.department_id,
+        urs.process_id
       FROM tbl_user_role_scopes urs
       JOIN tbl_role_permissions rp
         ON rp.role_id = urs.role_id
@@ -183,7 +193,10 @@ const rbacModel = {
       )
       SELECT DISTINCT
         p.resource,
-        p.action
+        p.action,
+        urs.hotel_id,
+        urs.department_id,
+        urs.process_id
       FROM tbl_user_role_scopes urs
       JOIN tbl_role_permissions rp
         ON rp.role_id = urs.role_id
@@ -227,6 +240,48 @@ const rbacModel = {
     );
   },
 
+  /**
+   * Return every hotel id the given user can access.
+   *
+   *  - Hotel-level mappings (mapping_type = 1) contribute their specific
+   *    hospitality_hotel_id directly.
+   *  - Company-level mappings (mapping_type = 0, hospitality_hotel_id NULL)
+   *    contribute ALL hotels under those hospitality companies.
+   *
+   * Used by the dashboard's "All Business Units" view — when the FE passes
+   * hotel_ids: [] we expand it to this full set so the permission lookup
+   * returns the union of grants across everything the user can reach.
+   */
+  getAllAccessibleHotelIds: async (userId) => {
+    const rows = await db.any(
+      `
+      WITH user_hotel_scope AS (
+        -- Direct hotel-level mappings
+        SELECT DISTINCT hum.hospitality_hotel_id AS hotel_id
+        FROM tbl_hospitality_user_mappings hum
+        WHERE hum.user_id = $1
+          AND hum.mapping_type = 1
+          AND hum.hospitality_hotel_id IS NOT NULL
+
+        UNION
+
+        -- Expand company-level mappings to every hotel under those companies
+        SELECT DISTINCT h.id AS hotel_id
+        FROM tbl_hospitality_user_mappings hum
+        JOIN tbl_hospitality_company_hotels h
+          ON h.hospitality_company_id = hum.hospitality_company_id
+        WHERE hum.user_id = $1
+          AND hum.mapping_type = 0
+          AND hum.hospitality_hotel_id IS NULL
+          AND h.is_deleted = 0
+      )
+      SELECT hotel_id FROM user_hotel_scope
+      `,
+      [userId]
+    );
+    return rows.map((r) => r.hotel_id);
+  },
+
   deleteUserRoleScopes: (userId, t = db) => {
     return t.none(
       `DELETE FROM tbl_user_role_scopes WHERE user_id = $1`,
@@ -265,10 +320,15 @@ const rbacModel = {
         r.title AS role_title,
         urs.company_id,
         urs.hotel_id,
-        urs.department_id
+        urs.department_id,
+        urs.process_id,
+        proc.name AS process_name,
+        proc.process_type
       FROM tbl_user_role_scopes urs
       JOIN tbl_roles r
         ON r.id = urs.role_id
+      LEFT JOIN tbl_approval_processes proc
+        ON proc.id = urs.process_id
       WHERE urs.user_id = $1
       ORDER BY r.title
       `,
@@ -281,10 +341,15 @@ const rbacModel = {
       `
       SELECT urs.id, urs.user_id, urs.role_id,
         r.title AS role_title,
-        urs.company_id, urs.hotel_id, urs.department_id
+        urs.company_id, urs.hotel_id, urs.department_id,
+        urs.process_id,
+        proc.name AS process_name,
+        proc.process_type
       FROM tbl_user_role_scopes urs
       JOIN tbl_roles r
         ON r.id = urs.role_id
+      LEFT JOIN tbl_approval_processes proc
+        ON proc.id = urs.process_id
       WHERE urs.user_id = ANY($1::int[])
       ORDER BY urs.user_id, r.title
       `,

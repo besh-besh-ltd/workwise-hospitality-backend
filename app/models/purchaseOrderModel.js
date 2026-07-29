@@ -8,6 +8,7 @@ import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES 
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
 import pricingEngine from "../services/pricingEngine.js";
+import { dispatch as dispatchNotification } from "../services/notificationService.js";
 import fs from 'fs';
 
 // Statuses at which the rendered PO PDF must stay sealed. The PDF is generated
@@ -30,15 +31,22 @@ const resolvePoPdfVisibility = (status, url) => {
 };
 
 const getNextPONumber = async () => {
-  return new Promise(async function (resolve, reject) {
-    const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
-    const response = await db.oneOrNone(query);
-    if (response) {
-      resolve(parseInt(response.po_number) + 1);
-    } else {
-      resolve(Math.floor(100000 + Math.random() * 900000));
-    }
-  });
+  // Next sequential number = (max existing NUMERIC po_number) + 1. We must
+  // ignore non-numeric po_numbers — legacy/seeded values like
+  // "PO-STG-2095943-228-8-2" — and pick the MAX rather than the latest row by
+  // created_at. The previous version took `ORDER BY created_at DESC LIMIT 1`
+  // and did `parseInt(po_number) + 1`, which produced the string "NaN" whenever
+  // the most recent PO happened to carry a non-numeric number.
+  const row = await db.oneOrNone(
+    `SELECT MAX(po_number::bigint) AS maxnum
+       FROM tbl_rfq_purchase_order
+      WHERE po_number ~ '^[0-9]+$'`
+  );
+  if (row && row.maxnum != null) {
+    return Number(row.maxnum) + 1;
+  }
+  // No numeric PO numbers yet — seed with a random 6-digit base.
+  return Math.floor(100000 + Math.random() * 900000);
 };
 
 const getItemTotalWOFreight = (item) => {
@@ -213,6 +221,35 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
       let po = null;
 
+      // Auto-merge: if the caller did not nominate a merge target, look for an
+      // existing draft PO on this RFQ for the same vendor that shares the same
+      // project + selected_hierarchy. If found, treat the new line as an
+      // append onto that PO. SELECT ... FOR UPDATE serializes concurrent
+      // finalize transactions targeting the same (rfq, vendor, project,
+      // hierarchy), so the "at most one draft PO per tuple" invariant holds
+      // even under parallel awards. selected_hierarchy is compared via ::text
+      // to be agnostic to json/jsonb/text storage; IS NOT DISTINCT FROM keeps
+      // NULL == NULL so legacy rows without a hierarchy can still merge.
+      // Restricted to status='draft' — pending-approval POs are mid-review
+      // and must not absorb new lines (would invalidate approval context).
+      if (!existing_po_id && finalized_vendor_id) {
+        const mergeTarget = await t.oneOrNone(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1
+              AND finalized_vendor_id = $2
+              AND project_id IS NOT DISTINCT FROM $3
+              AND selected_hierarchy::text IS NOT DISTINCT FROM $4::text
+              AND status = $5
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE`,
+          [rfq_id, finalized_vendor_id, project_id, selected_hierarchy, PO_STATUSES.DRAFT]
+        );
+        if (mergeTarget) {
+          existing_po_id = mergeTarget.id;
+        }
+      }
+
       if(existing_po_id) {
         if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
@@ -263,14 +300,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         else if (typeof rawGc === 'string' && rawGc.trim()) {
           try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
         }
-        let gcTotal = 0;
-        for (const gc of snapshotGlobals) {
-          const norm = pricingEngine.normalizeGlobalCharge(gc);
-          if (!norm) continue;
-          gcTotal += pricingEngine.applyChargeMode(
-            norm.amount, norm.amount_mode, lineSubtotal
-          );
-        }
+        // Includes each charge's additional_tax (e.g. GST on TCS). Delegating to
+        // the engine keeps this in lock-step with calculateDocumentTotals —
+        // previously this hand-rolled loop applied only norm.amount and dropped
+        // additional_tax, so merged (multi-product) POs undercounted total_value.
+        const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
         // Quantise to 2dp, matching pricingEngine.calculateDocumentTotals
         // (which is what the new-PO branch uses). Keeping rounding consistent
         // across the new-PO path and the merge path means the stored
@@ -326,10 +360,21 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         )
       }
 
+      // Auto-initiate eligibility probe — runs inside the same tx so the
+      // just-inserted line is visible. The result is returned to the
+      // caller (rfqController.finalize / negotiationQuotePostApproval),
+      // which fires `autoInitiateRFQPOs(rfq_id, user_id)` AFTER its
+      // transaction commits. Initiating inside `t` would couple PDF
+      // generation and approver emails to the line-insert atomicity,
+      // which we explicitly don't want.
+      const should_auto_initiate = await isRfqFullyAwarded(rfq_id, t);
+
       return {
         po_id: po.id,
         status: true,
-        message: "PO has been drafted successfully!"
+        message: "PO has been drafted successfully!",
+        should_auto_initiate,
+        rfq_id,
       };
     } catch (error) {
       throw error;
@@ -504,12 +549,9 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     else if (typeof rawGc === 'string' && rawGc.trim()) {
       try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
     }
-    let gcTotal = 0;
-    for (const gc of snapshotGlobals) {
-      const norm = pricingEngine.normalizeGlobalCharge(gc);
-      if (!norm) continue;
-      gcTotal += pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, lineSubtotal);
-    }
+    // Includes each charge's additional_tax — same engine helper as the
+    // draft-merge branch, so a kept PO's recomputed total can't drift either.
+    const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
     const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
 
     // Refresh derived header columns from the current line set. quote_id /
@@ -630,6 +672,20 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     if(!purchaseOrder) {
       throw new Error("No Purchase Order found by id:", po_id);
+    }
+
+    // Idempotency guard: initiate is a draft→pending-approval transition.
+    // If the PO has already moved past draft (auto-initiate already ran,
+    // or a parallel Force Initiate landed first) this call is a no-op.
+    // Returning early prevents duplicate approval-instance creation and
+    // duplicate PDF regeneration.
+    if (purchaseOrder.status !== PO_STATUSES.DRAFT) {
+      return {
+        status: false,
+        already_initiated: true,
+        message: `Purchase Order already initiated (status=${purchaseOrder.status})`,
+        po_id,
+      };
     }
 
     const { rfq_id, project_id, finalized_vendor_id } = purchaseOrder;
@@ -774,6 +830,179 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
   } catch (error) {
     throw error;
   }
+};
+
+/**
+ * Eligibility check for auto-initiate. An RFQ is "fully awarded" — and
+ * therefore eligible for system-driven PO initiation — when:
+ *
+ *   1. Every line item in `tbl_rfq_products` (one per (product_variant_id,
+ *      variant) on the RFQ) has at least one matching row in
+ *      `tbl_quote_finalization`. Multi-vendor split awards count as
+ *      finalized; the only thing that blocks is an unawarded line item.
+ *
+ *   2. No NEGOTIATION_QUOTE approval instance for any of this RFQ's
+ *      products is still PENDING. This is the load-bearing condition that
+ *      makes auto-initiate compatible with auto-merge: a pending
+ *      NEGOTIATION_QUOTE means a draft PO has not yet been created for
+ *      that line, so initiating now would lock out the future merge
+ *      target. We wait until every approval has settled (APPROVED or
+ *      REJECTED) before firing.
+ *
+ * `dbCtx` is either a pg-promise task `t` (when called inside a
+ * transaction) or the top-level `db` (when called standalone). Read-only
+ * — no side effects.
+ */
+export const isRfqFullyAwarded = async (rfq_id, dbCtx = db) => {
+  try {
+    const row = await dbCtx.oneOrNone(
+      `WITH unfinalized_lines AS (
+         SELECT 1
+         FROM tbl_rfq_products rp
+         WHERE rp.rfq_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM tbl_quote_finalization qf
+             WHERE qf.rfq_id = $1
+               AND qf.product_variant_id = rp.product_variant_id
+               AND qf.variant = rp.variant
+           )
+         LIMIT 1
+       ),
+       pending_quote_approvals AS (
+         SELECT 1
+         FROM tbl_approval_instances ai
+         WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+           AND ai.status = 'PENDING'
+           AND ai.entity_id IN (
+             SELECT id FROM tbl_rfq_products WHERE rfq_id = $1
+           )
+         LIMIT 1
+       )
+       SELECT
+         NOT EXISTS (SELECT 1 FROM unfinalized_lines) AS all_lines_finalized,
+         NOT EXISTS (SELECT 1 FROM pending_quote_approvals) AS no_pending_quote_approvals`,
+      [rfq_id]
+    );
+    return !!(row && row.all_lines_finalized && row.no_pending_quote_approvals);
+  } catch (error) {
+    logError('isRfqFullyAwarded check failed', error);
+    return false;
+  }
+};
+
+/**
+ * Auto-initiate every draft PO spawned by an RFQ. Called *outside* the
+ * triggering transaction, after the caller's commit, so that PDF
+ * generation, approval-instance creation, and approver emails happen in
+ * their own transactions and never block the parent request.
+ *
+ * Concurrency: the SELECT … FOR UPDATE serialises parallel batches for
+ * the same RFQ. If two awards land "fully awarded = true" simultaneously,
+ * both invoke this function; the second sees zero draft rows under the
+ * lock and returns a clean no-op.
+ *
+ * Failure handling: best-effort. Each PO is initiated independently.
+ * If `initiatePurchaseOrder` throws (commonly: "No approval policy
+ * found"), we catch, log, leave that PO in `draft`, and continue with
+ * the rest. Returns a summary the caller can surface in the response.
+ *
+ * @param {number} rfq_id
+ * @param {number} triggering_user_id  Whoever caused the eligibility
+ *   transition (the awarder or the final NEGOTIATION_QUOTE approver).
+ *   Stored on `tbl_notifications.sender_user_id` for the in-app summary.
+ *   The PO's own `initiated_by` (its creator) is reused as the initiator
+ *   passed to `initiatePurchaseOrder`, mirroring the data model.
+ * @returns {Promise<{initiated:number[],skipped_no_policy:number[],failed:Array<{po_id:number,reason:string}>,rfq_no:string|null}>}
+ */
+export const autoInitiateRFQPOs = async (rfq_id, triggering_user_id = null) => {
+  const summary = { initiated: [], skipped_no_policy: [], failed: [], rfq_no: null };
+  try {
+    // Lock and read draft POs for this RFQ in one fresh transaction.
+    // Initiation itself runs in separate transactions per PO so a single
+    // failure can't poison the rest of the batch.
+    const draftPOs = await db.tx(async (t) => {
+      const rfqRow = await t.oneOrNone(
+        `SELECT rfq_no FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+      summary.rfq_no = rfqRow?.rfq_no || null;
+      return await t.any(
+        `SELECT id, initiated_by
+           FROM tbl_rfq_purchase_order
+          WHERE rfq_id = $1 AND status = $2
+          ORDER BY created_at ASC
+          FOR UPDATE`,
+        [rfq_id, PO_STATUSES.DRAFT]
+      );
+    });
+
+    if (draftPOs.length === 0) return summary;
+
+    // Initiate each PO sequentially. `initiatePurchaseOrder` runs inside
+    // its own short-lived transaction via the `t` it receives — the early
+    // status guard inside it makes the call idempotent should two batches
+    // race past the FOR UPDATE.
+    for (const po of draftPOs) {
+      try {
+        const initiator = await db.oneOrNone(
+          `SELECT id, name, email, company_id, mobile FROM tbl_users WHERE id = $1`,
+          [po.initiated_by]
+        );
+        if (!initiator) {
+          summary.failed.push({ po_id: po.id, reason: 'Initiator user not found' });
+          continue;
+        }
+
+        await db.tx(async (t) => {
+          const result = await initiatePurchaseOrder(po.id, initiator, t);
+          if (result?.already_initiated) {
+            // Another batch beat us to it — not an error, just skip.
+            return;
+          }
+          await t.none(
+            `UPDATE tbl_rfq_purchase_order SET auto_initiated = TRUE WHERE id = $1`,
+            [po.id]
+          );
+        });
+        summary.initiated.push(po.id);
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (msg.includes('No approval policy found')) {
+          summary.skipped_no_policy.push(po.id);
+          logger.info({ po_id: po.id, rfq_id }, '[autoInitiateRFQPOs] skipped: no approval policy');
+        } else {
+          summary.failed.push({ po_id: po.id, reason: msg });
+          logError(`[autoInitiateRFQPOs] failed for po ${po.id}`, err);
+        }
+      }
+    }
+
+    // In-app notification: surface the batch outcome to the user whose
+    // action tripped the eligibility flip. Silent on empty batches.
+    if (triggering_user_id && (summary.initiated.length || summary.skipped_no_policy.length || summary.failed.length)) {
+      try {
+        const rfqLabel = summary.rfq_no ? `RFQ #${summary.rfq_no}` : `RFQ ${rfq_id}`;
+        const parts = [];
+        if (summary.initiated.length) parts.push(`${summary.initiated.length} auto-initiated`);
+        if (summary.skipped_no_policy.length) parts.push(`${summary.skipped_no_policy.length} skipped (no approval policy)`);
+        if (summary.failed.length) parts.push(`${summary.failed.length} failed`);
+        await dispatchNotification({
+          userIds: [Number(triggering_user_id)],
+          category: 'PO',
+          type: 'PO_AUTO_INITIATED',
+          title: `${rfqLabel}: purchase orders auto-initiated`,
+          body: `${rfqLabel} is fully awarded · ${parts.join(' · ')}.`,
+          data: { rfq_id, ...summary },
+          actionUrl: '/dashboard/buyer/purchase-orders',
+        });
+      } catch (notifyErr) {
+        logError('[autoInitiateRFQPOs] notification dispatch failed', notifyErr);
+      }
+    }
+  } catch (err) {
+    logError('[autoInitiateRFQPOs] outer failure', err);
+  }
+  return summary;
 };
 
 export const getPOItemDetails = async (purchase_order, t) => {
@@ -1495,13 +1724,14 @@ export const getPODetailsById = async (po_id, user_id) => {
          ON tai.id = po.approval_instance_id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_users TU ON TU.id = po.initiated_by
+       -- LEFT so call-off POs (initiated_by NULL, rfq_id NULL) still load (CO5).
+       LEFT JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id
-       JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
+       LEFT JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
        LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
        LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
        WHERE po.id = $1`,

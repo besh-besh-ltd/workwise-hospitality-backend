@@ -9,8 +9,18 @@
 
 import { IDS } from "../fixtures/ids.js";
 
-let RFQ_NO_COUNTER = 8000000;
-const nextRfqNo = () => ++RFQ_NO_COUNTER;
+// Factory-issued rfq_no values must not collide with rfq_no values minted by
+// production code (duplicateRfqForHotels, copy controller, etc.) which all
+// compute MAX(rfq_no) + 1 from tbl_rfq. A module-local monotonic counter
+// would race against those inserts and trip the uq_tbl_rfq_rfq_no unique
+// constraint mid-suite. Defer to the database so factory and controllers
+// share one source of truth.
+async function nextRfqNo(t) {
+  const row = await t.one(
+    `SELECT COALESCE(MAX(rfq_no), 8000000) + 1 AS next FROM tbl_rfq`
+  );
+  return Number(row.next);
+}
 
 /**
  * Create a fixture-shaped RFQ. All columns default to fixture values; pass
@@ -28,12 +38,15 @@ const nextRfqNo = () => ++RFQ_NO_COUNTER;
  * @param {0|1} [opts.is_tender]
  * @param {string} [opts.bid_end_date] - text; default 7 days hence
  * @param {string} [opts.title]
+ * @param {string} [opts.timestamp] - ISO timestamp string for the RFQ creation date
+ *   (e.g. "2026-04-01T00:00:00"); default is now(). TEST-ONLY — allows placing
+ *   RFQs in a specific Financial Year without post-insert UPDATEs.
  */
 export async function makeRFQ(t, opts) {
   if (!opts || !opts.createdBy) {
     throw new Error("makeRFQ: createdBy is required");
   }
-  const rfqNo = opts.rfq_no ?? nextRfqNo();
+  const rfqNo = opts.rfq_no ?? (await nextRfqNo(t));
   const status = opts.status ?? 0;
   const isPublished = opts.is_published ?? 0;
   const isTender = opts.is_tender ?? 0;
@@ -55,6 +68,11 @@ export async function makeRFQ(t, opts) {
     opts.vendor_clarification_date ??
     new Date(Date.now() + 5 * 86400_000).toISOString().replace("T", " ").slice(0, 19);
 
+  // Allow callers to specify a custom timestamp (for FY-filter tests). When
+  // provided it must be an ISO string. The SQL literal `now()` is used when
+  // the caller passes nothing so that the default behaviour is unchanged.
+  const timestampExpr = opts.timestamp ? `$22::timestamptz` : `now()`;
+
   const row = await t.one(
     `INSERT INTO tbl_rfq (
        rfq_no, comment, company_name, response_email, contact_name,
@@ -63,7 +81,7 @@ export async function makeRFQ(t, opts) {
        hospitality_company_id, hotel_id, department_id, process_id,
        is_tender, tender_publish_date, vendor_clarification_date, title, rfq_type
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(),
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, ${timestampExpr},
              $13,$14,$15,$16,$17,$18,$19,$20,$21)
      RETURNING id, rfq_no`,
     [
@@ -88,6 +106,10 @@ export async function makeRFQ(t, opts) {
       vendorClarificationDate,
       title,
       opts.rfq_type ?? "RFQ",
+      // $22 is only bound when opts.timestamp is provided; pg-promise ignores
+      // extra params beyond the highest $N referenced in the SQL, so it is safe
+      // to always push it into the array.
+      opts.timestamp ?? null,
     ]
   );
 

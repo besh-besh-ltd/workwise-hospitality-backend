@@ -4,6 +4,7 @@ import pgp from 'pg-promise';
 import { sendMail, logError } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from '../services/notificationService.js';
 
 const vendorModel = {
   // Helper function to escape SQL strings
@@ -1398,6 +1399,34 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
           subject: `New SPOC Added to Your Profile`,
           html: creatorTemplate
         });
+
+        try {
+          const spocUserIds = await resolveRecipientUserIds([{ email: spoc.email }]);
+          if (spocUserIds.length > 0) {
+            await dispatchNotification({
+              userIds: spocUserIds,
+              category: 'account',
+              type: 'spoc_added',
+              title: `You've been added as a SPOC for ${creatorOrganizationName}`,
+              body: `Role: ${spoc.role}. You'll receive all related communication.`,
+              data: { spoc_id: spoc.id, vendor_user_id: userId },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+          if (lookupId) {
+            await dispatchNotification({
+              userIds: [lookupId],
+              category: 'account',
+              type: 'spoc_added_to_profile',
+              title: 'New SPOC added to your profile',
+              body: `${spoc.name} (${spoc.role}) is now a SPOC on your profile.`,
+              data: { spoc_id: spoc.id, spoc_name: spoc.name },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch spoc_added failed', notifyErr);
+        }
       })
         .catch(function (err) {
           reject(new Error(err));

@@ -391,6 +391,14 @@ const hospitalityApprovalController = {
         return res.status(401).json({ status: 3, message: 'User authentication required' });
       }
 
+      // ARC is process-free BY DESIGN: ARC entities carry process_id = NULL, so
+      // findBestMatchingPolicyTx reduces to `process_id IS NULL` for them. An ARC
+      // policy saved with a non-NULL process could NEVER match → silent 400 at
+      // publish/eval time. Force process_id = NULL for every ARC entity type
+      // server-side, regardless of what the client sent.
+      const isArcEntity = typeof entity_type === 'string' && (entity_type === 'ARC' || entity_type.startsWith('ARC_'));
+      const effectiveProcessId = isArcEntity ? null : process_id;
+
       let policy;
       let propagationResult = null;
       if (id) {
@@ -469,7 +477,7 @@ const hospitalityApprovalController = {
             hospitality_company_id,
             hotel_id,
             department_id,
-            process_id,
+            process_id: effectiveProcessId,
             is_active,
             is_master
           }, t);
@@ -524,8 +532,12 @@ const hospitalityApprovalController = {
           });
         }
 
-        // Validate entity_type
-        const validEntityTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE'];
+        // Validate entity_type. Includes the process-free ARC (Rate Contract)
+        // v2 stage types so the admin wizard can create per-stage ARC policies.
+        const validEntityTypes = [
+          'RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE',
+          'ARC_TECH', 'ARC_NEGOTIATION', 'ARC_COMMITTEE', 'ARC_AMENDMENT', 'ARC_PUBLISH',
+        ];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({
             status: 3,
@@ -540,7 +552,7 @@ const hospitalityApprovalController = {
             hospitality_company_id,
             hotel_id,
             department_id,
-            process_id: process_id ? parseInt(process_id) : null,
+            process_id: effectiveProcessId ? parseInt(effectiveProcessId) : null,
             created_by,
             is_active,
             is_master: is_master || false
@@ -1067,11 +1079,18 @@ const processController = {
    */
   async getProcesses(req, res) {
     try {
-      const { include_inactive, process_type } = req.query;
-      const { company_id } = req.user;
+      const { include_inactive, process_type, company_id: queryCompanyId } = req.query;
+      const { company_id, user_type } = req.user;
+
+      // Hospitality admins (user_type=7) configuring scope for users in OTHER
+      // companies need to pass company_id explicitly. For everyone else, default
+      // to their own parent company (current self-service behavior).
+      const effectiveCompanyId = (queryCompanyId && Number(user_type) === 7)
+        ? parseInt(queryCompanyId, 10)
+        : (company_id ? parseInt(company_id) : undefined);
 
       const data = await getApprovalProcesses({
-        company_id: company_id ? parseInt(company_id) : undefined,
+        company_id: effectiveCompanyId,
         include_inactive: include_inactive === 'true',
         process_type: process_type || null
       });

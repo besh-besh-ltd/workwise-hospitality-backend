@@ -11,16 +11,101 @@ const parseAsUTC = (dateValue) => {
   return new Date(str.replace(' ', 'T') + 'Z');
 };
 
+// ============= MULTI-PRODUCT ROUND HELPERS =============
+// A round either targets a single product (legacy: rfq_product_id NOT NULL,
+// per-vendor fields in vendor_approvals[].negotiation_fields) or multiple
+// products (products JSONB: [{rfq_product_id, vendor_targets}, ...,
+// {is_rfq_level: true, vendor_targets}]).
+
+// SQL predicate: does round `nr` cover product <paramRef>? Works for both
+// legacy and multi shapes. `paramRef` is a pg-promise placeholder ('$2' etc).
+export const coversProductSql = (paramRef, alias = 'nr') =>
+  `(${alias}.rfq_product_id = ${paramRef} OR EXISTS (
+     SELECT 1 FROM jsonb_array_elements(COALESCE(${alias}.products,'[]'::jsonb)) cp_
+     WHERE (cp_->>'rfq_product_id')::int = ${paramRef}))`;
+
+// LATERAL emitting `product_names` json array for every product the round
+// covers: [{rfq_product_id, product_name}, ...]. NULL for rfq-level-only.
+export const productNamesLateralSql = (alias = 'nr') =>
+  `LEFT JOIN LATERAL (
+     SELECT json_agg(json_build_object(
+              'rfq_product_id', rp_.id,
+              'product_name', COALESCE(PV_.name, P_.name, 'Product #' || rp_.product_variant_id)
+            ) ORDER BY rp_.id) AS product_names
+     FROM tbl_rfq_products rp_
+     LEFT JOIN tbl_product_variant PV_ ON PV_.id = rp_.product_variant_id
+     LEFT JOIN tbl_product P_ ON P_.id = PV_.product_id
+     WHERE rp_.id = ${alias}.rfq_product_id
+        OR rp_.id IN (
+          SELECT (p_->>'rfq_product_id')::int
+          FROM jsonb_array_elements(COALESCE(${alias}.products,'[]'::jsonb)) p_
+          WHERE p_->>'rfq_product_id' IS NOT NULL
+        )
+   ) pn_ ON true`;
+
+// Product ids covered by a round row (legacy fallback to rfq_product_id).
+export const getCoveredProductIds = (round) => {
+  if (Array.isArray(round?.products) && round.products.length > 0) {
+    return round.products
+      .map(p => p?.rfq_product_id)
+      .filter(id => id != null)
+      .map(Number);
+  }
+  return round?.rfq_product_id != null ? [Number(round.rfq_product_id)] : [];
+};
+
+// Per-vendor negotiation fields for one product (or 'RFQ_LEVEL') of a round.
+export const getVendorFieldsForProduct = (round, vendorId, rfqProductId) => {
+  if (Array.isArray(round?.products) && round.products.length > 0) {
+    const entry = round.products.find(p => rfqProductId === 'RFQ_LEVEL'
+      ? p?.is_rfq_level === true
+      : Number(p?.rfq_product_id) === Number(rfqProductId));
+    const vt = (entry?.vendor_targets || []).find(v => Number(v?.vendor_id) === Number(vendorId));
+    return vt?.fields || [];
+  }
+  const va = (round?.vendor_approvals || []).find(v => Number(v?.vendor_id) === Number(vendorId));
+  return va?.negotiation_fields || [];
+};
+
+// Security: when a vendor reads a round, their view of products[] must only
+// carry their own vendor_targets — other vendors' targets must never leak.
+export const stripProductsForVendor = (round, vendorId) => {
+  if (round && Array.isArray(round.products)) {
+    round.products = round.products.map(p => ({
+      ...p,
+      vendor_targets: (p?.vendor_targets || []).filter(
+        vt => Number(vt?.vendor_id) === Number(vendorId)
+      ),
+    }));
+  }
+  return round;
+};
+
+// Backfill the singular `product_name` for multi rounds (first covered
+// product) so legacy consumers keep rendering something sensible.
+const normalizeProductNames = (row) => {
+  if (!row) return row;
+  if (!row.product_name && Array.isArray(row.product_names) && row.product_names.length > 0) {
+    row.product_name = row.product_names[0]?.product_name || null;
+  }
+  return row;
+};
+
 const negotiationModel = {
   // ============= NEGOTIATION ROUNDS =============
 
   /**
-   * Create a new negotiation round (product-specific)
+   * Create a new negotiation round (product-specific).
+   *
+   * Polymorphic via (source_type, source_id) — defaults to 'RFQ'+rfq_id when
+   * source_type/source_id aren't supplied, so existing RFQ callers don't need
+   * to change. ARC commercial-eval callers pass source_type='ARC' + source_id
+   * (the arc id) and leave rfq_id null.
    */
   createRound: async (roundData, txContext = null) => {
     const {
       rfq_id,
-      rfq_product_id,
+      rfq_product_id = null,
       round_number,
       target_price,
       end_date,
@@ -28,19 +113,31 @@ const negotiationModel = {
       created_by,
       remarks = null,
       vendor_ids = null,
-      vendor_approvals = null
+      vendor_approvals = null,
+      source_type,
+      source_id,
+      products = null
     } = roundData;
 
-    if (!rfq_product_id) {
-      throw new Error('rfq_product_id is required for product-specific negotiation rounds');
+    // A round is either single-product (legacy: rfq_product_id) or
+    // multi-product (products JSONB) — never neither.
+    if (!rfq_product_id && !(Array.isArray(products) && products.length > 0)) {
+      throw new Error('Either rfq_product_id or a non-empty products array is required');
+    }
+
+    const resolvedSourceType = source_type || (rfq_id ? 'RFQ' : null);
+    const resolvedSourceId   = source_id   ?? rfq_id;
+
+    if (!resolvedSourceType || !resolvedSourceId) {
+      throw new Error('source_type + source_id (or rfq_id for RFQ flow) is required');
     }
 
     return (txContext || db).one(
       `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals, source_type, source_id, products)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb)
        RETURNING *`,
-      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || [])]
+      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || []), resolvedSourceType, resolvedSourceId, products ? JSON.stringify(products) : null]
     );
   },
 
@@ -63,19 +160,21 @@ const negotiationModel = {
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
-        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+        pn_.product_names
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
+       ${productNamesLateralSql('nr')}
        WHERE nr.rfq_id = $1`;
 
     const values = [rfqId];
 
     if (rfqProductId) {
       values.push(rfqProductId);
-      query += ` AND nr.rfq_product_id = $${values.length}`;
+      query += ` AND ${coversProductSql(`$${values.length}`)}`;
     }
 
     if (vendorId) {
@@ -83,9 +182,306 @@ const negotiationModel = {
       query += ` AND $${values.length} = ANY(nr.vendor_ids)`;
     }
 
-    query += ` ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`;
+    // NULLS LAST keeps legacy per-product grouping while multi rounds
+    // (rfq_product_id NULL) sort by round number.
+    query += ` ORDER BY nr.rfq_product_id NULLS LAST, nr.round_number ASC, nr.created_at DESC`;
 
-    return db.any(query, values);
+    const rows = await db.any(query, values);
+    rows.forEach(normalizeProductNames);
+    // Vendor reads must not leak other vendors' targets.
+    if (vendorId) rows.forEach(r => stripProductsForVendor(r, vendorId));
+    return rows;
+  },
+
+  /**
+   * Buyer landing list: every RFQ that has at least one negotiation round,
+   * scoped to a hospitality company (and optionally a single hotel). One row
+   * per RFQ, rolled up to the RFQ's LATEST round (max created_at), with the
+   * aggregated facets the Negotiation list page renders (hotel, department,
+   * product names, vendor names) plus an effective `neg_status` string the
+   * page buckets into its tabs.
+   *
+   * neg_status mapping (latest round, with end_date check):
+   *   DRAFT | PENDING_APPROVAL                 → 'pending_approval'
+   *   ACTIVE & end_date in future (or null)    → 'active'
+   *   ACTIVE & end_date passed, or ENDED       → 'awaiting_decision'
+   *   COMPLETED                                → 'completed'
+   *   CANCELLED | EXPIRED                       → 'cancelled'
+   *
+   * Stored timestamps are UTC-naive (timestamp without time zone), so compare
+   * end_date against now() converted to UTC.
+   */
+  // Of the given RFQ ids, which have a negotiation approval waiting on the user
+  // (current-step pending approver). NEGOTIATION instances key on the round id
+  // (→ round.rfq_id); NEGOTIATION_QUOTE instances key on the rfq_product id
+  // (→ product.rfq_id).
+  getPendingNegotiationRfqIds: async (rfqIds, userId) => {
+    if (!Array.isArray(rfqIds) || rfqIds.length === 0 || !userId) return [];
+    const rows = await db.any(
+      `SELECT DISTINCT rfq_id FROM (
+         SELECT nr.rfq_id
+           FROM tbl_approval_instances i
+           JOIN tbl_negotiation_rounds nr ON nr.id = i.entity_id
+           JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type = 'NEGOTIATION' AND i.status = 'PENDING'
+            AND nr.rfq_id = ANY($1::int[])
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+         UNION
+         SELECT rp.rfq_id
+           FROM tbl_approval_instances i
+           JOIN tbl_rfq_products rp ON rp.id = i.entity_id
+           JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type = 'NEGOTIATION_QUOTE' AND i.status = 'PENDING'
+            AND rp.rfq_id = ANY($1::int[])
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+       ) t`,
+      [rfqIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.rfq_id));
+  },
+
+  // Per-ROUND equivalent of getPendingNegotiationRfqIds: round ids whose
+  // NEGOTIATION or ARC_NEGOTIATION approval instance (entity_id = round.id) is
+  // PENDING with the current user a pending approver at the current step.
+  // (No NEGOTIATION_QUOTE union — those are product-level, not a round.)
+  // Both entity types share the tbl_negotiation_rounds.id sequence, so no
+  // double-count is possible — each round id maps to exactly one entity_type.
+  getPendingNegotiationRoundIds: async (roundIds, userId) => {
+    if (!Array.isArray(roundIds) || roundIds.length === 0 || !userId) return [];
+    const rows = await db.any(
+      `SELECT DISTINCT i.entity_id AS round_id
+         FROM tbl_approval_instances i
+         JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+         JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+        WHERE i.entity_type IN ('NEGOTIATION','ARC_NEGOTIATION') AND i.status = 'PENDING'
+          AND i.entity_id = ANY($1::int[])
+          AND sa.approver_user_id = $2 AND sa.status = 'PENDING'`,
+      [roundIds.map(Number), Number(userId)]
+    );
+    return rows.map((r) => Number(r.round_id));
+  },
+
+  getNegotiationRfqList: async ({ companyIds = null, hotelIds = null }) => {
+    return db.any(
+      `WITH neg AS (
+         SELECT nr.rfq_id,
+                COUNT(*)::int AS total_rounds,
+                MAX(nr.round_number) AS latest_round_number,
+                (ARRAY_AGG(nr.id ORDER BY nr.created_at DESC))[1] AS latest_round_id
+           FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_id IS NOT NULL
+          GROUP BY nr.rfq_id
+       )
+       SELECT rfq.id                AS rfq_id,
+              rfq.rfq_no,
+              rfq.title,
+              rfq.is_tender,
+              rfq.hotel_id,
+              h.name                AS hotel_name,
+              rfq.department_id,
+              d.title               AS department_title,
+              neg.total_rounds,
+              neg.latest_round_number,
+              lr.status             AS latest_round_status,
+              lr.end_date,
+              lr.created_at         AS latest_round_created_at,
+              lr.approved_at,
+              lr.published_at,
+              lr.closed_at,
+              COALESCE(array_length(lr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN lr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN lr.status = 'ACTIVE'
+                     AND (lr.end_date IS NULL OR lr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN lr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN lr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN lr.status = 'COMPLETED' THEN 'completed'
+                WHEN lr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors
+         FROM neg
+         JOIN tbl_rfq rfq ON rfq.id = neg.rfq_id
+         JOIN tbl_negotiation_rounds lr ON lr.id = neg.latest_round_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
+         LEFT JOIN tbl_department d ON d.id = rfq.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = lr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT COALESCE(PV.name, P.name))
+                    FILTER (WHERE COALESCE(PV.name, P.name) IS NOT NULL) AS item_names
+             FROM tbl_rfq_products rp
+             LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+             LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.rfq_id = rfq.id
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM tbl_negotiation_rounds nr2
+             CROSS JOIN LATERAL unnest(COALESCE(nr2.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+            WHERE nr2.rfq_id = rfq.id
+         ) vend ON TRUE
+        WHERE ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
+          AND ($2::int[] IS NULL OR rfq.hotel_id = ANY($2::int[]))
+        ORDER BY lr.created_at DESC`,
+      [companyIds, hotelIds]
+    );
+  },
+
+  // Round-level list: ONE ROW PER negotiation round (an RFQ with 6 rounds yields
+  // 6 rows). Mirrors getNegotiationRfqList's status CASE, scope WHERE and facet
+  // columns, but everything is per-round. Per-round products honour both legacy
+  // (rfq_product_id) and multi-product (products JSONB) shapes.
+  getNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+    return db.any(
+      `SELECT nr.id                 AS round_id,
+              nr.round_number,
+              nr.created_at         AS round_created_at,
+              COUNT(*) OVER (PARTITION BY nr.rfq_id)::int AS total_rounds,
+              rfq.id                AS rfq_id,
+              rfq.rfq_no,
+              rfq.title,
+              rfq.is_tender,
+              rfq.hotel_id,
+              h.name                AS hotel_name,
+              rfq.department_id,
+              d.title               AS department_title,
+              nr.status             AS round_status,
+              nr.end_date,
+              nr.approved_at,
+              nr.published_at,
+              nr.closed_at,
+              COALESCE(array_length(nr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN nr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN nr.status = 'ACTIVE'
+                     AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN nr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN nr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN nr.status = 'COMPLETED' THEN 'completed'
+                WHEN nr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors,
+              'RFQ'::text AS source_type,
+              NULL::int   AS arc_id,
+              NULL::text  AS arc_number
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
+         LEFT JOIN tbl_department d ON d.id = rfq.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = nr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT COALESCE(PV.name, P.name))
+                    FILTER (WHERE COALESCE(PV.name, P.name) IS NOT NULL) AS item_names
+             FROM tbl_rfq_products rp
+             LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+             LEFT JOIN tbl_product P ON P.id = PV.product_id
+            WHERE rp.id = nr.rfq_product_id
+               OR rp.id IN (
+                 SELECT (p_->>'rfq_product_id')::int
+                 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                 WHERE p_->>'rfq_product_id' IS NOT NULL
+               )
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM unnest(COALESCE(nr.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+         ) vend ON TRUE
+        WHERE nr.rfq_id IS NOT NULL
+          AND ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
+          AND ($2::int IS NULL OR rfq.hotel_id = $2)
+        ORDER BY nr.created_at DESC`,
+      [companyIds, hotelId]
+    );
+  },
+
+  // ARC negotiation round list: one row per ARC negotiation round, shaped to the
+  // EXACT same column contract as getNegotiationRoundList so the controller's
+  // bucket/facet/sort/paginate logic works over the concatenated array unchanged.
+  // Scoped to a.hospitality_company_id = ANY(companyIds) — same guard as the RFQ branch.
+  getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+    return db.any(
+      `SELECT nr.id                 AS round_id,
+              nr.round_number,
+              nr.created_at         AS round_created_at,
+              COUNT(*) OVER (PARTITION BY nr.source_id)::int AS total_rounds,
+              NULL::int             AS rfq_id,
+              a.arc_number          AS rfq_no,
+              a.title               AS title,
+              0                     AS is_tender,
+              a.hotel_id,
+              h.name                AS hotel_name,
+              a.department_id,
+              d.title               AS department_title,
+              nr.status             AS round_status,
+              nr.end_date,
+              nr.approved_at,
+              nr.published_at,
+              nr.closed_at,
+              COALESCE(array_length(nr.vendor_ids, 1), 0)::int AS invited_count,
+              CASE
+                WHEN nr.status IN ('DRAFT','PENDING_APPROVAL') THEN 'pending_approval'
+                WHEN nr.status = 'ACTIVE'
+                     AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC')) THEN 'active'
+                WHEN nr.status = 'ACTIVE' THEN 'awaiting_decision'
+                WHEN nr.status = 'ENDED' THEN 'awaiting_decision'
+                WHEN nr.status = 'COMPLETED' THEN 'completed'
+                WHEN nr.status IN ('CANCELLED','EXPIRED') THEN 'cancelled'
+                ELSE 'pending_approval'
+              END AS neg_status,
+              COALESCE(q.quotes_received, 0)::int AS quotes_received,
+              COALESCE(items.item_names, '[]'::json) AS item_names,
+              COALESCE(vend.vendors, '[]'::jsonb) AS vendors,
+              'ARC'::text           AS source_type,
+              a.id                  AS arc_id,
+              a.arc_number          AS arc_number
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_arc a ON a.id = nr.source_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+         LEFT JOIN tbl_department d ON d.id = a.department_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.arc_item_id))::int AS quotes_received
+             FROM tbl_negotiation_round_quotes nrq
+            WHERE nrq.negotiation_round_id = nr.id
+         ) q ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT pv.name) FILTER (WHERE pv.name IS NOT NULL) AS item_names
+             FROM tbl_arc_item ai
+             LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+            WHERE ai.id = nr.arc_item_id
+               OR ai.id IN (
+                 SELECT (p_->>'arc_item_id')::int
+                   FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                  WHERE p_->>'arc_item_id' IS NOT NULL
+               )
+         ) items ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name)) AS vendors
+             FROM unnest(COALESCE(nr.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+             JOIN tbl_users u ON u.id = vid.vendor_id
+         ) vend ON TRUE
+        WHERE nr.source_type = 'ARC'
+          AND ($1::int[] IS NULL OR a.hospitality_company_id = ANY($1::int[]))
+          AND ($2::int IS NULL OR a.hotel_id = $2)
+        ORDER BY nr.created_at DESC`,
+      [companyIds, hotelId]
+    );
   },
 
   /**
@@ -112,14 +508,16 @@ const negotiationModel = {
           nr.*,
           u.name as created_by_name,
           u.email as created_by_email,
-          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+          pn_.product_names
          FROM tbl_negotiation_rounds nr
          LEFT JOIN tbl_users u ON u.id = nr.created_by
          LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
          LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
          LEFT JOIN tbl_product P ON P.id = PV.product_id
+         ${productNamesLateralSql('nr')}
          WHERE nr.rfq_id = $1
-           AND nr.rfq_product_id = $2
+           AND ${coversProductSql('$2')}
            AND nr.status IN ${statusFilter}
            ${endDateFilter}
            AND $3 = ANY(nr.vendor_ids)
@@ -133,14 +531,16 @@ const negotiationModel = {
           nr.*,
           u.name as created_by_name,
           u.email as created_by_email,
-          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+          COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+          pn_.product_names
          FROM tbl_negotiation_rounds nr
          LEFT JOIN tbl_users u ON u.id = nr.created_by
          LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
          LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
          LEFT JOIN tbl_product P ON P.id = PV.product_id
+         ${productNamesLateralSql('nr')}
          WHERE nr.rfq_id = $1
-           AND nr.rfq_product_id = $2
+           AND ${coversProductSql('$2')}
            AND nr.status IN ${statusFilter}
            ${endDateFilter}
          ORDER BY nr.round_number DESC
@@ -148,6 +548,8 @@ const negotiationModel = {
         [rfqId, rfqProductId]
       );
     }
+
+    normalizeProductNames(row);
 
     // F-NEGO-001: when a vendor is reading the round, scope vendor_approvals
     // to that vendor only — never expose other vendors' approval entries
@@ -157,6 +559,9 @@ const negotiationModel = {
         (elem) => Number(elem?.vendor_id) === Number(vendorId)
       );
     }
+    // Same rule for multi-product rounds: strip products[].vendor_targets
+    // down to the requesting vendor.
+    if (row && vendorId) stripProductsForVendor(row, vendorId);
 
     return row;
   },
@@ -173,23 +578,27 @@ const negotiationModel = {
     // (cron may not have updated the status to ENDED yet)
     const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
 
-    return db.any(
+    const rows = await db.any(
       `SELECT
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
-        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+        pn_.product_names
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
+       ${productNamesLateralSql('nr')}
        WHERE nr.rfq_id = $1
          AND nr.status IN ${statusFilter}
          ${endDateFilter}
-       ORDER BY nr.rfq_product_id, nr.round_number DESC`,
+       ORDER BY nr.rfq_product_id NULLS LAST, nr.round_number DESC`,
       [rfqId]
     );
+    rows.forEach(normalizeProductNames);
+    return rows;
   },
 
   /**
@@ -199,12 +608,26 @@ const negotiationModel = {
     if (!rfqProductId) {
       throw new Error('rfq_product_id is required');
     }
-    
+
     const result = await db.oneOrNone(
       `SELECT COALESCE(MAX(round_number), 0) + 1 as next_round
        FROM tbl_negotiation_rounds
        WHERE rfq_id = $1 AND rfq_product_id = $2`,
       [rfqId, rfqProductId]
+    );
+    return result ? parseInt(result.next_round) : 1;
+  },
+
+  /**
+   * Next round number across the whole RFQ — used for all NEW rounds
+   * (multi-product rounds have no single product to scope numbering to).
+   */
+  getNextRoundNumberForRfq: async (rfqId) => {
+    const result = await db.oneOrNone(
+      `SELECT COALESCE(MAX(round_number), 0) + 1 as next_round
+       FROM tbl_negotiation_rounds
+       WHERE rfq_id = $1`,
+      [rfqId]
     );
     return result ? parseInt(result.next_round) : 1;
   },
@@ -427,16 +850,18 @@ const negotiationModel = {
    * Only considers rounds where the vendor is assigned.
    */
   getVendorNegotiationStatus: async (rfqId, rfqProductId, vendorId) => {
-    // Find the latest negotiation round assigned to this vendor for this product
+    // Find the latest negotiation round assigned to this vendor covering this product
     const latestRound = await db.oneOrNone(
       `SELECT nr.*,
-        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+        COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+        pn_.product_names
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
+       ${productNamesLateralSql('nr')}
        WHERE nr.rfq_id = $1
-         AND nr.rfq_product_id = $2
+         AND ${coversProductSql('$2')}
          AND $3 = ANY(nr.vendor_ids)
        ORDER BY
          CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
@@ -456,11 +881,24 @@ const negotiationModel = {
       };
     }
 
-    // Check if vendor has submitted a quote for this round
+    normalizeProductNames(latestRound);
+    // Per-product negotiation fields for this vendor (multi rounds carry them
+    // in products[]; legacy in vendor_approvals[].negotiation_fields).
+    const negotiationFields = getVendorFieldsForProduct(latestRound, vendorId, rfqProductId);
+    stripProductsForVendor(latestRound, vendorId);
+    if (Array.isArray(latestRound.vendor_approvals)) {
+      latestRound.vendor_approvals = latestRound.vendor_approvals.filter(
+        (elem) => Number(elem?.vendor_id) === Number(vendorId)
+      );
+    }
+
+    // Check if vendor has submitted a quote for this round + product (multi
+    // rounds carry one quote row per covered product — without the product
+    // filter oneOrNone would throw on >1 row).
     const vendorQuote = await db.oneOrNone(
       `SELECT * FROM tbl_negotiation_round_quotes
-       WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-      [latestRound.id, vendorId]
+       WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+      [latestRound.id, vendorId, rfqProductId]
     );
 
     // Check both status and end_date as fallback in case cron hasn't fired yet
@@ -474,6 +912,7 @@ const negotiationModel = {
       hasRound: true,
       round: {
         ...latestRound,
+        negotiation_fields_for_product: negotiationFields,
         isExpired
       },
       vendorQuote: vendorQuote,
@@ -486,21 +925,35 @@ const negotiationModel = {
    * Only returns rounds where the vendor is assigned via the vendor_ids array column.
    */
   getActiveRoundsWithVendorStatus: async (rfqId, vendorId) => {
-    // Get the latest round per product assigned to this vendor
+    // Latest round per COVERED product assigned to this vendor. A multi
+    // round (rfq_product_id NULL, products JSONB) is unnested into one row
+    // per covered product so per-product lock/badge logic keeps working.
     const latestRounds = await db.any(
-      `SELECT DISTINCT ON (nr.rfq_product_id) nr.*,
+      `SELECT DISTINCT ON (cp.covered_product_id) nr.*,
+        cp.covered_product_id,
         COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
         nrq.id as vendor_quote_id,
         nrq.quoted_price as vendor_quoted_price,
         nrq.submitted_at as vendor_submitted_at
        FROM tbl_negotiation_rounds nr
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       CROSS JOIN LATERAL (
+         SELECT nr.rfq_product_id AS covered_product_id
+         WHERE nr.rfq_product_id IS NOT NULL
+         UNION
+         SELECT (p_->>'rfq_product_id')::int
+         FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+         WHERE p_->>'rfq_product_id' IS NOT NULL
+       ) cp
+       LEFT JOIN tbl_rfq_products rp ON rp.id = cp.covered_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
-       LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = $2
+       LEFT JOIN tbl_negotiation_round_quotes nrq
+         ON nrq.negotiation_round_id = nr.id
+         AND nrq.vendor_id = $2
+         AND nrq.rfq_product_id = cp.covered_product_id
        WHERE nr.rfq_id = $1
          AND $2 = ANY(nr.vendor_ids)
-       ORDER BY nr.rfq_product_id,
+       ORDER BY cp.covered_product_id,
          CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
          nr.round_number DESC,
          nr.created_at DESC`,
@@ -512,8 +965,18 @@ const negotiationModel = {
       const endDatePassed = parseAsUTC(round.end_date) <= new Date();
       const effectiveStatus = (round.status === 'ACTIVE' && endDatePassed) ? 'ENDED' : round.status;
       const isExpired = effectiveStatus === 'ENDED' || effectiveStatus === 'EXPIRED' || effectiveStatus === 'CLOSED' || effectiveStatus === 'COMPLETED';
+      const coveredProductId = round.covered_product_id ?? round.rfq_product_id;
+      stripProductsForVendor(round, vendorId);
+      if (Array.isArray(round.vendor_approvals)) {
+        round.vendor_approvals = round.vendor_approvals.filter(
+          (elem) => Number(elem?.vendor_id) === Number(vendorId)
+        );
+      }
       return {
         ...round,
+        // Per-product identity for consumers that key by rfq_product_id.
+        rfq_product_id: coveredProductId,
+        negotiation_fields_for_product: getVendorFieldsForProduct(round, vendorId, coveredProductId),
         isExpired,
         isActive: effectiveStatus === 'ACTIVE',
         hasSubmittedQuote: !!round.vendor_quote_id
@@ -692,14 +1155,16 @@ const negotiationModel = {
       // Full rounds history for the RFQ
       db.any(
         `SELECT nr.*, u.name as created_by_name, u.email as created_by_email,
-                COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name
+                COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) as product_name,
+                pn_.product_names
          FROM tbl_negotiation_rounds nr
          LEFT JOIN tbl_users u ON u.id = nr.created_by
          LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
          LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
          LEFT JOIN tbl_product P ON P.id = PV.product_id
+         ${productNamesLateralSql('nr')}
          WHERE nr.rfq_id = $1
-         ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`,
+         ORDER BY nr.rfq_product_id NULLS LAST, nr.round_number ASC, nr.created_at DESC`,
         [rfqId]
       ),
       // All approval instances for NEGOTIATION (entity_id = round_id) and NEGOTIATION_QUOTE (entity_id = product_id)
@@ -892,6 +1357,7 @@ const negotiationModel = {
     // New rounds use entity_id = round.id; old rounds used entity_id = rfq_product_id.
     // Try round.id first, then fall back to matching via metadata.round_id from the product bucket.
     const enrichedRounds = roundsHistory.map(round => {
+      normalizeProductNames(round);
       let roundApprovals = negotiationInstances[String(round.id)] || [];
       if (roundApprovals.length === 0) {
         // Backward compat: old instances keyed by rfq_product_id
@@ -937,36 +1403,49 @@ const negotiationModel = {
    * Get rounds that need rescheduling on server startup (future end_date, still pending or active)
    */
   getRoundsForReschedule: async () => {
-    return db.any(`
+    // LEFT JOIN on tbl_rfq_products: multi-product rounds have a NULL
+    // rfq_product_id — an INNER JOIN would silently drop them from the
+    // expiry scheduler and they would never end.
+    const rows = await db.any(`
       SELECT nr.*, r.rfq_no, r.hotel_id,
              rp.product_variant_id,
-             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name,
+             pn_.product_names
       FROM tbl_negotiation_rounds nr
       JOIN tbl_rfq r ON r.id = nr.rfq_id
-      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
       LEFT JOIN tbl_product P ON P.id = PV.product_id
+      ${productNamesLateralSql('nr')}
       WHERE nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
         AND nr.end_date > NOW()
     `);
+    rows.forEach(normalizeProductNames);
+    return rows;
   },
 
   /**
    * Get rounds that expired during server downtime (past end_date, still pending or active)
    */
   getExpiredRoundsDuringDowntime: async () => {
-    return db.any(`
+    // LEFT JOIN — see getRoundsForReschedule note (multi rounds have NULL
+    // rfq_product_id).
+    const rows = await db.any(`
       SELECT nr.*, r.rfq_no, r.hotel_id,
              rp.product_variant_id,
-             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name,
+             pn_.product_names
       FROM tbl_negotiation_rounds nr
       JOIN tbl_rfq r ON r.id = nr.rfq_id
-      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
       LEFT JOIN tbl_product P ON P.id = PV.product_id
+      ${productNamesLateralSql('nr')}
       WHERE nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
         AND nr.end_date <= NOW()
     `);
+    rows.forEach(normalizeProductNames);
+    return rows;
   },
 
   /**
@@ -984,17 +1463,22 @@ const negotiationModel = {
    * Get round by ID with RFQ and product info (for cron expiration handler)
    */
   getRoundWithContext: async (roundId) => {
-    return db.oneOrNone(`
+    // LEFT JOIN — see getRoundsForReschedule note (multi rounds have NULL
+    // rfq_product_id).
+    const row = await db.oneOrNone(`
       SELECT nr.*, r.rfq_no, r.hotel_id,
              rp.product_variant_id,
-             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name
+             COALESCE(PV.name, P.name, 'Product #' || rp.product_variant_id) AS product_name,
+             pn_.product_names
       FROM tbl_negotiation_rounds nr
       JOIN tbl_rfq r ON r.id = nr.rfq_id
-      JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+      LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
       LEFT JOIN tbl_product P ON P.id = PV.product_id
+      ${productNamesLateralSql('nr')}
       WHERE nr.id = $1
     `, [roundId]);
+    return normalizeProductNames(row);
   },
 
   // ============= ROUND VENDOR ASSIGNMENT =============
@@ -1005,13 +1489,13 @@ const negotiationModel = {
    */
   getVendorsInActiveRounds: async (rfqId, rfqProductId) => {
     const rows = await db.any(
-      `SELECT vendor_ids
-       FROM tbl_negotiation_rounds
-       WHERE rfq_id = $1
-         AND rfq_product_id = $2
-         AND status IN ('PENDING_APPROVAL', 'ACTIVE')
-         AND (status != 'ACTIVE' OR end_date > NOW())
-         AND vendor_ids IS NOT NULL`,
+      `SELECT nr.vendor_ids
+       FROM tbl_negotiation_rounds nr
+       WHERE nr.rfq_id = $1
+         AND ${coversProductSql('$2')}
+         AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())
+         AND nr.vendor_ids IS NOT NULL`,
       [rfqId, rfqProductId]
     );
     // Flatten all vendor_ids arrays into a unique set
@@ -1065,7 +1549,7 @@ const negotiationModel = {
          SELECT nr.id, nr.round_number, nr.status
          FROM tbl_negotiation_rounds nr
          WHERE nr.rfq_id = $2
-           AND nr.rfq_product_id = $1
+           AND ${coversProductSql('$1')}
            AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
            AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())
            AND u.id = ANY(nr.vendor_ids)
@@ -1078,6 +1562,25 @@ const negotiationModel = {
          CASE WHEN active_nr.id IS NOT NULL THEN 1 ELSE 0 END,
          COALESCE(c.company_name, u.organization_name, u.name)`,
       [rfqProductId, rfqId]
+    );
+  },
+
+  /**
+   * Distinct vendors across every product of an RFQ — used to validate the
+   * vendor list of an RFQ-level (no product) negotiation entry.
+   */
+  getVendorsForRfq: async (rfqId) => {
+    return db.any(
+      `SELECT DISTINCT u.id, u.name, u.email, u.organization_name, c.company_name
+       FROM tbl_rfq_products rp
+       JOIN tbl_rfq_product_vendors rpv
+         ON rpv.rfq_id = rp.rfq_id
+         AND rpv.product_variant_id = rp.product_variant_id
+         AND rpv.variant = rp.variant
+       JOIN tbl_users u ON u.id = rpv.user_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE rp.rfq_id = $1`,
+      [rfqId]
     );
   },
 
@@ -1111,8 +1614,9 @@ const negotiationModel = {
          SELECT jsonb_agg(
            CASE
              WHEN (elem->>'vendor_id')::int = $2
-             THEN jsonb_build_object(
-               'vendor_id', $2::int,
+             -- Merge instead of rebuild so extra keys on the entry (e.g.
+             -- legacy negotiation_fields) survive the status update.
+             THEN elem || jsonb_build_object(
                'status', $3::text,
                'remarks', $4::text,
                'acted_by', $5::int,
@@ -1184,8 +1688,9 @@ const negotiationModel = {
          SELECT jsonb_agg(
            CASE
              WHEN (elem->>'vendor_id')::int = $2
-             THEN jsonb_build_object(
-               'vendor_id', $2::int,
+             -- Merge instead of rebuild so extra keys on the entry (e.g.
+             -- legacy negotiation_fields) survive the reset.
+             THEN elem || jsonb_build_object(
                'status', 'PENDING',
                'remarks', null,
                'acted_by', null,

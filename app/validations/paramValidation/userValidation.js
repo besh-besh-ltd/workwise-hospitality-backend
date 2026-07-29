@@ -367,6 +367,7 @@ const schemas = {
         company_id: Joi.number().optional().allow(null),
         hotel_id: Joi.number().optional().allow(null),
         department_id: Joi.number().optional().allow(null),
+        process_id: Joi.number().integer().optional().allow(null),
         permissions: Joi.object().optional()
       })
     ).optional(),

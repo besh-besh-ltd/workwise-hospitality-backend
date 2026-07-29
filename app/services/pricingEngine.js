@@ -242,6 +242,25 @@ export const calculateDocumentTotals = (lineItems = [], globalCharges = []) => {
   };
 };
 
+// Document-level global charges total for a *known* line subtotal — the same
+// per-charge math calculateDocumentTotals applies (charge amount on the
+// subtotal, PLUS the charge's additional_tax on that amount), summed raw.
+// Callers that already have a subtotal (e.g. the PO multi-line merge path)
+// MUST use this instead of hand-rolling the loop, so they can never drift from
+// the engine by, say, forgetting additional_tax. Returns the raw (un-q2'd)
+// total — quantise at the caller's own boundary.
+export const sumGlobalCharges = (globalCharges = [], subtotal = 0) => {
+  let total = 0;
+  for (const gc of globalCharges || []) {
+    const norm = normalizeGlobalCharge(gc);
+    if (!norm) continue;
+    const amount = applyChargeMode(norm.amount, norm.amount_mode, subtotal);
+    const additionalTax = applyChargeMode(norm.additional_tax, norm.additional_tax_mode, amount);
+    total += amount + additionalTax;
+  }
+  return total;
+};
+
 // Quote-compare's "normalize" filter applies a payment-term factor to the
 // total, simulating the cost-of-money for advance/credit terms so vendors with
 // different payment terms can be compared apples-to-apples.
@@ -555,11 +574,44 @@ export const normalizeChargesMeta = (rawMeta = {}) => {
   };
 };
 
+// Reverse-calculate the tax-EXCLUSIVE base from a GST-INCLUSIVE price.
+//   base = inclusive / (1 + gst/100)
+// gstPct is a PERCENTAGE. gst <= 0 → base === inclusive (nothing to extract).
+// Defensive: if (1 + gst/100) <= 0 (gst <= -100), return the inclusive unchanged
+// (controller validation already rejects negative gst; this only guards divide-by-≤0).
+// Returns a RAW number — the caller quantises.
+export const deriveBaseFromInclusive = (inclusive, gstPct) => {
+  const inc = toNumber(inclusive);
+  const g = toNumber(gstPct);
+  const divisor = 1 + g / 100;
+  if (divisor <= 0) return inc;
+  return inc / divisor;
+};
+
+// Resolve raw MRP-mode inputs into the canonical exclusive line numbers.
+// discount is applied to MRP FIRST (percentage-of-MRP or absolute, via the
+// existing applyChargeMode), then GST is extracted from the net inclusive price.
+// Returns { net_inclusive, base, gst_amount, discount_amount } — base is
+// QUANTISED to 2dp (matches the numeric(15,2) columns and guarantees the value
+// stored == the value fed to the engine == the value any downstream reader
+// recomputes from, so persist-time and read-time totals never diverge). The
+// other fields are raw (for display + audit).
+export const deriveMrpLine = ({ mrp, discount, discount_mode, gst_pct } = {}) => {
+  const m = toNumber(mrp);
+  const discount_amount = applyChargeMode(discount, discount_mode, m); // % of MRP or absolute
+  const net_inclusive = Math.max(0, m - discount_amount);
+  const baseRaw = deriveBaseFromInclusive(net_inclusive, gst_pct);
+  const base = q2(baseRaw);
+  const gst_amount = net_inclusive - base;
+  return { net_inclusive, base, gst_amount, discount_amount };
+};
+
 export default {
   applyChargeMode,
   proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
+  sumGlobalCharges,
   applyPaymentTermNormalization,
   fillMissingChargesFromPeers,
   computeComparisonBands,
@@ -567,4 +619,6 @@ export default {
   computeFreightAdvantage,
   normalizeChargesMeta,
   normalizeGlobalCharge,
+  deriveBaseFromInclusive,
+  deriveMrpLine,
 };

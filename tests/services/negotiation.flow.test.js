@@ -205,7 +205,7 @@ describe("createRound — input validation", () => {
     });
     await negotiationController.createRound(m.req, m.res);
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.message).toMatch(/vendor_targets.*non-empty/i);
+    expect(m.calls.body.message).toMatch(/non-empty vendor_targets/i);
   });
 
   it("rejects when vendor_targets is an empty array", async () => {
@@ -339,7 +339,7 @@ describe("createRound — state gates", () => {
     });
     await negotiationController.createRound(m.req, m.res);
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.message).toMatch(/not part of this product/i);
+    expect(m.calls.body.message).toMatch(/not part of (this )?product/i);
   });
 });
 

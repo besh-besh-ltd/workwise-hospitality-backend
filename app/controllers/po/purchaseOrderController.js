@@ -10,8 +10,18 @@ import hospitalityModel from "../../models/hospitalityModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../../util/constants.js";
 import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
 import rbacModel from "../../models/rbacModel.js";
+import {
+  assertUserHasScope,
+  assertCanReadParentRfq,
+  AuthorizationError,
+  NoApprovalPolicyError,
+  sendScopeError
+} from "../../services/authorizationService.js";
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 import pricingEngine from "../../services/pricingEngine.js";
+import { getPODetailFull } from "../../models/poDashboardModel.js";
+import { deriveScope } from "./poDashboardController.js";
+import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -32,6 +42,13 @@ export const getPOByRFQ = async (req, res) => {
         const { page = 1, limit = 10, ...filters } = req.query;
         const { id, user_type } = req.user;
 
+        // Defense-in-depth: scope-check the parent RFQ before listing POs.
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+            if (e instanceof AuthorizationError) return sendScopeError(res, e);
+            throw e;
+        }
+
         const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
 
         return res.json(result);
@@ -51,10 +68,45 @@ export const getPODetails = async (req, res) => {
         const { po_id } = req.params;
         const { id } = req.user;
 
+        // Defense-in-depth: resolve parent RFQ from po_id, then scope-check.
+        // Skip when invoked via the GRN token path (req.user.id absent).
+        if (id) {
+            const parent = await db.oneOrNone(
+                `SELECT rfq_id FROM tbl_rfq_purchase_order WHERE id = $1`,
+                [po_id]
+            );
+            if (parent?.rfq_id) {
+                try { await assertCanReadParentRfq(id, parent.rfq_id); }
+                catch (e) {
+                    if (e instanceof AuthorizationError) return sendScopeError(res, e);
+                    throw e;
+                }
+            }
+        }
+
         const result = await getPODetailsById(po_id, id);
+
+        // Additively merge the new contract-shaped detail-full object under a
+        // `detail` key so the new PO Detail page can consume the structured
+        // shape WITHOUT breaking any existing consumer of the legacy `data`
+        // payload. Scope is derived from req.user + headers; for GRN
+        // token-users (id = -1, no company scope) we skip the augmentation.
+        let detail = null;
+        if (!req.user.is_token_user && req.user.id > 0) {
+          try {
+            const scope = await deriveScope(req);
+            if (scope.hospitalityCompanyIds === null || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0) || scope.companyId) {
+              detail = await getPODetailFull(po_id, scope);
+            }
+          } catch (augErr) {
+            // Never fail the legacy response because of the augmentation.
+            logError('getPODetails detail-full augmentation failed', augErr);
+          }
+        }
 
         return res.json({
           data: result,
+          detail,
         });
 
     } catch (error) {
@@ -936,11 +988,13 @@ export const acceptPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 
@@ -1008,6 +1062,7 @@ export const rejectPO = async (req, res) => {
     }
     const vendorUserId = req.user.id;
 
+    let callOffReject = null;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
       const po = await t.oneOrNone(
@@ -1020,11 +1075,13 @@ export const rejectPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 
@@ -1037,8 +1094,13 @@ export const rejectPO = async (req, res) => {
         WHERE id = $1
       `, [po_id, reason]);
 
-      // Definalize vendor — move from tbl_quote_finalization to history
-      await handlePORejection(po, vendorUserId, t);
+      // Call-off POs (no RFQ) reverse contract consumption + reopen the MR;
+      // RFQ POs run the de-finalization cascade (audit CO9).
+      if (po.is_call_off) {
+        callOffReject = await handleCallOffRejection(po_id, reason, t);
+      } else {
+        await handlePORejection(po, vendorUserId, t);
+      }
 
       await recordLifecycleEvent({
         entity_type: 'PO',
@@ -1057,10 +1119,20 @@ export const rejectPO = async (req, res) => {
       return po;
     });
 
-    // Send rejection notification to commercial evaluators (fire-and-forget)
-    sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
-      logError('Failed to send vendor rejection notification', err);
-    });
+    // Rejection notification (fire-and-forget). Call-offs notify the MR raiser;
+    // RFQ POs notify the commercial evaluators (audit CO9).
+    if (result.is_call_off) {
+      notifyCallOffRejected({
+        raisedBy: callOffReject?.raised_by,
+        mrNumber: callOffReject?.mr_number,
+        poNumber: result.po_number,
+        reason,
+      }).catch(err => logError('Failed to notify call-off rejection', err));
+    } else {
+      sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
+        logError('Failed to send vendor rejection notification', err);
+      });
+    }
 
     return res.json({
       status: 1,

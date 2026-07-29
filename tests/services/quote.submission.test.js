@@ -31,6 +31,7 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
+import pricingEngine from "../../app/services/pricingEngine.js";
 
 afterAll(async () => {
   await closeDb();
@@ -717,5 +718,572 @@ describe("updateQuoteItems — happy paths", () => {
     expect(history.length).toBeGreaterThan(0);
     expect(parseFloat(history[0].unit_price)).toBe(100);
     expect(history[0].comment).toBe("initial");
+  });
+});
+
+// ===========================================================================
+//  MRP (tax-inclusive) quoting — createQuote + updateQuoteItems
+//  Spec: .pipeline/spec.md §4, §8, §9.
+//
+//  Covers: server-authoritative derivation (unit_price/total_price are
+//  computed from entered_mrp/mrp_discount/gst via deriveMrpLine — NEVER
+//  trusted from the client, even when the client also sends a bogus
+//  unit_price/total_price); audit-column persistence on BOTH duplicated
+//  write paths (§8.7's divergence risk); round-trip to the entered MRP
+//  within 0.01; backward compat for a Traditional (no pricing_method) line;
+//  and explicit failure cases (entered_mrp <= 0, a zeroing discount).
+// ===========================================================================
+
+describe("MRP (tax-inclusive) quoting — createQuote", () => {
+  it("derives unit_price/total_price from entered_mrp server-side, discarding a client-supplied unit_price/total_price", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        pricing_method: "MRP",
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: 999999, tax: 18, total_price: 424242, // garbage — must be discarded
+            comment: "mrp line", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const quote = await db.one(`SELECT id, pricing_method FROM tbl_quotes WHERE rfq_id=$1`, [rfq_id]);
+    expect(quote.pricing_method).toBe("MRP");
+
+    const item = await db.one(
+      `SELECT unit_price, total_price, pricing_method, entered_mrp, mrp_discount, mrp_discount_mode
+       FROM tbl_quote_items WHERE quote_id=$1`,
+      [quote.id]
+    );
+    // base = 1180 / 1.18 = 1000 exactly — NOT the client's 999999.
+    expect(parseFloat(item.unit_price)).toBe(1000);
+    expect(item.pricing_method).toBe("MRP");
+    expect(parseFloat(item.entered_mrp)).toBe(1180);
+    expect(item.mrp_discount).toBeNull();
+    expect(item.mrp_discount_mode).toBe("percentage");
+    // total_price = 1000 * 1 * 1.18 = 1180 exactly — reproduces the entered
+    // MRP (qty=1) and is NOT the client's 424242.
+    expect(parseFloat(item.total_price)).toBe(1180);
+  });
+
+  it("forces percentage GST on an MRP line even when the client sends tax_mode='absolute' (round-trip preserved)", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        pricing_method: "MRP",
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "mrp abs-tamper", delivery_period: "7d", quantity: "1",
+            tax_mode: "absolute", other_charges: [], // client tampers with an absolute GST mode
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, tax, tax_mode, total_price FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // The server must IGNORE the client's absolute tax_mode and store percentage,
+    // so the engine re-adds 18% (not a flat ₹18) and the total reproduces the
+    // entered MRP: base 1000, total 1000 * 1.18 = 1180 — NOT 1000 + 18 = 1018.
+    expect(item.tax_mode).toBe("percentage");
+    expect(parseFloat(item.unit_price)).toBe(1000);
+    expect(parseFloat(item.total_price)).toBe(1180);
+  });
+
+  it("fractional MRP round-trips to the entered inclusive within 0.01", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 100, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, total_price FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // deriveMrpLine({mrp:100, gst_pct:18}).base === 84.75 (q2'd once in the helper).
+    expect(parseFloat(item.unit_price)).toBe(84.75);
+    // Engine round-trip: 84.75 * 1.18 = 100.005 → q2 → 100.01, within the spec's
+    // accepted 0.01 tolerance of the entered 100.
+    expect(parseFloat(item.total_price)).toBe(100.01);
+    expect(Math.abs(parseFloat(item.total_price) - 100)).toBeLessThanOrEqual(0.011);
+  });
+
+  it("applies a percentage discount to MRP before extracting GST", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: 10, mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, mrp_discount, mrp_discount_mode FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // net = 1180 - 10% = 1062; base = 1062 / 1.18 = 900 exactly.
+    expect(parseFloat(item.unit_price)).toBe(900);
+    expect(parseFloat(item.mrp_discount)).toBe(10);
+    expect(item.mrp_discount_mode).toBe("percentage");
+  });
+
+  it("a Traditional (no pricing_method) line is unaffected — backward compatible", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          { product_id: 1, variant: 0, unit_price: 100, tax: 18, total_price: 118, comment: "trad", delivery_period: "7d", quantity: "10", tax_mode: "percentage", other_charges: [] },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const quote = await db.one(`SELECT id, pricing_method FROM tbl_quotes WHERE rfq_id=$1`, [rfq_id]);
+    expect(quote.pricing_method).toBe("TRADITIONAL");
+
+    const item = await db.one(
+      `SELECT unit_price, total_price, pricing_method, entered_mrp, mrp_discount, mrp_discount_mode
+       FROM tbl_quote_items WHERE quote_id=$1`,
+      [quote.id]
+    );
+    expect(parseFloat(item.unit_price)).toBe(100);
+    expect(parseFloat(item.total_price)).toBe(1180); // 100 * 10 * 1.18, same formula as before MRP existed
+    expect(item.pricing_method).toBe("TRADITIONAL");
+    expect(item.entered_mrp).toBeNull();
+    expect(item.mrp_discount).toBeNull();
+    expect(item.mrp_discount_mode).toBeNull();
+  });
+
+  // ---- Failure cases ----
+
+  it("rejects an MRP line with entered_mrp <= 0 — nothing is persisted", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0, product_name: "Widget",
+            pricing_method: "MRP",
+            entered_mrp: 0, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/MRP must be greater than 0/i);
+
+    const quoteCount = await db.one(`SELECT COUNT(*)::int AS n FROM tbl_quotes WHERE rfq_id=$1`, [rfq_id]);
+    expect(quoteCount.n).toBe(0);
+  });
+
+  it("rejects a discount that zeroes the net (>= 100% of MRP)", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0, product_name: "Widget",
+            pricing_method: "MRP",
+            entered_mrp: 1000, mrp_discount: 100, mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/discount is invalid/i);
+  });
+
+  // ── Gap 4: other_charges stay enabled and ADD ON TOP of the MRP-derived
+  // base — MRP only governs the goods price, not per-line charges. ────────
+  it("MRP line with an other_charge: derived base is unaffected, and the charge (+ its own tri-state tax) adds ON TOP of the base", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "mrp with freight", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage",
+            other_charges: [
+              { name: "Freight", amount: 200, amount_mode: "absolute", tax: 10, tax_mode: "percentage", comment: "freight chg" },
+            ],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, total_price, other_charges FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // base = 1180 / 1.18 = 1000 — the freight charge does NOT alter the MRP derivation.
+    expect(parseFloat(item.unit_price)).toBe(1000);
+
+    const charges = Array.isArray(item.other_charges) ? item.other_charges : JSON.parse(item.other_charges || "[]");
+    // Charge amount/tax are computed independently of the MRP base — a flat
+    // ₹200 with its own explicit 10% tax (₹20), NOT scaled/derived from the
+    // MRP or discount math.
+    expect(pricingEngine.calculateLineTotal({
+      unit_price: 1000, quantity: 1, tax: 18, tax_mode: "percentage", other_charges: charges,
+    }).total).toBe(1400);
+    // total = base*(1+gst%) + charge(+its own tax) = 1180 (base+basetax) + 220.
+    expect(parseFloat(item.total_price)).toBe(1400);
+  });
+
+  // ── Gap 6: absolute (₹) discount, not just percentage ──────────────────
+  it("an absolute (₹) MRP discount derives the correct base — MRP 1180 less ₹118 → net 1062 → base 900 → total 1062", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: 118, mrp_discount_mode: "absolute",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, total_price, mrp_discount, mrp_discount_mode FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // net = 1180 - 118 = 1062; base = 1062 / 1.18 = 900 exactly.
+    expect(parseFloat(item.unit_price)).toBe(900);
+    expect(parseFloat(item.mrp_discount)).toBe(118);
+    expect(item.mrp_discount_mode).toBe("absolute");
+    expect(parseFloat(item.total_price)).toBe(1062);
+  });
+
+  // ── Gap 7: gst=0 is a valid MRP line, not an error ─────────────────────
+  it("an MRP line with gst=0 → base equals the entered MRP exactly, total has no tax, not an error", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1000, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 0, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT unit_price, total_price FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    // gst=0 → nothing to extract → base === entered MRP exactly, and the
+    // total (no tax) also equals the entered MRP. Not an error.
+    expect(parseFloat(item.unit_price)).toBe(1000);
+    expect(parseFloat(item.total_price)).toBe(1000);
+  });
+
+  // ── Gap 5 (RFQ half): downstream buyer-side reader parity ───────────────
+  //
+  // Proving the FULL HTTP quote-comparison-view path (GET
+  // /rfq/quote-comparison-view/:id) is disproportionately heavy for this
+  // suite: it requires deriveScope headers, a `quotes_locked`/deadline gate,
+  // optional tech-eval wiring, and finalization/approval fixtures — see the
+  // dedicated 900+ line `tests/services/rfq.quoteComparisonView.test.js`
+  // suite that already exists purely to set that up.
+  //
+  // Instead we assert at the model-READ level, using the EXACT same formula
+  // the comparison pipeline uses: `quoteCompareService.enrichQuoteCompareData`
+  // reads `merged.unit_price` / `merged.tax` / `merged.tax_mode` off the
+  // fetched quote row (no `pricing_method`/`entered_mrp` awareness at all —
+  // see quoteCompareService.js L107-110) and feeds them straight into
+  // `pricingEngine.calculateLineTotal` — the identical function
+  // `createQuote`'s own server-authoritative recompute uses. So: read the
+  // MRP row's persisted `unit_price`/`tax`/`tax_mode` (with NO `entered_mrp`/
+  // `pricing_method` in the read), run them through `calculateLineTotal`
+  // exactly as the comparison view would, and confirm the recomputed total
+  // reproduces the entered MRP identically — proving a downstream reader
+  // with zero MRP-specific code renders this row correctly.
+  it("downstream reader parity: stored unit_price/tax/tax_mode alone (no MRP awareness) reproduce the entered MRP via the same formula quote-comparison uses", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    // Read back ONLY the fields a downstream reader like
+    // quoteCompareService.enrichQuoteCompareData would read (unit_price, tax,
+    // tax_mode, quantity, other_charges) — deliberately NOT selecting
+    // pricing_method/entered_mrp/mrp_discount, to simulate an MRP-unaware reader.
+    const row = await db.one(
+      `SELECT unit_price, tax, tax_mode, quantity, other_charges, total_price
+       FROM tbl_quote_items WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    const oc = Array.isArray(row.other_charges) ? row.other_charges : JSON.parse(row.other_charges || "[]");
+    const landed = pricingEngine.calculateLineTotal({
+      unit_price: row.unit_price,
+      quantity: row.quantity,
+      tax: row.tax,
+      tax_mode: row.tax_mode,
+      other_charges: oc,
+    });
+    // The MRP-unaware recompute reproduces the entered MRP exactly (1180),
+    // matching both the stored total_price and the original entered_mrp.
+    expect(landed.total).toBe(1180);
+    expect(landed.total).toBe(parseFloat(row.total_price));
+  });
+});
+
+describe("MRP (tax-inclusive) quoting — updateQuoteItems (parity with createQuote)", () => {
+  async function seedTraditionalQuote(rfq_id) {
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          { product_id: 1, variant: 0, unit_price: 100, tax: 18, total_price: 118, comment: "initial", delivery_period: "7d", quantity: "1", tax_mode: "percentage", other_charges: [] },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+    return await db.one(`SELECT id FROM tbl_quotes WHERE rfq_id=$1`, [rfq_id]);
+  }
+
+  it("editing an existing Traditional line to MRP derives + persists identically to createQuote; the header updates; history carries the PRE-change (Traditional) state", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const quote = await seedTraditionalQuote(rfq_id);
+
+    const m = mockExpress({
+      user: vendorUser(),
+      params: { quoteId: String(quote.id) },
+      body: {
+        rfq_id, rfq_no: 12345,
+        globalPaymentTerms: null, globalComment: "switched to MRP", global_charges: [],
+        global_payment_term_list: { createdTerms: [], updatedTerms: [], deletedTerms: [] },
+        pricing_method: "MRP",
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: 777777, tax: 18, total_price: 555555, // garbage — must be discarded
+            comment: "now mrp", delivery_period: "5d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.updateQuoteItems(m.req, m.res, m.next);
+
+    const item = await db.one(
+      `SELECT unit_price, total_price, pricing_method, entered_mrp, mrp_discount, mrp_discount_mode
+       FROM tbl_quote_items WHERE quote_id=$1`,
+      [quote.id]
+    );
+    // Same derivation as createQuote: base 1000, total 1180 exactly.
+    expect(parseFloat(item.unit_price)).toBe(1000);
+    expect(parseFloat(item.total_price)).toBe(1180);
+    expect(item.pricing_method).toBe("MRP");
+    expect(parseFloat(item.entered_mrp)).toBe(1180);
+
+    // Header pricing_method updates too — the header-diff block fired because
+    // globalComment changed (pricing_method is gated the same way, per §4c).
+    const q = await db.one(`SELECT pricing_method FROM tbl_quotes WHERE id=$1`, [quote.id]);
+    expect(q.pricing_method).toBe("MRP");
+
+    // History row carries the PRE-change state (still Traditional, unit_price 100).
+    const history = await db.one(
+      `SELECT unit_price, pricing_method, entered_mrp
+       FROM tbl_quote_item_history
+       WHERE quote_item_id = (SELECT id FROM tbl_quote_items WHERE quote_id=$1)
+       ORDER BY id DESC LIMIT 1`,
+      [quote.id]
+    );
+    expect(parseFloat(history.unit_price)).toBe(100);
+    expect(history.pricing_method).toBe("TRADITIONAL");
+    expect(history.entered_mrp).toBeNull();
+  });
+
+  it("rejects an MRP line with entered_mrp <= 0 on the update path too (same guard as createQuote) — original line untouched", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const quote = await seedTraditionalQuote(rfq_id);
+
+    const m = mockExpress({
+      user: vendorUser(),
+      params: { quoteId: String(quote.id) },
+      body: {
+        rfq_id, rfq_no: 12345,
+        globalPaymentTerms: null, globalComment: null, global_charges: [],
+        global_payment_term_list: { createdTerms: [], updatedTerms: [], deletedTerms: [] },
+        products: [
+          {
+            product_id: 1, variant: 0, product_name: "Widget",
+            pricing_method: "MRP",
+            entered_mrp: -5, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "1",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.updateQuoteItems(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/MRP must be greater than 0/i);
+
+    const item = await db.one(`SELECT unit_price, pricing_method FROM tbl_quote_items WHERE quote_id=$1`, [quote.id]);
+    expect(parseFloat(item.unit_price)).toBe(100);
+    expect(item.pricing_method).toBe("TRADITIONAL");
+  });
+
+  // ── Gap 2 (DISCRIMINATING): the createQuote absolute-tamper guard has a
+  // twin at rfqController.js ~L14059 (`updateQuoteItems` pre-normalization),
+  // a SEPARATE code path with its own duplicated force. Without that force,
+  // this edit's `tax_mode` would resolve to the client's 'absolute' and the
+  // engine recompute at L14069-14079 (`tax_mode: product.tax_mode`) would
+  // store total_price=1018 (base 1000 + flat ₹18), not 1180 (base * 1.18) —
+  // exactly the undercharge bug §8.7 warns a divergent second guard chain
+  // could reintroduce. WITH the force (present), tax_mode is stored as
+  // 'percentage' and total_price reproduces the entered MRP (1180).
+  it("forces percentage GST on an MRP line even when the client sends tax_mode='absolute' on the UPDATE path — DISCRIMINATING (updateQuoteItems has its own separate pre-normalization force)", async () => {
+    const { rfq_id } = await makeRfqWithProducts();
+    const quote = await seedTraditionalQuote(rfq_id);
+
+    const m = mockExpress({
+      user: vendorUser(),
+      params: { quoteId: String(quote.id) },
+      body: {
+        rfq_id, rfq_no: 12345,
+        globalPaymentTerms: null, globalComment: "switched to MRP w/ abs tamper", global_charges: [],
+        global_payment_term_list: { createdTerms: [], updatedTerms: [], deletedTerms: [] },
+        pricing_method: "MRP",
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 1180, mrp_discount: "", mrp_discount_mode: "percentage",
+            unit_price: "", tax: 18, total_price: 0,
+            comment: "mrp abs-tamper on update", delivery_period: "5d", quantity: "1",
+            tax_mode: "absolute", other_charges: [], // client tampers with an absolute GST mode
+          },
+        ],
+      },
+    });
+    await rfqController.updateQuoteItems(m.req, m.res, m.next);
+
+    const item = await db.one(
+      `SELECT unit_price, tax, tax_mode, total_price, pricing_method FROM tbl_quote_items WHERE quote_id=$1`,
+      [quote.id]
+    );
+    // Server must IGNORE the client's absolute tax_mode and store percentage —
+    // base 1000, total 1000 * 1.18 = 1180, NOT 1000 + 18 = 1018.
+    expect(item.tax_mode).toBe("percentage");
+    expect(item.pricing_method).toBe("MRP");
+    expect(parseFloat(item.unit_price)).toBe(1000);
+    expect(parseFloat(item.total_price)).toBe(1180);
+    expect(parseFloat(item.total_price)).not.toBe(1018);
   });
 });

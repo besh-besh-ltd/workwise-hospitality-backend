@@ -176,7 +176,9 @@ CREATE TYPE public.permission_action_type AS ENUM (
     'update',
     'delete',
     'approve',
-    'regenerate'
+    'regenerate',
+    'evaluate',
+    'admin'
 );
 
 
@@ -215,7 +217,11 @@ CREATE TYPE public.resource_type AS ENUM (
     'negotiation',
     'arc',
     'awarding',
-    'boq'
+    'boq',
+    'arc-tech',
+    'arc-comm',
+    'arc-committee',
+    'mr'
 );
 
 
@@ -294,6 +300,25 @@ CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
 BEGIN
     NEW.updated_at = CURRENT_TIMESTAMP;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: tbl_negotiation_rounds_fill_source(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.tbl_negotiation_rounds_fill_source() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.source_type IS NULL AND NEW.rfq_id IS NOT NULL THEN
+    NEW.source_type := 'RFQ';
+  END IF;
+  IF NEW.source_id IS NULL AND NEW.rfq_id IS NOT NULL THEN
+    NEW.source_id := NEW.rfq_id;
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -1096,6 +1121,33 @@ CREATE TABLE public.tbl_category (
     updated_by integer,
     fee_amount integer DEFAULT 500 NOT NULL
 );
+
+
+--
+-- Name: tbl_category_department; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tbl_category_department (
+    id bigint NOT NULL,
+    category_id integer NOT NULL,
+    department_id integer NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: tbl_category_department_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.tbl_category_department_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE public.tbl_category_department_id_seq OWNED BY public.tbl_category_department.id;
 
 
 --
@@ -2173,6 +2225,7 @@ CREATE TABLE public.tbl_negotiation_round_quotes (
     negotiation_round_id integer NOT NULL,
     vendor_id integer NOT NULL,
     rfq_product_id integer,
+    arc_item_id bigint,
     quoted_price numeric(15,2),
     previous_price numeric(15,2),
     submitted_at timestamp without time zone,
@@ -2206,7 +2259,7 @@ ALTER SEQUENCE public.tbl_negotiation_round_quotes_id_seq OWNED BY public.tbl_ne
 
 CREATE TABLE public.tbl_negotiation_rounds (
     id integer NOT NULL,
-    rfq_id integer NOT NULL,
+    rfq_id integer,
     round_number integer DEFAULT 1 NOT NULL,
     target_price numeric(15,2),
     end_date timestamp without time zone NOT NULL,
@@ -2220,7 +2273,12 @@ CREATE TABLE public.tbl_negotiation_rounds (
     updated_at timestamp without time zone DEFAULT now(),
     rfq_product_id integer,
     vendor_ids integer[],
-    vendor_approvals jsonb DEFAULT '[]'::jsonb
+    vendor_approvals jsonb DEFAULT '[]'::jsonb,
+    source_type character varying(20) DEFAULT 'RFQ'::character varying NOT NULL,
+    source_id integer NOT NULL,
+    arc_item_id bigint,
+    products jsonb,
+    CONSTRAINT tbl_negotiation_rounds_source_type_chk CHECK (((source_type)::text = ANY ((ARRAY['RFQ'::character varying, 'ARC'::character varying])::text[])))
 );
 
 
@@ -2290,8 +2348,27 @@ CREATE TABLE public.tbl_notifications (
     additional_data json,
     created_at timestamp with time zone DEFAULT now(),
     admin_is_read smallint DEFAULT '0'::smallint,
-    token text
+    token text,
+    recipient_user_id integer,
+    action_url text,
+    category character varying(32)
 );
+
+-- Browser push subscriptions + per-recipient notification columns mirror
+-- migrations/2026_05_26_push_notifications.sql so the test schema stays in
+-- sync with production and notificationService.dispatch persists rows.
+CREATE TABLE IF NOT EXISTS public.tbl_push_subscriptions (
+    id serial PRIMARY KEY,
+    user_id integer NOT NULL,
+    endpoint text NOT NULL UNIQUE,
+    p256dh text NOT NULL,
+    auth text NOT NULL,
+    user_agent text,
+    created_at timestamp with time zone DEFAULT now(),
+    last_used_at timestamp with time zone
+);
+CREATE INDEX IF NOT EXISTS idx_push_sub_user ON public.tbl_push_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_notif_recipient_unread ON public.tbl_notifications(recipient_user_id, is_read);
 
 
 --
@@ -3007,13 +3084,15 @@ ALTER SEQUENCE public.tbl_purchase_order_hsn_mapping_id_seq OWNED BY public.tbl_
 CREATE TABLE public.tbl_purchase_order_product (
     id integer NOT NULL,
     purchase_order_id bigint NOT NULL,
-    rfq_product_id bigint NOT NULL,
-    quote_id bigint NOT NULL,
+    rfq_product_id bigint,
+    quote_id bigint,
     quantity numeric NOT NULL,
     unit character varying(99) NOT NULL,
     unit_price numeric NOT NULL,
     charges_meta jsonb,
-    total_price numeric NOT NULL
+    total_price numeric NOT NULL,
+    product_variant_id integer,
+    arc_contract_line_id bigint
 );
 
 
@@ -3281,7 +3360,8 @@ CREATE TABLE public.tbl_quote_finalization (
     vendor_id integer NOT NULL,
     created_by integer NOT NULL,
     "timestamp" timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    variant integer
+    variant integer,
+    comment text
 );
 
 
@@ -3300,7 +3380,8 @@ CREATE TABLE public.tbl_quote_finalization_history (
     "timestamp" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     variant integer,
     changed_by integer NOT NULL,
-    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    comment text
 );
 
 
@@ -3379,7 +3460,11 @@ CREATE TABLE public.tbl_quote_item_history (
     freight_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     package_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     tax_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
-    other_charges jsonb DEFAULT '[]'::jsonb
+    other_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying,
+    entered_mrp numeric(15,2),
+    mrp_discount numeric(15,2),
+    mrp_discount_mode public.item_mode
 );
 
 
@@ -3440,7 +3525,12 @@ CREATE TABLE public.tbl_quote_items (
     freight_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     package_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
     tax_mode public.item_mode DEFAULT 'percentage'::public.item_mode,
-    other_charges jsonb DEFAULT '[]'::jsonb
+    other_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying NOT NULL,
+    entered_mrp numeric(15,2),
+    mrp_discount numeric(15,2),
+    mrp_discount_mode public.item_mode,
+    CONSTRAINT chk_tbl_quote_items_pricing_method CHECK (((pricing_method)::text = ANY ((ARRAY['TRADITIONAL'::character varying, 'MRP'::character varying])::text[])))
 );
 
 
@@ -3476,7 +3566,9 @@ CREATE TABLE public.tbl_quotes (
     payment_id integer,
     global_tax numeric DEFAULT 0,
     global_tax_mode character varying(20) DEFAULT 'percentage'::character varying,
-    global_charges jsonb DEFAULT '[]'::jsonb
+    global_charges jsonb DEFAULT '[]'::jsonb,
+    pricing_method character varying(12) DEFAULT 'TRADITIONAL'::character varying NOT NULL,
+    CONSTRAINT chk_tbl_quotes_pricing_method CHECK (((pricing_method)::text = ANY ((ARRAY['TRADITIONAL'::character varying, 'MRP'::character varying])::text[])))
 );
 
 
@@ -3638,7 +3730,9 @@ CREATE TABLE public.tbl_rfq (
     publish_attempts integer DEFAULT 0 NOT NULL,
     last_publish_attempt_at timestamp without time zone,
     publish_failure_reason text,
-    publish_failure_notified_at timestamp without time zone
+    publish_failure_notified_at timestamp without time zone,
+    copied_from_rfq_id integer,
+    copied_from_rfq_no integer
 );
 
 
@@ -3650,6 +3744,16 @@ CREATE TABLE public.tbl_rfq (
 CREATE INDEX idx_rfq_stuck_publish
     ON public.tbl_rfq (tender_publish_date)
     WHERE status = 4 AND is_published = 0;
+
+
+--
+-- Name: idx_tbl_rfq_copied_from_rfq_id; Type: INDEX; Schema: public; Owner: -
+-- Lineage forward-link lookups for RFQ Copy feature
+--
+
+CREATE INDEX idx_tbl_rfq_copied_from_rfq_id
+    ON public.tbl_rfq (copied_from_rfq_id)
+    WHERE copied_from_rfq_id IS NOT NULL;
 
 
 --
@@ -4532,7 +4636,7 @@ CREATE TABLE public.tbl_rfq_products_specs (
 
 CREATE TABLE public.tbl_rfq_purchase_order (
     id integer NOT NULL,
-    rfq_id integer NOT NULL,
+    rfq_id integer,
     project_id integer,
     company_id integer NOT NULL,
     po_number character varying(80) NOT NULL,
@@ -4554,7 +4658,11 @@ CREATE TABLE public.tbl_rfq_purchase_order (
     vendor_rejection_reason text,
     vendor_action_at timestamp with time zone,
     vendor_reminder_count integer DEFAULT 0,
-    global_charges jsonb DEFAULT '[]'::jsonb NOT NULL
+    global_charges jsonb DEFAULT '[]'::jsonb NOT NULL,
+    arc_contract_id bigint,
+    source_mr_id bigint,
+    is_call_off boolean DEFAULT false NOT NULL,
+    auto_initiated boolean DEFAULT false NOT NULL
 );
 
 
@@ -5213,7 +5321,8 @@ CREATE TABLE public.tbl_user_role_scopes (
     role_id integer NOT NULL,
     company_id integer NOT NULL,
     hotel_id integer,
-    department_id integer
+    department_id integer,
+    process_id integer
 );
 
 
@@ -8613,6 +8722,13 @@ CREATE INDEX idx_negotiation_rounds_rfq_id ON public.tbl_negotiation_rounds USIN
 
 
 --
+-- Name: idx_tbl_negotiation_rounds_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tbl_negotiation_rounds_source ON public.tbl_negotiation_rounds USING btree (source_type, source_id);
+
+
+--
 -- Name: idx_negotiation_rounds_rfq_product_round; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9194,6 +9310,17 @@ CREATE INDEX idx_round_quotes_vendor_id ON public.tbl_negotiation_round_quotes U
 
 
 --
+-- Name: uq_neg_round_quote_arc_item; Type: INDEX; Schema: public; Owner: -
+-- Partial unique index: one quote per (round, vendor, ARC item). Excludes RFQ
+-- rows (arc_item_id IS NULL) so the existing RFQ path is unaffected.
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_neg_round_quote_arc_item
+  ON public.tbl_negotiation_round_quotes (negotiation_round_id, vendor_id, arc_item_id)
+  WHERE arc_item_id IS NOT NULL;
+
+
+--
 -- Name: idx_rpv_rfqid_variant_userid; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9519,7 +9646,21 @@ CREATE INDEX idx_urs_user ON public.tbl_user_role_scopes USING btree (user_id);
 -- Name: idx_urs_user_covering; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_urs_user_covering ON public.tbl_user_role_scopes USING btree (user_id) INCLUDE (id, role_id, company_id, hotel_id, department_id);
+CREATE INDEX idx_urs_user_covering ON public.tbl_user_role_scopes USING btree (user_id) INCLUDE (id, role_id, company_id, hotel_id, department_id, process_id);
+
+
+--
+-- Name: idx_urs_process; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_urs_process ON public.tbl_user_role_scopes USING btree (process_id);
+
+
+--
+-- Name: uq_user_role_scope_tuple; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_user_role_scope_tuple ON public.tbl_user_role_scopes USING btree (user_id, role_id, company_id, COALESCE(hotel_id, 0), COALESCE(department_id, 0), COALESCE(process_id, 0));
 
 
 --
@@ -9784,6 +9925,13 @@ CREATE OR REPLACE VIEW public.vw_approval_policies_summary AS
 --
 
 CREATE TRIGGER tbl_coupon_update BEFORE UPDATE ON public.tbl_coupon FOR EACH ROW EXECUTE FUNCTION public.update_at_timestamp();
+
+
+--
+-- Name: tbl_negotiation_rounds trg_tbl_negotiation_rounds_fill_source; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_tbl_negotiation_rounds_fill_source BEFORE INSERT ON public.tbl_negotiation_rounds FOR EACH ROW EXECUTE FUNCTION public.tbl_negotiation_rounds_fill_source();
 
 
 --
@@ -10865,6 +11013,15 @@ ALTER TABLE ONLY public.tbl_rfq
 
 
 --
+-- Name: tbl_rfq tbl_rfq_copied_from_rfq_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Self-referencing FK for the RFQ Copy feature lineage
+--
+
+ALTER TABLE ONLY public.tbl_rfq
+    ADD CONSTRAINT tbl_rfq_copied_from_rfq_id_fkey FOREIGN KEY (copied_from_rfq_id) REFERENCES public.tbl_rfq(id) ON DELETE SET NULL;
+
+
+--
 -- Name: tbl_tech_evaluation_rounds tbl_tech_evaluation_rounds_approval_instance_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10961,6 +11118,674 @@ ALTER TABLE ONLY public.tbl_vendor_payments
 
 
 --
+-- Name: tbl_category_department; constraints + indexes (deferred to end of
+-- file because the FKs reference tbl_category and tbl_department whose
+-- PRIMARY KEY constraints are declared later in this dump).
+--
+
+ALTER TABLE ONLY public.tbl_category_department
+    ADD CONSTRAINT tbl_category_department_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.tbl_category_department
+    ADD CONSTRAINT tbl_category_department_uniq UNIQUE (category_id, department_id);
+
+ALTER TABLE ONLY public.tbl_category_department
+    ADD CONSTRAINT tbl_category_department_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.tbl_category(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.tbl_category_department
+    ADD CONSTRAINT tbl_category_department_department_id_fkey FOREIGN KEY (department_id) REFERENCES public.tbl_department(id) ON DELETE CASCADE;
+
+CREATE INDEX idx_tbl_category_department_category ON public.tbl_category_department USING btree (category_id);
+CREATE INDEX idx_tbl_category_department_department ON public.tbl_category_department USING btree (department_id);
+
+ALTER TABLE ONLY public.tbl_category_department ALTER COLUMN id SET DEFAULT nextval('public.tbl_category_department_id_seq'::regclass);
+
+
+--
+-- ARC v2 core tables (plan §4.1 — core, §4.2 — history snapshot, §4.3 — tech eval)
+-- Mirrored from migrations/20260608100200_arc_core_tables.sql.
+-- Inline FK references are safe here because all referenced PKs (tbl_category,
+-- tbl_department, tbl_hospitality_companies, tbl_hospitality_company_hotels,
+-- tbl_approval_processes, tbl_users, tbl_product_variant) are declared above.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc (
+  id                              BIGSERIAL PRIMARY KEY,
+  arc_number                      VARCHAR(40)  NOT NULL UNIQUE,
+  title                           VARCHAR(255) NOT NULL,
+  description                     TEXT,
+  category_id                     INTEGER NOT NULL REFERENCES public.tbl_category(id) ON DELETE RESTRICT,
+  sub_category_ids                JSONB DEFAULT '[]'::jsonb,
+  hospitality_company_id          INTEGER NOT NULL REFERENCES public.tbl_hospitality_companies(id) ON DELETE RESTRICT,
+  hotel_id                        INTEGER NOT NULL REFERENCES public.tbl_hospitality_company_hotels(id) ON DELETE RESTRICT,
+  department_id                   INTEGER NOT NULL REFERENCES public.tbl_department(id) ON DELETE RESTRICT,
+  process_id                      INTEGER REFERENCES public.tbl_approval_processes(id) ON DELETE RESTRICT,
+  status                          VARCHAR(40) NOT NULL DEFAULT 'draft',
+  submission_start_at             TIMESTAMP WITHOUT TIME ZONE,
+  submission_end_at               TIMESTAMP WITHOUT TIME ZONE,
+  contract_start_at               TIMESTAMP WITHOUT TIME ZONE,
+  contract_end_at                 TIMESTAMP WITHOUT TIME ZONE,
+  technical_response_required     BOOLEAN NOT NULL DEFAULT FALSE,
+  sample_required                 BOOLEAN NOT NULL DEFAULT FALSE,
+  eligibility_type                VARCHAR(20) NOT NULL DEFAULT 'open',
+  type                            VARCHAR(20) DEFAULT 'product',
+  escalation_clause_json          JSONB DEFAULT '{}'::jsonb,
+  payment_terms_expected          VARCHAR(255),
+  delivery_expected               VARCHAR(255),
+  penalty_clause                  TEXT,
+  created_by                      INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  closed_reason                   TEXT,
+  created_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_arc_status_chk           CHECK (status IN (
+    'draft','pending_publish_approval','publish_rejected',
+    'floated','submission_closed',
+    'tech_eval_in_progress','tech_eval_approved','tech_eval_rejected',
+    'comm_eval_in_progress','comm_eval_finalized',
+    'committee_review','committee_approved','committee_sent_back','committee_rejected',
+    'contract_generated','awaiting_vendor_acceptance','contract_active',
+    'expiring_soon','expired','terminated','closed_no_award'
+  )),
+  CONSTRAINT tbl_arc_eligibility_chk      CHECK (eligibility_type IN ('open','invitation'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_hotel       ON public.tbl_arc (hotel_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_department  ON public.tbl_arc (department_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_category    ON public.tbl_arc (category_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_status      ON public.tbl_arc (status);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_created_by  ON public.tbl_arc (created_by);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item (
+  id                  BIGSERIAL PRIMARY KEY,
+  arc_id              BIGINT NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  product_variant_id  INTEGER NOT NULL REFERENCES public.tbl_product_variant(id) ON DELETE RESTRICT,
+  spec_text           TEXT,
+  target_price        NUMERIC(15,2),
+  indicative_qty      NUMERIC(15,2) NOT NULL,
+  uom                 VARCHAR(50),
+  spec_attachment_id  INTEGER,
+  -- migrations/20260626100100_arc_manual_doc_and_hsn.sql — India GST HSN code.
+  hsn                 TEXT,
+  created_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, product_variant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_item_arc      ON public.tbl_arc_item (arc_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_item_variant  ON public.tbl_arc_item (product_variant_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_invitation (
+  id            BIGSERIAL PRIMARY KEY,
+  arc_id        BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id     INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  status        VARCHAR(20) NOT NULL DEFAULT 'invited',
+  invited_at    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  responded_at  TIMESTAMP WITHOUT TIME ZONE,
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT tbl_arc_invitation_status_chk CHECK (status IN ('invited','viewed','submitted','declined'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_invitation_arc     ON public.tbl_arc_invitation (arc_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_invitation_vendor  ON public.tbl_arc_invitation (vendor_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_event_log (
+  id          BIGSERIAL PRIMARY KEY,
+  arc_id      BIGINT NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  event_type  VARCHAR(60) NOT NULL,
+  actor_id    INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  payload     JSONB DEFAULT '{}'::jsonb,
+  at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_event_log_arc       ON public.tbl_arc_event_log (arc_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_event_log_event_at  ON public.tbl_arc_event_log (event_type, at DESC);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_history_snapshot (
+  id              BIGSERIAL PRIMARY KEY,
+  arc_item_id     BIGINT NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  year_offset     SMALLINT NOT NULL,
+  consumed_qty    NUMERIC(15,2) NOT NULL DEFAULT 0,
+  last_rate       NUMERIC(15,2),
+  last_vendor_id  INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_item_id, year_offset),
+  CONSTRAINT tbl_arc_item_history_snapshot_year_chk CHECK (year_offset BETWEEN 1 AND 5)
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation (
+  id                       BIGSERIAL PRIMARY KEY,
+  arc_item_id              BIGINT NOT NULL UNIQUE REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  minimum_passing_score    NUMERIC(5,2) NOT NULL DEFAULT 0,
+  is_complete              BOOLEAN NOT NULL DEFAULT FALSE,
+  current_round            INTEGER NOT NULL DEFAULT 1,
+  approval_instance_id     INTEGER,
+  created_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_clauses (
+  id                              BIGSERIAL PRIMARY KEY,
+  arc_item_tech_evaluation_id     BIGINT NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation(id) ON DELETE CASCADE,
+  clause_text                     TEXT NOT NULL,
+  weightage                       NUMERIC(5,2) NOT NULL,
+  clause_type                     VARCHAR(40),
+  is_mandatory                    BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at                      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_item_tech_evaluation_clauses_eval
+  ON public.tbl_arc_item_tech_evaluation_clauses (arc_item_tech_evaluation_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_clauses_files (
+  id                                       BIGSERIAL PRIMARY KEY,
+  arc_item_tech_evaluation_clauses_id      BIGINT NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_clauses(id) ON DELETE CASCADE,
+  file_url                                 TEXT NOT NULL,
+  created_at                               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_vendors_response (
+  id                                       BIGSERIAL PRIMARY KEY,
+  arc_item_tech_evaluation_clauses_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_clauses(id) ON DELETE CASCADE,
+  vendor_id                                INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  vendor_response                          TEXT,
+  buyer_id                                 INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  buyer_marks                              NUMERIC(5,2),
+  buyer_remark                             TEXT,
+  mandatory_passed                         BOOLEAN,
+  score_timestamp                          TIMESTAMP WITHOUT TIME ZONE,
+  created_at                               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_item_tech_evaluation_clauses_id, vendor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_te_vendor_response_vendor
+  ON public.tbl_arc_item_tech_evaluation_vendors_response (vendor_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_vendors_response_files (
+  id                                                  BIGSERIAL PRIMARY KEY,
+  arc_item_tech_evaluation_vendors_response_id        BIGINT NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_vendors_response(id) ON DELETE CASCADE,
+  file_url                                            TEXT NOT NULL,
+  original_name                                       TEXT,
+  created_at                                          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_item_tech_evaluation_cleared_vendors (
+  id                            BIGSERIAL PRIMARY KEY,
+  arc_item_tech_evaluation_id   BIGINT  NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation(id) ON DELETE CASCADE,
+  vendor_id                     INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  calculated_score              NUMERIC(5,2),
+  is_verified                   BOOLEAN NOT NULL DEFAULT FALSE,
+  status                        VARCHAR(20) NOT NULL DEFAULT 'qualified',
+  evaluation_round              INTEGER NOT NULL DEFAULT 1,
+  approval_instance_id          INTEGER,
+  reject_message                TEXT,
+  created_by                    INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  created_at                    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_item_tech_evaluation_id, vendor_id, evaluation_round),
+  CONSTRAINT tbl_arc_item_te_cleared_status_chk CHECK (status IN ('qualified','not_qualified'))
+);
+
+--
+-- ARC v2 — Universal (ARC-wide) technical evaluation.
+-- Mirrored from migrations/20260721100000_arc_universal_tech_eval.sql.
+-- A SECOND, separate technical-clause configurator alongside the per-item
+-- family above — keyed on arc_id (one owner row per ARC). A vendor who fails
+-- the universal clauses is knocked out of the ENTIRE ARC. Per-item clauses are
+-- unaffected; universal is purely additive. Scoring/mandatory logic identical
+-- to the item family; approval rides the same ARC_TECH instance.
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation (
+  id                     BIGSERIAL PRIMARY KEY,
+  arc_id                 BIGINT NOT NULL UNIQUE REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  minimum_passing_score  NUMERIC(5,2) NOT NULL DEFAULT 0,
+  is_complete            BOOLEAN NOT NULL DEFAULT FALSE,
+  current_round          INTEGER NOT NULL DEFAULT 1,
+  approval_instance_id   INTEGER,
+  created_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation_clauses (
+  id                                   BIGSERIAL PRIMARY KEY,
+  arc_universal_tech_evaluation_id     BIGINT NOT NULL REFERENCES public.tbl_arc_universal_tech_evaluation(id) ON DELETE CASCADE,
+  clause_text                          TEXT NOT NULL,
+  weightage                            NUMERIC(5,2) NOT NULL,
+  clause_type                          VARCHAR(40),
+  is_mandatory                         BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at                           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_universal_te_clauses_eval
+  ON public.tbl_arc_universal_tech_evaluation_clauses (arc_universal_tech_evaluation_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation_clauses_files (
+  id                                        BIGSERIAL PRIMARY KEY,
+  arc_universal_tech_evaluation_clauses_id  BIGINT NOT NULL REFERENCES public.tbl_arc_universal_tech_evaluation_clauses(id) ON DELETE CASCADE,
+  file_url                                  TEXT NOT NULL,
+  created_at                                TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation_vendors_response (
+  id                                        BIGSERIAL PRIMARY KEY,
+  arc_universal_tech_evaluation_clauses_id  BIGINT  NOT NULL REFERENCES public.tbl_arc_universal_tech_evaluation_clauses(id) ON DELETE CASCADE,
+  vendor_id                                 INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  vendor_response                           TEXT,
+  buyer_id                                  INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  buyer_marks                               NUMERIC(5,2),
+  buyer_remark                              TEXT,
+  mandatory_passed                          BOOLEAN,
+  score_timestamp                           TIMESTAMP WITHOUT TIME ZONE,
+  created_at                                TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_universal_tech_evaluation_clauses_id, vendor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_univ_te_vendor_response_vendor
+  ON public.tbl_arc_universal_tech_evaluation_vendors_response (vendor_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation_vendors_response_files (
+  id                                                       BIGSERIAL PRIMARY KEY,
+  arc_universal_tech_evaluation_vendors_response_id        BIGINT NOT NULL REFERENCES public.tbl_arc_universal_tech_evaluation_vendors_response(id) ON DELETE CASCADE,
+  file_url                                                 TEXT NOT NULL,
+  original_name                                            TEXT,
+  created_at                                               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_universal_tech_evaluation_cleared_vendors (
+  id                                 BIGSERIAL PRIMARY KEY,
+  arc_universal_tech_evaluation_id   BIGINT  NOT NULL REFERENCES public.tbl_arc_universal_tech_evaluation(id) ON DELETE CASCADE,
+  vendor_id                          INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  calculated_score                   NUMERIC(5,2),
+  is_verified                        BOOLEAN NOT NULL DEFAULT FALSE,
+  status                             VARCHAR(20) NOT NULL DEFAULT 'qualified',
+  evaluation_round                   INTEGER NOT NULL DEFAULT 1,
+  approval_instance_id               INTEGER,
+  reject_message                     TEXT,
+  created_by                         INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  created_at                         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_universal_tech_evaluation_id, vendor_id, evaluation_round),
+  CONSTRAINT tbl_arc_univ_te_cleared_status_chk CHECK (status IN ('qualified','not_qualified'))
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_evaluation_rounds (
+  id            BIGSERIAL PRIMARY KEY,
+  arc_id        BIGINT NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  round_number  INTEGER NOT NULL,
+  status        VARCHAR(20) NOT NULL DEFAULT 'open',
+  opened_at     TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  closed_at     TIMESTAMP WITHOUT TIME ZONE,
+  opened_by     INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  UNIQUE (arc_id, round_number)
+);
+
+--
+-- ARC v2 — Blind technical evaluation (anti-favoritism).
+-- Mirrored from migrations/20260622100000_arc_vendor_alias.sql.
+-- Stable per-ARC alias index per vendor, assigned by tech-envelope
+-- first-submission order (NOT vendor_id ascending). Keyed on
+-- (arc_id, vendor_id) only — round-safe; identical for evaluator and approver.
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_vendor_alias (
+  id          BIGSERIAL PRIMARY KEY,
+  arc_id      BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id   INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  alias_index INTEGER NOT NULL,           -- 0-based; label = letterFor(alias_index)
+  created_at  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, vendor_id),
+  UNIQUE (arc_id, alias_index)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_vendor_alias_arc ON public.tbl_arc_vendor_alias (arc_id);
+
+--
+-- Sr 54 — commercial-ranked technical-evaluation shortlist.
+-- Mirrored from migrations/20260706100000_arc_tech_shortlist.sql.
+-- Whole-ARC per-vendor rank by sealed commercial basket total, computed at
+-- submission-close; gates who the tech evaluator actually scores. status:
+-- 'in_eval' (top-5) | 'on_hold' (rest) | 'promoted' (auto-backfilled on an
+-- in_eval vendor's not_qualified verdict). commercial_rank/basket_total are
+-- system-only — never exposed to the tech evaluator (blind-preserving).
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_shortlist (
+  id                BIGSERIAL PRIMARY KEY,
+  arc_id            BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id         INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  commercial_rank   INTEGER NOT NULL,
+  basket_total      NUMERIC(18,2),
+  status            VARCHAR(16) NOT NULL DEFAULT 'on_hold',
+  promoted_at       TIMESTAMP WITHOUT TIME ZONE,
+  promoted_by       INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT arc_tech_shortlist_status_chk CHECK (status IN ('in_eval', 'on_hold', 'promoted'))
+);
+CREATE INDEX IF NOT EXISTS idx_arc_tech_shortlist_arc ON public.tbl_arc_tech_shortlist (arc_id);
+
+
+--
+-- ARC v2 §4.4 — vendor quotes + commercial evaluation.
+-- Mirrored from migrations/20260608100300_arc_quote_tables.sql.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_quote (
+  id              BIGSERIAL PRIMARY KEY,
+  arc_id          BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  vendor_id       INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  submitted_at    TIMESTAMP WITHOUT TIME ZONE,
+  withdrawn_at    TIMESTAMP WITHOUT TIME ZONE,
+  tech_submitted_at TIMESTAMP WITHOUT TIME ZONE,
+  terms_accepted_at TIMESTAMP WITHOUT TIME ZONE,
+  payment_terms   VARCHAR(255),
+  gstin_used      VARCHAR(20),
+  quote_pricing   JSONB,
+  created_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  pricing_method  VARCHAR(12) NOT NULL DEFAULT 'TRADITIONAL',
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT chk_tbl_arc_quote_pricing_method CHECK (pricing_method IN ('TRADITIONAL','MRP'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_arc     ON public.tbl_arc_quote (arc_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_vendor  ON public.tbl_arc_quote (vendor_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line (
+  id                   BIGSERIAL PRIMARY KEY,
+  arc_quote_id         BIGINT  NOT NULL REFERENCES public.tbl_arc_quote(id) ON DELETE CASCADE,
+  arc_item_id          BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  rate                 NUMERIC(15,2),
+  gst_pct              NUMERIC(5,2),
+  charges              JSONB DEFAULT '[]'::jsonb,
+  lead_time_days       INTEGER,
+  moq                  NUMERIC(15,2),
+  validity_notes       TEXT,
+  line_pricing         JSONB,
+  rate_source          VARCHAR(16) NOT NULL DEFAULT 'LANDED',
+  negotiated_round_id  BIGINT,
+  created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  pricing_method       VARCHAR(12) NOT NULL DEFAULT 'TRADITIONAL',
+  entered_mrp          NUMERIC(15,2),
+  mrp_discount         NUMERIC(15,2),
+  mrp_discount_mode    VARCHAR(12),
+  UNIQUE (arc_quote_id, arc_item_id),
+  CONSTRAINT tbl_arc_quote_line_rate_source_chk CHECK (rate_source IN ('LANDED', 'NEGOTIATED')),
+  CONSTRAINT chk_tbl_arc_quote_line_pricing_method CHECK (pricing_method IN ('TRADITIONAL','MRP'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_line_item  ON public.tbl_arc_quote_line (arc_item_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_line_history (
+  id                  BIGSERIAL PRIMARY KEY,
+  arc_quote_line_id   BIGINT  NOT NULL REFERENCES public.tbl_arc_quote_line(id) ON DELETE CASCADE,
+  rate                NUMERIC(15,2),
+  gst_pct             NUMERIC(5,2),
+  charges             JSONB,
+  changed_by          INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  changed_at          TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Mirror of migration 20260627100000_arc_quote_version.sql — every vendor quote
+-- submission is archived here (append-only audit ledger; no FKs by design).
+CREATE TABLE IF NOT EXISTS public.tbl_arc_quote_version (
+  id            BIGSERIAL PRIMARY KEY,
+  arc_quote_id  BIGINT  NOT NULL,
+  arc_id        BIGINT  NOT NULL,
+  vendor_id     INTEGER NOT NULL,
+  version_no    INTEGER NOT NULL,
+  quote_pricing JSONB,
+  lines         JSONB,
+  submitted_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+  created_at    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_quote_version_lookup
+  ON public.tbl_arc_quote_version (arc_id, vendor_id, version_no);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_comm_evaluation (
+  id                     BIGSERIAL PRIMARY KEY,
+  arc_id                 BIGINT  NOT NULL UNIQUE REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  status                 VARCHAR(20) NOT NULL DEFAULT 'in_progress',
+  finalized_by           INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  finalized_at           TIMESTAMP WITHOUT TIME ZONE,
+  approval_instance_id   INTEGER,
+  created_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_arc_comm_evaluation_status_chk CHECK (status IN ('in_progress','finalized','sent_back'))
+);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_comm_evaluation_award (
+  id                          BIGSERIAL PRIMARY KEY,
+  arc_comm_evaluation_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_comm_evaluation(id) ON DELETE CASCADE,
+  arc_item_id                 BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  awarded_vendor_id           INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  awarded_quote_line_id       BIGINT  NOT NULL REFERENCES public.tbl_arc_quote_line(id) ON DELETE RESTRICT,
+  allocated_qty               NUMERIC(15,2) NOT NULL,
+  allocated_share_pct         NUMERIC(7,4),
+  l_rank                      VARCHAR(8),
+  is_l1_default               BOOLEAN NOT NULL DEFAULT FALSE,
+  awarded_quote_snapshot      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  awarded_at                  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_comm_evaluation_id, arc_item_id, awarded_vendor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_comm_award_eval    ON public.tbl_arc_comm_evaluation_award (arc_comm_evaluation_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_comm_award_item    ON public.tbl_arc_comm_evaluation_award (arc_item_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_comm_award_vendor  ON public.tbl_arc_comm_evaluation_award (awarded_vendor_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_comm_evaluation_history (
+  id                          BIGSERIAL PRIMARY KEY,
+  arc_comm_evaluation_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_comm_evaluation(id) ON DELETE CASCADE,
+  action                      VARCHAR(40) NOT NULL,
+  payload                     JSONB DEFAULT '{}'::jsonb,
+  changed_by                  INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  changed_at                  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_comm_eval_history_eval
+  ON public.tbl_arc_comm_evaluation_history (arc_comm_evaluation_id, changed_at DESC);
+
+
+--
+-- ARC v2 §4.6 — contract tables.
+-- Mirrored from migrations/20260608100400_arc_contract_tables.sql.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_contract (
+  id                       BIGSERIAL PRIMARY KEY,
+  arc_id                   BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE RESTRICT,
+  vendor_id                INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  document_s3_url          TEXT,
+  document_hash            VARCHAR(128),
+  -- migrations/20260626100100_arc_manual_doc_and_hsn.sql — distinguishes a hand-keyed
+  -- already-signed historical PDF ('manual_upload') from a system-generated one ('generated')
+  -- so the historical-active path is never re-rendered/overwritten.
+  document_source          VARCHAR(20) NOT NULL DEFAULT 'generated',
+  status                   VARCHAR(40) NOT NULL DEFAULT 'generated',
+  generated_at             TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  awaiting_until           TIMESTAMP WITHOUT TIME ZONE,
+  signed_by_vendor_at      TIMESTAMP WITHOUT TIME ZONE,
+  terminated_at            TIMESTAMP WITHOUT TIME ZONE,
+  terminated_reason        TEXT,
+  created_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_id, vendor_id),
+  CONSTRAINT tbl_arc_contract_status_chk CHECK (status IN (
+    'generated','awaiting_acceptance','clarification','active','expiring_soon','expired','terminated','declined'
+  )),
+  CONSTRAINT chk_tbl_arc_contract_document_source CHECK (document_source IN ('generated','manual_upload'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_arc     ON public.tbl_arc_contract (arc_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_vendor  ON public.tbl_arc_contract (vendor_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_status  ON public.tbl_arc_contract (status);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_line (
+  id                       BIGSERIAL PRIMARY KEY,
+  arc_contract_id          BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE CASCADE,
+  arc_item_id              BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE RESTRICT,
+  unit_rate                NUMERIC(15,2) NOT NULL,
+  gst_pct                  NUMERIC(5,2),
+  charges                  JSONB DEFAULT '[]'::jsonb,
+  payment_terms            VARCHAR(255),
+  delivery_terms           VARCHAR(255),
+  committed_qty            NUMERIC(15,2) NOT NULL,
+  consumed_qty             NUMERIC(15,2) NOT NULL DEFAULT 0,
+  awarded_quote_snapshot   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (arc_contract_id, arc_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_line_contract  ON public.tbl_arc_contract_line (arc_contract_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_line_item      ON public.tbl_arc_contract_line (arc_item_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_signature_otp (
+  id                   BIGSERIAL PRIMARY KEY,
+  arc_contract_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE CASCADE,
+  vendor_user_id       INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  otp_hash             VARCHAR(128) NOT NULL,
+  expires_at           TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+  verified_at          TIMESTAMP WITHOUT TIME ZONE,
+  attempts             INTEGER NOT NULL DEFAULT 0,
+  arc_amendment_document_id BIGINT,
+  created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_contract_signature_otp_contract
+  ON public.tbl_arc_contract_signature_otp (arc_contract_id);
+
+
+--
+-- ARC v2 — Manual / backfill data-entry provenance.
+-- Mirrored from migrations/20260626100000_arc_manual_entry.sql. Records that an
+-- ARC was hand-keyed by the purchase team (not produced by the live wizard/
+-- vendor flow), the target stage it was landed at, and a snapshot of the
+-- committee outcome (backfill has no live approval instance). One row per ARC.
+--
+CREATE TABLE IF NOT EXISTS public.tbl_arc_manual_entry (
+  id                     BIGSERIAL PRIMARY KEY,
+  arc_id                 BIGINT      NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  is_manual              BOOLEAN     NOT NULL DEFAULT TRUE,
+  target_stage           VARCHAR(20) NOT NULL,   -- draft|floated|evaluation|sig_pending|active|ended
+  eligibility_overridden BOOLEAN     NOT NULL DEFAULT FALSE,
+  committee_decision     VARCHAR(20),            -- approved|rejected (NULL pre-committee)
+  committee_decided_at   TIMESTAMP WITHOUT TIME ZONE,
+  committee_decided_by   INTEGER REFERENCES public.tbl_users(id),
+  committee_comment      TEXT,
+  entered_by             INTEGER     NOT NULL REFERENCES public.tbl_users(id),
+  entry_notes            TEXT,
+  backdated_dates        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  created_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_arc_manual_entry_arc UNIQUE (arc_id),
+  CONSTRAINT chk_arc_manual_entry_target_stage
+    CHECK (target_stage IN ('draft','floated','evaluation','sig_pending','active','ended')),
+  CONSTRAINT chk_arc_manual_entry_decision
+    CHECK (committee_decision IS NULL OR committee_decision IN ('approved','rejected'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_manual_entry_arc ON public.tbl_arc_manual_entry(arc_id);
+
+
+--
+-- ARC v2 §4.8 — Material Requisition + Call-off PO link.
+-- Mirrored from migrations/20260608100500_mr_tables.sql.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_material_requisition (
+  id                          BIGSERIAL PRIMARY KEY,
+  mr_number                   VARCHAR(40)  NOT NULL UNIQUE,
+  title                       VARCHAR(255) NOT NULL,
+  hospitality_company_id      INTEGER NOT NULL REFERENCES public.tbl_hospitality_companies(id) ON DELETE RESTRICT,
+  hotel_id                    INTEGER NOT NULL REFERENCES public.tbl_hospitality_company_hotels(id) ON DELETE RESTRICT,
+  department_id               INTEGER NOT NULL REFERENCES public.tbl_department(id) ON DELETE RESTRICT,
+  cost_center                 VARCHAR(120),
+  urgency                     VARCHAR(20) NOT NULL DEFAULT 'normal',
+  required_by_date            DATE,
+  justification               TEXT,
+  delivery_location           TEXT,
+  status                      VARCHAR(40) NOT NULL DEFAULT 'draft',
+  raised_by                   INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  submitted_at                TIMESTAMP WITHOUT TIME ZONE,
+  approval_instance_id        INTEGER,
+  created_at                  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at                  TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_material_requisition_urgency_chk CHECK (urgency IN ('low','normal','urgent')),
+  CONSTRAINT tbl_material_requisition_status_chk  CHECK (status IN ('draft','pending_approval','approved','po_released','rejected','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_hotel        ON public.tbl_material_requisition (hotel_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_department   ON public.tbl_material_requisition (department_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_status       ON public.tbl_material_requisition (status);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_raised_by    ON public.tbl_material_requisition (raised_by);
+
+CREATE TABLE IF NOT EXISTS public.tbl_material_requisition_item (
+  id                    BIGSERIAL PRIMARY KEY,
+  mr_id                 BIGINT  NOT NULL REFERENCES public.tbl_material_requisition(id) ON DELETE CASCADE,
+  product_variant_id    INTEGER NOT NULL REFERENCES public.tbl_product_variant(id) ON DELETE RESTRICT,
+  quantity              NUMERIC(15,2) NOT NULL,
+  uom                   VARCHAR(50),
+  arc_contract_id       BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE RESTRICT,
+  arc_contract_line_id  BIGINT  NOT NULL REFERENCES public.tbl_arc_contract_line(id) ON DELETE RESTRICT,
+  matched_unit_rate     NUMERIC(15,2),
+  created_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_item_mr               ON public.tbl_material_requisition_item (mr_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_item_contract         ON public.tbl_material_requisition_item (arc_contract_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_item_contract_line    ON public.tbl_material_requisition_item (arc_contract_line_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_material_requisition_item_variant          ON public.tbl_material_requisition_item (product_variant_id);
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_callof_po (
+  id                       BIGSERIAL PRIMARY KEY,
+  po_id                    INTEGER NOT NULL,
+  mr_id                    BIGINT  NOT NULL REFERENCES public.tbl_material_requisition(id) ON DELETE RESTRICT,
+  arc_contract_id          BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE RESTRICT,
+  arc_contract_line_id     BIGINT  NOT NULL REFERENCES public.tbl_arc_contract_line(id) ON DELETE RESTRICT,
+  quantity                 NUMERIC(15,2) NOT NULL,
+  applied_amendment_id     BIGINT,
+  price_applied            NUMERIC(15,2) NOT NULL,
+  released_at              TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (po_id, arc_contract_line_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_callof_po_mr           ON public.tbl_arc_callof_po (mr_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_callof_po_contract     ON public.tbl_arc_callof_po (arc_contract_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_callof_po_po_id        ON public.tbl_arc_callof_po (po_id);
+
+
+--
+-- ARC v2 §3.3 #2 — additive PO backlinks. Mirrored from
+-- migrations/20260608100600_po_arc_backlinks.sql.
+--
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tbl_rfq_purchase_order_arc_contract_fkey'
+  ) THEN
+    ALTER TABLE public.tbl_rfq_purchase_order
+      ADD CONSTRAINT tbl_rfq_purchase_order_arc_contract_fkey
+      FOREIGN KEY (arc_contract_id) REFERENCES public.tbl_arc_contract(id) ON DELETE RESTRICT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tbl_rfq_purchase_order_source_mr_fkey'
+  ) THEN
+    ALTER TABLE public.tbl_rfq_purchase_order
+      ADD CONSTRAINT tbl_rfq_purchase_order_source_mr_fkey
+      FOREIGN KEY (source_mr_id) REFERENCES public.tbl_material_requisition(id) ON DELETE RESTRICT;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_tbl_rfq_purchase_order_arc_contract
+  ON public.tbl_rfq_purchase_order (arc_contract_id)
+  WHERE arc_contract_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tbl_rfq_purchase_order_source_mr
+  ON public.tbl_rfq_purchase_order (source_mr_id)
+  WHERE source_mr_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tbl_rfq_purchase_order_call_off
+  ON public.tbl_rfq_purchase_order (is_call_off)
+  WHERE is_call_off = TRUE;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tbl_rfq_purchase_order_call_off_or_rfq_chk'
+  ) THEN
+    ALTER TABLE public.tbl_rfq_purchase_order
+      ADD CONSTRAINT tbl_rfq_purchase_order_call_off_or_rfq_chk
+      CHECK (
+        (is_call_off = TRUE  AND arc_contract_id IS NOT NULL AND source_mr_id IS NOT NULL)
+        OR
+        (is_call_off = FALSE AND rfq_id          IS NOT NULL)
+      );
+  END IF;
+END $$;
+
+
+--
 -- Name: tbl_units; Type: TABLE; Schema: public; Owner: -
 --
 -- Holds default units (created_by IS NULL) and per-user custom units
@@ -10995,3 +11820,133 @@ ON CONFLICT DO NOTHING;
 
 \unrestrict 4iYvkweprKpGCDEeusYa3UXb9A1ZL0elf3cmbvob2PGSgweg2r0CjiAlhJr4eYK
 
+
+--
+-- ARC v2 amendments. Mirrored from migrations/20260609100000_arc_amendments.sql,
+-- 20260609110000_arc_amendment_approval_chain.sql and
+-- 20260610100000_arc_amendment_edit_history.sql.
+--
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment (
+  id                    BIGSERIAL PRIMARY KEY,
+  arc_contract_id       BIGINT NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE RESTRICT,
+  amendment_type        VARCHAR(20) NOT NULL,
+  amendment_from        DATE NOT NULL,
+  amendment_to          DATE,
+  status                VARCHAR(20) NOT NULL DEFAULT 'requested',
+  reason                TEXT NOT NULL,
+  payload               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  requested_by          INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  approval_instance_id  INTEGER,
+  decided_by            INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  decided_at            TIMESTAMP WITHOUT TIME ZONE,
+  approval_chain        JSONB NOT NULL DEFAULT '[]'::jsonb,
+  current_step          INTEGER NOT NULL DEFAULT 1,
+  created_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_arc_amendment_type_chk
+    CHECK (amendment_type IN ('price','qty','item_add','item_remove','term')),
+  CONSTRAINT tbl_arc_amendment_status_chk
+    CHECK (status IN ('requested','approved','awaiting_signature','rejected','live','ended','voided')),
+  CONSTRAINT tbl_arc_amendment_window_chk
+    CHECK (amendment_to IS NULL OR amendment_to >= amendment_from)
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_contract
+  ON public.tbl_arc_amendment (arc_contract_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_status
+  ON public.tbl_arc_amendment (status);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_window
+  ON public.tbl_arc_amendment (arc_contract_id, amendment_from, amendment_to);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_current_step
+  ON public.tbl_arc_amendment (current_step)
+  WHERE status = 'requested';
+
+CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment_edit_history (
+  id                 BIGSERIAL PRIMARY KEY,
+  arc_amendment_id   BIGINT  NOT NULL REFERENCES public.tbl_arc_amendment(id) ON DELETE CASCADE,
+  field_changed      VARCHAR(60) NOT NULL,
+  before_value       JSONB,
+  after_value        JSONB,
+  changed_by         INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  comment            TEXT,
+  changed_at         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_edit_history_amendment
+  ON public.tbl_arc_amendment_edit_history (arc_amendment_id, changed_at DESC);
+
+-- Mirrored from migrations/20260615100100_arc_amendment_document.sql — the
+-- per-amendment addendum document the vendor re-signs (OTP) before effects bind.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_amendment_document (
+  id                   BIGSERIAL PRIMARY KEY,
+  arc_amendment_id     BIGINT  NOT NULL REFERENCES public.tbl_arc_amendment(id) ON DELETE CASCADE,
+  arc_contract_id      BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id)  ON DELETE CASCADE,
+  addendum_number      INTEGER NOT NULL,
+  document_s3_url      TEXT,
+  document_hash        VARCHAR(128),
+  status               VARCHAR(30) NOT NULL DEFAULT 'awaiting_signature'
+                         CHECK (status IN ('awaiting_signature','signed','voided')),
+  signed_by_vendor_at  TIMESTAMP WITHOUT TIME ZONE,
+  signed_by            INTEGER REFERENCES public.tbl_users(id),
+  generated_at         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  created_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tbl_arc_amendment_document_amendment
+  ON public.tbl_arc_amendment_document (arc_amendment_id);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_amendment_document_contract
+  ON public.tbl_arc_amendment_document (arc_contract_id, addendum_number);
+
+-- Mirrored from migrations/20260611100100_arc_tech_eval_edit_history.sql —
+-- amend-then-approve diffs on technical-evaluation marks.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_tech_eval_edit_history (
+  id                 BIGSERIAL PRIMARY KEY,
+  arc_id             BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  response_id        BIGINT  NOT NULL REFERENCES public.tbl_arc_item_tech_evaluation_vendors_response(id) ON DELETE CASCADE,
+  field_changed      VARCHAR(60) NOT NULL,
+  before_value       JSONB,
+  after_value        JSONB,
+  changed_by         INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  comment            TEXT,
+  changed_at         TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_arc
+  ON public.tbl_arc_tech_eval_edit_history (arc_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tbl_arc_tech_eval_edit_history_response
+  ON public.tbl_arc_tech_eval_edit_history (response_id);
+
+-- Mirrored from migrations/20260613100000_arc_contract_clarification.sql —
+-- vendor-initiated, field-scoped contract clarification loop.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_contract_clarification (
+  id                    BIGSERIAL PRIMARY KEY,
+  arc_id                BIGINT  NOT NULL REFERENCES public.tbl_arc(id) ON DELETE CASCADE,
+  arc_contract_id       BIGINT  NOT NULL REFERENCES public.tbl_arc_contract(id) ON DELETE CASCADE,
+  arc_item_id           BIGINT  NOT NULL REFERENCES public.tbl_arc_item(id) ON DELETE CASCADE,
+  vendor_id             INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  field                 VARCHAR(24) NOT NULL,
+  round                 INTEGER NOT NULL DEFAULT 1,
+  vendor_comment        TEXT NOT NULL,
+  status                VARCHAR(16) NOT NULL DEFAULT 'open',
+  old_value             JSONB,
+  new_value             JSONB,
+  buyer_response        TEXT,
+  raised_by             INTEGER NOT NULL REFERENCES public.tbl_users(id) ON DELETE RESTRICT,
+  resolved_by           INTEGER REFERENCES public.tbl_users(id) ON DELETE SET NULL,
+  resolved_at           TIMESTAMP WITHOUT TIME ZONE,
+  created_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT tbl_arc_contract_clarification_field_chk
+    CHECK (field IN ('base_price','gst','charges','committed_qty','payment_terms','delivery_terms')),
+  CONSTRAINT tbl_arc_contract_clarification_status_chk
+    CHECK (status IN ('open','revised','upheld','withdrawn'))
+);
+CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_arc
+  ON public.tbl_arc_contract_clarification (arc_id);
+CREATE INDEX IF NOT EXISTS idx_arc_contract_clarification_contract
+  ON public.tbl_arc_contract_clarification (arc_contract_id, status);
+
+-- Mirrored from migrations/20260701100000_arc_number_seq.sql — atomic per-FY
+-- counter backing the `ARC-<FY>-<seq>` contract-serial format.
+CREATE TABLE IF NOT EXISTS public.tbl_arc_number_seq (
+  fy        VARCHAR(9) PRIMARY KEY,   -- Indian FY label, e.g. '2026-27'
+  last_seq  INTEGER NOT NULL
+);

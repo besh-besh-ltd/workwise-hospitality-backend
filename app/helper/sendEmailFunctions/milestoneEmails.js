@@ -3,6 +3,7 @@ import userModel from "../../models/userModel.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
 export const sendReminderMail = async (milestone, userList) => {
   logger.info("SENDING MILESTONE MAIL");
@@ -73,6 +74,22 @@ export const sendReminderMail = async (milestone, userList) => {
       }
 
       sendMail(recipients);
+
+      try {
+        const userIds = await resolveRecipientUserIds(userList);
+        await dispatchNotification({
+          userIds,
+          category: 'po',
+          type: 'milestone_reminder',
+          title: `Milestone "${milestone_name}" due soon`,
+          body: `Due on ${new Date(due_date).toDateString()}.`,
+          data: { po_id, rfq_id, milestone_name, due_date },
+          actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}`
+        });
+      } catch (notifyErr) {
+        logError('dispatch milestone_reminder failed', notifyErr);
+      }
+
       return resolve(true);
 
     } catch (err) {

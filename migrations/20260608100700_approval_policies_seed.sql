@@ -1,0 +1,29 @@
+-- ARC v2 — Migration 9 of 10: approval policy entity-type registration.
+--
+-- This migration is intentionally documentation-only.
+--
+-- The plan called for "extending CHECK constraints on
+-- tbl_approval_policies.entity_type to accept ARC_TECH, ARC_COMMITTEE,
+-- ARC_AMENDMENT, MR". An audit of the live schema shows entity_type is a
+-- plain VARCHAR(50) with no CHECK constraint, so the new values are already
+-- accepted without DDL. We do NOT seed sample policies here because that
+-- requires tenant-specific IDs (hospitality_company_id, hotel_id, process_id,
+-- created_by) that this portable migration cannot know. Tenant admins seed
+-- their own policies through the existing approval-policy UI (extended this
+-- phase to surface the new entity_type options in its picker).
+--
+-- Recognised entity_type values after this phase ships:
+--   RFQ, TENDER, TECHNICAL, NEGOTIATION, NEGOTIATION_QUOTE, PO   (existing)
+--   ARC                                                          (existing)
+--   ARC_TECH        — gates tech-eval submission           (new)
+--   ARC_COMMITTEE   — gates the ARC committee approval     (new)
+--   ARC_AMENDMENT   — gates vendor-initiated amendments    (new, Phase C)
+--   MR              — gates Material Requisition approval  (new)
+--
+-- NOTE on lifecycle: existing ARC v1 policy rows (3 of them, found in the
+-- staging audit) become orphaned once the v2 quarantine completes. They
+-- harm nothing because the v1 controller they were wired to is no longer
+-- mounted, but tenant admins are expected to delete or migrate them to the
+-- new ARC_* entity types.
+
+SELECT 1 WHERE FALSE;  -- intentional no-op
