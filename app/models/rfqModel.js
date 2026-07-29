@@ -2619,9 +2619,17 @@ WHERE NOT EXISTS (
           SELECT json_agg(
             json_build_object(
               'product_id', TQI.product_variant_id,
+              'rfq_product_id', (
+                SELECT RP.id FROM tbl_rfq_products RP
+                WHERE RP.rfq_id = TQ.rfq_id
+                  AND RP.product_variant_id = TQI.product_variant_id
+                  AND COALESCE(RP.variant, 0) = COALESCE(TQI.variant, 0)
+                LIMIT 1
+              ),
               'variant', TQI.variant,
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
+              'quantity', TQI.quantity,
               'tax', TQI.tax,
               'tax_mode', TQI.tax_mode,
               'total_price', TQI.total_price,
