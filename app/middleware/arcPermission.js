@@ -21,6 +21,7 @@ import db from '../config/dbConn.js';
 import arcLifecycleModel from '../models/arc_v2/arcLifecycleModel.js';
 import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
 import rbacModel from '../models/rbacModel.js';
+import { filterRowsByProcessAxis } from '../helper/arc_v2/arcScope.js';
 import { logger } from '../util/logger.js';
 
 async function resolveArcId(req) {
@@ -69,7 +70,7 @@ export function requireArcPermission(keys = []) {
       }
 
       const arc = await db.oneOrNone(
-        `SELECT id, hotel_id, department_id FROM tbl_arc WHERE id = $1`, [arcId]
+        `SELECT id, hotel_id, department_id, process_id FROM tbl_arc WHERE id = $1`, [arcId]
       );
       if (!arc) return res.status(404).json({ status: 2, message: 'ARC not found' });
 
@@ -78,7 +79,13 @@ export function requireArcPermission(keys = []) {
         const rows = await rbacModel.getUserPermissionsForHotels(
           userId, [arc.hotel_id], null, arc.department_id || null
         );
-        held = new Set(rows.map((r) => `${r.resource}.${r.action}`));
+        // getUserPermissionsForHotels enforces company × hotel × department but
+        // returns urs.process_id WITHOUT filtering on it, so the fourth axis was
+        // silently unenforced here. Apply it, with the canonical strict
+        // semantics shared with the listing predicate (see arcScope.js).
+        held = new Set(
+          filterRowsByProcessAxis(rows, arc.process_id).map((r) => `${r.resource}.${r.action}`)
+        );
       }
 
       if (keys.some((k) => held.has(k))) return next();

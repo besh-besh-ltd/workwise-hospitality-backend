@@ -1788,6 +1788,20 @@ export async function getApprovalInstanceTenant(instance_id) {
 }
 
 /**
+ * Owning tenant of an approval PROCESS. Unlike policies and instances, a
+ * process hangs off the PARENT buyer company (tbl_company.id) — that is what
+ * createApprovalProcess writes from req.user.company_id.
+ *
+ * @returns {Promise<{id:number, company_id:number|null}|null>}
+ */
+export async function getApprovalProcessTenant(process_id) {
+  return db.oneOrNone(
+    `SELECT id, company_id FROM tbl_approval_processes WHERE id = $1`,
+    [process_id]
+  );
+}
+
+/**
  * Get a policy with all its steps
  */
 export async function getApprovalPolicyWithSteps(id) {

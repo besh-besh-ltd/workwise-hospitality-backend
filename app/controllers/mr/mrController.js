@@ -49,14 +49,28 @@ async function notifyCallOffReleased(mr, released) {
   }
 }
 
-// Authorization: may this caller act on the given hotel? Super admin (8)
-// bypasses; everyone else must have the hotel in their accessible set. Scope is
-// derived from the hotel, never trusted from the client (audit CO1).
-async function userCanAccessHotel(req, hotelId) {
+// Authorization: may this caller act on the given (hotel × department) cell?
+// Super admin (8) bypasses; everyone else must have a role scope covering that
+// exact cell — the SAME matrix the MR listing/analytics apply in SQL
+// (mrModel.scopeMatrixPredicate), so a point read can never answer a wider
+// question than the list does.
+//
+// Previously this used rbacModel.getAllAccessibleHotelIds (hospitality user
+// MAPPINGS), which expands a company-level mapping to every BU under the
+// company and ignores the department axis entirely — strictly wider than the
+// matrix. Scope is derived from the entity/hotel, never trusted from the
+// client (audit CO1).
+//
+// `departmentId = null` checks the hotel axis alone (used where the department
+// is not yet chosen, e.g. the department picker itself).
+async function userCanAccessCell(req, hotelId, departmentId = null, companyId = null) {
   if (Number(req.user?.user_type) === 8) return true;
   if (!req.user?.id || !hotelId) return false;
-  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
-  return accessible.map(Number).includes(Number(hotelId));
+  return mrModel.hasScopeForCell(req.user.id, {
+    hotel_id: hotelId,
+    department_id: departmentId,
+    hospitality_company_id: companyId,
+  });
 }
 
 // Validate a single MR item against its referenced contract line (audit CO2).
@@ -180,10 +194,12 @@ export async function searchContractedItems(req, res) {
     const hotelId      = Number(req.query.hotel_id);
     const departmentId = Number(req.query.department_id);
     if (!hotelId || !departmentId) return bad(res, 400, 'hotel_id and department_id are required');
-    // Authorize the hotel against the caller's own scope (audit CO1) — the
-    // picker exposes commercial rates, so it must not be enumerable cross-tenant.
-    if (!(await userCanAccessHotel(req, hotelId))) {
-      return bad(res, 403, 'You do not have access to this hotel');
+    // Authorize the FULL (hotel × department) cell against the caller's own role
+    // scope (audit CO1). department_id arrives from the query string and used to
+    // be taken on trust — the picker exposes contracted unit rates and vendor
+    // names, so neither axis may be enumerable.
+    if (!(await userCanAccessCell(req, hotelId, departmentId))) {
+      return bad(res, 403, 'You do not have access to this hotel/department');
     }
     const rows = await mrModel.searchContractedItems({
       hotel_id:      hotelId,
@@ -199,12 +215,15 @@ export async function searchContractedItems(req, res) {
 }
 
 /**
- * GET /v1/mr/form/hotels — hotels the requesting user can raise an MR for.
- * Derived from the user's own mappings (req.user) — no client company id.
+ * GET /v1/mr/form/hotels — business units the requesting user can raise an MR
+ * for. Derived from the user's role-scope matrix via the SAME query that backs
+ * `GET /v1/mr/dashboard/filter-options` (mrModel.scopedHotelOptions), so the
+ * create form and the dashboard filter can never disagree about what's in scope.
+ * Never depends on a client-supplied company/hotel.
  */
 export async function formHotels(req, res) {
   try {
-    const hotels = await mrModel.accessibleHotels(req.user.id);
+    const hotels = await mrModel.scopedHotelOptions(req.user.id, { isSuperAdmin: isSuperAdmin(req) });
     return ok(res, { hotels });
   } catch (err) {
     logger.error({ err }, '[mrController.formHotels]');
@@ -220,7 +239,10 @@ export async function formDepartments(req, res) {
   try {
     const hotelId = Number(req.query.hotel_id);
     if (!hotelId) return bad(res, 400, 'hotel_id is required');
-    if (!(await userCanAccessHotel(req, hotelId))) {
+    // Hotel axis only — the department axis is what this endpoint enumerates,
+    // and hotelDepartmentsForUser already returns only the caller's own
+    // role-scoped departments at that hotel.
+    if (!(await userCanAccessCell(req, hotelId))) {
       return bad(res, 403, 'You do not have access to this hotel');
     }
     const departments = await mrModel.hotelDepartmentsForUser(req.user.id, hotelId);
@@ -246,8 +268,12 @@ export async function createDraft(req, res) {
     // client-supplied hospitality_company_id (audit CO1).
     const [hotelMapping] = await rbacModel.getHotelCompanyMappings([hotelId]);
     if (!hotelMapping) return bad(res, 400, 'invalid hotel_id');
-    if (!(await userCanAccessHotel(req, hotelId))) {
-      return bad(res, 403, 'You do not have access to this hotel');
+    // Authorize the full (company × hotel × department) cell the MR will be
+    // written into — the department used to be accepted on trust, letting a
+    // user raise (and route for approval) a requisition against a department
+    // they hold no role scope for.
+    if (!(await userCanAccessCell(req, hotelId, departmentId, Number(hotelMapping.hospitality_company_id)))) {
+      return bad(res, 403, 'You do not have access to this hotel/department');
     }
     const mrScope = { hotel_id: hotelId, department_id: departmentId };
 
@@ -392,9 +418,13 @@ export async function getById(req, res) {
     const id = Number(req.params.id);
     const mr = await mrModel.getById(id);
     if (!mr) return bad(res, 404, 'MR not found', 2);
-    // Scope guard (audit CO1): only the raiser or a user with access to the
-    // MR's hotel may read it — no cross-tenant MR reads by id.
-    if (mr.raised_by !== req.user?.id && !(await userCanAccessHotel(req, mr.hotel_id))) {
+    // Scope guard (audit CO1): only the raiser, or a user whose role scope
+    // covers the MR's exact (company × hotel × DEPARTMENT) cell, may read it.
+    // The department axis used to be skipped, so any user at the hotel could
+    // read every other department's requisitions (items, contracted rates,
+    // vendors, approval chain) by id.
+    if (mr.raised_by !== req.user?.id &&
+        !(await userCanAccessCell(req, mr.hotel_id, mr.department_id, mr.hospitality_company_id))) {
       return bad(res, 403, 'You do not have access to this requisition');
     }
     const items = await mrModel.listItems(id);
@@ -422,6 +452,12 @@ export async function approvalPreview(req, res) {
     const hcId = await resolveHospitalityCompanyId(req);
     if (!hcId) return bad(res, 400, 'hospitality_company_id is required');
     const hotelId = req.query.hotel_id ? Number(req.query.hotel_id) : null;
+    // The preview names real approvers, so the requested BU must be one the
+    // caller is actually scoped to (hcId is already server-derived and refuses
+    // an unmapped company hint).
+    if (hotelId && !(await userCanAccessCell(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel');
+    }
     const policy = await findBestMatchingPolicy({
       entity_type: 'MR', hospitality_company_id: hcId, hotel_id: hotelId, process_id: null,
     });

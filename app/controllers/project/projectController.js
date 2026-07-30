@@ -7,6 +7,87 @@ import db from "../../config/dbConn.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
 
+/**
+ * TENANT gate for a single project.
+ *
+ * Every handler below used to short-circuit on `user_type === 7` ("Admin can
+ * access any project"), which conflates a ROLE with a MEMBERSHIP: Tenant A's
+ * admin was reading Tenant B's projects, team rosters and budgets by walking
+ * sequential project ids. An admin is an admin *of their own company*, so the
+ * admin branch is scoped to their company exactly the way the admin LISTING
+ * already is (projectModel.getAllProjectsByCompany: any project owned by — or
+ * teamed with — a user of that company).
+ *
+ * Returns true when the caller may act on the project:
+ *   - owner, or
+ *   - team member, or
+ *   - company admin (user_type 7) AND the project belongs to their company.
+ *
+ * Non-admins keep exactly the behaviour they had (owner OR member) — this
+ * function only ever narrows.
+ *
+ * Scope is derived from req.user (id / user_type / company_id) — never from the
+ * request body, query or headers.
+ */
+export async function userCanAccessProject(req, projectId) {
+  const userId = Number(req.user?.id);
+  const projId = Number(projectId);
+  if (!userId || !projId) return false;
+
+  // Platform super admin (8) keeps the cross-tenant reach it has everywhere
+  // else in the codebase (mrController.isSuperAdmin,
+  // resolveHospitalityCompanyScope). user_type 7 is a COMPANY admin and does not.
+  if (Number(req.user?.user_type) === 8) return true;
+
+  const isCompanyAdmin = Number(req.user?.user_type) === 7;
+  const companyId = req.user?.company_id != null ? Number(req.user.company_id) : null;
+
+  const row = await db.one(
+    `SELECT
+       EXISTS (SELECT 1 FROM tbl_projects p WHERE p.id = $1 AND p.user_id = $2) AS is_owner,
+       EXISTS (SELECT 1 FROM tbl_project_team pt WHERE pt.project_id = $1 AND pt.user_id = $2) AS is_member,
+       EXISTS (
+         SELECT 1 FROM tbl_projects p
+          WHERE p.id = $1
+            AND $3::int IS NOT NULL
+            AND (
+              EXISTS (SELECT 1 FROM tbl_users ou WHERE ou.id = p.user_id AND ou.company_id = $3)
+              OR EXISTS (
+                SELECT 1 FROM tbl_project_team pt
+                  JOIN tbl_users tu ON tu.id = pt.user_id
+                 WHERE pt.project_id = p.id AND tu.company_id = $3
+              )
+            )
+       ) AS in_company`,
+    [projId, userId, companyId]
+  );
+
+  if (row.is_owner || row.is_member) return true;
+  return isCompanyAdmin && row.in_company === true;
+}
+
+/**
+ * TENANT gate for "another user's" data (project rosters keyed by user id).
+ * The caller may only ask about users inside their own company.
+ */
+export async function userIsInSameCompany(req, targetUserId) {
+  if (Number(req.user?.user_type) === 8) return true;
+  const companyId = req.user?.company_id != null ? Number(req.user.company_id) : null;
+  const targetId = Number(targetUserId);
+  if (!companyId || !targetId) return false;
+  if (targetId === Number(req.user?.id)) return true;
+  const row = await db.oneOrNone(
+    `SELECT 1 FROM tbl_users WHERE id = $1 AND company_id = $2`,
+    [targetId, companyId]
+  );
+  return !!row;
+}
+
+const FORBIDDEN_PROJECT = {
+  status: false,
+  message: "You don't have permission to access this project"
+};
+
 const projectController = {
   create: async (req, res, next) => {
     try {
@@ -69,48 +150,26 @@ const projectController = {
 
       let projectDetails;
 
+      // Tenant gate first: admin (user_type 7) is an admin OF THEIR COMPANY,
+      // not of every company (see userCanAccessProject).
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json(FORBIDDEN_PROJECT);
+      }
+
       if (user_type === 7) {
-        // Admin can access any project
         projectDetails = await projectModel.getProjectByIdForAdmin(
           project_id,
           limit,
           offset
         );
       } else {
-        // Check if user is the project owner or a team member
-        const isOwner = await projectModel.checkProjectOwnership(
+        // Owner and team member both read through the owner-scoped query.
+        projectDetails = await projectModel.getProjectById(
           project_id,
-          user_id
+          user_id,
+          limit,
+          offset
         );
-
-        if (isOwner) {
-          // User is the project owner
-          projectDetails = await projectModel.getProjectById(
-            project_id,
-            user_id,
-            limit,
-            offset
-          );
-        } else {
-          // Check if user is a team member
-          const isMember = await projectModel.isTeamMember(project_id, user_id);
-
-          if (isMember) {
-            // User is a team member
-            projectDetails = await projectModel.getProjectById(
-              project_id,
-              user_id,
-              limit,
-              offset
-            );
-          } else {
-            // User doesn't have access to this project
-            return res.status(403).json({
-              status: false,
-              message: "You don't have permission to access this project"
-            });
-          }
-        }
       }
 
       if (
@@ -150,47 +209,27 @@ const projectController = {
 
       let projectDetails;
 
+      // Tenant gate first — role is not membership (see userCanAccessProject).
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json(FORBIDDEN_PROJECT);
+      }
+
+      const file = 'yes'; // we want file hence explictly assigning tis value for feching project files and docs.
       if (user_type === 7) {
-        // Admin can access any project
-        const file = 'yes';
         projectDetails = await projectModel.getProjectTableDataByIdForAdmin(
-           project_id,
-            user_id,
-            file
+          project_id,
+          user_id,
+          file
         );
       } else {
-        // Check if user is the project owner or a team member
         const isOwner = await projectModel.checkProjectOwnership(
           project_id,
           user_id
         );
-        const file = 'yes'; // we want file hence explictly assigning tis value for feching project files and docs.
-        if (isOwner) {
-          // User is the project owner
-          projectDetails = await projectModel.getProjectTableDataById(
-            project_id,
-            user_id,
-            file
-          );
-        } else {
-          // Check if user is a team member
-          const isMember = await projectModel.isTeamMember(project_id, user_id);
-          const file = 'yes';
-          if (isMember) {
-            // User is a team member, use the admin function to bypass owner check
-            projectDetails = await projectModel.getProjectTableDataByIdForAdmin(
-            project_id,
-            user_id,
-            file
-            );
-          } else {
-            // User doesn't have access to this project
-            return res.status(403).json({
-              status: false,
-              message: "You don't have permission to access this project"
-            });
-          }
-        }
+        projectDetails = isOwner
+          ? await projectModel.getProjectTableDataById(project_id, user_id, file)
+          // Team member: use the admin-shaped query to bypass the owner filter.
+          : await projectModel.getProjectTableDataByIdForAdmin(project_id, user_id, file);
       }
 
       if (
@@ -224,43 +263,16 @@ const projectController = {
   getProjectBudget: async (req, res, next) => {
     try {
       const project_id = req.params.project_id;
-      const user_id = req.user.id;
-      const user_type = req.user.user_type;
 
-      let projectBudget;
-
-      if (user_type === 7) {
-        // Admin can access any project budget
-        projectBudget = await projectModel.getProjectBudget(project_id);
-      } else {
-        // Check if user is the project owner or a team member
-        const isOwner = await projectModel.checkProjectOwnership(
-          project_id,
-          user_id
-        );
-        if (isOwner) {
-          // User is the project owner
-          projectBudget = await projectModel.getProjectBudget(
-            project_id
-          );
-        } else {
-          // Check if user is a team member
-          const isMember = await projectModel.isTeamMember(project_id, user_id);
-
-          if (isMember) {
-            // User is a team member, use the admin function to bypass owner check
-
-            projectBudget = await projectModel.getProjectBudget(project_id);
-          } else {
-            // User doesn't have access to this project
-            return res.status(403).json({
-              status: false,
-              message:
-                "You don't have permission to access this project's budget"
-            });
-          }
-        }
+      // Tenant gate — role is not membership (see userCanAccessProject).
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json({
+          status: false,
+          message: "You don't have permission to access this project's budget"
+        });
       }
+
+      const projectBudget = await projectModel.getProjectBudget(project_id);
       if (
         !projectBudget ||
         (Array.isArray(projectBudget) && projectBudget.length === 0)
@@ -294,37 +306,19 @@ const projectController = {
  getProjectAvailableBudget: async (req, res, next) => {
   try {
     const { project_id } = req.params;
-    const user_id = req.user.id;
-    const user_type = req.user.user_type;
 
-    let totalSpent = 0;
     let totalBudget = 0;
 
-    // Helper: Get total spent for project
-    const getTotalSpent = async () => {
-      const spentArr = await projectModel.getProjectBudget(project_id);
-      return spentArr.reduce((sum, b) => sum + Number(b.total_value || 0), 0);
-    };
-
-    if (user_type === 7) {
-      // Admin can access any project's available budget
-      totalSpent = await getTotalSpent();
-    } else {
-      const isOwner = await projectModel.checkProjectOwnership(project_id, user_id);
-      if (isOwner) {
-        totalSpent = await getTotalSpent();
-      } else {
-        const isMember = await projectModel.isTeamMember(project_id, user_id);
-        if (isMember) {
-          totalSpent = await getTotalSpent();
-        } else {
-          return res.status(403).json({
-            status: false,
-            message: "You don't have permission to access this project's available budget",
-          });
-        }
-      }
+    // Tenant gate — role is not membership (see userCanAccessProject).
+    if (!(await userCanAccessProject(req, project_id))) {
+      return res.status(403).json({
+        status: false,
+        message: "You don't have permission to access this project's available budget",
+      });
     }
+
+    const spentArr = await projectModel.getProjectBudget(project_id);
+    const totalSpent = spentArr.reduce((sum, b) => sum + Number(b.total_value || 0), 0);
 
     // Get project budget from rfqModel
     const budgetRows = await rfqModel.checkIfExists('tbl_projects', `id = ${project_id}`);
@@ -417,6 +411,16 @@ const projectController = {
 
       let udpatedProject;
 
+      // Same role-vs-membership defect on the WRITE side: user_type 7/8/2 is
+      // every buyer-side account, so any authenticated buyer could rewrite any
+      // project's name/status/budget by id. Gate on the tenant first.
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json({
+          status: false,
+          message: "You don't have permission to update this project"
+        });
+      }
+
       if (user_type === 7 || user_type === 8 || user_type === 2) {
         // Admin can update any project
         const tbl_project_data = {
@@ -480,6 +484,15 @@ const projectController = {
     }
 
     try {
+      // project_id arrives in the body and was never authorized — any buyer
+      // could attach documents to any tenant's project.
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json({
+          status: 2,
+          message: "You don't have permission to add files to this project"
+        });
+      }
+
       const filesData = files.map((file) => ({
         project_id,
         file_name: file.originalname,
@@ -511,32 +524,10 @@ const projectController = {
   getProjectTeamMembers: async (req, res, next) => {
     try {
       const { project_id } = req.params;
-      const user_id = req.user.id;
-      const user_type = req.user.user_type;
-
-      // Check if the user is allowed to access this project
-      let canAccess = false;
-
-      if (user_type === 7) {
-        // Admin can access any project
-        canAccess = true;
-      } else {
-        // Regular user can only access their own projects or projects they're a member of
-        const projectData = await projectModel.checkProjectOwnership(
-          project_id,
-          user_id
-        );
-
-        if (projectData) {
-          canAccess = true;
-        } else {
-          // Check if user is a team member
-          const isMember = await projectModel.isTeamMember(project_id, user_id);
-          canAccess = isMember;
-        }
-      }
-
-      if (!canAccess) {
+      // Owner / team member / company admin of the project's own company.
+      // The bare `user_type === 7 → allow` short-circuit that used to live here
+      // let any tenant's admin read any tenant's roster (names + emails).
+      if (!(await userCanAccessProject(req, project_id))) {
         return res.status(403).json({
           status: false,
           message: "You don't have permission to access this project's team"
@@ -568,23 +559,13 @@ const projectController = {
       const { project_id } = req.params;
       const { user_id, role } = req.body;
       const current_user_id = req.user.id;
-      const user_type = req.user.user_type;
 
-      // Check if the user is allowed to modify this project
-      let canModify = false;
-
-      if (user_type === 7) {
-        // Admin can modify any project
-        canModify = true;
-      } else {
-        // Regular user can only modify their own projects
-        const projectData = await projectModel.checkProjectOwnership(
-          project_id,
-          current_user_id
-        );
-
-        canModify = projectData !== null;
-      }
+      // Owner, or company admin of the project's OWN company. The previous
+      // `user_type === 7 → canModify = true` let any tenant's admin bolt
+      // themselves onto any tenant's project.
+      const canModify = Number(req.user?.user_type) === 7
+        ? await userCanAccessProject(req, project_id)
+        : (await projectModel.checkProjectOwnership(project_id, current_user_id)) !== null;
 
       if (!canModify) {
         return res.status(403).json({
@@ -672,23 +653,11 @@ const projectController = {
       const { project_id } = req.params;
       const { user_id } = req.body;
       const current_user_id = req.user.id;
-      const user_type = req.user.user_type;
 
-      // Check if the user is allowed to modify this project
-      let canModify = false;
-
-      if (user_type === 7) {
-        // Admin can modify any project
-        canModify = true;
-      } else {
-        // Regular user can only modify their own projects
-        const projectData = await projectModel.checkProjectOwnership(
-          project_id,
-          current_user_id
-        );
-
-        canModify = projectData !== null;
-      }
+      // Owner, or company admin of the project's OWN company (see addTeamMember).
+      const canModify = Number(req.user?.user_type) === 7
+        ? await userCanAccessProject(req, project_id)
+        : (await projectModel.checkProjectOwnership(project_id, current_user_id)) !== null;
 
       if (!canModify) {
         return res.status(403).json({
@@ -767,6 +736,16 @@ const projectController = {
     try {
       const { user_id } = req.params;
 
+      // Tenant gate: you may only ask about users inside your own company.
+      // Without it, any authenticated buyer could enumerate every user's
+      // project list (names, budgets, status) by incrementing user_id.
+      if (!(await userIsInSameCompany(req, user_id))) {
+        return res.status(403).json({
+          status: false,
+          message: "You don't have permission to access this user's projects"
+        });
+      }
+
       // Get projects where the specified user is a team member
       const projects = await projectModel.getUserProjects(user_id);
 
@@ -834,6 +813,11 @@ const projectController = {
   getProjectHospitalityContext: async (req, res, next) => {
     try {
       const { project_id } = req.params;
+
+      // Tenant gate — the hospitality context names the owning company/BU.
+      if (!(await userCanAccessProject(req, project_id))) {
+        return res.status(403).json(FORBIDDEN_PROJECT);
+      }
 
       // Get hospitality mappings for the project
       const mappings = await hospitalityModel.getProjectMappings(project_id);

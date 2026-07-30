@@ -42,25 +42,51 @@ PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 // check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
 // vendor user_types at the route layer.
 PORoutes.put('/:po_id', passportSignIn, noAcl([3]), updatePO)
+// Vendors legitimately call this (Order Book) — the controller skips the buyer
+// RBAC gate for user_type 3 and the model scopes them to finalized_vendor_id.
 PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
-PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
+
+// Initiate a draft PO (draft -> pending_approval + approval instance + PDF +
+// approver emails). This is a STATE-CHANGING operation that shipped as a GET
+// with no acl() and no scope check at all, so any authenticated user could
+// initiate any tenant's PO. Fixed in three places:
+//   1. noAcl([3])       — vendors can never initiate (the vendor Order Book
+//                         passes a handleInitiatePO prop that is destructured
+//                         but never rendered, so nothing breaks).
+//   2. assertPoAccess   — inside the controller, 4-axis tenant scope.
+//   3. POST binding     — the correct verb for the effect.
+// The GET binding is kept ONLY for backwards compatibility with the deployed
+// frontend, whose single call site is frontend/services/po.js
+// (handlePOInitialization). Once that switches to POST, delete the GET line.
+PORoutes.get('/initiate/:po_id', passportSignIn, noAcl([3]), initiatePO);
+PORoutes.post('/initiate/:po_id', passportSignIn, noAcl([3]), initiatePO);
 // Bulk-merge multiple draft POs of the same vendor on the same RFQ into one.
 // Same buyer-only acl as the other write routes; tenant scope is verified
 // inside the model against the kept PO's company_id.
 PORoutes.post('/merge-drafts', passportSignIn, noAcl([3]), mergePODrafts);
-PORoutes.post('/approve/:po_id', passportSignIn, approvePO);
+// Buyer-side PO writes. All of these previously ran with passportSignIn ONLY —
+// no role gate and no tenant scope — so a vendor (or any user from any other
+// company) could approve, regenerate, re-upload the PDF, or rewrite the GSTIN /
+// HSN codes of an arbitrary purchase order by id. noAcl([3]) blocks vendors at
+// the route; assertPoAccess enforces the 4-axis tenant scope in the controller.
+PORoutes.post('/approve/:po_id', passportSignIn, noAcl([3]), approvePO);
 PORoutes.post('/accept/:po_id', passportSignIn, acl([3]), acceptPO);
 PORoutes.post('/reject/:po_id', passportSignIn, acl([3]), rejectPO);
-PORoutes.post('/regenerate/:po_id', passportSignIn, regeneratePO);
-PORoutes.post('/upload-pdf/:po_id', passportSignIn, poUploadMiddleware, uploadPODocument);
-PORoutes.post('/updateGST/:po_id', passportSignIn, updateGST);
-PORoutes.post('/updateHSN/:po_id', passportSignIn, updateHSNForProduct);
+PORoutes.post('/regenerate/:po_id', passportSignIn, noAcl([3]), regeneratePO);
+PORoutes.post('/upload-pdf/:po_id', passportSignIn, noAcl([3]), poUploadMiddleware, uploadPODocument);
+PORoutes.post('/updateGST/:po_id', passportSignIn, noAcl([3]), updateGST);
+PORoutes.post('/updateHSN/:po_id', passportSignIn, noAcl([3]), updateHSNForProduct);
 PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, raiseInvoice);
 PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, markDispatched);
 PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([3]), addSiteRepresentative);
 PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), markGRN);
 
-// Milestone Routes
+// Milestone + Task routes. Deliberately NOT noAcl([3]): the vendor Order Book
+// creates and edits milestones on its own POs (components/dashboard/vendor/
+// order-book/CreateMilestoneModal.js). Tenancy is enforced per row by resolving
+// the parent PO and running assertPoAccess, which admits the finalized vendor
+// for their own PO and nobody else's — previously ANY authenticated user could
+// edit ANY milestone/task by its sequential id.
 PORoutes.get('/:po_id/milestones', passportSignIn, getMilestonesController);
 PORoutes.post('/milestones', passportSignIn, createMilestoneController);
 PORoutes.put('/milestones/:id', passportSignIn, updateMilestoneController);

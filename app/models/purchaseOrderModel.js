@@ -9,7 +9,272 @@ import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
 import pricingEngine from "../services/pricingEngine.js";
 import { dispatch as dispatchNotification } from "../services/notificationService.js";
+import {
+  assertUserHasScope,
+  AuthorizationError,
+  buildScopeExistsClause,
+} from "../services/authorizationService.js";
 import fs from 'fs';
+
+// ===========================================================================
+// SECURITY — legacy Purchase Order authorization gate
+// ---------------------------------------------------------------------------
+// The legacy PO surface (this model + purchaseOrderController) historically
+// authorized by one of three broken means, or by nothing at all:
+//
+//   * nothing            — GET /po/initiate/:po_id had no acl() and no scope
+//                          check while MUTATING state (draft -> pending
+//                          approval + approval instance + PDF + approver mail).
+//                          Same for updateGST / updateHSN / regenerate /
+//                          upload-pdf / markGRN / addSiteRepresentative and the
+//                          milestone + task mutations, all of which took an id
+//                          straight off the URL or body and wrote.
+//   * po.rfq_id = $1     — getPOByRFQId's ENTIRE tenant filter.
+//   * tbl_company.id     — the milestone/task queries. In production
+//                          buyer_company_id 13 owns 8 distinct hospitality
+//                          companies (4..11), so a tbl_company predicate does
+//                          not isolate legal entities.
+//
+// Everything now routes through assertPoAccess(), which resolves the PO's
+// tenancy from its parent RFQ (or, for call-off POs, its ARC) and evaluates the
+// canonical company x hotel x department x process tuple — the same predicate
+// commit 92604b60 adopted for the PO dashboard (poDashboardModel.js).
+//
+// Permission choice mirrors that commit: `awarding.read` OR `rfq.read` OR
+// `boq.read`. In production 3 users hold awarding.read without rfq.read and 1
+// holds the reverse; gating on any single one strands real users. All three
+// enforce the identical 4-axis scope, so the OR widens *who* may act, never
+// *which* PO any one of them reaches.
+//
+// NULL semantics — deliberately FAIL CLOSED. authorizationService's
+// assertCanReadParentRfq (line ~222) silently `return`s (i.e. ALLOWS) when the
+// parent RFQ carries a NULL hospitality_company_id; 84 such RFQs still exist in
+// production awaiting the scripted data repair, so that bypass is reachable.
+// Here the company is first re-derived from the RFQ's own hotel (the same
+// recovery saveRfqDraft uses), and if it still cannot be established access is
+// DENIED. Verified against production: 0 of 385 POs hang off an RFQ with a NULL
+// hospitality_company_id, so nothing legitimate is lost.
+//
+// Out-of-scope always answers 404, never 403, so the existence of another
+// tenant's purchase order is never leaked.
+// ===========================================================================
+export const PO_SCOPE_PERMISSIONS = ["awarding.read", "rfq.read", "boq.read"];
+
+export class PoAccessError extends Error {
+  constructor(message = "Purchase order not found.") {
+    super(message);
+    this.name = "PoAccessError";
+    this.status = 404;
+    this.code = "PO_NOT_FOUND_OR_OUT_OF_SCOPE";
+  }
+}
+
+/**
+ * OR-composition of the canonical EXISTS clause across PO_SCOPE_PERMISSIONS for
+ * one entity alias, for use inside a LIST query's WHERE. Mirrors
+ * poDashboardModel.scopedExistsFor. Mutates `values`; returns the next $N.
+ */
+export function buildPoScopeExists(userId, alias, values, startIndex) {
+  let i = startIndex;
+  const clauses = [];
+  for (const perm of PO_SCOPE_PERMISSIONS) {
+    const built = buildScopeExistsClause(userId, perm, alias, i);
+    clauses.push(built.clause);
+    values.push(...built.params);
+    i += built.paramsConsumed;
+  }
+  return { clause: `(${clauses.join(" OR ")})`, nextIndex: i };
+}
+
+// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
+const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
+  for (const perm of PO_SCOPE_PERMISSIONS) {
+    try {
+      await assertUserHasScope(userId, perm, tuple, dbCtx);
+      return true;
+    } catch (err) {
+      if (!(err instanceof AuthorizationError)) throw err;
+    }
+  }
+  return false;
+};
+
+/**
+ * Resolve a PO's tenancy tuple. RFQ-backed POs source it from tbl_rfq;
+ * call-off POs (rfq_id NULL) from their ARC via tbl_arc_contract. When the RFQ
+ * carries a NULL hospitality_company_id the company is re-derived from the
+ * RFQ's own hotel, matching the recovery saveRfqDraft performs.
+ *
+ * Returns null when the PO does not exist.
+ */
+export const resolvePoTenancy = async (po_id, dbCtx = db) => {
+  const id = Number(po_id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return dbCtx.oneOrNone(
+    `SELECT po.id,
+            po.company_id,
+            po.rfq_id,
+            po.arc_contract_id,
+            po.is_call_off,
+            po.finalized_vendor_id,
+            po.initiated_by,
+            po.status,
+            COALESCE(r.hospitality_company_id, hh.hospitality_company_id,
+                     a.hospitality_company_id)              AS hospitality_company_id,
+            COALESCE(r.hotel_id, a.hotel_id)                AS hotel_id,
+            COALESCE(r.department_id, a.department_id)      AS department_id,
+            COALESCE(r.process_id, a.process_id)            AS process_id
+       FROM tbl_rfq_purchase_order po
+       LEFT JOIN tbl_rfq r                          ON r.id  = po.rfq_id
+       LEFT JOIN tbl_hospitality_company_hotels hh  ON hh.id = r.hotel_id
+       LEFT JOIN tbl_arc_contract ac                ON ac.id = po.arc_contract_id
+       LEFT JOIN tbl_arc a                          ON a.id  = ac.arc_id
+      WHERE po.id = $1`,
+    [id]
+  );
+};
+
+/**
+ * THE gate for every per-PO legacy endpoint. Throws PoAccessError (404) when
+ * the caller may not touch this PO; returns the resolved tenancy row otherwise.
+ *
+ * Three caller classes, all derived from req.user — never from body/query:
+ *   - GRN site representative (token login): bound to exactly one po_id, which
+ *     auth.authUserOrGRNToken already validated; the binding is re-asserted.
+ *   - Vendor (user_type 3): vendors hold NO tbl_user_role_scopes rows at all
+ *     (0 of 424 in production), so their tenancy key is finalized_vendor_id.
+ *   - Buyer side: the 4-axis RBAC tuple, fail-closed on an unresolvable
+ *     hospitality company.
+ */
+export const assertPoAccess = async (user, po_id, dbCtx = db) => {
+  const po = await resolvePoTenancy(po_id, dbCtx);
+  if (!po) throw new PoAccessError();
+
+  if (user?.is_token_user) {
+    if (Number(user.entityId) !== Number(po.id)) throw new PoAccessError();
+    return po;
+  }
+
+  const userId = Number(user?.id);
+  if (!Number.isFinite(userId) || userId <= 0) throw new PoAccessError();
+
+  if (Number(user?.user_type) === 3) {
+    if (Number(po.finalized_vendor_id) !== userId) throw new PoAccessError();
+    return po;
+  }
+
+  // Super admin — parity with poDashboardModel, where a null hospitality
+  // company scope means "every company".
+  if (Number(user?.user_type) === 8) return po;
+
+  if (!po.hospitality_company_id) throw new PoAccessError();
+
+  const allowed = await hasAnyPoScope(userId, {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoAccessError();
+
+  return po;
+};
+
+/**
+ * Fail-closed replacement for authorizationService.assertCanReadParentRfq on
+ * the PO-by-RFQ listing. Same 4-axis tuple, but a NULL hospitality_company_id
+ * denies instead of allowing, and the company is re-derived from the hotel
+ * first. Throws PoAccessError (404) so the endpoint does not leak existence.
+ */
+export const assertRfqPoListingAccess = async (user, rfq_id, dbCtx = db) => {
+  const id = Number(rfq_id);
+  if (!Number.isFinite(id) || id <= 0) throw new PoAccessError();
+
+  const rfq = await dbCtx.oneOrNone(
+    `SELECT r.id,
+            COALESCE(r.hospitality_company_id, hh.hospitality_company_id) AS hospitality_company_id,
+            r.hotel_id, r.department_id, r.process_id
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+      WHERE r.id = $1`,
+    [id]
+  );
+  if (!rfq) throw new PoAccessError();
+  if (Number(user?.user_type) === 8) return rfq;
+  if (!rfq.hospitality_company_id) throw new PoAccessError();
+
+  const allowed = await hasAnyPoScope(Number(user?.id), {
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
+    process_id: rfq.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoAccessError();
+  return rfq;
+};
+
+/**
+ * True when the user is an EXPLICITLY ASSIGNED approver on this PO — either an
+ * approver row on its approval instance (new workflow) or a member of its
+ * legacy approval hierarchy.
+ *
+ * Why this exists: an approver's assignment is itself an authorization grant,
+ * and it does not always agree with their RBAC scope row. Verified in
+ * production: user 405's only scope row sits on hospitality company 13 while
+ * they are a PENDING approver on a PO in hospitality company 12. Gating the
+ * approve endpoint on scope ALONE would leave that live approval unactionable.
+ * Used only to widen the approve path — never for reads or for any other write.
+ */
+export const isAssignedPoApprover = async (userId, po_id, dbCtx = db) => {
+  const uid = Number(userId);
+  const pid = Number(po_id);
+  if (!Number.isFinite(uid) || uid <= 0 || !Number.isFinite(pid) || pid <= 0) return false;
+
+  const row = await dbCtx.oneOrNone(
+    `SELECT 1
+       FROM tbl_rfq_purchase_order po
+      WHERE po.id = $1
+        AND (
+          EXISTS (
+            SELECT 1
+              FROM tbl_approval_instance_steps tais
+              JOIN tbl_approval_step_approvers tasa
+                ON tasa.approval_instance_step_id = tais.id
+             WHERE tais.approval_instance_id = po.approval_instance_id
+               AND tasa.approver_user_id = $2
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM tbl_approval_hierarchy_transactions trx
+              JOIN tbl_approval_hierarchy ah
+                ON ah.hierarchy_id = trx.hierarchy_id
+               AND ah.hierarchy_type = 'po'
+             WHERE trx.hierarchy_type = 'po'
+               AND trx.target_entity_id = po.id
+               AND ah.user_id = $2
+          )
+        )
+      LIMIT 1`,
+    [pid, uid]
+  );
+  return !!row;
+};
+
+/** Resolve the parent po_id of a payment milestone (null when absent). */
+export const getMilestoneParentPoId = async (id, dbCtx = db) => {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const row = await dbCtx.oneOrNone(`SELECT po_id FROM tbl_payment_milestone WHERE id = $1`, [n]);
+  return row ? row.po_id : null;
+};
+
+/** Resolve the parent po_id of a PO task (null when absent). */
+export const getTaskParentPoId = async (id, dbCtx = db) => {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const row = await dbCtx.oneOrNone(`SELECT po_id FROM tbl_purchase_order_tasks WHERE id = $1`, [n]);
+  return row ? row.po_id : null;
+};
 
 // Statuses at which the rendered PO PDF must stay sealed. The PDF is generated
 // at draft time so the buyer can preview, but it is intended for the vendor —
@@ -1080,9 +1345,24 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
   try {
     const offset = (page - 1) * limit;
 
+    // SECURITY: `po.rfq_id = $1` used to be the ENTIRE tenant filter here — no
+    // company, hotel, department or process predicate at all. Anyone who could
+    // guess an RFQ id got that RFQ's full purchase-order book (vendor
+    // identities, unit prices, PO values). The controller-level gate is now
+    // fail-closed (assertRfqPoListingAccess), and the same 4-axis predicate is
+    // ALSO applied in SQL here so the model is safe for any direct caller.
+    // Vendors are exempt: they hold no tbl_user_role_scopes rows, and their own
+    // predicate (finalized_vendor_id, below) is the correct tenancy key.
     const conditions = ["po.rfq_id = $1"];
     const values = [rfq_id, user_id];
     let paramIndex = 3; // Next available $ index
+
+    const applyRbacScope = Number(user_type) !== 3 && Number(user_type) !== 8;
+    if (applyRbacScope) {
+      const scoped = buildPoScopeExists(user_id, "BUYER_RFQ", values, paramIndex);
+      conditions.push(scoped.clause);
+      paramIndex = scoped.nextIndex;
+    }
 
     // Search by PO Number
     if (filters.poNumber) {
@@ -1280,9 +1560,13 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
         };
       })
 
+      // The scope predicate correlates against the joined RFQ alias, so the
+      // count query needs the same join as the data query (tbl_rfq_purchase_order
+      // carries no hotel/department/process columns of its own).
       const count = await t.one(
         `SELECT COUNT(*) AS total
          FROM tbl_rfq_purchase_order po
+         JOIN tbl_rfq BUYER_RFQ ON BUYER_RFQ.id = po.rfq_id
          ${whereClause}`,
         values
       );
@@ -2097,15 +2381,24 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
   });
 };
 
+// Tenancy for milestones is enforced by assertPoAccess(po_id) in the
+// controller, NOT by company_id: tbl_payment_milestone.company_id is a
+// tbl_company id, and in production buyer_company_id 13 owns 8 distinct
+// hospitality companies — so a company_id predicate does not isolate legal
+// entities. The PO is the tenancy anchor; every row here belongs to it.
+//
+// (This query also used to emit `WHERE company_id = $2 WHERE po_id = $1 ...` —
+// two WHERE clauses — so GET /po/:po_id/milestones raised a syntax error and
+// answered 500 for every caller. Production has 0 milestone rows, which is
+// consistent with the endpoint never having worked.)
 export const getMilestonesByPOId = async (company_id, po_id, includeDeleted = false) => {
-  let condition = 'WHERE po_id = $1'
-  condition += includeDeleted ? '' : ` AND status != 'deleted'`;
+  const condition = includeDeleted ? '' : ` AND status != 'deleted'`;
 
   return db.any(
-    `SELECT * FROM tbl_payment_milestone 
-     WHERE company_id = $2 ${condition}
+    `SELECT * FROM tbl_payment_milestone
+     WHERE po_id = $1 ${condition}
      ORDER BY due_date ASC`,
-    [po_id, company_id]
+    [po_id]
   );
 };
 
@@ -2162,32 +2455,36 @@ export const deleteMilestone = async (id, user) => {
   return result;
 };
 
+// As with getMilestonesByPOId: the PO is the tenancy anchor (enforced by
+// assertPoAccess in the controller). The old `company_id = $2` predicate is a
+// tbl_company id that spans 8 hospitality companies in production and so
+// isolated nothing; it also silently hid rows whose creator sat under a
+// different tbl_company (e.g. a vendor-created task).
 export const getTasksByPOId = async (company_id, po_id, page, limit) => {
   const offset = (page - 1) * limit;
-  let condition = 'AND po_id = $1'
 
   const [pos, { total }] = await db.tx(async t => {
     const data = await t.any(
-      `SELECT pot.id, 
-        pot.rfq_id, 
-        pot.po_id, 
-        pot.company_id, 
-        pot.task_name, 
-        pot.completion_date::date, 
-        pot.status, 
+      `SELECT pot.id,
+        pot.rfq_id,
+        pot.po_id,
+        pot.company_id,
+        pot.task_name,
+        pot.completion_date::date,
+        pot.status,
         pot.task_description
       FROM tbl_purchase_order_tasks pot
-      WHERE company_id = $2 ${condition}
+      WHERE pot.po_id = $1
       ORDER BY completion_date DESC
-      LIMIT $3 OFFSET $4`,
-      [po_id, company_id, limit, offset]
+      LIMIT $2 OFFSET $3`,
+      [po_id, limit, offset]
     );
 
     const count = await t.one(
       `SELECT COUNT(*) AS total
         FROM tbl_purchase_order_tasks
-        WHERE company_id = $2 ${condition}`,
-      [po_id, company_id]
+        WHERE po_id = $1`,
+      [po_id]
     );
 
     return [data, count]
@@ -2236,10 +2533,10 @@ export const updateTask = async (id, updates, user_id) => {
 
 export const deleteTask = async (id, user) => {
   const result = await db.oneOrNone(
-    `DELETE FROM tbl_purchase_order_tasks 
-      WHERE id = $1 
+    `DELETE FROM tbl_purchase_order_tasks
+      WHERE id = $1
       RETURNING *`,
-    [id, user.id]
+    [id]
   );
 
   return result;

@@ -123,13 +123,39 @@ describe("MR flow — search → create → submit → call-off", () => {
     expect(Number(hit.remaining_qty)).toBe(1000);
   });
 
-  test("searchContractedItems hides the variant from a different department's view", async () => {
+  // Temporarily grant BUYER a role scope on another department so the request
+  // gets PAST the (hotel × department) scope gate and exercises the SQL
+  // department filter underneath it. Without the extra scope the endpoint now
+  // (correctly) refuses with 403 before any query runs.
+  async function withDeptScope(departmentId, fn) {
+    const row = await db.one(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+       VALUES ($1, 2, $2, $3, $4) RETURNING id`,
+      [BUYER, HC, HOTEL, departmentId]
+    );
+    try {
+      return await fn();
+    } finally {
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [row.id]);
+    }
+  }
+
+  test("searchContractedItems refuses a department the buyer has no role scope for", async () => {
     const res = await buyerClient.get(
       `/api/v1/mr/search-contracted-items?hotel_id=${HOTEL}&department_id=${DEPT_ENG}`
     );
-    expect(res.status).toBe(200);
-    const hit = res.body.data.items.find(i => i.arc_contract_line_id === contractLineId);
-    expect(hit).toBeUndefined();
+    expect(res.status).toBe(403);
+  });
+
+  test("searchContractedItems hides the variant from a different department's view", async () => {
+    await withDeptScope(DEPT_ENG, async () => {
+      const res = await buyerClient.get(
+        `/api/v1/mr/search-contracted-items?hotel_id=${HOTEL}&department_id=${DEPT_ENG}`
+      );
+      expect(res.status).toBe(200);
+      const hit = res.body.data.items.find(i => i.arc_contract_line_id === contractLineId);
+      expect(hit).toBeUndefined();
+    });
   });
 
   test("form/hotels returns the buyer's accessible hotels; form/departments their mapped depts", async () => {
@@ -373,19 +399,21 @@ describe("MR flow — search → create → submit → call-off", () => {
   });
 
   test("rejects an MR item whose parent ARC dept doesn't match the MR's dept (CO2)", async () => {
-    const mismatchRes = await buyerClient.post("/api/v1/mr").send({
-      title: "Mismatched dept",
-      hotel_id: HOTEL,
-      department_id: DEPT_ENG, // wrong dept for our contract (which is DEPT_PROC)
-      items: [
-        { product_variant_id: VARIANT_ID, quantity: 50, uom: "litre",
-          arc_contract_id: contractId, arc_contract_line_id: contractLineId,
-          matched_unit_rate: 90 },
-      ],
+    await withDeptScope(DEPT_ENG, async () => {
+      const mismatchRes = await buyerClient.post("/api/v1/mr").send({
+        title: "Mismatched dept",
+        hotel_id: HOTEL,
+        department_id: DEPT_ENG, // wrong dept for our contract (which is DEPT_PROC)
+        items: [
+          { product_variant_id: VARIANT_ID, quantity: 50, uom: "litre",
+            arc_contract_id: contractId, arc_contract_line_id: contractLineId,
+            matched_unit_rate: 90 },
+        ],
+      });
+      // createDraft validates contract-linkage + scope up-front and rejects an
+      // item whose contract is not in the MR's hotel/department (audit CO2).
+      expect(mismatchRes.status).toBe(400);
+      expect(mismatchRes.body.message).toMatch(/hotel\/department|not in this/i);
     });
-    // createDraft now validates contract-linkage + scope up-front and rejects
-    // an item whose contract is not in the MR's hotel/department (audit CO2).
-    expect(mismatchRes.status).toBe(400);
-    expect(mismatchRes.body.message).toMatch(/hotel\/department|not in this/i);
   });
 });

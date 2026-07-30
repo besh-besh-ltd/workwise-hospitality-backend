@@ -13,6 +13,7 @@ import {
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import axios from 'axios';
+import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -666,6 +667,17 @@ export async function submitTechEval(req, res) {
 export async function getTechEvalApproval(req, res) {
   try {
     const arcId = Number(req.params.arcId);
+    // The route deliberately carries NO TECH_READ gate: policy approvers are
+    // often not tech evaluators and may hold no ARC module role at all, so a
+    // permission gate here would lock the approver out of the chain they must
+    // act on. The tenant boundary still has to hold, though — this payload
+    // carries the approver matrix (names/emails/comments) plus the mark-edit
+    // history. Gate on the ARC's OWN scope instead of on a permission.
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (!(await userCanAccessArc(req, arc))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
     const instance = await db.oneOrNone(
       `SELECT * FROM tbl_approval_instances
         WHERE entity_type = 'ARC_TECH' AND entity_id = $1

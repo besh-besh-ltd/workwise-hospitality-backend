@@ -194,9 +194,14 @@ GeneralRoutes.post(
   passportSignIn,
   hospitalityApprovalController.submitApprovalAction
 );
+// SECURITY: this route had no role gate at all, so vendors (user_type 3) could
+// reach a handler that CANCELS approval instances by sequential id. The
+// controller's tenant guard is the real control (a vendor resolves to an empty
+// company scope and 404s); this mirrors the sibling /submit gate on top of it.
 GeneralRoutes.post(
   '/hospitality/approval/cancel',
   passportSignIn,
+  noAcl([3]),
   hospitalityApprovalController.cancelApproval
 );
 

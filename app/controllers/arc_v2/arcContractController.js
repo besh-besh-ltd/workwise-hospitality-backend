@@ -14,6 +14,7 @@ import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
+import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -36,16 +37,12 @@ import path from 'path';
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
-// Authorization: may this caller read/act on the given hotel's ARC? Super admin
-// (user_type 8) bypasses; everyone else must have the hotel in their accessible
-// set. Scope is derived from the ARC's own hotel_id — never trusted from the
-// client (security-first; mirrors arcController.userCanAccessHotel).
-async function userCanAccessHotel(req, hotelId) {
-  if (Number(req.user?.user_type) === 8) return true;
-  if (!req.user?.id || !hotelId) return false;
-  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
-  return accessible.map(Number).includes(Number(hotelId));
-}
+// Authorization: may this caller read/act on this ARC? Scope derives from the
+// ARC ROW (company × hotel × department × process) — never from the client.
+// One of four byte-identical copies that wrapped the hotel-blind
+// rbacModel.getAllAccessibleHotelIds; all four now share the single
+// implementation in helper/arc_v2/arcScope.js.
+const userCanAccessHotel = userCanAccessArc;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -835,7 +832,7 @@ export async function getVendorDocumentsBundle(req, res) {
     // (PAN/GST/MSME/FSSAI/cancelled-cheque). Gate on the contract's ARC hotel —
     // never trust the contractId alone (sequential ids → trivially enumerable).
     const contractArc = await arcModel.getById(contract.arc_id);
-    if (!contractArc || !(await userCanAccessHotel(req, contractArc.hotel_id))) {
+    if (!contractArc || !(await userCanAccessHotel(req, contractArc))) {
       return bad(res, 403, 'You do not have access to this contract', 3);
     }
     const vendorId = contract.vendor_id;
@@ -889,7 +886,7 @@ export async function getActiveSummary(req, res) {
     // Tenant isolation: active-summary exposes contracts, call-off PO prices,
     // amendment price changes, and buyer PII — gate on the ARC's own hotel_id
     // (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
