@@ -42,6 +42,11 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
     can_approve: !!summary?.user_can_approve,
     label: summary?.user_action_label || null,
     instance_id: summary?.user_approval_instance_id || null,
+    // The generic approval endpoint accepts a null step id, but the summary
+    // already resolves it — pass it through so the client doesn't have to
+    // re-derive which step it is acting on.
+    step_id: summary?.user_approval_step_id || null,
+    entity_type: summary?.user_approval_entity_type || null,
   };
 
   const stages = PHASE_ORDER.map((phaseKey) => {

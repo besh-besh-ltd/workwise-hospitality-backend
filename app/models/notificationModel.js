@@ -113,17 +113,34 @@ const notificationModel = {
         });
     });
   },
-  notificationDetail: async (notification_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_notifications where id = $1', [notification_id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+  // Ownership predicate for tbl_notifications.
+  //
+  // The table carries ownership in two columns for historical reasons:
+  //   - Legacy rows (1,718 in production) populate ONLY `sender_user_id`, and
+  //     despite the name it holds the RECIPIENT (e.g. "RFQ Pending" reminders
+  //     are written with sender_user_id = the buyer being reminded). The
+  //     notification LISTING has always keyed off this column.
+  //   - ARC-era rows (671) populate `recipient_user_id` (createForRecipient);
+  //     when both are set, `sender_user_id` is the genuine sender and only the
+  //     recipient may read the row.
+  //
+  // COALESCE(recipient_user_id, sender_user_id) therefore resolves to the one
+  // user who owns the notification under both shapes.
+  //
+  // SECURITY: `user_id` is REQUIRED and must come from req.user — never from
+  // the request. Ids in this table are sequential (40..2429 in production), so
+  // without the owner predicate any authenticated user (vendors included)
+  // could enumerate every tenant's notifications.
+  notificationDetail: async (notification_id, user_id) => {
+    if (!user_id) {
+      throw new Error('notificationDetail: user_id is required');
+    }
+    return db.any(
+      `select * from tbl_notifications
+        where id = $1
+          and COALESCE(recipient_user_id, sender_user_id) = $2`,
+      [notification_id, user_id]
+    );
   },
   checkReviewExists: async (user_id, reviewed_to) => {
     return new Promise(function (resolve, reject) {
@@ -140,22 +157,22 @@ const notificationModel = {
         });
     });
   },
-  statusUpdateNotification: async (notification_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `update 
-				tbl_notifications set 
-				is_read = 1
-       	where id=($1)`,
-        [notification_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          reject(err);
-        });
-    });
+  // SECURITY: same owner predicate as notificationDetail — the write side had
+  // the identical IDOR (any id could be flipped to read by anyone).
+  // Returns the affected rowCount so the controller can 404 on a miss.
+  statusUpdateNotification: async (notification_id, user_id) => {
+    if (!user_id) {
+      throw new Error('statusUpdateNotification: user_id is required');
+    }
+    const result = await db.result(
+      `update tbl_notifications
+          set is_read = 1,
+              is_read_at = NOW()
+        where id = $1
+          and COALESCE(recipient_user_id, sender_user_id) = $2`,
+      [notification_id, user_id]
+    );
+    return result.rowCount;
   },
 
   createForRecipient: async ({

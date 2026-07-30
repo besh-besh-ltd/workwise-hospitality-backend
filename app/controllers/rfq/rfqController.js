@@ -2191,12 +2191,100 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
-  // Validate hospitality context access if provided
-  if (hospitality_company_id) {
+  // ---------------------------------------------------------------------
+  // P0: "absent" is NOT "null".
+  //
+  // This handler used to build `rfqData` with `x: x || null` for every column
+  // and hand the whole object to rfqModel.updateWithTimestamp(), which derives
+  // its SET list from EVERY key present. An auto-save that simply omitted
+  // `hospitality_company_id` therefore wrote NULL over the RFQ's tenant
+  // anchor — and every buyer-visibility query gates on
+  // `urs.company_id = RFQ.hospitality_company_id`, so `x = NULL` is never TRUE
+  // and the RFQ disappeared from every buyer surface, direct URL included.
+  //
+  // Rule from here on: a key the caller did not send is left untouched; an
+  // EXPLICIT null still clears the column.
+  // ---------------------------------------------------------------------
+  const sentKey = (key) =>
+    Object.prototype.hasOwnProperty.call(reqBody, key) && reqBody[key] !== undefined;
+  // '' and the string forms of empty selects mean "cleared" for id columns.
+  const asId = (v) => {
+    if (v === null) return null;
+    if (v === '' || v === 'null' || v === 'undefined') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  // Current persisted context — the authority when the client omits a field.
+  const existingRfq = rfq_id
+    ? await db.oneOrNone(
+        `SELECT hospitality_company_id, hotel_id, department_id, process_id,
+                is_tender, reverse_auction
+           FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      )
+    : null;
+
+  // Effective entity type / auction mode. These drive cross-field invariants
+  // (tender_fees, ra_* dates) AND the ABAC resource, so an omitted flag must
+  // fall back to what the row already is — never to a hardcoded default.
+  // Absent `is_tender` used to be written as 0, silently converting a tender
+  // into an RFQ and rerouting its entire approval + ARC path.
+  const effIsTender = sentKey('is_tender')
+    ? (Number(is_tender) === 1 ? 1 : 0)
+    : (Number(existingRfq?.is_tender) === 1 ? 1 : 0);
+  const isReverseAuctionInput = (v) => v === 1 || v === '1' || v === true;
+  const effReverseAuction = sentKey('reverse_auction')
+    ? (isReverseAuctionInput(reverse_auction) ? 1 : 0)
+    : (Number(existingRfq?.reverse_auction) === 1 ? 1 : 0);
+
+  // Effective values = what the row will hold after this save.
+  let effHotelId = sentKey('hotel_id') ? asId(hotel_id) : (existingRfq?.hotel_id ?? null);
+  if (!effHotelId && Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+    effHotelId = asId(hotel_ids[0]);
+  }
+  if (!effHotelId && rfq_id) {
+    const mapped = await db.oneOrNone(
+      `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1 ORDER BY id LIMIT 1`,
+      [rfq_id]
+    );
+    effHotelId = mapped?.hotel_id ?? null;
+  }
+
+  let effCompanyId = sentKey('hospitality_company_id')
+    ? asId(hospitality_company_id)
+    : (existingRfq?.hospitality_company_id ?? null);
+
+  // Re-derive from the hotel exactly the way POST /rfq/create does, so an RFQ
+  // whose column was already wiped repairs itself on the next save instead of
+  // staying invisible.
+  let derivedCompanyName = null;
+  if (!effCompanyId && effHotelId) {
+    const hotelRecord = await db.oneOrNone(
+      `SELECT HCH.hospitality_company_id, HC.name AS hospitality_company_name
+         FROM tbl_hospitality_company_hotels HCH
+         JOIN tbl_hospitality_companies HC ON HC.id = HCH.hospitality_company_id
+        WHERE HCH.id = $1 AND HCH.is_deleted = 0`,
+      [effHotelId]
+    );
+    effCompanyId = hotelRecord?.hospitality_company_id || null;
+    derivedCompanyName = hotelRecord?.hospitality_company_name || null;
+  }
+
+  const effDepartmentId = sentKey('department_id')
+    ? asId(department_id)
+    : (existingRfq?.department_id ?? null);
+  const effProcessId = sentKey('process_id')
+    ? asId(process_id)
+    : (existingRfq?.process_id ?? null);
+
+  // Validate hospitality context access. Uses the EFFECTIVE company/hotel, so
+  // omitting the field can no longer skip the check.
+  if (effCompanyId) {
     const hasAccess = await hospitalityModel.userHasContext(
       user_id,
-      hospitality_company_id,
-      hotel_id || null
+      effCompanyId,
+      effHotelId || null
     );
     if (!hasAccess) {
       throw new Error(JSON.stringify({
@@ -2207,11 +2295,11 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   }
 
   // Validate process_id if provided
-  if (process_id && hospitality_company_id) {
+  if (effProcessId && effCompanyId) {
     // Get parent company from hospitality company
     const hospCompany = await db.oneOrNone(
       `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
-      [hospitality_company_id]
+      [effCompanyId]
     );
 
     if (!hospCompany) {
@@ -2225,7 +2313,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     const processExists = await db.oneOrNone(
       `SELECT id FROM tbl_approval_processes
        WHERE id = $1 AND company_id = $2 AND is_active = true`,
-      [process_id, hospCompany.company_id]
+      [effProcessId, hospCompany.company_id]
     );
 
     if (!processExists) {
@@ -2236,16 +2324,33 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     }
   }
 
-  // ABAC: 4-axis scope check (company / hotel / department / process). Only
-  // fires for hospitality RFQs — non-hospitality RFQs skip approval entirely
-  // (see startApprovalForRfq) and don't carry a process_id.
-  if (hospitality_company_id) {
-    const resource = Number(is_tender) === 1 ? 'boq' : 'rfq';
+  // ABAC: 4-axis scope check (company / hotel / department / process). Fires
+  // for hospitality RFQs — non-hospitality RFQs (no company on the row and no
+  // hotel to derive one from) skip approval entirely (see startApprovalForRfq)
+  // and don't carry a process_id.
+  //
+  // FAIL CLOSED: the check keys off the EFFECTIVE company, not the request
+  // field. Omitting `hospitality_company_id` used to bypass this gate outright.
+  const resource = effIsTender === 1 ? 'boq' : 'rfq';
+  if (effCompanyId) {
     await assertUserHasScope(user_id, `${resource}.create`, {
-      hospitality_company_id,
-      hotel_id: hotel_id || null,
-      department_id: department_id || null,
-      process_id: process_id || null,
+      hospitality_company_id: effCompanyId,
+      hotel_id: effHotelId || null,
+      department_id: effDepartmentId || null,
+      process_id: effProcessId || null,
+    });
+  }
+  // Moving an RFQ to a different tenant requires scope on the company it is
+  // leaving as well as the one it is entering.
+  if (
+    existingRfq?.hospitality_company_id &&
+    Number(existingRfq.hospitality_company_id) !== Number(effCompanyId)
+  ) {
+    await assertUserHasScope(user_id, `${resource}.create`, {
+      hospitality_company_id: existingRfq.hospitality_company_id,
+      hotel_id: existingRfq.hotel_id || null,
+      department_id: existingRfq.department_id || null,
+      process_id: existingRfq.process_id || null,
     });
   }
 
@@ -2284,22 +2389,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   // Auto-assign or create a default project mapped to the selected hotel
   let effectiveProjectId = project_id;
   try {
-    if ((!effectiveProjectId || effectiveProjectId === '' || effectiveProjectId === -1) && hospitality_company_id && hotel_id) {
+    if ((!effectiveProjectId || effectiveProjectId === '' || effectiveProjectId === -1) && effCompanyId && effHotelId) {
       // 1 = hotel-level mapping
       const existingMappings = await hospitalityModel.getProjectMappingsForContext(
-        hospitality_company_id,
+        effCompanyId,
         1,
-        hotel_id
+        effHotelId
       );
 
       if (existingMappings && existingMappings.length > 0) {
         effectiveProjectId = existingMappings[0].project_id;
       } else {
         // Create a minimal default project for this hotel context
-        const defaultProjectName = `Auto Project - Hotel ${hotel_id}`;
+        const defaultProjectName = `Auto Project - Hotel ${effHotelId}`;
         const tbl_project_data = {
           name: defaultProjectName,
-          description: `Auto-created project for hotel ${hotel_id}`,
+          description: `Auto-created project for hotel ${effHotelId}`,
           location: null,
           ended_at: null,
           rfq_type,
@@ -2318,8 +2423,8 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           await hospitalityModel.insertProjectMappings([
             {
               project_id: newProjectId,
-              hospitality_company_id,
-              hospitality_hotel_id: hotel_id,
+              hospitality_company_id: effCompanyId,
+              hospitality_hotel_id: effHotelId,
               mapping_type: 1,
               created_by: user_id,
             },
@@ -2331,9 +2436,6 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     // Log but do not block RFQ creation if auto project logic fails
     logError(autoProjectErr);
   }
-
-  // Normalize reverse_auction to ensure consistent comparison
-  const isReverseAuction = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
 
   // Helper to normalize date values - convert empty strings to null,
   // and ensure bare YYYY-MM-DD dates get a T00:00:00 time component
@@ -2349,33 +2451,90 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     return dateValue;
   };
 
+  // Only these two are unconditional: saveRfqDraft always parks the row as an
+  // unpublished draft owned by whoever just saved it.
   const rfqData = {
-      comment,
-      company_name,
-      response_email,
-      contact_name,
-      contact_number,
-      // bid_end_date is `text NOT NULL` on tbl_rfq, so a draft with no
-      // deadline yet has to round-trip as an empty string. The GET handler
-      // (getDraftById) maps '' back to null when serialising the response.
-      bid_end_date: normalizeDate(bid_end_date) ?? '',
-      location,
-      rfq_type,
-      reverse_auction: isReverseAuction ? 1 : 0,
-      is_tender: is_tender !== undefined ? is_tender : 0,
-      tender_fees: is_tender === 1 ? (tender_fees || 0) : 0,
-      tender_publish_date: normalizeDate(tender_publish_date) || null,
-      vendor_clarification_date: normalizeDate(vendor_clarification_date) || null,
-      hospitality_company_id: hospitality_company_id || null,
-      hotel_id: hotel_id || null,
-      department_id: department_id || null,
-      process_id: process_id || null,
-      ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
-      ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
       updated_by: user_id,
-      title: title || null,
   };
+
+  // ---- Absent-key rule, applied to EVERY remaining column ----------------
+  // Verified in production: all 35 RFQs with bid_end_date = '' also had
+  // hospitality_company_id IS NULL — a 100% overlap, proving one partial
+  // save-draft wipes several columns in the same UPDATE. An empty
+  // bid_end_date is not cosmetic: the vendor backfill query casts
+  // r.bid_end_date::timestamp, and a single '' aborts the entire query
+  // (`invalid input syntax for type timestamp: ""`), emptying every newly
+  // registered vendor's dashboard.
+  //
+  // comment / company_name / contact_name / contact_number / location /
+  // response_email / bid_end_date are `text NOT NULL`, so writing an omitted
+  // key as NULL also raised a 23502 and turned a partial save into a 500.
+
+  // Plain passthrough columns: sent => write, absent => leave alone.
+  if (sentKey('comment')) rfqData.comment = comment;
+  if (sentKey('company_name')) rfqData.company_name = company_name;
+  if (sentKey('contact_name')) rfqData.contact_name = contact_name;
+  if (sentKey('contact_number')) rfqData.contact_number = contact_number;
+  if (sentKey('location')) rfqData.location = location;
+  if (sentKey('response_email')) rfqData.response_email = response_email;
+  if (sentKey('rfq_type')) rfqData.rfq_type = rfq_type;
+  if (sentKey('title')) rfqData.title = title || null;
+  if (sentKey('tender_publish_date')) {
+    rfqData.tender_publish_date = normalizeDate(tender_publish_date) || null;
+  }
+  if (sentKey('vendor_clarification_date')) {
+    rfqData.vendor_clarification_date = normalizeDate(vendor_clarification_date) || null;
+  }
+  // bid_end_date is `text NOT NULL`, so a draft with no deadline yet has to
+  // round-trip as an empty string. The GET handler (getDraftById) maps ''
+  // back to null when serialising the response. An EXPLICIT null/'' still
+  // clears it; an absent key must not.
+  if (sentKey('bid_end_date')) {
+    rfqData.bid_end_date = normalizeDate(bid_end_date) ?? '';
+  }
+  // When we just repaired the company from the hotel, refresh the denormalised
+  // company_name alongside it (mirrors POST /rfq/create).
+  if (derivedCompanyName && !sentKey('company_name')) {
+    rfqData.company_name = derivedCompanyName;
+  }
+
+  // Entity type + its dependent money field. tender_fees is only meaningful on
+  // a tender, so a non-tender is always forced to 0 (a real invariant); on a
+  // tender the fee is preserved unless the caller actually sent one.
+  if (sentKey('is_tender')) rfqData.is_tender = effIsTender;
+  if (effIsTender !== 1) {
+    rfqData.tender_fees = 0;
+  } else if (sentKey('tender_fees')) {
+    rfqData.tender_fees = tender_fees || 0;
+  }
+
+  // Reverse auction + its dependent window. Same shape: the ra_* dates are
+  // only meaningful while reverse_auction is on.
+  if (sentKey('reverse_auction')) rfqData.reverse_auction = effReverseAuction;
+  if (effReverseAuction !== 1) {
+    rfqData.ra_start_date = null;
+    rfqData.ra_end_date = null;
+  } else {
+    if (sentKey('ra_start_date')) rfqData.ra_start_date = normalizeDate(ra_start_date);
+    if (sentKey('ra_end_date')) rfqData.ra_end_date = normalizeDate(ra_end_date);
+  }
+
+  // Tenant/scope columns. An omitted key leaves the column untouched; an
+  // EXPLICIT null (or '') clears it. `effCompanyId` also carries the
+  // re-derived-from-hotel repair, so a previously-wiped row heals on save.
+  if (sentKey('hospitality_company_id') || effCompanyId !== (existingRfq?.hospitality_company_id ?? null)) {
+    rfqData.hospitality_company_id = effCompanyId;
+  }
+  if (sentKey('hotel_id') || effHotelId !== (existingRfq?.hotel_id ?? null)) {
+    rfqData.hotel_id = effHotelId;
+  }
+  if (sentKey('department_id')) {
+    rfqData.department_id = effDepartmentId;
+  }
+  if (sentKey('process_id')) {
+    rfqData.process_id = effProcessId;
+  }
 
   const errorObj = { vendorNotPresent: [] };
 
@@ -7962,7 +8121,9 @@ const rfqController = {
     const user_id = req.user.id;
     try {
       const body = req.body || {};
-      const tab = ['all', 'pending', 'drafts', 'ongoing', 'approved', 'closed'].includes(body.tab) ? body.tab : 'all';
+      // 'approval' = awaiting publish approval (status 3/4). It used to be
+      // folded into 'drafts', which sent approvers into the edit wizard.
+      const tab = ['all', 'pending', 'drafts', 'approval', 'ongoing', 'approved', 'closed'].includes(body.tab) ? body.tab : 'all';
       const search = (body.search || body.search_val || '').toString().trim() || null;
       const sort = ['recent', 'oldest', 'deadline'].includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
@@ -7993,7 +8154,10 @@ const rfqController = {
       let lifecycleMap = {};
       if (rows.length > 0) lifecycleMap = await rfqModel.computeLifecycleStages(rows.map((r) => parseInt(r.id)));
       const STAGE_BUCKET = {
-        RFQ_APPROVAL: 'drafts',
+        // NOT 'drafts'. A pending-approval RFQ is somebody's to-do, not the
+        // creator's unfinished paperwork — the card must route to the detail
+        // page where the approver can act, and must not offer Edit/Delete only.
+        RFQ_APPROVAL: 'approval',
         AWAITING_QUOTES: 'ongoing', TECHNICAL_AWAITING_QUOTES: 'ongoing', TECHNICAL_EVALUATING: 'ongoing',
         TECHNICAL_APPROVING: 'ongoing', TECHNICAL_REJECTED: 'ongoing', RFQ_STUCK_TECHNICAL: 'ongoing',
         RFQ_STUCK_COMMERCIAL: 'ongoing', COMMERCIAL_EVALUATION: 'ongoing', NEGOTIATION_ONGOING: 'ongoing',
@@ -8016,13 +8180,16 @@ const rfqController = {
         const s = Number(r.status);
         if (s === 2) return 'closed';
         if (s === 0 || s === 5) return 'drafts';
-        // Not yet published (and not closed) → still a draft. The real drafts in
-        // this system are unpublished status-1 RFQs; awaiting-publish-approval
-        // (3/4) also belongs in Drafts. Key off is_published, not status alone.
+        // status 3 = PENDING_APPROVAL, 4 = READY_TO_PUBLISH. Both are
+        // is_published = 0, so this MUST be tested before the is_published
+        // short-circuit below — otherwise an RFQ an approver has to act on is
+        // filed as one of the creator's drafts (the P0 this fixes).
+        if (s === 3 || s === 4) return 'approval';
+        // Not yet published (and not closed / not awaiting approval) → a real
+        // draft: an unpublished status-1 RFQ.
         if (Number(r.is_published) === 0) return 'drafts';
         const stage = r.lifecycle_stage;
         if (stage && STAGE_BUCKET[stage]) return STAGE_BUCKET[stage];
-        if (s === 3 || s === 4) return 'drafts';
         if (r.po_completed) return 'approved';
         return 'ongoing';
       };
@@ -8040,8 +8207,16 @@ const rfqController = {
         try { actionMap = await rfqModel.getActionHoldersForRFQs(rows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
       }
       for (const r of rows) {
-        const users = actionMap[parseInt(r.id)]?.users || [];
+        const holders = actionMap[parseInt(r.id)];
+        const users = holders?.users || [];
         r._isMyAction = users.some((u) => Number(u.id) === Number(user_id));
+        // Approval affordances for the card. `can_approve` is narrower than
+        // `_isMyAction`: it is true only when the pending action is an APPROVAL
+        // this user is a pending approver on (not, say, a tech-eval task).
+        r._canApprove = holders?.type === 'approval' && r._isMyAction;
+        r._approvalInstanceId = holders?.type === 'approval' ? (holders.instance_id ?? null) : null;
+        r._approvalStepId = holders?.type === 'approval' ? (holders.step_id ?? null) : null;
+        r._approvalEntityType = holders?.type === 'approval' ? (holders.entity_type || null) : null;
       }
 
       // Safe array accessors for the json columns.
@@ -8067,7 +8242,7 @@ const rfqController = {
       const categoryPairs = (r) => dedupe(parseArr(r.categories).map((c) => ({ id: String(c.id), title: c.title })), (c) => c.id);
 
       // 3. tab counts (full scoped+search set).
-      const tab_counts = { all: rows.length, pending: 0, drafts: 0, ongoing: 0, approved: 0, closed: 0 };
+      const tab_counts = { all: rows.length, pending: 0, drafts: 0, approval: 0, ongoing: 0, approved: 0, closed: 0 };
       for (const r of rows) {
         tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
         if (r._isMyAction) tab_counts.pending++;
@@ -8145,6 +8320,13 @@ const rfqController = {
         is_quotes_present: r.is_quotes_present, has_dead_end_product: r.has_dead_end_product,
         has_tech_stuck_product: r.has_tech_stuck_product,
         action_holders: actionMap[parseInt(r.id)] || null,
+        // Approval affordances — let the card render Approve/Review and deep
+        // link to the pending instance instead of falling back to Edit/Delete.
+        can_approve: !!r._canApprove,
+        is_pending_for_me: !!r._isMyAction,
+        approval_instance_id: r._approvalInstanceId ?? null,
+        approval_step_id: r._approvalStepId ?? null,
+        approval_entity_type: r._approvalEntityType ?? null,
       }));
 
       return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
@@ -9421,6 +9603,66 @@ const rfqController = {
       // `undefined` (cross-tenant leak) and scope.userId is undefined (empty
       // negotiation history). See quoteCompareViewModel tenant gate.
       const scope = await deriveQcScope(req);
+
+      // ---- RBAC scope gate ------------------------------------------------
+      // The model below gates on hospitality COMPANY only, which admits every
+      // business unit in the tenant: in prod that exposed 223 RFQs to a user
+      // whose RBAC scope covers 47, leaking competitor pricing and vendor
+      // names across hotels/departments. Enforce the same 4-axis scope tuple
+      // the sibling getQuoteComparison enforces. Skipped for vendor user_type
+      // (no tbl_user_role_scopes rows); the route's noAcl([3]) blocks them.
+      if (Number(req.user?.user_type) !== 3) {
+        let scopeError = null;
+        try {
+          await assertCanReadParentRfq(req.user.id, req.params.id);
+        } catch (e) {
+          if (!(e instanceof AuthorizationError)) throw e;
+          scopeError = e;
+        }
+
+        if (scopeError) {
+          const parent = await db.oneOrNone(
+            `SELECT hospitality_company_id, hotel_id, department_id, process_id
+               FROM tbl_rfq WHERE id = $1`,
+            [req.params.id]
+          );
+
+          // Cross-tenant callers must not learn the RFQ exists — mirror the
+          // model's company gate and answer 404 rather than 403.
+          const tenantOk =
+            !Array.isArray(scope?.hospitalityCompanyIds) ||
+            scope.hospitalityCompanyIds
+              .map(Number)
+              .includes(Number(parent?.hospitality_company_id));
+          if (!tenantOk) {
+            return res
+              .status(404)
+              .json({ status: 2, message: 'Quote comparison not found.' })
+              .end();
+          }
+
+          // assertCanReadParentRfq keys off rfq.read / boq.read. Commercial
+          // approvers and negotiators own this screen but their seeded roles
+          // carry quote-compare.read WITHOUT rfq.read, so the parent-RFQ gate
+          // alone would lock them out of the page they are meant to act on.
+          // Re-check the IDENTICAL 4-axis scope tuple against the permission
+          // that actually governs Quote Comparison.
+          try {
+            await assertUserHasScope(req.user.id, 'quote-compare.read', {
+              hospitality_company_id: parent?.hospitality_company_id,
+              hotel_id: parent?.hotel_id ?? null,
+              department_id: parent?.department_id ?? null,
+              process_id: parent?.process_id ?? null,
+            });
+          } catch (fallbackErr) {
+            if (fallbackErr instanceof AuthorizationError) {
+              return sendScopeError(res, scopeError);
+            }
+            throw fallbackErr;
+          }
+        }
+      }
+
       // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
       const freightParam = req.query.freight;
       const noFreight =

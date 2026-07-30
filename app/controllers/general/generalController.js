@@ -23,8 +23,11 @@ import generalModel, {
   updateApprovalProcess,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
-  checkIfUserIsFinalApprover
+  checkIfUserIsFinalApprover,
+  getApprovalPolicyTenant,
+  getApprovalInstanceTenant
 } from '../../models/generalModel.js';
+import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import {
   snapshotPolicySteps,
@@ -366,6 +369,71 @@ const generalController = {
 
 // --- Hospitality Approval Engine Controllers Start ---
 
+// ===========================================================================
+// Tenant scope for the approval endpoints.
+// ---------------------------------------------------------------------------
+// Every handler below derives its company scope from req.user via these two
+// helpers. A client-supplied `hospitality_company_id` may only NARROW the
+// result; it can never widen it.
+// ===========================================================================
+
+/**
+ * Companies this request may read approval config for.
+ *   null      → super admin (user_type 8): every company.
+ *   number[]  → exactly these companies ([] = no access).
+ *
+ * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
+ * already refuses client widening for non-admins. Two active production
+ * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
+ * we union in tbl_user_role_scopes.company_id — still derived entirely from
+ * req.user, and it keeps those users from losing their own tenant's policies.
+ */
+async function resolveApprovalCompanyScope(req) {
+  const mapped = await resolveHospitalityCompanyScope(req);
+  if (mapped === null) return null; // super admin
+
+  const scoped = (await db.any(
+    `SELECT DISTINCT company_id
+       FROM tbl_user_role_scopes
+      WHERE user_id = $1 AND company_id IS NOT NULL`,
+    [req.user?.id || null]
+  )).map((r) => Number(r.company_id));
+
+  return [...new Set([...(mapped || []), ...scoped])];
+}
+
+/** True when `companyId` is inside the request's server-derived scope. */
+function inCompanyScope(scopeIds, companyId) {
+  if (scopeIds === null) return true; // super admin
+  if (companyId === null || companyId === undefined) return false;
+  return scopeIds.includes(Number(companyId));
+}
+
+/**
+ * Resolve a policy id to its owning company and 404 when it belongs to another
+ * tenant. Returns the policy tenant row, or null after the response is sent.
+ */
+async function guardPolicyTenant(req, res, policyId) {
+  const scopeIds = await resolveApprovalCompanyScope(req);
+  const tenant = await getApprovalPolicyTenant(policyId);
+  if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Policy not found' });
+    return null;
+  }
+  return tenant;
+}
+
+/** Same as guardPolicyTenant, for approval instances. */
+async function guardInstanceTenant(req, res, instanceId) {
+  const scopeIds = await resolveApprovalCompanyScope(req);
+  const tenant = await getApprovalInstanceTenant(instanceId);
+  if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Approval instance not found' });
+    return null;
+  }
+  return tenant;
+}
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -589,8 +657,22 @@ const hospitalityApprovalController = {
   async getApprovalPolicies(req, res) {
     try {
       const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include } = req.query;
+
+      // SECURITY: the company scope is SERVER-DERIVED and mandatory. Previously
+      // the model seeded its WHERE with 'TRUE' and applied the company filter
+      // only when the client happened to send the query param, so dropping the
+      // param dumped every tenant's policies. The client-sent id below is now
+      // only a narrowing facet (the Approval Wizard always sends the BU it is
+      // editing) and is discarded when it falls outside the user's own scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const requested = hospitality_company_id ? parseInt(hospitality_company_id) : undefined;
+      const narrow = requested !== undefined && inCompanyScope(scopeIds, requested)
+        ? requested
+        : undefined;
+
       const filters = {
-        hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
+        hospitality_company_ids: scopeIds,
+        hospitality_company_id: narrow,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
@@ -614,6 +696,9 @@ const hospitalityApprovalController = {
   async getApprovalPolicy(req, res) {
     try {
       const { id } = req.params;
+      // SECURITY: getApprovalPolicyWithSteps matches on `WHERE p.id = $1` only.
+      // Resolve the owning tenant first and 404 on a cross-tenant id.
+      if (!(await guardPolicyTenant(req, res, parseInt(id)))) return;
       const data = await getApprovalPolicyWithSteps(parseInt(id));
       res.json({ status: 1, data });
     } catch (e) {
@@ -628,6 +713,10 @@ const hospitalityApprovalController = {
    */
   async deleteApprovalPolicy(req, res) {
     try {
+      // SECURITY: same missing-tenant-column defect as the read endpoints, but
+      // destructive — a cross-tenant id would deactivate another company's
+      // approval policy.
+      if (!(await guardPolicyTenant(req, res, parseInt(req.params.id)))) return;
       await deleteApprovalPolicy(parseInt(req.params.id));
       res.json({ status: 1, message: 'Policy deactivated successfully' });
     } catch (e) {
@@ -693,6 +782,11 @@ const hospitalityApprovalController = {
     try {
       const { id } = req.params;
       const user_id = req.user?.id;
+      // SECURITY: getApprovalInstanceDetails matches on `WHERE i.id = $1` and
+      // returns approver names + emails plus company/hotel names. Guard at the
+      // HTTP boundary (the model function is shared with ARC/MR/PO/negotiation
+      // flows that already scope their own entity).
+      if (!(await guardInstanceTenant(req, res, parseInt(id)))) return;
       const data = await getApprovalInstanceDetails(parseInt(id), user_id);
       res.json({ status: 1, data });
     } catch (e) {
@@ -824,7 +918,12 @@ const hospitalityApprovalController = {
   async getEntityApprovals(req, res) {
     try {
       const { entity_type, entity_id } = req.params;
-      const data = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
+      // SECURITY: this route had no acl() at all (vendors reached it) and no
+      // tenant column in the WHERE. The role gate now lives on the route; here
+      // we drop any instance outside the caller's server-derived company scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const rows = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
+      const data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -845,6 +944,14 @@ const hospitalityApprovalController = {
           status: 3,
           message: 'entity_type and hospitality_company_id are required'
         });
+      }
+
+      // SECURITY: hospitality_company_id came straight off req.query on a route
+      // that had no acl() whatsoever. The role gate now lives on the route;
+      // here the requested company must be inside the caller's own scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      if (!inCompanyScope(scopeIds, parseInt(hospitality_company_id))) {
+        return res.status(404).json({ status: 2, message: 'No matching policy found' });
       }
 
       const policy = await findBestMatchingPolicy({
@@ -871,6 +978,9 @@ const hospitalityApprovalController = {
     try {
       const { id } = req.params;
       const { hospitality_company_id, hotel_id } = req.query;
+
+      // SECURITY: policy id was unscoped (`WHERE id = $1`).
+      if (!(await guardPolicyTenant(req, res, parseInt(id)))) return;
 
       const result = await getDepartmentSubGraphPreview(
         parseInt(id),
@@ -899,6 +1009,9 @@ const hospitalityApprovalController = {
       if (!policyId || isNaN(policyId)) {
         return res.status(400).json({ status: 3, message: 'Invalid policy ID' });
       }
+      // SECURITY: policy id was unscoped (`WHERE id = $1`); the payload leaks
+      // RFQ/PO identifiers from whichever tenant owns the policy.
+      if (!(await guardPolicyTenant(req, res, policyId))) return;
       const instances = await getPendingInstancesForPolicy(policyId);
       logger.info(`[PendingImpact] Found ${instances.length} pending instances for policy ${policyId}`);
 
@@ -929,6 +1042,8 @@ const hospitalityApprovalController = {
   async getInstanceChangeHistory(req, res) {
     try {
       const instanceId = parseInt(req.params.id);
+      // SECURITY: instance id was unscoped (`WHERE i.id = $1`).
+      if (!(await guardInstanceTenant(req, res, instanceId))) return;
       const history = await getInstanceChangeHistoryService(instanceId);
       return res.json({ status: 1, data: history });
     } catch (err) {

@@ -403,13 +403,20 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   );
   if (!rfq) return null;
 
-  // Tenant check: never leak across tenants. `scope.hospitalityCompanyIds` is
-  // the caller's mappings-derived company scope (from deriveScope), NOT a client
-  // header, so it can't be spoofed: null = super admin (all companies) → no gate;
-  // otherwise (a real user, array possibly empty) the RFQ's hospitality company
-  // MUST be in that set or we return null (controller → 404). (Hotel/department
-  // are narrowing filters in the dashboards; the single-RFQ view only needs the
-  // company-level ownership gate.)
+  // Tenant check — DEFENCE IN DEPTH, no longer the only gate.
+  //
+  // This is company-level only, which admits every business unit inside the
+  // tenant. That was previously the sole authorization on this view and leaked
+  // competitor pricing and vendor names across hotels/departments. The
+  // authoritative check is now assertCanReadParentRfq(req.user.id, rfqId) in
+  // rfqController.getQuoteComparisonView — full 4-axis RBAC scope
+  // (company × hotel × department × process), matching the sibling
+  // getQuoteComparison endpoint. Keep this gate: it is cheap, it is derived
+  // from the caller's mappings (`scope.hospitalityCompanyIds` comes from
+  // deriveScope, NOT a client header, so it can't be spoofed), and it still
+  // catches any future caller that reaches the model without the controller
+  // gate. null = super admin (all companies) → no gate; otherwise the RFQ's
+  // hospitality company MUST be in the set or we return null (controller → 404).
   if (scope && Array.isArray(scope.hospitalityCompanyIds)) {
     const allowed = scope.hospitalityCompanyIds.map(Number);
     if (!allowed.includes(Number(rfq.hospitality_company_id))) {

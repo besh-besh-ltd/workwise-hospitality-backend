@@ -45,7 +45,16 @@ describe("shapeRfqLifecycle", () => {
   test("attaches the action to the current stage", () => {
     const out = shapeRfqLifecycle(summary(), { permissions: {} });
     const cur = out.stages.find((s) => s.key === "negotiation-award");
-    expect(cur.action).toEqual({ required: true, can_approve: false, label: "You are an evaluator for this RFQ", instance_id: null });
+    // step_id / entity_type were added alongside instance_id so the client can
+    // post an approval decision without re-deriving the step.
+    expect(cur.action).toEqual({
+      required: true,
+      can_approve: false,
+      label: "You are an evaluator for this RFQ",
+      instance_id: null,
+      step_id: null,
+      entity_type: null,
+    });
   });
 
   test("APPROVED_COMPLETED (no current phase) → all complete, default_stage = purchase-order", () => {

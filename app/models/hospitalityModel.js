@@ -1996,7 +1996,13 @@ getVendorHotelCategoryMappings: async (vendorId) => {
       JOIN tbl_rfq_hotel_mappings rhm ON rhm.rfq_id = r.id
       JOIN vendor_hotels vh ON vh.hotel_id = rhm.hotel_id
       WHERE r.status = 1 AND r.is_published = 1
-        AND r.bid_end_date::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+        -- bid_end_date is TEXT and is '' (empty string, not NULL) on some rows.
+        -- An unguarded ::timestamp cast aborts the ENTIRE query with
+        -- "invalid input syntax for type timestamp" the moment one such row is
+        -- scanned, which silently zeroed out every new vendor's RFQ backfill.
+        -- NULLIF makes an empty deadline EXCLUDE the RFQ (conservative: never
+        -- auto-join a vendor to an RFQ that has no deadline).
+        AND NULLIF(r.bid_end_date, '')::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
         -- Skip products that already have an approved PO
         AND rp.id NOT IN (SELECT rfq_product_id FROM finalized_products)
         AND NOT EXISTS (

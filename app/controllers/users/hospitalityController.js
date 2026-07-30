@@ -3763,11 +3763,16 @@ const HospitalityController = {
       const [vendorUser, openRfqs] = await Promise.all([
         db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [vendorId]),
         db.any(
+          // NULLIF guard mirrors hospitalityModel.getMatchingOpenRfqsForVendor:
+          // bid_end_date is TEXT and can be '' (empty string, not NULL). An
+          // unguarded ::timestamp cast aborts the whole query as soon as such a
+          // row is in the id list — which is exactly what happens when a caller
+          // replays ids from a stale list or a repair script.
           `SELECT id, rfq_no, title, is_tender, bid_end_date, created_by
            FROM tbl_rfq
            WHERE id = ANY($1::int[])
              AND status = 1 AND is_published = 1
-             AND bid_end_date::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`,
+             AND NULLIF(bid_end_date, '')::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`,
           [rfqIds]
         )
       ]);

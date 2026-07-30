@@ -1579,13 +1579,53 @@ export async function updateApprovalPolicy(id, patch, t = db) {
 /**
  * Get approval policies with optional filtering
  * Returns policies ordered by specificity (most specific first)
+ *
+ * SECURITY (tenant scope is MANDATORY, not optional):
+ *   This function used to seed `conditions` with `'TRUE'` and add the company
+ *   filter only `if (hospitality_company_id)`. Callers that omitted the id got
+ *   EVERY tenant's policies back — in production that was 137 active policies
+ *   across 10 hospitality companies / 2 tenants, complete with company names,
+ *   hotel names and creator names.
+ *
+ *   `hospitality_company_ids` is now REQUIRED and must be derived server-side
+ *   from req.user (see resolveHospitalityCompanyScope):
+ *     - number[]  → restrict to exactly these companies
+ *     - []        → the user has no company access → no rows
+ *     - null      → super admin (user_type 8) bypass: no company filter.
+ *                   Spelled out explicitly so the "see everything" path can
+ *                   never be reached by simply forgetting to pass a scope.
+ *     - undefined → programming error → throw (fail closed).
+ *
+ *   `hospitality_company_id` remains available as a NARROWING filter (the
+ *   Approval Wizard passes the BU it is editing); it is intersected with the
+ *   server-derived set, never used in place of it.
  */
-export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
-  const conditions = ['TRUE'];
+export async function getApprovalPolicies({ hospitality_company_ids, hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
+  if (hospitality_company_ids === undefined) {
+    throw new Error(
+      'getApprovalPolicies: hospitality_company_ids is required (server-derived tenant scope; pass null only for the super-admin bypass)'
+    );
+  }
+  // No accessible company → no rows. Never degrade to "all".
+  if (Array.isArray(hospitality_company_ids) && hospitality_company_ids.length === 0) {
+    return [];
+  }
+
+  const conditions = [];
   const vals = [];
   let paramIdx = 1;
 
+  if (Array.isArray(hospitality_company_ids)) {
+    // Seed with the SERVER-DERIVED company predicate rather than 'TRUE'.
+    conditions.push(`p.hospitality_company_id = ANY($${paramIdx++}::int[])`);
+    vals.push(hospitality_company_ids);
+  } else {
+    // hospitality_company_ids === null → super admin, no company filter.
+    conditions.push('TRUE');
+  }
+
   if (hospitality_company_id) {
+    // Client-supplied narrowing, intersected with the scope above.
     conditions.push(`p.hospitality_company_id = $${paramIdx++}`);
     vals.push(hospitality_company_id);
   }
@@ -1713,6 +1753,38 @@ export async function getApprovalPoliciesWithSteps(filters) {
   }
 
   return policies.map(p => ({ ...p, steps: stepsByPolicy[p.id] || [] }));
+}
+
+// ===========================================================================
+// Tenant-ownership lookups for the per-id approval endpoints.
+// ---------------------------------------------------------------------------
+// The /policies/:id, /:id/department-preview, /:id/pending-impact,
+// /instance/:id, /instance/:id/change-history and /entity/:type/:id handlers
+// all matched on `WHERE p.id = $1` / `WHERE i.id = $1` with no tenant column —
+// a straight IDOR over 137 policies and 3,846 live approval instances that
+// return approver names + emails and company/hotel names.
+//
+// These two helpers return JUST the owning company id so a controller can 404
+// before any payload is assembled. They deliberately do NOT enforce anything
+// themselves: getApprovalInstanceDetails() is shared with the ARC, MR, PO,
+// negotiation and RFQ flows, so the guard belongs at the HTTP boundary rather
+// than buried in a function a dozen internal callers depend on.
+// ===========================================================================
+
+/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+export async function getApprovalPolicyTenant(policy_id) {
+  return db.oneOrNone(
+    `SELECT id, hospitality_company_id FROM tbl_approval_policies WHERE id = $1`,
+    [policy_id]
+  );
+}
+
+/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+export async function getApprovalInstanceTenant(instance_id) {
+  return db.oneOrNone(
+    `SELECT id, hospitality_company_id FROM tbl_approval_instances WHERE id = $1`,
+    [instance_id]
+  );
 }
 
 /**

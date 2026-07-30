@@ -11,6 +11,48 @@ const parseAsUTC = (dateValue) => {
   return new Date(str.replace(' ', 'T') + 'Z');
 };
 
+// ============= READ-SCOPE (RBAC MATRIX) =============
+// P0 FIX: the negotiation listings used to scope rows to the caller's
+// hospitality COMPANY only. That leaked every hotel's negotiation rounds —
+// vendor identities and negotiated prices included — to any user mapped to the
+// company, because resolveHospitalityCompanyScope() collapses a hotel-level
+// mapping (mapping_type = 1) into a company-wide read.
+//
+// The authoritative per-row scope is the RBAC matrix in tbl_user_role_scopes,
+// exactly as the RFQ listing already enforces it (rfqModel.getRfqList).
+// NULL on an axis of a scope row means "all" for that axis:
+//   company  — must match exactly (never NULL in the table)
+//   hotel    — NULL = every hotel under the company
+//   dept     — NULL = every department (also matched when the row has no dept)
+//   process  — NULL = every process
+//
+// `userParam` is a literal SQL expression yielding the caller's user id (a
+// pg-promise placeholder such as '$3'). It is NULL only for super admins
+// (user_type 8), who legitimately read everything.
+//
+// The permission resource is 'negotiation' (verified in production:
+// tbl_permissions holds negotiation × {read,create,update,delete,approve}).
+// Note the resource_type enum ALSO contains a legacy misspelling
+// 'negotitation' which nothing is seeded under — do not use it.
+export const negotiationReadScopeSql = (alias, userParam) =>
+  `(${userParam}::int IS NULL OR EXISTS (
+       SELECT 1
+         FROM tbl_user_role_scopes _urs
+         JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+         JOIN tbl_permissions _p       ON _p.id = _rp.permission_id
+        WHERE _urs.user_id = ${userParam}::int
+          AND _p.resource = 'negotiation'::resource_type
+          AND _p.action = 'read'
+          AND _urs.company_id = ${alias}.hospitality_company_id
+          AND (_urs.hotel_id IS NULL OR _urs.hotel_id = ${alias}.hotel_id)
+          AND (
+            ${alias}.department_id IS NULL
+            OR _urs.department_id IS NULL
+            OR _urs.department_id = ${alias}.department_id
+          )
+          AND (_urs.process_id IS NULL OR _urs.process_id = ${alias}.process_id)
+     ))`;
+
 // ============= MULTI-PRODUCT ROUND HELPERS =============
 // A round either targets a single product (legacy: rfq_product_id NOT NULL,
 // per-vendor fields in vendor_approvals[].negotiation_fields) or multiple
@@ -152,6 +194,54 @@ const negotiationModel = {
   },
 
   /**
+   * P0 FIX (IDOR): may this buyer read the negotiation data of `rfqId`?
+   * Applies the SAME RBAC read matrix as the listings, so a user cannot pull a
+   * different hotel's rounds — and with them vendor identities, emails and
+   * negotiated prices — by putting another RFQ's id in the URL.
+   *
+   * `userId` null = super admin (user_type 8) → allowed.
+   * A missing RFQ returns false (callers answer 404/403 identically, so an id
+   * probe cannot distinguish "does not exist" from "not yours").
+   */
+  userCanReadRfqNegotiation: async (userId, rfqId) => {
+    if (userId == null) return true;
+    if (!rfqId) return false;
+    const row = await db.oneOrNone(
+      `SELECT 1 AS ok
+         FROM tbl_rfq rfq
+        WHERE rfq.id = $2::int
+          AND ${negotiationReadScopeSql('rfq', '$1')}`,
+      [Number(userId), Number(rfqId)]
+    );
+    return !!row;
+  },
+
+  /**
+   * P0 FIX (IDOR): may this buyer read round `roundId`? Resolves the round's
+   * parent — tbl_rfq for RFQ rounds, tbl_arc for ARC rounds — and applies the
+   * same matrix against whichever one owns it.
+   *
+   * `userId` null = super admin (user_type 8) → allowed.
+   */
+  userCanReadRound: async (userId, roundId) => {
+    if (userId == null) return true;
+    if (!roundId) return false;
+    const row = await db.oneOrNone(
+      `SELECT 1 AS ok
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+        WHERE nr.id = $2::int
+          AND (
+            (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
+            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+          )`,
+      [Number(userId), Number(roundId)]
+    );
+    return !!row;
+  },
+
+  /**
    * Get all rounds for an RFQ (optionally filtered by product).
    * When vendorId is provided, returns only rounds where that vendor is in vendor_ids.
    */
@@ -263,7 +353,10 @@ const negotiationModel = {
     return rows.map((r) => Number(r.round_id));
   },
 
-  getNegotiationRfqList: async ({ companyIds = null, hotelIds = null }) => {
+  // `userId` drives the RBAC read matrix (see negotiationReadScopeSql). Pass
+  // null ONLY for super admins (user_type 8). The companyIds clause is kept as
+  // defence in depth — both must hold.
+  getNegotiationRfqList: async ({ companyIds = null, hotelIds = null, userId = null }) => {
     return db.any(
       `WITH neg AS (
          SELECT nr.rfq_id,
@@ -331,8 +424,9 @@ const negotiationModel = {
          ) vend ON TRUE
         WHERE ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
           AND ($2::int[] IS NULL OR rfq.hotel_id = ANY($2::int[]))
+          AND ${negotiationReadScopeSql('rfq', '$3')}
         ORDER BY lr.created_at DESC`,
-      [companyIds, hotelIds]
+      [companyIds, hotelIds, userId]
     );
   },
 
@@ -340,7 +434,10 @@ const negotiationModel = {
   // 6 rows). Mirrors getNegotiationRfqList's status CASE, scope WHERE and facet
   // columns, but everything is per-round. Per-round products honour both legacy
   // (rfq_product_id) and multi-product (products JSONB) shapes.
-  getNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+  // `userId` drives the RBAC read matrix (see negotiationReadScopeSql). Pass
+  // null ONLY for super admins (user_type 8). The companyIds clause is kept as
+  // defence in depth — both must hold.
+  getNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     return db.any(
       `SELECT nr.id                 AS round_id,
               nr.round_number,
@@ -406,8 +503,9 @@ const negotiationModel = {
         WHERE nr.rfq_id IS NOT NULL
           AND ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
           AND ($2::int IS NULL OR rfq.hotel_id = $2)
+          AND ${negotiationReadScopeSql('rfq', '$3')}
         ORDER BY nr.created_at DESC`,
-      [companyIds, hotelId]
+      [companyIds, hotelId, userId]
     );
   },
 
@@ -415,7 +513,7 @@ const negotiationModel = {
   // EXACT same column contract as getNegotiationRoundList so the controller's
   // bucket/facet/sort/paginate logic works over the concatenated array unchanged.
   // Scoped to a.hospitality_company_id = ANY(companyIds) — same guard as the RFQ branch.
-  getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null }) => {
+  getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     return db.any(
       `SELECT nr.id                 AS round_id,
               nr.round_number,
@@ -479,8 +577,9 @@ const negotiationModel = {
         WHERE nr.source_type = 'ARC'
           AND ($1::int[] IS NULL OR a.hospitality_company_id = ANY($1::int[]))
           AND ($2::int IS NULL OR a.hotel_id = $2)
+          AND ${negotiationReadScopeSql('a', '$3')}
         ORDER BY nr.created_at DESC`,
-      [companyIds, hotelId]
+      [companyIds, hotelId, userId]
     );
   },
 
