@@ -1,6 +1,7 @@
 import {
   getApprovalInstanceById,
   recordLifecycleEvent,
+  resetQuoteFinalizationForSendback,
 } from '../../models/generalModel.js';
 import { logError } from '../../helper/common.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
@@ -180,5 +181,94 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
     }
   } catch (negQuoteError) {
     logError('Error in NEGOTIATION_QUOTE post-approval (PO creation)', negQuoteError);
+  }
+};
+
+/**
+ * Handle NEGOTIATION_QUOTE post-REJECTION — undo the vendor award that the
+ * rejected approval was gating.
+ *
+ * WHY THIS EXISTS: NEGOTIATION_QUOTE used to be the only entity type in
+ * approvalActionService's postActionRegistry with an APPROVED handler and no
+ * REJECTED one. Rejecting a vendor finalization through the generic endpoint
+ * (POST /general/hospitality/approval/action — what the entity-agnostic
+ * RfqApprovalDecisionCard on the RFQ details page calls) therefore flipped the
+ * approval instance to REJECTED and stopped there, leaving the product
+ * finalized to a vendor whose award had just been refused, and leaving no
+ * lifecycle trace of the rejection.
+ *
+ * This is the SINGLE implementation of that rollback. The dedicated endpoint
+ * negotiationController.rejectQuotes used to carry a copy inline; it now routes
+ * through executeApprovalAction, so both surfaces reach this function via the
+ * registry and it runs exactly once per rejection.
+ *
+ * Side effects (deliberately in this order — it mirrors what rejectQuotes did):
+ *   1. resetQuoteFinalizationForSendback() — archives the tbl_quote_finalization
+ *      row into tbl_quote_finalization_history and deletes it, so the vendor
+ *      stops seeing the award. Target stage 'NEGOTIATION' keeps the negotiation
+ *      rounds intact so the buyer can open a fresh round.
+ *   2. A NEGOTIATION_QUOTES_REJECTED lifecycle event on the parent RFQ/Tender.
+ *
+ * Errors are logged, never rethrown: the approval transition has already
+ * committed by the time the dispatcher calls this.
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [ctx]
+ * @param {Object} [ctx.instance] - pre-loaded approval instance, optional
+ * @param {string} [ctx.comment]  - the rejection remarks
+ */
+export const handleNegotiationQuoteRejection = async (approval_instance_id, approver_user_id, ctx = {}) => {
+  try {
+    const instance = ctx.instance || await getApprovalInstanceById(approval_instance_id, 'NEGOTIATION_QUOTE');
+    // Idempotency + safety guard: only act on an instance that is genuinely a
+    // REJECTED NEGOTIATION_QUOTE. Mirrors handleNegotiationQuotePostApproval's
+    // APPROVED guard and handleNegotiationRejection's REJECTED guard.
+    if (!instance || instance.entity_type !== 'NEGOTIATION_QUOTE' || instance.status !== 'REJECTED') {
+      return;
+    }
+
+    const comment = ctx.comment || null;
+    const metadata = typeof instance.metadata === 'string'
+      ? JSON.parse(instance.metadata)
+      : (instance.metadata || {});
+
+    const rfq_id = metadata.rfq_id;
+    const rfq_product_id = metadata.rfq_product_id || instance.entity_id;
+    if (!rfq_id || !rfq_product_id) return;
+
+    // 1. Reset the vendor finalization so vendors don't keep seeing the award.
+    try {
+      await resetQuoteFinalizationForSendback(
+        rfq_id,
+        rfq_product_id,
+        approver_user_id,
+        comment ? `Quote approval rejected: ${comment}` : 'Quote approval rejected',
+        'NEGOTIATION'
+      );
+    } catch (resetError) {
+      logError('Error resetting quote finalization on quote rejection', resetError);
+    }
+
+    // 2. Record the rejection on the parent RFQ/Tender timeline.
+    const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${parseInt(rfq_id, 10)}`);
+    const rfqData = rfq?.[0];
+
+    await recordLifecycleEvent({
+      entity_type: rfqData?.is_tender === 1 ? 'TENDER' : 'RFQ',
+      entity_id: rfq_id,
+      stage: 'NEGOTIATION_QUOTES_REJECTED',
+      action: 'REJECT',
+      performed_by: approver_user_id,
+      metadata: {
+        approval_instance_id: parseInt(approval_instance_id, 10),
+        rfq_product_id,
+        quote_ids: metadata.selected_quotes?.map(q => q.quote_id) || [],
+        rejection_reason: comment
+      },
+      remarks: comment
+    });
+  } catch (negQuoteRejError) {
+    logError('Error in NEGOTIATION_QUOTE post-rejection (finalization reset)', negQuoteRejError);
   }
 };

@@ -10,10 +10,10 @@ import {
   submitApprovalAction,
   getApprovalInstancesByEntity,
   getApprovalInstanceById,
-  findBestMatchingPolicy,
-  resetQuoteFinalizationForSendback
+  findBestMatchingPolicy
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
 // Parse date strings as UTC when no timezone suffix is present
@@ -2710,48 +2710,29 @@ const NegotiationController = {
         });
       }
 
-      // 2. Get instance metadata for lifecycle event
-      const { getApprovalInstanceById } = await import('../../models/generalModel.js');
-      const instance = await getApprovalInstanceById(pendingInstance.id, 'NEGOTIATION_QUOTE');
-      const metadata = instance?.metadata || {};
-
-      // 3. Submit rejection
-      await submitApprovalAction({
+      // 2. Submit the rejection through the centralized engine.
+      //
+      // This used to call the raw `submitApprovalAction` model primitive and
+      // then repeat the rollback inline (reset finalization + record lifecycle
+      // event). The generic endpoint POST /general/hospitality/approval/action
+      // had no equivalent, because NEGOTIATION_QUOTE carried no REJECTED entry
+      // in approvalActionService's postActionRegistry — so a reject taken from
+      // the entity-agnostic approval card left the product finalized to the
+      // refused vendor.
+      //
+      // Both surfaces now converge on ONE implementation:
+      // handleNegotiationQuoteRejection, reached through the registry.
+      // executeApprovalAction dispatches it exactly once (only when the
+      // instance actually lands on REJECTED), so there is no inline copy left
+      // to double-fire. Post-action failures are logged and swallowed by the
+      // dispatcher rather than surfacing as a 4xx here — correct, because the
+      // approval transition has already committed at that point.
+      await executeApprovalAction({
         approval_instance_id: pendingInstance.id,
         approver_user_id: user_id,
         action: 'REJECT',
         comment: remarks
       });
-
-      // 3.5. Reset vendor finalization so vendors don't see it on their screen
-      if (metadata.rfq_id) {
-        try {
-          await resetQuoteFinalizationForSendback(metadata.rfq_id, rfq_product_id, user_id, `Quote approval rejected: ${remarks}`, 'NEGOTIATION');
-        } catch (resetError) {
-          logError('Error resetting quote finalization on quote rejection', resetError);
-        }
-      }
-
-      // 4. Record lifecycle event
-      if (metadata.rfq_id) {
-        const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
-        const rfqData = rfq?.[0];
-
-        await recordLifecycleEvent({
-          entity_type: rfqData?.is_tender === 1 ? 'TENDER' : 'RFQ',
-          entity_id: metadata.rfq_id,
-          stage: 'NEGOTIATION_QUOTES_REJECTED',
-          action: 'REJECT',
-          performed_by: user_id,
-          metadata: {
-            approval_instance_id: pendingInstance.id,
-            rfq_product_id,
-            quote_ids: metadata.selected_quotes?.map(q => q.quote_id) || [],
-            rejection_reason: remarks
-          },
-          remarks
-        });
-      }
 
       return res.status(200).json({
         status: 1,
@@ -2825,6 +2806,22 @@ const NegotiationController = {
       const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
       const source = ['all', 'RFQ', 'ARC'].includes(body.source) ? body.source : 'all';
       const search = (body.search || '').toString().trim().toLowerCase() || null;
+      // Tokenize the term. Two reasons:
+      //  1. The UI renders every RFQ/ARC number as "#536299" (cards AND the RFQ
+      //     facet label), so users type the '#'. The haystack below is built
+      //     from raw column values and contains no '#', so a plain
+      //     `hay.includes('#536299')` could never match — searching the number
+      //     exactly as displayed returned zero rows.
+      //  2. A single substring match also meant multi-word terms like
+      //     "orchid 536150" never matched, because the haystack's field order
+      //     rarely happens to place those words adjacent.
+      // Stripping a LEADING '#' per token (never an interior one) and requiring
+      // every token to be present fixes both. The ARC branch inherits the fix
+      // for free — getArcNegotiationRoundList aliases `arc_number AS rfq_no`.
+      // A term of only '#' collapses to zero tokens and is treated as no search.
+      const searchTokens = search
+        ? search.split(/\s+/).map((t) => t.replace(/^#+/, '')).filter(Boolean)
+        : [];
       const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
       const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
@@ -2884,6 +2881,11 @@ const NegotiationController = {
       const facets = { rfqId: toFacet(fm.rfqId), status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
 
       // 6. apply facet + search filters.
+      // KNOWN, DELIBERATELY UNCHANGED: this runs AFTER source_counts / tab_counts
+      // / facets, so searching from a non-"All" tab only searches that tab and
+      // the tab badges keep showing unsearched totals. Moving search earlier
+      // changes what those badges mean and needs a matching UI pass — do not
+      // "fix" it here in isolation.
       const filtered = tabRows.filter((r) => {
         if (filters.rfqId.length && !filters.rfqId.includes(String(r.rfq_id))) return false;
         if (filters.status.length && !filters.status.includes(r._bucket)) return false;
@@ -2891,9 +2893,9 @@ const NegotiationController = {
         if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
         if (filters.productId.length && !parseArr(r.item_names).map(String).some((n) => filters.productId.includes(n))) return false;
         if (filters.vendorId.length && !parseArr(r.vendors).some((v) => v && filters.vendorId.includes(String(v.id)))) return false;
-        if (search) {
+        if (searchTokens.length) {
           const hay = `${r.title || ''} ${r.rfq_no || ''} ${r.hotel_name || ''} ${r.department_title || ''}`.toLowerCase();
-          if (!hay.includes(search)) return false;
+          if (!searchTokens.every((tk) => hay.includes(tk))) return false;
         }
         return true;
       });
