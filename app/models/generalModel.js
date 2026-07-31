@@ -1318,7 +1318,9 @@ export async function createApprovalProcess({
 /**
  * Get approval processes with optional filtering
  * @param {Object} params - Filter parameters
- * @param {number|null} params.company_id - Filter by parent company
+ * @param {number|null} params.company_id - REQUIRED server-derived tenant scope
+ *   (the PARENT buyer company, tbl_company.id). Pass `null` ONLY for the
+ *   deliberate super-admin bypass; omitting it throws.
  * @param {boolean} params.include_inactive - Include inactive processes
  * @param {string|null} params.process_type - Filter by process_type ('RFQ', 'TENDER', 'ARC'); e.g. 'RFQ' for wizard (Tender/ARC excluded)
  */
@@ -1327,14 +1329,28 @@ export async function getApprovalProcesses({
   include_inactive = false,
   process_type = null
 }) {
+  // Tenant scope must be supplied by the caller and derived from req.user.
+  // This used to be `if (company_id)`, so any falsy value — notably the
+  // `undefined` the controller produced for a user whose tbl_users.company_id is
+  // NULL — dropped the company predicate and returned EVERY tenant's catalog.
+  // Same fail-open shape already closed in getApprovalPolicies below; keeping the
+  // two consistent is what stops it reappearing.
+  if (company_id === undefined) {
+    throw new Error(
+      'getApprovalProcesses: company_id is required (server-derived tenant scope; pass null only for the super-admin bypass)'
+    );
+  }
+
   const conditions = [];
   const vals = [];
   let paramIdx = 1;
 
-  if (company_id) {
+  if (company_id !== null) {
+    // Seed with the SERVER-DERIVED company predicate rather than nothing.
     conditions.push(`p.company_id = $${paramIdx++}`);
     vals.push(company_id);
   }
+  // company_id === null → super admin, no company filter.
 
   if (!include_inactive) {
     conditions.push('p.is_active = true');
