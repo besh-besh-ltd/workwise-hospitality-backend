@@ -100,8 +100,14 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationApproval),
     REJECTED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationRejection),
   },
+  // REJECTED was missing here until fix/negotiation-search-and-reject — this was
+  // the only entity type with an APPROVED handler and no rejection pair, so a
+  // reject taken from the generic action endpoint (the entity-agnostic approval
+  // card on the RFQ details page) flipped the instance to REJECTED but left the
+  // product finalized to the refused vendor, with nothing on the lifecycle.
   NEGOTIATION_QUOTE: {
     APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval),
+    REJECTED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuoteRejection),
   },
 };
 
