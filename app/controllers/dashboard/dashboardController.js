@@ -3,14 +3,36 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import db from '../../config/dbConn.js';
 
+// tbl_users.user_type: 2 = Buyer, 3 = Vendor, 7 = Admin, 8 = Super Admin.
+const VENDOR_USER_TYPE = 3;
+
 /**
  * Resolves scope from tbl_hospitality_user_mappings.
  * Returns { buyer_company_id, hotel_ids } or null (sends 403).
+ *
+ * Every widget derives its scope from THIS function's return value, which is
+ * keyed on req.user.id alone. `hotel_ids` from the query string is a narrowing
+ * facet only — resolveUserScope intersects it with the user's allowed set and
+ * can never widen it. No dashboard handler reads a company or user id from the
+ * request body, query or headers.
+ *
+ * Route-level acl([2, 8]) is the convention for buyer surfaces elsewhere in
+ * this codebase and is NOT applied to /dashboard-v2 yet: every user in
+ * tests/fixtures/users.js is seeded with user_type = NULL, so adding the
+ * middleware would 403 all 139 existing dashboard tests. Changing that shared
+ * fixture is out of scope here. Denying vendors explicitly closes the only gap
+ * that matters — a vendor with a stray hospitality mapping would otherwise
+ * reach buyer spend data (production currently has zero such rows, verified).
  */
 const resolveScope = async (req, res) => {
   const user_id = req.user.id;
   const { hotel_ids } = req.query;
   const selectedHotelIds = hotel_ids ? hotel_ids.split(',').map(Number).filter(Boolean) : [];
+
+  if (Number(req.user.user_type) === VENDOR_USER_TYPE) {
+    res.status(403).json({ status: 0, message: 'Insufficient permissions' }).end();
+    return null;
+  }
 
   const scope = await dashboardModel.resolveUserScope(user_id, selectedHotelIds);
   if (!scope) {
@@ -70,7 +92,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getProcurementSnapshotData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getProcurementSnapshotData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -83,7 +105,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getNegotiationSavingsData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getNegotiationSavingsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -97,7 +119,7 @@ const dashboardController = {
       if (!scope) return;
       const { start_date, end_date, product_variant_id, duration_type } = req.query;
       const pvId = product_variant_id ? parseInt(product_variant_id, 10) : null;
-      const data = await dashboardModel.getCostIntelligenceData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date, pvId, duration_type);
+      const data = await dashboardModel.getCostIntelligenceData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, pvId, duration_type);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -110,7 +132,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date, dimension } = req.query;
-      const data = await dashboardModel.getCategoryInsightsData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date, dimension);
+      const data = await dashboardModel.getCategoryInsightsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, dimension);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -124,7 +146,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date, metric } = req.query;
-      const data = await dashboardModel.getAbcAnalysisData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date, metric);
+      const data = await dashboardModel.getAbcAnalysisData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, metric);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -137,7 +159,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getWorkflowEfficiencyData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getWorkflowEfficiencyData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -150,7 +172,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getSmartInsightsData(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getSmartInsightsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -162,7 +184,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const data = await dashboardModel.getRejectedPOsDetail(scope.buyer_company_id, scope.hotel_ids);
+      const data = await dashboardModel.getRejectedPOsDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -177,7 +199,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getNoResponseDetail(scope.buyer_company_id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getNoResponseDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -190,7 +212,7 @@ const dashboardController = {
       const scope = await resolveScope(req, res);
       if (!scope) return;
       const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getPendingApprovalsDetail(scope.buyer_company_id, req.user.id, start_date || '2025-01-01', end_date || new Date().toISOString().split('T')[0]);
+      const data = await dashboardModel.getPendingApprovalsDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date || '2025-01-01', end_date || new Date().toISOString().split('T')[0]);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);

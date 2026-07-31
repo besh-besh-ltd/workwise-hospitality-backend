@@ -18,11 +18,40 @@ import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { userCanAccessProject } from '../project/projectController.js';
 import {
   simulateApproverImpact,
   revalidateApproverMembership,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
+
+/**
+ * Of the given business-unit ids, which belong to the caller's buyer company?
+ *
+ * The BU → hospitality company → buyer company chain is the tenant boundary
+ * used by every guarded handler in this file. Handlers that take a `hotel_id`
+ * (or a list of them) from the request must intersect against this before
+ * reading, emailing or mutating anything.
+ *
+ * Returns a Set of allowed ids (numbers).
+ */
+const hotelIdsInBuyerCompany = async (hotelIds, buyerCompanyId) => {
+  const ids = (Array.isArray(hotelIds) ? hotelIds : [hotelIds])
+    .map((v) => parseInt(v, 10))
+    .filter((v) => Number.isFinite(v));
+  if (!ids.length || !buyerCompanyId) return new Set();
+  const rows = await db.any(
+    `SELECT h.id
+       FROM tbl_hospitality_company_hotels h
+       JOIN tbl_hospitality_companies hc
+         ON hc.id = h.hospitality_company_id AND hc.is_deleted = 0
+      WHERE h.id = ANY($1::int[])
+        AND h.is_deleted = 0
+        AND hc.buyer_company_id = $2`,
+    [ids, buyerCompanyId]
+  );
+  return new Set(rows.map((r) => Number(r.id)));
+};
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -1101,6 +1130,22 @@ const HospitalityController = {
   getProjectMappings: async (req, res) => {
     try {
       const projectId = parseInt(req.params.project_id, 10);
+      if (!projectId) {
+        return res.status(400).json({ status: 0, message: 'project_id is required' });
+      }
+
+      // TENANT GATE (was missing). Reuses the project access rule so this
+      // endpoint and /project/:id/hospitality-context agree: owner, team
+      // member, or company admin of the project's OWN company. Without it, any
+      // hospitality admin could walk project_id and learn which company and
+      // business unit every other tenant's projects belong to.
+      if (!(await userCanAccessProject(req, projectId))) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Project not found'
+        });
+      }
+
       const mappings = await hospitalityModel.getProjectMappings(projectId);
 
       return res.status(200).json({
@@ -1162,12 +1207,38 @@ const HospitalityController = {
 
   getUserMappingsById: async (req, res) => {
     try {
+      const company = req.companyDetails;
       const userId = parseInt(req.params.user_id, 10);
       if (!userId) {
         return res.status(400).json({ status: 0, message: 'user_id is required' });
       }
+
+      // TENANT GATE (was missing). The target user must belong to the caller's
+      // own buyer company — otherwise any hospitality admin could walk user_id
+      // and read every other tenant's org chart (which companies and business
+      // units each person is mapped to).
+      const target = await db.oneOrNone(
+        `SELECT company_id FROM tbl_users WHERE id = $1`,
+        [userId]
+      );
+      if (!target || target.company_id !== company.id) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
       const mappings = await hospitalityModel.getUserMappings(userId);
-      return res.status(200).json({ status: 1, data: mappings });
+      // Defence in depth: a user could in principle be mapped into a
+      // hospitality company under a different buyer company. Only ever return
+      // the rows that belong to the caller's own tenant.
+      const ownCompanyIds = new Set(
+        (await db.any(
+          `SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1 AND is_deleted = 0`,
+          [company.id]
+        )).map((r) => Number(r.id))
+      );
+      const scoped = mappings.filter((m) =>
+        ownCompanyIds.has(Number(m.hospitality_company_id))
+      );
+      return res.status(200).json({ status: 1, data: scoped });
     } catch (error) {
       logError('Error fetching user mappings', error);
       return res.status(500).json({ status: 3, message: 'Failed to fetch user mappings' });
@@ -1395,6 +1466,43 @@ const HospitalityController = {
         });
       }
 
+      // TENANT GATE (was missing). This route is passportSignIn-only — no acl,
+      // no hospitality middleware — because both buyers and invited vendors
+      // legitimately call it. Without a check, any authenticated account could
+      // enumerate rfq_id and map out every tenant's RFQs → business units.
+      //
+      // Allowed callers, all derived from req.user (never from the request):
+      //   1. a vendor invited on this RFQ (tbl_rfq_product_vendors),
+      //   2. a user of the buyer company that owns the RFQ's hospitality
+      //      company, or that the RFQ's creator belongs to,
+      //   3. a user mapped into the RFQ's hospitality company.
+      const access = await db.one(
+        `SELECT EXISTS (
+             SELECT 1 FROM tbl_rfq_product_vendors rpv
+              WHERE rpv.rfq_id = $1 AND rpv.user_id = $2
+           ) OR EXISTS (
+             SELECT 1 FROM tbl_rfq r
+               JOIN tbl_users cu ON cu.id = r.created_by
+              WHERE r.id = $1 AND $3::int IS NOT NULL AND cu.company_id = $3
+           ) OR EXISTS (
+             SELECT 1 FROM tbl_rfq r
+               JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
+              WHERE r.id = $1 AND $3::int IS NOT NULL AND hc.buyer_company_id = $3
+           ) OR EXISTS (
+             SELECT 1 FROM tbl_rfq r
+               JOIN tbl_hospitality_user_mappings hum
+                 ON hum.hospitality_company_id = r.hospitality_company_id
+              WHERE r.id = $1 AND hum.user_id = $2
+           ) AS ok`,
+        [rfq_id, req.user?.id ?? null, req.user?.company_id ?? null]
+      );
+      if (!access.ok) {
+        return res.status(404).json({
+          status: 2,
+          message: 'RFQ not found'
+        });
+      }
+
       //  fetch mapped hotels with names
       const mappedHotels = await db.any(
         `SELECT rhm.rfq_id, rhm.hotel_id,
@@ -1426,12 +1534,36 @@ const HospitalityController = {
 
   getHotelDocuments: async (req, res) => {
     try {
+      const company = req.companyDetails;
       const hotelId = parseInt(req.params.hotel_id, 10);
 
       if (!hotelId) {
         return res.status(400).json({
           status: 0,
           message: "Hotel ID is required"
+        });
+      }
+
+      // TENANT GATE (was missing entirely, unlike every sibling handler in this
+      // file). This endpoint returns GST / PAN / cancelled-cheque / MSME
+      // documents; without the check, any hospitality admin could walk
+      // `hotel_id` and pull every other company's statutory and banking
+      // paperwork. Resolve the BU → its hospitality company → its buyer
+      // company, and require it to be the caller's own.
+      const hotel = await hospitalityModel.getHotelById(hotelId);
+      if (!hotel) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Business unit not found'
+        });
+      }
+      const owningCompany = await hospitalityModel.getCompanyById(
+        hotel.hospitality_company_id
+      );
+      if (!owningCompany || owningCompany.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Business unit not found'
         });
       }
 
@@ -1450,7 +1582,18 @@ const HospitalityController = {
   // Send payment link email to the business unit email
   sendPaymentLink: async (req, res) => {
     try {
+      const company = req.companyDetails;
       const hotelId = parseInt(req.params.hotel_id, 10);
+
+      // TENANT GATE (was missing). Without it an admin of one buyer company
+      // could email another company's business unit and flip its
+      // payment_status. (The unauthenticated /hotel-payment/* endpoints this
+      // links to are a deliberate product decision and are left as they are.)
+      const allowed = await hotelIdsInBuyerCompany([hotelId], company?.id);
+      if (!allowed.has(hotelId)) {
+        return res.status(404).json({ status: 0, message: 'Business unit not found' });
+      }
+
       const hotel = await hospitalityModel.getHotelPaymentDetails(hotelId);
 
       if (!hotel) {
@@ -1538,6 +1681,25 @@ const HospitalityController = {
 
       if (!hotel_ids || !Array.isArray(hotel_ids) || hotel_ids.length === 0) {
         return res.status(400).json({ status: 0, message: 'hotel_ids array is required and must not be empty' });
+      }
+
+      // TENANT GATE (was missing). company_id and hotel_ids both arrived from
+      // the request body and were used verbatim, so an admin of one buyer
+      // company could email another company's business units, flip their
+      // payment_status, and read back their email addresses in the response.
+      // Reject the whole batch if ANY id is outside the caller's tenant —
+      // silently dropping them would hide the attempt.
+      const company = req.companyDetails;
+      const owningCompany = await hospitalityModel.getCompanyById(parseInt(company_id, 10));
+      if (!owningCompany || owningCompany.buyer_company_id !== company.id) {
+        return res.status(404).json({ status: 2, message: 'Hospitality company not found' });
+      }
+      const allowedHotelIds = await hotelIdsInBuyerCompany(hotel_ids, company.id);
+      const outOfScope = hotel_ids
+        .map((v) => parseInt(v, 10))
+        .filter((v) => !allowedHotelIds.has(v));
+      if (outOfScope.length) {
+        return res.status(404).json({ status: 0, message: 'No valid business units found' });
       }
 
       // Fetch all selected hotels with company information
@@ -3763,11 +3925,16 @@ const HospitalityController = {
       const [vendorUser, openRfqs] = await Promise.all([
         db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [vendorId]),
         db.any(
+          // NULLIF guard mirrors hospitalityModel.getMatchingOpenRfqsForVendor:
+          // bid_end_date is TEXT and can be '' (empty string, not NULL). An
+          // unguarded ::timestamp cast aborts the whole query as soon as such a
+          // row is in the id list — which is exactly what happens when a caller
+          // replays ids from a stale list or a repair script.
           `SELECT id, rfq_no, title, is_tender, bid_end_date, created_by
            FROM tbl_rfq
            WHERE id = ANY($1::int[])
              AND status = 1 AND is_published = 1
-             AND bid_end_date::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`,
+             AND NULLIF(bid_end_date, '')::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`,
           [rfqIds]
         )
       ]);

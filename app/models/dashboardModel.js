@@ -1,14 +1,17 @@
 import db from '../config/dbConn.js';
+import { buildScopeExistsClause } from '../services/authorizationService.js';
 
 /**
  * Dashboard queries scope by buyer_company_id (covers ALL hospitality companies
- * under the same buyer account) + hotel_ids (intersected with user's allowed set).
+ * under the same buyer account) + hotel_ids (intersected with user's allowed set)
+ * + the caller's RBAC scope rows (company × hotel × department × process).
  *
  * Param convention:
  *   $1 = buyer_company_id (from tbl_hospitality_companies.buyer_company_id)
  *   $2 = start_date
  *   $3 = end_date
  *   $4 = hotel_ids (always provided — user's allowed scope)
+ *   $5.. = per-query extras, then the RBAC params appended by scopeFilter()
  */
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -16,6 +19,13 @@ import db from '../config/dbConn.js';
 /**
  * Company scope: matches any hospitality_company under the same buyer account.
  * Uses a subquery so we don't need to pass an array of company IDs.
+ *
+ * SECURITY NOTE — this predicate is NOT a tenant boundary on its own.
+ * `buyer_company_id` is the BILLING account. In production, buyer_company_id 13
+ * resolves to EIGHT distinct legal entities (Orchid Hotels Pune Pvt Ltd, Kamat
+ * Hotels India Ltd, Phileein, SLPD, Zaffiro, Envotel, ILEX, Chandi). Any widget
+ * relying on companyScope() alone shows all eight to every user of any one of
+ * them. Always pair it with hotelFilter() AND scopeFilter().
  */
 function companyScope(alias = 'r') {
   return `${alias}.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)`;
@@ -23,6 +33,60 @@ function companyScope(alias = 'r') {
 
 function hotelFilter(alias = 'r', paramIdx = 4) {
   return `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = ${alias}.id AND rhm.hotel_id = ANY($${paramIdx}))`;
+}
+
+// ── RBAC scope (company × hotel × department × process) ──────────────
+//
+// Before this, dashboardModel.js contained ZERO references to
+// tbl_user_role_scopes and no /dashboard-v2 route carried acl(). Scope came
+// only from tbl_hospitality_user_mappings, which is company-or-hotel granular
+// and carries no department or process axis — so those two axes were
+// structurally unenforceable, and any widget that also skipped hotelFilter()
+// crossed legal-entity boundaries inside one billing account.
+//
+// The authoritative predicate is now buildScopeExistsClause() from
+// authorizationService — the same EXISTS shape the RFQ listing uses
+// (rfqModel.js:3923-3936) and the same one commit 92604b60 adopted for the PO
+// dashboard. Measured on production: 93 of 232 active mapped users already see
+// ZERO RFQs in the RFQ listing while the dashboard showed them all 441 RFQs of
+// all eight legal entities. After this change the two surfaces agree.
+//
+// Permission choice mirrors poDashboardModel's documented rationale: the clause
+// OR-composes across the read permissions a given widget's persona plausibly
+// holds, because the seeded buyer roles do not all carry every entity-specific
+// read permission (production: awarding.read 253 users, rfq/boq.read 251,
+// te.read 249, negotiation/quote-compare.read 250, out of 254). All variants
+// enforce the identical 4-axis tuple, so the OR widens *who* sees a widget,
+// never *which* rows any one of them sees.
+const RFQ_SCOPE_PERMISSIONS = ['rfq.read', 'boq.read', 'awarding.read'];
+const TECH_SCOPE_PERMISSIONS = ['te.read', 'rfq.read', 'boq.read'];
+const COMMERCIAL_SCOPE_PERMISSIONS = ['quote-compare.read', 'negotiation.read', 'rfq.read', 'boq.read'];
+
+/**
+ * Build the RBAC scope fragment for an already-joined tbl_rfq alias.
+ *
+ * MUTATES `params`: appends the RBAC bind values at the end, so it must be
+ * called AFTER every other param for that query has been pushed. Returns an
+ * `AND (...)` fragment ready to splice into the WHERE/JOIN condition.
+ *
+ * The alias must expose hospitality_company_id, hotel_id, department_id and
+ * process_id — tbl_rfq and tbl_approval_instances both do.
+ *
+ * @param {number} user_id     always req.user.id — never a client-supplied id
+ * @param {string} alias       SQL alias of the scoped entity (usually 'r')
+ * @param {any[]} params       the query's bind array (mutated)
+ * @param {string[]} permissions
+ */
+function scopeFilter(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS) {
+  let i = params.length + 1;
+  const clauses = [];
+  for (const perm of permissions) {
+    const built = buildScopeExistsClause(user_id, perm, alias, i);
+    clauses.push(built.clause);
+    params.push(...built.params);
+    i += built.paramsConsumed;
+  }
+  return `AND (${clauses.join(' OR ')})`;
 }
 
 /**
@@ -147,33 +211,39 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
     [...params, user_id]
   );
 
+  // The four RFQ-rooted counts all get the canonical 4-axis RBAC predicate.
+  // Each builds its own param array because scopeFilter appends bind values.
+  const awaitingParams = [...params];
   const rfqsAwaitingQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
      WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
      AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-     ${dateFilterRfq} ${hf}`,
-    params
+     ${dateFilterRfq} ${hf} ${scopeFilter(user_id, 'r', awaitingParams)}`,
+    awaitingParams
   );
 
   // RFQs ending soon: any RFQ (tender or not) whose bid_end_date is within 3 days
+  const endingSoonParams = [...params];
   const rfqsEndingSoonQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
      WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
      AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
-     ${hf}`,
-    params
+     ${hf} ${scopeFilter(user_id, 'r', endingSoonParams)}`,
+    endingSoonParams
   );
 
+  const posAwaitingParams = [...params];
   const posAwaitingQuery = db.one(
     `SELECT COUNT(*) as count
      FROM tbl_rfq_purchase_order po
      JOIN tbl_rfq r ON r.id = po.rfq_id
      WHERE ${companyScope()} AND po.status = 'acceptance_pending'
-     ${dateFilterPo} ${hf}`,
-    params
+     ${dateFilterPo} ${hf} ${scopeFilter(user_id, 'r', posAwaitingParams)}`,
+    posAwaitingParams
   );
 
   // Only count rejected POs where no replacement PO exists for the same product
+  const rejectedParams = [...params];
   const rejectedVendorsQuery = db.one(
     `SELECT COUNT(*) as count
      FROM tbl_rfq_purchase_order po
@@ -188,8 +258,8 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
        AND po2.id != po.id
        AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
      )
-     ${dateFilterPo} ${hf}`,
-    params
+     ${dateFilterPo} ${hf} ${scopeFilter(user_id, 'r', rejectedParams)}`,
+    rejectedParams
   );
 
   const [pa, ra, es, poa, rv] = await Promise.all([
@@ -212,11 +282,12 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
 //       active  — bid_end_date still in the future (or unset)
 //       expired — bid_end_date already passed
 // ─────────────────────────────────────────────────────────────────────
-async function getNoResponseDetail(buyer_company_id, hotel_ids = [], start_date, end_date) {
+async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const hasDates = start_date && end_date;
   const dateFilter = hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : '';
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
 
   const rows = await db.any(
     `SELECT
@@ -238,7 +309,7 @@ async function getNoResponseDetail(buyer_company_id, hotel_ids = [], start_date,
      FROM tbl_rfq r
      WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
      AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-     ${dateFilter} ${hf}
+     ${dateFilter} ${hf} ${sc}
      ORDER BY r.bid_end_date ASC NULLS LAST`,
     params
   );
@@ -261,19 +332,22 @@ async function getNoResponseDetail(buyer_company_id, hotel_ids = [], start_date,
 // ─────────────────────────────────────────────────────────────────────
 // 2. Procurement Snapshot
 // ─────────────────────────────────────────────────────────────────────
-async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], start_date, end_date) {
+async function getProcurementSnapshotData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  // One shared fragment: every query below binds the identical param array, so
+  // the RBAC values can be appended once and reused across all seven.
+  const sc = scopeFilter(user_id, 'r', params);
 
   const totalRfqsQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf}`,
+     WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}`,
     params
   );
 
   const activeTendersQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_tender = 1 AND r.is_published = 1 AND r.status = 1 ${hf}`,
+     WHERE ${companyScope()} AND r.is_tender = 1 AND r.is_published = 1 AND r.status = 1 ${hf} ${sc}`,
     params
   );
 
@@ -281,7 +355,7 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
   // intentionally NOT date-filtered (matches active_tenders semantics).
   const activeRfqsQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1 ${hf}`,
+     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1 ${hf} ${sc}`,
     params
   );
 
@@ -289,7 +363,7 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
   // via the RFQ creation timestamp.
   const closedRfqsQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.status = 2 AND r.timestamp BETWEEN $2 AND $3 ${hf}`,
+     WHERE ${companyScope()} AND r.status = 2 AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}`,
     params
   );
 
@@ -302,7 +376,7 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
      FROM tbl_rfq_purchase_order po
      JOIN tbl_rfq r ON r.id = po.rfq_id
      WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-     AND po.status NOT IN ('draft', 'cancelled') ${hf}`,
+     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}`,
     params
   );
 
@@ -326,7 +400,7 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
      JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
      JOIN tbl_rfq r ON r.id = po.rfq_id
      WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-     AND po.status NOT IN ('draft', 'cancelled') ${hf}`,
+     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}`,
     params
   );
 
@@ -336,7 +410,7 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
      FROM tbl_quote_finalization qf
      JOIN tbl_rfq r ON r.id = qf.rfq_id
      WHERE ${companyScope()} AND qf.timestamp BETWEEN $2 AND $3
-     AND r.tender_publish_date IS NOT NULL ${hf}`,
+     AND r.tender_publish_date IS NOT NULL ${hf} ${sc}`,
     params
   );
 
@@ -370,16 +444,17 @@ async function getProcurementSnapshotData(buyer_company_id, hotel_ids = [], star
 //    Compares round 1 quoted_price (initial vendor offer) with the
 //    LAST round quoted_price for the same vendor+product (final negotiated price).
 // ─────────────────────────────────────────────────────────────────────
-async function getNegotiationSavingsData(buyer_company_id, hotel_ids = [], start_date, end_date) {
+async function getNegotiationSavingsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
 
   const savingsQuery = await db.oneOrNone(
     `WITH scoped_rfqs AS (
        SELECT DISTINCT nr.rfq_id
        FROM tbl_negotiation_rounds nr
        JOIN tbl_rfq r ON r.id = nr.rfq_id
-       WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf}
+       WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf} ${sc}
        -- Sr 240: exclude Terminated/Rejected RFQs. WITHDRAWN (status=5) is the
        -- terminated/rejected-by-us state; also drop RFQs whose only PO was
        -- rejected by the vendor (no surviving non-rejected/cancelled PO).
@@ -438,9 +513,10 @@ async function getNegotiationSavingsData(buyer_company_id, hotel_ids = [], start
 // ─────────────────────────────────────────────────────────────────────
 // 4. Cost Intelligence
 // ─────────────────────────────────────────────────────────────────────
-async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_date, end_date, product_variant_id = null, duration_type = 'past7days') {
+async function getCostIntelligenceData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, product_variant_id = null, duration_type = 'past7days') {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
 
   // Item selector — ordered by purchase VALUE so the highest-spend (A-class)
   // items lead the dropdown (Sr 301), not an arbitrary first item (Sr 302).
@@ -454,7 +530,7 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
        GROUP BY rp.product_variant_id
      )
      SELECT iv.product_variant_id, pv.name as product_name, iv.order_count, iv.value
@@ -473,7 +549,7 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
        FROM tbl_rfq_products rp
        JOIN tbl_rfq r ON r.id = rp.rfq_id AND ${companyScope()}
        JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-       WHERE r.timestamp BETWEEN $2 AND $3 ${hf}
+       WHERE r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
        GROUP BY rp.product_variant_id, pv.name
        ORDER BY order_count DESC
        LIMIT 8`,
@@ -501,6 +577,18 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
     trunc = Number.isFinite(spanDays) && spanDays > 62 ? 'month' : 'day';
   }
 
+  // The three per-item panels bind $5 = the selected variant, so they need
+  // their own param array: `params` already carries the RBAC values appended
+  // above and pushing pid onto it would land at $11, not $5.
+  //
+  // `product_variant_id` arrives from the query string. It is NOT validated
+  // against a whitelist — it does not need to be, because the same 4-axis
+  // scope filter is applied to every panel below. Asking for an item outside
+  // your scope returns an empty trend, an empty vendor list and a null
+  // benchmark rather than another business unit's price history.
+  const pidParams = [buyer_company_id, start_date, end_date, hotel_ids, pid];
+  const pidSc = scopeFilter(user_id, 'r', pidParams);
+
   // Generate complete time series with gaps filled as nulls
   // Then LEFT JOIN actual price data onto it
   const priceTrendQuery = db.any(
@@ -523,14 +611,14 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
        JOIN tbl_quotes q ON q.id = qi.quote_id
        JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
        WHERE qi.product_variant_id = $5
-       AND q.timestamp BETWEEN $2 AND $3 ${hf}
+       AND q.timestamp BETWEEN $2 AND $3 ${hf} ${pidSc}
        GROUP BY DATE_TRUNC('${trunc}', q.timestamp)
      )
      SELECT s.period, p.avg_price, p.max_price, p.min_price
      FROM series s
      LEFT JOIN prices p ON p.period = s.period
      ORDER BY s.period`,
-    [...params, pid]
+    pidParams
   );
 
   // Vendor comparison using per-UNIT price (consistent with the trend + benchmark).
@@ -543,10 +631,10 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
      JOIN tbl_users u ON u.id = q.created_by
      LEFT JOIN tbl_company c ON c.id = u.company_id
      WHERE qi.product_variant_id = $5
-     AND q.timestamp BETWEEN $2 AND $3 ${hf}
+     AND q.timestamp BETWEEN $2 AND $3 ${hf} ${pidSc}
      GROUP BY u.id, u.name, c.company_name, u.organization_name
      ORDER BY avg_price ASC LIMIT 5`,
-    [...params, pid]
+    pidParams
   );
 
   // Benchmark = best (lowest) unit price ever PAID for this item (all-time,
@@ -559,8 +647,8 @@ async function getCostIntelligenceData(buyer_company_id, hotel_ids = [], start_d
      JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
      JOIN tbl_rfq r ON r.id = po.rfq_id
      WHERE ${companyScope()} AND rp.product_variant_id = $5
-     AND po.status NOT IN ('draft', 'cancelled') ${hf}`,
-    [...params, pid]
+     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${pidSc}`,
+    pidParams
   );
 
   const [priceTrend, vendorComparison, benchmarkRow] = await Promise.all([
@@ -652,10 +740,11 @@ function categoryLabelCte(dimension) {
      )`;
 }
 
-async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_date, end_date, dimension = 'category') {
+async function getCategoryInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, dimension = 'category') {
   const dim = ['category', 'subcategory', 'item'].includes(dimension) ? dimension : 'category';
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
 
   const rows = await db.any(
     `WITH product_spend AS (
@@ -668,7 +757,7 @@ async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_d
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
        GROUP BY rp.product_variant_id
      ),
      ${categoryLabelCte(dim)}
@@ -723,10 +812,11 @@ async function getCategoryInsightsData(buyer_company_id, hotel_ids = [], start_d
 //     An item is assigned by the cumulative % BEFORE it, so the largest item
 //     is always A and the boundary item is included in the higher tier.
 // ─────────────────────────────────────────────────────────────────────
-async function getAbcAnalysisData(buyer_company_id, hotel_ids = [], start_date, end_date, metric = 'value') {
+async function getAbcAnalysisData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, metric = 'value') {
   const m = metric === 'volume' ? 'volume' : 'value';
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
   const round2 = (n) => Math.round(n * 100) / 100;
 
   const rows = await db.any(
@@ -740,7 +830,7 @@ async function getAbcAnalysisData(buyer_company_id, hotel_ids = [], start_date, 
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
        GROUP BY rp.product_variant_id
      )
      SELECT
@@ -801,15 +891,16 @@ async function getAbcAnalysisData(buyer_company_id, hotel_ids = [], start_date, 
 // 6. Workflow Efficiency — derived from actual table timestamps
 //    Each stage duration computed from real columns, not lifecycle table.
 // ─────────────────────────────────────────────────────────────────────
-async function getWorkflowEfficiencyData(buyer_company_id, hotel_ids = [], start_date, end_date) {
+async function getWorkflowEfficiencyData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
 
   const stages = await db.any(
     `WITH scoped_rfqs AS (
        SELECT r.id, r.timestamp as created_at, r.tender_publish_date
        FROM tbl_rfq r
-       WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf}
+       WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
      ),
 
      -- 1. Draft → RFQ Approval submitted
@@ -940,10 +1031,34 @@ async function getWorkflowEfficiencyData(buyer_company_id, hotel_ids = [], start
 // ─────────────────────────────────────────────────────────────────────
 // 7. Smart Insights
 // ─────────────────────────────────────────────────────────────────────
-async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date, end_date) {
+async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
+  // Second alias for the benchmark LATERAL below, correlated on r2.
+  const sc2 = scopeFilter(user_id, 'r2', params);
 
+  // CROSS-TENANT LEAK (P0, fixed here).
+  //
+  // The `market` LATERAL used to read tbl_quote_items with NO predicate other
+  // than the product variant:
+  //     SELECT AVG(qi2.unit_price) FROM tbl_quote_items qi2
+  //      WHERE qi2.product_variant_id = qi.product_variant_id
+  // — every quote from every buyer on the platform. That average was then
+  // rendered verbatim into the insight copy at the bottom of this function
+  // ("Market: ₹…"), so one tenant's negotiated unit prices reached another
+  // tenant's screen. Verified on production: 3 product variants are quoted by
+  // both buyer_company 13 and 90, and for OVAL TABLE (variant 13038) the
+  // HAVING below is satisfied — company 13's own average of ₹6,800 (₹11,000 +
+  // ₹2,600 over two quotes) is compared against a "market" of ₹4,533.33, a
+  // figure only reachable by averaging in company 90's ₹0.00 row. A number
+  // arithmetically impossible from company 13's own data was being rendered
+  // to company 13 as their market benchmark.
+  //
+  // The LATERAL now walks quote → rfq → the same company/hotel/RBAC scope as
+  // the outer query. The comparison it expresses becomes "this period's price
+  // vs YOUR OWN all-time average for this item" (the LATERAL stays deliberately
+  // date-unbounded, which is what made it a useful baseline in the first place).
   const priceDeviationsQuery = db.any(
     `SELECT pv.name as product_name,
        AVG(qi.unit_price) as user_avg_price,
@@ -955,9 +1070,13 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
      JOIN tbl_product_variant pv ON pv.id = qi.product_variant_id
      CROSS JOIN LATERAL (
        SELECT AVG(qi2.unit_price) as avg_price
-       FROM tbl_quote_items qi2 WHERE qi2.product_variant_id = qi.product_variant_id
+       FROM tbl_quote_items qi2
+       JOIN tbl_quotes q2 ON q2.id = qi2.quote_id
+       JOIN tbl_rfq r2 ON r2.id = q2.rfq_id AND ${companyScope('r2')}
+       WHERE qi2.product_variant_id = qi.product_variant_id
+       ${hotelFilter('r2')} ${sc2}
      ) market
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} AND market.avg_price > 0
+     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc} AND market.avg_price > 0
      GROUP BY pv.name, market.avg_price
      HAVING AVG(qi.unit_price) > market.avg_price * 1.15
      LIMIT 3`,
@@ -972,7 +1091,9 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
      JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
      JOIN tbl_users u ON u.id = q.created_by
      LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf}
+     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
+     -- The MIN() subquery is correlated on qi.rfq_id, so it can only ever read
+     -- quotes belonging to the same RFQ (and therefore the same tenant).
      AND qi.unit_price = (
        SELECT MIN(qi2.unit_price) FROM tbl_quote_items qi2
        WHERE qi2.rfq_id = qi.rfq_id AND qi2.product_variant_id = qi.product_variant_id
@@ -990,7 +1111,7 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
      ),
      previous_spend AS (
        SELECT COALESCE(SUM(pop.total_price), 0) as total
@@ -999,7 +1120,7 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()}
        AND po.created_at BETWEEN ($2::timestamp - ${periodDuration}) AND $2
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
      )
      SELECT cs.total as current_spend, ps.total as previous_spend,
        CASE WHEN ps.total > 0
@@ -1023,7 +1144,7 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id
        WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
        GROUP BY rp.product_variant_id
      ),
      benchmark AS (
@@ -1032,7 +1153,7 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.status NOT IN ('draft', 'cancelled') ${hf}
+       WHERE ${companyScope()} AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
        GROUP BY rp.product_variant_id
      )
      SELECT pv.name as product_name, ip.latest_price, b.best_price, ip.period_value,
@@ -1104,7 +1225,13 @@ async function getSmartInsightsData(buyer_company_id, hotel_ids = [], start_date
 // ─────────────────────────────────────────────────────────────────────
 // 8. Pending Approvals (detailed list for modal)
 // ─────────────────────────────────────────────────────────────────────
-async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, end_date) {
+// Hotel scope: this list is the drill-down behind the Action Centre's
+// `pending_approvals` badge, and its count sibling in getActionCenterData
+// already filters `i.hotel_id = ANY(...)`. This query did not, so the badge and
+// the list it opens disagreed — and the list leaked approvals filed at business
+// units outside the caller's scope, including RFQ titles, ARC numbers and the
+// hotel name. The approver-is-me predicate bounded the damage but not the axis.
+async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   return db.any(
     `SELECT
        i.id as approval_id,
@@ -1172,15 +1299,18 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, start_date, 
        AND EXISTS (SELECT 1 FROM tbl_rfq r2 WHERE r2.id = i.entity_id AND r2.is_published = 1)
      )
      AND i.created_at BETWEEN $3 AND $4
+     AND i.hotel_id = ANY($5)
      ORDER BY i.created_at ASC`,
-    [buyer_company_id, user_id, start_date, end_date]
+    [buyer_company_id, user_id, start_date, end_date, hotel_ids]
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // 9. Rejected POs (detail list for modal)
 // ─────────────────────────────────────────────────────────────────────
-async function getRejectedPOsDetail(buyer_company_id, hotel_ids = []) {
+async function getRejectedPOsDetail(buyer_company_id, user_id, hotel_ids = []) {
+  const params = [buyer_company_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
   return db.any(
     `SELECT
        po.id as po_id,
@@ -1217,10 +1347,11 @@ async function getRejectedPOsDetail(buyer_company_id, hotel_ids = []) {
        AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
      )
      AND rhm.hotel_id = ANY($2)
+     ${sc}
      GROUP BY po.id, po.rfq_id, po.status, po.created_at, po.vendor_action_at,
        r.title, r.rfq_no, u_vendor.name, c_vendor.company_name, u_vendor.organization_name, hch.name
      ORDER BY po.vendor_action_at DESC NULLS LAST`,
-    [buyer_company_id, hotel_ids]
+    params
   );
 }
 
@@ -1465,10 +1596,23 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
     return { count: 0, oldest_opened_at: null, items: [] };
   }
-  // Tech evals share a queue per BU+role — there's no per-user assignment
-  // column. The widget shows every incomplete tech-eval at the hotels the
-  // user is scoped to (the dashboard permission gate has already filtered
-  // out users who shouldn't see this widget).
+  // Tech evals share a queue — tbl_rfq_product_tech_evaluation has no
+  // per-user assignment column (verified against the production schema), so
+  // "my" cannot mean "assigned to me".
+  //
+  // The previous comment here claimed "the dashboard permission gate has
+  // already filtered out users who shouldn't see this widget". THAT GATE DOES
+  // NOT EXIST — no /dashboard-v2 route carries acl() or any permission check,
+  // and this model had no RBAC join at all. The widget was therefore
+  // buyer-ACCOUNT-wide: every incomplete tech-eval across all eight legal
+  // entities under one buyer_company_id.
+  //
+  // "My" now means the tightest binding the schema supports: evaluations whose
+  // RFQ falls inside THIS caller's own role-scope tuple (company × hotel ×
+  // department × process) and for which they hold a technical read permission.
+  // A Procurement-scoped evaluator no longer sees Engineering's queue.
+  const params = [buyer_company_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
   const rows = await db.any(
     `SELECT te.id,
             te.rfq_id,
@@ -1483,9 +1627,10 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
      WHERE te.is_complete = false
        AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
                    WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+       ${sc}
      ORDER BY te."timestamp" ASC
      LIMIT 50`,
-    [buyer_company_id, hotel_ids]
+    params
   );
   const items = rows.map((r) => ({
     id: r.id,
@@ -1507,6 +1652,11 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
   if (!hotel_ids || hotel_ids.length === 0) {
     return { count: 0, total_disagreement_clauses: 0, items: [] };
   }
+  // Same treatment as getMyTechEvalsPendingData: this rollup exposed vendor
+  // disagreement counts and product names for every business unit under the
+  // billing account.
+  const params = [buyer_company_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
   const rows = await db.any(
     `WITH disagreements AS (
        SELECT te.id            AS tech_eval_id,
@@ -1524,6 +1674,7 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
          AND LOWER(TRIM(vr.vendor_response)) = 'disagree'
          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+         ${sc}
      ),
      per_eval AS (
        SELECT
@@ -1548,7 +1699,7 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
      JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
      ORDER BY pe.disagreeing_vendor_count DESC, pe.disagreeing_clause_count DESC
      LIMIT 50`,
-    [buyer_company_id, hotel_ids]
+    params
   );
   const items = rows.map((r) => ({
     id: r.id,
@@ -1581,6 +1732,12 @@ async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
   // "completed_at" as the latest vendor-response score_timestamp on any
   // clause under a complete tech-eval — that's when scoring closed.
   // Current vs prior period: last 30 days vs previous 30 days.
+  //
+  // A rollup rather than a list, but it was still averaging over every
+  // business unit in the billing account, so a hotel-scoped evaluator was
+  // benchmarked against other legal entities' turnaround.
+  const params = [buyer_company_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
   const row = await db.oneOrNone(
     `WITH completed_evals AS (
        SELECT te.id,
@@ -1595,6 +1752,7 @@ async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
        WHERE te.is_complete = true
          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+         ${sc}
        GROUP BY te.id, te."timestamp"
      )
      SELECT
@@ -1604,7 +1762,7 @@ async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
          FILTER (WHERE completed_at >= NOW() - INTERVAL '60 days'
                   AND completed_at <  NOW() - INTERVAL '30 days') AS prior_avg
      FROM completed_evals`,
-    [buyer_company_id, hotel_ids]
+    params
   );
   const sparkRows = await db.any(
     `WITH completed_evals AS (
@@ -1619,6 +1777,7 @@ async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
        WHERE te.is_complete = true
          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+         ${sc}
        GROUP BY te.id, te."timestamp"
      )
      SELECT
@@ -1628,7 +1787,7 @@ async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
      WHERE completed_at >= NOW() - INTERVAL '28 days'
      GROUP BY weeks_ago
      ORDER BY weeks_ago DESC`,
-    [buyer_company_id, hotel_ids]
+    params
   );
   const rawSparkline = [0, 0, 0, 0];
   for (const r of sparkRows) {
@@ -1817,8 +1976,12 @@ async function getTechApprovalThroughputData(buyer_company_id, user_id, hotel_id
 async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
   // Quote-compare stage = live RFQ with quotes, no negotiation round, no PO.
-  // Shared queue per BU (no per-user assignment column in schema). The
-  // dashboard permission gate is what restricts which users see this widget.
+  // No per-user assignment column exists, and the "dashboard permission gate"
+  // this comment used to appeal to was never implemented — so the widget was
+  // billing-account-wide. "My" now means the caller's own role-scope tuple
+  // plus a commercial read permission.
+  const params = [buyer_company_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params, COMMERCIAL_SCOPE_PERMISSIONS);
   const rows = await db.any(
     `WITH qc_rfqs AS (
        SELECT r.id, r.rfq_no, r.title, r."timestamp" AS entered_qc_at,
@@ -1835,11 +1998,12 @@ async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
              AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
          )
          AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
+         ${sc}
      )
      SELECT * FROM qc_rfqs
      ORDER BY entered_qc_at ASC
      LIMIT 50`,
-    [buyer_company_id, hotel_ids]
+    params
   );
   return {
     count: rows.length,
@@ -2044,6 +2208,14 @@ async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_i
   // For each pending PO approval on this user, compare unit_price on the
   // line item against the most recent COMPLETED PO for the same product
   // variant. If the awarded price is materially higher (≥10%), flag it.
+  //
+  // The `last_paid` CTE below applied companyScope() but NOT hotelFilter(),
+  // so the "last paid" figure — and the product name attached to it — could be
+  // sourced from any of the eight legal entities sharing the billing account.
+  // An approver at one hotel was shown another company's unit price as their
+  // own baseline, and the response body carried it as `last_paid_unit_price`.
+  const params = [buyer_company_id, user_id, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params);
   const rows = await db.any(
     `WITH my_pending AS (
        SELECT i.id AS instance_id, po.id AS po_id, po.rfq_id, pop.id AS pop_id,
@@ -2065,8 +2237,9 @@ async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_i
          AND i.hotel_id = ANY($3)
      ),
      last_paid AS (
-       -- Most recent completed PO unit_price per product_variant (per
-       -- this buyer-company scope). DISTINCT ON gives the latest.
+       -- Most recent completed PO unit_price per product_variant, restricted
+       -- to the caller's own hotels AND role scope — not merely to the
+       -- billing account.
        SELECT DISTINCT ON (rp.product_variant_id)
          rp.product_variant_id,
          pop.unit_price AS last_paid_unit_price,
@@ -2076,6 +2249,7 @@ async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_i
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
        JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
        WHERE po.status = 'completed'
+       ${hotelFilter('r', 3)} ${sc}
        ORDER BY rp.product_variant_id, po.created_at DESC
      )
      SELECT mp.po_id, mp.rfq_id, mp.product_variant_id,
@@ -2091,7 +2265,7 @@ async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_i
        AND ((mp.awarded_unit_price - lp.last_paid_unit_price) / lp.last_paid_unit_price * 100) >= 10
      ORDER BY drift_pct DESC
      LIMIT 50`,
-    [buyer_company_id, user_id, hotel_ids]
+    params
   );
   const items = rows.map((r) => ({
     id: r.po_id,
@@ -2234,6 +2408,14 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
   //   Completed = PO approved or further downstream (vendor accepted /
   //               sent / GRN / completed).
   //   Ongoing   = pending_approval OR acceptance_pending.
+  //
+  // This one is a value rollup, not a "my" list, so it is deliberately NOT
+  // bound to the caller's user id — binding award ₹ to one approver would
+  // misreport the pipeline. It is bound to the caller's SCOPE instead, which
+  // is what was missing: the department and process axes were unenforced and
+  // the figure summed every business unit in the billing account.
+  const pipelineParams = [buyer_company_id, hotel_ids];
+  const pipelineScope = scopeFilter(user_id, 'r', pipelineParams);
   const row = await db.one(
     `SELECT
         COALESCE(SUM(CASE WHEN po.status IN ('approved','sent','GRN','completed','invoice_raised','dispatched')
@@ -2245,8 +2427,9 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
      FROM tbl_rfq_purchase_order po
      JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
      WHERE EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))`,
-    [buyer_company_id, hotel_ids]
+                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
+     ${pipelineScope}`,
+    pipelineParams
   );
   return {
     completed_value: Number(row.completed_value) || 0,

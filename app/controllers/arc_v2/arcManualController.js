@@ -12,6 +12,7 @@ import { sendMail } from '../../helper/common.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
 import { financialYearOf, currentFinancialYearIst } from '../../helper/financialYear.js';
+import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Manual / backfill data-entry controller (spec §6).
@@ -45,15 +46,11 @@ function bad(res, status, message, code = 0) {
   return res.status(status).json({ status: code, message });
 }
 
-// Authorization: may this caller act on the given hotel? Super-admin (user_type 8)
-// bypasses; everyone else must have the hotel in their accessible set. Scope is
-// derived from the entity's hotel_id — never trusted from the client (§6.6).
-async function userCanAccessHotel(req, hotelId) {
-  if (Number(req.user?.user_type) === 8) return true;
-  if (!req.user?.id || !hotelId) return false;
-  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
-  return accessible.map(Number).includes(Number(hotelId));
-}
+// Authorization: may this caller act on this hotel / ARC row? Scope derives
+// from the entity — never from the client (§6.6). One of four byte-identical
+// copies that wrapped the hotel-blind rbacModel.getAllAccessibleHotelIds; all
+// four now share the single implementation in helper/arc_v2/arcScope.js.
+const userCanAccessHotel = userCanAccessArc;
 
 // Reload the ARC + its manual-entry row and verify the caller still has scope.
 // Returns { arc, manual } on success, or sends the response and returns null.
@@ -62,7 +59,7 @@ async function reloadAndVerify(req, res, arcId, runner = db) {
   if (!arc) { bad(res, 404, 'ARC not found', 2); return null; }
   const manual = await arcManualEntryModel.getByArc(arcId, runner);
   if (!manual) { bad(res, 404, 'This ARC was not created through the manual-entry workspace', 2); return null; }
-  if (!(await userCanAccessHotel(req, arc.hotel_id))) { bad(res, 403, 'You do not have access to this ARC'); return null; }
+  if (!(await userCanAccessHotel(req, arc))) { bad(res, 403, 'You do not have access to this ARC'); return null; }
   return { arc, manual };
 }
 

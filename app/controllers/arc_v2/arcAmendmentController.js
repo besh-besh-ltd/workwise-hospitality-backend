@@ -4,6 +4,7 @@ import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import { prepareAddendumForSignature } from '../../services/arcAddendumService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 import {
   createApprovalInstance,
   submitApprovalAction,
@@ -270,6 +271,21 @@ export async function listAmendments(req, res) {
     const arcId      = Number(req.query.arc_id || 0);
     const contractId = Number(req.query.arc_contract_id || 0);
     if (!arcId && !contractId) return bad(res, 400, 'arc_id or arc_contract_id is required');
+    // Both ids are client-supplied and sequential, and the rows carry vendor
+    // identities plus the buyer approval chain. Resolve whichever was given
+    // back to its ARC and gate on the ARC's OWN scope — never on the id alone.
+    const scopeArc = await db.oneOrNone(
+      arcId
+        ? `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id
+             FROM tbl_arc a WHERE a.id = $1`
+        : `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id
+             FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id WHERE c.id = $1`,
+      [arcId || contractId]
+    );
+    if (!scopeArc) return bad(res, 404, 'Rate contract not found', 2);
+    if (!(await userCanAccessArc(req, scopeArc))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
     const rows = arcId
       ? await arcAmendmentModel.listForArc(arcId)
       : await arcAmendmentModel.listForContract(contractId);

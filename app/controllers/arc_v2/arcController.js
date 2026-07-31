@@ -7,6 +7,7 @@ import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
+import { userCanAccessArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { sendMail } from '../../helper/common.js';
 import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/arcTime.js';
@@ -44,16 +45,20 @@ function bad(res, status, message, code = 0) {
   return res.status(status).json({ status: code, message });
 }
 
-// Authorization: may this caller act on the given hotel? Super admin
-// (user_type 8) bypasses; everyone else must have the hotel in their
-// accessible set. Scope is derived from the entity's hotel_id — never trusted
-// from the client (security-first; see audit C4).
-async function userCanAccessHotel(req, hotelId) {
-  if (Number(req.user?.user_type) === 8) return true;
-  if (!req.user?.id || !hotelId) return false;
-  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
-  return accessible.map(Number).includes(Number(hotelId));
-}
+// Authorization: may this caller act on the given hotel / ARC row?
+//
+// This used to be one of FOUR byte-identical copies (here,
+// arcContractController, arcCommitteeController, arcManualController), all
+// wrapping rbacModel.getAllAccessibleHotelIds — which reads the HOTEL-BLIND
+// tbl_hospitality_user_mappings and expands any company-level mapping to every
+// hotel in the company, so a single-BU user could read every other BU's rate
+// contracts. All four now delegate to the ONE implementation in
+// helper/arc_v2/arcScope.js, which enforces the same 4-axis RBAC matrix
+// (company × hotel × department × process) as authorizationService.
+//
+// Prefer passing the ARC ROW (not just its hotel id) — the row form also
+// enforces the department and process axes.
+const userCanAccessHotel = userCanAccessArc;
 
 // Notify every invited vendor that an ARC was floated (audit C2). Best-effort
 // and post-commit: a notification/email failure must NEVER roll back or block
@@ -250,7 +255,7 @@ export async function updateDraft(req, res) {
     // before mutating it. Without this the :id path param alone would let any
     // authenticated buyer PATCH (and now, with the item/invitation persistence
     // below, meaningfully mutate) another tenant's draft ARC.
-    if (!(await userCanAccessHotel(req, existing.hotel_id))) {
+    if (!(await userCanAccessHotel(req, existing))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
 
@@ -335,7 +340,7 @@ export async function publish(req, res) {
     const arc = await arcModel.getById(id);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     // Re-verify tenant ownership on publish — never flip a foreign ARC (C4).
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
     // Publishable from a fresh draft OR a previously-rejected publish (RESOLVED 4).
@@ -615,6 +620,16 @@ export async function publishApprovalDecide(req, res) {
 export async function getPublishApproval(req, res) {
   try {
     const arcId = Number(req.params.id);
+    // Tenant isolation: the chain detail carries the full approver matrix —
+    // names, emails and comments of another company's staff — over sequential
+    // ids. Gate on the ARC's OWN scope before touching the instance. 404 when
+    // the ARC does not exist, 403 when it does but is out of scope (mirrors
+    // requireArcPermission, so existence is not leaked differently here).
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+    if (!(await userCanAccessHotel(req, arc))) {
+      return bad(res, 403, 'You do not have access to this rate contract', 3);
+    }
     const instance = await db.oneOrNone(
       `SELECT * FROM tbl_approval_instances
         WHERE entity_type = 'ARC_PUBLISH' AND entity_id = $1
@@ -688,7 +703,7 @@ export async function terminate(req, res) {
     // reload-and-verify the ARC belongs to a hotel the caller can act on before
     // mutating it. Without this the :id path param alone would let any
     // authenticated buyer terminate another tenant's rate contract (IDOR).
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
     // Respond-AFTER-commit: return the updated row from the tx and send the HTTP
@@ -737,7 +752,7 @@ export async function extendSubmission(req, res) {
 
     // Tenant guard — reload-and-verify, never trust the :id param alone
     // (security-first; mirrors getById/publish/terminate).
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
@@ -866,7 +881,17 @@ export async function getArcListView(req, res) {
     };
 
     // 1. fetch the full scoped set (big cap so faceting is complete).
-    const result = await arcModel.list({ hospitality_company_ids: companyIds, statusGroup: 'all', page: 1, limit: 1000 });
+    //    scope_user_id applies the caller's 4-axis RBAC matrix. Everything
+    //    downstream — rows, tab_counts (step 3) and the facet maps (step 5),
+    //    including buId — is derived from THIS array, so scoping it here is what
+    //    keeps a facet from enumerating an inaccessible hotel with an exact count.
+    const result = await arcModel.list({
+      hospitality_company_ids: companyIds,
+      scope_user_id: arcScopeUserId(req),
+      statusGroup: 'all',
+      page: 1,
+      limit: 1000,
+    });
     const rows = Array.isArray(result.data) ? result.data : [];
 
     // 2. action stamping (approval waiting on me OR open eval window) + bucket.
@@ -980,17 +1005,20 @@ async function computeArcEvalActionIds(req, rows) {
     return ids;
   }
   const cache = new Map();
-  const permsFor = async (hotelId, deptId) => {
-    const key = `${hotelId}:${deptId ?? ''}`;
+  // Keyed on all three axes the ARC row carries — getUserPermissionsForHotels
+  // filters company × hotel × department only, so the process axis is applied
+  // here (same strict semantics as arcPermission + the listing predicate).
+  const permsFor = async (hotelId, deptId, processId) => {
+    const key = `${hotelId}:${deptId ?? ''}:${processId ?? ''}`;
     if (cache.has(key)) return cache.get(key);
     const list = await rbacModel.getUserPermissionsForHotels(req.user.id, [hotelId], null, deptId || null);
-    const set = new Set((list || []).map((p) => `${p.resource}.${p.action}`));
+    const set = new Set(filterRowsByProcessAxis(list, processId).map((p) => `${p.resource}.${p.action}`));
     cache.set(key, set);
     return set;
   };
   for (const r of candidates) {
     if (!r.hotel_id) continue;
-    const perms = await permsFor(r.hotel_id, r.department_id);
+    const perms = await permsFor(r.hotel_id, r.department_id, r.process_id);
     const canTech = perms.has('arc-tech.evaluate') || perms.has('arc.admin');
     const canComm = perms.has('arc-comm.evaluate') || perms.has('arc.admin');
     if ((TECH.has(r.status) && canTech) || (COMM.has(r.status) && canComm)) {
@@ -1008,6 +1036,10 @@ export async function list(req, res) {
     const companyIds = await resolveHospitalityCompanyScope(req);
     const result = await arcModel.list({
       hospitality_company_ids: companyIds,
+      // Company membership alone is NOT scope — a hotel-level mapping expands
+      // to the whole company. The RBAC matrix is the authority; the client's
+      // hotel_ids/department_ids only narrow within it.
+      scope_user_id:  arcScopeUserId(req),
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
       statusGroup: statusGroup || 'all',
@@ -1055,7 +1087,7 @@ export async function getById(req, res) {
     // Mirror createDraft/publish — derive access from req.user (super-admin
     // bypass), never trust the id alone. A valid policy approver is always
     // hotel/company-mapped, so they retain read access.
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const [items, invitations, techEvalByItem] = await Promise.all([
@@ -1099,7 +1131,7 @@ export async function getLifecycle(req, res) {
     if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
     // Tenant guard — the lifecycle now carries approver/evaluator PII (names,
     // emails, mobiles), so it must not be cross-tenant readable. Mirror getById.
-    if (!(await userCanAccessHotel(req, lifecycle.arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, lifecycle.arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
@@ -1110,8 +1142,11 @@ export async function getLifecycle(req, res) {
     } else {
       permissions = Object.fromEntries(ARC_PERMISSION_RESOURCES.map((r) => [r, []]));
       if (lifecycle.arc.hotel_id != null) {
-        const rows = await rbacModel.getUserPermissionsForHotels(
-          userId, [lifecycle.arc.hotel_id], null, lifecycle.arc.department_id || null
+        const rows = filterRowsByProcessAxis(
+          await rbacModel.getUserPermissionsForHotels(
+            userId, [lifecycle.arc.hotel_id], null, lifecycle.arc.department_id || null
+          ),
+          lifecycle.arc.process_id
         );
         for (const row of rows) {
           const resource = String(row.resource);
@@ -1133,6 +1168,7 @@ export async function dashboardCounts(req, res) {
     const companyIds = await resolveHospitalityCompanyScope(req);
     const counts = await arcModel.dashboardCounts({
       hospitality_company_ids: companyIds,
+      scope_user_id:  arcScopeUserId(req),
       hotel_ids:      hotel_ids      ? String(hotel_ids).split(',').map(Number)      : null,
       department_ids: department_ids ? String(department_ids).split(',').map(Number) : null,
     });
@@ -1147,14 +1183,25 @@ export async function getDepartmentsForCategory(req, res) {
   try {
     const categoryId = Number(req.query.category_id);
     const userId     = req.user?.id;
-    const hcId       = Number(req.query.hospitality_company_id || req.user?.hospitality_company_id);
+    // The company is SERVER-derived: resolveHospitalityCompanyId honours a
+    // client hint only when the caller is actually mapped to that company, so a
+    // spoofed hospitality_company_id can never widen the answer.
+    const hcId       = await resolveHospitalityCompanyId(req);
     if (!categoryId || !userId || !hcId) {
       return bad(res, 400, 'category_id, user, and hospitality_company_id are required');
+    }
+    // Optional BU narrowing — once the wizard has a hotel, only departments the
+    // caller is scoped to AT THAT HOTEL may be offered. Without it, a user
+    // scoped proc@A1 + eng@A2 was offered {proc, eng} for either hotel.
+    const hotelId = Number(req.query.hotel_id) || null;
+    if (hotelId && !(await userCanAccessHotel(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel', 3);
     }
     const departments = await arcModel.getDepartmentsForCategoryAndUser({
       category_id: categoryId,
       user_id: userId,
       hospitality_company_id: hcId,
+      hotel_id: hotelId,
     });
     return ok(res, { departments });
   } catch (err) {
@@ -1222,13 +1269,23 @@ export async function listAccessibleHotels(req, res) {
     // multi-company user can't select (and so can't act on) a hotel in any
     // company but their lowest-id one. Super admin (null) → all companies.
     const companyIds = await resolveHospitalityCompanyScope(req);
+    // …but "the user's companies" is not the same as "the user's hotels": one
+    // company-level mapping row used to list every BU in the company, so this
+    // picker enumerated hotels the caller has no grant on. Narrow to the RBAC
+    // matrix — a scope row with hotel_id NULL still means "every hotel in that
+    // company", so company-wide admins are unaffected.
+    const scope = buildArcScopeClause(arcScopeUserId(req), {
+      company: 'h.hospitality_company_id',
+      hotel: 'h.id',
+    }, 2);
     const rows = await db.any(
-      `SELECT id, hospitality_company_id, name, city, keys
-         FROM tbl_hospitality_company_hotels
-        WHERE ($1::int[] IS NULL OR hospitality_company_id = ANY($1::int[]))
-          AND COALESCE(is_deleted, 0) = 0
-        ORDER BY name`,
-      [companyIds && companyIds.length ? companyIds : (companyIds === null ? null : [])]
+      `SELECT h.id, h.hospitality_company_id, h.name, h.city, h.keys
+         FROM tbl_hospitality_company_hotels h
+        WHERE ($1::int[] IS NULL OR h.hospitality_company_id = ANY($1::int[]))
+          AND COALESCE(h.is_deleted, 0) = 0
+          AND ${scope.clause}
+        ORDER BY h.name`,
+      [companyIds && companyIds.length ? companyIds : (companyIds === null ? null : []), ...scope.params]
     );
     return ok(res, { hotels: rows });
   } catch (err) {
@@ -1307,6 +1364,13 @@ export async function listEligibleVendors(req, res) {
     const categoryId = Number(req.query.category_id);
     const hotelId    = Number(req.query.hotel_id);
     if (!categoryId || !hotelId) return bad(res, 400, 'category_id and hotel_id are required');
+    // hotel_id arrives from the client and the response carries vendor PII
+    // (name, email, mobile), so the hotel must be validated against the
+    // caller's own scope — otherwise any buyer could enumerate every tenant's
+    // vendor panel by walking hotel ids.
+    if (!(await userCanAccessHotel(req, hotelId))) {
+      return bad(res, 403, 'You do not have access to this hotel', 3);
+    }
     const rows = await db.any(
       `SELECT DISTINCT u.id, u.name, u.email, u.mobile
          FROM tbl_users u

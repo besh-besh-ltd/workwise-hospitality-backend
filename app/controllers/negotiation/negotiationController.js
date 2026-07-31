@@ -35,6 +35,12 @@ import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNo
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
 
+// Server-derived id for the RBAC read matrix. NEVER read from the body/query/
+// headers. Returns null for super admins (user_type 8), which the model treats
+// as "no matrix filter".
+const readScopeUserId = (req) =>
+  Number(req.user?.user_type) === 8 ? null : (req.user?.id ?? null);
+
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
   const message = error.message || Config.errorText.value;
@@ -1019,6 +1025,28 @@ const NegotiationController = {
 
       // Vendors (user_type 3) see only rounds they are selected for
       const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
+
+      // P0 FIX (IDOR): this route is reachable by any authenticated buyer and
+      // had NO tenant check — any rfq_id returned that RFQ's rounds, including
+      // vendor identities/emails and negotiated prices. Buyers must now pass
+      // the same RBAC read matrix the listings use.
+      //
+      // The VENDOR path is untouched: vendors arrive here legitimately via the
+      // no-login email token (noLogin.vendorTokenOrJwt) and are already
+      // narrowed to their own rounds by vendor_ids above.
+      if (!vendorId) {
+        const allowed = await negotiationModel.userCanReadRfqNegotiation(
+          readScopeUserId(req),
+          rfq_id
+        );
+        if (!allowed) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You do not have access to this RFQ'
+          });
+        }
+      }
+
       const rounds = await negotiationModel.getRoundsByRfqId(rfq_id, rfq_product_id, vendorId);
 
       // Enrich each round with assigned vendors
@@ -1831,6 +1859,19 @@ const NegotiationController = {
         return res.status(404).json({
           status: 2,
           message: 'Round not found'
+        });
+      }
+
+      // P0 FIX (IDOR): this route had NO tenant check — any authenticated buyer
+      // could read any round's negotiated prices and vendor identities by id.
+      // Resolve the round's parent (RFQ or ARC) and apply the same RBAC read
+      // matrix the listings use. Runs BEFORE the quote-visibility check so an
+      // out-of-scope caller learns nothing about the round's state.
+      const allowed = await negotiationModel.userCanReadRound(readScopeUserId(req), round_id);
+      if (!allowed) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
         });
       }
 
@@ -2755,7 +2796,13 @@ const NegotiationController = {
       // Scope to ALL the user's companies (super admin → null = all) so multi-
       // company users see their negotiations; the in-page BU facet narrows.
       const companyIds = await resolveHospitalityCompanyScope(req);
-      const rows = await negotiationModel.getNegotiationRfqList({ companyIds });
+      // Company scope alone is NOT sufficient — a hotel-level mapping collapses
+      // to company-wide there. The per-row RBAC matrix (userId) is what keeps
+      // one hotel's rounds out of another hotel's user's list.
+      const rows = await negotiationModel.getNegotiationRfqList({
+        companyIds,
+        userId: readScopeUserId(req),
+      });
       return res.status(200).json({ status: 1, data: rows });
     } catch (error) {
       logError(error);
@@ -2769,6 +2816,10 @@ const NegotiationController = {
     try {
       const userId = req.user?.id;
       const companyIds = await resolveHospitalityCompanyScope(req);
+      // Per-row RBAC read matrix. Derived from req.user only — a client can
+      // never widen it. Facets, tab_counts, source_counts, total and the page
+      // slice are all computed from the rows this returns, so they inherit it.
+      const scopeUserId = readScopeUserId(req);
       const body = req.body || {};
       const BUCKETS = ['pending', 'active', 'awaiting', 'completed', 'cancelled'];
       const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
@@ -2788,8 +2839,8 @@ const NegotiationController = {
       // 1. fetch the full scoped set — ONE ROW PER ROUND.
       // Always fetch both branches so source_counts reflects the full union totals.
       const [rfqRows, arcRows] = await Promise.all([
-        negotiationModel.getNegotiationRoundList({ companyIds }),
-        negotiationModel.getArcNegotiationRoundList({ companyIds }),
+        negotiationModel.getNegotiationRoundList({ companyIds, userId: scopeUserId }),
+        negotiationModel.getArcNegotiationRoundList({ companyIds, userId: scopeUserId }),
       ]);
       const allRows = [...rfqRows, ...arcRows];
       const source_counts = { all: allRows.length, RFQ: rfqRows.length, ARC: arcRows.length };

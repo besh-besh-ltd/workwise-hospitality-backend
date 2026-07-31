@@ -1,5 +1,6 @@
 import db from '../../config/dbConn.js';
 import { logger } from '../../util/logger.js';
+import { buildArcScopeClause } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Core model
@@ -192,13 +193,23 @@ const arcModel = {
 
   /**
    * List ARCs with optional status-group filter, scoped by hospitality_company
-   * + (optional hotel_ids / department_ids).
+   * + the caller's RBAC scope matrix + (optional hotel_ids / department_ids).
+   *
+   * `scope_user_id` is MANDATORY for correctness on every buyer-facing caller:
+   *   number → rows are filtered by that user's tbl_user_role_scopes matrix
+   *   null   → NO scope filter (super admin only)
+   * The company-id list alone is not a scope: resolveHospitalityCompanyScope
+   * expands a single hotel-level mapping into a whole-company read, which is
+   * exactly how every business unit's contracts leaked to every other BU.
+   * Client-supplied hotel_ids / department_ids remain a NARROWING facet — they
+   * are ANDed with the matrix and can never widen it.
    *
    * statusGroup values map to the lifecycle buckets surfaced by the sidebar
    * (plan §6.4): drafts, ongoing, approved, active, ended, all.
    */
   list: async ({
     hospitality_company_ids = null, // number[] (scope) | null (all, super admin)
+    scope_user_id = null,           // number (RBAC matrix) | null (super admin)
     hotel_ids = null,
     department_ids = null,
     statusGroup = 'all',
@@ -217,6 +228,18 @@ const arcModel = {
     if (hospitality_company_ids !== null) {
       conditions.push(`a.hospitality_company_id = ANY($${p++}::int[])`);
       args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
+    }
+    // 4-axis RBAC matrix (company × hotel × department × process).
+    const scope = buildArcScopeClause(scope_user_id, {
+      company: 'a.hospitality_company_id',
+      hotel: 'a.hotel_id',
+      department: 'a.department_id',
+      process: 'a.process_id',
+    }, p);
+    if (scope.paramsConsumed > 0) {
+      conditions.push(scope.clause);
+      args.push(...scope.params);
+      p += scope.paramsConsumed;
     }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
@@ -383,27 +406,47 @@ const arcModel = {
 
   /**
    * Dashboard KPI counts per status-group — feeds the sidebar live badges.
+   *
+   * Counts are a leak surface in their own right: an exact count for a hotel
+   * the caller cannot open still discloses that hotel's activity. Same
+   * `scope_user_id` contract as list().
    */
-  dashboardCounts: async ({ hospitality_company_ids = null, hotel_ids = null, department_ids = null }, txContext = null) => {
+  dashboardCounts: async ({
+    hospitality_company_ids = null,
+    scope_user_id = null,
+    hotel_ids = null,
+    department_ids = null,
+  }, txContext = null) => {
     const runner = txContext || db;
     const conditions = [];
     const args = [];
     let p = 1;
     if (hospitality_company_ids !== null) {
-      conditions.push(`hospitality_company_id = ANY($${p++}::int[])`);
+      conditions.push(`a.hospitality_company_id = ANY($${p++}::int[])`);
       args.push(Array.isArray(hospitality_company_ids) ? hospitality_company_ids : []);
     }
+    const scope = buildArcScopeClause(scope_user_id, {
+      company: 'a.hospitality_company_id',
+      hotel: 'a.hotel_id',
+      department: 'a.department_id',
+      process: 'a.process_id',
+    }, p);
+    if (scope.paramsConsumed > 0) {
+      conditions.push(scope.clause);
+      args.push(...scope.params);
+      p += scope.paramsConsumed;
+    }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`hotel_id = ANY($${p++}::int[])`);
+      conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {
-      conditions.push(`department_id = ANY($${p++}::int[])`);
+      conditions.push(`a.department_id = ANY($${p++}::int[])`);
       args.push(department_ids);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await runner.any(
-      `SELECT status, COUNT(*)::int AS c FROM tbl_arc ${where} GROUP BY status`,
+      `SELECT a.status, COUNT(*)::int AS c FROM tbl_arc a ${where} GROUP BY a.status`,
       args
     );
     const counts = { drafts: 0, ongoing: 0, approved: 0, active: 0, ended: 0, all: 0 };
@@ -599,9 +642,18 @@ const arcModel = {
   // Category → Department resolution (powers the wizard picker)
   // ============================================================
 
-  getDepartmentsForCategoryAndUser: async ({ category_id, user_id, hospitality_company_id }, txContext = null) => {
-    // Intersection of (departments mapped to the category) ∩ (departments the
-    // user is scoped to via tbl_user_role_scopes for this company).
+  /**
+   * Intersection of (departments mapped to the category) ∩ (departments the
+   * user is scoped to via tbl_user_role_scopes for this company AND, when the
+   * wizard has already picked a business unit, for THAT hotel).
+   *
+   * The hotel axis matters: a user scoped proc@A1 + eng@A2 was previously
+   * offered {proc, eng} for either hotel, so the picker could hand them a
+   * (A1, eng) cell they have no grant for — a scope widening at creation time
+   * and an enumeration of another BU's departments. hotel_id is optional so
+   * the company-wide picker still works before a BU is chosen.
+   */
+  getDepartmentsForCategoryAndUser: async ({ category_id, user_id, hospitality_company_id, hotel_id = null }, txContext = null) => {
     return (txContext || db).any(
       `SELECT DISTINCT d.id, d.title
          FROM tbl_category_department cd
@@ -611,10 +663,11 @@ const arcModel = {
             SELECT 1 FROM tbl_user_role_scopes urs
              WHERE urs.user_id = $2
                AND urs.company_id = $3
+               AND ($4::int IS NULL OR urs.hotel_id IS NULL OR urs.hotel_id = $4)
                AND (urs.department_id = d.id OR urs.department_id IS NULL)
           )
         ORDER BY d.title`,
-      [category_id, user_id, hospitality_company_id]
+      [category_id, user_id, hospitality_company_id, hotel_id]
     );
   },
 

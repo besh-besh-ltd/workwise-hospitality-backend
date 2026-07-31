@@ -103,6 +103,24 @@ describe("MR create guards (CO1 scope · CO2 linkage · CO4 over-consumption)", 
     arc_contract_id: contractId, arc_contract_line_id: contractLineId, matched_unit_rate: 90, ...over,
   });
 
+  // Temporarily grant BUYER a role scope on another department so the request
+  // gets PAST the (hotel × department) scope gate and reaches the CO2
+  // contract-linkage validation underneath it. Without this the endpoint now
+  // (correctly) refuses with 403 before any item is inspected, which would hide
+  // the linkage guard the test is actually about.
+  async function withDeptScope(departmentId, fn) {
+    const row = await db.one(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+       VALUES ($1, 2, $2, $3, $4) RETURNING id`,
+      [BUYER, HC, HOTEL, departmentId]
+    );
+    try {
+      return await fn();
+    } finally {
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [row.id]);
+    }
+  }
+
   test("CO1 — derives hospitality_company_id from the hotel; ignores a spoofed body value", async () => {
     const res = await client.post("/api/v1/mr").send({
       title: "Scope derive",
@@ -138,10 +156,19 @@ describe("MR create guards (CO1 scope · CO2 linkage · CO4 over-consumption)", 
   });
 
   test("CO2 — rejects an item whose contract is not in the MR's department", async () => {
-    const res = await client.post("/api/v1/mr").send({
-      title: "Wrong dept", hotel_id: HOTEL, department_id: DEPT_ENG, items: [validItem()],
+    await withDeptScope(DEPT_ENG, async () => {
+      const res = await client.post("/api/v1/mr").send({
+        title: "Wrong dept", hotel_id: HOTEL, department_id: DEPT_ENG, items: [validItem()],
+      });
+      expect(res.status).toBe(400);
     });
-    expect(res.status).toBe(400);
+  });
+
+  test("CO1 — rejects an MR for a department the buyer has no role scope for", async () => {
+    const res = await client.post("/api/v1/mr").send({
+      title: "Unscoped dept", hotel_id: HOTEL, department_id: DEPT_ENG, items: [validItem()],
+    });
+    expect(res.status).toBe(403);
   });
 
   test("CO4 — submit is blocked when requested qty exceeds the line's remaining qty", async () => {

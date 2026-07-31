@@ -1988,6 +1988,11 @@ WHERE NOT EXISTS (
           'vendor_clarification_date', RFQ.vendor_clarification_date ,
           'tender_fees', RFQ.tender_fees,
           'is_tender', RFQ.is_tender,
+          -- The tenant anchor MUST round-trip. Without it the wizard can't echo
+          -- the value back on save-draft, and an absent field used to be
+          -- written as NULL — which hides the RFQ from every buyer query
+          -- (they all gate on urs.company_id = RFQ.hospitality_company_id).
+          'hospitality_company_id', RFQ.hospitality_company_id,
           'hotel_id', RFQ.hotel_id,
           'department_id', RFQ.department_id,
           'process_id', RFQ.process_id,
@@ -4360,7 +4365,8 @@ LIMIT 2;
         if (rfqApprovalIds.length > 0) {
           params.push(rfqApprovalIds);
           cteParts.push(`
-            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
+            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -4375,7 +4381,8 @@ LIMIT 2;
         if (techApprovingIds.length > 0) {
           params.push(techApprovingIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -4391,7 +4398,8 @@ LIMIT 2;
         if (quoteApprovalIds.length > 0) {
           params.push(quoteApprovalIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -4407,7 +4415,8 @@ LIMIT 2;
         if (poApprovalIds.length > 0) {
           params.push(poApprovalIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -4427,7 +4436,18 @@ LIMIT 2;
           // Group by rfq_id
           const grouped = {};
           for (const row of rows) {
-            if (!grouped[row.rfq_id]) grouped[row.rfq_id] = { users: [], decision_rule: row.decision_rule || null };
+            if (!grouped[row.rfq_id]) {
+              grouped[row.rfq_id] = {
+                users: [],
+                decision_rule: row.decision_rule || null,
+                // The PENDING approval instance the RFQ is currently sitting on.
+                // Callers (list-view rows, RFQ detail) need this to route an
+                // approver at the approve/reject action instead of guessing.
+                instance_id: row.instance_id ?? null,
+                entity_type: row.entity_type || null,
+                step_id: row.step_id ?? null,
+              };
+            }
             // Deduplicate by user_id
             if (!grouped[row.rfq_id].users.some(u => u.id === row.user_id)) {
               grouped[row.rfq_id].users.push({ id: row.user_id, name: row.name, email: row.email });
@@ -4439,12 +4459,18 @@ LIMIT 2;
               type: 'approval',
               label: APPROVAL_LABEL,
               users: grouped[rfq.id]?.users || [],
-              decision_rule: grouped[rfq.id]?.decision_rule || null
+              decision_rule: grouped[rfq.id]?.decision_rule || null,
+              instance_id: grouped[rfq.id]?.instance_id ?? null,
+              entity_type: grouped[rfq.id]?.entity_type || null,
+              step_id: grouped[rfq.id]?.step_id ?? null
             };
           }
         } else {
           for (const rfq of approvalRfqs) {
-            result[rfq.id] = { type: 'approval', label: APPROVAL_LABEL, users: [], decision_rule: null };
+            result[rfq.id] = {
+              type: 'approval', label: APPROVAL_LABEL, users: [], decision_rule: null,
+              instance_id: null, entity_type: null, step_id: null
+            };
           }
         }
       } catch (err) {

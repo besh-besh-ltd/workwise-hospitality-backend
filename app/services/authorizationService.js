@@ -217,14 +217,44 @@ export async function assertCanReadParentRfq(userId, rfqId, dbContext = db) {
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
-  // Non-existent or non-hospitality RFQ: leave the existing handler's own
-  // not-found / no-op behavior intact.
-  if (!rfq || !rfq.hospitality_company_id) return;
+  // Non-existent RFQ: leave the existing handler's own not-found behavior intact.
+  if (!rfq) return;
+
+  // A NULL hospitality_company_id used to short-circuit to ALLOW. That turned
+  // every caller of this helper into an open door, because the saveRfqDraft
+  // defect (fixed in 92604b60) wiped the column on 84 production RFQs — so the
+  // bypass was reachable in practice, not theoretical.
+  //
+  // Re-derive the tenant from the RFQ's own hotel (column first, then its hotel
+  // mapping), exactly as the repair script does, and enforce against that. Only
+  // when no tenant can be established at all do we refuse: an RFQ with no hotel,
+  // no mapping and no company has no tenant to authorise against, and failing
+  // closed is the only safe reading. In production that is 4 abandoned,
+  // unpublished drafts with no hotel_id, no department and no hotel mapping.
+  let companyId = rfq.hospitality_company_id;
+  let hotelId = rfq.hotel_id;
+  if (!companyId) {
+    const derived = await dbContext.oneOrNone(
+      `SELECT h.id AS hotel_id, h.hospitality_company_id
+         FROM tbl_hospitality_company_hotels h
+        WHERE h.is_deleted = 0
+          AND h.id = COALESCE(
+                $2::int,
+                (SELECT m.hotel_id FROM tbl_rfq_hotel_mappings m
+                  WHERE m.rfq_id = $1 ORDER BY m.id LIMIT 1))`,
+      [rfq.id, rfq.hotel_id]
+    );
+    if (!derived) {
+      throw new AuthorizationError('RFQ has no resolvable tenant', { rfq_id: rfq.id });
+    }
+    companyId = derived.hospitality_company_id;
+    hotelId = hotelId ?? derived.hotel_id;
+  }
 
   const resource = Number(rfq.is_tender) === 1 ? 'boq' : 'rfq';
   await assertUserHasScope(userId, `${resource}.read`, {
-    hospitality_company_id: rfq.hospitality_company_id,
-    hotel_id: rfq.hotel_id,
+    hospitality_company_id: companyId,
+    hotel_id: hotelId,
     department_id: rfq.department_id,
     process_id: rfq.process_id,
   }, dbContext);

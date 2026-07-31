@@ -1,10 +1,21 @@
 // ============================================================================
 // poDashboardController.js
 // ----------------------------------------------------------------------------
-// Read-only controllers for the four new Purchase Order UI pages. Every handler
-// derives the tenant scope from req.user + request HEADERS via deriveScope()
-// and NEVER trusts tenant ids from the request body/query. See poDashboardModel
-// for the SQL layer.
+// Read-only controllers for the four new Purchase Order UI pages.
+//
+// SECURITY MODEL (corrected):
+//   The AUTHORITY for what a caller may see is their RBAC scope rows
+//   (tbl_user_role_scopes), applied in SQL by poDashboardModel.buildScopeClause
+//   via authorizationService.buildScopeExistsClause — company × hotel ×
+//   department × process, all derived from req.user.id.
+//
+//   The x-hotel-ids / x-department-id headers are a UI FACET only. They can
+//   narrow the scoped set; they can never be the source of it. Previously they
+//   WERE the source: omitting x-hotel-ids deleted the hotel predicate entirely
+//   and a hotel-scoped buyer saw their whole company's POs (measured at
+//   ₹4.86 crore vs a correct ₹2.07 crore for one production user).
+//
+//   Tenant ids are never accepted from the request body/query.
 // ============================================================================
 
 import { logError } from "../../helper/common.js";
@@ -19,22 +30,25 @@ import {
 } from "../../models/poDashboardModel.js";
 
 // ---------------------------------------------------------------------------
-// deriveScope(req): single source of truth for tenant scope.
-// Precedence mirrors app/middleware/auth.js can():
-//   company  : x-company-id || x-hospitality-company || req.user.company_id
-//   hotels   : x-hotel-ids (csv) || x-hotel-id / x-hospitality-hotel (single)
-//   dept     : x-department-id
-// The header-supplied company id is the HOSPITALITY company id in the
-// hospitality flow; we keep both `hospitalityCompanyId` (header) and
-// `companyId` (req.user fallback for legacy non-hospitality POs) so the model
-// can scope POs through their RFQ's hospitality_company_id when present.
+// deriveScope(req): assembles the scope object the model consumes.
+//
+//   userId                 — THE scope authority. The model correlates it
+//                            against tbl_user_role_scopes for the company ×
+//                            hotel × department × process predicate.
+//   hospitalityCompanyIds  — null = super admin (all companies); [] = no
+//                            hospitality mappings (legacy po.company_id
+//                            fallback); [...] = the user's mapped companies.
+//   hotelIds / departmentId — NARROWING facets read from x-hotel-ids /
+//                            x-hotel-id / x-hospitality-hotel /
+//                            x-department-id. Intersected with the RBAC-scoped
+//                            set; never a substitute for it. A caller passing a
+//                            hotel outside their scope gets fewer rows, not more.
 // ---------------------------------------------------------------------------
 async function deriveScope(req) {
   // Company scope spans ALL the user's mapped hospitality companies (super admin
-  // → null = all), so a multi-company user sees their whole portfolio rather than
-  // just the BU currently selected in the header. The dashboard narrows by the
-  // explicit hotel/department facets below, NOT by the global BU selection —
-  // consistent with the MR / ARC / Negotiation listings.
+  // → null = all). Hotel/department granularity within those companies comes
+  // from the RBAC predicate in the model, not from this call — the mappings
+  // table is company-granular and would otherwise discard hotel binding.
   const hospitalityCompanyIds = await resolveHospitalityCompanyScope(req);
 
   // tbl_company id fallback for legacy non-hospitality POs (po.company_id) —

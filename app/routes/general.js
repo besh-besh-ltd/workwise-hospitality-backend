@@ -118,9 +118,14 @@ GeneralRoutes.post(
   acl([7]),
   hospitalityApprovalController.upsertApprovalPolicy
 );
+// SECURITY: this route previously had NO acl() at all, so vendors (user_type 3)
+// could reach it and read any tenant's policy by passing their company id in
+// the query string. Gated to the same buyer/admin roles as the sibling policy
+// routes; the controller additionally checks the company against req.user.
 GeneralRoutes.get(
   '/hospitality/approval/policies/match',
   passportSignIn,
+  acl([7, 2]),
   hospitalityApprovalController.findMatchingPolicy
 );
 GeneralRoutes.get(
@@ -176,9 +181,12 @@ GeneralRoutes.get(
   passportSignIn,
   hospitalityApprovalController.getApprovalInstance
 );
+// SECURITY: also previously ungated. Returns approval instances (approver
+// names/emails, company + hotel names) for an arbitrary entity id.
 GeneralRoutes.get(
   '/hospitality/approval/entity/:entity_type/:entity_id',
   passportSignIn,
+  acl([7, 2]),
   hospitalityApprovalController.getEntityApprovals
 );
 GeneralRoutes.post(
@@ -186,9 +194,14 @@ GeneralRoutes.post(
   passportSignIn,
   hospitalityApprovalController.submitApprovalAction
 );
+// SECURITY: this route had no role gate at all, so vendors (user_type 3) could
+// reach a handler that CANCELS approval instances by sequential id. The
+// controller's tenant guard is the real control (a vendor resolves to an empty
+// company scope and 404s); this mirrors the sibling /submit gate on top of it.
 GeneralRoutes.post(
   '/hospitality/approval/cancel',
   passportSignIn,
+  noAcl([3]),
   hospitalityApprovalController.cancelApproval
 );
 

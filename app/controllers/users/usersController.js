@@ -3830,13 +3830,23 @@ publish_profile_reviews: async (req, res, next) => {
   },
   notificationDetail: async (req, res, next) => {
     try {
-      // let user_id = req.user.id;
-      let notification_id = req.params.notification_id;
+      // SECURITY: the owner check below used to be commented out and the model
+      // ran `select * from tbl_notifications where id = $1` with no owner
+      // filter, so any authenticated user (vendors reach this route too — it is
+      // passportSignIn-only) could walk the sequential ids and read every
+      // tenant's notifications. Scope is derived from req.user, never the
+      // request. A row that exists but belongs to someone else is
+      // indistinguishable from a missing one: both 404.
+      const user_id = req.user.id;
+      const notification_id = req.params.notification_id;
       const notificationDetail = await notificationModel.notificationDetail(
-        notification_id
+        notification_id,
+        user_id
       );
 
-      if (notificationDetail) {
+      // db.any() returns [] on a miss — and [] is truthy, which is why the old
+      // `if (notificationDetail)` branch always reported success.
+      if (Array.isArray(notificationDetail) && notificationDetail.length > 0) {
         res
           .status(200)
           .json({
@@ -3846,10 +3856,10 @@ publish_profile_reviews: async (req, res, next) => {
           .end();
       } else {
         res
-          .status(400)
+          .status(404)
           .json({
             status: 2,
-            message: 'User not exist'
+            message: 'Notification not found'
           })
           .end();
       }
@@ -3866,18 +3876,30 @@ publish_profile_reviews: async (req, res, next) => {
   },
   readNotification: async (req, res, next) => {
     try {
-      let user_id = req.user.id;
-      let notification_id = req.params.notification_id;
+      // SECURITY: companion defect to notificationDetail — `user_id` was read
+      // here but never passed to the model, so the UPDATE matched on id alone
+      // and any user could flip any tenant's notification to read.
+      const user_id = req.user.id;
+      const notification_id = req.params.notification_id;
 
-      let notification = await notificationModel.statusUpdateNotification(
-        notification_id
+      const updatedCount = await notificationModel.statusUpdateNotification(
+        notification_id,
+        user_id
       );
-      if (notification) {
+      if (updatedCount > 0) {
         res
           .status(200)
           .json({
             status: 1,
             message: 'Notification status read updated'
+          })
+          .end();
+      } else {
+        res
+          .status(404)
+          .json({
+            status: 2,
+            message: 'Notification not found'
           })
           .end();
       }

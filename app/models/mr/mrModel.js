@@ -30,11 +30,22 @@ const STATUS_GROUPS_MR = {
  * Mirrors the RFQ buyer-listing role-scope EXISTS subquery in
  * `app/models/rfqModel.js` `getAllBuyerRfq` (the "Permission filter: only RFQs
  * the user has read access for" clause, ~rfqModel.js:3889). RFQ ties its matrix
- * to a boq/rfq `read` permission via tbl_role_permissions/tbl_permissions; MR
- * has no `mr.read` permission key (membership/role-scope based throughout the
- * module — see userCanAccessHotel / hotelDepartmentsForUser), so we mirror the
- * SAME (company, hotel-NULL-or-eq, dept-NULL-or-eq) shape WITHOUT the permission
- * JOIN. Pure role-scope membership.
+ * to a boq/rfq `read` permission via tbl_role_permissions/tbl_permissions.
+ *
+ * WHY NO PERMISSION JOIN HERE (measured, not assumed):
+ *   `mr.read` DOES exist — migrations/20260608100800_permissions_seed.sql seeds
+ *   it (production tbl_permissions.id = 65), granted to the two system roles
+ *   'MR Approver' (26) and 'MR Raiser' (30). But as of 2026-07-30 production
+ *   holds **0 of 254** scoped users on either role (0 of 2307 tbl_user_role_scopes
+ *   rows reference role 26 or 30). Adding `JOIN tbl_role_permissions/…
+ *   WHERE resource||'.'||action = 'mr.read'` would therefore return the empty
+ *   set for every single user and blank the whole module.
+ *
+ *   So the matrix stays pure role-scope membership — the SAME
+ *   (company, hotel-NULL-or-eq, dept-NULL-or-eq) shape, WITHOUT the permission
+ *   JOIN. Re-add the JOIN only after the MR Raiser / MR Approver roles are
+ *   actually assigned (re-run the count above first); until then the acl([2, 8])
+ *   route gate plus this matrix are the access contract.
  *
  * Returns a SQL boolean expression string referencing the given table `alias`'s
  * `hospitality_company_id`, `hotel_id`, `department_id` columns. The userId is
@@ -54,6 +65,49 @@ function scopeMatrixPredicate(userId, alias) {
 }
 
 const mrModel = {
+  /**
+   * The single-row form of `scopeMatrixPredicate` — "does this user's role-scope
+   * matrix cover this exact (company × hotel × department) cell?".
+   *
+   * Every per-entity MR guard (create, detail read, contracted-item picker,
+   * approval preview) funnels through this so a point read can never answer a
+   * wider question than the listing does. Same NULL semantics as the listing
+   * predicate: a role-scope row with hotel_id IS NULL covers every hotel in the
+   * company, department_id IS NULL covers every department.
+   *
+   * `hospitality_company_id` is optional — when omitted it is derived from the
+   * hotel row, so callers holding only a hotel id (the pickers) cannot smuggle
+   * in a company. Pass `department_id: null` to check the hotel axis alone.
+   *
+   * Returns boolean. Never trusts client input: callers pass req.user.id.
+   */
+  hasScopeForCell: async (userId, { hotel_id, department_id = null, hospitality_company_id = null } = {}, txContext = null) => {
+    const uid = Number(userId);
+    const hotelId = Number(hotel_id);
+    if (!uid || !hotelId) return false;
+    const row = await (txContext || db).one(
+      `WITH cell AS (
+         SELECT COALESCE(
+                  $3::int,
+                  (SELECT h.hospitality_company_id
+                     FROM tbl_hospitality_company_hotels h
+                    WHERE h.id = $2 AND h.is_deleted = 0)
+                ) AS company_id
+       )
+       SELECT EXISTS (
+         SELECT 1
+           FROM tbl_user_role_scopes urs, cell
+          WHERE urs.user_id = $1
+            AND cell.company_id IS NOT NULL
+            AND urs.company_id = cell.company_id
+            AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
+            AND ($4::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $4)
+       ) AS ok`,
+      [uid, hotelId, hospitality_company_id ?? null, department_id ?? null]
+    );
+    return row.ok === true;
+  },
+
   createDraft: async (data, txContext = null) => {
     const runner = txContext || db;
     return runner.one(
@@ -102,29 +156,13 @@ const mrModel = {
     );
   },
 
-  // Hotels the user can raise an MR for — the same accessible set used for
-  // authorization (hotel-level mappings + every hotel under a company-level
-  // mapping). Scoped to the user; never depends on a client-supplied company.
-  accessibleHotels: async (userId, txContext = null) => {
-    return (txContext || db).any(
-      `WITH user_hotels AS (
-         SELECT DISTINCT hum.hospitality_hotel_id AS hotel_id
-           FROM tbl_hospitality_user_mappings hum
-          WHERE hum.user_id = $1 AND hum.mapping_type = 1 AND hum.hospitality_hotel_id IS NOT NULL
-         UNION
-         SELECT DISTINCT h.id AS hotel_id
-           FROM tbl_hospitality_user_mappings hum
-           JOIN tbl_hospitality_company_hotels h ON h.hospitality_company_id = hum.hospitality_company_id
-          WHERE hum.user_id = $1 AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL AND h.is_deleted = 0
-       )
-       SELECT h.id, h.name, h.city, h.hospitality_company_id
-         FROM tbl_hospitality_company_hotels h
-         JOIN user_hotels uh ON uh.hotel_id = h.id
-        WHERE h.is_deleted = 0
-        ORDER BY h.name`,
-      [userId]
-    );
-  },
+  // NOTE: `accessibleHotels` used to live here and answered the MR create-form
+  // BU picker from tbl_hospitality_user_mappings — a COMPANY-level mapping
+  // expanded to every hotel under the company, so the picker offered business
+  // units the user's role-scope matrix does not cover. It has been removed;
+  // `scopedHotelOptions` (below) is the single source of truth for "which BUs
+  // may this user see", and it derives from the same tbl_user_role_scopes matrix
+  // as the listing/analytics predicate.
 
   // Departments the user is mapped to at a hotel (role-scope membership, not a
   // specific permission). A NULL-department scope at the hotel = all-departments

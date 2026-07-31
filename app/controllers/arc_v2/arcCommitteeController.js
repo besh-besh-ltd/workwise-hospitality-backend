@@ -8,6 +8,7 @@ import { logger } from '../../util/logger.js';
 import { generateContractsForArc, generateContractPdfsForArc } from './arcContractController.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Committee approval controller.
@@ -23,17 +24,13 @@ import { executeApprovalAction } from '../../services/approvalActionService.js';
 function ok(res, data, message = 'success')  { return res.status(200).json({ status: 1, message, data }); }
 function bad(res, status, message, code = 0) { return res.status(status).json({ status: code, message }); }
 
-// Authorization: may this caller read/act on the given hotel's ARC? Super admin
-// (user_type 8) bypasses; everyone else must have the hotel in their accessible
-// set. Scope is derived from the ARC's own hotel_id — never trusted from the
-// client (security-first; mirrors arcController.userCanAccessHotel). A valid
-// policy approver is always hotel/company-mapped, so they retain access.
-async function userCanAccessHotel(req, hotelId) {
-  if (Number(req.user?.user_type) === 8) return true;
-  if (!req.user?.id || !hotelId) return false;
-  const accessible = await rbacModel.getAllAccessibleHotelIds(req.user.id);
-  return accessible.map(Number).includes(Number(hotelId));
-}
+// Authorization: may this caller read/act on this ARC? Scope derives from the
+// ARC ROW (company × hotel × department × process) — never from the client.
+// This was one of four byte-identical copies wrapping the hotel-blind
+// rbacModel.getAllAccessibleHotelIds; they now share the single implementation
+// in helper/arc_v2/arcScope.js. A valid policy approver is always scoped to the
+// ARC's hotel, so they retain access.
+const userCanAccessHotel = userCanAccessArc;
 
 export async function getCommitteeView(req, res) {
   try {
@@ -44,7 +41,7 @@ export async function getCommitteeView(req, res) {
     // allocated quantities, and full negotiated price/term snapshots — must not
     // be cross-tenant readable via id enumeration. Derive access from the ARC's
     // own hotel_id (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc.hotel_id))) {
+    if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const comm = await arcEvalModel.getCommEval(arcId);

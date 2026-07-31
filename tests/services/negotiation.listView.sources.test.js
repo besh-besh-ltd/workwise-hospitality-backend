@@ -21,13 +21,20 @@ import { makeRFQ } from "../factories/rfq.js";
 const HC_A    = IDS.hospitality.A;
 const HC_B    = IDS.hospitality.B;
 const HOTEL_A = IDS.hotels.A1;
+const HOTEL_A2 = IDS.hotels.A2;                  // second hotel under the SAME company
 const HOTEL_B = IDS.hotels.B1;
 const DEPT    = IDS.departments.proc;
 const PROC    = IDS.processes.A_P1;
-const BUYER   = IDS.users.a1_proc_buyer;         // user_type=2, scoped to HC_A
+const BUYER   = IDS.users.a1_proc_buyer;         // user_type=2, RBAC-scoped to (HC_A, A1)
 const BUYER_B = IDS.users.companyB_admin;        // will set user_type=2, scoped to HC_B only
 const CATEGORY = TEST_CATEGORIES.beverages;
 const VARIANT_ID = 1;
+
+// The list-view read matrix keys off permission negotiation.read. The shared
+// fixture role for BUYER (TENDER_CREATOR / role 2) does not carry it — true in
+// production too — so grant a role that does, scoped to (HC_A, A1, all depts).
+// Torn down in afterAll. Role 8 = Commercial Negotiator N1.
+const ROLE_NEG_READ = 8;
 
 // Policy ID for the pending-on-me ARC_NEGOTIATION instance (must be in tbl_approval_policies).
 // Use 64970 to avoid clash with arc.negotiation.flow.test.js (64960).
@@ -44,6 +51,9 @@ let arcId, arcItemId, arcRoundId;
 let pendingArcId, pendingArcItemId, pendingArcRoundId;
 let instanceId, instanceStepId;
 let arcB_Id, arcB_RoundId; // Company B — for scope-isolation assertion
+let rfqA2_Id, rfqA2_RoundId; // SAME company, DIFFERENT hotel — hotel isolation
+let arcA2_Id, arcA2_ItemId, arcA2_RoundId;
+let negScopeId; // tbl_user_role_scopes row granting BUYER negotiation.read
 
 describe("Negotiation list-view — source filter (RFQ + ARC unification)", () => {
   // ── SETUP ──────────────────────────────────────────────────────────────────
@@ -52,6 +62,15 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
     // Company B admin also needs user_type=2 for the isolation test.
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER_B]);
+
+    // Grant BUYER negotiation.read at (HC_A, A1, all depts) — see ROLE_NEG_READ.
+    const scopeRow = await db.one(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+       VALUES ($1, $2, $3, $4, NULL)
+       RETURNING id`,
+      [BUYER, ROLE_NEG_READ, HC_A, HOTEL_A]
+    );
+    negScopeId = Number(scopeRow.id);
 
     buyerClient = await httpClient(BUYER);
 
@@ -215,6 +234,60 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
       [arcB_Id, Number(arcBItem.id), D(5), BUYER_B]
     );
     arcB_RoundId = Number(arcBRound.id);
+
+    // ── 5. SAME company (HC_A), DIFFERENT hotel (A2) — hotel isolation ───────
+    // BUYER is RBAC-scoped to A1 only. These rows share the company clause but
+    // must still be invisible: the company boundary is NOT the read boundary.
+    const { rfq_id: rfqA2 } = await makeRFQ(db, {
+      createdBy: BUYER_B,
+      hospitality: HC_A,
+      hotel: HOTEL_A2,
+      department: DEPT,
+    });
+    rfqA2_Id = Number(rfqA2);
+
+    const rfqA2Round = await db.one(
+      `INSERT INTO tbl_negotiation_rounds
+         (rfq_id, source_type, source_id, round_number, status, end_date, created_by)
+       VALUES ($1, 'RFQ', $1, 1, 'ACTIVE', $2, $3)
+       RETURNING id`,
+      [rfqA2_Id, D(7), BUYER_B]
+    );
+    rfqA2_RoundId = Number(rfqA2Round.id);
+
+    const arcA2 = await db.one(
+      `INSERT INTO tbl_arc
+         (arc_number, title, category_id, hospitality_company_id, hotel_id,
+          department_id, process_id, status,
+          submission_start_at, submission_end_at,
+          contract_start_at, contract_end_at,
+          created_by, eligibility_type)
+       VALUES ('LISTV-SRC-ARC-A2', 'Same Company Other Hotel ARC',
+               $1, $2, $3, $4, $5, 'comm_eval_in_progress',
+               NOW() - INTERVAL '10 days', NOW() - INTERVAL '1 day',
+               NOW() + INTERVAL '7 days', NOW() + INTERVAL '180 days',
+               $6, 'open')
+       RETURNING id`,
+      [CATEGORY, HC_A, HOTEL_A2, DEPT, PROC, BUYER_B]
+    );
+    arcA2_Id = Number(arcA2.id);
+
+    const arcA2Item = await db.one(
+      `INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom)
+       VALUES ($1, $2, 15, 'unit')
+       RETURNING id`,
+      [arcA2_Id, VARIANT_ID]
+    );
+    arcA2_ItemId = Number(arcA2Item.id);
+
+    const arcA2Round = await db.one(
+      `INSERT INTO tbl_negotiation_rounds
+         (source_type, source_id, arc_item_id, rfq_id, round_number, status, end_date, created_by)
+       VALUES ('ARC', $1, $2, NULL, 1, 'ACTIVE', $3, $4)
+       RETURNING id`,
+      [arcA2_Id, arcA2_ItemId, D(5), BUYER_B]
+    );
+    arcA2_RoundId = Number(arcA2Round.id);
   });
 
   // ── TEARDOWN ───────────────────────────────────────────────────────────────
@@ -241,8 +314,14 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
       [PENDING_POLICY_ID]
     );
 
+    // Role-scope grant that gave BUYER negotiation.read.
+    if (negScopeId) {
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [negScopeId]);
+    }
+
     // Negotiation round quotes (none seeded but belt-and-suspenders).
-    const allRoundIds = [rfqRoundId, arcRoundId, pendingArcRoundId, arcB_RoundId].filter(Boolean);
+    const allRoundIds = [rfqRoundId, arcRoundId, pendingArcRoundId, arcB_RoundId,
+                         rfqA2_RoundId, arcA2_RoundId].filter(Boolean);
     if (allRoundIds.length) {
       await db.none(
         `DELETE FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = ANY($1::int[])`,
@@ -255,7 +334,7 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
     }
 
     // ARC items
-    const allArcItemIds = [arcItemId, pendingArcItemId].filter(Boolean);
+    const allArcItemIds = [arcItemId, pendingArcItemId, arcA2_ItemId].filter(Boolean);
     if (allArcItemIds.length) {
       await db.none(`DELETE FROM tbl_arc_item WHERE id = ANY($1::int[])`, [allArcItemIds]);
     }
@@ -263,15 +342,16 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
     await db.none(`DELETE FROM tbl_arc_item WHERE arc_id = ANY($1::int[])`, [[arcB_Id].filter(Boolean)]);
 
     // ARC event logs + ARCs
-    const allArcIds = [arcId, pendingArcId, arcB_Id].filter(Boolean);
+    const allArcIds = [arcId, pendingArcId, arcB_Id, arcA2_Id].filter(Boolean);
     if (allArcIds.length) {
       await db.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = ANY($1::int[])`, [allArcIds]);
       await db.none(`DELETE FROM tbl_arc WHERE id = ANY($1::int[])`, [allArcIds]);
     }
 
-    // RFQ
-    if (rfqId) {
-      await db.none(`DELETE FROM tbl_rfq WHERE id = $1`, [rfqId]);
+    // RFQs
+    const allRfqIds = [rfqId, rfqA2_Id].filter(Boolean);
+    if (allRfqIds.length) {
+      await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [allRfqIds]);
     }
   });
 
@@ -414,7 +494,12 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Test 6 — Scope isolation: Company-A BUYER does NOT see Company-B ARC round
+  // Test 6 — Scope isolation. Two boundaries, both enforced:
+  //   (a) company: Company-A buyer never sees a Company-B round;
+  //   (b) hotel:   an A1-scoped buyer never sees an A2 round of their OWN
+  //                company. Company alone is NOT the read boundary — this is
+  //                the P0 leak (see negotiation.listView.scope.test.js). Kept
+  //                here too so the two suites cannot drift apart.
   // ─────────────────────────────────────────────────────────────────────────
   test("6. Company-A buyer cannot see Company-B ARC negotiation round in any source mode", async () => {
     // source='all'
@@ -426,6 +511,32 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
     const resArc = await listView({ source: "ARC" });
     expect(resArc.status).toBe(200);
     expect(roundIds(resArc)).not.toContain(arcB_RoundId);
+  });
+
+  test("6b. An A1-scoped buyer cannot see A2 rounds of their OWN company (RFQ or ARC)", async () => {
+    // limit high enough that "absent" means scoped out, not paginated away.
+    const resAll = await listView({ source: "all", limit: 100 });
+    expect(resAll.status).toBe(200);
+    const idsAll = roundIds(resAll);
+
+    // In scope (hotel A1) — still visible.
+    expect(idsAll).toContain(rfqRoundId);
+    expect(idsAll).toContain(arcRoundId);
+    // Same company, other hotel — must NOT leak, on either branch of the union.
+    expect(idsAll).not.toContain(rfqA2_RoundId);
+    expect(idsAll).not.toContain(arcA2_RoundId);
+
+    // Per-source modes enforce it too.
+    const resRfq = await listView({ source: "RFQ", limit: 100 });
+    expect(roundIds(resRfq)).not.toContain(rfqA2_RoundId);
+    const resArc = await listView({ source: "ARC", limit: 100 });
+    expect(roundIds(resArc)).not.toContain(arcA2_RoundId);
+
+    // The derived buId facet must not advertise the out-of-scope hotel either.
+    const buIds = (resAll.body.data.facets.buId || []).map((f) => String(f.key));
+    expect(buIds).toContain(String(HOTEL_A));
+    expect(buIds).not.toContain(String(HOTEL_A2));
+    expect(buIds).not.toContain(String(HOTEL_B));
   });
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -294,7 +294,17 @@ describe("assertCanReadParentRfq — defense-in-depth gate for per-entity GETs",
     }
   });
 
-  it("is a no-op for non-hospitality RFQs (hospitality_company_id IS NULL)", async () => {
+  // Behaviour deliberately changed: this used to resolve (ALLOW) whenever
+  // hospitality_company_id was NULL, on the assumption that such a row was a
+  // legacy non-hospitality RFQ with no scope to enforce. Two facts killed that
+  // assumption: the saveRfqDraft defect (fixed in 92604b60) wiped the column on
+  // 84 real production RFQs, making the bypass reachable through every caller of
+  // this helper; and production has no non-hospitality RFQs at all (3 such
+  // companies exist, none of them own an RFQ). A row with no company, no
+  // hotel_id and no hotel mapping has no tenant to authorise against, so the
+  // only safe reading is to refuse. Rows that merely lost the column are
+  // re-derived from their hotel and enforced normally — see the test below.
+  it("refuses an RFQ with no resolvable tenant (no company, no hotel, no mapping)", async () => {
     const legacy = await db.one(
       `INSERT INTO tbl_rfq
          (rfq_no, comment, company_name, response_email, contact_name, contact_number,
@@ -305,9 +315,35 @@ describe("assertCanReadParentRfq — defense-in-depth gate for per-entity GETs",
     );
     try {
       await expect(assertCanReadParentRfq(IDS.users.a1_proc_buyer, legacy.id))
-        .resolves.toBeUndefined();
+        .rejects.toBeInstanceOf(AuthorizationError);
     } finally {
       await db.none(`DELETE FROM tbl_rfq WHERE id = $1`, [legacy.id]);
+    }
+  });
+
+  // The 84-row production case: hospitality_company_id was wiped but the RFQ
+  // still knows its hotel, so the tenant is recoverable. The gate must enforce
+  // against the derived company rather than either allowing blindly (the old
+  // bypass) or refusing a legitimate RFQ.
+  it("re-derives the tenant from hotel_id when hospitality_company_id was wiped", async () => {
+    const wiped = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by,
+          hotel_id, "timestamp")
+       VALUES (9000904, '', '', '', '', '', '', '', 0, 1, $1, $1, $2, NOW())
+       RETURNING id`,
+      [IDS.users.a1_proc_buyer, IDS.hotels.A1]
+    );
+    try {
+      // In-scope user for hotel A1 is allowed via the derived company...
+      await expect(assertCanReadParentRfq(IDS.users.a1_proc_buyer, wiped.id))
+        .resolves.toBeUndefined();
+      // ...and a user scoped elsewhere is still refused.
+      await expect(assertCanReadParentRfq(IDS.users.companyB_admin, wiped.id))
+        .rejects.toBeInstanceOf(AuthorizationError);
+    } finally {
+      await db.none(`DELETE FROM tbl_rfq WHERE id = $1`, [wiped.id]);
     }
   });
 
