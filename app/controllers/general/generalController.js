@@ -1363,12 +1363,73 @@ const processController = {
       const { include_inactive, process_type, company_id: queryCompanyId } = req.query;
       const { company_id, user_type } = req.user;
 
-      // Hospitality admins (user_type=7) configuring scope for users in OTHER
-      // companies need to pass company_id explicitly. For everyone else, default
-      // to their own parent company (current self-service behavior).
-      const effectiveCompanyId = (queryCompanyId && Number(user_type) === 7)
-        ? parseInt(queryCompanyId, 10)
-        : (company_id ? parseInt(company_id) : undefined);
+      // Server-derived tenant scope for the query below. `null` is the model's
+      // EXPLICIT cross-tenant bypass and is only ever set on the super-admin
+      // branch — it is never what a missing value degrades into.
+      let effectiveCompanyId;
+
+      // Hospitality admins (user_type=7) configuring scope for OTHER business
+      // units pass company_id explicitly — and what they pass is a HOSPITALITY
+      // company id (tbl_hospitality_companies.id), because that is the id space
+      // the Approval Hierarchy page and RoleScopeSelector work in and the one
+      // tbl_approval_policies.hospitality_company_id is keyed by.
+      //
+      // Processes live in a DIFFERENT id space: tbl_approval_processes.company_id
+      // -> tbl_company.id, the PARENT buyer company (createProcess derives it as
+      // req.user.company_id). Feeding the hospitality id straight into the query
+      // matched zero rows — in production no hospitality company has an id equal
+      // to its own buyer_company_id, so the workflow list rendered blank for every
+      // tenant while the policy-fed KPI row still counted stages.
+      //
+      // It was also a cross-tenant read: nothing verified ownership of the param,
+      // so wherever the two id spaces collided numerically (hospitality company 13
+      // is owned by buyer 90, yet buyer company 13 also exists) an admin saw
+      // another tenant's process catalog. Verify against the request's
+      // server-derived scope first — 404 on a miss, as the policy/instance guards
+      // above already do — then bridge to the buyer id.
+      if (queryCompanyId && Number(user_type) === 7) {
+        const notFound = () =>
+          res.status(404).json({ status: 2, message: 'Company not found' });
+
+        const hospitalityCompanyId = parseInt(queryCompanyId, 10);
+        if (!Number.isFinite(hospitalityCompanyId)) return notFound();
+
+        const scopeIds = await resolveApprovalCompanyScope(req);
+        if (!inCompanyScope(scopeIds, hospitalityCompanyId)) return notFound();
+
+        const owner = await db.oneOrNone(
+          `SELECT buyer_company_id
+             FROM tbl_hospitality_companies
+            WHERE id = $1
+              AND COALESCE(is_deleted, 0) = 0`,
+          [hospitalityCompanyId]
+        );
+        if (!owner || owner.buyer_company_id === null) return notFound();
+
+        effectiveCompanyId = Number(owner.buyer_company_id);
+      } else if (Number(user_type) === 8) {
+        // Super admin reads across every company. Kept explicit — the bypass has
+        // to be ASKED for, never inherited from a value we failed to work out.
+        // (Unreachable over HTTP today: this route is acl([7, 2]) and production
+        // has zero user_type-8 users. Stated rather than left as a gap in the
+        // logic, matching guardProcessTenant above.)
+        effectiveCompanyId = null;
+      } else {
+        // Everyone else reads their own parent buyer company. CreateRFQ.js calls
+        // this endpoint with no params at all and relies on exactly this, and it
+        // is also the whole of the user_type=2 branch.
+        //
+        // A caller with NO parent company used to fall through as `undefined`,
+        // which made the model drop its company predicate and hand back every
+        // tenant's catalog. Production has one active user_type-7 admin with
+        // tbl_users.company_id NULL, so that was a live cross-tenant read. No
+        // company → no catalog.
+        const ownCompanyId = company_id ? parseInt(company_id) : NaN;
+        if (!Number.isFinite(ownCompanyId)) {
+          return res.json({ status: 1, data: [] });
+        }
+        effectiveCompanyId = ownCompanyId;
+      }
 
       const data = await getApprovalProcesses({
         company_id: effectiveCompanyId,
