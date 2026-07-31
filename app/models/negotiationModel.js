@@ -85,6 +85,20 @@ export const productNamesLateralSql = (alias = 'nr') =>
         )
    ) pn_ ON true`;
 
+// Same predicate, generalised to "does round `nr` cover ANY of <paramRef>?"
+// (`paramRef` is an int[] placeholder). Used by the round-detail API, which has
+// to gather every sibling / prior round touching the products of one round.
+export const coversAnyProductSql = (paramRef, alias = 'nr') =>
+  `(${alias}.rfq_product_id = ANY(${paramRef}::int[]) OR EXISTS (
+     SELECT 1 FROM jsonb_array_elements(COALESCE(${alias}.products,'[]'::jsonb)) cp_
+     WHERE (cp_->>'rfq_product_id')::int = ANY(${paramRef}::int[])))`;
+
+// ARC counterpart of coversAnyProductSql (ARC rounds key on arc_item_id).
+export const coversAnyArcItemSql = (paramRef, alias = 'nr') =>
+  `(${alias}.arc_item_id = ANY(${paramRef}::bigint[]) OR EXISTS (
+     SELECT 1 FROM jsonb_array_elements(COALESCE(${alias}.products,'[]'::jsonb)) ca_
+     WHERE (ca_->>'arc_item_id')::bigint = ANY(${paramRef}::bigint[])))`;
+
 // Product ids covered by a round row (legacy fallback to rfq_product_id).
 export const getCoveredProductIds = (round) => {
   if (Array.isArray(round?.products) && round.products.length > 0) {
@@ -131,6 +145,488 @@ const normalizeProductNames = (row) => {
     row.product_name = row.product_names[0]?.product_name || null;
   }
   return row;
+};
+
+// ============================================================================
+// ROUND DETAIL ("Negotiation Command Center")
+// ============================================================================
+//
+// Everything below backs GET /negotiation/rounds/:id/detail. The maths is
+// deliberately explicit because two production facts make naive versions wrong:
+//
+//   * For RFQ rounds `tbl_negotiation_round_quotes.quoted_price` is the landed
+//     LINE TOTAL (it is written straight from tbl_quote_items.total_price at
+//     both vendor-quote write sites), while a `base_price` target in
+//     vendor_approvals[].negotiation_fields is a UNIT price. Subtracting one
+//     from the other is wrong by roughly (quantity x tax).
+//     => achieved_pct is a LINE-TOTAL ratio, requested_pct is a UNIT ratio,
+//        and BOTH are taken off the same baseline so they are comparable.
+//
+//   * For ARC rounds the same column holds a UNIT rate (arcNegotiationController
+//     writes `Number(rate)`), and previous_price IS populated there. The two
+//     sources therefore need different bases — see `amount_basis` on each line.
+//
+// Savings are SIGNED and never clamped: prices genuinely go up (production
+// rounds 890 and 891 both came back higher than the baseline). Note that
+// dashboardModel.getNegotiationSavingsData clamps with Math.max(x, 0); this
+// module deliberately does not.
+
+// Target field names that are free text and must NEVER enter numeric maths.
+// Verified against production: payment_terms (469 occurrences), documents (83),
+// comment (56), comments (31), global_comment (9), delivery_period (2).
+export const NEGOTIATION_TEXT_TARGET_FIELDS = new Set([
+  'payment_terms',
+  'documents',
+  'comment',
+  'comments',
+  'global_comment',
+  'delivery_period',
+  'vendor_tc',
+]);
+
+const MONEY_EPSILON = 0.005;
+
+const num = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const round2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
+const round4 = (v) => (v == null ? null : Math.round(v * 10000) / 10000);
+const isoOrNull = (v) => {
+  const d = parseAsUTC(v);
+  return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
+};
+
+// The (product | arc item | rfq-level) slots a round negotiates over.
+export const getRoundItemSlots = (round) => {
+  const prods = Array.isArray(round?.products) ? round.products : [];
+  if (prods.length > 0) {
+    return prods.map((p) =>
+      p?.is_rfq_level === true || p?.is_arc_level === true
+        ? { rfq_product_id: null, arc_item_id: null, is_rfq_level: true }
+        : {
+            rfq_product_id: p?.rfq_product_id != null ? Number(p.rfq_product_id) : null,
+            arc_item_id: p?.arc_item_id != null ? Number(p.arc_item_id) : null,
+            is_rfq_level: false,
+          }
+    );
+  }
+  if (round?.rfq_product_id != null) {
+    return [{ rfq_product_id: Number(round.rfq_product_id), arc_item_id: null, is_rfq_level: false }];
+  }
+  if (round?.arc_item_id != null) {
+    return [{ rfq_product_id: null, arc_item_id: Number(round.arc_item_id), is_rfq_level: false }];
+  }
+  return [{ rfq_product_id: null, arc_item_id: null, is_rfq_level: true }];
+};
+
+// PER_ITEM (legacy single product) | MULTI_ITEM | WHOLE_RFQ.
+export const getRoundMode = (round) => {
+  const slots = getRoundItemSlots(round);
+  const itemSlots = slots.filter((s) => !s.is_rfq_level);
+  if (itemSlots.length === 0) return 'WHOLE_RFQ';
+  const prods = Array.isArray(round?.products) ? round.products : [];
+  return prods.length > 0 ? 'MULTI_ITEM' : 'PER_ITEM';
+};
+
+// Every vendor the round touches — vendor_ids is NULL on 71 production rounds,
+// so vendor_approvals and products[].vendor_targets are folded in as well.
+export const getRoundVendorIds = (round) => {
+  const set = new Set();
+  (Array.isArray(round?.vendor_ids) ? round.vendor_ids : []).forEach((v) => {
+    if (v != null) set.add(Number(v));
+  });
+  (Array.isArray(round?.vendor_approvals) ? round.vendor_approvals : []).forEach((va) => {
+    if (va?.vendor_id != null) set.add(Number(va.vendor_id));
+  });
+  (Array.isArray(round?.products) ? round.products : []).forEach((p) =>
+    (p?.vendor_targets || []).forEach((vt) => {
+      if (vt?.vendor_id != null) set.add(Number(vt.vendor_id));
+    })
+  );
+  return [...set].sort((a, b) => a - b);
+};
+
+// Split a vendor's negotiation_fields into numeric asks and free-text asks.
+// A numeric field whose target does not parse as a finite number is demoted to
+// text — never guessed at.
+export const splitTargetFields = (fields) => {
+  const numeric = [];
+  const text = [];
+  for (const f of Array.isArray(fields) ? fields : []) {
+    const name = f?.name != null ? String(f.name) : null;
+    if (!name) continue;
+    const rawTarget = f?.target;
+    if (NEGOTIATION_TEXT_TARGET_FIELDS.has(name)) {
+      text.push({ name, target: rawTarget == null ? null : String(rawTarget), demand: f?.demand == null ? null : String(f.demand) });
+      continue;
+    }
+    const parsed = num(rawTarget);
+    if (parsed == null) {
+      text.push({ name, target: rawTarget == null ? null : String(rawTarget), demand: f?.demand == null ? null : String(f.demand) });
+      continue;
+    }
+    numeric.push({ name, target: parsed, mode: f?.mode ? String(f.mode) : null });
+  }
+  return { numeric, text };
+};
+
+// Effective status: the raw column plus the end_date check the listings apply.
+export const getEffectiveRoundStatus = (round, now = Date.now()) => {
+  const status = String(round?.status || '').toUpperCase();
+  const end = parseAsUTC(round?.end_date);
+  const past = end ? end.getTime() <= now : false;
+  if (status === 'ACTIVE') return past ? 'AWAITING_DECISION' : 'ACTIVE';
+  if (status === 'ENDED') return 'AWAITING_DECISION';
+  return status || 'UNKNOWN';
+};
+
+// Given a landed line total, recover the matching unit price by finding the
+// quote-item revision that produced it. Falls back to arithmetic only when no
+// revision matches (percentage tax is the only mode production uses here).
+const resolveUnitForAmount = (facts, amount) => {
+  if (amount == null || !facts) return { unit: null, source: null };
+  const cur = num(facts.total_price);
+  if (cur != null && Math.abs(cur - amount) < MONEY_EPSILON) {
+    return { unit: num(facts.unit_price), source: 'current_quote' };
+  }
+  const history = Array.isArray(facts.history_rows) ? facts.history_rows : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const h = num(history[i]?.total_price);
+    if (h != null && Math.abs(h - amount) < MONEY_EPSILON) {
+      return { unit: num(history[i]?.unit_price), source: 'quote_history' };
+    }
+  }
+  const qty = num(facts.quantity);
+  const tax = num(facts.tax);
+  if (qty && qty !== 0) {
+    const uplift = String(facts.tax_mode || 'percentage') === 'percentage' && tax != null ? 1 + tax / 100 : 1;
+    if (uplift !== 0) return { unit: amount / (qty * uplift), source: 'derived' };
+  }
+  return { unit: null, source: null };
+};
+
+// Baseline resolution. The ORDER is the contract; `baseline_source` on every
+// line reports which rung was used, because the derivation varies enough that
+// presenting the number without its provenance would be dishonest.
+//
+//   previous_price -> prior_round -> quote_history -> current_quote
+//
+// Production distribution over the 520 legacy round-quote rows:
+//   previous_price 0 · prior_round 78 · quote_history 411 · current_quote 31.
+export const resolveBaseline = ({ sourceType, roundQuote, priorRoundQuote, facts }) => {
+  const isArc = sourceType === 'ARC';
+
+  const prev = num(roundQuote?.previous_price);
+  if (prev != null) {
+    return { amount: prev, source: 'previous_price', round_id: null, captured_at: null };
+  }
+
+  if (priorRoundQuote && num(priorRoundQuote.quoted_price) != null) {
+    return {
+      amount: num(priorRoundQuote.quoted_price),
+      source: 'prior_round',
+      round_id: Number(priorRoundQuote.negotiation_round_id),
+      captured_at: priorRoundQuote.submitted_at || null,
+    };
+  }
+
+  if (isArc) {
+    const rate = num(facts?.arc_line_rate);
+    if (rate != null) return { amount: rate, source: 'current_quote', round_id: null, captured_at: null };
+    return { amount: null, source: null, round_id: null, captured_at: null };
+  }
+
+  const history = Array.isArray(facts?.history_rows) ? facts.history_rows : [];
+  if (history.length > 0 && num(history[0]?.total_price) != null) {
+    return {
+      amount: num(history[0].total_price),
+      source: 'quote_history',
+      round_id: null,
+      captured_at: history[0]?.timestamp || null,
+    };
+  }
+
+  const cur = num(facts?.total_price);
+  if (cur != null) return { amount: cur, source: 'current_quote', round_id: null, captured_at: null };
+
+  return { amount: null, source: null, round_id: null, captured_at: null };
+};
+
+// Assemble one (round x item x vendor) line. Pure — all IO already done.
+const buildLine = ({ round, slot, vendorId, roundQuote, priorRoundQuote, facts, parentSourceType }) => {
+  const isArc = parentSourceType === 'ARC';
+  const amountBasis = isArc ? 'unit' : 'line_total';
+
+  const fields = getVendorFieldsForProduct(
+    round,
+    vendorId,
+    slot.is_rfq_level ? 'RFQ_LEVEL' : (slot.rfq_product_id ?? slot.arc_item_id)
+  );
+  const { numeric, text } = splitTargetFields(fields);
+  const basePriceTarget = numeric.find((t) => t.name === 'base_price') || null;
+  const targetUnit = basePriceTarget ? basePriceTarget.target : null;
+
+  const quantity = num(facts?.quantity);
+  const responded = !!roundQuote;
+  const rawQuoted = num(roundQuote?.quoted_price);
+
+  const baseline = resolveBaseline({ sourceType: parentSourceType, roundQuote, priorRoundQuote, facts });
+
+  let achievedLineTotal = null;
+  let achievedUnit = null;
+  let baselineLineTotal = null;
+  let baselineUnit = null;
+
+  if (isArc) {
+    achievedUnit = rawQuoted;
+    baselineUnit = baseline.amount;
+    if (quantity != null) {
+      achievedLineTotal = achievedUnit == null ? null : achievedUnit * quantity;
+      baselineLineTotal = baselineUnit == null ? null : baselineUnit * quantity;
+    }
+  } else {
+    achievedLineTotal = rawQuoted;
+    achievedUnit = resolveUnitForAmount(facts, rawQuoted).unit;
+    baselineLineTotal = baseline.amount;
+    baselineUnit = resolveUnitForAmount(facts, baseline.amount).unit;
+  }
+
+  const canScore = responded && baselineLineTotal != null && achievedLineTotal != null;
+  const savedValue = canScore ? baselineLineTotal - achievedLineTotal : null;
+  const achievedPct =
+    canScore && Math.abs(baselineLineTotal) > MONEY_EPSILON
+      ? (savedValue / baselineLineTotal) * 100
+      : null;
+  const requestedPct =
+    targetUnit != null && baselineUnit != null && Math.abs(baselineUnit) > 1e-9
+      ? ((baselineUnit - targetUnit) / baselineUnit) * 100
+      : null;
+  const targetLineTotal =
+    targetUnit != null && baselineUnit != null && baselineLineTotal != null && Math.abs(baselineUnit) > 1e-9
+      ? baselineLineTotal * (targetUnit / baselineUnit)
+      : null;
+
+  const targetMet =
+    targetLineTotal != null && achievedLineTotal != null
+      ? achievedLineTotal <= targetLineTotal + MONEY_EPSILON
+      : null;
+
+  let outcome;
+  if (!responded) outcome = 'no_response';
+  else if (baselineLineTotal == null || achievedLineTotal == null) outcome = 'no_baseline';
+  else if (savedValue < -MONEY_EPSILON) outcome = 'regressed';
+  else if (Math.abs(savedValue) <= MONEY_EPSILON) outcome = 'unchanged';
+  else if (targetMet === true) outcome = 'target_met';
+  else if (targetMet === false) outcome = 'target_missed';
+  else outcome = 'improved';
+
+  const approvalEntry = (Array.isArray(round.vendor_approvals) ? round.vendor_approvals : []).find(
+    (va) => Number(va?.vendor_id) === Number(vendorId)
+  );
+
+  const notes = [];
+  if (baseline.source === 'quote_history') {
+    const historyCount = Array.isArray(facts?.history_rows) ? facts.history_rows.length : 0;
+    if (historyCount > 1) {
+      notes.push(
+        'Quote history is overwritten in place with no round linkage; the earliest revision was used as the baseline.'
+      );
+    }
+  }
+  if (baseline.source === 'current_quote' && responded) {
+    notes.push('No earlier price is on record for this vendor and item — the current quote was used as the baseline.');
+  }
+
+  return {
+    line_id: `${round.id}:${slot.is_rfq_level ? 'RFQ_LEVEL' : slot.rfq_product_id ?? slot.arc_item_id}:${vendorId}`,
+    round_id: Number(round.id),
+    round_number: Number(round.round_number),
+    round_status: round.status,
+    is_rfq_level: !!slot.is_rfq_level,
+    rfq_product_id: slot.rfq_product_id ?? null,
+    arc_item_id: slot.arc_item_id ?? null,
+    product_variant_id: facts?.product_variant_id != null ? Number(facts.product_variant_id) : null,
+    product_name: facts?.product_name ?? (slot.is_rfq_level ? 'Whole RFQ' : null),
+    vendor_id: Number(vendorId),
+    vendor_name: facts?.vendor_name ?? null,
+    vendor_contact_name: facts?.vendor_contact_name ?? null,
+    vendor_email: facts?.vendor_email ?? null,
+    vendor_mobile: facts?.vendor_mobile ?? null,
+    quantity,
+    uom: facts?.uom ?? null,
+    amount_basis: amountBasis,
+    baseline_line_total: round2(baselineLineTotal),
+    baseline_unit: baselineUnit == null ? null : round4(baselineUnit),
+    baseline_source: baseline.source,
+    baseline_round_id: baseline.round_id,
+    baseline_captured_at: isoOrNull(baseline.captured_at),
+    target_unit: targetUnit == null ? null : round4(targetUnit),
+    target_mode: basePriceTarget?.mode ?? null,
+    target_line_total: round2(targetLineTotal),
+    has_numeric_target: numeric.length > 0,
+    has_unit_target: targetUnit != null,
+    achieved_line_total: round2(achievedLineTotal),
+    achieved_unit: achievedUnit == null ? null : round4(achievedUnit),
+    responded,
+    responded_at: isoOrNull(roundQuote?.submitted_at),
+    requested_pct: round4(requestedPct),
+    achieved_pct: round4(achievedPct),
+    saved_value: round2(savedValue),
+    target_met: targetMet,
+    outcome,
+    vendor_approval_status: approvalEntry?.status ?? null,
+    vendor_approval_remarks: approvalEntry?.remarks ?? null,
+    vendor_approval_acted_at: isoOrNull(approvalEntry?.acted_at),
+    vendor_approval_acted_by: approvalEntry?.acted_by ?? null,
+    numeric_targets: numeric,
+    text_targets: text,
+    notes,
+  };
+};
+
+const EMPTY_SOURCE_COUNTS = () => ({
+  previous_price: 0,
+  prior_round: 0,
+  quote_history: 0,
+  current_quote: 0,
+  none: 0,
+});
+
+// Aggregate a set of lines. Money is summed only over lines that actually have
+// BOTH a baseline and an achieved figure, so baseline_total - achieved_total is
+// always a like-for-like difference.
+export const summariseLines = (lines) => {
+  const sources = EMPTY_SOURCE_COUNTS();
+  let baselineTotal = 0;
+  let achievedTotal = 0;
+  let targetBaselineTotal = 0;
+  let targetTotal = 0;
+  let targetAchievedTotal = 0;
+  let scored = 0;
+  let targetScored = 0;
+
+  let responded = 0;
+  let withTarget = 0;
+  let improved = 0;
+  let regressed = 0;
+  let unchanged = 0;
+  let metCount = 0;
+
+  for (const l of lines) {
+    sources[l.baseline_source || 'none'] += 1;
+    if (l.responded) responded += 1;
+    if (l.has_numeric_target) withTarget += 1;
+
+    if (l.saved_value != null) {
+      scored += 1;
+      baselineTotal += l.baseline_line_total;
+      achievedTotal += l.achieved_line_total;
+      if (l.saved_value > MONEY_EPSILON) improved += 1;
+      else if (l.saved_value < -MONEY_EPSILON) regressed += 1;
+      else unchanged += 1;
+    }
+    if (l.target_line_total != null && l.baseline_line_total != null) {
+      targetBaselineTotal += l.baseline_line_total;
+      targetTotal += l.target_line_total;
+      if (l.achieved_line_total != null) {
+        targetAchievedTotal += l.achieved_line_total;
+        targetScored += 1;
+      }
+    }
+    if (l.target_met === true) metCount += 1;
+  }
+
+  const savedValue = baselineTotal - achievedTotal;
+  const savedPct = scored > 0 && Math.abs(baselineTotal) > MONEY_EPSILON ? (savedValue / baselineTotal) * 100 : null;
+  const requestedPct =
+    targetBaselineTotal > MONEY_EPSILON ? ((targetBaselineTotal - targetTotal) / targetBaselineTotal) * 100 : null;
+  const attainmentPct =
+    savedPct != null && requestedPct != null && Math.abs(requestedPct) > 1e-9 ? (savedPct / requestedPct) * 100 : null;
+  const targetMet = targetScored > 0 ? targetAchievedTotal <= targetTotal + MONEY_EPSILON : null;
+
+  const vendorIds = new Set(lines.map((l) => l.vendor_id));
+  const vendorsResponded = new Set(lines.filter((l) => l.responded).map((l) => l.vendor_id));
+
+  return {
+    currency: 'INR',
+    lines_total: lines.length,
+    lines_responded: responded,
+    lines_awaiting: lines.length - responded,
+    lines_scored: scored,
+    lines_with_numeric_target: withTarget,
+    lines_improved: improved,
+    lines_regressed: regressed,
+    lines_unchanged: unchanged,
+    lines_target_met: metCount,
+    vendors_total: vendorIds.size,
+    vendors_responded: vendorsResponded.size,
+    baseline_total: round2(baselineTotal),
+    achieved_total: round2(achievedTotal),
+    target_baseline_total: targetBaselineTotal > 0 ? round2(targetBaselineTotal) : null,
+    target_total: targetBaselineTotal > 0 ? round2(targetTotal) : null,
+    saved_value: round2(savedValue),
+    saved_pct: round4(savedPct),
+    requested_pct: round4(requestedPct),
+    attainment_pct: round4(attainmentPct),
+    target_met: targetMet,
+    baseline_sources: sources,
+  };
+};
+
+// Per-vendor roll-up — "who responded and who didn't", with money.
+export const summariseVendors = (lines) => {
+  const byVendor = new Map();
+  for (const l of lines) {
+    if (!byVendor.has(l.vendor_id)) {
+      byVendor.set(l.vendor_id, {
+        vendor_id: l.vendor_id,
+        vendor_name: l.vendor_name,
+        vendor_contact_name: l.vendor_contact_name,
+        vendor_email: l.vendor_email,
+        vendor_mobile: l.vendor_mobile,
+        approval_status: l.vendor_approval_status,
+        approval_remarks: l.vendor_approval_remarks,
+        approval_acted_at: l.vendor_approval_acted_at,
+        lines: 0,
+        lines_responded: 0,
+        first_responded_at: null,
+        last_responded_at: null,
+        baseline_total: 0,
+        achieved_total: 0,
+        _scored: 0,
+      });
+    }
+    const v = byVendor.get(l.vendor_id);
+    v.lines += 1;
+    if (l.responded) {
+      v.lines_responded += 1;
+      if (l.responded_at) {
+        if (!v.first_responded_at || l.responded_at < v.first_responded_at) v.first_responded_at = l.responded_at;
+        if (!v.last_responded_at || l.responded_at > v.last_responded_at) v.last_responded_at = l.responded_at;
+      }
+    }
+    if (l.saved_value != null) {
+      v.baseline_total += l.baseline_line_total;
+      v.achieved_total += l.achieved_line_total;
+      v._scored += 1;
+    }
+  }
+  return [...byVendor.values()]
+    .map((v) => {
+      const saved = v.baseline_total - v.achieved_total;
+      const { _scored, ...rest } = v;
+      return {
+        ...rest,
+        has_responded: v.lines_responded > 0,
+        baseline_total: round2(v.baseline_total),
+        achieved_total: round2(v.achieved_total),
+        saved_value: round2(saved),
+        saved_pct: _scored > 0 && Math.abs(v.baseline_total) > MONEY_EPSILON ? round4((saved / v.baseline_total) * 100) : null,
+      };
+    })
+    .sort((a, b) => String(a.vendor_name || '').localeCompare(String(b.vendor_name || '')));
 };
 
 const negotiationModel = {
@@ -239,6 +735,702 @@ const negotiationModel = {
       [Number(userId), Number(roundId)]
     );
     return !!row;
+  },
+
+  // ============= ROUND DETAIL (Negotiation Command Center) =============
+
+  /**
+   * Rounds by id, joined to their polymorphic parent, with the SAME RBAC read
+   * matrix `userCanReadRound` applies — re-evaluated per row.
+   *
+   * This is the only door into the detail API's data. Sibling expansion and
+   * cumulative roll-up both go through it rather than assuming "these rounds
+   * share a parent, so they share a scope": `nr.rfq_id` and `nr.source_id` are
+   * independent columns, so a sibling by (source_type, source_id, round_number)
+   * can legitimately belong to a different RFQ — and therefore a different
+   * hotel — than the round being viewed.
+   *
+   * `userId` null = super admin (user_type 8) → no matrix filter.
+   */
+  getScopedRoundsByIds: async (roundIds, userId) => {
+    const ids = (roundIds || []).map(Number).filter((n) => Number.isFinite(n));
+    if (ids.length === 0) return [];
+    return db.any(
+      `SELECT nr.*,
+              u.name        AS created_by_name,
+              u.email       AS created_by_email,
+              u.mobile      AS created_by_mobile,
+              u.designation AS created_by_designation,
+              rfq.id                     AS parent_rfq_id,
+              rfq.rfq_no                 AS parent_rfq_no,
+              rfq.title                  AS parent_rfq_title,
+              rfq.bid_end_date           AS parent_bid_end_date,
+              rfq.status                 AS parent_rfq_status,
+              rfq.is_tender              AS parent_is_tender,
+              rfq.vendor_clarification_date AS parent_vendor_clarification_date,
+              a.id                       AS parent_arc_id,
+              a.arc_number               AS parent_arc_number,
+              a.title                    AS parent_arc_title,
+              a.status                   AS parent_arc_status,
+              a.submission_end_at        AS parent_arc_submission_end_at,
+              COALESCE(rfq.hospitality_company_id, a.hospitality_company_id) AS parent_company_id,
+              COALESCE(rfq.hotel_id, a.hotel_id)                             AS parent_hotel_id,
+              COALESCE(rfq.department_id, a.department_id)                   AS parent_department_id,
+              COALESCE(rfq.process_id, a.process_id)                         AS parent_process_id,
+              hc.name  AS parent_company_name,
+              h.name   AS parent_hotel_name,
+              d.title  AS parent_department_name
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_users u ON u.id = nr.created_by
+         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+         LEFT JOIN tbl_hospitality_companies hc      ON hc.id = COALESCE(rfq.hospitality_company_id, a.hospitality_company_id)
+         LEFT JOIN tbl_hospitality_company_hotels h  ON h.id  = COALESCE(rfq.hotel_id, a.hotel_id)
+         LEFT JOIN tbl_department d                  ON d.id  = COALESCE(rfq.department_id, a.department_id)
+        WHERE nr.id = ANY($2::int[])
+          AND (
+            (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
+            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+          )
+        ORDER BY nr.round_number ASC, nr.id ASC`,
+      [userId == null ? null : Number(userId), ids]
+    );
+  },
+
+  /**
+   * Ids of every round in the same cycle — i.e. sharing
+   * (source_type, source_id, round_number) — INCLUDING the round itself.
+   * Deliberately unscoped: the caller intersects this with
+   * getScopedRoundsByIds so it can report how many siblings were withheld
+   * without ever revealing their contents.
+   */
+  getSiblingRoundIds: async (roundId) => {
+    const rows = await db.any(
+      `SELECT sib.id
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_negotiation_rounds sib
+           ON sib.source_type = nr.source_type
+          AND sib.source_id   = nr.source_id
+          AND sib.round_number = nr.round_number
+        WHERE nr.id = $1::int
+        ORDER BY sib.id`,
+      [Number(roundId)]
+    );
+    return rows.map((r) => Number(r.id));
+  },
+
+  /**
+   * Every round on the same parent that touches at least one of `rfqProductIds`
+   * / `arcItemIds`, scoped to the caller. Backs both round-history denominators
+   * and the cumulative roll-up.
+   */
+  getRelatedRoundIds: async ({ sourceType, sourceId, rfqProductIds = [], arcItemIds = [], userId }) => {
+    const products = (rfqProductIds || []).map(Number).filter(Number.isFinite);
+    const items = (arcItemIds || []).map(Number).filter(Number.isFinite);
+    const rows = await db.any(
+      `SELECT nr.id, nr.round_number, nr.status
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+        WHERE nr.source_type = $1
+          AND nr.source_id = $2::int
+          AND (
+            ($3::int[] IS NOT NULL AND array_length($3::int[], 1) > 0 AND ${coversAnyProductSql('$3')})
+            OR ($4::bigint[] IS NOT NULL AND array_length($4::bigint[], 1) > 0 AND ${coversAnyArcItemSql('$4')})
+          )
+          AND (
+            (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$5')})
+            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$5')})
+          )
+        ORDER BY nr.round_number ASC, nr.id ASC`,
+      [sourceType, Number(sourceId), products, items, userId == null ? null : Number(userId)]
+    );
+    return rows.map((r) => ({ id: Number(r.id), round_number: Number(r.round_number), status: r.status }));
+  },
+
+  /** Count of every round on the parent that the caller may read. */
+  countScopedRoundsOnParent: async ({ sourceType, sourceId, userId }) => {
+    const row = await db.one(
+      `SELECT COUNT(*)::int AS n
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+        WHERE nr.source_type = $1
+          AND nr.source_id = $2::int
+          AND (
+            (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$3')})
+            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$3')})
+          )`,
+      [sourceType, Number(sourceId), userId == null ? null : Number(userId)]
+    );
+    return row.n;
+  },
+
+  /** Raw vendor responses for a set of rounds. */
+  getRoundQuotesForRounds: async (roundIds) => {
+    const ids = (roundIds || []).map(Number).filter(Number.isFinite);
+    if (ids.length === 0) return [];
+    return db.any(
+      `SELECT nrq.id, nrq.negotiation_round_id, nrq.vendor_id, nrq.rfq_product_id,
+              nrq.arc_item_id, nrq.quoted_price, nrq.previous_price, nrq.submitted_at
+         FROM tbl_negotiation_round_quotes nrq
+        WHERE nrq.negotiation_round_id = ANY($1::int[])
+        ORDER BY nrq.negotiation_round_id, nrq.vendor_id, nrq.id`,
+      [ids]
+    );
+  },
+
+  /**
+   * Pricing + identity facts for a set of (rfq_id, rfq_product_id, vendor_id)
+   * triples: the vendor's live quote item, its full revision history, the RFQ
+   * quantity/unit spec, and vendor contact details.
+   *
+   * The (product_variant_id, variant) pair is the real key into
+   * tbl_quote_items — product_variant_id alone is NOT unique within a quote
+   * (271+ production quotes carry several variants of the same variant id).
+   */
+  getRfqLineFacts: async (triples) => {
+    const rows = (triples || []).filter((t) => t && t.rfq_id != null && t.vendor_id != null);
+    if (rows.length === 0) return [];
+    return db.any(
+      `WITH t AS (
+         SELECT * FROM unnest($1::int[], $2::int[], $3::int[]) AS x(rfq_id, rfq_product_id, vendor_id)
+       )
+       SELECT t.rfq_id, t.rfq_product_id, t.vendor_id,
+              rp.product_variant_id, rp.variant,
+              COALESCE(pv.name, p.name, 'Product #' || rp.product_variant_id) AS product_name,
+              COALESCE(c.company_name, u.organization_name, u.name)           AS vendor_name,
+              u.name   AS vendor_contact_name,
+              u.email  AS vendor_email,
+              u.mobile AS vendor_mobile,
+              qitem.id           AS quote_item_id,
+              qitem.unit_price,
+              qitem.total_price,
+              qitem.tax,
+              qitem.tax_mode,
+              COALESCE(NULLIF(regexp_replace(COALESCE(qitem.quantity, ''), '[^0-9.\\-]', '', 'g'), ''),
+                       NULLIF(regexp_replace(COALESCE(spec.qty, ''), '[^0-9.\\-]', '', 'g'), '')) AS quantity,
+              spec.uom,
+              hist.rows AS history_rows
+         FROM t
+         LEFT JOIN tbl_rfq_products rp     ON rp.id = t.rfq_product_id
+         LEFT JOIN tbl_product_variant pv  ON pv.id = rp.product_variant_id
+         LEFT JOIN tbl_product p           ON p.id = pv.product_id
+         LEFT JOIN tbl_users u             ON u.id = t.vendor_id
+         LEFT JOIN tbl_company c           ON c.id = u.company_id
+         LEFT JOIN LATERAL (
+           SELECT q.id FROM tbl_quotes q
+            WHERE q.rfq_id = t.rfq_id AND q.created_by = t.vendor_id
+            ORDER BY q.id DESC LIMIT 1
+         ) vq ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT qi.* FROM tbl_quote_items qi
+            WHERE qi.quote_id = vq.id
+              AND qi.product_variant_id = rp.product_variant_id
+              AND qi.variant = rp.variant
+            ORDER BY qi.id DESC LIMIT 1
+         ) qitem ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT MAX(CASE WHEN lower(s.title) = 'quantity' THEN s.value END) AS qty,
+                  MAX(CASE WHEN lower(s.title) = 'unit'     THEN s.value END) AS uom
+             FROM tbl_rfq_products_specs s
+            WHERE s.rfq_id = t.rfq_id
+              AND s.product_variant_id = rp.product_variant_id
+              AND s.variant = rp.variant
+         ) spec ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object(
+                    'unit_price', h.unit_price,
+                    'total_price', h.total_price,
+                    'timestamp', h.timestamp
+                  ) ORDER BY h.timestamp ASC, h.id ASC) AS rows
+             FROM tbl_quote_item_history h
+            WHERE h.quote_item_id = qitem.id
+         ) hist ON TRUE`,
+      [rows.map((t) => t.rfq_id), rows.map((t) => t.rfq_product_id), rows.map((t) => t.vendor_id)]
+    );
+  },
+
+  /**
+   * ARC counterpart of getRfqLineFacts. ARC negotiation stores a UNIT rate in
+   * quoted_price (see arcNegotiationController.submitRevisedRate), so the
+   * "current quote" rung of the baseline ladder is the vendor's live
+   * tbl_arc_quote_line rate rather than a quote-item total.
+   */
+  getArcLineFacts: async (triples) => {
+    const rows = (triples || []).filter((t) => t && t.arc_id != null && t.vendor_id != null);
+    if (rows.length === 0) return [];
+    return db.any(
+      `WITH t AS (
+         SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::int[]) AS x(arc_id, arc_item_id, vendor_id)
+       )
+       SELECT t.arc_id, t.arc_item_id, t.vendor_id,
+              ai.product_variant_id,
+              COALESCE(pv.name, p.name, 'Item #' || ai.product_variant_id) AS product_name,
+              COALESCE(c.company_name, u.organization_name, u.name)        AS vendor_name,
+              u.name   AS vendor_contact_name,
+              u.email  AS vendor_email,
+              u.mobile AS vendor_mobile,
+              ai.indicative_qty AS quantity,
+              ai.uom,
+              aql.rate AS arc_line_rate,
+              aql.gst_pct AS arc_line_gst_pct
+         FROM t
+         LEFT JOIN tbl_arc_item ai        ON ai.id = t.arc_item_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+         LEFT JOIN tbl_product p          ON p.id = pv.product_id
+         LEFT JOIN tbl_users u            ON u.id = t.vendor_id
+         LEFT JOIN tbl_company c          ON c.id = u.company_id
+         LEFT JOIN LATERAL (
+           SELECT aq.id FROM tbl_arc_quote aq
+            WHERE aq.arc_id = t.arc_id AND aq.vendor_id = t.vendor_id
+            ORDER BY aq.id DESC LIMIT 1
+         ) vq ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT l.rate, l.gst_pct FROM tbl_arc_quote_line l
+            WHERE l.arc_quote_id = vq.id AND l.arc_item_id = t.arc_item_id
+            ORDER BY l.id DESC LIMIT 1
+         ) aql ON TRUE`,
+      [rows.map((t) => t.arc_id), rows.map((t) => t.arc_item_id), rows.map((t) => t.vendor_id)]
+    );
+  },
+
+  /**
+   * Approval instances (entity_type NEGOTIATION) for a set of rounds, with
+   * steps, approvers and the "is it waiting on me?" flag.
+   */
+  getRoundApprovalState: async (roundIds, viewerUserId) => {
+    const ids = (roundIds || []).map(Number).filter(Number.isFinite);
+    if (ids.length === 0) return [];
+    const instances = await db.any(
+      `SELECT i.id, i.entity_id, i.status, i.current_step, i.approval_policy_id,
+              i.created_at, i.completed_at, i.initiated_by,
+              iu.name AS initiated_by_name, iu.email AS initiated_by_email
+         FROM tbl_approval_instances i
+         LEFT JOIN tbl_users iu ON iu.id = i.initiated_by
+        WHERE i.entity_type = 'NEGOTIATION'
+          AND i.entity_id = ANY($1::int[])
+        ORDER BY i.created_at DESC, i.id DESC`,
+      [ids]
+    );
+    if (instances.length === 0) return [];
+
+    const instanceIds = instances.map((i) => Number(i.id));
+    const [steps, approvers] = await Promise.all([
+      db.any(
+        `SELECT s.id, s.approval_instance_id, s.step_order, s.decision_rule, s.status, s.completed_at
+           FROM tbl_approval_instance_steps s
+          WHERE s.approval_instance_id = ANY($1::int[])
+          ORDER BY s.step_order ASC, s.id ASC`,
+        [instanceIds]
+      ),
+      db.any(
+        `SELECT sa.id, sa.approval_instance_step_id, sa.approver_user_id, sa.status,
+                sa.comment, sa.acted_at, sa.removed_at,
+                u.name AS approver_name, u.email AS approver_email, u.mobile AS approver_mobile
+           FROM tbl_approval_step_approvers sa
+           JOIN tbl_approval_instance_steps s ON s.id = sa.approval_instance_step_id
+           LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
+          WHERE s.approval_instance_id = ANY($1::int[])
+          ORDER BY sa.id ASC`,
+        [instanceIds]
+      ),
+    ]);
+
+    const approversByStep = new Map();
+    for (const a of approvers) {
+      const key = Number(a.approval_instance_step_id);
+      if (!approversByStep.has(key)) approversByStep.set(key, []);
+      approversByStep.get(key).push(a);
+    }
+    const stepsByInstance = new Map();
+    for (const s of steps) {
+      const key = Number(s.approval_instance_id);
+      if (!stepsByInstance.has(key)) stepsByInstance.set(key, []);
+      stepsByInstance.get(key).push(s);
+    }
+
+    return instances.map((inst) => {
+      const instSteps = (stepsByInstance.get(Number(inst.id)) || []).map((s) => ({
+        step_id: Number(s.id),
+        step_order: Number(s.step_order),
+        decision_rule: s.decision_rule,
+        status: s.status,
+        completed_at: isoOrNull(s.completed_at),
+        approvers: (approversByStep.get(Number(s.id)) || [])
+          .filter((a) => a.removed_at == null)
+          .map((a) => ({
+            user_id: Number(a.approver_user_id),
+            name: a.approver_name,
+            email: a.approver_email,
+            mobile: a.approver_mobile,
+            status: a.status,
+            comment: a.comment,
+            acted_at: isoOrNull(a.acted_at),
+          })),
+      }));
+      const currentStep = instSteps.find((s) => s.step_order === Number(inst.current_step)) || null;
+      const pendingWith =
+        inst.status === 'PENDING' && currentStep
+          ? currentStep.approvers.filter((a) => a.status === 'PENDING')
+          : [];
+      return {
+        instance_id: Number(inst.id),
+        round_id: Number(inst.entity_id),
+        status: inst.status,
+        current_step: inst.current_step == null ? null : Number(inst.current_step),
+        total_steps: instSteps.length,
+        policy_id: inst.approval_policy_id == null ? null : Number(inst.approval_policy_id),
+        created_at: isoOrNull(inst.created_at),
+        completed_at: isoOrNull(inst.completed_at),
+        initiated_by: {
+          user_id: inst.initiated_by == null ? null : Number(inst.initiated_by),
+          name: inst.initiated_by_name,
+          email: inst.initiated_by_email,
+        },
+        steps: instSteps,
+        pending_with: pendingWith,
+        is_pending_for_me:
+          viewerUserId != null && pendingWith.some((a) => Number(a.user_id) === Number(viewerUserId)),
+      };
+    });
+  },
+
+  /**
+   * The caller's negotiation.* permissions IN THE SCOPE OF one round's parent.
+   * Same 4-axis matrix as the read gate, just not pinned to action='read'.
+   * `userId` null = super admin → everything.
+   */
+  getNegotiationPermissionsForRound: async (userId, roundId) => {
+    const all = { read: true, create: true, update: true, approve: true, delete: true };
+    if (userId == null) return all;
+    const rows = await db.any(
+      `SELECT DISTINCT _p.action::text AS action
+         FROM tbl_negotiation_rounds nr
+         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+         JOIN tbl_user_role_scopes _urs ON _urs.user_id = $1::int
+         JOIN tbl_role_permissions _rp  ON _rp.role_id = _urs.role_id
+         JOIN tbl_permissions _p        ON _p.id = _rp.permission_id
+        WHERE nr.id = $2::int
+          AND _p.resource = 'negotiation'::resource_type
+          AND (
+            (rfq.id IS NOT NULL
+             AND _urs.company_id = rfq.hospitality_company_id
+             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = rfq.hotel_id)
+             AND (rfq.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = rfq.department_id)
+             AND (_urs.process_id IS NULL OR _urs.process_id = rfq.process_id))
+            OR
+            (a.id IS NOT NULL
+             AND _urs.company_id = a.hospitality_company_id
+             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = a.hotel_id)
+             AND (a.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = a.department_id)
+             AND (_urs.process_id IS NULL OR _urs.process_id = a.process_id))
+          )`,
+      [Number(userId), Number(roundId)]
+    );
+    const granted = new Set(rows.map((r) => r.action));
+    return {
+      read: granted.has('read'),
+      create: granted.has('create'),
+      update: granted.has('update'),
+      approve: granted.has('approve'),
+      delete: granted.has('delete'),
+    };
+  },
+
+  /**
+   * Assemble the full round-detail payload.
+   *
+   * @param {number}  roundId
+   * @param {'round'|'cycle'} scope
+   * @param {number|null} scopeUserId  RBAC matrix user id (null = super admin)
+   * @param {number|null} viewerUserId real caller id, used for "pending for me"
+   * @returns {Promise<object|null>} null when the round does not exist OR is
+   *          out of scope — callers must answer both identically.
+   */
+  getRoundDetail: async ({ roundId, scope = 'round', scopeUserId = null, viewerUserId = null }) => {
+    const primary = (await negotiationModel.getScopedRoundsByIds([roundId], scopeUserId))[0];
+    if (!primary) return null;
+
+    const sourceType = String(primary.source_type || 'RFQ').toUpperCase();
+    const sourceId = Number(primary.source_id);
+
+    // ── Scope expansion ──────────────────────────────────────────────────────
+    let scopeRounds = [primary];
+    let cycle = null;
+    if (scope === 'cycle') {
+      const siblingIds = await negotiationModel.getSiblingRoundIds(roundId);
+      // Re-apply the predicate: siblings are NOT implicitly in scope.
+      const scoped = await negotiationModel.getScopedRoundsByIds(siblingIds, scopeUserId);
+      scopeRounds = scoped.length > 0 ? scoped : [primary];
+      cycle = {
+        round_number: Number(primary.round_number),
+        sibling_round_ids: scopeRounds.map((r) => Number(r.id)),
+        sibling_count: scopeRounds.length,
+        excluded_sibling_count: Math.max(siblingIds.length - scopeRounds.length, 0),
+      };
+    }
+
+    // ── Item + vendor grid across the scope ──────────────────────────────────
+    const slotsByRound = new Map();
+    const vendorsByRound = new Map();
+    const productIds = new Set();
+    const arcItemIds = new Set();
+    for (const r of scopeRounds) {
+      const slots = getRoundItemSlots(r);
+      slotsByRound.set(Number(r.id), slots);
+      vendorsByRound.set(Number(r.id), getRoundVendorIds(r));
+      slots.forEach((s) => {
+        if (s.rfq_product_id != null) productIds.add(s.rfq_product_id);
+        if (s.arc_item_id != null) arcItemIds.add(s.arc_item_id);
+      });
+    }
+
+    // ── Rounds sharing these items (denominators + cumulative) ───────────────
+    const relatedRounds =
+      productIds.size > 0 || arcItemIds.size > 0
+        ? await negotiationModel.getRelatedRoundIds({
+            sourceType,
+            sourceId,
+            rfqProductIds: [...productIds],
+            arcItemIds: [...arcItemIds],
+            userId: scopeUserId,
+          })
+        : [];
+    const roundsOnParent = await negotiationModel.countScopedRoundsOnParent({
+      sourceType,
+      sourceId,
+      userId: scopeUserId,
+    });
+
+    // Cumulative set: rounds 1..N on the same items, CANCELLED excluded.
+    const currentRoundNumber = Number(primary.round_number);
+    const cumulativeRoundIds = relatedRounds
+      .filter((r) => r.round_number <= currentRoundNumber && String(r.status).toUpperCase() !== 'CANCELLED')
+      .map((r) => r.id);
+
+    const allRoundIds = [...new Set([...scopeRounds.map((r) => Number(r.id)), ...cumulativeRoundIds])];
+    const allRounds = await negotiationModel.getScopedRoundsByIds(allRoundIds, scopeUserId);
+    const roundsById = new Map(allRounds.map((r) => [Number(r.id), r]));
+
+    // ── Facts ────────────────────────────────────────────────────────────────
+    const roundQuotes = await negotiationModel.getRoundQuotesForRounds(allRoundIds);
+    const quoteKey = (roundIdKey, itemId, vendorId) => `${roundIdKey}|${itemId ?? 'null'}|${vendorId}`;
+    const quotesByKey = new Map();
+    for (const q of roundQuotes) {
+      const itemId = sourceType === 'ARC' ? q.arc_item_id : q.rfq_product_id;
+      quotesByKey.set(quoteKey(Number(q.negotiation_round_id), itemId == null ? null : Number(itemId), Number(q.vendor_id)), q);
+    }
+
+    // Prior-round lookup index: (item, vendor) → responses ordered by round no.
+    const priorIndex = new Map();
+    for (const q of roundQuotes) {
+      const r = roundsById.get(Number(q.negotiation_round_id));
+      if (!r) continue;
+      const itemId = sourceType === 'ARC' ? q.arc_item_id : q.rfq_product_id;
+      const key = `${itemId ?? 'null'}|${Number(q.vendor_id)}`;
+      if (!priorIndex.has(key)) priorIndex.set(key, []);
+      priorIndex.get(key).push({ ...q, round_number: Number(r.round_number) });
+    }
+    for (const arr of priorIndex.values()) arr.sort((x, y) => x.round_number - y.round_number || x.id - y.id);
+    const findPrior = (itemId, vendorId, roundNumber) => {
+      const arr = priorIndex.get(`${itemId ?? 'null'}|${vendorId}`) || [];
+      let best = null;
+      for (const q of arr) if (q.round_number < roundNumber) best = q;
+      return best;
+    };
+
+    // Facts are fetched for every (item, vendor) pair across the union of the
+    // scope rounds and the cumulative rounds so one query serves both.
+    const factTriples = new Map();
+    for (const r of allRounds) {
+      const slots = slotsByRound.get(Number(r.id)) || getRoundItemSlots(r);
+      const vendors = vendorsByRound.get(Number(r.id)) || getRoundVendorIds(r);
+      for (const s of slots) {
+        for (const v of vendors) {
+          const key =
+            sourceType === 'ARC'
+              ? `${sourceId}|${s.arc_item_id ?? 'null'}|${v}`
+              : `${Number(r.rfq_id ?? sourceId)}|${s.rfq_product_id ?? 'null'}|${v}`;
+          if (!factTriples.has(key)) {
+            factTriples.set(
+              key,
+              sourceType === 'ARC'
+                ? { arc_id: sourceId, arc_item_id: s.arc_item_id, vendor_id: v }
+                : { rfq_id: Number(r.rfq_id ?? sourceId), rfq_product_id: s.rfq_product_id, vendor_id: v }
+            );
+          }
+        }
+      }
+    }
+    const factRows =
+      sourceType === 'ARC'
+        ? await negotiationModel.getArcLineFacts([...factTriples.values()])
+        : await negotiationModel.getRfqLineFacts([...factTriples.values()]);
+    const factsByKey = new Map();
+    for (const f of factRows) {
+      const key =
+        sourceType === 'ARC'
+          ? `${Number(f.arc_id)}|${f.arc_item_id == null ? 'null' : Number(f.arc_item_id)}|${Number(f.vendor_id)}`
+          : `${Number(f.rfq_id)}|${f.rfq_product_id == null ? 'null' : Number(f.rfq_product_id)}|${Number(f.vendor_id)}`;
+      factsByKey.set(key, f);
+    }
+
+    const linesForRound = (r) => {
+      const slots = slotsByRound.get(Number(r.id)) || getRoundItemSlots(r);
+      const vendors = vendorsByRound.get(Number(r.id)) || getRoundVendorIds(r);
+      const out = [];
+      for (const s of slots) {
+        for (const v of vendors) {
+          const itemId = sourceType === 'ARC' ? s.arc_item_id : s.rfq_product_id;
+          const factKey =
+            sourceType === 'ARC'
+              ? `${sourceId}|${s.arc_item_id ?? 'null'}|${v}`
+              : `${Number(r.rfq_id ?? sourceId)}|${s.rfq_product_id ?? 'null'}|${v}`;
+          out.push(
+            buildLine({
+              round: r,
+              slot: s,
+              vendorId: v,
+              roundQuote: quotesByKey.get(quoteKey(Number(r.id), itemId, v)) || null,
+              priorRoundQuote: findPrior(itemId, v, Number(r.round_number)),
+              facts: factsByKey.get(factKey) || null,
+              parentSourceType: sourceType,
+            })
+          );
+        }
+      }
+      return out;
+    };
+
+    const lines = scopeRounds.flatMap(linesForRound);
+    const totals = summariseLines(lines);
+    const vendors = summariseVendors(lines);
+
+    // ── Cumulative across rounds 1..N on the same items ──────────────────────
+    const cumulativeRounds = cumulativeRoundIds.map((id) => roundsById.get(id)).filter(Boolean);
+    const cumulativeLines = cumulativeRounds.flatMap(linesForRound);
+    const cumulativeByPair = new Map();
+    for (const l of cumulativeLines) {
+      const key = `${l.rfq_product_id ?? l.arc_item_id ?? 'RFQ_LEVEL'}|${l.vendor_id}`;
+      if (!cumulativeByPair.has(key)) cumulativeByPair.set(key, []);
+      cumulativeByPair.get(key).push(l);
+    }
+    let cumBaseline = 0;
+    let cumAchieved = 0;
+    let cumPairs = 0;
+    for (const arr of cumulativeByPair.values()) {
+      arr.sort((a, b) => a.round_number - b.round_number || a.round_id - b.round_id);
+      const first = arr.find((l) => l.baseline_line_total != null);
+      const lastResponded = [...arr].reverse().find((l) => l.achieved_line_total != null);
+      if (first && lastResponded) {
+        cumBaseline += first.baseline_line_total;
+        cumAchieved += lastResponded.achieved_line_total;
+        cumPairs += 1;
+      }
+    }
+    const cumSaved = cumBaseline - cumAchieved;
+    const cumulative = {
+      from_round_number: cumulativeRounds.length ? Math.min(...cumulativeRounds.map((r) => Number(r.round_number))) : null,
+      to_round_number: cumulativeRounds.length ? Math.max(...cumulativeRounds.map((r) => Number(r.round_number))) : null,
+      round_ids: cumulativeRounds.map((r) => Number(r.id)),
+      rounds_counted: cumulativeRounds.length,
+      pairs_counted: cumPairs,
+      baseline_total: round2(cumBaseline),
+      achieved_total: round2(cumAchieved),
+      saved_value: round2(cumSaved),
+      saved_pct: cumPairs > 0 && Math.abs(cumBaseline) > MONEY_EPSILON ? round4((cumSaved / cumBaseline) * 100) : null,
+      excludes_cancelled: true,
+    };
+
+    // ── Approval + permissions ───────────────────────────────────────────────
+    const [approvalInstances, permissions] = await Promise.all([
+      negotiationModel.getRoundApprovalState(scopeRounds.map((r) => Number(r.id)), viewerUserId),
+      negotiationModel.getNegotiationPermissionsForRound(scopeUserId, roundId),
+    ]);
+
+    const vendorApprovals = Array.isArray(primary.vendor_approvals) ? primary.vendor_approvals : [];
+    const approval = {
+      instances: approvalInstances,
+      status: approvalInstances[0]?.status ?? null,
+      pending_with: approvalInstances[0]?.pending_with ?? [],
+      is_pending_for_me: approvalInstances.some((i) => i.is_pending_for_me),
+      vendor_approvals: {
+        total: vendorApprovals.length,
+        approved: vendorApprovals.filter((v) => String(v?.status).toUpperCase() === 'APPROVED').length,
+        rejected: vendorApprovals.filter((v) => String(v?.status).toUpperCase() === 'REJECTED').length,
+        pending: vendorApprovals.filter((v) => !['APPROVED', 'REJECTED'].includes(String(v?.status).toUpperCase())).length,
+      },
+    };
+
+    const effectiveStatus = getEffectiveRoundStatus(primary);
+    const endDate = parseAsUTC(primary.end_date);
+    const now = Date.now();
+
+    const relatedRoundNumbers = relatedRounds.map((r) => r.round_number);
+
+    return {
+      scope,
+      cycle,
+      round: {
+        round_id: Number(primary.id),
+        round_number: Number(primary.round_number),
+        status: primary.status,
+        effective_status: effectiveStatus,
+        is_open: effectiveStatus === 'ACTIVE',
+        is_expired: endDate ? endDate.getTime() <= now : false,
+        mode: getRoundMode(primary),
+        source_type: sourceType,
+        source_id: sourceId,
+        rounds_on_parent: roundsOnParent,
+        rounds_on_products: relatedRounds.length,
+        max_round_number_on_products: relatedRoundNumbers.length ? Math.max(...relatedRoundNumbers) : Number(primary.round_number),
+        target_price: num(primary.target_price),
+        remarks: primary.remarks ?? null,
+        end_date: isoOrNull(primary.end_date),
+        time_remaining_ms: endDate ? endDate.getTime() - now : null,
+        created_at: isoOrNull(primary.created_at),
+        updated_at: isoOrNull(primary.updated_at),
+        approved_at: isoOrNull(primary.approved_at),
+        published_at: isoOrNull(primary.published_at),
+        closed_at: isoOrNull(primary.closed_at),
+        created_by: {
+          user_id: primary.created_by == null ? null : Number(primary.created_by),
+          name: primary.created_by_name ?? null,
+          email: primary.created_by_email ?? null,
+          mobile: primary.created_by_mobile ?? null,
+          designation: primary.created_by_designation ?? null,
+        },
+      },
+      parent: {
+        source_type: sourceType,
+        rfq_id: primary.parent_rfq_id == null ? null : Number(primary.parent_rfq_id),
+        rfq_no: primary.parent_rfq_no == null ? null : Number(primary.parent_rfq_no),
+        arc_id: primary.parent_arc_id == null ? null : Number(primary.parent_arc_id),
+        arc_number: primary.parent_arc_number ?? null,
+        title: primary.parent_rfq_title ?? primary.parent_arc_title ?? null,
+        status: primary.parent_rfq_status ?? primary.parent_arc_status ?? null,
+        is_tender: primary.parent_is_tender == null ? null : Number(primary.parent_is_tender),
+        bid_end_date: primary.parent_bid_end_date ?? null,
+        vendor_clarification_date: isoOrNull(primary.parent_vendor_clarification_date),
+        submission_end_at: isoOrNull(primary.parent_arc_submission_end_at),
+        hospitality_company_id: primary.parent_company_id == null ? null : Number(primary.parent_company_id),
+        company_name: primary.parent_company_name ?? null,
+        hotel_id: primary.parent_hotel_id == null ? null : Number(primary.parent_hotel_id),
+        hotel_name: primary.parent_hotel_name ?? null,
+        department_id: primary.parent_department_id == null ? null : Number(primary.parent_department_id),
+        department_name: primary.parent_department_name ?? null,
+        process_id: primary.parent_process_id == null ? null : Number(primary.parent_process_id),
+      },
+      lines,
+      totals,
+      cumulative,
+      vendors,
+      approval,
+      permissions,
+      _effective_status: effectiveStatus,
+    };
   },
 
   /**
