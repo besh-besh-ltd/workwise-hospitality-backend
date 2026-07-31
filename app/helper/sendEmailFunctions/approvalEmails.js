@@ -4,13 +4,41 @@ import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
-// Entity type → frontend link path mapping
+// Entity type → frontend link path mapping.
+//
+// `id` is the approval instance's entity_id, and its meaning is per entity
+// type: for NEGOTIATION_QUOTE it is an **rfq_product_id** (vendor finalization
+// is approved per product), for every other type it is the RFQ / PO id. A
+// builder may return null to say "I cannot construct a correct link" — callers
+// fall back to a generic destination rather than emitting a wrong one.
+//
+// The optional third argument lets a caller that only knows the RFQ (e.g. the
+// cancellation mail, whose instance is already gone) ask for the RFQ-level
+// link instead of a per-entity deep link.
 const ENTITY_LINK_MAP = {
   'RFQ': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
   'TENDER': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
   'TECHNICAL': (id) => `/dashboard/buyer/technical-evaluation?rfq_id=${id}`,
   'NEGOTIATION': (id, ctx) => `/dashboard/buyer/quote-compare?rfq=${ctx?.rfq_id || id}`,
-  'NEGOTIATION_QUOTE': (id, ctx) => `/dashboard/buyer/quote-compare?rfq=${ctx?.rfq_id || id}`,
+  'NEGOTIATION_QUOTE': (id, ctx, opts = {}) => {
+    const rfqId = ctx?.rfq_id;
+    // Upstream callers default extraContext.rfq_id to `metadata.rfq_id ||
+    // entity_id`, so an rfq_id equal to the entity id means metadata.rfq_id was
+    // missing and all we really hold is a product id. Refuse instead of
+    // emitting `?rfq=<product id>`, which would drop the approver into a
+    // completely different RFQ. (Verified against production 2026-07-30: all
+    // 1,770 live NEGOTIATION_QUOTE instances carry metadata.rfq_id and none has
+    // rfq_id == entity_id, so this is a latent guard, not a live path.)
+    if (!rfqId) return null;
+    if (!opts.idIsRfq && String(rfqId) === String(id)) return null;
+    const base = `/dashboard/buyer/quote-compare?rfq=${rfqId}`;
+    // The Approve control for a finalization lives on one product card deep in
+    // the comparison matrix. RFQ #536255 alone raises 47 of these instances —
+    // 47 separate mails — so without the product every link is identical and
+    // the approver has to hunt. Carry the product plus a focus hint the page
+    // uses to scroll/highlight that exact card.
+    return opts.idIsRfq ? base : `${base}&rfq_product_id=${id}&focus=approval`;
+  },
   'ARC': (id, ctx) => `/dashboard/buyer/arc-committee?rfq_id=${ctx?.rfq_id || id}`,
   'PO': (id, ctx) => `/dashboard/buyer/purchase-order?rfq=${ctx?.rfq_id || id}`,
 };
@@ -161,7 +189,9 @@ export const sendApprovalStepNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : `/dashboard`;
+    // A builder returns null when it cannot name the right destination; send
+    // the approver to their dashboard rather than to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || `/dashboard`;
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
@@ -959,9 +989,14 @@ export const sendApprovalCancelledNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn && extraContext?.rfq_id
-      ? linkFn(extraContext.rfq_id, extraContext)
-      : '/dashboard';
+    // This mail fires after the instance has been cancelled, so the caller only
+    // carries the RFQ — not the entity. `idIsRfq` tells per-entity builders to
+    // emit their RFQ-level link instead of synthesising a deep link out of an
+    // id that is not theirs (a per-product builder would otherwise publish the
+    // rfq_id as an rfq_product_id).
+    const linkPath = (linkFn && extraContext?.rfq_id
+      ? linkFn(extraContext.rfq_id, extraContext, { idIsRfq: true })
+      : null) || '/dashboard';
     const viewUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const subject = `Approval No Longer Required — ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`;
@@ -1058,7 +1093,9 @@ export const sendPolicyChangeNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    // Null means the builder could not name a correct destination — prefer a
+    // generic landing over a link to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const reasonLabel = changeReason === 'policy_change' ? 'approval policy update'
@@ -1348,7 +1385,9 @@ export const sendApproverAddedMidFlightNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    // Null means the builder could not name a correct destination — prefer a
+    // generic landing over a link to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const reasonLabel = changeReason === 'policy_change' ? 'a policy update'
