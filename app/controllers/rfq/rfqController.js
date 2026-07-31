@@ -9339,12 +9339,44 @@ const rfqController = {
                     );
 
                     if (!existingNegotiationQuote) {
+                      // previous_price = the landed line total this response
+                      // replaces. On the create path the items above belong to
+                      // a brand-new tbl_quotes row, so the only possible prior
+                      // price is on an earlier quote by the same vendor for the
+                      // same RFQ + variant. Usually there is none and NULL is
+                      // the honest answer — but recording it when it exists
+                      // stops downstream consumers guessing the baseline.
+                      const priorItem = await t.oneOrNone(
+                        `SELECT qi.total_price
+                           FROM tbl_quote_items qi
+                           JOIN tbl_quotes q ON q.id = qi.quote_id
+                          WHERE q.rfq_id = $1
+                            AND q.created_by = $2
+                            AND qi.quote_id <> $3
+                            AND qi.product_variant_id = $4
+                            AND qi.variant = $5
+                          ORDER BY qi.id DESC
+                          LIMIT 1`,
+                        [
+                          rfq_id,
+                          user.id,
+                          created_quote_id,
+                          quoteItem.product_variant_id,
+                          quoteItem.variant
+                        ]
+                      );
                       // Insert negotiation round quote
                       await t.none(
-                        `INSERT INTO tbl_negotiation_round_quotes 
+                        `INSERT INTO tbl_negotiation_round_quotes
                           (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
-                         VALUES ($1, $2, $3, $4, NULL, NOW())`,
-                        [activeRound.id, user.id, rfqProductId, quoteItem.total_price]
+                         VALUES ($1, $2, $3, $4, $5, NOW())`,
+                        [
+                          activeRound.id,
+                          user.id,
+                          rfqProductId,
+                          quoteItem.total_price,
+                          priorItem?.total_price ?? null
+                        ]
                       );
                     }
                   }
@@ -14400,6 +14432,29 @@ sendFollowUpEmails: async (req, res) => {
         paymentTermAndCommentChanges = true;
       }
 
+      // Snapshot the landed line total of every quote item BEFORE the update
+      // loop overwrites it. This is the same value rfqModel
+      // .updateQuoteItemWithHistory archives into tbl_quote_item_history, and
+      // it is what `previous_price` on a negotiation round quote is supposed to
+      // hold (0 of 520 production rows had it, forcing every consumer to guess
+      // the baseline from overwritten history). Keyed by
+      // "<product_variant_id>::<variant>" — product_variant_id alone is not
+      // unique within a quote.
+      const preUpdateLineTotals = new Map();
+      try {
+        const priorItems = await db.any(
+          `SELECT product_variant_id, variant, total_price
+             FROM tbl_quote_items WHERE quote_id = $1`,
+          [quoteId]
+        );
+        for (const it of priorItems) {
+          preUpdateLineTotals.set(`${it.product_variant_id}::${it.variant}`, it.total_price);
+        }
+      } catch (snapshotError) {
+        // Never block a quote update over the negotiation baseline.
+        logError('Error snapshotting pre-update quote item totals', snapshotError);
+      }
+
       // Process each product in the request
       const quoteItemChanges = await Promise.all(
         products
@@ -14545,12 +14600,18 @@ sendFollowUpEmails: async (req, res) => {
               );
 
               if (!existingNegotiationQuote) {
-                // Insert negotiation round quote
+                // Insert negotiation round quote. previous_price carries the
+                // pre-update landed line total captured above, so the baseline
+                // of this negotiation response is recorded at the moment it is
+                // known instead of being reconstructed later from history that
+                // gets overwritten in place.
+                const previousLineTotal =
+                  preUpdateLineTotals.get(`${prodItem.product_id}::${prodItem.variant}`) ?? null;
                 await db.none(
-                  `INSERT INTO tbl_negotiation_round_quotes 
+                  `INSERT INTO tbl_negotiation_round_quotes
                     (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
-                   VALUES ($1, $2, $3, $4, NULL, NOW())`,
-                  [activeRound.id, user.id, rfqProductId, prodItem.total_price]
+                   VALUES ($1, $2, $3, $4, $5, NOW())`,
+                  [activeRound.id, user.id, rfqProductId, prodItem.total_price, previousLineTotal]
                 );
               }
             }

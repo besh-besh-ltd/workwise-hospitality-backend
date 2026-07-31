@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { acl } from '../../helper/common.js';
 import { can } from '../../middleware/auth.js';
 import negotiationController from '../../controllers/negotiation/negotiationController.js';
+import negotiationRoundDetailController from '../../controllers/negotiation/negotiationRoundDetailController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
 import passport from '../../middleware/passport.js';
 import noLogin from '../../middleware/noLogin.js';
@@ -124,6 +125,18 @@ NegotiationRoutes.post(
   // can('negotiation.update'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.closeRound
+);
+
+// Negotiation Command Center — everything about one round (or one cycle of
+// sibling rounds) in a single read. Distinct literal third segment, so it does
+// not collide with '/rounds/:rfq_id'. Tenant scope + quote-visibility are
+// enforced inside the controller (see its header comment for the ordering).
+NegotiationRoutes.get(
+  '/rounds/:id/detail',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management (buyer)
+  hospitalityMiddleware.checkHospitality(false),
+  negotiationRoundDetailController.getRoundDetail
 );
 
 // Get quotes for a round
