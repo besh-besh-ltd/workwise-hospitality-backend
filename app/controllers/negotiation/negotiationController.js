@@ -1,7 +1,9 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
-import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct } from '../../models/negotiationModel.js';
+import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct,
+  NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION,
+  NEG_PARENT_STATE_ORDER } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
@@ -175,40 +177,253 @@ const buildEmailContext = async (rfqData, round) => {
 };
 
 /**
- * Handle NEGOTIATION post-approval actions (add quotes to finalization)
- * Called after NEGOTIATION approval instance is fully approved
+ * notifyNegotiationRoundLive
+ *
+ * The complete "this round is now live" notification bundle:
+ *   1. sendNegotiationRoundApprovedNotification — internal: the round's
+ *      initiator plus the hotel's commercial evaluators.
+ *   2. sendNegotiationRoundVendorNotification  — the VENDOR INVITATION. Without
+ *      it the round is live but nobody outside the building knows, so it ends
+ *      up expiring with zero quotes.
+ *
+ * Both mails always travel together. They used to be copy-pasted into
+ * approveRound (which sent both), createRound's auto-approve branch (both) and
+ * approveVendor (which sent only the internal one — the vendors were never
+ * told). This is now the single implementation; every activation path reaches
+ * it through activateApprovedNegotiationRound.
+ *
+ * Best-effort and strictly post-commit: it is only ever invoked for a round
+ * that just won the PENDING_APPROVAL -> ACTIVE race, so a double-click cannot
+ * send it twice. Failures are logged, never propagated — an SMTP problem must
+ * not undo an approval that has already committed.
+ */
+const notifyNegotiationRoundLive = async (round_id, roundRow, rfqData) => {
+  const roundWithContext = await negotiationModel.getRoundWithContext(round_id);
+  const round = roundWithContext || roundRow;
+
+  const productName = roundWithContext?.product_name || 'Product';
+  const productNames = (roundWithContext?.product_names || [])
+    .map(p => p?.product_name)
+    .filter(Boolean);
+
+  const emailContext = await buildEmailContext(rfqData, round);
+
+  const initiatorData = await userModel.getUserById(roundRow.created_by);
+  const initiator = initiatorData?.[0]
+    ? { name: initiatorData[0].name, email: initiatorData[0].email }
+    : null;
+
+  const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
+  const commercialEvaluators = hotelIds.length > 0
+    ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
+    : [];
+
+  if (initiator) {
+    await sendNegotiationRoundApprovedNotification({
+      round,
+      rfqNo: rfqData.rfq_no,
+      rfqTitle: rfqData?.title || '',
+      productName,
+      productNames,
+      initiator,
+      commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
+      companyName: emailContext.companyName,
+      businessUnitName: emailContext.businessUnitName,
+      vendorApprovals: emailContext.vendorApprovals,
+      vendorsLookup: emailContext.vendorsLookup,
+      vendorQuotes: emailContext.vendorQuotes,
+      chargeLabels: emailContext.chargeLabels
+    });
+  }
+
+  const vendors = await negotiationModel.getVendorsForRound(round_id);
+  if (vendors.length > 0) {
+    const vaByVendorId = Object.fromEntries(
+      (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
+    );
+    // Multi rounds: per-vendor per-product fields live in products[].
+    const productsForVendor = (vid) => (Array.isArray(round?.products) ? round.products : [])
+      .map(p => ({
+        rfq_product_id: p?.rfq_product_id ?? null,
+        is_rfq_level: p?.is_rfq_level === true,
+        fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
+      }))
+      .filter(p => p.fields.length > 0);
+
+    const vendorsWithTokens = await Promise.all(
+      vendors.map(async (v) => {
+        const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
+        return {
+          id: v.id,
+          name: v.name || v.organization_name || v.company_name,
+          email: v.email,
+          token: tokenRows?.[0]?.token || null,
+          negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
+          products: productsForVendor(v.id),
+          quote: emailContext.vendorQuotes?.[v.id] || null
+        };
+      })
+    );
+
+    await sendNegotiationRoundVendorNotification({
+      round,
+      rfqNo: rfqData.rfq_no,
+      rfqTitle: rfqData?.title || '',
+      productName,
+      productNames,
+      buyerCompanyName: emailContext.companyName,
+      vendors: vendorsWithTokens,
+      companyName: emailContext.companyName,
+      businessUnitName: emailContext.businessUnitName,
+      chargeLabels: emailContext.chargeLabels
+    });
+  }
+};
+
+/**
+ * activateNegotiationRoundInTx — the DB half of "this round is fully approved,
+ * make it live". Must run inside a transaction.
+ *
+ * IDEMPOTENT BY CONSTRUCTION. The `WHERE status = 'PENDING_APPROVAL'` predicate
+ * IS the claim: exactly one caller can win it, and only the winner runs the
+ * side effects. This is what makes a double-click safe — approveRound used to
+ * read round.status without a row lock and ignore the engine's
+ * `already_completed` flag, so a retry re-sent the approved mail and every
+ * vendor invitation (23 production rounds carry multiple APPROVED instances).
+ *
+ * Ordering note (Fix 2): vendor_approvals[] only flips to APPROVED HERE, i.e.
+ * once the WHOLE round is approved. approveRound used to do it unconditionally,
+ * outside the fully-approved branch, so on a multi-step ALL policy the first
+ * approver marked every vendor APPROVED while the round was still
+ * PENDING_APPROVAL.
+ *
+ * @returns {Promise<{activated: boolean, round: Object|null, rfqData: Object|null}>}
+ */
+const activateNegotiationRoundInTx = async (t, round_id, actor_user_id, remarks = null) => {
+  const round = await t.oneOrNone(
+    `UPDATE tbl_negotiation_rounds
+        SET status = 'ACTIVE',
+            approved_at = NOW(),
+            published_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+        AND status = 'PENDING_APPROVAL'
+      RETURNING *`,
+    [round_id]
+  );
+
+  // Lost the race (or the round was never pending) — somebody else already
+  // activated it and already notified. Nothing more to do.
+  if (!round) return { activated: false, round: null, rfqData: null };
+
+  await negotiationModel.updateAllVendorsStatus(round_id, 'APPROVED', remarks || null, actor_user_id, t);
+
+  const rfqData = round.rfq_id
+    ? await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [round.rfq_id])
+    : null;
+
+  if (rfqData) {
+    await recordLifecycleEvent({
+      entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+      entity_id: round.rfq_id,
+      stage: `NEGOTIATION_ROUND_${round.round_number}`,
+      action: 'ROUND_PUBLISHED',
+      performed_by: actor_user_id,
+      metadata: {
+        round_id: round_id,
+        round_number: round.round_number
+      },
+      remarks: remarks || null,
+      txContext: t
+    });
+  }
+
+  return { activated: true, round, rfqData };
+};
+
+/**
+ * activateApprovedNegotiationRound — THE single activation entry point.
+ *
+ * Every surface that can complete a NEGOTIATION approval converges here:
+ *   - the generic engine (POST /general/hospitality/approval/action → the
+ *     approvalActionService registry → handleNegotiationPostApproval), which
+ *     is what RfqApprovalDecisionCard and the in-app pending-approvals queue
+ *     call, and which previously never activated anything at all;
+ *   - the dedicated endpoint POST /negotiation/rounds/:id/approve;
+ *   - the vendor-level endpoint POST /negotiation/rounds/:id/approve-vendor,
+ *     which previously activated the round but never invited the vendors.
+ *
+ * The DB writes are transactional; the notifications fire only after that
+ * transaction commits, so a rollback can never leave vendors holding an
+ * invitation to a round that isn't live.
+ */
+const activateApprovedNegotiationRound = async (round_id, actor_user_id, { remarks = null, txContext = null } = {}) => {
+  const exec = (t) => activateNegotiationRoundInTx(t, round_id, actor_user_id, remarks);
+
+  let result;
+  if (txContext) {
+    result = typeof txContext.tx === 'function' ? await txContext.tx(exec) : await exec(txContext);
+  } else {
+    result = await db.tx(exec);
+  }
+
+  if (result.activated && result.rfqData) {
+    // Fire-and-forget, post-commit. Only the caller that won the activation
+    // race gets here, so this cannot double-send.
+    notifyNegotiationRoundLive(round_id, result.round, result.rfqData)
+      .catch((emailErr) => logError('Failed to send negotiation round activation emails', emailErr));
+  }
+
+  return result;
+};
+
+/**
+ * Handle NEGOTIATION post-approval actions.
+ * Called after a NEGOTIATION approval instance is fully approved, from EVERY
+ * surface — the generic engine dispatcher (approvalActionService's
+ * postActionRegistry) and the dedicated negotiation endpoints alike.
+ *
+ * This function is the convergence point that Fix 1 is about. It used to write
+ * finalizations and flip vendor statuses but never set status='ACTIVE',
+ * approved_at, published_at, and never sent the vendor invitation — the
+ * dedicated endpoint did all of that inline instead. So an approver acting from
+ * the RFQ workspace saw "approved" while the round sat in PENDING_APPROVAL until
+ * it expired with zero vendor quotes. Activation now lives in ONE place
+ * (activateApprovedNegotiationRound) that this handler always calls.
  *
  * @param {number} approval_instance_id
  * @param {number} approver_user_id
  * @param {Object} [options]
  * @param {Object} [options.txContext] - Optional transaction context to participate in
+ * @param {Object} [options.instance]  - Pre-loaded approval instance (from the dispatcher)
+ * @param {string} [options.comment]   - Approval remarks
+ * @returns {Promise<{activated: boolean}>}
  */
 const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
   const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
-    // Get approval instance
+    // Get approval instance. The dispatcher pre-loads it; re-validate the
+    // entity type either way so a foreign instance can never reach this path.
     const { getApprovalInstanceById } = await import('../../models/generalModel.js');
-    const instance = await getApprovalInstanceById(approval_instance_id, 'NEGOTIATION', t);
-    if (!instance || instance.status !== 'APPROVED') {
-      return; // Not approved yet or not NEGOTIATION type
+    const instance = options?.instance || await getApprovalInstanceById(approval_instance_id, 'NEGOTIATION', t);
+    if (!instance || instance.entity_type !== 'NEGOTIATION' || instance.status !== 'APPROVED') {
+      return { activated: false }; // Not approved yet or not NEGOTIATION type
     }
 
-    const metadata = instance.metadata || {};
+    const metadata = typeof instance.metadata === 'string'
+      ? JSON.parse(instance.metadata)
+      : (instance.metadata || {});
     const rfq_product_id = metadata.rfq_product_id || instance.entity_id;
     const rfq_id = metadata.rfq_id;
     const round_id = metadata.round_id || instance.entity_id;
+    const remarks = options?.comment ?? null;
 
-    // Propagate APPROVED status to all vendor_approvals entries in the round
-    if (round_id) {
-      try {
-        await negotiationModel.updateAllVendorsStatus(round_id, 'APPROVED', null, approver_user_id, t);
-      } catch (vaErr) {
-        logError('Failed to update vendor_approvals on post-approval', vaErr);
-      }
-    }
-
+    // Legacy shape: a handful of historical NEGOTIATION instances carry
+    // selected_quotes and expect the award to be written here. Rounds created
+    // by createRound never do (their metadata has no selected_quotes), so for
+    // those this block is a no-op.
     if (rfq_id && metadata.selected_quotes && metadata.selected_quotes.length > 0) {
       // Get RFQ data
       const rfq = await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id]);
@@ -276,9 +491,17 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
         }
       }
     }
+
+    // THE convergence: activate the round, propagate vendor statuses, record
+    // ROUND_PUBLISHED and invite the vendors — identically, from every surface.
+    if (round_id) {
+      return await activateApprovedNegotiationRound(round_id, approver_user_id, { remarks, txContext });
+    }
+    return { activated: false };
   } catch (negQuoteError) {
     // Log but don't fail the transaction
     logError('Error handling NEGOTIATION post-approval', negQuoteError);
+    return { activated: false };
   }
 };
 
@@ -746,9 +969,12 @@ const NegotiationController = {
         });
       }
 
-      // Round numbering is per-RFQ for all new rounds (multi rounds have no
-      // single product to scope numbering to).
-      const round_number = await negotiationModel.getNextRoundNumberForRfq(rfq_id);
+      // Round numbering is RFQ-WIDE: one round, one position, however many
+      // products it covers. Allocated INSIDE the transaction below — the
+      // allocator serialises concurrent creates with a row lock on the parent
+      // RFQ, and that lock is only held for the caller's transaction. Declared
+      // here because the response message reads it after the commit.
+      let round_number;
 
       // Persistence shape:
       //  - single product entry → legacy columns (rfq_product_id +
@@ -789,6 +1015,8 @@ const NegotiationController = {
 
       // Create round in transaction
       const result = await db.tx(async (t) => {
+        round_number = await negotiationModel.getNextRoundPositionForRfq(rfq_id, t);
+
         const round = await negotiationModel.createRound({
           rfq_id,
           rfq_product_id: legacyProductId,
@@ -1196,6 +1424,18 @@ const NegotiationController = {
         });
       }
 
+      // SCOPE FIRST (P0 IDOR): this endpoint resolved the round by id and acted
+      // on it with no tenant check, so any acl([2,8]) user could approve — and
+      // publish to vendors — another hotel's round by guessing an id. The guard
+      // runs BEFORE any state read so an out-of-scope caller cannot even learn
+      // whether the round exists. Same matrix the read surfaces already use.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
+        });
+      }
+
       const round = await negotiationModel.getRoundById(round_id);
       if (!round) {
         return res.status(404).json({
@@ -1222,7 +1462,21 @@ const NegotiationController = {
         });
       }
 
-      const approvalResult = await submitApprovalAction({
+      // Route through the centralized engine rather than the raw
+      // submitApprovalAction primitive + an inline copy of the post-approval
+      // work. executeApprovalAction dispatches handleNegotiationPostApproval
+      // via approvalActionService's registry — the SAME function the generic
+      // endpoint POST /general/hospitality/approval/action reaches — so both
+      // surfaces produce identical outcomes (activation, timestamps, vendor
+      // statuses, ROUND_PUBLISHED, vendor invitation) and there is no second
+      // implementation left to drift or double-fire.
+      //
+      // The engine returns `already_completed` when the instance was already
+      // terminal (double-click, refresh). We no longer act on that; and even if
+      // the dispatcher re-runs the handler, activation is claimed by a
+      // `WHERE status = 'PENDING_APPROVAL'` update, so the round activates once
+      // and the vendors are invited once.
+      const approvalResult = await executeApprovalAction({
         approval_instance_id: pendingInstance.id,
         approver_user_id: user_id,
         action: 'APPROVE',
@@ -1231,117 +1485,13 @@ const NegotiationController = {
 
       const isFullyApproved = approvalResult.instance_status === 'APPROVED';
 
-      // Propagate approval to all vendor_approvals entries
-      await negotiationModel.updateAllVendorsStatus(round_id, 'APPROVED', remarks || null, user_id);
-
-      if (isFullyApproved) {
-        await handleNegotiationPostApproval(pendingInstance.id, user_id);
-
-        await negotiationModel.updateRoundStatus(round_id, 'ACTIVE', {
-          approved_at: new Date(),
-          published_at: new Date()
-        });
-
-        // Record lifecycle event for round published
-        const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
-        const rfqData = rfq[0];
-        await recordLifecycleEvent({
-          entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-          entity_id: round.rfq_id,
-          stage: `NEGOTIATION_ROUND_${round.round_number}`,
-          action: 'ROUND_PUBLISHED',
-          performed_by: user_id,
-          metadata: {
-            round_id: round_id,
-            round_number: round.round_number
-          }
-        });
-
-        // Send round-approved-live email (fire-and-forget)
-        (async () => {
-          try {
-            const roundWithContext = await negotiationModel.getRoundWithContext(round_id);
-            const initiatorData = await userModel.getUserById(round.created_by);
-            const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
-            const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
-            const commercialEvaluators = hotelIds.length > 0
-              ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
-              : [];
-
-            const emailContext = await buildEmailContext(rfqData, roundWithContext || round);
-
-            if (initiator) {
-              await sendNegotiationRoundApprovedNotification({
-                round: roundWithContext || round,
-                rfqNo: rfqData.rfq_no,
-                rfqTitle: rfqData?.title || '',
-                productName: roundWithContext?.product_name || 'Product',
-                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
-                initiator,
-                commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
-                companyName: emailContext.companyName,
-                businessUnitName: emailContext.businessUnitName,
-                vendorApprovals: emailContext.vendorApprovals,
-                vendorsLookup: emailContext.vendorsLookup,
-                vendorQuotes: emailContext.vendorQuotes,
-                chargeLabels: emailContext.chargeLabels
-              });
-            }
-
-            // Send vendor notification emails
-            const vendors = await negotiationModel.getVendorsForRound(round_id);
-            if (vendors.length > 0) {
-              const vaByVendorId = Object.fromEntries(
-                (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
-              );
-              // Multi rounds: per-vendor per-product fields live in products[].
-              const roundForFields = roundWithContext || round;
-              const productsForVendor = (vid) => (Array.isArray(roundForFields?.products) ? roundForFields.products : [])
-                .map(p => ({
-                  rfq_product_id: p?.rfq_product_id ?? null,
-                  is_rfq_level: p?.is_rfq_level === true,
-                  fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
-                }))
-                .filter(p => p.fields.length > 0);
-              const vendorsWithTokens = await Promise.all(
-                vendors.map(async (v) => {
-                  const tokenRows = await rfqModel.getVendorRfqToken(v.id, rfqData.rfq_no);
-                  return {
-                    id: v.id,
-                    name: v.name || v.organization_name || v.company_name,
-                    email: v.email,
-                    token: tokenRows?.[0]?.token || null,
-                    negotiation_fields: vaByVendorId[v.id]?.negotiation_fields || [],
-                    products: productsForVendor(v.id),
-                    quote: emailContext.vendorQuotes?.[v.id] || null
-                  };
-                })
-              );
-              await sendNegotiationRoundVendorNotification({
-                round: roundWithContext || round,
-                rfqNo: rfqData.rfq_no,
-                rfqTitle: rfqData?.title || '',
-                productName: roundWithContext?.product_name || 'Product',
-                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
-                buyerCompanyName: emailContext.companyName,
-                vendors: vendorsWithTokens,
-                companyName: emailContext.companyName,
-                businessUnitName: emailContext.businessUnitName,
-                chargeLabels: emailContext.chargeLabels
-              });
-            }
-          } catch (emailErr) {
-            logError('Failed to send round approval email', emailErr);
-          }
-        })();
-      }
-
       return res.status(200).json({
         status: 1,
         data: {
           approved: true,
           allApproved: isFullyApproved,
-          published: isFullyApproved
+          published: isFullyApproved,
+          alreadyProcessed: approvalResult.already_completed === true
         },
         message: isFullyApproved
           ? 'Round approved and published to vendors'
@@ -1374,6 +1524,14 @@ const NegotiationController = {
         return res.status(400).json({
           status: 2,
           message: 'vendor_id is required'
+        });
+      }
+
+      // SCOPE FIRST (P0 IDOR) — see approveRound.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
         });
       }
 
@@ -1418,73 +1576,19 @@ const NegotiationController = {
         const pendingInstance = instances.find(i => i.status === 'PENDING');
 
         if (pendingInstance) {
-          const approvalResult = await submitApprovalAction({
+          // Same centralized engine as approveRound and the generic endpoint.
+          // This path used to activate the round and send ONLY the internal
+          // "round approved" mail — the vendor invitation was missing, so the
+          // round went live and the vendors were never told. It now reaches the
+          // one shared activation function, which always sends both.
+          const approvalResult = await executeApprovalAction({
             approval_instance_id: pendingInstance.id,
             approver_user_id: user_id,
             action: 'APPROVE',
             comment: remarks || 'All vendors approved'
           });
 
-          const isFullyApproved = approvalResult.instance_status === 'APPROVED';
-
-          if (isFullyApproved) {
-            await handleNegotiationPostApproval(pendingInstance.id, user_id);
-
-            await negotiationModel.updateRoundStatus(round_id, 'ACTIVE', {
-              approved_at: new Date(),
-              published_at: new Date()
-            });
-            isRoundActive = true;
-
-            const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
-            const rfqData = rfq[0];
-            await recordLifecycleEvent({
-              entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-              entity_id: round.rfq_id,
-              stage: `NEGOTIATION_ROUND_${round.round_number}`,
-              action: 'ROUND_PUBLISHED',
-              performed_by: user_id,
-              metadata: {
-                round_id: round_id,
-                round_number: round.round_number
-              }
-            });
-
-            // Send round-approved-live email (fire-and-forget)
-            (async () => {
-              try {
-                const roundWithContext = await negotiationModel.getRoundWithContext(round_id);
-                const initiatorData = await userModel.getUserById(round.created_by);
-                const initiator = initiatorData?.[0] ? { name: initiatorData[0].name, email: initiatorData[0].email } : null;
-                const hotelIds = rfqData.hotel_id ? [rfqData.hotel_id] : [];
-                const commercialEvaluators = hotelIds.length > 0
-                  ? await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'])
-                  : [];
-
-                const emailContext = await buildEmailContext(rfqData, roundWithContext || round);
-
-                if (initiator) {
-                  await sendNegotiationRoundApprovedNotification({
-                    round: roundWithContext || round,
-                    rfqNo: rfqData.rfq_no,
-                    rfqTitle: rfqData?.title || '',
-                    productName: roundWithContext?.product_name || 'Product',
-                productNames: (roundWithContext?.product_names || []).map(p => p?.product_name).filter(Boolean),
-                    initiator,
-                    commercialEvaluators: commercialEvaluators.map(u => ({ name: u.name, email: u.email })),
-                    companyName: emailContext.companyName,
-                    businessUnitName: emailContext.businessUnitName,
-                    vendorApprovals: emailContext.vendorApprovals,
-                    vendorsLookup: emailContext.vendorsLookup,
-                vendorQuotes: emailContext.vendorQuotes,
-                chargeLabels: emailContext.chargeLabels
-                  });
-                }
-              } catch (emailErr) {
-                logError('Failed to send round approval email', emailErr);
-              }
-            })();
-          }
+          isRoundActive = approvalResult.instance_status === 'APPROVED';
         }
       }
 
@@ -1533,6 +1637,14 @@ const NegotiationController = {
         return res.status(400).json({
           status: 2,
           message: 'Remarks are required for rejection'
+        });
+      }
+
+      // SCOPE FIRST (P0 IDOR) — see approveRound.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
         });
       }
 
@@ -1638,6 +1750,14 @@ const NegotiationController = {
         });
       }
 
+      // SCOPE FIRST (P0 IDOR) — see approveRound.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
+        });
+      }
+
       const round = await negotiationModel.getRoundById(round_id);
       if (!round) {
         return res.status(404).json({
@@ -1707,6 +1827,14 @@ const NegotiationController = {
         });
       }
 
+      // SCOPE FIRST (P0 IDOR) — see approveRound.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
+        });
+      }
+
       const round = await negotiationModel.getRoundById(round_id);
       if (!round) {
         return res.status(404).json({
@@ -1767,6 +1895,14 @@ const NegotiationController = {
         return res.status(400).json({
           status: 2,
           message: 'Round ID is required'
+        });
+      }
+
+      // SCOPE FIRST (P0 IDOR) — see approveRound.
+      if (!(await negotiationModel.userCanReadRound(readScopeUserId(req), round_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation round'
         });
       }
 
@@ -1854,24 +1990,26 @@ const NegotiationController = {
         });
       }
 
-      const round = await negotiationModel.getRoundById(round_id);
-      if (!round) {
-        return res.status(404).json({
-          status: 2,
-          message: 'Round not found'
-        });
-      }
-
       // P0 FIX (IDOR): this route had NO tenant check — any authenticated buyer
       // could read any round's negotiated prices and vendor identities by id.
       // Resolve the round's parent (RFQ or ARC) and apply the same RBAC read
-      // matrix the listings use. Runs BEFORE the quote-visibility check so an
-      // out-of-scope caller learns nothing about the round's state.
+      // matrix the listings use. Runs BEFORE the existence probe and before the
+      // quote-visibility check, so an out-of-scope id and an unknown id are
+      // indistinguishable — the guard used to sit below the 404, which leaked
+      // whether the round existed.
       const allowed = await negotiationModel.userCanReadRound(readScopeUserId(req), round_id);
       if (!allowed) {
         return res.status(403).json({
           status: 0,
           message: 'You do not have access to this negotiation round'
+        });
+      }
+
+      const round = await negotiationModel.getRoundById(round_id);
+      if (!round) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Round not found'
         });
       }
 
@@ -2793,6 +2931,19 @@ const NegotiationController = {
 
   // Server-authoritative listing — search / facet / sort / paginate + a
   // "Pending for me" tab, all server-side. Mirrors rfqController.getRfqListView.
+  //
+  // TWO LEVELS, ONE PIPELINE. `groupBy` selects the row grain:
+  //
+  //   'parent' (DEFAULT) one row per RFQ / per ARC. This is what the listing
+  //                      renders: RFQ 512 has 138 negotiation rounds and users
+  //                      read 138 rows as 138 different RFQs.
+  //   'round'            one row per negotiation round — the historic shape,
+  //                      byte-for-byte. Nothing below branches on the level
+  //                      except the row accessors, so the two levels cannot
+  //                      drift into disagreeing status vocabularies the way
+  //                      the listing and the detail page once did.
+  //
+  // There is deliberately NO second route: one endpoint, one pipeline.
   getNegotiationListView: async (req, res) => {
     try {
       const userId = req.user?.id;
@@ -2802,8 +2953,13 @@ const NegotiationController = {
       // slice are all computed from the rows this returns, so they inherit it.
       const scopeUserId = readScopeUserId(req);
       const body = req.body || {};
-      const BUCKETS = ['pending', 'active', 'awaiting', 'completed', 'cancelled'];
+      const groupBy = body.groupBy === 'round' ? 'round' : 'parent';
+      const isParent = groupBy === 'parent';
+      const BUCKETS = Object.values(NEG_STATE);
       const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      // Orthogonal to `tab`: a round's state and whether it waits on the caller
+      // are different questions, so the toggle composes with any status tab.
+      const needsMyApproval = body.needsMyApproval === true || body.needsMyApproval === 'true';
       const source = ['all', 'RFQ', 'ARC'].includes(body.source) ? body.source : 'all';
       const search = (body.search || '').toString().trim().toLowerCase() || null;
       // Tokenize the term. Two reasons:
@@ -2817,60 +2973,117 @@ const NegotiationController = {
       //     rarely happens to place those words adjacent.
       // Stripping a LEADING '#' per token (never an interior one) and requiring
       // every token to be present fixes both. The ARC branch inherits the fix
-      // for free — getArcNegotiationRoundList aliases `arc_number AS rfq_no`.
+      // for free at BOTH grains — the ARC round and parent queries alike alias
+      // `arc_number AS rfq_no`.
       // A term of only '#' collapses to zero tokens and is treated as no search.
       const searchTokens = search
         ? search.split(/\s+/).map((t) => t.replace(/^#+/, '')).filter(Boolean)
         : [];
-      const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
+      // 'rounds' and 'savings' only mean anything on a parent row; on the round
+      // grain they fall back to 'recent' rather than 400ing.
+      const SORT_KEYS = isParent
+        ? ['recent', 'oldest', 'status', 'rounds', 'savings']
+        : ['recent', 'oldest', 'status'];
+      const sort = SORT_KEYS.includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
       const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
       const f = body.filters || {};
       const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
       const filters = {
+        // rfqId keeps working verbatim. NOTE it can never select an ARC parent:
+        // ARC rows carry rfq_id = NULL by construction. That is exactly why
+        // parentKey exists.
         rfqId: asStrArr(f.rfqId),
+        parentKey: asStrArr(f.parentKey),
         status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
         productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
       };
 
-      // 1. fetch the full scoped set — ONE ROW PER ROUND.
-      // Always fetch both branches so source_counts reflects the full union totals.
+      // 1. fetch the full scoped set. Always fetch both branches so
+      // source_counts reflects the full union totals.
       const [rfqRows, arcRows] = await Promise.all([
-        negotiationModel.getNegotiationRoundList({ companyIds, userId: scopeUserId }),
-        negotiationModel.getArcNegotiationRoundList({ companyIds, userId: scopeUserId }),
+        isParent
+          ? negotiationModel.getNegotiationParentList({ companyIds, userId: scopeUserId })
+          : negotiationModel.getNegotiationRoundList({ companyIds, userId: scopeUserId }),
+        isParent
+          ? negotiationModel.getArcNegotiationParentList({ companyIds, userId: scopeUserId })
+          : negotiationModel.getArcNegotiationRoundList({ companyIds, userId: scopeUserId }),
       ]);
       const allRows = [...rfqRows, ...arcRows];
       const source_counts = { all: allRows.length, RFQ: rfqRows.length, ARC: arcRows.length };
       // Narrow to the requested source AFTER computing counts.
-      const rows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
-
-      // 2. bucket + pending-for-me stamping (per round).
-      const NEG_BUCKET = { pending_approval: 'pending', active: 'active', awaiting_decision: 'awaiting', completed: 'completed', cancelled: 'cancelled' };
-      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId) : []);
-      for (const r of rows) {
-        r._bucket = NEG_BUCKET[r.neg_status] || 'pending';
-        r._isMyAction = pendingIds.has(Number(r.round_id));
-        r.action_required = r._isMyAction;
-        r.action_label = r._isMyAction ? 'Approval needed' : null;
-      }
+      const sourceRows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
 
       const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
 
-      // 3. tab counts.
-      const tab_counts = { all: rows.length, for_me: 0, pending: 0, active: 0, awaiting: 0, completed: 0, cancelled: 0 };
+      // Parent identity of a row at EITHER grain. Round rows do not carry a
+      // parent_key column (their shape is frozen), so it is derived here for
+      // filtering only — deriving it never adds a field to the response.
+      const parentKeyOf = (r) =>
+        r.parent_key || (r.rfq_id != null ? `RFQ:${r.rfq_id}` : r.arc_id != null ? `ARC:${r.arc_id}` : null);
+
+      // 2. SEARCH — moved AHEAD of tab_counts and facets.
+      // It used to run last, so a search from the "All" tab left every tab
+      // badge showing its unsearched total and the facet lists full of options
+      // that matched nothing on screen. Badges now count what the user can
+      // actually see. Scope still bounds everything: search NARROWS the RBAC
+      // row set and can never reach outside it.
+      const rows = searchTokens.length
+        ? sourceRows.filter((r) => {
+            const hay = [
+              r.title, r.rfq_no, r.hotel_name, r.department_title,
+              ...parseArr(r.item_names).map((n) => (n && typeof n === 'object' ? n.product_name : n)),
+              ...parseArr(r.vendors).map((v) => v && v.name),
+            ].filter(Boolean).join(' ').toLowerCase();
+            return searchTokens.every((tk) => hay.includes(tk));
+          })
+        : sourceRows;
+
+      // 3. bucket + pending-for-me stamping.
+      const pendingKeys = new Set(
+        rows.length && userId
+          ? isParent
+            ? await negotiationModel.getPendingNegotiationParentIds(rows.map(parentKeyOf).filter(Boolean), userId)
+            : (await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId)).map(Number)
+          : []
+      );
+      for (const r of rows) {
+        // neg_status IS the bucket at both grains: negotiationStateCaseSql emits
+        // one of the seven NEG_STATE keys per round, and the parent query rolls
+        // those up with NEG_PARENT_STATE_ORDER into one of the same seven. Tabs
+        // therefore partition the rows — every row lands in exactly one.
+        r._bucket = NEG_STATE_PRESENTATION[r.neg_status] ? r.neg_status : NEG_STATE.AWAITING_APPROVAL;
+        r._isMyAction = isParent ? pendingKeys.has(parentKeyOf(r)) : pendingKeys.has(Number(r.round_id));
+        r.action_required = r._isMyAction;
+        r.action_label = r._isMyAction ? 'Approval needed' : null;
+        if (isParent) {
+          r.vendor_count = parseArr(r.vendors).length;
+          r.product_count = parseArr(r.item_names).length;
+        }
+      }
+
+      // 4. tab counts — over the searched set, so they sum to `all`.
+      const tab_counts = { all: rows.length, for_me: 0 };
+      for (const k of BUCKETS) tab_counts[k] = 0;
       for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
 
-      // 4. tab scope.
-      const tabRows = tab === 'all' ? rows
+      // 5. tab scope.
+      const byTab = tab === 'all' ? rows
         : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
         : rows.filter((r) => r._bucket === tab);
+      const tabRows = needsMyApproval ? byTab.filter((r) => r._isMyAction) : byTab;
 
-      // 5. facets over tab scope.
-      const fm = { rfqId: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      // 6. facets over tab scope.
+      const fm = { rfqId: new Map(), parentKey: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
       const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
-      const STATUS_LABEL = { pending: 'Pending approval', active: 'Active', awaiting: 'Awaiting decision', completed: 'Completed', cancelled: 'Cancelled' };
+      const STATUS_LABEL = Object.fromEntries(
+        Object.entries(NEG_STATE_PRESENTATION).map(([k, v]) => [k, v.label]));
       for (const r of tabRows) {
         if (r.rfq_id != null) bump(fm.rfqId, String(r.rfq_id), `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
+        if (isParent) {
+          const pk = parentKeyOf(r);
+          if (pk) bump(fm.parentKey, pk, `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
+        }
         bump(fm.status, r._bucket, STATUS_LABEL[r._bucket] || r._bucket);
         if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
         if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
@@ -2879,39 +3092,75 @@ const NegotiationController = {
       }
       const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
       const facets = { rfqId: toFacet(fm.rfqId), status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
+      if (isParent) facets.parentKey = toFacet(fm.parentKey);
 
-      // 6. apply facet + search filters.
-      // KNOWN, DELIBERATELY UNCHANGED: this runs AFTER source_counts / tab_counts
-      // / facets, so searching from a non-"All" tab only searches that tab and
-      // the tab badges keep showing unsearched totals. Moving search earlier
-      // changes what those badges mean and needs a matching UI pass — do not
-      // "fix" it here in isolation.
+      // 7. apply facet filters. These NARROW a set that is already scoped —
+      // they are never lookup keys. An out-of-scope rfqId / parentKey therefore
+      // yields an empty page, not a 403 and not somebody else's data.
       const filtered = tabRows.filter((r) => {
-        if (filters.rfqId.length && !filters.rfqId.includes(String(r.rfq_id))) return false;
+        // r.rfq_id is NULL on ARC rows: guard the null so a literal "null" in
+        // the filter cannot select them.
+        if (filters.rfqId.length && (r.rfq_id == null || !filters.rfqId.includes(String(r.rfq_id)))) return false;
+        const pk = parentKeyOf(r);
+        if (filters.parentKey.length && (pk == null || !filters.parentKey.includes(pk))) return false;
         if (filters.status.length && !filters.status.includes(r._bucket)) return false;
         if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
         if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
         if (filters.productId.length && !parseArr(r.item_names).map(String).some((n) => filters.productId.includes(n))) return false;
         if (filters.vendorId.length && !parseArr(r.vendors).some((v) => v && filters.vendorId.includes(String(v.id)))) return false;
-        if (searchTokens.length) {
-          const hay = `${r.title || ''} ${r.rfq_no || ''} ${r.hotel_name || ''} ${r.department_title || ''}`.toLowerCase();
-          if (!searchTokens.every((tk) => hay.includes(tk))) return false;
-        }
         return true;
       });
 
-      // 7. sort.
-      const ORDER = { pending: 0, active: 1, awaiting: 2, completed: 3, cancelled: 4 };
-      const ts = (r) => new Date(r.round_created_at || 0).getTime();
+      // 8. savings, parent grain only.
+      // ⚠️ SECURITY: getNegotiationParentSavings reads tbl_quotes /
+      // tbl_quote_items / tbl_quote_item_history and applies NO scope of its
+      // own. The ids handed to it here are exactly the rfq ids that survived
+      // the RBAC-scoped parent query plus every narrowing filter above — never
+      // ids taken from the request. Do not move this call above step 1.
+      if (isParent) {
+        const savingsRows = await negotiationModel.getNegotiationParentSavings(
+          filtered.map((r) => r.rfq_id).filter((id) => id != null)
+        );
+        const byRfq = new Map(savingsRows.map((s) => [Number(s.rfq_id), s]));
+        const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+        const pct = (saved, base) =>
+          Math.abs(Number(base || 0)) > 0.005 ? Math.round((saved / Number(base)) * 1000000) / 10000 : null;
+        for (const r of filtered) {
+          const s = r.rfq_id != null ? byRfq.get(Number(r.rfq_id)) : null;
+          // Signed and UNCLAMPED — prices genuinely go up (14 production RFQs
+          // ended above their baseline) and a floor of zero would hide it.
+          const saved = s ? money(s.baseline_total) - money(s.achieved_total) : 0;
+          const savedAwarded = s ? money(s.baseline_total_awarded) - money(s.achieved_total_awarded) : 0;
+          r.baseline_total = s ? money(s.baseline_total) : 0;
+          r.achieved_total = s ? money(s.achieved_total) : 0;
+          r.saved_value = money(saved);
+          r.saved_pct = s ? pct(saved, s.baseline_total) : null;
+          r.baseline_total_awarded = s ? money(s.baseline_total_awarded) : 0;
+          r.achieved_total_awarded = s ? money(s.achieved_total_awarded) : 0;
+          r.saved_value_awarded = money(savedAwarded);
+          r.saved_pct_awarded = s ? pct(savedAwarded, s.baseline_total_awarded) : null;
+          r.savings_pairs_counted = s ? Number(s.pairs_counted || 0) : 0;
+          r.savings_pairs_counted_awarded = s ? Number(s.pairs_counted_awarded || 0) : 0;
+          r.baseline_sources = s ? s.baseline_sources : null;
+        }
+      }
+
+      // 9. sort. The status sort is the ONE place the two grains legitimately
+      // differ: a round orders by NEG_STATE_ORDER, a parent by the action-first
+      // NEG_PARENT_STATE_ORDER.
+      const ORDER = isParent ? NEG_PARENT_STATE_ORDER : NEG_STATE_ORDER;
+      const ts = (r) => new Date((isParent ? r.last_activity_at : r.round_created_at) || 0).getTime();
       if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
       else if (sort === 'status') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
+      else if (sort === 'rounds') filtered.sort((a, b) => Number(b.round_count || 0) - Number(a.round_count || 0));
+      else if (sort === 'savings') filtered.sort((a, b) => Number(b.saved_value || 0) - Number(a.saved_value || 0));
       else filtered.sort((a, b) => ts(b) - ts(a));
 
-      // 8. paginate.
+      // 10. paginate.
       const total = filtered.length;
       const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
 
-      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit } });
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit, group_by: groupBy } });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

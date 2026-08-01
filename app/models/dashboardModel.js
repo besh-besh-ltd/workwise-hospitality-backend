@@ -1,5 +1,6 @@
 import db from '../config/dbConn.js';
 import { buildScopeExistsClause } from '../services/authorizationService.js';
+import negotiationModel from './negotiationModel.js';
 
 /**
  * Dashboard queries scope by buyer_company_id (covers ALL hospitality companies
@@ -441,72 +442,129 @@ async function getProcurementSnapshotData(buyer_company_id, user_id, hotel_ids =
 
 // ─────────────────────────────────────────────────────────────────────
 // 3. Negotiation Savings
-//    Compares round 1 quoted_price (initial vendor offer) with the
-//    LAST round quoted_price for the same vendor+product (final negotiated price).
 // ─────────────────────────────────────────────────────────────────────
+//
+// ONE DEFINITION OF "SAVED", SHARED WITH THE NEGOTIATION MODULE.
+//
+// Every savings figure on this dashboard is priced by
+// negotiationModel.getNegotiationParentSavings — the same function that prices
+// the negotiation listing's parent cards and agrees with the round-detail
+// page's `cumulative` tile. The dashboard does NOT carry its own copy of the
+// maths, so the two surfaces cannot drift apart again.
+//
+// WHAT IT REPLACED, AND WHY (all measured against production 2026-08-01):
+//
+//   The widget used to join `tbl_negotiation_rounds nr ON ... AND
+//   nr.round_number = 1` for the baseline and take the last round as achieved.
+//   That was wrong three times over and under-reported by ~23×:
+//
+//   1. It only saw 274 of 441 quote pairs. 167 pairs sit on RFQs with no round
+//      numbered 1 — legacy numbering is PER PRODUCT and the current allocator
+//      is RFQ-wide, so "round 1" is not a thing every RFQ has — and those
+//      contributed NOTHING.
+//   2. 243 of the 274 it did see (89%) compared a round against ITSELF. On a
+//      single-round negotiation round 1 IS the last round, so the delta is
+//      exactly ₹0. The real baseline for a first round is the vendor's
+//      ORIGINAL RFQ quote, in tbl_quote_item_history, which it never read.
+//   3. What survived was then inflated by a clamp: suppressing genuine price
+//      RISES instead of subtracting them turned a real ₹3,15,379 into
+//      ₹4,26,825.
+//
+//   Over the whole production dataset, all-time, all hotels:
+//     OLD  274 pairs · baseline ₹4,07,77,896 · saved ₹3,15,379
+//          (₹4,26,825 once the rises are clamped away)
+//     NEW  427 pairs · baseline ₹8,03,94,568 · saved ₹98,45,639
+//   The negotiation module reports ₹98,45,639 on ₹8,04,14,568 over 428 pairs —
+//   the same saved figure to the rupee. The one-pair, ₹20,000 baseline gap is
+//   RFQ 344, which the Sr-240 exclusion below drops (its only PO was rejected)
+//   and which saved ₹0 anyway.
+//
+// THE RULE, in full: per (vendor, rfq_product) pair, over the parent's
+// NON-CANCELLED rounds, BASELINE from the EARLIEST round via the ladder
+// previous_price → quote_history → prior_round → current_quote, ACHIEVED from
+// the LATEST round. SIGNED and NEVER clamped — 7 production RFQs genuinely
+// ended higher than they started, and hiding that is what caused this.
+//
+// ⚠️ SECURITY: getNegotiationParentSavings reads tbl_quotes / tbl_quote_items /
+// tbl_quote_item_history and carries NO scope predicate of its own. Every
+// caller below feeds it ONLY rfq ids that already survived a scoped query
+// (companyScope + hotelFilter + the RBAC scopeFilter, or created_by = the
+// caller). Never hand it ids from a request body, a facet or a filter.
+const EMPTY_SAVINGS = Object.freeze({
+  baseline: 0, achieved: 0, saved: 0, pairs: 0, parents: 0,
+  baseline_awarded: 0, achieved_awarded: 0, saved_awarded: 0, pairs_awarded: 0,
+});
+
+async function priceNegotiations(rfqIds) {
+  const ids = [...new Set((rfqIds || []).map(Number).filter(Number.isFinite))];
+  if (ids.length === 0) return { ...EMPTY_SAVINGS };
+  const rows = await negotiationModel.getNegotiationParentSavings(ids);
+  const sum = (key) => rows.reduce((acc, r) => acc + (Number(r[key]) || 0), 0);
+  const baseline = sum('baseline_total');
+  const achieved = sum('achieved_total');
+  const baselineAwarded = sum('baseline_total_awarded');
+  const achievedAwarded = sum('achieved_total_awarded');
+  return {
+    baseline,
+    achieved,
+    saved: baseline - achieved,
+    pairs: sum('pairs_counted'),
+    // RFQs that actually produced a priced pair — an RFQ whose rounds carry no
+    // vendor response is in scope but contributes nothing and is not counted.
+    parents: rows.filter((r) => (Number(r.pairs_counted) || 0) > 0).length,
+    baseline_awarded: baselineAwarded,
+    achieved_awarded: achievedAwarded,
+    saved_awarded: baselineAwarded - achievedAwarded,
+    pairs_awarded: sum('pairs_counted_awarded'),
+  };
+}
+
 async function getNegotiationSavingsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
   const sc = scopeFilter(user_id, 'r', params);
 
-  const savingsQuery = await db.oneOrNone(
-    `WITH scoped_rfqs AS (
-       SELECT DISTINCT nr.rfq_id
+  const scopedRfqs = await db.any(
+    `SELECT DISTINCT nr.rfq_id
        FROM tbl_negotiation_rounds nr
        JOIN tbl_rfq r ON r.id = nr.rfq_id
-       WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf} ${sc}
-       -- Sr 240: exclude Terminated/Rejected RFQs. WITHDRAWN (status=5) is the
-       -- terminated/rejected-by-us state; also drop RFQs whose only PO was
-       -- rejected by the vendor (no surviving non-rejected/cancelled PO).
-       AND r.status <> 5
-       AND NOT (
-         EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
-         AND NOT EXISTS (
-           SELECT 1 FROM tbl_rfq_purchase_order po2
-           WHERE po2.rfq_id = r.id
-           AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
-         )
-       )
-     ),
-     round1 AS (
-       SELECT sr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-       FROM scoped_rfqs sr
-       JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id AND nr.round_number = 1
-       JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-       WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-     ),
-     last_round AS (
-       SELECT DISTINCT ON (nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id)
-         nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-       FROM scoped_rfqs sr
-       JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id
-       JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-       WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-       ORDER BY nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nr.round_number DESC
-     )
-     SELECT
-       COALESCE(SUM(r1.quoted_price), 0) as market_baseline,
-       COALESCE(SUM(lr.quoted_price), 0) as negotiated_total,
-       COALESCE(SUM(r1.quoted_price) - SUM(lr.quoted_price), 0) as total_savings,
-       COUNT(*) as negotiation_count
-     FROM round1 r1
-     JOIN last_round lr ON lr.rfq_id = r1.rfq_id
-       AND lr.vendor_id = r1.vendor_id
-       AND lr.rfq_product_id = r1.rfq_product_id`,
+      WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf} ${sc}
+        -- Sr 240: exclude Terminated/Rejected RFQs. WITHDRAWN (status=5) is the
+        -- terminated/rejected-by-us state; also drop RFQs whose only PO was
+        -- rejected by the vendor (no surviving non-rejected/cancelled PO).
+        AND r.status <> 5
+        AND NOT (
+          EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order po2
+            WHERE po2.rfq_id = r.id
+            AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
+          )
+        )`,
     params
   );
 
-  const marketBaseline = savingsQuery ? parseFloat(savingsQuery.market_baseline) : 0;
-  const negotiatedTotal = savingsQuery ? parseFloat(savingsQuery.negotiated_total) : 0;
-  const totalSavings = savingsQuery ? parseFloat(savingsQuery.total_savings) : 0;
+  const totals = await priceNegotiations(scopedRfqs.map((r) => r.rfq_id));
 
   return {
-    total_savings: Math.max(totalSavings, 0),
-    market_baseline: marketBaseline,
-    negotiated_total: negotiatedTotal,
-    negotiation_count: savingsQuery ? parseInt(savingsQuery.negotiation_count, 10) : 0,
+    // SIGNED. A negative total means the negotiations in this window ended
+    // above their baseline — that is a real outcome, not a rendering problem.
+    total_savings: totals.saved,
+    market_baseline: totals.baseline,
+    negotiated_total: totals.achieved,
+    negotiation_count: totals.pairs,
+    // The realised benefit: the same maths restricted to the vendor whose quote
+    // was actually APPROVED. Additive — the headline above stays all-vendor, on
+    // the same basis as the negotiation listing's primary figure — so the FE can
+    // surface both without either number changing meaning.
+    awarded: {
+      total_savings: totals.saved_awarded,
+      market_baseline: totals.baseline_awarded,
+      negotiated_total: totals.achieved_awarded,
+      negotiation_count: totals.pairs_awarded,
+    },
     top_category_saving: { name: null, percentage: 0 },
-    cost_avoidance: Math.max(totalSavings, 0),
+    cost_avoidance: totals.saved,
   };
 }
 
@@ -2084,58 +2142,47 @@ async function getSavingsPipelineData(buyer_company_id, user_id, hotel_ids) {
       avg_savings_pct: 0,
     };
   }
-  // For negotiations led by user (round 1 created_by = user), compute
-  // SUM(round1 prices) − SUM(last round prices). Two windows: current 30d
-  // vs prior 30d, by the closed_at / final-round date.
+  // Negotiations LED BY this user, priced by the shared ladder (see
+  // getNegotiationSavingsData). Two windows: current 30d vs prior 30d, keyed on
+  // when the negotiation closed.
+  //
+  // "Led by" used to mean `round_number = 1 AND created_by = $2`. That read the
+  // stored column, which under legacy per-product numbering carried one row per
+  // PRODUCT — so a 3-product RFQ produced three my_rfqs rows with three
+  // different closed_at values and multiplied its own quote rows threefold —
+  // and under RFQ-wide numbering carries at most one row per RFQ, which would
+  // have dropped every negotiation the user opened on a later product. It is
+  // now the RFQ's EARLIEST non-cancelled round: numbering-invariant, exactly
+  // one row per RFQ, and the honest reading of who opened the negotiation.
   const computePeriod = async (intervalStart, intervalEnd) => {
-    const row = await db.oneOrNone(
-      `WITH my_rfqs AS (
-         SELECT DISTINCT nr.rfq_id, nr.closed_at
-         FROM tbl_negotiation_rounds nr
-         JOIN tbl_rfq r ON r.id = nr.rfq_id AND ${companyScope()}
-         WHERE nr.round_number = 1
-           AND nr.created_by = $2
-           AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                       WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-       ),
-       round1 AS (
-         SELECT mr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-         FROM my_rfqs mr
-         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = mr.rfq_id AND nr.round_number = 1
-         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-         WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-           AND ${intervalStart === null
-             ? "TRUE"
-             : `(mr.closed_at IS NULL OR (mr.closed_at >= NOW() - INTERVAL '${intervalEnd}' AND mr.closed_at < NOW() - INTERVAL '${intervalStart}'))`}
-       ),
-       last_round AS (
-         SELECT DISTINCT ON (nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id)
-                nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-         FROM my_rfqs mr
-         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = mr.rfq_id
-         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-         WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-         ORDER BY nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nr.round_number DESC
-       )
-       SELECT
-         COALESCE(SUM(r1.quoted_price), 0) AS baseline_total,
-         COALESCE(SUM(lr.quoted_price), 0) AS final_total,
-         COUNT(DISTINCT r1.rfq_id)::int AS negotiation_count
-       FROM round1 r1
-       JOIN last_round lr ON lr.rfq_id = r1.rfq_id
-         AND lr.vendor_id = r1.vendor_id
-         AND lr.rfq_product_id = r1.rfq_product_id`,
+    const rows = await db.any(
+      `SELECT r.id AS rfq_id
+         FROM tbl_rfq r
+         JOIN LATERAL (
+           SELECT nr.created_by, nr.closed_at
+             FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = r.id
+              AND nr.status <> 'CANCELLED'
+            ORDER BY nr.created_at, nr.id
+            LIMIT 1
+         ) first_round ON TRUE
+        WHERE ${companyScope()}
+          AND first_round.created_by = $2
+          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+          AND ${intervalStart === null
+            ? 'TRUE'
+            : `(first_round.closed_at IS NULL OR (first_round.closed_at >= NOW() - INTERVAL '${intervalEnd}' AND first_round.closed_at < NOW() - INTERVAL '${intervalStart}'))`}`,
       [buyer_company_id, user_id, hotel_ids]
     );
-    const baseline = Number(row?.baseline_total) || 0;
-    const final = Number(row?.final_total) || 0;
+    const totals = await priceNegotiations(rows.map((r) => r.rfq_id));
     return {
       // Signed value: positive = saved, negative = lost (negotiated above
       // baseline). FE renders losses in red.
-      savings: baseline - final,
-      baseline,
-      final,
-      negotiation_count: row?.negotiation_count || 0,
+      savings: totals.saved,
+      baseline: totals.baseline,
+      final: totals.achieved,
+      negotiation_count: totals.parents,
     };
   };
 
@@ -2612,46 +2659,22 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
     params
   );
 
-  // 7. Weekly savings — negotiation delta on rounds *started* this week.
-  //    Same shape as getNegotiationSavingsData but date-bounded inline.
-  const weeklySavingsP = db.oneOrNone(
-    `WITH scoped_rfqs AS (
-       SELECT DISTINCT nr.rfq_id
-         FROM tbl_negotiation_rounds nr
-         JOIN tbl_rfq r ON r.id = nr.rfq_id
-        WHERE r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-          AND r.created_by = $2
-          ${hasDates ? 'AND nr.created_at BETWEEN $4 AND $5' : "AND nr.created_at >= NOW() - INTERVAL '7 days'"}
-          AND EXISTS (
-            SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-             WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-          )
-     ),
-     round1 AS (
-       SELECT sr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-         FROM scoped_rfqs sr
-         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id AND nr.round_number = 1
-         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-        WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-     ),
-     last_round AS (
-       SELECT DISTINCT ON (nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id)
-              nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nrq.quoted_price
-         FROM scoped_rfqs sr
-         JOIN tbl_negotiation_rounds nr ON nr.rfq_id = sr.rfq_id
-         JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id
-        WHERE nrq.quoted_price IS NOT NULL AND nrq.quoted_price > 0
-        ORDER BY nr.rfq_id, nrq.vendor_id, nrq.rfq_product_id, nr.round_number DESC
-     )
-     SELECT
-       COALESCE(SUM(r1.quoted_price), 0) AS market_baseline,
-       COALESCE(SUM(lr.quoted_price), 0) AS negotiated_total
-       FROM round1 r1
-       JOIN last_round lr ON lr.rfq_id = r1.rfq_id
-         AND lr.vendor_id = r1.vendor_id
-         AND lr.rfq_product_id = r1.rfq_product_id`,
+  // 7. Weekly savings — the user's own RFQs whose rounds *started* this week,
+  //    priced by the shared ladder (see getNegotiationSavingsData). The ids are
+  //    scoped here; the pricing itself carries no scope of its own.
+  const weeklySavingsRfqsP = db.any(
+    `SELECT DISTINCT nr.rfq_id
+       FROM tbl_negotiation_rounds nr
+       JOIN tbl_rfq r ON r.id = nr.rfq_id
+      WHERE r.hospitality_company_id IN (
+        SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
+      )
+        AND r.created_by = $2
+        ${hasDates ? 'AND nr.created_at BETWEEN $4 AND $5' : "AND nr.created_at >= NOW() - INTERVAL '7 days'"}
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq_hotel_mappings rhm
+           WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
+        )`,
     params
   );
 
@@ -2662,7 +2685,7 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
     quoteCompareReady,
     poAcceptancePending,
     weeklyPublished,
-    weeklySavings,
+    weeklySavingsRfqs,
   ] = await Promise.all([
     pendingApprovalsP,
     closingSoonP,
@@ -2670,11 +2693,12 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
     quoteCompareReadyP,
     poAcceptancePendingP,
     weeklyPublishedP,
-    weeklySavingsP,
+    weeklySavingsRfqsP,
   ]);
 
-  const baseline = weeklySavings ? Number(weeklySavings.market_baseline) || 0 : 0;
-  const negotiated = weeklySavings ? Number(weeklySavings.negotiated_total) || 0 : 0;
+  const weeklySavings = await priceNegotiations(weeklySavingsRfqs.map((r) => r.rfq_id));
+  const baseline = weeklySavings.baseline;
+  const negotiated = weeklySavings.achieved;
   const savings_pct = baseline > 0 ? Math.round(((baseline - negotiated) / baseline) * 1000) / 10 : 0;
 
   // Mode is derived here so server and client agree on tone.

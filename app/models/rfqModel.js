@@ -9,6 +9,18 @@ import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 
 
+// A bare (optionally schema-qualified) SQL identifier. Table names reaching
+// the generic helpers below are always literals in the source; anything else
+// is a bug or an injection attempt and is rejected outright.
+const SQL_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$/;
+
+// Tokens whose only purpose in a WHERE fragment is to terminate the intended
+// statement or comment out the rest of it. pg-promise formats client-side and
+// sends a single text statement to Postgres, so a `;` really does start a
+// second command. See checkIfExists for why the legacy string form of the
+// condition cannot simply be parameterized in place.
+const SQL_BREAKOUT_RE = /;|--|\/\*|\*\/|\0/;
+
 const generateReminderTokenValue = () => {
   const timestamp = Date.now().toString();
   const randomSegment = Math.floor(Math.random() * 1_000_000)
@@ -200,12 +212,15 @@ WHERE NOT EXISTS (
 
   getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
     try {
-      const condition = `rfq_id = ${rfq_id} ${
-        is_processed && is_processed == 'true' ? 'AND is_processed' : ''
-      } ${
-        sheet_id && !isNaN(parseInt(sheet_id)) ? ` AND id = ${sheet_id}` : ``
-      } ORDER BY id`;
-      return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition);
+      const values = [rfq_id];
+      let where = `rfq_id = $1`;
+      if (is_processed && is_processed == 'true') where += ` AND is_processed`;
+      if (sheet_id && !isNaN(parseInt(sheet_id))) {
+        values.push(parseInt(sheet_id, 10));
+        where += ` AND id = $${values.length}`;
+      }
+      where += ` ORDER BY id`;
+      return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', { where, values });
     } catch (error) {
       throw error;
     }
@@ -363,11 +378,10 @@ WHERE NOT EXISTS (
     jsonUrl
   ) => {
     try {
-      const persistenceQuery = `id = ${persistenceId}`;
-      let persistence = await rfqModel.checkIfExists(
-        'tbl_rfq_persistent_jobs',
-        persistenceQuery
-      );
+      let persistence = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', {
+        where: 'id = $1',
+        values: [persistenceId]
+      });
 
       if (!persistence || persistence.length <= 0) {
         throw new Error('Persistence does not exist!');
@@ -590,10 +604,12 @@ WHERE NOT EXISTS (
           }
 
         // Insert into tbl_rfq_products and get back their IDs
-        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
         let sheet = await rfqModel.checkIfExists(
           'tbl_rfq_draft_sheets',
-          parameter,
+          {
+            where: 'rfq_id = $1 AND sheet_name = $2',
+            values: [rfq_id, sheetToProcess.sheet_name]
+          },
           t
         );
 
@@ -1272,14 +1288,25 @@ WHERE NOT EXISTS (
     });
   },
   update: async (table_name, data, primary_key, db_con = db) => {
+    if (
+      typeof table_name !== 'string' ||
+      !SQL_IDENTIFIER_RE.test(table_name.trim())
+    ) {
+      throw new Error(`update: invalid table name ${JSON.stringify(table_name)}`);
+    }
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
     const values = Object.values(data);
+    // `primary_key` is a VALUE, never SQL. It used to be interpolated raw,
+    // which made every caller that passed a request parameter through
+    // (rfqController.updateQuoteItems passed `req.params.quoteId`) a second
+    // injection sink on top of checkIfExists.
+    values.push(primary_key);
     const updateQuery = `
-      UPDATE ${table_name}
+      UPDATE ${table_name.trim()}
       SET ${setClause}
-      WHERE id = ${primary_key}
+      WHERE id = $${values.length}
       RETURNING *`;
 
     return new Promise(function (resolve, reject) {
@@ -1294,15 +1321,50 @@ WHERE NOT EXISTS (
         });
     });
   },
+  /**
+   * `UPDATE <table> SET <data> WHERE <where_clause>`.
+   *
+   * Same two call forms as checkIfExists. In the parameterized form the
+   * caller numbers their placeholders from $1; they are shifted past the SET
+   * clause's own parameters here so the caller never has to know how many
+   * columns are being written.
+   */
   updateWhere: async (table_name, data, where_clause, db_con = db) => {
+    if (
+      typeof table_name !== 'string' ||
+      !SQL_IDENTIFIER_RE.test(table_name.trim())
+    ) {
+      throw new Error(`updateWhere: invalid table name ${JSON.stringify(table_name)}`);
+    }
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
     const values = Object.values(data);
+
+    let whereSql;
+    if (where_clause && typeof where_clause === 'object' && !Array.isArray(where_clause)) {
+      const rawWhere = where_clause.where ?? where_clause.text;
+      const whereValues = where_clause.values ?? [];
+      if (typeof rawWhere !== 'string' || !rawWhere.trim()) {
+        throw new Error('updateWhere: parameterized form requires a `where` string');
+      }
+      const offset = values.length;
+      whereSql = rawWhere.replace(/\$(\d+)/g, (_m, n) => `$${Number(n) + offset}`);
+      values.push(...whereValues);
+    } else {
+      if (typeof where_clause !== 'string' || !where_clause.trim()) {
+        throw new Error('updateWhere: a where clause is required');
+      }
+      if (SQL_BREAKOUT_RE.test(where_clause)) {
+        throw new Error('updateWhere: unsafe where clause rejected (statement-breakout token)');
+      }
+      whereSql = where_clause;
+    }
+
     const updateQuery = `
-      UPDATE ${table_name}
+      UPDATE ${table_name.trim()}
       SET ${setClause}
-      WHERE ${where_clause}
+      WHERE ${whereSql}
       RETURNING *`;
 
     return new Promise(function (resolve, reject) {
@@ -6009,20 +6071,63 @@ LIMIT 2;
     }
   },
 
+  /**
+   * `SELECT * FROM <table> WHERE <condition>`.
+   *
+   * SECURITY — this helper used to be a raw-interpolation sink:
+   *   `SELECT * FROM ${table_name} WHERE ${parameter}`
+   * with `[table_name]` passed as "values" (inert — the query carries no
+   * placeholders). pg-promise formats client-side and hands Postgres ONE text
+   * statement, so a `;` inside `parameter` executed a SECOND statement. Every
+   * caller that interpolated a user-controlled value was an injection sink.
+   *
+   * Two call forms are supported; the signature is unchanged so the ~50
+   * existing callers keep working:
+   *
+   *   PREFERRED (parameterized — use this for anything user-controlled):
+   *     checkIfExists('tbl_quotes', { where: 'id = $1', values: [quoteId] })
+   *
+   *   LEGACY (raw condition string, still used by callers that only ever
+   *   interpolate server-derived constants):
+   *     checkIfExists('tbl_quotes', `id = ${someInternalId}`)
+   *   The legacy form now fails closed on statement-breakout tokens
+   *   (semicolon, SQL line comment, C-style comment delimiters, NUL) so the
+   *   destructive class of injection is dead everywhere, including callers
+   *   outside this file.
+   *
+   * The table name is always validated as a bare SQL identifier — no caller
+   * has ever passed anything else.
+   */
   checkIfExists: async (table_name, parameter, db_con = db) => {
-    const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+    if (
+      typeof table_name !== 'string' ||
+      !SQL_IDENTIFIER_RE.test(table_name.trim())
+    ) {
+      throw new Error(
+        `checkIfExists: invalid table name ${JSON.stringify(table_name)}`
+      );
+    }
+    const table = table_name.trim();
 
-    return new Promise(function (resolve, reject) {
-      db_con
-        .any(query, [table_name])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    // Parameterized form.
+    if (parameter && typeof parameter === 'object' && !Array.isArray(parameter)) {
+      const where = parameter.where ?? parameter.text;
+      const values = parameter.values ?? [];
+      if (typeof where !== 'string' || !where.trim()) {
+        throw new Error('checkIfExists: parameterized form requires a `where` string');
+      }
+      return db_con.any(`SELECT * FROM ${table} WHERE ${where}`, values);
+    }
+
+    if (typeof parameter !== 'string' || !parameter.trim()) {
+      throw new Error('checkIfExists: a condition is required');
+    }
+    if (SQL_BREAKOUT_RE.test(parameter)) {
+      throw new Error(
+        'checkIfExists: unsafe condition rejected (statement-breakout token)'
+      );
+    }
+    return db_con.any(`SELECT * FROM ${table} WHERE ${parameter}`);
   },
   getQuotesByRfqById: async (id, user_id) => {
     return new Promise(function (resolve, reject) {

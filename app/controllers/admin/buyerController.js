@@ -13,6 +13,19 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
+/**
+ * Coerce a request-supplied id to a plain JS integer, or null if it is not one.
+ * Mirrors the helper in app/validations/dbValidation/userDbValidation.js — see
+ * there for why this is Number() and not parseInt().
+ */
+const toSafeId = (value) => {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const candidate = typeof value === 'string' ? value.trim() : value;
+  if (candidate === '') return null;
+  const parsed = Number(candidate);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+};
+
 const buyerController = {
   buyerList: async (req, res, next) => {
     try {
@@ -178,12 +191,27 @@ const buyerController = {
         max_finance: parseInt(max_finance) || 0
       };
 
+      // `company_id` is a route param. Interpolated into the WHERE it made
+      // this an UPDATE sink, not just a read one: `company_id = -1 OR 1=1`
+      // rewrote the account limits of EVERY company on the platform in one
+      // request. The statement-breakout guard in rfqModel.updateWhere does not
+      // catch that — it is ordinary boolean logic, no `;` or comment needed.
+      const companyId = toSafeId(company_id);
+      if (companyId === null) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'A valid company ID is required'
+          })
+          .end();
+      }
+
       // Use general updateWhere function
-      await rfqModel.updateWhere(
-        'tbl_company_buyer_account_limit',
-        limitsData,
-        `company_id = ${company_id}`
-      );
+      await rfqModel.updateWhere('tbl_company_buyer_account_limit', limitsData, {
+        where: 'company_id = $1',
+        values: [companyId]
+      });
 
       res
         .status(200)
@@ -316,7 +344,27 @@ const buyerController = {
       // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
       const { vendorTempId, status, reject_reason, buyerName, productdetails } = req.body
       
-      const userDetails = await rfqModel.checkIfExists('tbl_temp_user', `id = ${vendorTempId}`);
+      // `vendorTempId` arrives raw off req.body. Interpolated, `id = -1 OR 1=1`
+      // matched every pending temp vendor, so the existence check below passed
+      // and `userDetails[0]` became a record this admin never named — which the
+      // status=3 branch then acts on by email. Reject a non-id outright; the
+      // 400 matches what a non-numeric value already produced (via the catch),
+      // so nothing that worked before stops working.
+      const tempUserId = toSafeId(vendorTempId);
+      if (tempUserId === null) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'A valid vendorTempId is required'
+          })
+          .end();
+      }
+
+      const userDetails = await rfqModel.checkIfExists('tbl_temp_user', {
+        where: 'id = $1',
+        values: [tempUserId]
+      });
       if (userDetails.length <= 0) {
         return res
           .status(200)

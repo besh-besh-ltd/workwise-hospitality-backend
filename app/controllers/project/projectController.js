@@ -320,8 +320,15 @@ const projectController = {
     const spentArr = await projectModel.getProjectBudget(project_id);
     const totalSpent = spentArr.reduce((sum, b) => sum + Number(b.total_value || 0), 0);
 
-    // Get project budget from rfqModel
-    const budgetRows = await rfqModel.checkIfExists('tbl_projects', `id = ${project_id}`);
+    // Get project budget from rfqModel.
+    // Bound rather than interpolated. Not reachable today — the Joi param
+    // schema is Joi.number().integer() and userCanAccessProject() above does
+    // Number(projectId) and returns false on NaN — but both of those are
+    // guards somewhere else, and this line should not depend on them.
+    const budgetRows = await rfqModel.checkIfExists('tbl_projects', {
+      where: 'id = $1',
+      values: [Number(project_id)]
+    });
     totalBudget = budgetRows.reduce((sum, b) => sum + Number(b.budget || 0), 0);
 
     return res.status(200).json({

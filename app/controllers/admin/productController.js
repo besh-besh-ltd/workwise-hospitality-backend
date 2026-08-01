@@ -3161,7 +3161,17 @@ const productController = {
 
       // fetch existing product makes for the mapping
       const tblProductMake = 'tbl_product_variant_vendor_make';
-      const fetchedMakeList = await rfqModel.checkIfExists(tblProductMake, `variant_vendor_map_id = ${mapping_id}`);
+      // Read against the id the DATABASE just handed back, not the string off
+      // req.body. Interpolated, `variant_vendor_map_id = <id>) OR (1=1` would
+      // have widened this read to every mapping in the table, and the
+      // delete-diff below would then have deleted other mappings' makes.
+      // (In practice the getVariantVendorMappingById lookup above rejects a
+      // non-integer first, so this was not reachable — but that is an accident
+      // of statement order, not a guarantee.)
+      const fetchedMakeList = await rfqModel.checkIfExists(tblProductMake, {
+        where: 'variant_vendor_map_id = $1',
+        values: [mapping.mapping_id]
+      });
   
       // Prepare clean lists
       const existingMakes = fetchedMakeList.map(m => m.make_name?.trim());
@@ -3198,7 +3208,14 @@ const productController = {
 
 
       for (let id of approved_id) {
-        const result = await rfqModel.checkIfExists(tbl, `id = ${id}`);
+        // Already safe before this change — `approved_id.map(Number)` above
+        // means `id` is a JS number, never attacker-controlled text. Bound
+        // anyway so the safety is local to this line instead of depending on
+        // a coercion five lines up surviving a future edit.
+        const result = await rfqModel.checkIfExists(tbl, {
+          where: 'id = $1',
+          values: [id]
+        });
         if (!result) {
           missingIds.push(id);
         }

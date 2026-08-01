@@ -21,7 +21,7 @@
 //      targets and vendor names but drops EVERY price field and all totals.
 
 import { logError } from '../../helper/common.js';
-import negotiationModel from '../../models/negotiationModel.js';
+import negotiationModel, { NEG_STATE } from '../../models/negotiationModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import { buildQuoteVisibilityMeta } from '../../helper/quoteVisibility.js';
 
@@ -85,6 +85,21 @@ const LOCKED_VENDOR_FIELDS = [
   'has_responded',
 ];
 
+const LOCKED_HISTORY_FIELDS = [
+  'round_id',
+  'round_number',
+  'status',
+  'state',
+  'state_label',
+  'is_current',
+  'end_date',
+  'closed_at',
+  'created_at',
+  'line_count',
+  'responded_count',
+  'vendors_total',
+];
+
 const pick = (obj, keys) => {
   const out = {};
   for (const k of keys) if (obj && Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
@@ -98,26 +113,48 @@ const pick = (obj, keys) => {
  * the round's own scope, so the page never has to guess (and never renders a
  * button the API would refuse).
  */
-export const deriveActions = ({ effectiveStatus, permissions, locked, vendorApprovalSummary, hasResponses }) => {
+export const deriveActions = ({ state, permissions, locked, vendorApprovalSummary, hasResponses }) => {
   const p = permissions || {};
-  const pre = ['DRAFT', 'PENDING_APPROVAL'].includes(effectiveStatus);
-  const live = ['ACTIVE', 'AWAITING_DECISION'].includes(effectiveStatus);
-  const terminal = ['CANCELLED', 'EXPIRED'].includes(effectiveStatus);
+  const s = String(state || '');
+
+  // Before vendors are involved at all — the approval gate.
+  const preApproval = s === NEG_STATE.AWAITING_APPROVAL;
+  // The response window is genuinely still open.
+  const windowOpen = s === NEG_STATE.OPEN_WITH_VENDORS;
+
+  // A follow-up round is BLOCKED only while this one is still in flight.
+  //
+  // The old rule was `!pre && !live && !terminal` with live = ACTIVE |
+  // AWAITING_DECISION. Since ENDED maps to AWAITING_DECISION, that counted
+  // every one of the 622 ENDED rounds as "live" — so only the 5 COMPLETED
+  // rounds in all of production could spawn a follow-up. EXPIRED (171) and
+  // CANCELLED (88) were blocked too, and opening a fresh round is precisely
+  // the recovery from both: a lapsed round never reached a vendor, and a
+  // cancelled one was withdrawn on purpose.
+  const canCreateNext = !preApproval && !windowOpen;
+
   const summary = vendorApprovalSummary || {};
   const anyPending = Number(summary.pending || 0) > 0;
   const anyRejected = Number(summary.rejected || 0) > 0;
 
   return {
-    can_approve: !!p.approve && pre,
-    can_reject: !!p.approve && pre,
-    can_approve_vendor: !!p.approve && pre && anyPending,
-    can_reject_vendor: !!p.approve && pre && anyPending,
-    can_resubmit_vendor: !!p.approve && pre && anyRejected,
-    can_close: !!p.update && live,
-    can_create_next_round: !!p.create && !pre && !live && !terminal,
+    can_approve: !!p.approve && preApproval,
+    can_reject: !!p.approve && preApproval,
+    can_approve_vendor: !!p.approve && preApproval && anyPending,
+    can_reject_vendor: !!p.approve && preApproval && anyPending,
+    can_resubmit_vendor: !!p.approve && preApproval && anyRejected,
+    // Closing the window early, or closing out a window that has run down but
+    // has not yet been dispositioned. A concluded round has nothing to close.
+    can_close:
+      !!p.update &&
+      [NEG_STATE.OPEN_WITH_VENDORS, NEG_STATE.READY_FOR_DECISION, NEG_STATE.NO_VENDOR_RESPONSE].includes(s),
+    can_create_next_round: !!p.create && canCreateNext,
     can_view_quotes: !!p.read && !locked,
     can_submit_quotes_for_approval:
-      !!p.update && effectiveStatus === 'AWAITING_DECISION' && !locked && !!hasResponses,
+      !!p.update &&
+      [NEG_STATE.READY_FOR_DECISION, NEG_STATE.CONCLUDED].includes(s) &&
+      !locked &&
+      !!hasResponses,
   };
 };
 
@@ -133,6 +170,9 @@ export const redactForLockedVisibility = (data) => ({
   vendors: data.vendors.map((v) => pick(v, LOCKED_VENDOR_FIELDS)),
   totals: null,
   cumulative: null,
+  // The round-history table carries per-round money too — same whitelist
+  // discipline as the lines, so a money field added later cannot leak.
+  history: (data.history || []).map((h) => pick(h, LOCKED_HISTORY_FIELDS)),
 });
 
 const negotiationRoundDetailController = {
@@ -186,7 +226,11 @@ const negotiationRoundDetailController = {
         quoteVisibility = buildQuoteVisibilityMeta(await rfqModel.getRfqDetailsById(detail.parent.rfq_id));
       }
 
-      const { _effective_status: effectiveStatus, ...payload } = detail;
+      // Both underscore keys are internal: `_effective_status` is the legacy
+      // raw+deadline status and is dropped entirely; `_state` is the derived
+      // seven-state key the action gates read. `round.state` on the payload is
+      // the copy the client sees.
+      const { _effective_status: _dropped, _state: state, ...payload } = detail;
 
       // Actions are derived with the lock already accounted for, so the
       // redaction below only ever strips data — it can never widen what the
@@ -196,7 +240,7 @@ const negotiationRoundDetailController = {
         quote_visibility: quoteVisibility,
         prices_hidden: false,
         actions: deriveActions({
-          effectiveStatus,
+          state,
           permissions: payload.permissions,
           locked: quoteVisibility.locked,
           vendorApprovalSummary: payload.approval?.vendor_approvals ?? null,

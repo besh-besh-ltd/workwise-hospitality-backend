@@ -164,8 +164,13 @@ describe("Negotiation list-view search — '#'-prefixed numbers and multi-token 
     await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [users]);
   });
 
+  // groupBy defaults to 'parent' (one row per RFQ/ARC). This suite asserts on
+  // round_id, so it pins the ROUND grain explicitly — and in doing so acts as
+  // the regression guard that groupBy:'round' is unchanged.
   const search = (client, term, body = {}) =>
-    client.post("/api/v1/negotiation/list-view").send({ limit: 200, search: term, ...body });
+    client
+      .post("/api/v1/negotiation/list-view")
+      .send({ limit: 200, groupBy: "round", search: term, ...body });
 
   const idsOf = (res) => res.body.data.rows.map((r) => Number(r.round_id));
 

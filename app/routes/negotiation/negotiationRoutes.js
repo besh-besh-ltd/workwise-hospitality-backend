@@ -22,6 +22,13 @@ NegotiationRoutes.get(
   negotiationController.listNegotiationRfqs
 );
 // Server-authoritative listing (search / facet / sort / paginate + Pending-for-me).
+//
+// ONE endpoint, TWO grains, selected by `groupBy` in the body:
+//   'parent' (DEFAULT) one row per RFQ / per ARC, with a rolled-up status,
+//                      round_count, state_counts and the savings block.
+//   'round'            one row per negotiation round — the historic shape.
+// Deliberately NOT two routes: a second endpoint is exactly how the listing and
+// the round-detail page ended up with two disagreeing status vocabularies.
 NegotiationRoutes.post(
   '/list-view',
   passportSignIn,

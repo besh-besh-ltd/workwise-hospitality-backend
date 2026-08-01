@@ -407,14 +407,20 @@ describe("Negotiation round detail — contract, baselines and signed savings", 
     expect(typeof d.round.end_date).toBe("string");
     expect(d.round.created_by.user_id).toBe(U_NEG);
 
-    // BOTH denominators — the UI's "Round 5 of 32" bug came from mixing them.
-    // This round is round_number 1 and covers product PREV. Ten rounds exist on
-    // the RFQ; TWO of them touch PREV (this one, plus the multi-item round
-    // numbered 5). So "Round 1 of 10" and "Round 1 of 2" are both misleading and
-    // the honest denominator is a third number — hence all three are returned.
+    // A round's number is its position in the WHOLE RFQ (product definition),
+    // so the denominator is every round on the RFQ. `rounds_on_products` rides
+    // along as context — how many of those rounds touched these items — but it
+    // never divides the position.
     expect(d.round.rounds_on_parent).toBeGreaterThanOrEqual(9);
+    expect(d.round.total_rounds).toBe(d.round.rounds_on_parent);
     expect(d.round.rounds_on_products).toBe(2);
-    expect(d.round.max_round_number_on_products).toBe(5);
+
+    // The displayed number is computed, never the stored column: this round is
+    // STORED as round_number 1 (its product's first) but sits earlier in the
+    // RFQ's own chronology than nine other rounds.
+    expect(d.round.stored_round_number).toBe(1);
+    expect(d.round.round_number).toBeGreaterThanOrEqual(1);
+    expect(d.round.round_number).toBeLessThanOrEqual(d.round.rounds_on_parent);
 
     // Parent identifiers
     expect(d.parent.source_type).toBe("RFQ");
@@ -643,8 +649,10 @@ describe("Negotiation round detail — contract, baselines and signed savings", 
     const res = await detail(R.HIST2);
     const c = res.body.data.cumulative;
 
-    expect(c.from_round_number).toBe(1);
-    expect(c.to_round_number).toBe(2);
+    // The endpoints are RFQ-wide POSITIONS, matching the number the page header
+    // shows — not the stored per-product sequence, which would say "rounds 1–2"
+    // on a page headed "Round 5 of 10".
+    expect(c.from_round_number).toBeLessThan(c.to_round_number);
     expect(c.round_ids.sort()).toEqual([R.HIST, R.HIST2].sort());
     expect(c.round_ids).not.toContain(R.HISTCANCEL);
     expect(c.rounds_counted).toBe(2);
