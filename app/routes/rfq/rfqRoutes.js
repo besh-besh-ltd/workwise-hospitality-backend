@@ -17,6 +17,27 @@ import hospitalityMiddleware from '../../middleware/hospitality.js';
 
 const RfqRoutes = Router();
 
+/**
+ * Reject any route param that is not a positive integer BEFORE it reaches a
+ * controller. First line of defence for id-shaped params: `/quote/update/
+ * :quoteId` had none, and the raw value flowed into a string-interpolated
+ * WHERE clause (see rfqModel.checkIfExists).
+ *
+ * The param is normalised to its canonical decimal form so downstream string
+ * concatenation cannot be surprised by leading zeros or whitespace.
+ */
+const requirePositiveIntParam = (name) => (req, res, next) => {
+  const raw = req.params?.[name];
+  if (typeof raw !== 'string' || !/^[0-9]{1,15}$/.test(raw) || Number(raw) <= 0) {
+    return res.status(400).json({
+      status: 0,
+      message: `Invalid ${name}.`
+    });
+  }
+  req.params[name] = String(Number(raw));
+  next();
+};
+
 RfqRoutes.post(
   '/create',
   passportSignIn,
@@ -275,6 +296,7 @@ RfqRoutes.post(
 
 RfqRoutes.put(
   '/quote/update/:quoteId',
+  requirePositiveIntParam('quoteId'),
   noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.updateQuoteItems

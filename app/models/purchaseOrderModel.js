@@ -2265,14 +2265,23 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       else if (typeof rawGc === 'string' && rawGc.trim()) {
         try { globalCharges = JSON.parse(rawGc); } catch (_e) { globalCharges = []; }
       }
-      let globalChargesTotal = 0;
-      for (const gc of globalCharges) {
-        const norm = pricingEngine.normalizeGlobalCharge(gc);
-        if (!norm) continue;
-        globalChargesTotal += pricingEngine.applyChargeMode(
-          norm.amount, norm.amount_mode, lineSubtotal
-        );
-      }
+      // Delegates to the engine — same helper the draft-merge branch
+      // (draftPurchaseOrder) and mergeDraftPOs use, so an edited PO can never
+      // disagree with a freshly drafted or merged one.
+      //
+      // This used to hand-roll the loop and apply ONLY norm.amount, silently
+      // dropping each charge's `additional_tax` (e.g. the 18% GST levied on a
+      // 7% Transportation charge). A PO was therefore correct the moment it
+      // was drafted and became wrong the first time anybody edited it.
+      // Production PO 440 / 138712: 6 lines summing ₹16,939 with
+      // "Transportation 7% + additional_tax 18%" stored ₹18,124.73 instead of
+      // ₹18,338.16 — the ₹213.43 additional_tax leg was missing. The printed
+      // PO always showed the correct figure, because poTemplatePricing
+      // recomputes from the lines and does apply additional_tax.
+      const globalChargesTotal = pricingEngine.sumGlobalCharges(globalCharges, lineSubtotal);
+      // Quantise at this boundary only (the engine returns a raw sum), matching
+      // draftPurchaseOrder/mergeDraftPOs so the stored total_value can't drift
+      // by a paisa depending on which path last wrote it.
       const grandTotal = Math.round((lineSubtotal + globalChargesTotal) * 100) / 100;
 
       await t.none(

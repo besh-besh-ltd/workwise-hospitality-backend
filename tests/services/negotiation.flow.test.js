@@ -450,14 +450,20 @@ describe("approveRound / rejectRound — state transitions", () => {
     return { rfq_id, product_id, round };
   }
 
-  it("returns 404 when approving a non-existent round", async () => {
+  it("refuses to act on a non-existent round without revealing that it does not exist", async () => {
     const m = mockExpress({
       user: { id: IDS.users.a1_proc_commApp },
       params: { id: "999999999" },
       body: {},
     });
     await negotiationController.approveRound(m.req, m.res);
-    expect([400, 404]).toContain(m.calls.status);
+    // approveRound now applies the negotiation read matrix BEFORE any state
+    // read (it previously mutated any round by id with no tenant check). The
+    // matrix cannot match a row that isn't there, so an unknown id and an
+    // out-of-scope id are refused identically with 403 — deliberately, so an
+    // id probe cannot enumerate which rounds exist. Same contract the
+    // round-detail endpoint already enforces.
+    expect([400, 403, 404]).toContain(m.calls.status);
   });
 
   it("rejectRound with missing remarks returns 400", async () => {
