@@ -274,8 +274,12 @@ describe("Negotiation status taxonomy", () => {
   });
 
   // ── helpers ──────────────────────────────────────────────────────────────
+  // groupBy defaults to 'parent' (one row per RFQ/ARC). This suite is about
+  // per-ROUND state derivation and position, so it pins the round grain.
   const listRows = async () => {
-    const res = await client.post("/api/v1/negotiation/list-view").send({ tab: "all", limit: 100 });
+    const res = await client
+      .post("/api/v1/negotiation/list-view")
+      .send({ tab: "all", limit: 100, groupBy: "round" });
     expect(res.status).toBe(200);
     return res.body.data.rows;
   };
@@ -456,7 +460,9 @@ describe("Negotiation status taxonomy", () => {
     });
 
     it("counts it in tab_counts.for_me", async () => {
-      const res = await client.post("/api/v1/negotiation/list-view").send({ tab: "all", limit: 100 });
+      const res = await client
+        .post("/api/v1/negotiation/list-view")
+        .send({ tab: "all", limit: 100, groupBy: "round" });
       expect(res.body.data.tab_counts.for_me).toBeGreaterThanOrEqual(1);
     });
 

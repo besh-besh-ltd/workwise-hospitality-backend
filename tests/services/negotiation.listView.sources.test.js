@@ -356,8 +356,11 @@ describe("Negotiation list-view — source filter (RFQ + ARC unification)", () =
   });
 
   // ── HELPER ─────────────────────────────────────────────────────────────────
+  // groupBy defaults to 'parent' (one row per RFQ/ARC). This suite asserts on
+  // round_id, so it pins the ROUND grain explicitly — and in doing so acts as
+  // the regression guard that groupBy:'round' is unchanged.
   const listView = (body = {}) =>
-    buyerClient.post("/api/v1/negotiation/list-view").send(body);
+    buyerClient.post("/api/v1/negotiation/list-view").send({ groupBy: "round", ...body });
 
   const roundIds = (res) => res.body.data.rows.map((r) => Number(r.round_id));
 

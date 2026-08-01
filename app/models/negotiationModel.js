@@ -384,6 +384,86 @@ export const NEG_STATE_ORDER = Object.fromEntries(
   Object.entries(NEG_STATE_PRESENTATION).map(([k, v]) => [k, v.order])
 );
 
+// ============= PARENT (RFQ / ARC) ROLL-UP STATE =============
+//
+// The listing groups by PARENT, so an RFQ with 138 rounds is ONE row and needs
+// ONE status. That status is a ROLL-UP over the states present, not the latest
+// round's state and NOT NEG_STATE_ORDER.
+//
+// The precedence is ACTION-FIRST: rungs 0-2 need a human, rungs 3-6 do not.
+//
+//   0 awaiting_approval   an approver is blocking
+//   1 open_with_vendors   vendors can still move the number
+//   2 ready_for_decision  the buyer is blocking
+//   3 concluded           a decision was taken
+//   4 no_vendor_response  nobody replied
+//   5 lapsed              never approved in time
+//   6 cancelled           deliberately stopped
+//
+// This is DELIBERATELY NOT NEG_STATE_ORDER. The round-level order puts
+// no_vendor_response ABOVE concluded, which is right for one round ("this
+// round got nothing") and wrong for an RFQ. Measured on production
+// 2026-08-01: 15 of the 124 RFQs in negotiation contain at least one
+// no-response round AND at least one concluded round. Under the round-level
+// order all 15 would head their card "Closed — no vendor response" while a
+// later round of the same RFQ had actually concluded.
+//
+// NEG_STATE_ORDER is left untouched: the round listing's "Lifecycle order"
+// sort and the round-detail page both read it.
+export const NEG_PARENT_STATE_ORDER = Object.freeze({
+  [NEG_STATE.AWAITING_APPROVAL]: 0,
+  [NEG_STATE.OPEN_WITH_VENDORS]: 1,
+  [NEG_STATE.READY_FOR_DECISION]: 2,
+  [NEG_STATE.CONCLUDED]: 3,
+  [NEG_STATE.NO_VENDOR_RESPONSE]: 4,
+  [NEG_STATE.LAPSED]: 5,
+  [NEG_STATE.CANCELLED]: 6,
+});
+
+// Rungs 0-2 — the parent is waiting on a person. Drives the "needs attention"
+// split on the parent card.
+export const NEG_PARENT_ACTION_STATES = Object.freeze(
+  new Set([NEG_STATE.AWAITING_APPROVAL, NEG_STATE.OPEN_WITH_VENDORS, NEG_STATE.READY_FOR_DECISION])
+);
+
+// Precedence, most-urgent first. Single source of truth for both the JS
+// roll-up and the SQL CASE below, so the two can never drift.
+const NEG_PARENT_PRECEDENCE = Object.entries(NEG_PARENT_STATE_ORDER)
+  .sort((a, b) => a[1] - b[1])
+  .map(([state]) => state);
+
+/**
+ * Roll a parent's round states up to ONE state. Pure; the SQL CASE below is a
+ * transcription of it and negotiation.listView.parent.test.js asserts they
+ * agree. Unknown states are ignored; an empty set yields null.
+ */
+export const rollUpNegotiationStates = (states) => {
+  const present = new Set((Array.isArray(states) ? states : []).map((s) => String(s)));
+  for (const state of NEG_PARENT_PRECEDENCE) {
+    if (present.has(state)) return state;
+  }
+  return null;
+};
+
+// SQL transcription of rollUpNegotiationStates, for use in the GROUP BY of the
+// parent queries. `stateExpr` is the per-round state expression of the
+// subquery being aggregated (i.e. the output of negotiationStateCaseSql).
+export const negotiationParentStateCaseSql = (stateExpr) =>
+  `CASE
+     ${NEG_PARENT_PRECEDENCE.map(
+       (s) => `WHEN bool_or(${stateExpr} = '${s}') THEN '${s}'`
+     ).join('\n     ')}
+     ELSE NULL
+   END`;
+
+// jsonb object carrying one count per NEG_STATE key. Every key is always
+// present (zero when absent) so the client can render a fixed set of chips
+// without null-guarding each one.
+export const negotiationStateCountsSql = (stateExpr) =>
+  `jsonb_build_object(${Object.values(NEG_STATE)
+    .map((s) => `'${s}', COUNT(*) FILTER (WHERE ${stateExpr} = '${s}')::int`)
+    .join(', ')})`;
+
 /**
  * Derive the user-facing state of ONE round. Pure — the SQL CASE in the two
  * listing queries below is a literal transcription of this ladder, and
@@ -1048,22 +1128,74 @@ const negotiationModel = {
   },
 
   /**
-   * Ids of every round in the same cycle — i.e. sharing
-   * (source_type, source_id, round_number) — INCLUDING the round itself.
-   * Deliberately unscoped: the caller intersects this with
-   * getScopedRoundsByIds so it can report how many siblings were withheld
-   * without ever revealing their contents.
+   * Ids of every round in the same CYCLE — INCLUDING the round itself.
+   *
+   * A cycle is one wave of negotiation across the parent: under the legacy
+   * per-product allocator, creating "round 2" for three products wrote three
+   * rows all stored as round_number = 2, and those three are one cycle.
+   * Production holds sibling groups of up to 46 rounds, spread over as much as
+   * 50 days, so they are NOT identifiable by creation time.
+   *
+   * This used to group by (source_type, source_id, round_number). It cannot any
+   * more: the allocator now stores the round's RFQ-WIDE POSITION (see
+   * getNextRoundPositionForRfq), which is unique per parent, so every cycle
+   * would collapse to a single round and the detail page's scope=cycle would
+   * silently degrade into scope=round.
+   *
+   * The re-key is the round's ITEM-WISE CYCLE ORDINAL: its chronological place
+   * among the rounds on the same parent that touch at least one of ITS OWN
+   * items (rounds carrying no items — RFQ-level and ARC rounds — group with the
+   * other item-less rounds). That is precisely what the legacy stored value
+   * meant — "the k-th round on this product" — expressed so that it is read off
+   * the data instead of off a column whose meaning changed. Two rounds are
+   * siblings when their ordinals match.
+   *
+   * Verified on production (2026-08-01): for all 886 rounds the sibling set this
+   * returns is byte-identical to what the round_number grouping returned, and
+   * the per-product ordinal equals the stored round_number on all 885 legacy
+   * single-product rows. Nothing about existing data moves; only rows written
+   * by the new allocator, which the old rule would have orphaned, land in the
+   * cycle they belong to.
+   *
+   * Deliberately unscoped: the caller intersects this with getScopedRoundsByIds
+   * so it can report how many siblings were withheld without ever revealing
+   * their contents.
    */
   getSiblingRoundIds: async (roundId) => {
     const rows = await db.any(
-      `SELECT sib.id
-         FROM tbl_negotiation_rounds nr
-         JOIN tbl_negotiation_rounds sib
-           ON sib.source_type = nr.source_type
-          AND sib.source_id   = nr.source_id
-          AND sib.round_number = nr.round_number
-        WHERE nr.id = $1::int
-        ORDER BY sib.id`,
+      `WITH me AS (
+         SELECT nr.source_type, nr.source_id
+           FROM tbl_negotiation_rounds nr
+          WHERE nr.id = $1::int
+       ), family AS (
+         SELECT nr.id, nr.created_at, items.ids
+           FROM tbl_negotiation_rounds nr
+           JOIN me ON me.source_type IS NOT DISTINCT FROM nr.source_type
+                  AND me.source_id   IS NOT DISTINCT FROM nr.source_id
+           CROSS JOIN LATERAL (
+             SELECT COALESCE(array_agg(DISTINCT _pid) FILTER (WHERE _pid IS NOT NULL), '{}'::int[]) AS ids
+               FROM (
+                 SELECT nr.rfq_product_id AS _pid
+                 UNION ALL
+                 SELECT (_p->>'rfq_product_id')::int
+                   FROM jsonb_array_elements(COALESCE(nr.products, '[]'::jsonb)) _p
+               ) _s
+           ) items
+       ), ranked AS (
+         SELECT f.id,
+                (SELECT COUNT(*)
+                   FROM family g
+                  WHERE (g.created_at, g.id) <= (f.created_at, f.id)
+                    AND CASE WHEN cardinality(f.ids) = 0
+                             THEN cardinality(g.ids) = 0
+                             ELSE g.ids && f.ids
+                        END)::int AS cycle_no
+           FROM family f
+       )
+       SELECT r.id
+         FROM ranked r
+        WHERE r.cycle_no = (SELECT cycle_no FROM ranked WHERE id = $1::int)
+        ORDER BY r.id`,
       [Number(roundId)]
     );
     return rows.map((r) => Number(r.id));
@@ -1925,6 +2057,14 @@ const negotiationModel = {
    * Stored timestamps are UTC-naive (timestamp without time zone), so compare
    * end_date against now() converted to UTC.
    */
+  // DEPRECATED — DEAD (no callers) AND WRONG. Superseded by
+  // getPendingNegotiationParentIds. Two defects, both fixed there:
+  //   * `nr.id = i.entity_id` drops the 69 legacy instances whose entity_id is
+  //     an rfq_product id, including every currently-PENDING one. Use
+  //     negotiationInstanceRoundIdSql instead — it resolves 884/884.
+  //   * no `sa.removed_at IS NULL`, so a removed approver still counts.
+  // Left in place rather than deleted; do not wire it into anything new.
+  //
   // Of the given RFQ ids, which have a negotiation approval waiting on the user
   // (current-step pending approver). NEGOTIATION instances key on the round id
   // (→ round.rfq_id); NEGOTIATION_QUOTE instances key on the rfq_product id
@@ -2254,6 +2394,430 @@ const negotiationModel = {
     );
   },
 
+  // ==========================================================================
+  // PARENT-LEVEL LIST — ONE ROW PER RFQ / ARC
+  // ==========================================================================
+  //
+  // The round-level list above returns one row per round. RFQ 512 has 138 of
+  // them, and users read 138 rows as 138 different RFQs. Production carries 886
+  // rounds over 124 distinct RFQs (median 2 rounds, max 138), so grouping
+  // collapses 45 pages to 7.
+  //
+  // These two functions are the SAME query as getNegotiationRoundList /
+  // getArcNegotiationRoundList, wrapped as a subquery and GROUPed BY the
+  // parent. negotiationStateCaseSql and approvedQuoteLateralSql are reused
+  // verbatim inside the subquery, so a round's state means exactly the same
+  // thing at both levels; only the roll-up on top is new.
+  //
+  // SCOPE: the RBAC read matrix is applied INSIDE the subquery, against the
+  // parent (rfq / a) exactly as the round-level queries apply it. Grouping over
+  // an already-scoped set cannot widen scope. Every round of a visible parent is
+  // visible (the matrix resolves entirely against parent columns), so the
+  // correlated sub-selects below — which re-read the parent's rounds by
+  // rfq_id / source_id to union vendors and products — cannot widen it either.
+  //
+  // `userId` drives the RBAC read matrix (see negotiationReadScopeSql). Pass
+  // null ONLY for super admins (user_type 8). The companyIds clause is kept as
+  // defence in depth — both must hold.
+  getNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
+    const stateExpr = 'r.neg_status';
+    return db.any(
+      `SELECT 'RFQ:' || r.rfq_id            AS parent_key,
+              'RFQ'::text                   AS source_type,
+              r.rfq_id,
+              NULL::int                     AS arc_id,
+              NULL::text                    AS arc_number,
+              r.rfq_no,
+              r.title,
+              r.is_tender,
+              r.hotel_id,
+              r.hotel_name,
+              r.department_id,
+              r.department_title,
+              COUNT(*)::int                 AS round_count,
+              ${negotiationStateCountsSql(stateExpr)} AS state_counts,
+              ${negotiationParentStateCaseSql(stateExpr)} AS neg_status,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.READY_FOR_DECISION}')::int AS ready_for_decision_count,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.OPEN_WITH_VENDORS}')::int  AS open_with_vendors_count,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.AWAITING_APPROVAL}')::int  AS awaiting_approval_count,
+              MIN(r.round_created_at)       AS first_round_at,
+              -- Latest thing that happened anywhere on this parent: any round
+              -- transition, or the most recent vendor response.
+              GREATEST(MAX(r.round_created_at), MAX(r.approved_at),
+                       MAX(r.published_at), MAX(r.closed_at), MAX(r.last_quote_at))
+                                            AS last_activity_at,
+              -- The next thing that WILL happen: earliest still-future window
+              -- close across the parent's rounds. NULL when nothing is pending.
+              MIN(r.end_date) FILTER (WHERE r.end_date > (now() AT TIME ZONE 'UTC'))
+                                            AS next_deadline,
+              -- Distinct vendor responses across the whole parent (a vendor that
+              -- re-quoted the same product in six rounds counts once).
+              (SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int
+                 FROM tbl_negotiation_round_quotes nrq
+                 JOIN tbl_negotiation_rounds nr2 ON nr2.id = nrq.negotiation_round_id
+                WHERE nr2.rfq_id = r.rfq_id) AS quotes_received,
+              -- Vendors invited to ANY round of this parent.
+              COALESCE((SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name))
+                          FROM tbl_negotiation_rounds nr2
+                          CROSS JOIN LATERAL unnest(COALESCE(nr2.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+                          JOIN tbl_users u ON u.id = vid.vendor_id
+                         WHERE nr2.rfq_id = r.rfq_id), '[]'::jsonb) AS vendors,
+              -- Products ACTUALLY NEGOTIATED — the union of every round's
+              -- rfq_product_id and its products JSONB. NOT every product on the
+              -- RFQ: an 80-line RFQ may have negotiated 3 of them.
+              COALESCE((SELECT json_agg(DISTINCT pnames.nm)
+                          FROM tbl_negotiation_rounds nr2
+                          CROSS JOIN LATERAL (
+                            SELECT nr2.rfq_product_id AS pid
+                            UNION ALL
+                            SELECT (p_->>'rfq_product_id')::int
+                              FROM jsonb_array_elements(COALESCE(nr2.products, '[]'::jsonb)) p_
+                             WHERE p_->>'rfq_product_id' IS NOT NULL
+                          ) ids
+                          JOIN tbl_rfq_products rp ON rp.id = ids.pid
+                          LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+                          LEFT JOIN tbl_product P ON P.id = PV.product_id
+                          CROSS JOIN LATERAL (SELECT COALESCE(PV.name, P.name) AS nm) pnames
+                         WHERE nr2.rfq_id = r.rfq_id
+                           AND COALESCE(PV.name, P.name) IS NOT NULL), '[]'::json) AS item_names
+         FROM (
+           SELECT rfq.id                AS rfq_id,
+                  rfq.rfq_no,
+                  rfq.title,
+                  rfq.is_tender,
+                  rfq.hotel_id,
+                  h.name                AS hotel_name,
+                  rfq.department_id,
+                  d.title               AS department_title,
+                  nr.id                 AS round_id,
+                  nr.created_at         AS round_created_at,
+                  nr.end_date,
+                  nr.approved_at,
+                  nr.published_at,
+                  nr.closed_at,
+                  ${negotiationStateCaseSql('nr', 'q.quotes_received', 'aq.has_approved_quote')} AS neg_status,
+                  q.last_quote_at
+             FROM tbl_negotiation_rounds nr
+             JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
+             LEFT JOIN tbl_hospitality_company_hotels h ON h.id = rfq.hotel_id
+             LEFT JOIN tbl_department d ON d.id = rfq.department_id
+             ${approvedQuoteLateralSql('nr', 'aq')}
+             LEFT JOIN LATERAL (
+               SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.rfq_product_id))::int AS quotes_received,
+                      MAX(nrq.submitted_at) AS last_quote_at
+                 FROM tbl_negotiation_round_quotes nrq
+                WHERE nrq.negotiation_round_id = nr.id
+             ) q ON TRUE
+            WHERE nr.rfq_id IS NOT NULL
+              AND ($1::int[] IS NULL OR rfq.hospitality_company_id = ANY($1::int[]))
+              AND ($2::int IS NULL OR rfq.hotel_id = $2)
+              AND ${negotiationReadScopeSql('rfq', '$3')}
+         ) r
+        GROUP BY r.rfq_id, r.rfq_no, r.title, r.is_tender,
+                 r.hotel_id, r.hotel_name, r.department_id, r.department_title
+        ORDER BY last_activity_at DESC NULLS LAST`,
+      [companyIds, hotelId, userId]
+    );
+  },
+
+  // ARC counterpart, shaped to the EXACT same column contract so the
+  // controller's search / facet / sort / paginate pipeline works over the
+  // concatenated array unchanged. ARC parents carry rfq_id = NULL — which is
+  // precisely why filters.parentKey exists alongside filters.rfqId.
+  getArcNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
+    const stateExpr = 'r.neg_status';
+    return db.any(
+      `SELECT 'ARC:' || r.arc_id            AS parent_key,
+              'ARC'::text                   AS source_type,
+              NULL::int                     AS rfq_id,
+              r.arc_id,
+              r.arc_number,
+              r.arc_number                  AS rfq_no,
+              r.title,
+              0                             AS is_tender,
+              r.hotel_id,
+              r.hotel_name,
+              r.department_id,
+              r.department_title,
+              COUNT(*)::int                 AS round_count,
+              ${negotiationStateCountsSql(stateExpr)} AS state_counts,
+              ${negotiationParentStateCaseSql(stateExpr)} AS neg_status,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.READY_FOR_DECISION}')::int AS ready_for_decision_count,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.OPEN_WITH_VENDORS}')::int  AS open_with_vendors_count,
+              COUNT(*) FILTER (WHERE ${stateExpr} = '${NEG_STATE.AWAITING_APPROVAL}')::int  AS awaiting_approval_count,
+              MIN(r.round_created_at)       AS first_round_at,
+              GREATEST(MAX(r.round_created_at), MAX(r.approved_at),
+                       MAX(r.published_at), MAX(r.closed_at), MAX(r.last_quote_at))
+                                            AS last_activity_at,
+              MIN(r.end_date) FILTER (WHERE r.end_date > (now() AT TIME ZONE 'UTC'))
+                                            AS next_deadline,
+              (SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.arc_item_id))::int
+                 FROM tbl_negotiation_round_quotes nrq
+                 JOIN tbl_negotiation_rounds nr2 ON nr2.id = nrq.negotiation_round_id
+                WHERE nr2.source_type = 'ARC' AND nr2.source_id = r.arc_id) AS quotes_received,
+              COALESCE((SELECT jsonb_agg(DISTINCT jsonb_build_object('id', u.id, 'name', u.name))
+                          FROM tbl_negotiation_rounds nr2
+                          CROSS JOIN LATERAL unnest(COALESCE(nr2.vendor_ids, '{}'::int[])) AS vid(vendor_id)
+                          JOIN tbl_users u ON u.id = vid.vendor_id
+                         WHERE nr2.source_type = 'ARC' AND nr2.source_id = r.arc_id), '[]'::jsonb) AS vendors,
+              COALESCE((SELECT json_agg(DISTINCT pv.name)
+                          FROM tbl_negotiation_rounds nr2
+                          CROSS JOIN LATERAL (
+                            SELECT nr2.arc_item_id AS aid
+                            UNION ALL
+                            SELECT (p_->>'arc_item_id')::bigint
+                              FROM jsonb_array_elements(COALESCE(nr2.products, '[]'::jsonb)) p_
+                             WHERE p_->>'arc_item_id' IS NOT NULL
+                          ) ids
+                          JOIN tbl_arc_item ai ON ai.id = ids.aid
+                          LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+                         WHERE nr2.source_type = 'ARC' AND nr2.source_id = r.arc_id
+                           AND pv.name IS NOT NULL), '[]'::json) AS item_names
+         FROM (
+           SELECT a.id                  AS arc_id,
+                  a.arc_number,
+                  a.title,
+                  a.hotel_id,
+                  h.name                AS hotel_name,
+                  a.department_id,
+                  d.title               AS department_title,
+                  nr.id                 AS round_id,
+                  nr.created_at         AS round_created_at,
+                  nr.end_date,
+                  nr.approved_at,
+                  nr.published_at,
+                  nr.closed_at,
+                  -- No ARC counterpart of the NEGOTIATION_QUOTE approval entity
+                  -- exists, so hasApprovedQuote is structurally false and
+                  -- COMPLETED is the only route to 'concluded'. Same as the
+                  -- ARC round-level list.
+                  ${negotiationStateCaseSql('nr', 'q.quotes_received', 'false')} AS neg_status,
+                  q.last_quote_at
+             FROM tbl_negotiation_rounds nr
+             JOIN tbl_arc a ON a.id = nr.source_id
+             LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+             LEFT JOIN tbl_department d ON d.id = a.department_id
+             LEFT JOIN LATERAL (
+               SELECT COUNT(DISTINCT (nrq.vendor_id, nrq.arc_item_id))::int AS quotes_received,
+                      MAX(nrq.submitted_at) AS last_quote_at
+                 FROM tbl_negotiation_round_quotes nrq
+                WHERE nrq.negotiation_round_id = nr.id
+             ) q ON TRUE
+            WHERE nr.source_type = 'ARC'
+              AND ($1::int[] IS NULL OR a.hospitality_company_id = ANY($1::int[]))
+              AND ($2::int IS NULL OR a.hotel_id = $2)
+              AND ${negotiationReadScopeSql('a', '$3')}
+         ) r
+        GROUP BY r.arc_id, r.arc_number, r.title,
+                 r.hotel_id, r.hotel_name, r.department_id, r.department_title
+        ORDER BY last_activity_at DESC NULLS LAST`,
+      [companyIds, hotelId, userId]
+    );
+  },
+
+  // ==========================================================================
+  // PARENT SAVINGS — the money on a parent card
+  // ==========================================================================
+  //
+  // ⚠️ SECURITY: this query reads tbl_quotes / tbl_quote_items /
+  // tbl_quote_item_history and carries NO scope predicate of its own. It is a
+  // pure "given these rfq ids, price them" function. CALLERS MUST PASS ONLY
+  // RFQ IDS THAT ALREADY SURVIVED THE SCOPED PARENT QUERY. Never call it with
+  // ids taken from a request body, a facet, or a filter.
+  //
+  // TWO figures per parent, because they answer different questions:
+  //   * all-vendor  — every vendor that participated. Same basis as the round
+  //     page's `cumulative` tile, so the two levels agree when a user drills in.
+  //   * awarded     — only the vendor whose quote was actually APPROVED
+  //     (an APPROVED NEGOTIATION_QUOTE whose metadata.vendor_id matches). This
+  //     is the realised benefit. It is null/zero for parents with no approved
+  //     quote (36 of the 124 production RFQs) — correct, not a bug.
+  //
+  // METHOD. Per (vendor, rfq_product) pair, over the parent's NON-CANCELLED
+  // rounds: BASELINE from the EARLIEST round, ACHIEVED from the LATEST round.
+  // Values are SIGNED and NEVER clamped — 14 production RFQs genuinely ended
+  // higher than they started, and hiding that would be a lie.
+  //
+  // The baseline uses the documented ladder (see resolveBaseline):
+  //
+  //     previous_price -> prior_round -> quote_history -> current_quote
+  //
+  // evaluated AT THE EARLIEST ROUND, which is what makes the span the full
+  // negotiation rather than its last leg. Two notes on the rungs:
+  //
+  //   * `prior_round` means "an earlier round's price for this pair". At the
+  //     earliest round there is, by construction, no earlier round — so within
+  //     one RFQ that rung can only fire as a fallback when the vendor's quote
+  //     item has no revision history at all. It is placed accordingly (below
+  //     quote_history) rather than left as dead code. Measured on production
+  //     both placements give byte-identical totals: 0 multi-round pairs lack
+  //     quote history.
+  //   * the NAIVE "first round price vs last round price" rule is NOT used. It
+  //     returns 0 for 91 of 101 priced RFQs because only 78 of 428 (rfq,
+  //     vendor, product) triples appear in more than one round at all —
+  //     ₹3.43 lakh total, against ₹98.46 lakh for the ladder.
+  //
+  // Production totals for the ladder as implemented (measured 2026-08-01):
+  //   all vendors  baseline ₹8,04,14,568  saved ₹98,45,639
+  //   awarded only baseline ₹6,26,64,916  saved ₹64,67,966
+  //
+  // ARC parents are not priced here: ARC round quotes carry a UNIT rate against
+  // a different fact table, and ARC has no NEGOTIATION_QUOTE award entity to
+  // define an "awarded" subset. They report null savings.
+  getNegotiationParentSavings: async (rfqIds) => {
+    const ids = [...new Set((rfqIds || []).map(Number).filter(Number.isFinite))];
+    if (ids.length === 0) return [];
+    return db.any(
+      `WITH r AS (
+         SELECT nr.id, nr.rfq_id, nr.created_at
+           FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_id = ANY($1::int[])
+            AND COALESCE(nr.source_type, 'RFQ') <> 'ARC'
+            AND nr.status <> 'CANCELLED'
+       ), q AS (
+         SELECT r.rfq_id, nrq.vendor_id, nrq.rfq_product_id,
+                nrq.quoted_price, nrq.previous_price,
+                ROW_NUMBER() OVER (PARTITION BY r.rfq_id, nrq.vendor_id, nrq.rfq_product_id
+                                       ORDER BY r.created_at, r.id, nrq.id)                AS rn_asc,
+                ROW_NUMBER() OVER (PARTITION BY r.rfq_id, nrq.vendor_id, nrq.rfq_product_id
+                                       ORDER BY r.created_at DESC, r.id DESC, nrq.id DESC) AS rn_desc,
+                DENSE_RANK() OVER (PARTITION BY r.rfq_id, nrq.vendor_id, nrq.rfq_product_id
+                                       ORDER BY r.created_at DESC, r.id DESC)              AS dr_desc
+           FROM tbl_negotiation_round_quotes nrq
+           JOIN r ON r.id = nrq.negotiation_round_id
+          WHERE nrq.rfq_product_id IS NOT NULL
+       ), pair AS (
+         SELECT e.rfq_id, e.vendor_id, e.rfq_product_id,
+                e.previous_price,
+                e.quoted_price AS first_quoted,
+                mx.n_rounds,
+                l.quoted_price AS achieved
+           FROM q e
+           JOIN q l ON l.rfq_id = e.rfq_id AND l.vendor_id = e.vendor_id
+                   AND l.rfq_product_id = e.rfq_product_id AND l.rn_desc = 1
+           JOIN LATERAL (
+             SELECT MAX(z.dr_desc) AS n_rounds
+               FROM q z
+              WHERE z.rfq_id = e.rfq_id AND z.vendor_id = e.vendor_id
+                AND z.rfq_product_id = e.rfq_product_id
+           ) mx ON TRUE
+          WHERE e.rn_asc = 1
+       ), facts AS (
+         SELECT p.*,
+                qi.total_price AS cur_total,
+                hist.first_total,
+                EXISTS (
+                  SELECT 1 FROM tbl_approval_instances ai
+                   WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+                     AND ai.status = 'APPROVED'
+                     AND ai.entity_id = p.rfq_product_id
+                     AND (ai.metadata->>'vendor_id') ~ '^[0-9]+$'
+                     AND (ai.metadata->>'vendor_id')::int = p.vendor_id
+                ) AS is_awarded
+           FROM pair p
+           LEFT JOIN tbl_rfq_products rp ON rp.id = p.rfq_product_id
+           LEFT JOIN LATERAL (
+             SELECT qq.id FROM tbl_quotes qq
+              WHERE qq.rfq_id = p.rfq_id AND qq.created_by = p.vendor_id
+              ORDER BY qq.id DESC LIMIT 1
+           ) vq ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT qi2.* FROM tbl_quote_items qi2
+              WHERE qi2.quote_id = vq.id
+                AND qi2.product_variant_id = rp.product_variant_id
+                AND qi2.variant = rp.variant
+              ORDER BY qi2.id DESC LIMIT 1
+           ) qi ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT h.total_price FROM tbl_quote_item_history h
+              WHERE h.quote_item_id = qi.id
+              ORDER BY h.timestamp ASC, h.id ASC LIMIT 1
+           ) hist(first_total) ON TRUE
+       ), scored AS (
+         SELECT f.rfq_id, f.achieved, f.is_awarded,
+                COALESCE(f.previous_price,
+                         f.first_total,
+                         CASE WHEN f.n_rounds > 1 THEN f.first_quoted END,
+                         f.cur_total) AS baseline,
+                CASE WHEN f.previous_price IS NOT NULL           THEN 'previous_price'
+                     WHEN f.first_total    IS NOT NULL           THEN 'quote_history'
+                     WHEN f.n_rounds > 1                         THEN 'prior_round'
+                     WHEN f.cur_total      IS NOT NULL           THEN 'current_quote'
+                     ELSE NULL END AS baseline_source
+           FROM facts f
+       )
+       SELECT rfq_id,
+              COUNT(*) FILTER (WHERE baseline IS NOT NULL AND achieved IS NOT NULL)::int AS pairs_counted,
+              COALESCE(SUM(baseline)  FILTER (WHERE baseline IS NOT NULL AND achieved IS NOT NULL), 0) AS baseline_total,
+              COALESCE(SUM(achieved)  FILTER (WHERE baseline IS NOT NULL AND achieved IS NOT NULL), 0) AS achieved_total,
+              COUNT(*) FILTER (WHERE is_awarded AND baseline IS NOT NULL AND achieved IS NOT NULL)::int AS pairs_counted_awarded,
+              COALESCE(SUM(baseline)  FILTER (WHERE is_awarded AND baseline IS NOT NULL AND achieved IS NOT NULL), 0) AS baseline_total_awarded,
+              COALESCE(SUM(achieved)  FILTER (WHERE is_awarded AND baseline IS NOT NULL AND achieved IS NOT NULL), 0) AS achieved_total_awarded,
+              jsonb_build_object(
+                'previous_price', COUNT(*) FILTER (WHERE baseline_source = 'previous_price')::int,
+                'prior_round',    COUNT(*) FILTER (WHERE baseline_source = 'prior_round')::int,
+                'quote_history',  COUNT(*) FILTER (WHERE baseline_source = 'quote_history')::int,
+                'current_quote',  COUNT(*) FILTER (WHERE baseline_source = 'current_quote')::int,
+                'none',           COUNT(*) FILTER (WHERE baseline_source IS NULL)::int
+              ) AS baseline_sources
+         FROM scored
+        GROUP BY rfq_id`,
+      [ids]
+    );
+  },
+
+  // Of the given PARENT KEYS ('RFQ:<id>' / 'ARC:<id>'), which have a negotiation
+  // approval waiting on this user right now (a pending approver at the current
+  // step)?
+  //
+  // Replaces getPendingNegotiationRfqIds, which was dead AND wrong on two
+  // counts:
+  //   * it joined `nr.id = i.entity_id`, which drops the 69 legacy instances
+  //     whose entity_id is an rfq_product id — including every currently
+  //     PENDING one, so the toggle was permanently empty. Resolution now goes
+  //     through negotiationInstanceRoundIdSql, which resolves 884/884.
+  //   * it omitted `sa.removed_at IS NULL`, so a REMOVED approver still counted
+  //     as pending.
+  // Both fixes match getPendingNegotiationRoundIds, so the round listing and
+  // the parent listing can never disagree about who owes an action.
+  //
+  // Unlike the round-level version this DOES union the NEGOTIATION_QUOTE
+  // instances: they key on tbl_rfq_products.id, which is not a round but IS
+  // unambiguously one RFQ.
+  getPendingNegotiationParentIds: async (parentKeys, userId) => {
+    const keys = (parentKeys || []).map(String).filter(Boolean);
+    if (keys.length === 0 || !userId) return [];
+    const roundIdExpr = negotiationModel.negotiationInstanceRoundIdSql('i');
+    const rows = await db.any(
+      `SELECT DISTINCT t.parent_key FROM (
+         SELECT CASE WHEN nr.source_type = 'ARC' THEN 'ARC:' || nr.source_id
+                     ELSE 'RFQ:' || nr.rfq_id END AS parent_key
+           FROM tbl_approval_instances i
+           ${negotiationModel.negotiationInstanceRoundJoinSql('i')}
+           JOIN tbl_negotiation_rounds nr ON nr.id = (${roundIdExpr})
+           JOIN tbl_approval_instance_steps s
+             ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type IN ('NEGOTIATION','ARC_NEGOTIATION') AND i.status = 'PENDING'
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+            AND sa.removed_at IS NULL
+         UNION
+         SELECT 'RFQ:' || rp.rfq_id AS parent_key
+           FROM tbl_approval_instances i
+           JOIN tbl_rfq_products rp ON rp.id = i.entity_id
+           JOIN tbl_approval_instance_steps s
+             ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+           JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+          WHERE i.entity_type = 'NEGOTIATION_QUOTE' AND i.status = 'PENDING'
+            AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
+            AND sa.removed_at IS NULL
+       ) t
+        WHERE t.parent_key = ANY($1::text[])`,
+      [keys, Number(userId)]
+    );
+    return rows.map((r) => r.parent_key);
+  },
+
   /**
    * Get active round for a product.
    * When vendorId is provided, returns only the round assigned to that vendor.
@@ -2389,17 +2953,14 @@ const negotiationModel = {
   },
 
   /**
-   * Next round number across the whole RFQ — used for all NEW rounds
-   * (multi-product rounds have no single product to scope numbering to).
+   * MAX(round_number) + 1 across the RFQ.
    *
-   * NOT CORRECT under the product definition, and deliberately NOT changed —
-   * see getNextRoundPositionForRfq directly below for the replacement and the
-   * cross-file work that has to land with it. MAX+1 on RFQ 512 returns 5
-   * (highest stored value is 4) when the true next position is 139.
-   *
-   * Leaving it alone is safe because the DISPLAYED number no longer reads this
-   * column at all — roundPositionSql computes the position at read time — so
-   * this function now only feeds storage, not the UI.
+   * ⚠️ NO LONGER USED FOR ALLOCATION, and must not be reintroduced. It is not
+   * correct under the product definition: stored values are legacy per-product
+   * numbers, so on RFQ 512 (138 rounds, highest stored value 4) it returns 5
+   * where the true next position is 139. negotiationController.createRound now
+   * calls getNextRoundPositionForRfq. Kept only because callers outside this
+   * repo's hot path may still import it; prefer the position function.
    */
   getNextRoundNumberForRfq: async (rfqId) => {
     const result = await db.oneOrNone(
@@ -2412,42 +2973,45 @@ const negotiationModel = {
   },
 
   /**
-   * The RFQ-wide POSITION a new round should be stored with, per the product
-   * definition ("how many rounds were there in this RFQ").
+   * The RFQ-wide POSITION a new round is stored with, per the product
+   * definition ("how many rounds were there in this RFQ"). WIRED UP at
+   * negotiationController.createRound, inside its transaction.
    *
-   * ⚠️ NOT WIRED UP. negotiationController.js:751 still calls
-   * getNextRoundNumberForRfq. Switching that one call site changes the MEANING
-   * of the stored column for new rows, and three consumers outside this file
-   * read the old meaning:
+   * The three consumers that read the OLD meaning were all dealt with in the
+   * same change:
    *
-   *   dashboardModel.js:474, :2096, :2104, :2635 — the savings baseline is
-   *     `JOIN tbl_negotiation_rounds nr ON ... AND nr.round_number = 1`, i.e.
-   *     "the first round for each product". Under RFQ-wide numbering exactly
-   *     ONE round per RFQ is numbered 1, so every other product loses its
-   *     baseline while still contributing to the negotiated total — savings go
-   *     understated, and negative for products introduced late. 55 production
-   *     RFQs have more than one negotiated product.
-   *   negotiationModel.getSiblingRoundIds (:1026) — groups a "cycle" by
-   *     (source_type, source_id, round_number). RFQ-wide numbering is unique
-   *     per RFQ, so every cycle collapses to a single round and the detail
-   *     page's scope=cycle becomes identical to scope=round. Production has
-   *     sibling groups of up to 46 rounds today.
-   *   negotiationModel.getRoundApprovalState fallback (:3057) — legacy
-   *     approval instances without a round_id are matched on
-   *     metadata.round_number.
+   *   dashboardModel — the savings baseline was
+   *     `JOIN tbl_negotiation_rounds nr ON ... AND nr.round_number = 1`. All
+   *     four sites now call getNegotiationParentSavings instead, which never
+   *     reads round_number. (That join was already wrong on its own terms: it
+   *     reached 274 of 441 production quote pairs and scored 243 of those at
+   *     ₹0 by comparing a round with itself.)
+   *   getSiblingRoundIds — re-keyed onto the item-wise cycle ordinal; see the
+   *     note there, and the production proof that the grouping is unchanged.
+   *   the legacy approval fallback below (`metadata.round_number`) — reachable
+   *     only for instances that are BOTH keyed by rfq_product_id AND carry no
+   *     metadata.round_id. Production has zero such rows: all 884 NEGOTIATION
+   *     instances carry metadata.round_id, and every new one is created with
+   *     entity_id = round.id as well (startApprovalForNegotiation), so new rows
+   *     cannot reach that rung.
    *
-   * Land those together with this, or the stored column will mean two
-   * different things for rows on either side of the deploy.
+   * Three more consumers need only CHRONOLOGICAL order, which RFQ-wide
+   * numbering preserves — and it preserves it even across mixed data, because
+   * a new position is COUNT(*) + 1 and no RFQ in production has a stored
+   * round_number exceeding its own round count (checked: 0 of 124), so every
+   * newly written value is strictly greater than every legacy value on the same
+   * RFQ. Those are: getRoundDetail's `findPrior` (walks backwards from a line's
+   * own number), its cumulative-set filter (`round_number <= current`), and the
+   * `last_round` / `ORDER BY nr.round_number DESC` picks in rfqController and
+   * quoteCompareViewModel.
    *
    * RACE: two concurrent creates on the same RFQ both read the same count and
    * both store the same number. There is no unique constraint on
    * (rfq_id, round_number) — production already holds 46 rounds sharing one
    * value — so this cannot error, it can only produce a duplicate stored value.
-   * That is now cosmetically harmless because display is computed, but the
-   * lock below removes it anyway: taking a row lock on the parent RFQ
-   * serialises concurrent allocations within the caller's transaction. Pass
-   * the transaction context, or the lock is released immediately and buys
-   * nothing.
+   * The row lock below removes it: taking a lock on the parent RFQ serialises
+   * concurrent allocations within the caller's transaction. Pass the
+   * transaction context, or the lock is released immediately and buys nothing.
    */
   getNextRoundPositionForRfq: async (rfqId, txContext = null) => {
     const conn = txContext || db;

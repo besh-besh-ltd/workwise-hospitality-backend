@@ -236,8 +236,11 @@ describe("Negotiation scope — list-view RBAC matrix + detail-endpoint IDOR", (
     await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [tempUsers]);
   });
 
+  // groupBy defaults to 'parent' (one row per RFQ/ARC). This suite asserts on
+  // round_id, so it pins the ROUND grain explicitly — and in doing so acts as
+  // the regression guard that groupBy:'round' is unchanged.
   const listView = (client, body = {}) =>
-    client.post("/api/v1/negotiation/list-view").send({ limit: 200, ...body });
+    client.post("/api/v1/negotiation/list-view").send({ limit: 200, groupBy: "round", ...body });
 
   const idsOf = (res) => res.body.data.rows.map((r) => Number(r.round_id));
   const facetKeys = (res, name) => (res.body.data.facets[name] || []).map((f) => String(f.key));

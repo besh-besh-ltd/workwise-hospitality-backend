@@ -2,7 +2,8 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct,
-  NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION } from '../../models/negotiationModel.js';
+  NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION,
+  NEG_PARENT_STATE_ORDER } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
@@ -968,9 +969,12 @@ const NegotiationController = {
         });
       }
 
-      // Round numbering is per-RFQ for all new rounds (multi rounds have no
-      // single product to scope numbering to).
-      const round_number = await negotiationModel.getNextRoundNumberForRfq(rfq_id);
+      // Round numbering is RFQ-WIDE: one round, one position, however many
+      // products it covers. Allocated INSIDE the transaction below — the
+      // allocator serialises concurrent creates with a row lock on the parent
+      // RFQ, and that lock is only held for the caller's transaction. Declared
+      // here because the response message reads it after the commit.
+      let round_number;
 
       // Persistence shape:
       //  - single product entry → legacy columns (rfq_product_id +
@@ -1011,6 +1015,8 @@ const NegotiationController = {
 
       // Create round in transaction
       const result = await db.tx(async (t) => {
+        round_number = await negotiationModel.getNextRoundPositionForRfq(rfq_id, t);
+
         const round = await negotiationModel.createRound({
           rfq_id,
           rfq_product_id: legacyProductId,
@@ -2925,6 +2931,19 @@ const NegotiationController = {
 
   // Server-authoritative listing — search / facet / sort / paginate + a
   // "Pending for me" tab, all server-side. Mirrors rfqController.getRfqListView.
+  //
+  // TWO LEVELS, ONE PIPELINE. `groupBy` selects the row grain:
+  //
+  //   'parent' (DEFAULT) one row per RFQ / per ARC. This is what the listing
+  //                      renders: RFQ 512 has 138 negotiation rounds and users
+  //                      read 138 rows as 138 different RFQs.
+  //   'round'            one row per negotiation round — the historic shape,
+  //                      byte-for-byte. Nothing below branches on the level
+  //                      except the row accessors, so the two levels cannot
+  //                      drift into disagreeing status vocabularies the way
+  //                      the listing and the detail page once did.
+  //
+  // There is deliberately NO second route: one endpoint, one pipeline.
   getNegotiationListView: async (req, res) => {
     try {
       const userId = req.user?.id;
@@ -2934,6 +2953,8 @@ const NegotiationController = {
       // slice are all computed from the rows this returns, so they inherit it.
       const scopeUserId = readScopeUserId(req);
       const body = req.body || {};
+      const groupBy = body.groupBy === 'round' ? 'round' : 'parent';
+      const isParent = groupBy === 'parent';
       const BUCKETS = Object.values(NEG_STATE);
       const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
       // Orthogonal to `tab`: a round's state and whether it waits on the caller
@@ -2952,64 +2973,117 @@ const NegotiationController = {
       //     rarely happens to place those words adjacent.
       // Stripping a LEADING '#' per token (never an interior one) and requiring
       // every token to be present fixes both. The ARC branch inherits the fix
-      // for free — getArcNegotiationRoundList aliases `arc_number AS rfq_no`.
+      // for free at BOTH grains — the ARC round and parent queries alike alias
+      // `arc_number AS rfq_no`.
       // A term of only '#' collapses to zero tokens and is treated as no search.
       const searchTokens = search
         ? search.split(/\s+/).map((t) => t.replace(/^#+/, '')).filter(Boolean)
         : [];
-      const sort = ['recent', 'oldest', 'status'].includes(body.sort) ? body.sort : 'recent';
+      // 'rounds' and 'savings' only mean anything on a parent row; on the round
+      // grain they fall back to 'recent' rather than 400ing.
+      const SORT_KEYS = isParent
+        ? ['recent', 'oldest', 'status', 'rounds', 'savings']
+        : ['recent', 'oldest', 'status'];
+      const sort = SORT_KEYS.includes(body.sort) ? body.sort : 'recent';
       const page = Number(body.page) > 0 ? Number(body.page) : 1;
       const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
       const f = body.filters || {};
       const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
       const filters = {
+        // rfqId keeps working verbatim. NOTE it can never select an ARC parent:
+        // ARC rows carry rfq_id = NULL by construction. That is exactly why
+        // parentKey exists.
         rfqId: asStrArr(f.rfqId),
+        parentKey: asStrArr(f.parentKey),
         status: asStrArr(f.status), buId: asStrArr(f.buId), departmentId: asStrArr(f.departmentId),
         productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
       };
 
-      // 1. fetch the full scoped set — ONE ROW PER ROUND.
-      // Always fetch both branches so source_counts reflects the full union totals.
+      // 1. fetch the full scoped set. Always fetch both branches so
+      // source_counts reflects the full union totals.
       const [rfqRows, arcRows] = await Promise.all([
-        negotiationModel.getNegotiationRoundList({ companyIds, userId: scopeUserId }),
-        negotiationModel.getArcNegotiationRoundList({ companyIds, userId: scopeUserId }),
+        isParent
+          ? negotiationModel.getNegotiationParentList({ companyIds, userId: scopeUserId })
+          : negotiationModel.getNegotiationRoundList({ companyIds, userId: scopeUserId }),
+        isParent
+          ? negotiationModel.getArcNegotiationParentList({ companyIds, userId: scopeUserId })
+          : negotiationModel.getArcNegotiationRoundList({ companyIds, userId: scopeUserId }),
       ]);
       const allRows = [...rfqRows, ...arcRows];
       const source_counts = { all: allRows.length, RFQ: rfqRows.length, ARC: arcRows.length };
       // Narrow to the requested source AFTER computing counts.
-      const rows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
-
-      // 2. bucket + pending-for-me stamping (per round).
-      const pendingIds = new Set(rows.length && userId ? await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId) : []);
-      for (const r of rows) {
-        // neg_status IS the bucket now — negotiationStateCaseSql emits one of
-        // the seven NEG_STATE keys directly.
-        r._bucket = NEG_STATE_PRESENTATION[r.neg_status] ? r.neg_status : NEG_STATE.AWAITING_APPROVAL;
-        r._isMyAction = pendingIds.has(Number(r.round_id));
-        r.action_required = r._isMyAction;
-        r.action_label = r._isMyAction ? 'Approval needed' : null;
-      }
+      const sourceRows = source === 'RFQ' ? rfqRows : source === 'ARC' ? arcRows : allRows;
 
       const parseArr = (v) => (Array.isArray(v) ? v : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } })() : []));
 
-      // 3. tab counts.
+      // Parent identity of a row at EITHER grain. Round rows do not carry a
+      // parent_key column (their shape is frozen), so it is derived here for
+      // filtering only — deriving it never adds a field to the response.
+      const parentKeyOf = (r) =>
+        r.parent_key || (r.rfq_id != null ? `RFQ:${r.rfq_id}` : r.arc_id != null ? `ARC:${r.arc_id}` : null);
+
+      // 2. SEARCH — moved AHEAD of tab_counts and facets.
+      // It used to run last, so a search from the "All" tab left every tab
+      // badge showing its unsearched total and the facet lists full of options
+      // that matched nothing on screen. Badges now count what the user can
+      // actually see. Scope still bounds everything: search NARROWS the RBAC
+      // row set and can never reach outside it.
+      const rows = searchTokens.length
+        ? sourceRows.filter((r) => {
+            const hay = [
+              r.title, r.rfq_no, r.hotel_name, r.department_title,
+              ...parseArr(r.item_names).map((n) => (n && typeof n === 'object' ? n.product_name : n)),
+              ...parseArr(r.vendors).map((v) => v && v.name),
+            ].filter(Boolean).join(' ').toLowerCase();
+            return searchTokens.every((tk) => hay.includes(tk));
+          })
+        : sourceRows;
+
+      // 3. bucket + pending-for-me stamping.
+      const pendingKeys = new Set(
+        rows.length && userId
+          ? isParent
+            ? await negotiationModel.getPendingNegotiationParentIds(rows.map(parentKeyOf).filter(Boolean), userId)
+            : (await negotiationModel.getPendingNegotiationRoundIds(rows.map((r) => r.round_id), userId)).map(Number)
+          : []
+      );
+      for (const r of rows) {
+        // neg_status IS the bucket at both grains: negotiationStateCaseSql emits
+        // one of the seven NEG_STATE keys per round, and the parent query rolls
+        // those up with NEG_PARENT_STATE_ORDER into one of the same seven. Tabs
+        // therefore partition the rows — every row lands in exactly one.
+        r._bucket = NEG_STATE_PRESENTATION[r.neg_status] ? r.neg_status : NEG_STATE.AWAITING_APPROVAL;
+        r._isMyAction = isParent ? pendingKeys.has(parentKeyOf(r)) : pendingKeys.has(Number(r.round_id));
+        r.action_required = r._isMyAction;
+        r.action_label = r._isMyAction ? 'Approval needed' : null;
+        if (isParent) {
+          r.vendor_count = parseArr(r.vendors).length;
+          r.product_count = parseArr(r.item_names).length;
+        }
+      }
+
+      // 4. tab counts — over the searched set, so they sum to `all`.
       const tab_counts = { all: rows.length, for_me: 0 };
       for (const k of BUCKETS) tab_counts[k] = 0;
       for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
 
-      // 4. tab scope.
+      // 5. tab scope.
       const byTab = tab === 'all' ? rows
         : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
         : rows.filter((r) => r._bucket === tab);
       const tabRows = needsMyApproval ? byTab.filter((r) => r._isMyAction) : byTab;
 
-      // 5. facets over tab scope.
-      const fm = { rfqId: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      // 6. facets over tab scope.
+      const fm = { rfqId: new Map(), parentKey: new Map(), status: new Map(), buId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
       const bump = (m, key, label) => { if (key == null || key === '') return; const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
       const STATUS_LABEL = Object.fromEntries(
         Object.entries(NEG_STATE_PRESENTATION).map(([k, v]) => [k, v.label]));
       for (const r of tabRows) {
         if (r.rfq_id != null) bump(fm.rfqId, String(r.rfq_id), `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
+        if (isParent) {
+          const pk = parentKeyOf(r);
+          if (pk) bump(fm.parentKey, pk, `#${r.rfq_no}${r.title ? ` · ${r.title}` : ''}`);
+        }
         bump(fm.status, r._bucket, STATUS_LABEL[r._bucket] || r._bucket);
         if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
         if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
@@ -3018,39 +3092,75 @@ const NegotiationController = {
       }
       const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
       const facets = { rfqId: toFacet(fm.rfqId), status: toFacet(fm.status), buId: toFacet(fm.buId), departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId) };
+      if (isParent) facets.parentKey = toFacet(fm.parentKey);
 
-      // 6. apply facet + search filters.
-      // KNOWN, DELIBERATELY UNCHANGED: this runs AFTER source_counts / tab_counts
-      // / facets, so searching from a non-"All" tab only searches that tab and
-      // the tab badges keep showing unsearched totals. Moving search earlier
-      // changes what those badges mean and needs a matching UI pass — do not
-      // "fix" it here in isolation.
+      // 7. apply facet filters. These NARROW a set that is already scoped —
+      // they are never lookup keys. An out-of-scope rfqId / parentKey therefore
+      // yields an empty page, not a 403 and not somebody else's data.
       const filtered = tabRows.filter((r) => {
-        if (filters.rfqId.length && !filters.rfqId.includes(String(r.rfq_id))) return false;
+        // r.rfq_id is NULL on ARC rows: guard the null so a literal "null" in
+        // the filter cannot select them.
+        if (filters.rfqId.length && (r.rfq_id == null || !filters.rfqId.includes(String(r.rfq_id)))) return false;
+        const pk = parentKeyOf(r);
+        if (filters.parentKey.length && (pk == null || !filters.parentKey.includes(pk))) return false;
         if (filters.status.length && !filters.status.includes(r._bucket)) return false;
         if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
         if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
         if (filters.productId.length && !parseArr(r.item_names).map(String).some((n) => filters.productId.includes(n))) return false;
         if (filters.vendorId.length && !parseArr(r.vendors).some((v) => v && filters.vendorId.includes(String(v.id)))) return false;
-        if (searchTokens.length) {
-          const hay = `${r.title || ''} ${r.rfq_no || ''} ${r.hotel_name || ''} ${r.department_title || ''}`.toLowerCase();
-          if (!searchTokens.every((tk) => hay.includes(tk))) return false;
-        }
         return true;
       });
 
-      // 7. sort.
-      const ORDER = NEG_STATE_ORDER;
-      const ts = (r) => new Date(r.round_created_at || 0).getTime();
+      // 8. savings, parent grain only.
+      // ⚠️ SECURITY: getNegotiationParentSavings reads tbl_quotes /
+      // tbl_quote_items / tbl_quote_item_history and applies NO scope of its
+      // own. The ids handed to it here are exactly the rfq ids that survived
+      // the RBAC-scoped parent query plus every narrowing filter above — never
+      // ids taken from the request. Do not move this call above step 1.
+      if (isParent) {
+        const savingsRows = await negotiationModel.getNegotiationParentSavings(
+          filtered.map((r) => r.rfq_id).filter((id) => id != null)
+        );
+        const byRfq = new Map(savingsRows.map((s) => [Number(s.rfq_id), s]));
+        const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+        const pct = (saved, base) =>
+          Math.abs(Number(base || 0)) > 0.005 ? Math.round((saved / Number(base)) * 1000000) / 10000 : null;
+        for (const r of filtered) {
+          const s = r.rfq_id != null ? byRfq.get(Number(r.rfq_id)) : null;
+          // Signed and UNCLAMPED — prices genuinely go up (14 production RFQs
+          // ended above their baseline) and a floor of zero would hide it.
+          const saved = s ? money(s.baseline_total) - money(s.achieved_total) : 0;
+          const savedAwarded = s ? money(s.baseline_total_awarded) - money(s.achieved_total_awarded) : 0;
+          r.baseline_total = s ? money(s.baseline_total) : 0;
+          r.achieved_total = s ? money(s.achieved_total) : 0;
+          r.saved_value = money(saved);
+          r.saved_pct = s ? pct(saved, s.baseline_total) : null;
+          r.baseline_total_awarded = s ? money(s.baseline_total_awarded) : 0;
+          r.achieved_total_awarded = s ? money(s.achieved_total_awarded) : 0;
+          r.saved_value_awarded = money(savedAwarded);
+          r.saved_pct_awarded = s ? pct(savedAwarded, s.baseline_total_awarded) : null;
+          r.savings_pairs_counted = s ? Number(s.pairs_counted || 0) : 0;
+          r.savings_pairs_counted_awarded = s ? Number(s.pairs_counted_awarded || 0) : 0;
+          r.baseline_sources = s ? s.baseline_sources : null;
+        }
+      }
+
+      // 9. sort. The status sort is the ONE place the two grains legitimately
+      // differ: a round orders by NEG_STATE_ORDER, a parent by the action-first
+      // NEG_PARENT_STATE_ORDER.
+      const ORDER = isParent ? NEG_PARENT_STATE_ORDER : NEG_STATE_ORDER;
+      const ts = (r) => new Date((isParent ? r.last_activity_at : r.round_created_at) || 0).getTime();
       if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
       else if (sort === 'status') filtered.sort((a, b) => (ORDER[a._bucket] ?? 9) - (ORDER[b._bucket] ?? 9));
+      else if (sort === 'rounds') filtered.sort((a, b) => Number(b.round_count || 0) - Number(a.round_count || 0));
+      else if (sort === 'savings') filtered.sort((a, b) => Number(b.saved_value || 0) - Number(a.saved_value || 0));
       else filtered.sort((a, b) => ts(b) - ts(a));
 
-      // 8. paginate.
+      // 10. paginate.
       const total = filtered.length;
       const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
 
-      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit } });
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, source_counts, total, page, limit, group_by: groupBy } });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

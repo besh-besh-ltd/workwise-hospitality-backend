@@ -1458,7 +1458,14 @@ const HospitalityController = {
       const rfq_id = req.params.rfq_id;
 
       //  check if rfg exist
-      const rfqExist = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      // Bound rather than interpolated. Not reachable today — the route's Joi
+      // param schema is Joi.number().integer().required(), so a crafted
+      // :rfq_id never gets this far — but that guard lives in the route file,
+      // and this line should hold on its own.
+      const rfqExist = await rfqModel.checkIfExists('tbl_rfq', {
+        where: 'id = $1',
+        values: [Number(rfq_id)]
+      });
       if( rfqExist.length === 0 ) {
         return res.status(404).json({
           status: 2,

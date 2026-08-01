@@ -68,7 +68,7 @@ const rfqNos = {};
 const rpIds = {};
 const roundIds = {};
 let lockedRfqId, lockedRpId, lockedRoundId;
-let siblingInScopeRoundId, siblingOutOfScopeRoundId;
+let siblingInScopeRoundId, siblingOutOfScopeRoundId, siblingDecoyRoundId;
 const quoteIds = [];
 
 async function makeUser(userId, name, { roleId, scopes, hotelForMapping }) {
@@ -225,10 +225,21 @@ describe("Negotiation round detail — RBAC scope, visibility lock, sibling defe
       [lockedRoundId, VA, lockedRpId]
     );
 
-    // ── Cycle sibling pair sharing (source_type, source_id, round_number) ────
+    // ── Cycle sibling pair — the SECOND wave on their respective products ────
     // Both claim source_id = the A1/PROC RFQ, but the second one's OWN parent
     // (nr.rfq_id) is the out-of-scope B1 RFQ. A naive "siblings share a parent"
     // expansion would leak it.
+    //
+    // A cycle is keyed on the round's item-wise ordinal (see
+    // negotiationModel.getSiblingRoundIds) rather than on the stored
+    // round_number, which the RFQ-wide allocator no longer makes comparable
+    // across rounds. So the pair has to genuinely BE the same wave: each of the
+    // two products already carries one earlier round in this family — the
+    // A1/PROC product through roundIds.A1_PROC above, the B1 product through
+    // the decoy seeded here — which makes both of the rounds below wave 2.
+    // (Stored number 5 only to clear the partial unique index on
+    // (rfq_id, rfq_product_id, round_number) — nothing reads it.)
+    siblingDecoyRoundId = await seedRound(rfqIds.B1_PROC, rfqIds.A1_PROC, rpIds.B1_PROC, 5, VA, 95);
     siblingInScopeRoundId = await seedRound(rfqIds.A1_PROC, rfqIds.A1_PROC, rpIds.A1_PROC, 7, VA, 80);
     siblingOutOfScopeRoundId = await seedRound(rfqIds.B1_PROC, rfqIds.A1_PROC, rpIds.B1_PROC, 7, VA, 70);
     await db.none(
@@ -253,6 +264,7 @@ describe("Negotiation round detail — RBAC scope, visibility lock, sibling defe
       lockedRoundId,
       siblingInScopeRoundId,
       siblingOutOfScopeRoundId,
+      siblingDecoyRoundId,
     ].filter(Boolean);
     if (allRounds.length) {
       await db.none(`DELETE FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = ANY($1::int[])`, [allRounds]);
