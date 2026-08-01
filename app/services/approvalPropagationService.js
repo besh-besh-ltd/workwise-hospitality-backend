@@ -42,6 +42,118 @@ const SKIP_PUBLISHED_RFQ_SQL = `
     SELECT 1 FROM tbl_rfq r WHERE r.id = ai.entity_id AND r.is_published = 1
   ))`;
 
+/**
+ * Normalise a scope axis value to `null` or a positive integer.
+ *
+ * Scope snapshots taken in usersController COALESCE NULLs to 0 so the tuple
+ * diff can use string keys; 0 therefore means "unscoped on this axis"
+ * (= wildcard), exactly like a NULL column value.
+ */
+function scopeAxis(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Build the SQL predicate restricting approval-instance discovery to the role
+ * scopes actually being removed.
+ *
+ * One OR-group per removed `tbl_user_role_scopes` row. Each group mirrors the
+ * matching semantics of `resolveApprovers()` (generalModel.js) EXACTLY —
+ * anything looser over-reports (the bug this closes), anything tighter
+ * under-reports (worse: a real skipped approval goes unwarned):
+ *
+ *   company    `urs.company_id = $2`               → hard equality, no wildcard
+ *   hotel      `urs.hotel_id IS NULL OR = $3`      → NULL scope covers every hotel
+ *   department deptClause applied only when the instance IS dept-scoped, and
+ *              then `urs.department_id = $5 OR IS NULL`
+ *   process    `$6 IS NULL OR urs.process_id IS NULL OR urs.process_id = $6`
+ *
+ * Department *membership* removals (tbl_user_department) stay hotel-blind —
+ * that table carries no company/hotel axis — so they keep the flat
+ * `changedDeptIds` treatment.
+ *
+ * Mutates `params` (pushing bind values) and returns the SQL fragment.
+ * Returns `' AND FALSE'` when the caller supplied change info but none of it
+ * can match anything — matching nothing is the safe reading of "the removed
+ * grants could never have made this user an approver".
+ *
+ * Assumes the calling SQL aliases the instance table as `ai` and the policy
+ * step table as `ps`.
+ */
+function buildChangedScopeFilterSql(changedScopes, changedDeptIds, params) {
+  const orGroups = [];
+
+  for (const scope of changedScopes) {
+    const roleId = scopeAxis(scope.role_id);
+    const companyId = scopeAxis(scope.company_id);
+    // A scope row without a role or a company can never resolve an approver
+    // (resolveApprovers joins on both), so it cannot have caused any impact.
+    if (!roleId || !companyId) continue;
+
+    params.push(roleId, companyId, scopeAxis(scope.hotel_id),
+      scopeAxis(scope.department_id), scopeAxis(scope.process_id));
+    const p = params.length;
+    orGroups.push(`(
+      ps.approver_source_type = 'ROLE'
+      AND ps.approver_source_id = $${p - 4}
+      AND ai.hospitality_company_id = $${p - 3}
+      AND ($${p - 2}::int IS NULL OR ai.hotel_id = $${p - 2})
+      AND ($${p - 1}::int IS NULL OR ai.department_id IS NULL OR ai.department_id = $${p - 1})
+      AND ($${p}::int IS NULL OR ai.process_id IS NULL OR ai.process_id = $${p})
+    )`);
+  }
+
+  if (changedDeptIds.length > 0) {
+    params.push(changedDeptIds);
+    orGroups.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+  }
+
+  if (orGroups.length === 0) return ' AND FALSE';
+  return ` AND (${orGroups.join(' OR ')})`;
+}
+
+/**
+ * Metadata keys that carry a human-facing identifier, per entity type. The
+ * FIRST hit wins, so a PO instance is labelled with its PO number even though
+ * its metadata also carries the originating RFQ number.
+ */
+const IDENTIFIER_KEYS_BY_ENTITY = {
+  PO: ['po_number', 'po_no'],
+  MR: ['mr_number', 'mr_no'],
+  RFQ: ['rfq_number', 'rfq_no'],
+  TENDER: ['tender_number', 'rfq_number', 'rfq_no'],
+  TECHNICAL: ['rfq_number', 'rfq_no'],
+  NEGOTIATION: ['rfq_number', 'rfq_no'],
+  NEGOTIATION_QUOTE: ['rfq_number', 'rfq_no'],
+  ARC: ['arc_number', 'arc_no', 'contract_number'],
+  ARC_PUBLISH: ['arc_number', 'arc_no', 'contract_number'],
+  ARC_TECH: ['arc_number', 'arc_no', 'contract_number'],
+  ARC_COMMITTEE: ['arc_number', 'arc_no', 'contract_number'],
+  ARC_NEGOTIATION: ['arc_number', 'arc_no', 'contract_number'],
+};
+
+// Last-resort ordering for entity types not listed above.
+const IDENTIFIER_KEYS_FALLBACK = [
+  'rfq_number', 'rfq_no', 'po_number', 'po_no', 'arc_number', 'arc_no', 'mr_number',
+];
+
+/**
+ * Pick the identifier that belongs to THIS instance's entity type.
+ *
+ * Previously a flat `rfq_number || rfq_no || po_number || …` chain, which
+ * labelled a Purchase Order with the RFQ number it descended from — the admin
+ * saw "Purchase Order 536074" for PO 138626.
+ */
+function resolveEntityIdentifier(entityType, metadata, entityId) {
+  const keys = IDENTIFIER_KEYS_BY_ENTITY[entityType] || [];
+  for (const key of [...keys, ...IDENTIFIER_KEYS_FALLBACK]) {
+    const value = metadata?.[key];
+    if (value !== undefined && value !== null && value !== '') return String(value);
+  }
+  return `ID-${entityId}`;
+}
+
 // ============================================================================
 // SECTION 1: POLICY STEP DIFF
 // ============================================================================
@@ -775,11 +887,23 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
  *
  * @param {number} userId — user being affected
  * @param {string} changeType — 'role_removed' | 'dept_removed' | 'user_deactivated' | 'scope_removed'
- * @param {Object} [options] — { companyId, hotelId } to scope the search
+ * @param {Object} [options]
+ * @param {number} [options.companyId] — blanket company filter (mapping removal path)
+ * @param {number} [options.hotelId]   — blanket hotel filter (mapping removal path)
+ * @param {Array}  [options.changedScopes] — removed tbl_user_role_scopes tuples
+ *        `{role_id, company_id, hotel_id, department_id, process_id}`. PREFERRED:
+ *        the filter then matches each removed grant on all four scope axes, so
+ *        editing a role at one hotel cannot surface pending approvals from a
+ *        different hotel — let alone a different legal entity.
+ * @param {Array}  [options.changedRoleIds] — legacy bare role ids. Matches on
+ *        role alone (no company/hotel/department/process predicate) and will
+ *        over-report; kept only for callers that have no scope tuples.
+ * @param {Array}  [options.changedDeptIds] — removed department memberships
+ *        (tbl_user_department carries no company/hotel axis, so this stays flat)
  * @returns {{ willAutoComplete: boolean, affectedInstances: Array }}
  */
 export async function simulateApproverImpact(userId, changeType, options = {}) {
-  const { companyId, hotelId, changedRoleIds = [], changedDeptIds = [] } = options;
+  const { companyId, hotelId, changedScopes = [], changedRoleIds = [], changedDeptIds = [] } = options;
 
   // Find PENDING instances where this user is a PENDING approver on
   // ROLE/DEPARTMENT-based steps. Mirrors revalidateApproverMembership query.
@@ -816,20 +940,26 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
     query += ` AND ai.hotel_id = $${params.length}`;
   }
 
-  // Scope by changed role/dept IDs — only check steps tied to the roles/depts
-  // actually being removed. This prevents false positives where the user is an
-  // approver via a DIFFERENT role that is being kept.
-  if (changeType !== 'user_deactivated' && (changedRoleIds.length > 0 || changedDeptIds.length > 0)) {
-    const sourceIdConditions = [];
-    if (changedRoleIds.length > 0) {
-      params.push(changedRoleIds);
-      sourceIdConditions.push(`(ps.approver_source_type = 'ROLE' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+  // Scope by what actually changed — only check steps tied to the role grants
+  // / departments being removed. Two shapes:
+  //   changedScopes  → full (role, company, hotel, dept, process) matching
+  //   changedRoleIds → legacy role-only matching (over-reports; see JSDoc)
+  // A deactivation disqualifies the user everywhere, so it skips both.
+  if (changeType !== 'user_deactivated') {
+    if (changedScopes.length > 0) {
+      query += buildChangedScopeFilterSql(changedScopes, changedDeptIds, params);
+    } else if (changedRoleIds.length > 0 || changedDeptIds.length > 0) {
+      const sourceIdConditions = [];
+      if (changedRoleIds.length > 0) {
+        params.push(changedRoleIds);
+        sourceIdConditions.push(`(ps.approver_source_type = 'ROLE' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+      }
+      if (changedDeptIds.length > 0) {
+        params.push(changedDeptIds);
+        sourceIdConditions.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
+      }
+      query += ` AND (${sourceIdConditions.join(' OR ')})`;
     }
-    if (changedDeptIds.length > 0) {
-      params.push(changedDeptIds);
-      sourceIdConditions.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${params.length}::int[]))`);
-    }
-    query += ` AND (${sourceIdConditions.join(' OR ')})`;
   }
 
   query += ' ORDER BY ai.id ASC';
@@ -896,7 +1026,7 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
       instance_id: row.instance_id,
       entity_type: row.entity_type,
       entity_id: row.entity_id,
-      entity_identifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${row.entity_id}`,
+      entity_identifier: resolveEntityIdentifier(row.entity_type, metadata, row.entity_id),
       step_order: row.step_order,
       current_step: row.current_step,
       impact: 'REMOVE_APPROVER',
@@ -920,7 +1050,15 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
  * @param {number} params.userId — the user whose membership changed
  * @param {number} params.changedBy — admin who made the change
  * @param {string} params.changeType — 'role_removed' | 'role_added' | 'dept_removed' | 'dept_added' | 'user_deactivated' | 'user_activated' | 'scope_removed' | 'scope_added'
- * @param {Array}  [params.changedRoleIds] — role IDs that were added/removed
+ * @param {Array}  [params.changedScopes] — removed/added role scope tuples
+ *        `{role_id, company_id, hotel_id, department_id, process_id}`. When
+ *        present, PART 1's discovery query is narrowed the same way
+ *        simulateApproverImpact narrows its own — so simulation and mutation
+ *        agree on which instances a change can possibly touch. Behaviourally a
+ *        no-op (resolveApprovers already re-filters per instance below), but it
+ *        removes wasted per-instance work and the divergence that let the
+ *        pre-flight over-reporting bug hide.
+ * @param {Array}  [params.changedRoleIds] — legacy bare role IDs (over-matches)
  * @param {Array}  [params.changedDeptIds] — department IDs that were added/removed
  * @param {number} [params.companyId] — scope to specific company
  * @param {number} [params.hotelId] — scope to specific hotel
@@ -928,7 +1066,7 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
  */
 export async function revalidateApproverMembership({
   userId, changedBy, changeType,
-  changedRoleIds = [], changedDeptIds = [],
+  changedScopes = [], changedRoleIds = [], changedDeptIds = [],
   companyId, hotelId,
   txContext
 }) {
@@ -974,19 +1112,22 @@ export async function revalidateApproverMembership({
     removeQuery += ` AND ai.hospitality_company_id = $${removeParams.length}`;
   }
 
-  // Scope by changed role/dept IDs to avoid unnecessary revalidation
-  if (changedRoleIds.length > 0 || changedDeptIds.length > 0) {
-    const sourceIdConditions = [];
-    if (changedRoleIds.length > 0) {
-      removeParams.push(changedRoleIds);
-      sourceIdConditions.push(`(ps.approver_source_type = 'ROLE' AND ps.approver_source_id = ANY($${removeParams.length}::int[]))`);
-    }
-    if (changedDeptIds.length > 0) {
-      removeParams.push(changedDeptIds);
-      sourceIdConditions.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${removeParams.length}::int[]))`);
-    }
-    // For user_deactivated/user_activated, don't filter by source IDs — affects all
-    if (changeType !== 'user_deactivated' && changeType !== 'user_activated') {
+  // Scope by what changed to avoid unnecessary revalidation. Same predicate the
+  // pre-flight simulation uses, so the two never disagree about which instances
+  // are in play. (De/reactivation disqualifies everywhere — no source filter.)
+  if (changeType !== 'user_deactivated' && changeType !== 'user_activated') {
+    if (changedScopes.length > 0) {
+      removeQuery += buildChangedScopeFilterSql(changedScopes, changedDeptIds, removeParams);
+    } else if (changedRoleIds.length > 0 || changedDeptIds.length > 0) {
+      const sourceIdConditions = [];
+      if (changedRoleIds.length > 0) {
+        removeParams.push(changedRoleIds);
+        sourceIdConditions.push(`(ps.approver_source_type = 'ROLE' AND ps.approver_source_id = ANY($${removeParams.length}::int[]))`);
+      }
+      if (changedDeptIds.length > 0) {
+        removeParams.push(changedDeptIds);
+        sourceIdConditions.push(`(ps.approver_source_type = 'DEPARTMENT' AND ps.approver_source_id = ANY($${removeParams.length}::int[]))`);
+      }
       removeQuery += ` AND (${sourceIdConditions.join(' OR ')})`;
     }
   }

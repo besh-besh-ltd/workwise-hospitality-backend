@@ -1998,10 +1998,29 @@ update_user_detail: async (req, res, next) => {
       const newDeptIds = Array.isArray(reqData.department_ids) ? reqData.department_ids : null;
       const newStatus = reqData.status;
 
+      /* `tbl_user_role_scopes.company_id` holds a HOSPITALITY company id
+         (tbl_hospitality_companies.id, 4-11 in production), while
+         loggedInUser.company_id is the buyer's PARENT company id (tbl_company,
+         13) — different number spaces entirely. The old
+         `r.company_id || loggedInUser.company_id` fallback silently wrote a
+         buyer id into a hospitality column, producing a scope row that matches
+         no hotel and no approval instance. It was inert only because the
+         frontend always sends company_id. Fail closed instead: every role scope
+         must name its own hospitality company. */
+      const roleScopeMissingCompany = Array.isArray(reqData.roles)
+        && reqData.roles.some(r => !Number.isInteger(Number(r.company_id)) || Number(r.company_id) <= 0);
+      if (roleScopeMissingCompany) {
+        return res.status(400).json({
+          status: 3,
+          code: 'ROLE_SCOPE_COMPANY_REQUIRED',
+          message: 'Every role assignment must specify the hospitality company it applies to.'
+        });
+      }
+
       const newRoleScopes = Array.isArray(reqData.roles)
         ? reqData.roles.map(r => ({
             role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id || 0,
+            company_id: Number(r.company_id),
             hotel_id: r.hotel_id || 0,
             department_id: r.department_id || 0,
             process_id: r.process_id || 0,
@@ -2053,6 +2072,47 @@ update_user_detail: async (req, res, next) => {
 
       logger.info(`[UpdateUser ${targetUserId}] role scopes: old=${oldRoleScopes.length}, new=${newRoleScopes?.length ?? 'n/a'}, removedScopes=${removedScopes.length}, addedScopes=${addedScopes.length}`);
 
+      /* ---- FULL-WIPE BACKSTOP ----
+         `roles: []` / `department_ids: []` mean "replace everything with
+         nothing" — the update below deletes every one of this user's role
+         scopes and department memberships. That is a legitimate admin action
+         (removing someone's last role), but it is ALSO exactly what an edit
+         modal emits when its data never arrived: an empty form submitted
+         against a user who actually holds dozens of grants.
+
+         The two are indistinguishable from the payload alone — both are an
+         empty array. What distinguishes them is INTENT, which only a client
+         that has shown the real current state to a human can assert. So a
+         clear-to-empty of a NON-empty set requires `confirm_clear_all_scopes`;
+         a client that never loaded the data cannot honestly set it, and the
+         request fails closed with the scopes untouched.
+
+         Deliberately narrow: it only trips when the incoming array is EMPTY
+         and the user currently has rows. Removing 68 of 69 grants, or clearing
+         roles for a user who had none, passes straight through — this is a
+         tripwire on total erasure, not a general confirmation dialog. */
+      const clearingAllRoleScopes = Array.isArray(reqData.roles)
+        && reqData.roles.length === 0
+        && oldRoleScopes.length > 0;
+      const clearingAllDepartments = Array.isArray(reqData.department_ids)
+        && reqData.department_ids.length === 0
+        && oldDeptIds.length > 0;
+
+      if ((clearingAllRoleScopes || clearingAllDepartments) && reqData.confirm_clear_all_scopes !== true) {
+        logger.warn(`[UpdateUser ${targetUserId}] ⊘ blocked full-scope wipe — roleScopes=${oldRoleScopes.length}→0=${clearingAllRoleScopes}, departments=${oldDeptIds.length}→0=${clearingAllDepartments}`);
+        return res.status(400).json({
+          status: 3,
+          code: 'SCOPE_CLEAR_NOT_CONFIRMED',
+          message: 'This would remove every role and department assigned to this user. Re-open the account, confirm the list is correct, and try again.',
+          data: {
+            currentRoleScopeCount: oldRoleScopes.length,
+            currentDepartmentCount: oldDeptIds.length,
+            clearingAllRoleScopes,
+            clearingAllDepartments
+          }
+        });
+      }
+
       /* ---- PRE-FLIGHT CHECK for approval impact ----
          Only fires for actual REMOVALS — pure additions cannot disqualify
          the user from any pending approval. Scope-aware: removing
@@ -2069,17 +2129,22 @@ update_user_detail: async (req, res, next) => {
 
         logger.info(`[UpdateUser ${targetUserId}] running pre-flight check (changeType=${changeType})`);
 
-        // NOTE: do NOT pass loggedInUser.company_id here. simulateApproverImpact
-        // filters by tbl_approval_instances.hospitality_company_id (a hospitality
-        // entity ID), but loggedInUser.company_id is the buyer's parent company
-        // ID — different number space. Passing it here matches zero rows and the
-        // pre-flight check silently no-ops. The user mutation is global, so the
-        // impact check must be global too.
-        // Pass changedRoleIds/changedDeptIds so the simulation only checks steps
-        // tied to the roles/depts actually being removed (prevents false positives
-        // where user is an approver via a different, kept role).
+        // NOTE: do NOT pass the blanket companyId/hotelId options here.
+        // simulateApproverImpact filters those against
+        // tbl_approval_instances.hospitality_company_id (a hospitality entity
+        // ID), but loggedInUser.company_id is the buyer's PARENT company ID —
+        // a different number space. Passing it matches zero rows and the
+        // pre-flight check silently no-ops. Scoping comes from the removed
+        // scope tuples instead, which carry hospitality company IDs.
+        //
+        // Pass the full removed scope TUPLES, not bare role ids. Bare ids
+        // collapse "role 13 was removed at Fort Jadhavgadh" into "role 13 was
+        // removed somewhere", which surfaced every PENDING role-13 step on the
+        // platform — including instances belonging to other legal entities.
+        // Department MEMBERSHIP removals stay flat: tbl_user_department has no
+        // company/hotel axis, so those are genuinely global.
         const impact = await simulateApproverImpact(targetUserId, changeType, {
-          changedRoleIds: scopeRemoveContext.affectedRemovedRoleIds,
+          changedScopes: scopeRemoveContext.removedScopes,
           changedDeptIds: scopeRemoveContext.removedDeptIds
         });
 
@@ -2151,7 +2216,9 @@ update_user_detail: async (req, res, next) => {
         ? reqData.roles.map(r => ({
             user_id: targetUserId,
             role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id,
+            // Hospitality company id — never the buyer parent id. Guaranteed
+            // present by the ROLE_SCOPE_COMPANY_REQUIRED check above.
+            company_id: Number(r.company_id),
             hotel_id: r.hotel_id || null,
             department_id: r.department_id || null,
             process_id: r.process_id || null
@@ -2203,7 +2270,10 @@ update_user_detail: async (req, res, next) => {
               userId: targetUserId,
               changedBy: loggedInUser.id,
               changeType,
-              changedRoleIds: ctx.statusDeactivating ? [] : ctx.affectedRemovedRoleIds,
+              // Same scope tuples the pre-flight simulation used, so discovery
+              // and mutation agree on the candidate set. resolveApprovers still
+              // has the final say per instance, so this only trims wasted work.
+              changedScopes: ctx.statusDeactivating ? [] : ctx.removedScopes,
               changedDeptIds: ctx.statusDeactivating ? [] : ctx.removedDeptIds,
               txContext: t
             });
