@@ -1,5 +1,135 @@
 import db from '../config/dbConn.js';
 
+// ── IST bid-window clock ─────────────────────────────────────────────
+//
+// Every predicate in this file that touches `tbl_rfq.bid_end_date` must use
+// the constant below instead of `CURRENT_DATE` / `NOW()`.
+//
+// `bid_end_date` is `text NOT NULL` holding a NAIVE IST wall-clock string
+// (e.g. '2026-03-14T11:00'), the same shape app/helper/quoteVisibility.js
+// reads under QUOTE_VISIBILITY_TIMEZONE = Asia/Kolkata. It carries no offset,
+// so the moment it is compared against a `timestamptz` clock Postgres resolves
+// the naive side **through the session timezone**. Production's session
+// timezone is UTC (verified on the live DB: `current_setting('TimeZone')` = UTC;
+// the app sets no PGOPTIONS, no PGTZ and issues no `SET timezone`), so every
+// such comparison silently asks the wrong question.
+
+/**
+ * "Now" for bid-window purposes, as a TIMESTAMP.
+ *
+ * THE ONLY CLOCK IN THIS FILE. Every `bid_end_date` predicate here compares at
+ * wall-clock precision — "the bid window is still open", "closes within the
+ * next 24h", "closes within the next 3 days", "the bid window is over".
+ *
+ * WHY THERE IS NO `IST_TODAY` DAY-GRANULAR TWIN ANY MORE
+ * Three sites used to compare `DATE(bid_end_date)` against the IST calendar
+ * day: `getOpportunities`.pending_quotes, `getOpportunities`.closing_soon and
+ * `getInsights`.missed_count. Rounding to a calendar day means an RFQ whose bid
+ * closed at 09:00 IST still counted as a live opportunity — and stayed out of
+ * the missed count — until IST midnight, so for up to 15 hours the vendor
+ * dashboard invited a vendor to quote on a bid they could no longer win. The
+ * deadline's actual time now decides, which also puts these three counts in
+ * agreement with the timestamp family below, with the buyer dashboard, and with
+ * `bid_ended` in rfqModel.js — all of which already compared at moment
+ * precision. Do not reintroduce `::date` here: a day-granular predicate next to
+ * a moment-granular one is how the same RFQ ends up "open" on one card and
+ * "closed" on the card beside it.
+ *
+ * Note this also narrowed closing_soon's 3-day window from "closes on a
+ * calendar day between today and today+3" (up to ~96h, and inclusive of bids
+ * that had already closed earlier today) to a rolling 72h from now. See the
+ * site itself.
+ *
+ * WHY IT IS NOT `NOW()`
+ * `bid_end_date::timestamp` is naive; `NOW()` is `timestamptz`; Postgres
+ * promotes the naive side to `timestamptz` through the session timezone. So
+ * `bid_end_date::timestamp > NOW()` really asks "is this IST wall-clock string,
+ * reinterpreted as session-local time, in the future?". On production's UTC
+ * session an 11:00 IST deadline is read as the instant 11:00 UTC — 16:30 IST.
+ * Every bid-window boundary lands 5h30m LATE, all day, every day.
+ *
+ * On the vendor surfaces in this file that meant, with a UTC session:
+ *   • `new_rfqs_unviewed` (the "still open" gate) counted RFQs whose bid window
+ *     had already closed up to 5h30m earlier — the vendor was told to go quote
+ *     on a dead RFQ;
+ *   • `closing_soon` covered real deadlines from 5h30m in the PAST to 18h30m
+ *     ahead instead of 0–24h, so it advertised already-closed RFQs as urgent
+ *     and stayed silent on every bid closing 18h30m–24h out — exactly the ones
+ *     a vendor still has time to act on.
+ *
+ * `pending_quotes`, `closing_soon` and `missed_count` now live in this family
+ * too, so they carry the same exposure: written with `NOW()` they would each be
+ * 5h30m out on production rather than merely a day coarse.
+ *
+ * The error is `5h30m − session_offset`, so it CHANGES SIGN east of IST rather
+ * than shrinking: on an Asia/Singapore session (+8) it is 2h30m early instead
+ * of 5h30m late. A test seeded to catch one direction passes against the buggy
+ * code under the other, which is why the boundary suites straddle both.
+ *
+ * Deliberately NOT applied to `r.timestamp`, `po.created_at`, `q.timestamp` or
+ * `nr.created_at`. Those are real `timestamp` columns defaulted from
+ * `CURRENT_TIMESTAMP`, i.e. written under the same session timezone they are
+ * later read under, so plain `NOW()` is already frame-consistent for them and
+ * shifting them to IST would *introduce* the skew this removes.
+ *
+ * Also NOT applied to `nr.end_date` (negotiation round deadline) or
+ * `vhcs.end_date` (subscription expiry). Neither is a `bid_end_date` string;
+ * the negotiation module reads its column as UTC-naive by its own convention
+ * (negotiationModel.js:513 uses `now() AT TIME ZONE 'UTC'`), and the
+ * subscription column is a real `date`. Wrapping either in IST here would put
+ * this file out of step with the module that owns the column.
+ */
+const IST_NOW = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`;
+
+/**
+ * `bid_end_date` cast to a comparable naive timestamp, EMPTY-SAFE.
+ *
+ * `bid_end_date` is `text NOT NULL` but a real share of rows carry `''` — an
+ * RFQ published with no deadline. `''::timestamp` does not return NULL, it
+ * raises `invalid input syntax for type timestamp: ""` and aborts the WHOLE
+ * query, so one such row 500s the entire dashboard endpoint. That is not
+ * hypothetical: it is the incident documented at hospitalityModel.js:1999,
+ * where an unguarded cast silently zeroed out every new vendor's RFQ backfill.
+ *
+ * It is tempting to lean on the `bid_end_date = ''` / `!= ''` conjunct sitting
+ * next to the cast, but Postgres does not guarantee left-to-right evaluation of
+ * AND/OR, and whether it happens to short-circuit is a property of the PLAN,
+ * not of the SQL. Measured on 20k rows, 40 of them `''`:
+ *
+ *     WHERE bid != '' AND bid::timestamp > now()               -- OK
+ *     WHERE (bid = '' OR bid::timestamp > now())               -- OK
+ *     ... FROM t JOIN g ON g.id = t.id
+ *     WHERE g.ok AND t.bid::timestamp > now()                  -- ERROR
+ *
+ * The last one is the same guard, still on every row, merely moved onto a
+ * joined relation — and it raises. Nothing about the predicate changed; the
+ * plan did. Adding a join, or letting the planner re-cost one, is enough.
+ *
+ * `NULLIF` moves the guard INSIDE the expression, where no plan can reorder
+ * around it: an empty deadline becomes NULL, every comparison against it yields
+ * NULL, and NULL is not true, so the row simply fails the predicate instead of
+ * killing the query. All three shapes above are safe with it.
+ *
+ * The `= ''` / `!= ''` conjuncts are kept anyway — they still carry the
+ * INTENT (does an RFQ with no deadline count here or not?), which differs per
+ * site and is not derivable from the NULLIF alone:
+ *   • pending_quotes — `''` is INCLUDED. No deadline means the window has not
+ *     closed, so the RFQ is still an opportunity. Preserved from the pre-change
+ *     behaviour verbatim; flipping it would silently drop live opportunities.
+ *   • closing_soon / missed_count — `''` is EXCLUDED. Neither "closes within
+ *     3 days" nor "the vendor let it lapse" is meaningful without a deadline.
+ *
+ * Parameterised by alias because the status-banner `soonest` sub-select ranges
+ * over `_r` rather than `r`; both need the same protection.
+ *
+ * This is NOT theoretical: production currently holds 36 RFQs with
+ * bid_end_date = '', one of which (id 744 / rfq_no 536286) is published and
+ * live, so the vendor status banner is one planner decision away from 500ing
+ * for every vendor.
+ */
+const bidEndTs = (alias = 'r') => `NULLIF(${alias}.bid_end_date, '')::timestamp`;
+const BID_END_TS = bidEndTs('r');
+
 // ─────────────────────────────────────────────────────────────────────
 // 1. Opportunity Feed
 // ─────────────────────────────────────────────────────────────────────
@@ -14,21 +144,37 @@ async function getOpportunities(vendor_id, start_date, end_date) {
      WHERE rpv.user_id = $1 AND q.id IS NULL
      AND r.timestamp BETWEEN $2 AND $3`, params);
 
+  // Bids the vendor can still win: the deadline has not passed YET, at IST
+  // wall-clock precision. Was `DATE(bid_end_date) >= <IST today>`, which kept
+  // an RFQ that closed at 09:00 IST on the feed until IST midnight.
+  // An empty deadline still counts as open — see BID_END_TS.
   const pendingQuotesQuery = db.one(
     `SELECT COUNT(DISTINCT rpv.rfq_id) as count
      FROM tbl_rfq_product_vendors rpv
      JOIN tbl_rfq r ON r.id = rpv.rfq_id AND r.is_published = 1 AND r.status = 1
      LEFT JOIN tbl_quotes q ON q.rfq_id = rpv.rfq_id AND q.created_by = $1
      WHERE rpv.user_id = $1 AND q.id IS NULL
-     AND (r.bid_end_date = '' OR DATE(r.bid_end_date) >= CURRENT_DATE)`, [vendor_id]);
+     AND (r.bid_end_date = '' OR ${BID_END_TS} > ${IST_NOW})`, [vendor_id]);
 
+  // Urgency counterpart of the above: of those still-open bids, the ones due
+  // inside a ROLLING 72 HOURS from this instant.
+  //
+  // This window changed shape, not just precision. It used to be
+  // `DATE(bid_end_date) BETWEEN <IST today> AND <IST today> + 3 days` — every
+  // bid whose CLOSING CALENDAR DAY fell in a four-day span, which reached up to
+  // ~96h ahead (a bid at 23:59 on day +3, read at 00:01 today) and, worse,
+  // reached BACKWARDS: a bid that closed at 09:00 this morning was still being
+  // advertised as "closing soon" all day, because its calendar day was still
+  // today. Now the count means exactly "closes in the next 72h and has not
+  // closed yet" — the lower `BETWEEN` bound of IST_NOW is what excludes bids
+  // already past. Expect it to read slightly lower than it used to.
   const closingSoonQuery = db.one(
     `SELECT COUNT(DISTINCT rpv.rfq_id) as count
      FROM tbl_rfq_product_vendors rpv
      JOIN tbl_rfq r ON r.id = rpv.rfq_id AND r.is_published = 1 AND r.status = 1
      LEFT JOIN tbl_quotes q ON q.rfq_id = rpv.rfq_id AND q.created_by = $1
      WHERE rpv.user_id = $1 AND q.id IS NULL
-     AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'`, [vendor_id]);
+     AND r.bid_end_date != '' AND ${BID_END_TS} BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '3 days'`, [vendor_id]);
 
   const posReceivedQuery = db.one(
     `SELECT COUNT(*) as count
@@ -185,7 +331,12 @@ async function getInsights(vendor_id, start_date, end_date) {
      AND r.tender_publish_date IS NOT NULL
      AND q.timestamp BETWEEN $2 AND $3`, params);
 
-  // Missed RFQs
+  // Missed RFQs — invited, never quoted, and no longer quotable: either the RFQ
+  // left the open state or its deadline has PASSED, at IST wall-clock
+  // precision. Was `DATE(bid_end_date) < <IST today>`, which withheld a bid
+  // from the response-efficiency card until IST midnight even though the vendor
+  // had already lost it that morning. Exact mirror of pending_quotes above, so
+  // the two can no longer both claim the same RFQ.
   const missedQuery = db.one(
     `SELECT COUNT(DISTINCT rpv.rfq_id) as count
      FROM tbl_rfq_product_vendors rpv
@@ -193,7 +344,7 @@ async function getInsights(vendor_id, start_date, end_date) {
      LEFT JOIN tbl_quotes q ON q.rfq_id = rpv.rfq_id AND q.created_by = $1
      WHERE rpv.user_id = $1 AND q.id IS NULL
      AND r.timestamp BETWEEN $2 AND $3
-     AND (r.status != 1 OR (r.bid_end_date != '' AND DATE(r.bid_end_date) < CURRENT_DATE))`, params);
+     AND (r.status != 1 OR (r.bid_end_date != '' AND ${BID_END_TS} < ${IST_NOW}))`, params);
 
   // Win/Loss with more detail
   const winLossQuery = db.one(
@@ -319,13 +470,18 @@ async function getStatusBannerData(vendor_id, start_date, end_date) {
         AND r.is_published = 1
         AND r.status = 1
         AND (rpv.is_rfq_viewed IS NULL OR rpv.is_rfq_viewed = 0)
-        AND (r.bid_end_date IS NULL OR r.bid_end_date = '' OR r.bid_end_date::timestamp > NOW())
+        AND (r.bid_end_date IS NULL OR r.bid_end_date = '' OR ${BID_END_TS} > ${IST_NOW})
         ${hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : ''}`,
     params
   );
 
   // 2. Closing soon — bid window ends in <24h AND vendor hasn't quoted.
   //    Also returns the soonest RFQ so the FE can name it in the subline.
+  //
+  //    The `ORDER BY ${bidEndTs('_r')} ASC` below is intentionally
+  //    left un-wrapped: it ranks naive IST strings against EACH OTHER, never
+  //    against a clock, so it carries no session-timezone dependence. The rows
+  //    it ranks have already been filtered by the IST_NOW window above.
   const closingSoonP = db.oneOrNone(
     `SELECT COUNT(DISTINCT rpv.rfq_id)::INTEGER AS count,
             (SELECT json_build_object('id', _r.id, 'title', _r.title, 'rfq_no', _r.rfq_no)
@@ -335,12 +491,12 @@ async function getStatusBannerData(vendor_id, start_date, end_date) {
                 AND _r.is_published = 1
                 AND _r.status = 1
                 AND _r.bid_end_date IS NOT NULL AND _r.bid_end_date != ''
-                AND _r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+                AND ${bidEndTs('_r')} BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
                 AND NOT EXISTS (
                   SELECT 1 FROM tbl_quotes _q
                    WHERE _q.rfq_id = _r.id AND _q.created_by = $1
                 )
-              ORDER BY _r.bid_end_date::timestamp ASC
+              ORDER BY ${bidEndTs('_r')} ASC
               LIMIT 1) AS soonest
        FROM tbl_rfq_product_vendors rpv
        JOIN tbl_rfq r ON r.id = rpv.rfq_id
@@ -348,7 +504,7 @@ async function getStatusBannerData(vendor_id, start_date, end_date) {
         AND r.is_published = 1
         AND r.status = 1
         AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-        AND r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND ${BID_END_TS} BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
         AND NOT EXISTS (
           SELECT 1 FROM tbl_quotes q
            WHERE q.rfq_id = r.id AND q.created_by = $1

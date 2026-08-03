@@ -36,6 +36,73 @@ function hotelFilter(alias = 'r', paramIdx = 4) {
   return `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = ${alias}.id AND rhm.hotel_id = ANY($${paramIdx}))`;
 }
 
+/**
+ * "Today" for bid-window purposes, as a DATE.
+ *
+ * `tbl_rfq.bid_end_date` is `text NOT NULL` holding a NAIVE IST wall-clock
+ * string (see app/helper/quoteVisibility.js — QUOTE_VISIBILITY_TIMEZONE). It
+ * carries no offset, so any comparison against `CURRENT_DATE` / `DATE(NOW())`
+ * silently resolves through the Postgres SESSION timezone. That is wrong on
+ * every deployment whose session timezone is not Asia/Kolkata — notably RDS,
+ * which defaults to UTC. Between 18:30 and 24:00 UTC (00:00–05:30 IST) the UTC
+ * calendar day still lags the IST one, so a bid that closed at the end of the
+ * IST day is not yet reported as closed and every day-count is short by one.
+ *
+ * `CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'` pins the boundary to IST
+ * regardless of session timezone — the same idiom already used for
+ * `bid_end_date` in rfqModel.js (:4247, :13236) and hospitalityModel.js (:2005),
+ * and the SQL-side twin of arcTime.js / quoteVisibility.js.
+ */
+const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
+
+/**
+ * "Now" for bid-window purposes, as a TIMESTAMP.
+ *
+ * The timestamp-granularity twin of IST_TODAY. It exists for the predicates
+ * that compare `bid_end_date` at wall-clock precision rather than by calendar
+ * day — "closes within the next 24h", "bid window already passed".
+ *
+ * Same root cause, strictly worse blast radius. `bid_end_date::timestamp` is
+ * naive; `NOW()` is `timestamptz`; Postgres resolves the mixed comparison by
+ * promoting the naive side to `timestamptz` **through the session timezone**.
+ * So `bid_end_date::timestamp < NOW()` really asks "is this IST wall-clock
+ * string, reinterpreted as session-local time, in the past?". Production's
+ * session timezone is UTC (verified on the live DB: `current_setting('TimeZone')`
+ * = UTC; the app sets no PGOPTIONS, no PGTZ and issues no `SET timezone`), so
+ * an 11:00 IST deadline is read as the instant 11:00 UTC — 16:30 IST. Every
+ * bid-window boundary lands 5h30m LATE, all day, every day, not only during
+ * the 18:30–24:00 UTC window in which the `::date` twin above skews. The error
+ * is `5h30m − session_offset`, so it flips sign east of IST rather than
+ * vanishing: on an Asia/Singapore session (+8) it is 2h30m early instead.
+ *
+ * On the status banner, with production's UTC session, that means:
+ *   • `closed_no_quotes` only fires once a bid has been closed for MORE than
+ *     5h30m, so the "vendors aren't biting" alarm — the one signal that alone
+ *     forces `critical` mode — is 5h30m late every single time;
+ *   • `closing_soon` covers real deadlines from 5h30m in the PAST to 18h30m
+ *     ahead instead of 0–24h, so it advertises already-dead RFQs as still open
+ *     and stays silent on every bid closing 18h30m–24h out.
+ *
+ * `CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'` returns IST wall clock as a
+ * naive `timestamp`, putting both sides of the comparison in the same frame
+ * under any session timezone.
+ *
+ * Deliberately NOT applied to `r.timestamp`, `i.created_at`, `po.created_at` or
+ * `nr.created_at`. Those are real `timestamp` columns defaulted from
+ * `CURRENT_TIMESTAMP`, i.e. written under the same session timezone they are
+ * later read under, so plain `NOW()` is already frame-consistent for them and
+ * shifting them to IST would *introduce* the skew this removes.
+ *
+ * Also deliberately NOT applied to the `$4`/`$5` date-range parameters. Those
+ * arrive from the FE as bare `YYYY-MM-DD` strings built with local-time
+ * `moment().format(...)` (frontend/components/dashboard/buyer/index.js
+ * getDateRange), never `toISOString()`, and Postgres resolves an untyped
+ * parameter in `<timestamp> BETWEEN $4 AND $5` to `timestamp without time
+ * zone` — so that branch is already naive-IST vs naive-IST and carries no
+ * session-timezone dependence at all. Wrapping it would break it.
+ */
+const IST_NOW = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`;
+
 // ── RBAC scope (company × hotel × department × process) ──────────────
 //
 // Before this, dashboardModel.js contained ZERO references to
@@ -228,7 +295,7 @@ async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], st
   const rfqsEndingSoonQuery = db.one(
     `SELECT COUNT(*) as count FROM tbl_rfq r
      WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
-     AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
+     AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN ${IST_TODAY} AND ${IST_TODAY} + INTERVAL '3 days'
      ${hf} ${scopeFilter(user_id, 'r', endingSoonParams)}`,
     endingSoonParams
   );
@@ -304,7 +371,7 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], st
        (SELECT COUNT(*) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id) as invited_vendor_count,
        CASE
          WHEN r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-              AND DATE(r.bid_end_date) < CURRENT_DATE
+              AND DATE(r.bid_end_date) < ${IST_TODAY}
          THEN true ELSE false
        END as is_expired
      FROM tbl_rfq r
@@ -1561,7 +1628,7 @@ async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids, sta
          AND r.created_by = $2
          AND r.bid_end_date IS NOT NULL
          AND r.bid_end_date != ''
-         AND DATE(r.bid_end_date) >= CURRENT_DATE
+         AND DATE(r.bid_end_date) >= ${IST_TODAY}
          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
          ${dateClause}
@@ -1621,14 +1688,14 @@ async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_i
   }
   const rows = await db.any(
     `SELECT r.id, r.rfq_no, r.title, r.bid_end_date,
-            (DATE(NOW()) - DATE(r.bid_end_date))::int AS days_overdue
+            (${IST_TODAY} - DATE(r.bid_end_date))::int AS days_overdue
      FROM tbl_rfq r
      WHERE ${companyScope()}
        AND r.is_published = 1
        AND r.created_by = $2
        AND r.bid_end_date IS NOT NULL
        AND r.bid_end_date != ''
-       AND DATE(r.bid_end_date) < CURRENT_DATE
+       AND DATE(r.bid_end_date) < ${IST_TODAY}
        AND r.status IN (1, 2)
        AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
        AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
@@ -2542,7 +2609,7 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
                 AND _r.is_published = 1
                 AND _r.status = 1
                 AND _r.bid_end_date IS NOT NULL AND _r.bid_end_date != ''
-                AND _r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+                AND _r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
                 AND _r.hospitality_company_id IN (
                   SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
                 )
@@ -2557,7 +2624,7 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
         AND r.is_published = 1
         AND r.status = 1
         AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-        AND r.bid_end_date::timestamp BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
         AND r.hospitality_company_id IN (
           SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
         )
@@ -2581,10 +2648,15 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
         AND r.is_published = 1
         AND r.status = 1
         AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-        AND r.bid_end_date::timestamp < NOW()
+        AND r.bid_end_date::timestamp < ${IST_NOW}
         ${hasDates
+          // $4/$5 stay bare on purpose — see IST_NOW's comment. They are naive
+          // `YYYY-MM-DD` strings from the FE's local-time date picker and
+          // Postgres types them as `timestamp without time zone`, so this
+          // branch is already IST-vs-IST. `AT TIME ZONE` here would shift the
+          // user's selected calendar window by 5h30m.
           ? 'AND r.bid_end_date::timestamp BETWEEN $4 AND $5'
-          : "AND r.bid_end_date::timestamp > NOW() - INTERVAL '14 days'"}
+          : `AND r.bid_end_date::timestamp > ${IST_NOW} - INTERVAL '14 days'`}
         AND r.hospitality_company_id IN (
           SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
         )

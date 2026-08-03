@@ -80,6 +80,47 @@ const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
   new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * `tbl_users.user_type` values that may act on behalf of another user.
+ *
+ *   7 — company / hospitality administrator. This is the type the codebase
+ *       already treats as "admin": every genuinely admin-only route is gated
+ *       `acl([7])` (approval hierarchy + approval processes/policies in
+ *       app/routes/general.js, the whole hospitality company/hotel
+ *       administration surface in app/routes/hospitality/hospitalityRoutes.js —
+ *       33 routes in total), and, decisively, the one other endpoint in this
+ *       codebase with the *identical* "honour req.body.user_id" shape —
+ *       usersController.update_user_detail — gates it on exactly
+ *       `loggedInUser.user_type === 7` (app/controllers/users/usersController.js:1951).
+ *   8 — platform super admin. Documented as strictly-more-privileged than 7 at
+ *       three independent sites (mrController.isSuperAdmin,
+ *       arcController:765, and the comment on projectController.userCanAccessProject
+ *       explaining that 8 "keeps the cross-tenant reach it has everywhere else"
+ *       while 7 does not). Included because 8 is never denied where 7 is
+ *       allowed; note there are currently no user_type 8 rows in production, so
+ *       this arm grants nothing today.
+ *
+ * Deliberately NOT here: 2 (buyer, 262 prod users) and 3 (vendor, 428) — the
+ * two types that actually call the vendor listing.
+ */
+const ACT_AS_ADMIN_USER_TYPES = Object.freeze([7, 8]);
+const canActOnBehalfOfOtherUsers = (user) =>
+  ACT_AS_ADMIN_USER_TYPES.includes(Number(user?.user_type));
+
+/**
+ * Strict positive-integer coercion for an id arriving from the request body.
+ * Returns null for anything that is not a clean positive integer, so a payload
+ * like `'1 OR 1=1'`, `'1; DROP TABLE'`, `{}` or `['1']` can never become a
+ * user_id. `Number()` (not parseInt) on purpose: parseInt('1 OR 1=1') === 1,
+ * which would silently accept the injection string as the id it prefixes.
+ */
+const toPositiveIntId = (value) => {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+};
+
 const VENDORS_FILTER_KEYS = [
   'vendor_approved_by',
   'state',
@@ -7785,9 +7826,35 @@ const rfqController = {
   },
 
   getRfqByUser: async (req, res, next) => {
-    let user_id = req.user.id;
-    if (req.body.user_id) {
-      user_id = req.body.user_id;
+    // SCOPE IS DERIVED FROM req.user, NOT FROM THE BODY.
+    //
+    // This used to be `if (req.body.user_id) user_id = req.body.user_id`, with
+    // no check of any kind. `user_id` is the ONLY thing scoping this listing —
+    // it is both the row filter (`tbl_rfq_product_vendors.user_id`) and, until
+    // the companion fix in rfqModel.getRfqByUser, raw SQL text. So the body
+    // field was simultaneously an IDOR (any authenticated vendor could read any
+    // other vendor's RFQ list, quote statuses and counterparty names by posting
+    // someone else's id) and a SQL injection sink.
+    //
+    // The route's `validateDbBody.user_id_profileexists` guard does not help:
+    // it reads `req.user.id` (userDbValidation.js:241) and never looks at
+    // `req.body.user_id`.
+    //
+    // The override is kept — an administrator inspecting a vendor's RFQ list is
+    // a legitimate back-office action — but it is now gated on the caller's own
+    // user_type and the supplied id must be a clean positive integer. For
+    // everyone else the body field is ignored outright rather than rejected, so
+    // an existing client that harmlessly echoes its own id keeps working.
+    let user_id = toPositiveIntId(req.user.id);
+    if (req.body.user_id !== undefined && canActOnBehalfOfOtherUsers(req.user)) {
+      const requestedUserId = toPositiveIntId(req.body.user_id);
+      if (requestedUserId === null) {
+        return res
+          .status(400)
+          .json({ status: 0, message: 'Invalid user_id' })
+          .end();
+      }
+      user_id = requestedUserId;
     }
     try {
       let page,

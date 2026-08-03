@@ -6,6 +6,7 @@
 // for isolation and seed a single acceptance-pending PO.
 
 import { describe, it, expect, afterAll, beforeEach, afterEach } from "@jest/globals";
+import moment from "moment-timezone";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -42,6 +43,14 @@ describe("GET /vendor-dashboard/status-banner — PO to accept is a positive 'wi
       hotel: IDS.hotels.A1,
       is_published: 1,
       status: 1,
+      // Explicit NAIVE IST wall clock. Omitting this inherits the makeRFQ
+      // default, which is `new Date(...).toISOString()` — a UTC wall clock
+      // written into a column the app reads as IST, i.e. a silent 5h30m shift.
+      // At +7 days it is far enough out to be harmless, but the test should not
+      // depend on that: `mode` must be 'win' because the PO is the ONLY
+      // actionable item, and a bid window drifting near a boundary would let
+      // closing_soon fire and flip the mode to 'action_needed'.
+      bid_end_date: moment.tz("Asia/Kolkata").add(7, "days").format("YYYY-MM-DD HH:mm:ss"),
       title: "Win-state RFQ",
     });
     inserted.rfqIds.push(rfq_id);

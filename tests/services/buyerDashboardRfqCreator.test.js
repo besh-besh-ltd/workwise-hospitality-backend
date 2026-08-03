@@ -6,6 +6,7 @@
 // SQL drifts, these tests will scream.
 
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import moment from "moment-timezone";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -19,6 +20,15 @@ import {
 // IDs we insert during this suite — drop them in afterAll so subsequent
 // suites see the original fixture state.
 const inserted = { rfqIds: [] };
+
+// `tbl_rfq.bid_end_date` is `text` holding a naive IST wall-clock string (see
+// app/helper/quoteVisibility.js), and dashboardModel resolves the bid-window
+// boundary against IST "today". Seeds must therefore be built from the IST
+// calendar, not from `new Date().toISOString()` — a UTC-derived date lands one
+// day short between 18:30 and 24:00 UTC (00:00–05:30 IST), which flipped the
+// `days_overdue` assertion below from 3 to 4 for 5.5 hours every night.
+const istDate = (offsetDays) =>
+  moment.tz("Asia/Kolkata").add(offsetDays, "days").format("YYYY-MM-DD");
 
 // Pre-loaded summary of what we seeded so individual tests can assert
 // on the exact rfq IDs we expect each widget to return.
@@ -204,8 +214,7 @@ beforeAll(async () => {
     });
 
     // ── No-response RFQs: 2 silent-vendor RFQs (both with future bid_end_date) ─
-    const futureDate = new Date(Date.now() + 7 * 86400_000)
-      .toISOString().slice(0, 10);
+    const futureDate = istDate(7);
 
     const noRespAll = await makeRfqVisibleToDashboard(t, {
       createdBy: IDS.users.a1_proc_buyer,
@@ -268,8 +277,7 @@ beforeAll(async () => {
     });
 
     // ── Bid-closed + no quotes: urgent attention widget ────────────────
-    const pastDate = new Date(Date.now() - 3 * 86400_000)
-      .toISOString().slice(0, 10); // 3 days ago
+    const pastDate = istDate(-3); // 3 IST days ago
 
     // No quotes, bid_end_date passed → SHOULD appear in urgent attention.
     const bidClosed = await makeRfqVisibleToDashboard(t, {

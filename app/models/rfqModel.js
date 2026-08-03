@@ -29,6 +29,58 @@ const generateReminderTokenValue = () => {
   return parseInt((timestamp + randomSegment).slice(0, 16), 10);
 };
 
+/**
+ * "Now" and "today" for bid-window purposes, pinned to IST.
+ *
+ * `tbl_rfq.bid_end_date` is `text NOT NULL` holding a NAIVE IST wall-clock
+ * string (e.g. '2026-03-14T11:00' — see app/helper/quoteVisibility.js,
+ * QUOTE_VISIBILITY_TIMEZONE). It carries no offset, so any comparison against
+ * `CURRENT_DATE` / `now()` silently resolves through the Postgres SESSION
+ * timezone: `CURRENT_DATE` *is* the session's calendar day, and a bare `date`
+ * compared against `now()` (a timestamptz) is promoted to midnight *in the
+ * session zone*. That is wrong on every deployment whose session timezone is
+ * not Asia/Kolkata — notably RDS, which defaults to UTC and which production
+ * runs on (`current_setting('TimeZone')` = UTC; the app never issues SET
+ * TIME ZONE anywhere). Between 18:30 and 24:00 UTC (00:00–05:30 IST) the UTC
+ * calendar day still lags the IST one, so every bid-window predicate misfiles
+ * the RFQs closing on the IST "today" — measured on production at ~3.25 RFQs
+ * a night, worst night 12.
+ *
+ * `CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'` yields a naive IST wall-clock
+ * `timestamp`, directly comparable with `bid_end_date::timestamp`, and pins the
+ * boundary to IST regardless of session timezone. It is the same idiom already
+ * used for `bid_end_date` below (bid_status at ~:4247, has_pending_evaluation
+ * at ~:13236) and in hospitalityModel.js (~:2005), and the SQL-side twin of
+ * arcTime.js / quoteVisibility.js.
+ *
+ * Note the LHS never needs fixing: `DATE(bid_end_date)` / `bid_end_date::timestamp`
+ * read a naive string into a naive value and are already session-independent.
+ * Only the "now" side leaked the session zone.
+ *
+ * ── BID_WINDOW_FACETS: granularity ───────────────────────────────────────────
+ * There is deliberately only ONE constant. Every bid-window predicate in this
+ * file is MOMENT-granular: it compares `bid_end_date::timestamp` against
+ * IST_NOW, so the deadline's time of day decides.
+ *
+ * The vendor listing facets (`rfq_status`, `bid_ends_in`) and the vendor
+ * "closing soon" stat used to be CALENDAR-DAY granular — `DATE(bid_end_date)`
+ * against an IST `::date` — which meant an RFQ that stopped accepting bids at
+ * 09:00 IST still advertised itself as "open" and "closing soon" until IST
+ * midnight, up to 15 hours after vendors could no longer act on it. They now
+ * match the buyer dashboard, which is moment-granular.
+ *
+ * Consequences worth knowing before you add a predicate here:
+ *   - `bid_ends_in = '3d'` means a ROLLING 72 HOURS from now, not "closes on a
+ *     calendar day within the next 3 days". Likewise 5d/1w/1m.
+ *   - a bid_ends_in facet can no longer contain an already-closed RFQ.
+ *   - `open` and `closed` still partition exactly (`>= IST_NOW` / `< IST_NOW`).
+ *
+ * If you need a day boundary for something genuinely calendar-shaped, add the
+ * `::date` at the call site rather than reintroducing a second constant — a
+ * spare IST_TODAY is how the two granularities drifted apart in the first place.
+ */
+const IST_NOW = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`;
+
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
     const keys = Object.keys(data);
@@ -1821,20 +1873,25 @@ WHERE NOT EXISTS (
     // - Published RFQs (is_published = 1, status 1 or 2)
     // - Pending approval RFQs (is_published = 0, status 3)
     // - Ready to publish RFQs (is_published = 0, status 4)
+    // `user_id` is BOUND ($5), never interpolated. It used to be spliced in as
+    // `'${user_id}'`; see the note on getRfqByUser below for why that was a
+    // live injection sink rather than a style nit. Dropping the surrounding
+    // quotes also stops comparing the integer `created_by` against a string
+    // literal, which forced a per-row cast and defeated the index.
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,
       ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id
     ) AS "quotations",
 
     ARRAY(
-      SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
+      SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = $5
     ) AS "finilize"
     FROM tbl_rfq RFQ
-    WHERE created_by = '${user_id}'
+    WHERE created_by = $5
       AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
       AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
     return new Promise(function (resolve, reject) {
-      db.query(query, [month, year, limit, offset])
+      db.query(query, [month, year, limit, offset, user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -1849,20 +1906,21 @@ WHERE NOT EXISTS (
     // - Published RFQs (is_published = 1, status 1 or 2)
     // - Pending approval RFQs (is_published = 0, status 3)
     // - Ready to publish RFQs (is_published = 0, status 4)
+    // `user_id` is BOUND ($3), never interpolated — same fix as getAllRfqBuyer.
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,
       ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id
     ) AS "quotations",
 
     ARRAY(
-      SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
+      SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = $3
     ) AS "finilize"
     FROM tbl_rfq RFQ
-    WHERE created_by = '${user_id}'
+    WHERE created_by = $3
       AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
       AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
     return new Promise(function (resolve, reject) {
-      db.query(query, [month, year])
+      db.query(query, [month, year, user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -1872,6 +1930,24 @@ WHERE NOT EXISTS (
         });
     });
   },
+  /**
+   * Vendor-facing RFQ listing, scoped to a single vendor `user_id`.
+   *
+   * `user_id` is BOUND as $3 everywhere it appears. Three of those occurrences
+   * used to be template-interpolated (`AND trpv.user_id = ${user_id}`) while the
+   * *same* value was already bound as $3 two lines away — so the value was
+   * simultaneously data and SQL text. Its only caller
+   * (rfqController.getRfqByUser) took it from `req.body.user_id` when present,
+   * and the route's `validateDbBody.user_id_profileexists` guard reads
+   * `req.user.id`, never `req.body.user_id` — so the body field reached the
+   * string concatenation completely unvalidated. Proven locally: with the sink
+   * `WHERE created_by = ${payload}`, `1` matched one row and `1 OR 1=1` matched
+   * every row.
+   *
+   * Callers must still pass an integer they derived from `req.user` (or, for an
+   * admin, one they validated) — parameterisation closes the injection, not the
+   * IDOR. That half of the fix lives in the controller.
+   */
   getRfqByUser: async (limit, offset, user_id, filters = {}) => {
     return new Promise(function (resolve, reject) {
       const negotiationFilter = filters?.negotiation_filter || null;
@@ -1958,12 +2034,12 @@ WHERE NOT EXISTS (
                         ))
                         FROM tbl_rfq_product_vendors RFQ_P_V
                         WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
-                        AND RFQ_P_V.user_id = ${user_id} 
+                        AND RFQ_P_V.user_id = $3
                     )
                 )
                 FROM tbl_rfq_products RFQ_P
-                JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
-                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
+                JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = $3 AND trpv.product_variant_id = RFQ_P.product_variant_id
+                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = $3 AND trpv.product_variant_id = RFQ_P.product_variant_id
             ) AS "products" ,
           CASE
               WHEN EXISTS (
@@ -1994,12 +2070,30 @@ WHERE NOT EXISTS (
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
         ${filters?.search_val ? `AND (RFQ.rfq_no::text LIKE '%' || $4 || '%' OR RFQ.title ILIKE '%' || $4 || '%' OR RFQ.company_name ILIKE '%' || $4 || '%')` : ''}
-        ${filters?.rfq_status === 'open' ? `AND RFQ.status = 1 AND (RFQ.bid_end_date = '' OR DATE(RFQ.bid_end_date) >= CURRENT_DATE)` : ''}
-        ${filters?.rfq_status === 'closed' ? `AND (RFQ.status != 1 OR (RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) < CURRENT_DATE))` : ''}
-        ${filters?.bid_ends_in === '3d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
-        ${filters?.bid_ends_in === '5d' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
-        ${filters?.bid_ends_in === '1w' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
-        ${filters?.bid_ends_in === '1m' ? `AND RFQ.bid_end_date != '' AND DATE(RFQ.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+        ${/* BID-WINDOW FACETS ARE MOMENT-GRANULAR (see BID_WINDOW_FACETS note at
+              the top of this file). The deadline's TIME decides, not its
+              calendar day: an RFQ that closed at 09:00 IST is "closed" from
+              09:00, and `bid_ends_in = '3d'` is a rolling 72 hours from now,
+              not "closes on a calendar day within 3 days".
+
+              `bid_end_date::timestamp` parses the naive IST wall-clock string
+              into a naive timestamp; IST_NOW renders "now" in the same frame.
+              Both sides are therefore session-timezone-independent, which is
+              the same predicate shape the bid_ended sites in this file already
+              use (bid_status in getLifecycleSummary, getAllRfqByUser,
+              getClosedRfqs, has_pending_evaluation).
+
+              open/closed still partition exactly: `>= IST_NOW` and
+              `< IST_NOW` are complements, and the empty-bid_end_date arm is
+              open-only in both. BETWEEN's lower bound is IST_NOW, so a
+              bid_ends_in facet can no longer contain an already-closed RFQ —
+              which day granularity allowed for up to 24 hours. */ ''}
+        ${filters?.rfq_status === 'open' ? `AND RFQ.status = 1 AND (RFQ.bid_end_date = '' OR RFQ.bid_end_date::timestamp >= ${IST_NOW})` : ''}
+        ${filters?.rfq_status === 'closed' ? `AND (RFQ.status != 1 OR (RFQ.bid_end_date != '' AND RFQ.bid_end_date::timestamp < ${IST_NOW}))` : ''}
+        ${filters?.bid_ends_in === '3d' ? `AND RFQ.bid_end_date != '' AND RFQ.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '3 days'` : ''}
+        ${filters?.bid_ends_in === '5d' ? `AND RFQ.bid_end_date != '' AND RFQ.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '5 days'` : ''}
+        ${filters?.bid_ends_in === '1w' ? `AND RFQ.bid_end_date != '' AND RFQ.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '7 days'` : ''}
+        ${filters?.bid_ends_in === '1m' ? `AND RFQ.bid_end_date != '' AND RFQ.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '1 month'` : ''}
         ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
         ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3)` : ''}
         ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $3 AND TQ.is_regret = 0)` : ''}
@@ -2924,8 +3018,16 @@ LIMIT 1;`;
                         (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
                         AND
                         (
+                            ${/* Same timestamp-family bug as the bid-window sites:
+                                  CAST(bid_end_date AS TIMESTAMP) is a NAIVE IST
+                                  wall-clock value, while bare CURRENT_TIMESTAMP is a
+                                  timestamptz that Postgres renders in the SESSION
+                                  zone — so on production (UTC) "one day from now"
+                                  was really 5h30m earlier than intended, and the
+                                  reverse-auction lowest quote became visible 5h30m
+                                  late. IST_NOW pins both sides to IST. */ ''}
                             (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != ''
-                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (${IST_NOW} + interval '1 days'))
                             OR
                             (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = ''
                             AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
@@ -8551,11 +8653,21 @@ WHERE row_num_by_name_category = 1
                     ELSE to_char(tr.timestamp, 'YYYY-MM-DD')
                 END AS period,
                 count(*) FILTER (WHERE tr.status = 1) AS new_rfqs,
+                ${/* "Closed" here asks a MOMENT question — has the deadline passed
+                      yet — not a calendar-day one; the original `now()` on the RHS
+                      says so. The `DATE(...)` wrapper was a cast artifact (the
+                      column is text and had to be coerced to something comparable),
+                      and it silently truncated the deadline to midnight, so an RFQ
+                      still taking bids until 17:00 was counted closed from 00:00
+                      that morning. Comparing the parsed wall-clock against IST now
+                      is both the session-timezone fix AND the predicate the rest of
+                      the codebase already uses for "bid_ended" (see bid_status in
+                      getLifecycleSummary and has_pending_evaluation below). */ ''}
                 count(*) FILTER (
                     WHERE tr.status = 2
                     OR (
                         (tr.bid_end_date IS NOT NULL AND tr.bid_end_date != ''
-                        AND DATE(tr.bid_end_date) < now())
+                        AND tr.bid_end_date::timestamp < ${IST_NOW})
                     )
                 ) AS closed_rfqs,
                 count(*) FILTER (
@@ -8747,11 +8859,18 @@ WHERE row_num_by_name_category = 1
       FROM tbl_rfq
       WHERE created_by = $1
         ${status ? `AND status = $2` : ``}
+        ${/* "Active RFQs" = published, status 1, deadline NOT yet passed. The
+              exact complement of getClosedRfqs below, so the two must use the
+              identical predicate or the dashboard double-counts. As there, this
+              is a moment comparison against IST now: the old
+              `DATE(bid_end_date) >= now()` both leaked the session zone AND
+              dropped an RFQ out of "active" from midnight on its closing day,
+              while vendors could still bid on it all day. */ ''}
         ${
           status == 1
             ? `AND bid_end_date IS NOT NULL
             AND bid_end_date != ''
-            AND DATE(bid_end_date) >= now()`
+            AND bid_end_date::timestamp >= ${IST_NOW}`
             : ``
         }
         AND is_published = 1
@@ -8802,7 +8921,10 @@ WHERE row_num_by_name_category = 1
           OR (
             tr.bid_end_date IS NOT NULL
             AND tr.bid_end_date != ''
-            AND DATE(tr.bid_end_date) < now()
+            ${/* Complement of the "active" predicate in getAllRfqByUser: moment
+                  comparison against IST now, not the session-zone midnight of
+                  the closing day. */ ''}
+            AND tr.bid_end_date::timestamp < ${IST_NOW}
           )
         );
     `;
@@ -8825,7 +8947,9 @@ WHERE row_num_by_name_category = 1
           AND tr.is_published = 1
           AND bid_end_date IS NOT NULL
             AND bid_end_date != ''
-            AND DATE(bid_end_date) >= now()
+            ${/* "Active quotes" = quotes on an RFQ still inside its bid window.
+                  Same moment-against-IST-now predicate as getAllRfqByUser. */ ''}
+            AND bid_end_date::timestamp >= ${IST_NOW}
     `;
 
     try {
@@ -9437,12 +9561,17 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
          JOIN tbl_rfq r ON v.rfq_id = r.id
          WHERE v.user_id = $1 AND r.is_published = 1 AND r.status NOT IN (3, 4)
          ${filters?.search_val ? `AND (r.rfq_no::text LIKE '%' || $2 || '%' OR r.title ILIKE '%' || $2 || '%' OR r.company_name ILIKE '%' || $2 || '%')` : ''}
-         ${filters?.rfq_status === 'open' ? `AND r.status = 1 AND (r.bid_end_date = '' OR DATE(r.bid_end_date) >= CURRENT_DATE)` : ''}
-         ${filters?.rfq_status === 'closed' ? `AND (r.status != 1 OR (r.bid_end_date != '' AND DATE(r.bid_end_date) < CURRENT_DATE))` : ''}
-         ${filters?.bid_ends_in === '3d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'` : ''}
-         ${filters?.bid_ends_in === '5d' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '5 days'` : ''}
-         ${filters?.bid_ends_in === '1w' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'` : ''}
-         ${filters?.bid_ends_in === '1m' ? `AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 month'` : ''}
+         ${/* MUST stay character-for-character in step with the same six
+               predicates in getRfqByUser above — this is the COUNT twin of that
+               listing, and a divergence shows up as a pager that promises rows
+               the list cannot produce. Same IST anchor, same MOMENT
+               granularity. */ ''}
+         ${filters?.rfq_status === 'open' ? `AND r.status = 1 AND (r.bid_end_date = '' OR r.bid_end_date::timestamp >= ${IST_NOW})` : ''}
+         ${filters?.rfq_status === 'closed' ? `AND (r.status != 1 OR (r.bid_end_date != '' AND r.bid_end_date::timestamp < ${IST_NOW}))` : ''}
+         ${filters?.bid_ends_in === '3d' ? `AND r.bid_end_date != '' AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '3 days'` : ''}
+         ${filters?.bid_ends_in === '5d' ? `AND r.bid_end_date != '' AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '5 days'` : ''}
+         ${filters?.bid_ends_in === '1w' ? `AND r.bid_end_date != '' AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '7 days'` : ''}
+         ${filters?.bid_ends_in === '1m' ? `AND r.bid_end_date != '' AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '1 month'` : ''}
          ${filters?.hotel_ids?.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id IN (${filters.hotel_ids.map(Number).filter(Boolean).join(',')}))` : ''}
          ${filters?.quote_status === 'pending' ? `AND NOT EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1)` : ''}
          ${filters?.quote_status === 'sent' ? `AND EXISTS (SELECT 1 FROM tbl_quotes TQ WHERE TQ.rfq_id = r.id AND TQ.created_by = $1 AND TQ.is_regret = 0)` : ''}
@@ -9470,8 +9599,13 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
          COUNT(DISTINCT v.rfq_id) FILTER (
            WHERE EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1 AND q.is_regret = 0)
          ) as quoted,
+         ${/* "Closing soon" card. Same rolling 72-hour window as the
+               bid_ends_in='3d' facet above and must agree with it, so it uses
+               the identical moment-granular predicate. An RFQ whose deadline
+               has already passed is no longer counted as closing soon — under
+               day granularity it was, for the rest of its closing day. */ ''}
          COUNT(DISTINCT v.rfq_id) FILTER (
-           WHERE r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
+           WHERE r.bid_end_date != '' AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '3 days'
            AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = v.rfq_id AND q.created_by = $1)
          ) as closing_soon,
          COUNT(DISTINCT v.rfq_id) FILTER (
