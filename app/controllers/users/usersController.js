@@ -918,6 +918,33 @@ create_buyer_company_users: async (req, res, next) => {
 
       await validateRoleScopeProcesses(roleScopes);
       await rbacModel.assignUserRoleScopes(roleScopes);
+
+      /* ---- PROPAGATE: newly granted role scopes may match live approvals ----
+         A freshly created user granted a role scope that resolveApprovers()
+         would already select for an existing PENDING instance (same
+         company/hotel/department, ROLE-sourced step) is never added to it —
+         the instance snapshotted its approver set before this user existed.
+         Mirrors update_user_detail's 'role_added' propagation branch
+         (usersController.js, update_user_detail) for symmetry. Best-effort:
+         a failure here is logged but must not fail user creation, since the
+         user and their role scopes already committed. */
+      try {
+        const newRoleIds = [...new Set(roleScopes.map((r) => r.role_id))];
+        const propResult = await db.tx(async (t) => {
+          return revalidateApproverMembership({
+            userId: createdUser.id,
+            changedBy: loginUserID,
+            changeType: 'role_added',
+            changedRoleIds: newRoleIds,
+            txContext: t
+          });
+        });
+        if (propResult?._emailData) {
+          dispatchPropagationEmails(propResult._emailData, loginUserID, 'role_added');
+        }
+      } catch (propErr) {
+        logError('Error propagating role-scope addition to approvals (user creation)', propErr);
+      }
     }
 
     /* -------------------- USER ↔ HOSPITALITY MAPPINGS -------------------- */
@@ -946,6 +973,37 @@ create_buyer_company_users: async (req, res, next) => {
 
         if (mappingRows.length) {
           await hospitalityModel.insertUserMappings(mappingRows);
+
+          /* ---- PROPAGATE: newly-mapped user may now qualify as approver ----
+             Same reasoning as hospitalityController.mapUsers: resolveApprovers()
+             INNER JOINs tbl_hospitality_user_mappings for both ROLE and
+             DEPARTMENT approver sources, so this mapping row is itself a grant
+             of approval authority for whatever role/department scopes this
+             new user was just given above. changeType 'scope_added' runs
+             PART 2 (add) of revalidateApproverMembership, scoped per mapping
+             row's own company/hotel. Best-effort — already inside this
+             function's own try/catch, so a propagation failure is caught by
+             the same handler as the mapping write and never fails user
+             creation. */
+          for (const m of mappingRows) {
+            try {
+              const propResult = await db.tx(async (t) => {
+                return revalidateApproverMembership({
+                  userId: createdUser.id,
+                  changedBy: loginUserID,
+                  changeType: 'scope_added',
+                  companyId: m.hospitality_company_id,
+                  hotelId: m.hospitality_hotel_id,
+                  txContext: t
+                });
+              });
+              if (propResult?._emailData) {
+                dispatchPropagationEmails(propResult._emailData, loginUserID, 'scope_added');
+              }
+            } catch (propErr) {
+              logError('Error propagating mapping addition to approvals (user creation)', propErr);
+            }
+          }
         }
       } catch (mapErr) {
         logError("Hospitality mapping failed (user was created)", mapErr);

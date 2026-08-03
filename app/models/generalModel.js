@@ -19,16 +19,68 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // MR is the call-off/demand path — role approvers resolve against the same
   // 'awarding' permission as POs (USER-source steps bypass this map).
   'MR': 'awarding',
-  // ARC_NEGOTIATION: ROLE-source approver steps resolve against arc-comm
-  // read+approve perms (same as ARC_COMMITTEE). Without this entry, ROLE steps
-  // would fall back to 'arc_negotiation', which has no permission rows and
-  // would silently drop all role-based approvers.
+  // ARC_NEGOTIATION: ROLE-source approver steps resolve against the 'arc-comm'
+  // resource. SEE THE WARNING BELOW — 'arc-comm' has no `approve` row, so this
+  // mapping does NOT do what the comment here used to claim.
   'ARC_NEGOTIATION': 'arc-comm',
-  // NOTE (latent gap, out of scope here): ARC_TECH and ARC_COMMITTEE are wired
-  // in postActionRegistry but are NOT mapped here, so their ROLE-source approver
-  // steps fall back to entity_type.toLowerCase() which has no permission rows and
-  // silently drops those approvers. This is a pre-existing gap — verify production
-  // ARC_TECH/ARC_COMMITTEE policies before adding mappings here.
+  // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
+  // BOTH `read` and `approve` (seeded together in
+  // migrations/20260608100800_permissions_seed.sql:56-57), so this is the one
+  // ARC v2 entity type whose resource is modelled the way
+  // roleHasReadAndApprovePermission expects. Mapped 2026-08-03; see below for
+  // why ARC_TECH is deliberately NOT mapped alongside it.
+  'ARC_COMMITTEE': 'arc-committee',
+
+  // ── UNMAPPED ENTITY TYPES: THE REAL FAILURE MODE ───────────────────────────
+  // The NOTE that used to sit here said unmapped ARC types "silently drop those
+  // approvers". That is WRONG, and the correction matters because the two
+  // failure modes need opposite responses.
+  //
+  // `tbl_permissions.resource` is the `resource_type` ENUM. The fallback
+  // `entity_type.toLowerCase()` yields UNDERSCORES (`arc_tech`), while the enum
+  // members use HYPHENS (`arc-tech`). So `p.resource = $2` in
+  // roleHasReadAndApprovePermission does not return false — Postgres raises
+  // `invalid input value for enum resource_type`, and the whole
+  // createApprovalInstance call FAILS. An unmapped ARC entity type does not
+  // quietly lose its approvers; it cannot create an approval at all.
+  //
+  // Loud and fail-closed, so nothing is silently under-approved — but it is
+  // still a crash, and it is why ARC_COMMITTEE is now mapped above.
+  //
+  // ── ARC_TECH IS NOT MAPPED, ON PURPOSE ─────────────────────────────────────
+  // Mapping ARC_TECH → 'arc-tech' would convert that crash into a SILENT
+  // STEP-SKIP, which is strictly worse: every ROLE step of every future
+  // ARC_TECH policy would be dropped at creation with no error anywhere.
+  //
+  // The reason is that 'arc-tech' has no `approve` row to match. Verified
+  // 2026-08-03 by sweeping the whole migrations/ tree — these are ALL the rows
+  // that exist for the ARC-stage resources:
+  //
+  //   arc-committee  read (20260608100800:56) + approve (20260608100800:57)  ✅
+  //   arc-tech       evaluate (20260608100800:54) + read (20260611100000:19) ❌ no approve
+  //   arc-comm       evaluate (20260608100800:55) + read (20260611100000:20) ❌ no approve
+  //
+  // This is a MODELLING mismatch, not a missing row to backfill. The tech and
+  // commercial stages are authored as `evaluate` resources — that is what
+  // 20260611100000 is about ("adds the 'read' action so admins can grant
+  // view-only access to Technical / Commercial WITHOUT granting scoring
+  // rights"). roleHasReadAndApprovePermission only knows the verb `approve`.
+  // Mapping ARC_TECH therefore needs a product decision first: either seed
+  // `arc-tech.approve`, or teach the gate that some entity types qualify on
+  // `evaluate`. Do not add the mapping without one.
+  //
+  // ── KNOWN CONSEQUENCE FOR ARC_NEGOTIATION (pre-existing, unfixed) ──────────
+  // 'arc-comm' has the same shape as 'arc-tech', so the ARC_NEGOTIATION mapping
+  // above is ALREADY producing the silent skip described here: every ROLE-source
+  // step of an ARC_NEGOTIATION policy resolves against `arc-comm.read` +
+  // `arc-comm.approve`, the latter does not exist, and the step is dropped at
+  // creation. Untouched here because fixing it is the same product decision as
+  // ARC_TECH — but it is live today, not hypothetical.
+  //
+  // Verified read-only on production 2026-08-03: ZERO ARC_TECH and ZERO
+  // ARC_COMMITTEE policies exist (`ARC` itself has 2 policies / 3 ROLE steps /
+  // 1 USER step), so the ARC_COMMITTEE mapping added above changes no existing
+  // approval — it only removes a crash from a future one.
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";

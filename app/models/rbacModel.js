@@ -398,8 +398,18 @@ const rbacModel = {
       [roleId]
     );
   },
-  updateRole: async (roleId, { title, description }) => {
-    return db.none(
+  // The three functions below take an OPTIONAL transaction context, following
+  // the same convention as generalModel's createApprovalPolicy / insertPolicySteps.
+  //
+  // WHY IT MATTERS HERE: a role edit REPLACES its permissions
+  // (deleteRolePermissions then assignPermissionsToRole). Run on the root `db`
+  // those are two independent transactions, so between them the role visibly
+  // holds ZERO permissions. Any createApprovalInstance landing in that window
+  // fails roleHasReadAndApprovePermission (generalModel.js:2237) and silently
+  // drops the role's step — permanently, since instance steps are a snapshot
+  // and nothing rebuilds them. Passing one `t` through closes the window.
+  updateRole: async (roleId, { title, description }, t = db) => {
+    return t.none(
       `
       UPDATE tbl_roles
       SET title = $1,
@@ -409,8 +419,8 @@ const rbacModel = {
       [title.trim(), description || null, roleId]
     );
   },
-  deleteRolePermissions: async (roleId) => {
-    return db.none(
+  deleteRolePermissions: async (roleId, t = db) => {
+    return t.none(
       `
       DELETE FROM tbl_role_permissions
       WHERE role_id = $1
@@ -418,16 +428,16 @@ const rbacModel = {
       [roleId]
     );
   },
-  assignPermissionsToRole: async (roleId, permissionIds = []) => {
+  assignPermissionsToRole: async (roleId, permissionIds = [], t = null) => {
     if (!permissionIds.length) return;
 
     // Remove duplicates
     const uniqueIds = [...new Set(permissionIds)];
 
-    return db.tx(t =>
-      t.batch(
+    const run = (tx) =>
+      tx.batch(
         uniqueIds.map(pid =>
-          t.none(
+          tx.none(
             `
             INSERT INTO tbl_role_permissions (role_id, permission_id)
             VALUES ($1, $2)
@@ -435,8 +445,11 @@ const rbacModel = {
             [roleId, pid]
           )
         )
-      )
-    );
+      );
+
+    // Join the caller's transaction when given one; otherwise open our own, so
+    // the standalone callers (createRoleWithPermissions) are unchanged.
+    return t ? run(t) : db.tx(run);
   },
   getAllPermissions: () => {
     return db.any(`

@@ -928,6 +928,42 @@ const HospitalityController = {
 
       await hospitalityModel.insertUserMappings(rows);
 
+      /* ---- PROPAGATE: newly-mapped users may now qualify as approvers ----
+         resolveApprovers() (generalModel.js) INNER JOINs
+         tbl_hospitality_user_mappings for both ROLE and DEPARTMENT approver
+         sources, so adding this mapping row is itself a grant of approval
+         authority — a user who already holds a matching role/department
+         scope but was previously unmapped (and therefore excluded from
+         resolution) can now resolve as an approver on live PENDING
+         instances in this scope. Mirrors deleteUserMapping's propagation
+         call below (its exact inverse for the remove direction), but with
+         changeType 'scope_added' so PART 2 (add) of
+         revalidateApproverMembership runs instead of PART 1 (remove).
+         Deliberately NO pre-flight/blocking gate here — see note above:
+         granting authority can never need a "would this auto-approve"
+         confirmation, only removing it can. Best-effort: a propagation
+         failure is logged but never fails the mapping request, since the
+         mapping itself already committed. */
+      for (const userId of sanitizedUserIds) {
+        try {
+          const propResult = await db.tx(async (t) => {
+            return revalidateApproverMembership({
+              userId,
+              changedBy: req.user.id,
+              changeType: 'scope_added',
+              companyId: record.id,
+              hotelId,
+              txContext: t
+            });
+          });
+          if (propResult?._emailData) {
+            dispatchPropagationEmails(propResult._emailData, req.user.id, 'scope_added');
+          }
+        } catch (propErr) {
+          logError('Error propagating mapping addition to approvals', propErr);
+        }
+      }
+
       if (autoMapProjects) {
         const projectMappings =
           await hospitalityModel.getProjectMappingsForContext(

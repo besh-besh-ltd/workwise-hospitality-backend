@@ -457,6 +457,158 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
 }
 
 // ============================================================================
+// SECTION 2B: THE CREATION-TIME PERMISSION GATE, APPLIED MID-FLIGHT
+// ============================================================================
+
+/**
+ * `createApprovalInstance` refuses to build a ROLE-source step whose role does
+ * not hold BOTH `read` and `approve` on the entity's resource
+ * (generalModel.js:2235-2239 → roleHasReadAndApprovePermission). The step is
+ * skipped outright: it never exists, and it does not even consume a step number.
+ *
+ * Nothing re-applied that gate afterwards. `resolveApprovers` — the only check
+ * the reconciler ran — never reads `tbl_role_permissions` at all; it matches on
+ * `tbl_user_role_scopes` (who holds the role) and says nothing about what the
+ * role is allowed to do. So `PUT /api/v1/rbac/roles/:roleId` could strip
+ * `approve` (or `read`) from a live role and every already-snapshotted approver
+ * row backed by it stayed PENDING.
+ *
+ * That is not cosmetic, because THE SNAPSHOT IS THE AUTHORIZATION:
+ * `generalModel.submitApprovalAction` validates only that the acting user has a
+ * row on the current step with `status = 'PENDING'`. It re-checks no role, no
+ * permission and no scope. Anything surviving in `tbl_approval_step_approvers`
+ * keeps real authority over POs, RFQs and ARCs.
+ *
+ * ── WHY THIS FAILS OPEN ON AN UNKNOWN RESOURCE ──
+ * `tbl_permissions.resource` is the `resource_type` ENUM, and
+ * ENTITY_APPROVE_RESOURCE_MAP does not cover every entity type — ARC_TECH and
+ * ARC_COMMITTEE fall back to `entity_type.toLowerCase()`, which is not even a
+ * member of the enum (see the note at generalModel.js:27-31). Two consequences:
+ *
+ *   1. `roleHasReadAndApprovePermission(role, 'arc_tech')` would THROW
+ *      (`invalid input value for enum resource_type`), not return false;
+ *   2. a "false" for an unmapped resource says nothing about the role. It says
+ *      the map has a hole.
+ *
+ * Creation can afford to fail closed on that hole — declining to create a step
+ * merely withholds an approval that was never collected. Mid-flight the same
+ * verdict would DESTROY a live step and advance an instance nobody approved,
+ * which is the strictly worse outcome. So the catalogue is probed first (cast to
+ * text so an unknown value cannot raise), and an entity type whose resource has
+ * no permission rows at all is left alone and logged.
+ *
+ * @returns {{permitted: boolean, resource: string, reason: string}}
+ */
+export async function roleStepPermissionVerdict(roleId, entityType, t = db, cache = null) {
+  const resource = ENTITY_APPROVE_RESOURCE_MAP[entityType] || String(entityType || '').toLowerCase();
+  const cacheKey = `${roleId}::${resource}`;
+  if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+
+  let verdict;
+  const inCatalogue = await t.oneOrNone(
+    `SELECT 1 FROM tbl_permissions
+      WHERE resource::text = $1 AND action IN ('read', 'approve') LIMIT 1`,
+    [resource]
+  );
+
+  if (!inCatalogue) {
+    verdict = { permitted: true, resource, reason: 'RESOURCE_NOT_IN_CATALOGUE' };
+    logger.warn(`[RolePermGate] entity_type ${entityType} maps to resource '${resource}', which has no read/approve rows in tbl_permissions — role ${roleId} left in place (failing OPEN; a map hole is not evidence about the role)`);
+  } else {
+    const ok = await roleHasReadAndApprovePermission(roleId, resource, t);
+    verdict = { permitted: ok, resource, reason: ok ? 'OK' : 'MISSING_READ_OR_APPROVE' };
+  }
+
+  if (cache) cache.set(cacheKey, verdict);
+  return verdict;
+}
+
+/**
+ * Retire a PENDING instance step whose ROLE source has lost read+approve.
+ *
+ * ── WHY THE *STEP* IS MARKED REMOVED AND NOT MERELY ITS APPROVERS ──
+ * Marking only the approvers REMOVED also advances the instance, via
+ * `reEvaluateInstanceStep`'s "no non-REMOVED approvers left → auto-complete"
+ * branch — but that branch writes `status = 'APPROVED', completed_at = NOW()`.
+ * The instance would then carry a step recorded as APPROVED with zero approval
+ * actions behind it. On spend of this size an approval nobody granted is the
+ * worst artifact this engine can produce: it is indistinguishable, to a reader
+ * and to every downstream query, from a real one.
+ *
+ * The honest analogue of the creation-time behaviour is "this step should not
+ * exist", and the engine already has a vocabulary for exactly that — the
+ * STEP_REMOVED path in `applyDiffToInstance`, used when a policy step is
+ * deleted under a live instance. This mirrors it byte for byte: step →
+ * `REMOVED` + `removed_mid_flight`, PENDING approvers → `REMOVED` with a
+ * removal reason, one `STEP_REMOVED` audit row, and advancement only if this
+ * was the current step. APPROVED/REJECTED approver rows are left untouched,
+ * same as there — an action already taken is history, not state.
+ *
+ * Returns null when the step is no longer PENDING (already retired by an
+ * earlier row in the same pass, or completed concurrently).
+ */
+async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, changedBy, changeType, t }) {
+  // Re-read under the caller's instance lock rather than trusting the
+  // discovery snapshot: one instance can hold several steps backed by the same
+  // role, and an earlier iteration may already have advanced past this one.
+  const step = await t.oneOrNone(
+    'SELECT id, step_order, status FROM tbl_approval_instance_steps WHERE id = $1',
+    [stepId]
+  );
+  if (!step || step.status !== 'PENDING') return null;
+
+  await t.none(
+    `UPDATE tbl_approval_instance_steps
+        SET status = 'REMOVED', removed_mid_flight = true, completed_at = NOW()
+      WHERE id = $1`,
+    [step.id]
+  );
+
+  const pendingApprovers = await t.any(
+    `SELECT approver_user_id FROM tbl_approval_step_approvers
+      WHERE approval_instance_step_id = $1 AND status = 'PENDING'`,
+    [step.id]
+  );
+  if (pendingApprovers.length > 0) {
+    await t.none(
+      `UPDATE tbl_approval_step_approvers
+          SET status = 'REMOVED', removed_at = NOW(), removal_reason = $2
+        WHERE approval_instance_step_id = $1 AND status = 'PENDING'`,
+      [step.id, changeType]
+    );
+  }
+
+  await t.none(
+    `INSERT INTO tbl_approval_actions
+       (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+     VALUES ($1, $2, $3, 'STEP_REMOVED', $4)`,
+    [instanceId, step.id, changedBy,
+      `Step removed: role ${roleId} no longer holds both ${resource}.read and ${resource}.approve`]
+  );
+
+  logger.warn(`[RolePermGate] instance ${instanceId} step ${step.id} (step_order=${step.step_order}) REMOVED — role ${roleId} lost ${resource}.read/${resource}.approve; ${pendingApprovers.length} pending approver row(s) revoked`);
+
+  // Advance only if this was the step the instance is actually sitting on;
+  // a future step simply stays dead and `advanceInstanceToNextStep` skips it.
+  let instanceCompleted = false;
+  const instance = await t.oneOrNone(
+    'SELECT current_step, status FROM tbl_approval_instances WHERE id = $1',
+    [instanceId]
+  );
+  if (instance && instance.status === 'PENDING' && step.step_order === instance.current_step) {
+    const adv = await advanceInstanceToNextStep(instanceId, t);
+    instanceCompleted = adv.instanceCompleted;
+  }
+
+  return {
+    step_id: step.id,
+    step_order: step.step_order,
+    approver_user_ids: pendingApprovers.map((a) => a.approver_user_id),
+    instanceCompleted,
+  };
+}
+
+// ============================================================================
 // SECTION 3: APPLY DIFF TO A SINGLE INSTANCE
 // ============================================================================
 
@@ -1206,6 +1358,9 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
 
   let willAutoComplete = false;
   const affectedInstances = [];
+  // One verdict per (role, resource) for the whole simulation — an admin edit
+  // routinely touches dozens of steps sharing a handful of roles.
+  const permCache = new Map();
 
   for (const row of affected) {
     // NOTE: No re-resolution here. This simulation runs BEFORE DB mutations,
@@ -1227,6 +1382,18 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
       logger.warn(`[SimulateImpact] instance ${row.instance_id} step ${row.step_id} (step_order=${row.step_order}, policy_step_id=${row.policy_step_id}) has no resolvable policy step under policy ${row.approval_policy_id} — reported as affected, but the mutation path will not act on it`);
     }
 
+    // ROLE-SOURCE PERMISSION GATE. If the backing role no longer holds
+    // read+approve, the mutation path will not merely drop THIS user — it
+    // retires the whole step (see retireIneligibleRoleStep). The warning has to
+    // say so, or the admin is shown a smaller change than the one they are
+    // about to authorise. Reported as REMOVE_STEP, and the step is treated as
+    // certain to clear, because it is: it stops existing.
+    let stepRetiredByPermissionGate = false;
+    if (row.approver_source_type === 'ROLE') {
+      const verdict = await roleStepPermissionVerdict(row.approver_source_id, row.entity_type, db, permCache);
+      stepRetiredByPermissionGate = !verdict.permitted;
+    }
+
     // Get all OTHER approvers for this step (excluding the user being removed and already REMOVED ones)
     const otherApprovers = await db.any(
       `SELECT status FROM tbl_approval_step_approvers
@@ -1238,7 +1405,9 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
 
     // Would the step auto-complete if this user is removed?
     let wouldAutoCompleteStep = false;
-    if (otherApprovers.length === 0) {
+    if (stepRetiredByPermissionGate) {
+      wouldAutoCompleteStep = true;
+    } else if (otherApprovers.length === 0) {
       // No other approvers — step auto-completes (empty)
       wouldAutoCompleteStep = true;
     } else if (row.decision_rule === 'ALL' && otherApprovers.every(a => a.status === 'APPROVED')) {
@@ -1275,7 +1444,7 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
       entity_identifier: resolveEntityIdentifier(row.entity_type, metadata, row.entity_id),
       step_order: row.step_order,
       current_step: row.current_step,
-      impact: 'REMOVE_APPROVER',
+      impact: stepRetiredByPermissionGate ? 'REMOVE_STEP' : 'REMOVE_APPROVER',
       wouldAutoCompleteStep,
       wouldAutoCompleteInstance
     });
@@ -1329,8 +1498,16 @@ export async function revalidateApproverMembership({
     // Steps discovered but deliberately NOT acted on because their originating
     // policy step could not be resolved at all. Surfaced so this is countable
     // rather than invisible.
-    unresolvedSteps: []
+    unresolvedSteps: [],
+    // Whole steps retired because their ROLE source lost read+approve. Distinct
+    // from `approversRemoved`: those are per-user, these say the step itself
+    // should not exist. See retireIneligibleRoleStep for why it is the step and
+    // not an auto-APPROVE.
+    stepsRemoved: []
   };
+
+  // (role, resource) → verdict, for the whole call.
+  const permCache = new Map();
 
   // ── PART 1: Remove user from steps where they no longer qualify ──
 
@@ -1460,6 +1637,50 @@ export async function revalidateApproverMembership({
     const policy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [row.approval_policy_id]);
     if (!policy) continue;
 
+    // ── THE CREATION-TIME PERMISSION GATE (see SECTION 2B) ──
+    // resolveApprovers below answers "does this user still HOLD the role?" and
+    // nothing else. It never reads tbl_role_permissions, so a role stripped of
+    // read/approve still resolves all of its holders and they all stay live.
+    // Apply the gate createApprovalInstance applies, first.
+    //
+    // NOTE ON BLAST RADIUS: this call is keyed on one user, but the verdict is
+    // about the ROLE, so retiring the step also revokes co-approvers who hold
+    // the same dead role. That is the correct outcome — none of them may act on
+    // an entity their role can no longer read or approve — and it is exactly
+    // what createApprovalInstance would have done had the instance been built
+    // one moment later.
+    if (row.approver_source_type === 'ROLE') {
+      const verdict = await roleStepPermissionVerdict(row.approver_source_id, row.entity_type, t, permCache);
+      if (!verdict.permitted) {
+        const retired = await retireIneligibleRoleStep({
+          instanceId: row.instance_id,
+          stepId: row.step_id,
+          roleId: row.approver_source_id,
+          resource: verdict.resource,
+          changedBy,
+          changeType,
+          t
+        });
+        if (retired) {
+          result.stepsRemoved.push({
+            instance_id: row.instance_id, step_id: retired.step_id,
+            step_order: retired.step_order, role_id: row.approver_source_id,
+            resource: verdict.resource, reason: verdict.reason
+          });
+          for (const removedUserId of retired.approver_user_ids) {
+            result.approversRemoved.push({
+              user_id: removedUserId, step_order: retired.step_order,
+              instance_id: row.instance_id, entity_type: row.entity_type,
+              entity_id: row.entity_id, metadata: row.metadata
+            });
+          }
+          result.instancesAffected.add(row.instance_id);
+          if (retired.instanceCompleted) result.autoCompletedInstanceIds.push(row.instance_id);
+        }
+        continue;
+      }
+    }
+
     // All entities are department-scoped
     const resolveDeptId = row.department_id;
 
@@ -1573,6 +1794,25 @@ export async function revalidateApproverMembership({
         [row.step_id, userId]
       );
       if (existingApprover) continue; // already active
+
+      // NO PERMISSION GATE HERE, deliberately. Symmetry is tempting — never
+      // GRANT authority via a role that cannot read+approve the entity — but it
+      // changes behaviour this defect is not about, and it is measurably wrong
+      // against a step shape that legitimately exists:
+      // `applyDiffToInstance` (STEP_ADDED / STEP_MODIFIED) resolves approvers
+      // WITHOUT the creation-time gate, so a policy edit can leave a live ROLE
+      // step whose role holds no rows for that resource. Gating the add path
+      // then silently withholds approvers from steps that are still collecting
+      // approvals — an under-population failure to sit alongside the
+      // over-population one being fixed. (Empirically: it broke
+      // approvalPropagation.mapAndCreateGaps.test.js, whose PO instances are
+      // sourced from roles with no 'awarding' permissions at all.)
+      //
+      // PART 1 owns the gate. Retiring a step is a statement about the step;
+      // declining to populate one is a statement about a user, and the two are
+      // not interchangeable. If the add path should be gated, the right fix is
+      // to gate applyDiffToInstance at the point steps are created, not to
+      // filter their approvers afterwards.
 
       // Lock the instance
       await t.oneOrNone('SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE', [row.instance_id]);
@@ -1696,12 +1936,176 @@ export async function revalidateApproverMembership({
     autoCompletedInstanceIds: result.autoCompletedInstanceIds,
     // Steps skipped because their policy step could not be resolved (fail-closed).
     unresolvedSteps: result.unresolvedSteps,
+    // Steps retired because their ROLE source lost read+approve.
+    stepsRemoved: result.stepsRemoved,
     // Same shape consumed by dispatchPropagationEmails — lets the caller
     // (usersController / hospitalityController) fire emails after the tx
     // commits without re-shaping the data.
     _emailData: {
       approversAdded: result.approversAdded,
       approversRemoved: result.approversRemoved,
+      approversKeptApproved: []
+    }
+  };
+}
+
+// ============================================================================
+// SECTION 6B: ROLE PERMISSION CHANGE REVALIDATION (role-keyed)
+// ============================================================================
+
+/**
+ * Reconcile every in-flight approval backed by a role whose PERMISSIONS just
+ * changed. Called from `rbacController.updateRoleWithPermissions` inside the
+ * same transaction as the permission write.
+ *
+ * ── WHY THIS EXISTS SEPARATELY FROM revalidateApproverMembership ──
+ * That function is keyed on a USER: its whole discovery query pivots on
+ * `asa.approver_user_id = $1`, and its per-step decision is "does this user
+ * still resolve?". A permission edit changes nothing about any user — the
+ * membership rows in `tbl_user_role_scopes` are untouched, so re-resolving
+ * would find every holder still qualified and remove nobody. The changed thing
+ * is the ROLE, and the affected population is "every PENDING step sourced from
+ * it", which the user-keyed query cannot express. Hence a second entry point
+ * that pivots on `ps.approver_source_id = $1` instead.
+ *
+ * Everything downstream is deliberately shared: the same
+ * POLICY_STEP_RESOLUTION_SQL precedence (link first, ordinal fallback), the
+ * same published-RFQ exclusion, the same retirement primitive, the same
+ * `_emailData` shape for `dispatchPropagationEmails`, and the same audit
+ * surfaces (`tbl_approval_actions` + `tbl_approval_instance_change_log` +
+ * `tbl_approval_policy_change_log`).
+ *
+ * NOT SYMMETRIC, on purpose: a role that GAINS read+approve does not get its
+ * steps back. Creation skips an ineligible step without materialising it, so
+ * there is no dead row to revive — reinstating one would mean inventing a step
+ * position mid-flight, which this engine declines to do everywhere else (see
+ * the STEP_ADDED note in applyDiffToInstance). Newly-permitted roles take
+ * effect on the next instance created.
+ *
+ * @param {Object} params
+ * @param {number} params.roleId    — the role whose permissions changed
+ * @param {number} params.changedBy — admin who made the change
+ * @param {string} [params.changeType] — recorded as the removal reason
+ * @param {Object} params.txContext — transaction context (required)
+ */
+export async function revalidateRolePermissionChange({
+  roleId, changedBy, changeType = 'role_permissions_changed', txContext
+}) {
+  const t = txContext;
+  if (!t) throw new Error('revalidateRolePermissionChange requires a transaction context');
+  const numericRoleId = Number(roleId);
+  if (!Number.isInteger(numericRoleId) || numericRoleId <= 0) {
+    throw new Error(`revalidateRolePermissionChange: invalid roleId ${roleId}`);
+  }
+
+  const stepsRemoved = [];
+  const approversRemoved = [];
+  const autoCompletedInstanceIds = [];
+  const instancesAffected = new Set();
+  const permCache = new Map();
+
+  // Ordered by instance id so concurrent admin edits take the instance locks in
+  // the same sequence, exactly like propagatePolicyChangeToInstances.
+  const rows = await t.any(
+    `SELECT DISTINCT
+       ai.id AS instance_id, ai.entity_type, ai.entity_id, ai.metadata,
+       ai.approval_policy_id,
+       ais.id AS step_id, ais.step_order, ais.policy_step_id,
+       ps.approver_source_type, ps.approver_source_id, ps.matched_by_id
+     FROM tbl_approval_instances ai
+     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+     ${POLICY_STEP_RESOLUTION_SQL}
+     WHERE ai.status = 'PENDING'
+       AND ais.status = 'PENDING'
+       AND ps.approver_source_type = 'ROLE'
+       AND ps.approver_source_id = $1
+       ${SKIP_PUBLISHED_RFQ_SQL}
+     ORDER BY ai.id ASC, ais.step_order ASC`,
+    [numericRoleId]
+  );
+
+  for (const row of rows) {
+    const verdict = await roleStepPermissionVerdict(numericRoleId, row.entity_type, t, permCache);
+    // The overwhelmingly common case: the role still holds read+approve for
+    // this entity type, so the step is left completely alone — no audit row,
+    // no change-log entry, no email. A permission edit that adds a permission,
+    // or that touches an unrelated resource, must be a total no-op here.
+    if (verdict.permitted) continue;
+
+    if (!row.matched_by_id) {
+      logger.info(`[RolePermGate] instance ${row.instance_id} step ${row.step_id}: policy step resolved by ORDINAL fallback (stored policy_step_id=${row.policy_step_id})`);
+    }
+
+    await t.oneOrNone('SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE', [row.instance_id]);
+
+    const retired = await retireIneligibleRoleStep({
+      instanceId: row.instance_id,
+      stepId: row.step_id,
+      roleId: numericRoleId,
+      resource: verdict.resource,
+      changedBy,
+      changeType,
+      t
+    });
+    if (!retired) continue;
+
+    stepsRemoved.push({
+      instance_id: row.instance_id, step_id: retired.step_id,
+      step_order: retired.step_order, entity_type: row.entity_type,
+      entity_id: row.entity_id, resource: verdict.resource, reason: verdict.reason
+    });
+    for (const removedUserId of retired.approver_user_ids) {
+      approversRemoved.push({
+        user_id: removedUserId, step_order: retired.step_order,
+        instance_id: row.instance_id, entity_type: row.entity_type,
+        entity_id: row.entity_id, metadata: row.metadata
+      });
+    }
+    instancesAffected.add(row.instance_id);
+    if (retired.instanceCompleted) autoCompletedInstanceIds.push(row.instance_id);
+  }
+
+  for (const instanceId of instancesAffected) {
+    await t.none(
+      `INSERT INTO tbl_approval_instance_change_log
+         (approval_instance_id, change_summary)
+       VALUES ($1, $2)`,
+      [instanceId, JSON.stringify({
+        reason: changeType,
+        role_id: numericRoleId,
+        steps_removed: stepsRemoved.filter((s) => s.instance_id === instanceId),
+        approvers_removed: approversRemoved.filter((a) => a.instance_id === instanceId)
+      })]
+    );
+  }
+
+  if (instancesAffected.size > 0) {
+    await t.none(
+      `INSERT INTO tbl_approval_policy_change_log
+         (approval_policy_id, changed_by, change_type, change_summary, affected_instance_ids)
+       VALUES (NULL, $1, $2, $3, $4)`,
+      [changedBy, changeType.toUpperCase(),
+        JSON.stringify({
+          role_id: numericRoleId,
+          steps_removed: stepsRemoved.length,
+          approvers_removed: approversRemoved.length
+        }),
+        [...instancesAffected]]
+    );
+    logger.warn(`[RolePermGate] role ${numericRoleId} permission change retired ${stepsRemoved.length} live approval step(s) across ${instancesAffected.size} instance(s); ${autoCompletedInstanceIds.length} instance(s) auto-completed`);
+  }
+
+  return {
+    roleId: numericRoleId,
+    stepsRemoved,
+    approversRemoved,
+    instancesAffected: instancesAffected.size,
+    autoCompletedInstanceIds,
+    // Same shape dispatchPropagationEmails consumes, so the caller fires the
+    // "you were removed from this approval" mails post-commit without reshaping.
+    _emailData: {
+      approversAdded: [],
+      approversRemoved,
       approversKeptApproved: []
     }
   };
