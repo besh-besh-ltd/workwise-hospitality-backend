@@ -1,0 +1,82 @@
+{
+  "$comment": [
+    "Single source of truth for CI test sharding. Read by BOTH:",
+    "  - scripts/check-shard-coverage.mjs  (proves the patterns partition the suite)",
+    "  - .github/workflows/ci-tests.yml    (builds the job matrix via fromJSON)",
+    "so the two can never drift.",
+    "",
+    "WHY WE SHARD: every suite retains ~29 MB that is never released (each one",
+    "imports the whole app). Measured: 218 MB at suite 1 -> 2,814 MB at suite 90.",
+    "All 167 suites in one process projects to ~5,060 MB against Node 20's ~4,096 MB",
+    "default heap, so the single-job CI OOMs deterministically, not intermittently.",
+    "Each shard here peaks 3-5x under that ceiling.",
+    "",
+    "WHY ONE JOB PER SHARD (and NOT jest --maxWorkers): all suites in a Jest process",
+    "share ONE database and isolate via per-test transactional rollback. Concurrent",
+    "workers would interleave transactions on the same rows. The unit of parallelism",
+    "must therefore be one database per Jest process => one per CI job.",
+    "Do not raise maxWorkers in jest.config.js to 'speed this up'.",
+    "",
+    "DB ISOLATION IS FREE: tests/setup/envguard.js reads TEST_RUN_ID before falling",
+    "back to GITHUB_RUN_ID, so the workflow sets TEST_RUN_ID=ci_<run_id>_<shard> and",
+    "each job gets its own hospitality_test_* database with no harness change.",
+    "",
+    "ADDING A TEST FILE: if it does not match exactly one pattern below, the",
+    "coverage-guard job fails the build. That is deliberate - it is the only thing",
+    "standing between us and a new suite silently never running in CI. Fix the",
+    "pattern or add a shard; do not weaken the guard.",
+    "",
+    "PATTERNS are JS regexes matched UNANCHORED against the repo-relative POSIX",
+    "path, which is exactly how Jest's --testPathPatterns treats them. Do not add",
+    "a leading ^ : Jest matches against the ABSOLUTE path and the anchor would",
+    "select nothing (silently green, zero tests run).",
+    "",
+    "SPLIT: a domain too large for one shard is divided by Jest's own --shard=i/n,",
+    "which is exhaustive and balanced by construction. The guard only checks the",
+    "pattern layer; Jest guarantees full coverage within it."
+  ],
+
+  "shards": [
+    {
+      "name": "rfq",
+      "pattern": "tests/services/rfq\\.",
+      "description": "RFQ lifecycle: create, draft, publish, copy, edit, withdraw, clarification, quote comparison"
+    },
+    {
+      "name": "negotiation",
+      "pattern": "tests/services/negotiation",
+      "description": "Negotiation rounds, listing, status taxonomy, savings, and NEGOTIATION_QUOTE approvals"
+    },
+    {
+      "name": "dashboard",
+      "pattern": "tests/services/(dashboard\\.|buyerDashboard|vendorDashboard)",
+      "description": "Buyer/vendor dashboards, analytics widgets, insights, status banners"
+    },
+    {
+      "name": "po-pricing",
+      "pattern": "tests/services/(po\\.|poTemplate|pricing|quote)",
+      "description": "Purchase orders, PO templates, the pricing engine, and quote submission/compare"
+    },
+    {
+      "name": "security-approval",
+      "pattern": "tests/services/(security\\.|approval|authorizationService|rbac\\.|arc\\.approvers)",
+      "description": "Tenant-scope/IDOR regressions, the approval engine, RBAC and process scoping"
+    },
+    {
+      "name": "platform",
+      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.)",
+      "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, and harness self-checks"
+    },
+    {
+      "name": "arc-core",
+      "pattern": "tests/services/arc_v2/arc\\.",
+      "split": 2,
+      "description": "ARC v2 core: create, publish, tech/commercial eval, award, amendment, negotiation, manual entry"
+    },
+    {
+      "name": "arc-mr",
+      "pattern": "tests/services/arc_v2/(mr\\.|admin\\.|signatureOtp|negotiationPolymorphic|arcPricingResolver)",
+      "description": "Material Requisitions and call-off POs, ARC self-serve admin, signature OTP, pricing resolver"
+    }
+  ]
+}

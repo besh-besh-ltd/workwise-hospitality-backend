@@ -40,11 +40,21 @@ async function dropOne(admin, dbName) {
 }
 
 async function findOrphans(admin) {
+  // Only databases with NO live backend attached are orphans. Without this, a
+  // cleanup run drops every hospitality_test_* database except its own — which
+  // kills any test run happening concurrently (a second local run, or a sharded
+  // CI matrix pointed at a shared Postgres). The header's "24h" claim was never
+  // implemented; "nobody is connected" is the check that actually protects a
+  // run in flight, and it needs no superuser privileges.
   const { rows } = await admin.query(`
-    SELECT datname FROM pg_database
-    WHERE datname LIKE 'hospitality_test\\_%' ESCAPE '\\'
-      AND datname NOT IN (
+    SELECT d.datname FROM pg_database d
+    WHERE d.datname LIKE 'hospitality_test\\_%' ESCAPE '\\'
+      AND d.datname NOT IN (
         'hospitality','hospitality_prod','hospitality_production','hospitality_stage','hospitality_staging'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_stat_activity a
+        WHERE a.datname = d.datname AND a.pid <> pg_backend_pid()
       )
   `);
   return rows.map((r) => r.datname);

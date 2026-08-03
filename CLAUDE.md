@@ -427,9 +427,62 @@ npm run dev
 # Start production server
 npm start
 
-# Run tests
+# Run tests (all 167 suites — needs ~5 GB of heap; see sharding note below)
 npm test
+
+# Run one domain's tests (the flag is --testPathPatterns, PLURAL)
+npm test -- --testPathPatterns "tests/services/rfq\."
+
+# Verify the CI shard patterns still cover every suite exactly once
+npm run test:shards
 ```
+
+### Test sharding
+
+CI splits the suite into 9 parallel per-domain jobs, defined in `tests/shards.json`.
+This is not an optimisation — it is required. Every suite retains ~29 MB that is
+never released (each imports the whole app), so all 167 in one process projects to
+~5,060 MB against Node 20's ~4,096 MB default heap and dies with
+`Ineffective mark-compacts near heap limit` and no `FAIL` lines.
+
+Two things to know before changing anything here:
+
+- **`maxWorkers: 1` in `jest.config.js` is load-bearing.** All suites in a Jest
+  process share one database and isolate via per-test transactional rollback;
+  concurrent workers would interleave transactions on the same rows. Parallelism
+  has to come from separate jobs with separate databases, not from workers.
+- **Adding a test file that matches no shard pattern fails the build**, via
+  `scripts/check-shard-coverage.mjs`. That guard is the only thing preventing a new
+  suite from silently never running in CI. Run `npm run test:shards` locally before
+  pushing a new test file.
+
+### Timezone: your local Postgres does not match production
+
+`tbl_rfq.bid_end_date` is `text` holding a **naive IST wall-clock** string with no
+offset, so every comparison against `NOW()` / `CURRENT_DATE` resolves through the
+**Postgres session timezone**.
+
+| | session timezone |
+|---|---|
+| local (Homebrew — inherits your system zone) | `Asia/Kolkata` |
+| production | `UTC` |
+| CI | `UTC` (now pinned explicitly in the workflow) |
+
+Locally those comparisons are accidentally correct, so this entire bug class is
+**invisible on your machine** and only misbehaves in production. That is why it kept
+shipping. Always use `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')` when comparing
+against `bid_end_date` — see `IST_TODAY` / `IST_NOW` in `app/models/dashboardModel.js`.
+
+To reproduce one locally:
+
+```bash
+# NOT TZ=UTC — that is a Node setting and never reaches Postgres.
+PGOPTIONS="-c timezone=UTC" npm test -- --testPathPatterns "statusBanner"
+```
+
+The error is `5h30m − session_offset`, so it **changes sign** east of IST rather than
+shrinking. A case that fails under `UTC` can pass under `Asia/Singapore` against the
+same buggy code — test both directions.
 
 ---
 
