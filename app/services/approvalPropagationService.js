@@ -43,6 +43,94 @@ const SKIP_PUBLISHED_RFQ_SQL = `
   ))`;
 
 /**
+ * Resolve which POLICY step an INSTANCE step came from, with a defined
+ * precedence. Every reconciliation query must use this and only this.
+ *
+ *   1. `ais.policy_step_id` — the true link, written by createApprovalInstance
+ *      (generalModel.js) and refreshed by propagatePolicyChangeToInstances.
+ *      Accepted only when it still resolves to a LIVE step OF THIS INSTANCE'S
+ *      POLICY; a link that points into some other policy is treated as broken,
+ *      not followed.
+ *   2. `ps.step_order = ais.step_order` — ordinal fallback, used ONLY when (1)
+ *      is NULL or does not resolve to a live step of this instance's policy.
+ *      (In production a broken link is always NULL — see the invariants below —
+ *      but the id is re-checked against the policy rather than trusted.)
+ *
+ * BOTH are required.
+ *
+ * (1) is required because instance step numbering is NOT policy step numbering.
+ * createApprovalInstance assigns instance `step_order` from a fresh counter that
+ * only advances for steps that survived resolution (generalModel.js:2226-2258):
+ * a ROLE step whose role lacks read+approve, or any step resolving to zero
+ * approvers, is dropped WITHOUT consuming a number. Policy steps 1,2,3 with #1
+ * dropped become instance steps 1,2 — so instance step 1 is policy step 2.
+ * Matching on the ordinal alone then hands the reconciler the WRONG policy step,
+ * and re-resolution runs against the wrong role. That fails in the dangerous
+ * direction: a user who holds the other level's role is judged "still qualified"
+ * and keeps an authority they were just stripped of. This population is real and
+ * sizeable in production — see the counts below.
+ *
+ * (2) is required because a policy edit DELETEs and re-INSERTs every step row
+ * (generalController.upsertApprovalPolicy → deletePolicySteps + insertPolicySteps).
+ * `fk_instance_step_policy_step` is ON DELETE SET NULL, so every live instance
+ * older than the last policy edit has its link NULLed out. Dropping the ordinal
+ * path would strand all of them.
+ *
+ * KNOWN LIMIT — a stored link may itself be ordinal-shaped. Until this commit,
+ * propagatePolicyChangeToInstances refreshed links with
+ * `UPDATE … WHERE step_order = <policy step_order>`, i.e. it wrote
+ * `ais(step_order=k).policy_step_id = newStep(step_order=k).id`. On a divergent
+ * instance that link is a re-labelled ordinal guess, and rule (1) above follows
+ * it at TOP precedence and reports `matched_by_id = true` — a pre-existing
+ * corrupted link is INDISTINGUISHABLE from a genuine one, here and in the logs
+ * (only the fallback case is logged). This is not a regression: it returns the
+ * same answer the old ordinal-only path returned, and it was measured read-only
+ * on production before being accepted.
+ *
+ * What that measurement established — these are invariants, and they are the
+ * part worth trusting:
+ *   - `fk_instance_step_policy_step` is present and `convalidated = true`;
+ *   - ZERO dangling links exist (no `policy_step_id` without a matching policy
+ *     step). A broken link is therefore always NULL, never a stale id;
+ *   - ZERO linked steps have a linked role that fails to contain the step's live
+ *     approvers — i.e. no ordinal-shaped link is currently producing a wrong
+ *     answer, in any entity type.
+ * So there is no bleed to stop and NO backfill/repair pass is warranted; do not
+ * add one without a fresh measurement.
+ *
+ * Supporting counts, POINT-IN-TIME and expected to drift — instances complete
+ * continuously, and these moved measurably within an hour of being taken. State
+ * the predicate with any number quoted from here. Measured 2026-08-03:
+ *   - all steps of PENDING instances:      366 linked / 150 NULL (516)
+ *   - PENDING steps of PENDING instances:  320 linked / 131 NULL (451)
+ *   - 471 instance steps where the ordinal lands on a different policy step than
+ *     `policy_step_id` — the population rule (1) exists for.
+ *
+ * Emits exactly one row (or none) per instance step, aliased `ps`, so callers —
+ * including buildChangedScopeFilterSql, which writes `ps.approver_source_type` /
+ * `ps.approver_source_id` — need no changes. `ps.matched_by_id` says which rule
+ * fired; `ps IS NULL` means the step is UNRESOLVABLE (policy deleted, or the
+ * policy has fewer steps than the instance) and callers must decide explicitly
+ * what to do about it rather than letting a join quietly drop the row.
+ *
+ * Assumes the calling SQL aliases the instance table `ai` and instance steps `ais`.
+ */
+const POLICY_STEP_RESOLUTION_SQL = `
+  LEFT JOIN LATERAL (
+    SELECT
+      p.id                AS matched_policy_step_id,
+      p.approver_source_type,
+      p.approver_source_id,
+      (p.id IS NOT DISTINCT FROM ais.policy_step_id) AS matched_by_id
+    FROM tbl_approval_policy_steps p
+    WHERE p.approval_policy_id = ai.approval_policy_id
+      AND (p.id = ais.policy_step_id OR p.step_order = ais.step_order)
+    ORDER BY (p.id IS NOT DISTINCT FROM ais.policy_step_id) DESC,
+             p.step_order ASC, p.id ASC
+    LIMIT 1
+  ) ps ON TRUE`;
+
+/**
  * Normalise a scope axis value to `null` or a positive integer.
  *
  * Scope snapshots taken in usersController COALESCE NULLs to 0 so the tuple
@@ -376,8 +464,16 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  * Apply a policy step diff to a single PENDING approval instance.
  * Must be called within a transaction that holds FOR UPDATE locks on the instance.
  *
- * @returns {{ approversAdded: Array, approversRemoved: Array, stepsAdded: Array,
- *             stepsRemoved: Array, rulesChanged: Array, autoCompleted: boolean }}
+ * @returns {{ approversAdded: Array, approversRemoved: Array,
+ *             approversKeptApproved: Array, stepsAdded: Array, stepsRemoved: Array,
+ *             stepsModified: Array, unmatchedDiffEntries: Array,
+ *             rulesChanged: Array, autoCompleted: boolean }}
+ *   `stepsModified` entries are `{step_order, instance_step_id, new_policy_step_id}`
+ *   and exist so the caller can re-point `policy_step_id` BY ROW ID.
+ *   `unmatchedDiffEntries` are `{type, step_order, policy_step_id}` for diff
+ *   entries that found no instance step to apply to — a reconciliation this
+ *   instance did NOT receive. Same reporting standard as PART 1's
+ *   `unresolvedSteps` in revalidateApproverMembership.
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t) {
   const result = {
@@ -390,6 +486,16 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
     approversKeptApproved: [],
     stepsAdded: [],
     stepsRemoved: [],
+    // Instance steps matched to a STEP_MODIFIED diff entry, with the new policy
+    // step id they should now point at. The caller re-points `policy_step_id`
+    // from this list — by instance step ID, never by step_order.
+    stepsModified: [],
+    // Diff entries that claimed no instance step at all: either the policy step
+    // was dropped at creation time (routine — nothing to reconcile) or an
+    // earlier entry already claimed the only candidate (a reconciliation this
+    // instance did NOT receive). Reported rather than silently dropped, matching
+    // how PART 1 reports `unresolvedSteps`.
+    unmatchedDiffEntries: [],
     rulesChanged: [],
     autoCompleted: false
   };
@@ -413,23 +519,103 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
   const modifications = diff.filter(d => d.type === 'STEP_MODIFIED');
   const additions = diff.filter(d => d.type === 'STEP_ADDED').sort((a, b) => a.step_order - b.step_order);
 
-  // Match instance steps by step_order (not policy_step_id, which goes stale
-  // across policy updates). This works because both the policy step_order and
-  // instance step_order use the same 1-based sequential numbering.
-  const findInstanceStepByOrder = (stepOrder) => {
-    const found = instanceSteps.find(s => s.step_order === stepOrder);
-    logger.info(`[PropagateMatch] Looking for step_order=${stepOrder}: ${found ? `found id=${found.id}, status=${found.status}` : 'NOT FOUND'}`);
-    return found;
-  };
+  // Map each diff entry (expressed in POLICY step_order terms) onto the instance
+  // step it actually came from, with the same precedence the reconciler uses:
+  //
+  //   1. `ais.policy_step_id === d.oldStep.id` — the true link. `oldStep` is a
+  //      real pre-edit row from snapshotPolicySteps(), so its id is exactly what
+  //      createApprovalInstance stored. This is a comparison of stored values,
+  //      not a join, so it keeps working after the controller has DELETEd the
+  //      old policy step rows.
+  //   2. instance `step_order === d.step_order` — ordinal fallback.
+  //
+  // The ordinal alone is NOT sufficient, contrary to the comment that used to
+  // sit here. Instance and policy numbering coincide only when no policy step
+  // was dropped at creation; createApprovalInstance skips steps without
+  // consuming a number (generalModel.js:2226-2258), so policy step 3 can be
+  // instance step 2. Matching on the ordinal then applies a REMOVE or a source
+  // change to the wrong step of a live approval.
+  //
+  // The fallback still has to exist: a policy edit deletes and re-inserts every
+  // step row and `fk_instance_step_policy_step` is ON DELETE SET NULL, so any
+  // instance older than the last edit has a NULL link and the ordinal is the
+  // only mapping left.
+  //
+  // ── WHY THIS IS A TWO-PASS ASSIGNMENT AND NOT A per-entry lookup ──
+  // Matching on one key is injective for free: `idx_unique_instance_step_order`
+  // is UNIQUE (approval_instance_id, step_order) and computePolicyStepDiff emits
+  // at most one entry per step_order, so the old ordinal-only matcher was 1:1 by
+  // construction. Mixing TWO key spaces breaks that: entry X can ordinal-match
+  // instance step S while entry Y id-matches the SAME step S. The precondition is
+  // routine — propagatePolicyChangeToInstances re-points `policy_step_id` only
+  // for MODIFIED steps, so after any policy edit an instance holds a mix of live
+  // links and NULLs.
+  //
+  // A double claim is not cosmetic. If a STEP_REMOVED and a STEP_MODIFIED land on
+  // the same step, the removals loop kills it and the modifications loop then
+  // INSERTs PENDING approver rows + APPROVER_ADDED audit rows onto a dead step.
+  // getPendingApprovalsForUser (generalModel.js:3116-3121) filters on `sa.status`
+  // and `s.step_order = i.current_step` but NOT on `s.status`, so that row reads
+  // as a live approval and dispatchPropagationEmails emails the person "action
+  // required" for a step that no longer exists. Two removals colliding would
+  // write a duplicate STEP_REMOVED audit row; two modifications colliding would
+  // issue two policy_step_id UPDATEs (last wins) and leave a step unreconciled.
+  //
+  // So: resolve EVERY id-match first, globally, then hand out the ordinal matches
+  // from what is left. One instance step is claimed by at most one diff entry.
+  const claimedStepIds = new Set();
+  const stepForDiff = new Map(); // diff entry (by identity) -> instance step row
+
+  // STEP_ADDED is excluded on purpose — it creates a new row rather than
+  // claiming an existing one, and its position is derived separately below.
+  const claimingEntries = [...removals, ...modifications]
+    .sort((a, b) => a.step_order - b.step_order);
+
+  for (const d of claimingEntries) {
+    const oldPolicyStepId = d.oldStep?.id;
+    if (oldPolicyStepId == null) continue;
+    const hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && s.policy_step_id === oldPolicyStepId);
+    if (!hit) continue;
+    claimedStepIds.add(hit.id);
+    stepForDiff.set(d, hit);
+    logger.info(`[PropagateMatch] ${d.type} policy step_order=${d.step_order} (policy_step_id=${oldPolicyStepId}): claimed instance step id=${hit.id} step_order=${hit.step_order} status=${hit.status} via policy_step_id`);
+  }
+
+  for (const d of claimingEntries) {
+    if (stepForDiff.has(d)) continue;
+    const hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && s.step_order === d.step_order);
+    if (!hit) {
+      // Either the policy step was dropped at creation (routine) or another
+      // entry took the only candidate. Either way this instance does not get
+      // this part of the policy change, which is a fact worth surfacing.
+      logger.warn(`[PropagateMatch] instance ${instance.id}: ${d.type} policy step_order=${d.step_order} (policy_step_id=${d.oldStep?.id ?? 'n/a'}) matched NO unclaimed instance step — this reconciliation was not applied`);
+      result.unmatchedDiffEntries.push({
+        type: d.type,
+        step_order: d.step_order,
+        policy_step_id: d.oldStep?.id ?? null
+      });
+      continue;
+    }
+    claimedStepIds.add(hit.id);
+    stepForDiff.set(d, hit);
+    logger.info(`[PropagateMatch] ${d.type} policy step_order=${d.step_order} (policy_step_id=${d.oldStep?.id ?? 'n/a'}): claimed instance step id=${hit.id} step_order=${hit.step_order} status=${hit.status} via step_order`);
+  }
+
+  const findInstanceStepForDiff = (d) => stepForDiff.get(d);
 
   // --- STEP REMOVALS ---
   for (const d of removals) {
-    const instStep = findInstanceStepByOrder(d.step_order);
+    const instStep = findInstanceStepForDiff(d);
     if (!instStep) continue; // step was skipped at creation time (0 approvers)
 
-    if (instStep.status === 'APPROVED' || instStep.status === 'REJECTED') {
-      // Historical — do not modify
-      result.stepsRemoved.push({ step_order: instStep.step_order, skipped: true, reason: 'already_completed' });
+    if (instStep.status !== 'PENDING') {
+      // Historical (APPROVED/REJECTED) or already dead (REMOVED/SKIPPED). Never
+      // modify, and never write a second STEP_REMOVED audit row for a step that
+      // is already gone.
+      const reason = (instStep.status === 'APPROVED' || instStep.status === 'REJECTED')
+        ? 'already_completed'
+        : 'not_pending';
+      result.stepsRemoved.push({ step_order: instStep.step_order, skipped: true, reason });
       continue;
     }
 
@@ -438,6 +624,10 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       `UPDATE tbl_approval_instance_steps SET status = 'REMOVED', removed_mid_flight = true, completed_at = NOW() WHERE id = $1`,
       [instStep.id]
     );
+    // Keep the in-memory snapshot (loaded once, above) in step with the DB.
+    // Every later loop reads `instStep.status` from this object; without this
+    // line a step killed here still looks PENDING to them.
+    instStep.status = 'REMOVED';
 
     // Mark all PENDING approvers as REMOVED
     const pendingApprovers = await t.any(
@@ -480,11 +670,30 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
 
   // --- STEP MODIFICATIONS (approver/rule changes) ---
   for (const d of modifications) {
-    const instStep = findInstanceStepByOrder(d.step_order);
+    const instStep = findInstanceStepForDiff(d);
     if (!instStep) continue;
 
-    if (instStep.status === 'APPROVED' || instStep.status === 'REJECTED') {
-      // Historical — audit note only
+    // Record the match regardless of the step's status so the caller re-points
+    // `policy_step_id` at the new policy step row for completed steps too —
+    // otherwise their link dangles forever and every later reconciliation of
+    // this instance falls back to the ordinal.
+    if (d.newStep?.id) {
+      result.stepsModified.push({
+        step_order: instStep.step_order,
+        instance_step_id: instStep.id,
+        new_policy_step_id: d.newStep.id
+      });
+    }
+
+    if (instStep.status !== 'PENDING') {
+      // Historical (APPROVED/REJECTED) or dead (REMOVED/SKIPPED) — audit note
+      // only. REMOVED matters as much as APPROVED here: inserting a PENDING
+      // approver row onto a dead step produces an approver record nobody can
+      // act on, which getPendingApprovalsForUser still surfaces (it filters on
+      // sa.status, not s.status) and dispatchPropagationEmails then emails
+      // about. The two-pass assignment above already makes a removal and a
+      // modification claiming the same step impossible; this is the backstop
+      // for a step that was REMOVED by an earlier propagation.
       continue;
     }
 
@@ -635,7 +844,25 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
   }
 
   // --- STEP ADDITIONS (with renumbering) ---
-  // Process additions in ascending order to handle renumbering correctly
+  // Process additions in ascending order to handle renumbering correctly.
+  //
+  // Insert POSITION stays ordinal, deliberately. A STEP_ADDED entry describes a
+  // policy step that did not exist before, so there is no `policy_step_id` on
+  // any instance step that could point at it — the id-first precedence used for
+  // removals/modifications has nothing to match. Nor can the neighbouring steps
+  // supply it: the controller deletes and re-inserts EVERY policy step on save,
+  // and the FK NULLs each link as it goes, so at this moment every surviving
+  // instance step's link is NULL except the ones re-pointed a few lines above.
+  // The ordinal is the only mapping that exists here.
+  //
+  // Residual risk, stated plainly: on an instance whose numbering diverged, a
+  // step can be inserted one position off, and a position below current_step is
+  // inserted as SKIPPED rather than PENDING — i.e. an approval that should have
+  // been collected is not. The approver SET is still correct (resolveApprovers
+  // runs fresh against the new policy step), so this is a sequencing error, not
+  // a wrong-approver error. Fixing it properly needs the full new step list
+  // threaded through applyDiffToInstance and a policy→instance position map;
+  // that is a larger change than this defect and is left out on purpose.
   let renumberOffset = 0;
   for (const d of additions) {
     const insertPosition = d.step_order + renumberOffset;
@@ -790,14 +1017,19 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
 
     const instanceResult = await applyDiffToInstance(instance, diff, policy, changedBy, t);
 
-    // Update policy_step_id references on modified steps to point to the new policy step IDs
-    for (const d of diff.filter(dd => dd.type === 'STEP_MODIFIED' && dd.newStep?.id)) {
-      const instStep = instanceResult.stepsModified?.find(s => s.step_order === d.step_order);
-      // Also update by step_order directly in DB
+    // Re-point policy_step_id on modified steps at the newly inserted policy
+    // step rows, BY INSTANCE STEP ID. applyDiffToInstance already resolved which
+    // instance step each diff entry belongs to (policy_step_id first, ordinal
+    // fallback); reusing that decision is the whole point. The previous form
+    // updated `WHERE step_order = <policy step_order>`, which wrote the new link
+    // onto whichever instance step shared the ordinal — actively corrupting the
+    // one column the reconciler depends on, on exactly the instances whose
+    // numbering had diverged.
+    for (const mod of instanceResult.stepsModified) {
       await t.none(
         `UPDATE tbl_approval_instance_steps SET policy_step_id = $1
-         WHERE approval_instance_id = $2 AND step_order = $3`,
-        [d.newStep.id, instance.id, d.step_order]
+         WHERE id = $2 AND approval_instance_id = $3`,
+        [mod.new_policy_step_id, mod.instance_step_id, instance.id]
       );
     }
 
@@ -827,6 +1059,10 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
       steps_added: instanceResult.stepsAdded.length,
       steps_removed: instanceResult.stepsRemoved.length,
       rules_changed: instanceResult.rulesChanged.length,
+      // Parts of the policy change this instance did not receive because no
+      // instance step claimed them. Surfaced alongside the applied counts so a
+      // partial reconciliation is visible in the propagation summary.
+      unmatched_diff_entries: instanceResult.unmatchedDiffEntries.length,
       auto_completed: instanceResult.autoCompleted
     });
 
@@ -905,11 +1141,12 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
 export async function simulateApproverImpact(userId, changeType, options = {}) {
   const { companyId, hotelId, changedScopes = [], changedRoleIds = [], changedDeptIds = [] } = options;
 
-  // Find PENDING instances where this user is a PENDING approver on
-  // ROLE/DEPARTMENT-based steps. Mirrors revalidateApproverMembership query.
+  // Find PENDING instances where this user is a PENDING approver.
+  // MUST mirror revalidateApproverMembership's PART 1 discovery — the two are
+  // only meaningful as a pair (the warning has to describe what the mutation
+  // will actually do; commit 5a28b931). The originating policy step is resolved
+  // with the SAME precedence rule on both sides — see POLICY_STEP_RESOLUTION_SQL.
   // Published RFQs are excluded — see SKIP_PUBLISHED_RFQ_SQL.
-  // NOTE: Join policy steps via approval_policy_id + step_order (not the stale
-  // policy_step_id, which points to deleted rows after policy updates).
   let query = `
     SELECT DISTINCT
       ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
@@ -921,9 +1158,7 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
     FROM tbl_approval_instances ai
     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
-    LEFT JOIN tbl_approval_policy_steps ps
-      ON ps.approval_policy_id = ai.approval_policy_id
-      AND ps.step_order = ais.step_order
+    ${POLICY_STEP_RESOLUTION_SQL}
     WHERE ai.status = 'PENDING'
       AND asa.approver_user_id = $1
       AND asa.status = 'PENDING'
@@ -980,6 +1215,17 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
     // prevents false positives by only matching steps tied to the roles/depts
     // actually being removed. The actual re-resolution happens post-mutation
     // in revalidateApproverMembership().
+
+    // UNRESOLVABLE STEP (no live policy step by id OR by ordinal — policy
+    // deleted, or the policy now has fewer steps than the instance). Kept in
+    // the warning DELIBERATELY, even though revalidateApproverMembership will
+    // refuse to touch it: the two sides fail in opposite-but-both-safe
+    // directions. The admin is told the step exists and is in a broken state
+    // (over-report), and nobody is removed on a guess (under-mutate). Silence
+    // on both sides would be the one combination that hides a broken approval.
+    if (!row.approver_source_type) {
+      logger.warn(`[SimulateImpact] instance ${row.instance_id} step ${row.step_id} (step_order=${row.step_order}, policy_step_id=${row.policy_step_id}) has no resolvable policy step under policy ${row.approval_policy_id} — reported as affected, but the mutation path will not act on it`);
+    }
 
     // Get all OTHER approvers for this step (excluding the user being removed and already REMOVED ones)
     const otherApprovers = await db.any(
@@ -1061,7 +1307,9 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
  * @param {Array}  [params.changedRoleIds] — legacy bare role IDs (over-matches)
  * @param {Array}  [params.changedDeptIds] — department IDs that were added/removed
  * @param {number} [params.companyId] — scope to specific company
- * @param {number} [params.hotelId] — scope to specific hotel
+ * @param {number} [params.hotelId] — accepted for caller symmetry but NOT applied
+ *        as a discovery predicate; see the comment at the PART 1 query for why
+ *        discovery stays company-wide.
  * @param {Object} [params.txContext] — transaction context (required)
  */
 export async function revalidateApproverMembership({
@@ -1077,39 +1325,82 @@ export async function revalidateApproverMembership({
     approversRemoved: [],
     approversAdded: [],
     instancesAffected: new Set(),
-    autoCompletedInstanceIds: []
+    autoCompletedInstanceIds: [],
+    // Steps discovered but deliberately NOT acted on because their originating
+    // policy step could not be resolved at all. Surfaced so this is countable
+    // rather than invisible.
+    unresolvedSteps: []
   };
 
   // ── PART 1: Remove user from steps where they no longer qualify ──
 
-  // Find PENDING instances where user is a PENDING approver on
-  // ROLE/DEPARTMENT-based steps. Published RFQs are excluded.
-  // NOTE: Join policy steps via approval_policy_id + step_order (not the stale
-  // policy_step_id, which points to deleted rows after policy updates).
+  // Find PENDING instances where user is a PENDING approver. The originating
+  // policy step is resolved by POLICY_STEP_RESOLUTION_SQL (policy_step_id first,
+  // ordinal only as fallback) — NOT by the ordinal alone, which silently
+  // re-resolves against the wrong role whenever instance and policy numbering
+  // diverge. Published RFQs are excluded.
+  //
+  // The source-type predicate below is written to KEEP unresolvable rows
+  // (`ps.approver_source_type IS NULL`). Previously `IN ('ROLE','DEPARTMENT')`
+  // alone silently demoted the LEFT JOIN to an INNER JOIN, so a step with no
+  // matching policy step vanished from discovery and its approver was never
+  // revalidated — an invisible outcome produced by a join, not by a decision.
+  //
+  // SCOPE OF THAT WIDENING, precisely: it only bites when NO change filter is
+  // appended — i.e. `user_deactivated` / `user_activated`, and the
+  // deleteUserMapping path (companyId/hotelId only, no changedScopes). Whenever
+  // `changedScopes` or `changedRoleIds`/`changedDeptIds` ARE supplied, the
+  // filter appended below emits `ps.approver_source_type = 'ROLE'` (see
+  // buildChangedScopeFilterSql and the legacy branch further down), which is
+  // NULL — not TRUE — for an unresolvable row, so those rows drop out again.
+  // That is acceptable: a scope-scoped change can only be justified against a
+  // step whose source we can actually read, and the fail-closed outcome for an
+  // unresolvable row is identical either way (nobody is removed). The
+  // difference is only whether we get to LOG it. Rows that do survive to the
+  // loop are logged and skipped explicitly there.
   let removeQuery = `
     SELECT DISTINCT
       ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
       ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id, ai.initiated_by,
       ai.approval_policy_id, ai.metadata,
       ais.id as step_id, ais.step_order, ais.policy_step_id,
-      ps.approver_source_type, ps.approver_source_id
+      ps.approver_source_type, ps.approver_source_id,
+      ps.matched_policy_step_id, ps.matched_by_id
     FROM tbl_approval_instances ai
     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
-    LEFT JOIN tbl_approval_policy_steps ps
-      ON ps.approval_policy_id = ai.approval_policy_id
-      AND ps.step_order = ais.step_order
+    ${POLICY_STEP_RESOLUTION_SQL}
     WHERE ai.status = 'PENDING'
       AND asa.approver_user_id = $1
       AND asa.status = 'PENDING'
       AND ais.status = 'PENDING'
-      AND ps.approver_source_type IN ('ROLE', 'DEPARTMENT')
+      AND (ps.approver_source_type IS NULL OR ps.approver_source_type IN ('ROLE', 'DEPARTMENT'))
       ${SKIP_PUBLISHED_RFQ_SQL}`;
   const removeParams = [userId];
 
   if (companyId) {
     removeParams.push(companyId);
     removeQuery += ` AND ai.hospitality_company_id = $${removeParams.length}`;
+  }
+
+  // `hotelId` is DELIBERATELY NOT applied as a discovery predicate here, even
+  // though the caller (hospitalityController.deleteUserMapping) passes it.
+  //
+  // Discovery and mutation have opposite safe directions. Missing a row here
+  // means a user who just lost their grant keeps a live approval — the exact
+  // failure this reconciler exists to prevent. Over-discovering costs only a
+  // wasted resolveApprovers() call, because resolveApprovers has the final say
+  // per instance and removes nobody who still qualifies. So discovery is
+  // deliberately the wider of the two.
+  //
+  // A naive `ai.hotel_id = $hotelId` would also under-report structurally: a
+  // company-scoped instance carries `hotel_id IS NULL`, and a company-wide role
+  // grant (`urs.hotel_id IS NULL`) covers every hotel — the same NULL-as-wildcard
+  // asymmetry buildChangedScopeFilterSql is careful about. Narrowing correctly
+  // would mean `(ai.hotel_id IS NULL OR ai.hotel_id = $hotelId)`, which buys
+  // nothing but the loss of the company-wide drift sweep. Left wide on purpose.
+  if (hotelId) {
+    logger.info(`[Revalidate] hotel ${hotelId} named by caller; discovery stays company-wide (see comment) — resolveApprovers still decides per instance`);
   }
 
   // Scope by what changed to avoid unnecessary revalidation. Same predicate the
@@ -1137,6 +1428,31 @@ export async function revalidateApproverMembership({
   const affectedRows = await t.any(removeQuery, removeParams);
 
   for (const row of affectedRows) {
+    // UNRESOLVABLE STEP — neither `policy_step_id` nor the ordinal found a live
+    // policy step (policy deleted, or the policy now has fewer steps than the
+    // instance). We cannot know what this step was sourced from: instance steps
+    // do not carry approver_source_type, so there is nothing left to re-resolve
+    // against. FAIL CLOSED — never remove an approver on a guess; a wrong
+    // removal can auto-complete the step, advance the instance and release
+    // spend with nobody having approved it. Recorded + logged so this is
+    // visible instead of being a row a join quietly dropped.
+    if (!row.approver_source_type) {
+      logger.warn(`[Revalidate] instance ${row.instance_id} step ${row.step_id} (step_order=${row.step_order}, policy_step_id=${row.policy_step_id}) has no resolvable policy step under policy ${row.approval_policy_id} — user ${userId} LEFT IN PLACE (cannot re-resolve; failing closed)`);
+      result.unresolvedSteps.push({
+        instance_id: row.instance_id, step_id: row.step_id,
+        step_order: row.step_order, policy_step_id: row.policy_step_id
+      });
+      continue;
+    }
+
+    if (!row.matched_by_id) {
+      // Fell back to the ordinal because the true link was NULL, or did not
+      // resolve to a live step of this policy — the NULL case is expected after
+      // a policy edit (steps deleted + re-inserted, FK NULLs each link), but
+      // worth a breadcrumb when a removal decision is later questioned.
+      logger.info(`[Revalidate] instance ${row.instance_id} step ${row.step_id}: policy step resolved by ORDINAL fallback (step_order=${row.step_order}, stored policy_step_id=${row.policy_step_id} is null or not a live step of policy ${row.approval_policy_id}) → policy step ${row.matched_policy_step_id}`);
+    }
+
     // Lock the instance
     await t.oneOrNone('SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE', [row.instance_id]);
 
@@ -1194,22 +1510,30 @@ export async function revalidateApproverMembership({
   // ── PART 2: Add user to steps where they now qualify ──
 
   if (['role_added', 'dept_added', 'user_activated', 'scope_added'].includes(changeType)) {
-    // Find policy steps that reference the changed roles/departments.
+    // Find PENDING instance steps whose originating policy step references the
+    // changed roles/departments. Driven from the INSTANCE side through
+    // POLICY_STEP_RESOLUTION_SQL, exactly like PART 1 — the old form joined
+    // policy steps to instance steps on step_order alone, which attaches an
+    // instance step to whichever policy step happens to share its ordinal and
+    // could therefore ADD a user to a step their role does not back. Adding an
+    // approver who should not be there is an over-grant of authority, the same
+    // defect as PART 1's failure to remove, just pointed the other way.
     // Published RFQs are excluded.
-    // NOTE: Join instance steps to current policy steps via step_order (not stale policy_step_id)
+    //
+    // Unresolvable steps are excluded here (no `IS NULL` escape hatch, unlike
+    // PART 1): if we cannot say which policy step this is, we certainly cannot
+    // justify granting someone approval authority on it. Fail closed in the
+    // direction that grants nothing.
     let addQuery = `
       SELECT DISTINCT
         ai.id as instance_id, ai.entity_type, ai.entity_id, ai.current_step,
         ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id, ai.initiated_by,
         ai.approval_policy_id, ai.metadata,
         ais.id as step_id, ais.step_order,
-        ps.approver_source_type, ps.approver_source_id, ps.id as policy_step_id
+        ps.approver_source_type, ps.approver_source_id
       FROM tbl_approval_instances ai
-      JOIN tbl_approval_policies p ON ai.approval_policy_id = p.id
-      JOIN tbl_approval_policy_steps ps ON ps.approval_policy_id = p.id
-      JOIN tbl_approval_instance_steps ais
-        ON ais.approval_instance_id = ai.id
-        AND ais.step_order = ps.step_order
+      JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+      ${POLICY_STEP_RESOLUTION_SQL}
       WHERE ai.status = 'PENDING'
         AND ais.status = 'PENDING'
         AND ps.approver_source_type IN ('ROLE', 'DEPARTMENT')
@@ -1361,11 +1685,17 @@ export async function revalidateApproverMembership({
     );
   }
 
+  if (result.unresolvedSteps.length > 0) {
+    logger.warn(`[Revalidate] ${result.unresolvedSteps.length} PENDING step(s) for user ${userId} could not be tied to a live policy step and were left untouched: ${JSON.stringify(result.unresolvedSteps)}`);
+  }
+
   return {
     approversRemoved: result.approversRemoved,
     approversAdded: result.approversAdded,
     instancesAffected: result.instancesAffected.size,
     autoCompletedInstanceIds: result.autoCompletedInstanceIds,
+    // Steps skipped because their policy step could not be resolved (fail-closed).
+    unresolvedSteps: result.unresolvedSteps,
     // Same shape consumed by dispatchPropagationEmails — lets the caller
     // (usersController / hospitalityController) fire emails after the tx
     // commits without re-shaping the data.

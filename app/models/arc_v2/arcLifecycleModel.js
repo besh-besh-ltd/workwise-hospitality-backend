@@ -130,7 +130,30 @@ async function loadInstance(runner, entityType, arcId, userId) {
   };
 }
 
-/** Load current-step approvers for a pending approval instance. Returns step metadata + people[]. */
+/**
+ * Load current-step approvers for a pending approval instance. Returns step
+ * metadata + people[].
+ *
+ * REMOVED rows are EXCLUDED in SQL. They are tombstones written by the
+ * mid-flight reconciler (role revoked / policy changed / user deactivated),
+ * not live approvers. The consumers of this `people[]` array — the ARC stage
+ * aside's ApprovalDecisionCard and ActorFlowCard (StageAside.js), reached from
+ * AwardingStage/TechnicalStage/OverviewStage via
+ * `approvers={stage?.actors?.approver?.people}` — have NO removed-approver UI:
+ * they render every entry as a live approver and show a "+N more" count off
+ * `people.length`. Passing tombstones through would therefore both mislabel
+ * them and inflate that count, and (via deriveContact below) could surface a
+ * removed person's name + mobile as the "who to call" contact on a PII-bearing,
+ * tenant-guarded endpoint. Excluded here in SQL rather than at each use site so
+ * every consumer of the array is correct by construction.
+ *
+ * The approver join is a LEFT JOIN so the STEP row survives even when every
+ * approver on it is REMOVED: step_order / total_steps / decision_rule stay
+ * accurate (the step label keeps reading "Level 2 of 3") and the caller's
+ * `unassigned: people.length === 0` correctly reports that nobody live remains,
+ * instead of silently degrading to the "Level N of 1 · any one approves"
+ * placeholder the old zero-row early return produced.
+ */
 async function loadCurrentApprovers(runner, instanceId, currentStep) {
   const rows = await runner.any(
     `SELECT s.step_order, s.decision_rule, s.status AS step_status,
@@ -141,9 +164,12 @@ async function loadCurrentApprovers(runner, instanceId, currentStep) {
                JOIN tbl_department d ON d.id = ud.department_id
               WHERE ud.user_id = u.id ORDER BY ud.id DESC LIMIT 1) AS department
        FROM tbl_approval_instance_steps s
-       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-       JOIN tbl_users u ON u.id = sa.approver_user_id
-      WHERE s.approval_instance_id = $1 AND s.step_order = $2`,
+       LEFT JOIN tbl_approval_step_approvers sa
+              ON sa.approval_instance_step_id = s.id
+             AND sa.status <> 'REMOVED'
+       LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
+      WHERE s.approval_instance_id = $1 AND s.step_order = $2
+      ORDER BY sa.id`,
     [instanceId, currentStep]
   );
   if (!rows || rows.length === 0) {
@@ -154,15 +180,19 @@ async function loadCurrentApprovers(runner, instanceId, currentStep) {
     step_order: Number(first.step_order),
     total_steps: Number(first.total_steps),
     decision_rule: first.decision_rule || 'ANY',
-    people: rows.map((r) => ({
-      user_id: Number(r.user_id),
-      name: r.name,
-      designation: r.designation || null,
-      department: r.department || null,
-      email: r.email,
-      mobile: r.mobile || null,
-      status: r.status,
-    })),
+    // A step with no live approvers yields ONE row with a NULL user_id (the
+    // LEFT JOIN miss) — that is metadata, not a person.
+    people: rows
+      .filter((r) => r.user_id !== null && r.user_id !== undefined)
+      .map((r) => ({
+        user_id: Number(r.user_id),
+        name: r.name,
+        designation: r.designation || null,
+        department: r.department || null,
+        email: r.email,
+        mobile: r.mobile || null,
+        status: r.status,
+      })),
   };
 }
 
@@ -188,18 +218,39 @@ async function resolveEvaluators(arc, evaluatorPerm) {
 }
 
 function deriveContact(stage, approver, evaluators) {
-  // Pending approval → contact the first pending approver
+  // Pending approval → contact the first pending approver.
+  //
+  // This block surfaces a real person's name, email AND mobile number on a
+  // tenant-guarded, PII-bearing endpoint, so the candidate set is filtered
+  // twice over: loadCurrentApprovers already excludes REMOVED tombstones in
+  // SQL, and the `live` filter here makes it structurally impossible for one
+  // to be picked even if `people` ever arrives from another source.
+  //
+  // When NOBODY live remains on the step (every approver tombstoned by the
+  // reconciler), we deliberately fall THROUGH rather than fall BACK to
+  // `people[0]` as the old code did. Handing out a removed approver's mobile
+  // as "who to call" is the worst outcome available: the caller is directed at
+  // someone who no longer has the authority to unblock the stage, and their
+  // personal contact details are disclosed for a duty they no longer hold.
+  // Falling through lets the evaluator branch below name the person who CAN
+  // act (re-submit / re-resolve the approval), and if there is no evaluator
+  // either the endpoint returns contact: null — which the FE already renders
+  // (a locked stage has no contact today). Surfacing nobody beats surfacing
+  // the wrong person.
   if (approver?.status === 'PENDING' && approver.people && approver.people.length > 0) {
-    const pendingPeople = approver.people.filter((p) => p.status === 'PENDING');
-    const people = pendingPeople.length > 0 ? pendingPeople : approver.people;
-    const first = people[0];
-    return {
-      name: first.name,
-      role: approver.role,
-      email: first.email,
-      mobile: first.mobile || null,
-      plus: people.length > 1 ? people.length - 1 : undefined,
-    };
+    const live = approver.people.filter((p) => p.status !== 'REMOVED');
+    const pendingPeople = live.filter((p) => p.status === 'PENDING');
+    const people = pendingPeople.length > 0 ? pendingPeople : live;
+    if (people.length > 0) {
+      const first = people[0];
+      return {
+        name: first.name,
+        role: approver.role,
+        email: first.email,
+        mobile: first.mobile || null,
+        plus: people.length > 1 ? people.length - 1 : undefined,
+      };
+    }
   }
   // Active/partial stage and evaluators exist → contact the first evaluator
   if (['active', 'partial'].includes(stage.state) && evaluators.length > 0) {

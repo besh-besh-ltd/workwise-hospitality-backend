@@ -41,11 +41,30 @@ const TYPES = new Set(['price', 'qty', 'item_add', 'item_remove', 'term']);
 function shapeChain(details) {
   if (!details || !Array.isArray(details.steps)) return [];
   return details.steps.map((s) => {
+    // Approvers tombstoned by the mid-flight reconciler (status='REMOVED' +
+    // removed_at + removal_reason) are dropped here, once, for the whole step.
+    //
+    // getApprovalInstanceDetails deliberately passes tombstones through — the
+    // approval-details surfaces have dedicated removed-approver UI that labels
+    // them. This chain does not: ActiveStage.js renders `approver_names` as the
+    // live approver list and derives `isCurrentApprover` from
+    // `approver_user_ids`, which showed a removed approver the "your turn"
+    // state plus the approve/reject controls. The engine still refuses the
+    // action (generalModel.submitApprovalAction requires the approver's own row
+    // to be PENDING), so this was a false affordance rather than an authz hole
+    // — but it is also wrong data: this array is persisted verbatim into
+    // tbl_arc_amendment.approval_chain, so the stale name outlives the request.
+    //
+    // Only PENDING rows are ever tombstoned (approvalPropagationService updates
+    // `WHERE status = 'PENDING'`), so an approver who already APPROVED/REJECTED
+    // can never be filtered out here and `decidedApprover` below is unaffected.
+    const liveApprovers = (s.approvers || []).filter((a) => a.status !== 'REMOVED');
+
     // Roll up the step decision from the per-approver records. ANY-decision
     // steps complete on the first APPROVED/REJECTED action; ALL-decision
     // steps complete only once everyone has acted. The engine has already
     // collapsed this into s.status.
-    const decidedApprover = (s.approvers || []).find((a) => a.status === 'APPROVED' || a.status === 'REJECTED');
+    const decidedApprover = liveApprovers.find((a) => a.status === 'APPROVED' || a.status === 'REJECTED');
 
     // Derive a human label from the policy step's source. The schema has
     // no dedicated label column, so we lean on approver_source_type +
@@ -53,14 +72,14 @@ function shapeChain(details) {
     let role = `Step ${s.step_order}`;
     if (s.approver_source_type === 'ROLE')        role = 'Role-based approval';
     else if (s.approver_source_type === 'DEPARTMENT') role = 'Departmental approval';
-    else if (s.approvers && s.approvers.length === 1) role = s.approvers[0].user_designation || s.approvers[0].user_name || role;
+    else if (liveApprovers.length === 1) role = liveApprovers[0].user_designation || liveApprovers[0].user_name || role;
 
     return {
       step: s.step_order,
       role,
       decision_rule:      s.decision_rule || 'ANY',
-      approver_user_ids: (s.approvers || []).map((a) => a.user_id),
-      approver_names:    (s.approvers || []).map((a) => a.user_name),
+      approver_user_ids: liveApprovers.map((a) => a.user_id),
+      approver_names:    liveApprovers.map((a) => a.user_name),
       status: (s.status || 'PENDING').toLowerCase(),
       decided_by: decidedApprover?.user_id || null,
       decided_at: decidedApprover?.acted_at || null,
@@ -92,6 +111,87 @@ async function refreshChainCache(amendmentId, instanceId, userId) {
     [JSON.stringify(chain), currentStep, newStatus, amendmentId]
   );
   return { chain, status: row.status, engineStatus: newStatus, currentStep };
+}
+
+/**
+ * Reconcile ALREADY-CACHED approval_chain values against the engine's live
+ * tombstones, on read.
+ *
+ * Why this exists rather than a one-shot backfill: `approval_chain` is only
+ * ever rewritten by refreshChainCache(), i.e. when the AMENDMENT controller
+ * touches the engine (request / review / post-approval hook). The mid-flight
+ * reconciler (approvalPropagationService) is a SECOND writer to the same
+ * approval instance — it tombstones approvers on a role revoke, a policy edit
+ * or a user deactivation, and it never touches tbl_arc_amendment. So any
+ * PENDING amendment whose approver is removed between two controller touches
+ * keeps a stale name in the cache until the next decision. A backfill would
+ * correct today's rows and then go stale again on the very next removal; this
+ * pass is correct for the rows already in production AND for every future
+ * removal, costs one extra query for the whole list, and writes nothing.
+ *
+ * It is applied on the BUYER list endpoint because that is the only surface
+ * that renders identities out of this cache (ActiveStage.js: `approver_names`
+ * as the live approver list, `approver_user_ids` → isCurrentApprover → the
+ * approve/reject controls). The vendor projection (arcAmendmentModel.vendorView)
+ * strips names and ids to numbered levels, so it is unaffected.
+ */
+async function stripRemovedFromCachedChains(rows) {
+  const instanceIds = [
+    ...new Set(
+      (rows || [])
+        .filter((r) => r.approval_instance_id && Array.isArray(r.approval_chain) && r.approval_chain.length)
+        .map((r) => Number(r.approval_instance_id))
+    ),
+  ];
+  if (instanceIds.length === 0) return rows;
+
+  const dead = await db.any(
+    `SELECT s.approval_instance_id, s.step_order,
+            sa.approver_user_id, u.name, u.designation
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+       LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
+      WHERE s.approval_instance_id = ANY($1::int[])
+        AND sa.status = 'REMOVED'`,
+    [instanceIds]
+  );
+  if (dead.length === 0) return rows;
+
+  // key: "<instance_id>:<step_order>" → { ids:Set<number>, labels:Set<string> }
+  const byStep = new Map();
+  for (const d of dead) {
+    const key = `${Number(d.approval_instance_id)}:${Number(d.step_order)}`;
+    let entry = byStep.get(key);
+    if (!entry) { entry = { ids: new Set(), labels: new Set() }; byStep.set(key, entry); }
+    entry.ids.add(Number(d.approver_user_id));
+    // A single-approver step caches that person's designation-or-name as the
+    // step's `role` label (see shapeChain). If that person is the one who was
+    // removed, the label is just as wrong as the list was.
+    if (d.name) entry.labels.add(d.name);
+    if (d.designation) entry.labels.add(d.designation);
+  }
+
+  for (const row of rows) {
+    if (!row.approval_instance_id || !Array.isArray(row.approval_chain)) continue;
+    row.approval_chain = row.approval_chain.map((st) => {
+      const entry = byStep.get(`${Number(row.approval_instance_id)}:${Number(st.step)}`);
+      if (!entry) return st;
+      const ids   = Array.isArray(st.approver_user_ids) ? st.approver_user_ids : [];
+      const names = Array.isArray(st.approver_names)    ? st.approver_names    : [];
+      // approver_names[i] pairs positionally with approver_user_ids[i] — both
+      // are built by the same map in shapeChain — so filter by index.
+      const keep = ids.map((_, i) => i).filter((i) => !entry.ids.has(Number(ids[i])));
+      const roleIsDeadPerson = typeof st.role === 'string' && entry.labels.has(st.role);
+      if (keep.length === ids.length && !roleIsDeadPerson) return st;
+      return {
+        ...st,
+        approver_user_ids: keep.map((i) => ids[i]),
+        approver_names:    keep.map((i) => names[i]).filter((n) => n !== undefined && n !== null),
+        role: roleIsDeadPerson ? `Step ${st.step}` : st.role,
+      };
+    });
+  }
+  return rows;
 }
 
 // ============================================================
@@ -289,6 +389,10 @@ export async function listAmendments(req, res) {
     const rows = arcId
       ? await arcAmendmentModel.listForArc(arcId)
       : await arcAmendmentModel.listForContract(contractId);
+    // Rows cached before this fix (and any row whose approver was tombstoned
+    // by the reconciler since the last engine touch) still carry removed
+    // approvers in approval_chain — drop them here, on read.
+    await stripRemovedFromCachedChains(rows);
     return ok(res, { amendments: rows });
   } catch (err) {
     logger.error({ err }, '[amendmentController.listAmendments]');

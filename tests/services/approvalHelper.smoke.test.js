@@ -4,7 +4,7 @@
 
 import { describe, it, expect, afterAll } from "@jest/globals";
 import { db, withTx, closeDb } from "../setup/db.js";
-import { createApprovalInstance } from "../../app/models/generalModel.js";
+import { createApprovalInstance, getApprovalWorkflowUsers } from "../../app/models/generalModel.js";
 import { IDS } from "../fixtures/ids.js";
 import {
   approveStep, rejectStep, approveFully, getInstanceState, getLatestAction,
@@ -161,5 +161,81 @@ describe("approval helper — multi-step instance (PO at A1/P1, 3 steps ALL)", (
 describe("approval helper — getInstanceState shape", () => {
   it("returns null for non-existent instance", async () => {
     expect(await getInstanceState(999999999)).toBeNull();
+  });
+});
+
+// getApprovalWorkflowUsers is the informational-notification recipient list
+// (fanout to "everyone in the approval hierarchy" — rfqController.js,
+// cronManager.js, arcNotificationService.js). It had no status predicate at
+// all: a user whose ONLY row on the whole instance is a REMOVED tombstone
+// (role revoked, mid-flight reconciler) would still get emailed about a live
+// procurement they no longer have any say in. The fix must not, however,
+// drop someone who is REMOVED on one step but still has a genuine
+// (non-REMOVED) row on another step of the SAME instance.
+describe("getApprovalWorkflowUsers — REMOVED-only involvement excluded, but retained via any other non-REMOVED row", () => {
+  it("drops a user whose sole row is REMOVED, keeps a live approver, and keeps a user with a REMOVED row on one step + a live row on another", async () => {
+    const entityId = nextEntityId();
+    const userIds = await withTx(async (t) => {
+      const inst = await t.one(
+        `INSERT INTO tbl_approval_instances
+           (entity_type, entity_id, approval_policy_id, status, current_step,
+            hospitality_company_id, hotel_id, department_id, initiated_by, process_id)
+         VALUES ('RFQ', $1, $2, 'PENDING', 2, $3, $4, $5, $6, $7)
+         RETURNING id`,
+        [
+          entityId, IDS.policies.A1_P1_RFQ, IDS.hospitality.A, IDS.hotels.A1,
+          IDS.departments.proc, IDS.users.a1_proc_buyer, IDS.processes.A_P1,
+        ]
+      );
+      const step1 = await t.one(
+        `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+         VALUES ($1, 1, 'ANY', 'APPROVED') RETURNING id`,
+        [inst.id]
+      );
+      const step2 = await t.one(
+        `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+         VALUES ($1, 2, 'ANY', 'PENDING') RETURNING id`,
+        [inst.id]
+      );
+
+      // Step 1: A (only-ever REMOVED) + C (REMOVED here, but live elsewhere).
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers
+           (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+         VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed')`,
+        [step1.id, IDS.users.a1_proc_poApp]
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers
+           (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+         VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed')`,
+        [step1.id, IDS.users.a1_proc_commApp]
+      );
+      // Step 2: B (live PENDING) + C reappears live APPROVED.
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+         VALUES ($1, $2, 'PENDING')`,
+        [step2.id, IDS.users.a1_proc_finance]
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+         VALUES ($1, $2, 'APPROVED')`,
+        [step2.id, IDS.users.a1_proc_commApp]
+      );
+
+      const rows = await getApprovalWorkflowUsers("RFQ", entityId, t);
+      return rows.map((r) => Number(r.user_id));
+    });
+
+    // A's only row anywhere on the instance is REMOVED -> excluded.
+    expect(userIds).not.toContain(IDS.users.a1_proc_poApp);
+    // B is a live PENDING approver -> included.
+    expect(userIds).toContain(IDS.users.a1_proc_finance);
+    // C has a REMOVED row on step 1 but a live APPROVED row on step 2 ->
+    // still included (retention property — REMOVED on ONE step must not
+    // drop a user who is genuinely active on another).
+    expect(userIds).toContain(IDS.users.a1_proc_commApp);
+    // The initiator is always included via the separate UNION branch.
+    expect(userIds).toContain(IDS.users.a1_proc_buyer);
   });
 });

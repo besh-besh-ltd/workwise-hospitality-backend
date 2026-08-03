@@ -384,6 +384,69 @@ describe("buildPOTemplateData — full data assembly for the PDF template", () =
 });
 
 // ===========================================================================
+// A REMOVED approver is a soft-tombstone the mid-flight reconciler leaves in
+// tbl_approval_step_approvers (role revoked etc.) — status='REMOVED' +
+// removed_at + removal_reason, row NOT deleted. buildPOTemplateData's
+// poApprovers query had no status predicate, so a REMOVED row fell into the
+// `else` branch and printed literally as "REMOVED" on the vendor-facing PDF.
+// A tombstone has no business on a document sent to a vendor.
+// ===========================================================================
+describe("buildPOTemplateData — REMOVED approver tombstones never print on the customer-facing PDF", () => {
+  it("excludes a REMOVED approver from poApprovers; the live PENDING approver still appears", async () => {
+    const scenario = await buildFullPOScenario({
+      unitPrice: 500, quantity: 10, taxPercent: 18, otherCharges: [],
+    });
+
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status, current_step,
+          hospitality_company_id, hotel_id, department_id, initiated_by, process_id)
+       VALUES ('PO', $1, $2, 'PENDING', 1, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [
+        scenario.po_id, IDS.policies.A1_P1_PO, IDS.hospitality.A, IDS.hotels.A1,
+        IDS.departments.proc, IDS.users.a1_proc_buyer, IDS.processes.A_P1,
+      ]
+    );
+    const step = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+       VALUES ($1, 1, 'ANY', 'PENDING') RETURNING id`,
+      [inst.id]
+    );
+    const pendingAppr = await db.one(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       VALUES ($1, $2, 'PENDING') RETURNING id`,
+      [step.id, IDS.users.a1_proc_poApp]
+    );
+    const removedAppr = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+       VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed') RETURNING id`,
+      [step.id, IDS.users.a1_proc_finance]
+    );
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = $1 WHERE id = $2`, [inst.id, scenario.po_id]);
+
+    try {
+      const removedName = (await db.one(`SELECT name FROM tbl_users WHERE id=$1`, [IDS.users.a1_proc_finance])).name;
+      const pendingName = (await db.one(`SELECT name FROM tbl_users WHERE id=$1`, [IDS.users.a1_proc_poApp])).name;
+
+      const data = await buildPOTemplateData(scenario.po_id);
+      expect(Array.isArray(data.poApprovers)).toBe(true);
+      const names = data.poApprovers.map((a) => a.name);
+      expect(names).not.toContain(removedName);
+      expect(names).toContain(pendingName);
+      // No row anywhere prints the literal tombstone status.
+      expect(data.poApprovers.some((a) => a.status === "REMOVED")).toBe(false);
+    } finally {
+      await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL WHERE id = $1`, [scenario.po_id]);
+      await db.none(`DELETE FROM tbl_approval_step_approvers WHERE id = ANY($1::int[])`, [[pendingAppr.id, removedAppr.id]]);
+      await db.none(`DELETE FROM tbl_approval_instance_steps WHERE id = $1`, [step.id]);
+      await db.none(`DELETE FROM tbl_approval_instances WHERE id = $1`, [inst.id]);
+    }
+  });
+});
+
+// ===========================================================================
 //  END-TO-END money path: vendor quote → finalize → drafted PO →
 //  buildPOTemplateData. The printed PO total MUST match what the vendor
 //  quoted, including every other_charge.

@@ -833,6 +833,158 @@ describe("GET /po/detail/:po_id — awaiting_me + audit trail", () => {
 });
 
 // ===========================================================================
+// 13b) REMOVED-approver tombstones must not leak into the audit trail.
+//      Root cause (PO 138699 / RFQ 681, instance 3628 in production): the
+//      mid-flight reconciler soft-deletes a revoked approver — status=
+//      'REMOVED' + removed_at + removal_reason — rather than deleting the
+//      row. buildAuditTrail's per-step approver aggregate had no status
+//      predicate, so a REMOVED row still counted toward "N approvers", could
+//      be picked as the step's `by` actor, and a SKIPPED step fell through
+//      the nodeStatus ladder to "pending" as if still queued.
+// ===========================================================================
+describe("GET /po/detail/:po_id — REMOVED approver tombstones are excluded from the audit trail", () => {
+  it("a REMOVED approver does not inflate the 'N approvers' count and is never named as the step's actor", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const instId = await makePendingPoApproval({ po_rfq_id: rfq_id, approverUserId: IDS.users.a1_proc_poApp });
+
+    // Tombstone a second approver on the SAME step, mirroring the production
+    // reconciler (role revoked -> status='REMOVED', removed_at, removal_reason).
+    const step = await db.one(
+      `SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    );
+    const removed = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+       VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed') RETURNING id`,
+      [step.id, IDS.users.a1_proc_finance]
+    );
+    inserted.approverIds.push(removed.id);
+
+    const po_id = await makePo({
+      rfq_id, status: "pending_approval", rfq_product_ids: [rfq_product_id],
+      quote_ids: [quote_id], approvalInstanceId: instId,
+    });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    await db.none(`UPDATE tbl_approval_instances SET entity_id = $1 WHERE id = $2`, [po_id, instId]);
+
+    const pendingName = (await db.one(`SELECT name FROM tbl_users WHERE id=$1`, [IDS.users.a1_proc_poApp])).name;
+    const removedName = (await db.one(`SELECT name FROM tbl_users WHERE id=$1`, [IDS.users.a1_proc_finance])).name;
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+
+    const stepNode = res.body.data.workflow.find((w) => w.title === "L1 approval");
+    expect(stepNode).toBeDefined();
+    // Exactly one ACTIVE approver remains -> no "N approvers" inflation from
+    // counting the tombstone alongside the live one.
+    expect(stepNode.policy).toBeNull();
+    // The live PENDING approver is named as the actor — never the tombstone.
+    expect(stepNode.by).toBe(pendingName);
+    expect(stepNode.by).not.toBe(removedName);
+  });
+
+  it("a SKIPPED step does not render as pending or current", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+
+    // A two-step instance: step 1 SKIPPED, step 2 PENDING = the current step.
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status, current_step,
+          hospitality_company_id, hotel_id, department_id, initiated_by, process_id)
+       VALUES ('PO', 0, $1, 'PENDING', 2, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [IDS.policies.A1_P1_PO, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, IDS.users.a1_proc_buyer, IDS.processes.A_P1]
+    );
+    inserted.approvalInstanceIds.push(inst.id);
+
+    const step1 = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+       VALUES ($1, 1, 'ANY', 'SKIPPED') RETURNING id`,
+      [inst.id]
+    );
+    inserted.approvalStepIds.push(step1.id);
+
+    const step2 = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+       VALUES ($1, 2, 'ANY', 'PENDING') RETURNING id`,
+      [inst.id]
+    );
+    inserted.approvalStepIds.push(step2.id);
+
+    const appr = await db.one(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       VALUES ($1, $2, 'PENDING') RETURNING id`,
+      [step2.id, IDS.users.a1_proc_poApp]
+    );
+    inserted.approverIds.push(appr.id);
+
+    const po_id = await makePo({
+      rfq_id, status: "pending_approval", rfq_product_ids: [rfq_product_id],
+      quote_ids: [quote_id], approvalInstanceId: inst.id,
+    });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    await db.none(`UPDATE tbl_approval_instances SET entity_id = $1 WHERE id = $2`, [po_id, inst.id]);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+
+    const skippedNode = res.body.data.workflow.find((w) => w.title === "L1 approval");
+    const currentNode = res.body.data.workflow.find((w) => w.title === "L2 approval");
+    expect(skippedNode).toBeDefined();
+    expect(currentNode).toBeDefined();
+    expect(skippedNode.status).not.toBe("pending");
+    expect(skippedNode.status).not.toBe("current");
+    expect(skippedNode.status).toBe("skipped");
+    expect(currentNode.status).toBe("current");
+  });
+
+  it("a step whose approver rows ALL exist but are ALL REMOVED aggregates to an empty set ('[]', not [null])", async () => {
+    // Edge case distinct from "no approver rows at all" (the LEFT JOIN miss,
+    // already covered by the SKIPPED-step test above): here every row on the
+    // step is present but tombstoned, so the FILTER excludes every one of
+    // them. Postgres semantics: JSON_AGG(...) FILTER (WHERE <all false>) over
+    // a non-empty group is NULL, not an array containing a null element —
+    // COALESCE(..., '[]') must still yield an empty array, and the step must
+    // render with a null actor rather than throwing or naming a tombstone.
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const instId = await makePendingPoApproval({ po_rfq_id: rfq_id, approverUserId: IDS.users.a1_proc_poApp });
+
+    const step = await db.one(
+      `SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    );
+    // Tombstone the only approver row on the step (the row makePendingPoApproval
+    // created and already tracked in inserted.approverIds — we're mutating it
+    // in place, not adding a new row).
+    await db.none(
+      `UPDATE tbl_approval_step_approvers
+         SET status = 'REMOVED', removed_at = NOW(), removal_reason = 'role_removed'
+       WHERE approval_instance_step_id = $1`,
+      [step.id]
+    );
+
+    const po_id = await makePo({
+      rfq_id, status: "pending_approval", rfq_product_ids: [rfq_product_id],
+      quote_ids: [quote_id], approvalInstanceId: instId,
+    });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    await db.none(`UPDATE tbl_approval_instances SET entity_id = $1 WHERE id = $2`, [po_id, instId]);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+
+    const stepNode = res.body.data.workflow.find((w) => w.title === "L1 approval");
+    expect(stepNode).toBeDefined();
+    expect(stepNode.policy).toBeNull();
+    expect(stepNode.by).toBeNull();
+  });
+});
+
+// ===========================================================================
 // 14) Technical evaluation on PO detail — per-product clause marks, the
 //     vendor's percentage, and who approved the evaluation.
 // ===========================================================================

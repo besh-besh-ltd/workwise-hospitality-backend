@@ -2760,6 +2760,7 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
     JOIN tbl_users u ON asa.approver_user_id = u.id
     WHERE ai.entity_type = $1 AND ai.entity_id = $2
+      AND asa.status <> 'REMOVED'
       AND u.email IS NOT NULL AND u.email LIKE '%@%'
     UNION
     SELECT u.id AS user_id, u.name, u.email

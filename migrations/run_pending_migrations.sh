@@ -41,7 +41,7 @@
 #
 #   Run only one domain group (for re-runs on an already-migrated DB):
 #     ./migrations/run_pending_migrations.sh --only negotiation
-#     Groups: pre | arc | mr | rbac | negotiation | charges | mrp
+#     Groups: pre | arc | mr | rbac | negotiation | charges | mrp | approvals
 #
 # ⚠️  PRODUCTION: take an RDS snapshot (AWS console) AND/OR a pg_dump backup
 #     BEFORE applying. Run the DB migrations FIRST, then deploy the arc-2.0 code.
@@ -109,6 +109,12 @@ MIGRATIONS=(
   "rbac|20260713100000_urs_process_id.sql"                      # tbl_user_role_scopes.process_id
   "arc|20260721100000_arc_universal_tech_eval.sql"              # 6 universal-tech-eval tables
   "mrp|20260724100000_mrp_quoting.sql"                          # MRP columns (14)
+  # ── Phase F: approval-engine mid-flight propagation ──
+  # Already present in production/stage (applied by hand from an unmerged WIP
+  # branch, never landed here). Fully idempotent, so it is a no-op there; it
+  # exists so a database rebuilt from this set gets the REMOVED mechanism.
+  # Touches only the pre-arc-2.0 tbl_approval_* tables, so it is order-free.
+  "approvals|20260803100000_approval_mid_flight_propagation.sql"
 )
 
 DRY_RUN=0
