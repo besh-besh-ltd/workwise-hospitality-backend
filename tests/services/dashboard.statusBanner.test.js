@@ -16,6 +16,7 @@
 //   6. greeting.first_name is returned
 
 import { describe, it, expect, afterAll, beforeEach, afterEach } from "@jest/globals";
+import moment from "moment-timezone";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -34,9 +35,16 @@ afterAll(async () => {
 
 const ENDPOINT = "/api/v1/dashboard-v2/buyer-status-banner";
 
-// Helper — wall-clock IST-ish string in tbl_rfq.bid_end_date format.
+// Helper — `now + offsetMs` as a NAIVE IST wall-clock string, the exact shape
+// `tbl_rfq.bid_end_date` (text) holds in production.
+//
+// This used to be `new Date(Date.now() + off).toISOString()`, which writes a
+// UTC wall clock into a column the whole application reads as IST — a built-in
+// 5h30m lie that made every offset here mean something 5.5 hours other than
+// what it says, and made the suite unable to see the boundary bug it is now
+// pinning. Precedent: tests/services/buyerDashboardRfqCreator.test.js.
 function offsetString(offsetMs) {
-  return new Date(Date.now() + offsetMs).toISOString().replace("T", " ").slice(0, 19);
+  return moment.tz("Asia/Kolkata").add(offsetMs, "ms").format("YYYY-MM-DD HH:mm:ss");
 }
 
 // Track everything we seed for cleanup. Scoped per describe block; reset in
@@ -255,6 +263,149 @@ describe("GET /dashboard-v2/buyer-status-banner — respects selected date range
     });
     expect(wide.status).toBe(200);
     expect(wide.body.data.counts.closed_no_quotes).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IST bid-window boundary.
+//
+// `tbl_rfq.bid_end_date` is naive IST text. `NOW()` is a `timestamptz`, so
+// `bid_end_date::timestamp <op> NOW()` makes Postgres promote the naive side
+// through the SESSION timezone. Production's session timezone is UTC, so an
+// 11:00 IST deadline was compared as the instant 11:00 UTC — 16:30 IST. Every
+// boundary landed 5h30m late, all day, every day.
+//
+// The error is `5h30m − session_offset`: it does not merely shrink east of
+// IST, it changes sign. So the seeds below straddle the boundary in both
+// directions, and each is a straight true/false flip between the old model
+// and the fixed one:
+//
+//   • closed 2 IST-hours ago — WEST of IST (production: UTC, +5h30m) the bid
+//     reads as 3h30m in the FUTURE, so it lands in "closing soon" and never in
+//     "closed, no quotes". Exactly backwards.
+//   • closes in 1 IST-hour — EAST of IST (Asia/Singapore, −2h30m) the bid
+//     reads as 1h30m in the PAST, so a live RFQ vendors can still quote on is
+//     reported as closed-with-no-quotes and forces the banner into critical.
+//   • closes in 23 IST-hours — UTC reads it as 28h30m out, past the 24h
+//     window, so no warning fires on a bid closing tomorrow.
+//
+// Run them against a non-IST Postgres session to see the failures — the lever
+// is PGOPTIONS, not TZ (TZ is a Node setting and never reaches the server).
+// One timezone is not enough to catch all three; UTC exposes the first and
+// third, Asia/Singapore the second:
+//
+//   PGOPTIONS="-c timezone=UTC" TEST_RUN_ID=... npm test -- \
+//     --testPathPatterns "dashboard.statusBanner"
+//
+// Counts are asserted as deltas against a baseline read taken immediately
+// before seeding, because every suite in a Jest process shares one database.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("GET /dashboard-v2/buyer-status-banner — IST bid-window boundary", () => {
+  const QUERY = { hotel_ids: String(IDS.hotels.A1) };
+
+  async function readCounts(client) {
+    const res = await client.get(ENDPOINT).query(QUERY);
+    expect(res.status).toBe(200);
+    return res.body.data;
+  }
+
+  it("counts a bid that closed 2 IST-hours ago as closed_no_quotes, not closing_soon", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await readCounts(client);
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      bid_end_date: offsetString(-2 * 3600_000), // 2 IST-hours in the past
+      title: "Closed 2 IST-hours ago",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await readCounts(client);
+
+    // The bid IS over.
+    expect(after.counts.closed_no_quotes).toBe(before.counts.closed_no_quotes + 1);
+    // …and therefore is NOT "closing soon". Under the old model with a UTC
+    // session this incremented instead, and named the RFQ as soonest-closing.
+    expect(after.counts.closing_soon).toBe(before.counts.closing_soon);
+    expect(after.soonest_closing?.id).not.toBe(rfq_id);
+    // closed_no_quotes >= 1 forces critical mode.
+    expect(after.mode).toBe("critical");
+  });
+
+  it("does NOT count a bid closing in 1 IST-hour as closed_no_quotes", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await readCounts(client);
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      bid_end_date: offsetString(1 * 3600_000), // 1 IST-hour in the future
+      title: "Closes in 1 IST-hour",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await readCounts(client);
+
+    // Still open — vendors can quote for another hour.
+    expect(after.counts.closing_soon).toBe(before.counts.closing_soon + 1);
+    expect(after.soonest_closing).toBeTruthy();
+    // Under the old model on a session EAST of IST this incremented, marking a
+    // live bid as dead and forcing the banner into critical mode.
+    expect(after.counts.closed_no_quotes).toBe(before.counts.closed_no_quotes);
+  });
+
+  it("counts a bid closing in 23 IST-hours as closing_soon", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await readCounts(client);
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      bid_end_date: offsetString(23 * 3600_000), // inside the 24h window
+      title: "Closes in 23 IST-hours",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await readCounts(client);
+
+    // Under the old model with a UTC session this read as 28h30m away and the
+    // count did not move — the buyer got no warning on a bid closing tomorrow.
+    expect(after.counts.closing_soon).toBe(before.counts.closing_soon + 1);
+    // A future bid window is not a closed one.
+    expect(after.counts.closed_no_quotes).toBe(before.counts.closed_no_quotes);
+  });
+
+  it("keeps a bid that closed 6 IST-hours ago out of closing_soon (outside the 5h30m band)", async () => {
+    // Control: 6h > 5h30m, so old and new agree here. Its job is to prove the
+    // two tests above fail on the SKEW and not on some unrelated regression in
+    // how the seed or the endpoint handles past bid windows.
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const before = await readCounts(client);
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      bid_end_date: offsetString(-6 * 3600_000),
+      title: "Closed 6 IST-hours ago",
+    });
+    inserted.rfqIds.push(rfq_id);
+
+    const after = await readCounts(client);
+    expect(after.counts.closed_no_quotes).toBe(before.counts.closed_no_quotes + 1);
+    expect(after.counts.closing_soon).toBe(before.counts.closing_soon);
   });
 });
 
