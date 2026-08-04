@@ -22,6 +22,7 @@ import { userCanAccessProject } from '../project/projectController.js';
 import {
   simulateApproverImpact,
   revalidateApproverMembership,
+  getApproverSourceScopesForUsers,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 
@@ -943,14 +944,54 @@ const HospitalityController = {
          granting authority can never need a "would this auto-approve"
          confirmation, only removing it can. Best-effort: a propagation
          failure is logged but never fails the mapping request, since the
-         mapping itself already committed. */
+         mapping itself already committed.
+
+         SCOPED, NOT SWEEPING. Passing neither changedRoleIds nor
+         changedDeptIds makes PART 2's candidate set every PENDING ROLE-/
+         DEPARTMENT-sourced step in the company (215 PENDING instances in
+         production company 5), each locked FOR UPDATE and re-resolved before
+         the user is even known to qualify — N users x that, serially, against
+         a 30s frontend timeout, with concurrent submitApprovalAction calls
+         blocking on the same rows. A mapping can only make the user qualify
+         via a role they hold or a department they belong to, so their own
+         source ids are the exact candidate set; see
+         getApproverSourceScopesForUsers for why the narrowing is lossless
+         rather than merely cheaper. One batched read for all N users. */
+      const propagationScopes = await getApproverSourceScopesForUsers(
+        sanitizedUserIds,
+        record.id
+      );
+
+      /* PER-USER TRANSACTIONS, DELIBERATELY — not one tx for the batch.
+         The mapping has already committed and this propagation is explicitly
+         best-effort, so the question is only which partial outcome is better.
+         Per-user, a failure on user k costs that user's propagation and
+         nothing else, and the catch below names k so it is recoverable rather
+         than silent. One shared tx would instead discard every correct
+         propagation in the batch because of one bad user, AND hold FOR UPDATE
+         locks on every touched instance for the whole batch — worsening the
+         approver-blocking this change exists to relieve. */
       for (const userId of sanitizedUserIds) {
+        const { roleIds, deptIds } =
+          propagationScopes.get(userId) || { roleIds: [], deptIds: [] };
+
+        // Neither a role scope in this company nor a department membership =>
+        // no ROLE- or DEPARTMENT-sourced step can resolve this user, so there
+        // is nothing to propagate. This is a correctness guard, not just an
+        // optimisation: with both lists empty the reconciler appends no source
+        // filter and degrades right back to the full unscoped sweep — and a
+        // freshly created, not-yet-role-granted user being bulk-mapped is
+        // exactly that case.
+        if (!roleIds.length && !deptIds.length) continue;
+
         try {
           const propResult = await db.tx(async (t) => {
             return revalidateApproverMembership({
               userId,
               changedBy: req.user.id,
               changeType: 'scope_added',
+              changedRoleIds: roleIds,
+              changedDeptIds: deptIds,
               companyId: record.id,
               hotelId,
               txContext: t
@@ -960,7 +1001,10 @@ const HospitalityController = {
             dispatchPropagationEmails(propResult._emailData, req.user.id, 'scope_added');
           }
         } catch (propErr) {
-          logError('Error propagating mapping addition to approvals', propErr);
+          logError(
+            `Error propagating mapping addition to approvals (user ${userId}, hospitality company ${record.id}, hotel ${hotelId ?? 'ALL'}) — remaining users in this batch still processed`,
+            propErr
+          );
         }
       }
 

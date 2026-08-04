@@ -34,6 +34,18 @@
  * Everything here drives the real HTTP endpoints through the full middleware
  * chain (auth -> acl -> validation -> controller), per tests/CONVENTIONS.md §3.
  *
+ * 3. AVAILABILITY (added later): both propagation calls above originally ran
+ *    with neither `changedRoleIds` nor `changedDeptIds`, which makes PART 2's
+ *    candidate set EVERY PENDING ROLE-/DEPARTMENT-sourced step in the company
+ *    — each locked FOR UPDATE and re-resolved before the user is even known to
+ *    qualify, once per mapped user, serially, against a 30s frontend timeout.
+ *    They now pass the user's own role ids / department memberships (see
+ *    approvalPropagationService.js#getApproverSourceScopesForUsers). The three
+ *    trailing describes below pin the narrowing from BOTH sides: it must not
+ *    drop an add that the sweep would have made (a cheap fix that silently
+ *    loses a real approver is worse than the latency it cures), and it must
+ *    not add anyone the sweep would not have.
+ *
  * PRIVATE ID BLOCK: 83xxx (users / hotels / instances) and 63xxx
  * (policies / policy steps) for this file. 88xxx/68xxx
  * (approvalPropagation.scopedImpact.test.js) and 87xxx/67xxx
@@ -52,6 +64,16 @@ import { ROLE_IDS } from "../fixtures/users.js";
 const ADMIN_ID = 83001;      // user_type 7 — company admin, calls both endpoints
 const NON_ADMIN_ID = 83002;  // user_type 2 — must be rejected by the new acl([7]) gate
 const TARGET_ID = 83003;     // has a matching role scope but starts UNMAPPED
+// NOROLE_ID is numbered and inserted BETWEEN the two qualifying users on
+// purpose. mapUsers does not iterate the request's user_ids — it iterates
+// hospitalityModel.filterUsersByCompany's result, which has no ORDER BY — so
+// the only way to guarantee the skipped user is processed before a qualifying
+// one is to place it before TARGET2 in the fixture INSERT below. Without that,
+// a skip implemented as `break` instead of `continue` (silently dropping the
+// rest of the batch) passes the multi-user test.
+const NOROLE_ID = 83004;     // NO role scopes and NO departments — must be skipped
+const TARGET2_ID = 83005;    // same role scope as TARGET — multi-user batch
+const DEPT_TARGET_ID = 83006; // department member ONLY (no role scope at all)
 
 // ---- Hotels under IDS.hospitality.A (83101-83199) ----
 const HOTEL_MAP = 83101;    // scenario 1: mapUsers
@@ -62,10 +84,16 @@ const POLICY_MAP = 63001;
 const STEP_MAP = 63101;
 const POLICY_CREATE = 63002;
 const STEP_CREATE = 63102;
+const POLICY_WRONGROLE = 63003; // ROLE step sourced from a role TARGET does NOT hold
+const STEP_WRONGROLE = 63103;
+const POLICY_DEPT = 63004;      // DEPARTMENT-sourced step
+const STEP_DEPT = 63104;
 
 // ---- Instances (83201-83299), created per-test ----
 const INSTANCE_MAP = 83201;
 const INSTANCE_CREATE = 83202;
+const INSTANCE_WRONGROLE = 83203;
+const INSTANCE_DEPT = 83204;
 
 // Both scenarios use FINAL_AWARDING_P1 (role 13): revalidateApproverMembership's
 // add path (a concurrently-developed RolePermGate in
@@ -78,6 +106,18 @@ const INSTANCE_CREATE = 83202;
 // both qualify, which is what surfaced this gate while writing this suite.
 const ROLE_MAP_SCOPE = ROLE_IDS.FINAL_AWARDING_P1;    // 13
 const ROLE_CREATE_SCOPE = ROLE_IDS.FINAL_AWARDING_P1; // 13
+
+// A role NOBODY in this file is granted. Backs the negative test: the scoped
+// propagation must not reach a step sourced from a role the mapped user does
+// not hold — and neither did the unscoped sweep, since resolveApprovers'
+// ROLE branch hard-equals urs.role_id to the step's approver_source_id.
+const ROLE_NOT_HELD = ROLE_IDS.COMM_APPROVER;         // 12
+
+// DEPARTMENT-sourced steps resolve through tbl_user_department (membership),
+// NOT through tbl_user_role_scopes.department_id (a role grant's scope). The
+// narrowing reads the former; this fixture proves it, by giving DEPT_TARGET_ID
+// a department membership and no role scope whatsoever.
+const DEPT_SOURCE = IDS.departments.proc;
 
 // Test-only emails/mobiles — cleaned up in afterAll AND pre-cleaned in
 // beforeAll so a re-run against a database left dirty by a crashed prior run
@@ -102,11 +142,16 @@ async function insertPendingInstance({ instanceId, policyId, stepId, hotelId, po
     [instanceId, 900000 + instanceId, policyId, IDS.hospitality.A, hotelId, ADMIN_ID,
       JSON.stringify({ po_number: poNumber })]
   );
+  // Instance-step id is derived from the INSTANCE id, not the policy-step id.
+  // Same +900000 offset convention as the entity_id above, but keyed on the
+  // thing that is unique per row: a test that stands two instances up against
+  // the SAME policy step (the multi-user batch does) would otherwise collide on
+  // this primary key.
   await db.none(
     `INSERT INTO tbl_approval_instance_steps
        (id, approval_instance_id, policy_step_id, step_order, decision_rule, status)
      VALUES ($1, $2, $3, 1, 'ANY', 'PENDING')`,
-    [stepId + 900000, instanceId, stepId]
+    [instanceId + 900000, instanceId, stepId]
   );
 }
 
@@ -130,11 +175,14 @@ beforeAll(async () => {
 
   await db.none(
     `INSERT INTO tbl_users (id, name, email, mobile, password, user_type, status, company_id)
-     VALUES ($1, 'Gap B Admin',     'gapb.admin@test.local',     '9830000001', 'x', 7, 1, $4),
-            ($2, 'Gap B Non-Admin', 'gapb.nonadmin@test.local',  '9830000002', 'x', 2, 1, $4),
-            ($3, 'Gap B Target',    'gapb.target@test.local',    '9830000003', 'x', 2, 1, $4)
+     VALUES ($1, 'Gap B Admin',     'gapb.admin@test.local',     '9830000001', 'x', 7, 1, $7),
+            ($2, 'Gap B Non-Admin', 'gapb.nonadmin@test.local',  '9830000002', 'x', 2, 1, $7),
+            ($3, 'Gap B Target',    'gapb.target@test.local',    '9830000003', 'x', 2, 1, $7),
+            ($4, 'Gap B No Role',   'gapb.norole@test.local',    '9830000004', 'x', 2, 1, $7),
+            ($5, 'Gap B Target 2',  'gapb.target2@test.local',   '9830000005', 'x', 2, 1, $7),
+            ($6, 'Gap B Dept Only', 'gapb.deptonly@test.local',  '9830000006', 'x', 2, 1, $7)
      ON CONFLICT (id) DO NOTHING`,
-    [ADMIN_ID, NON_ADMIN_ID, TARGET_ID, IDS.companies.A]
+    [ADMIN_ID, NON_ADMIN_ID, TARGET_ID, NOROLE_ID, TARGET2_ID, DEPT_TARGET_ID, IDS.companies.A]
   );
 
   await db.none(
@@ -150,29 +198,52 @@ beforeAll(async () => {
   // them in.
   await db.none(
     `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
-     VALUES ($1, $2, $3, $4, NULL, NULL)
+     VALUES ($1, $3, $4, $5, NULL, NULL),
+            ($2, $3, $4, $5, NULL, NULL)
      ON CONFLICT DO NOTHING`,
-    [TARGET_ID, ROLE_MAP_SCOPE, IDS.hospitality.A, HOTEL_MAP]
+    [TARGET_ID, TARGET2_ID, ROLE_MAP_SCOPE, IDS.hospitality.A, HOTEL_MAP]
   );
 
+  // DEPT_TARGET_ID gets a department MEMBERSHIP and deliberately NO row in
+  // tbl_user_role_scopes — the only thing that can make them resolve is the
+  // DEPARTMENT branch of resolveApprovers.
+  await db.none(
+    `INSERT INTO tbl_user_department (user_id, department_id) VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [DEPT_TARGET_ID, DEPT_SOURCE]
+  );
+  // NOROLE_ID gets neither. Nothing to insert — stated here so its emptiness
+  // reads as a fixture decision rather than an omission.
+
+  // The three HOTEL_MAP policies must differ on the policy's own department_id:
+  // uq_approval_policy_scope_process is UNIQUE on
+  // (entity_type, hospitality_company_id, hotel_id, department_id, process_id)
+  // WHERE is_active. That scope column is inert for these tests — every
+  // instance below is inserted with department_id NULL, and resolveApprovers is
+  // handed the INSTANCE's department_id (`resolveDeptId = row.department_id`),
+  // never the policy's. Keeping them on the SAME hotel is what matters: it
+  // leaves the step's approver_source_id as the only thing that can decide
+  // whether a mapped user resolves.
   const policies = [
-    [POLICY_MAP, HOTEL_MAP, STEP_MAP, ROLE_MAP_SCOPE],
-    [POLICY_CREATE, HOTEL_CREATE, STEP_CREATE, ROLE_CREATE_SCOPE],
+    [POLICY_MAP, HOTEL_MAP, null, STEP_MAP, 'ROLE', ROLE_MAP_SCOPE],
+    [POLICY_CREATE, HOTEL_CREATE, null, STEP_CREATE, 'ROLE', ROLE_CREATE_SCOPE],
+    [POLICY_WRONGROLE, HOTEL_MAP, IDS.departments.eng, STEP_WRONGROLE, 'ROLE', ROLE_NOT_HELD],
+    [POLICY_DEPT, HOTEL_MAP, IDS.departments.fb, STEP_DEPT, 'DEPARTMENT', DEPT_SOURCE],
   ];
-  for (const [policyId, hotelId, stepId, roleId] of policies) {
+  for (const [policyId, hotelId, policyDeptId, stepId, sourceType, sourceId] of policies) {
     await db.none(
       `INSERT INTO tbl_approval_policies
          (id, entity_type, hospitality_company_id, hotel_id, department_id, is_active, created_by)
-       VALUES ($1, 'PO', $2, $3, NULL, true, $4)
+       VALUES ($1, 'PO', $2, $3, $5, true, $4)
        ON CONFLICT (id) DO NOTHING`,
-      [policyId, IDS.hospitality.A, hotelId, ADMIN_ID]
+      [policyId, IDS.hospitality.A, hotelId, ADMIN_ID, policyDeptId]
     );
     await db.none(
       `INSERT INTO tbl_approval_policy_steps
          (id, approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
-       VALUES ($1, $2, 1, 'ANY', 'ROLE', $3)
+       VALUES ($1, $2, 1, 'ANY', $3, $4)
        ON CONFLICT (id) DO NOTHING`,
-      [stepId, policyId, roleId]
+      [stepId, policyId, sourceType, sourceId]
     );
   }
 });
@@ -200,11 +271,12 @@ afterEach(async () => {
     createdInstanceIds = [];
   }
 
-  // Undo the mapUsers test's mapping so re-running it in the same file stays
+  // Undo the mapUsers tests' mappings so re-running them in the same file stays
   // idempotent (the endpoint itself is ON CONFLICT DO UPDATE, not additive).
   await db.none(
-    `DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1 AND hospitality_company_id = $2 AND hospitality_hotel_id = $3`,
-    [TARGET_ID, IDS.hospitality.A, HOTEL_MAP]
+    `DELETE FROM tbl_hospitality_user_mappings
+      WHERE user_id = ANY($1::int[]) AND hospitality_company_id = $2 AND hospitality_hotel_id = $3`,
+    [[TARGET_ID, TARGET2_ID, NOROLE_ID, DEPT_TARGET_ID], IDS.hospitality.A, HOTEL_MAP]
   );
 
   if (createdUserIds.length) {
@@ -222,20 +294,22 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  const ALL_TEST_USERS = [ADMIN_ID, NON_ADMIN_ID, TARGET_ID, TARGET2_ID, NOROLE_ID, DEPT_TARGET_ID];
   await db.none(
     `DELETE FROM tbl_approval_policy_steps WHERE id = ANY($1::int[])`,
-    [[STEP_MAP, STEP_CREATE]]
+    [[STEP_MAP, STEP_CREATE, STEP_WRONGROLE, STEP_DEPT]]
   );
   await db.none(
     `DELETE FROM tbl_approval_policies WHERE id = ANY($1::int[])`,
-    [[POLICY_MAP, POLICY_CREATE]]
+    [[POLICY_MAP, POLICY_CREATE, POLICY_WRONGROLE, POLICY_DEPT]]
   );
-  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1`, [TARGET_ID]);
+  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [ALL_TEST_USERS]);
+  await db.none(`DELETE FROM tbl_user_department WHERE user_id = ANY($1::int[])`, [ALL_TEST_USERS]);
   await db.none(
     `DELETE FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[])`,
     [[HOTEL_MAP, HOTEL_CREATE]]
   );
-  await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [[ADMIN_ID, NON_ADMIN_ID, TARGET_ID]]);
+  await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [ALL_TEST_USERS]);
 });
 
 describe("hospitalityController.mapUsers propagates newly-granted authority", () => {
@@ -286,6 +360,138 @@ describe("hospitalityController.mapUsers propagates newly-granted authority", ()
       [INSTANCE_MAP, TARGET_ID]
     );
     expect(action).not.toBeNull();
+  });
+});
+
+describe("mapUsers propagation stays scoped to sources the user can actually resolve", () => {
+  it("adds the user to the step backed by a role they hold, and NOT to one backed by a role they don't", async () => {
+    await insertPendingInstance({
+      instanceId: INSTANCE_MAP,
+      policyId: POLICY_MAP,
+      stepId: STEP_MAP,
+      hotelId: HOTEL_MAP,
+      poNumber: "PO-GAPB-SCOPE-HELD",
+    });
+    // Same company, same hotel, same entity type, instance department_id NULL
+    // like the one above — the only thing that can decide differently is the
+    // step's approver_source_id. Under the old unscoped sweep this instance was
+    // locked and re-resolved for nothing; under the narrowing it is never a
+    // candidate. Either way the user must not end up on it.
+    await insertPendingInstance({
+      instanceId: INSTANCE_WRONGROLE,
+      policyId: POLICY_WRONGROLE,
+      stepId: STEP_WRONGROLE,
+      hotelId: HOTEL_MAP,
+      poNumber: "PO-GAPB-SCOPE-NOTHELD",
+    });
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await client
+      .post(`/api/v1/hospitality/company/${IDS.hospitality.A}/map-users`)
+      .send({
+        mapping_type: 1,
+        hotel_id: HOTEL_MAP,
+        user_ids: [TARGET_ID],
+        auto_map_projects: false,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+
+    // Not regressed: the add the narrowing optimises still happens.
+    const held = await approverRowFor(INSTANCE_MAP, TARGET_ID);
+    expect(held).not.toBeNull();
+    expect(held.status).toBe("PENDING");
+
+    // Not widened: no authority granted through a role they do not hold.
+    expect(await approverRowFor(INSTANCE_WRONGROLE, TARGET_ID)).toBeNull();
+    const strayAction = await db.oneOrNone(
+      `SELECT action FROM tbl_approval_actions
+        WHERE approval_instance_id = $1 AND approver_user_id = $2`,
+      [INSTANCE_WRONGROLE, TARGET_ID]
+    );
+    expect(strayAction).toBeNull();
+  });
+
+  it("still adds a DEPARTMENT-sourced approver who holds no role scope at all", async () => {
+    // The narrowing takes department ids from tbl_user_department, not from
+    // tbl_user_role_scopes.department_id. This user has ONLY the former, so if
+    // the wrong relation were read their changedDeptIds would come back empty,
+    // propagation would be skipped, and they would silently never be added.
+    await insertPendingInstance({
+      instanceId: INSTANCE_DEPT,
+      policyId: POLICY_DEPT,
+      stepId: STEP_DEPT,
+      hotelId: HOTEL_MAP,
+      poNumber: "PO-GAPB-SCOPE-DEPT",
+    });
+
+    expect(await approverRowFor(INSTANCE_DEPT, DEPT_TARGET_ID)).toBeNull();
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await client
+      .post(`/api/v1/hospitality/company/${IDS.hospitality.A}/map-users`)
+      .send({
+        mapping_type: 1,
+        hotel_id: HOTEL_MAP,
+        user_ids: [DEPT_TARGET_ID],
+        auto_map_projects: false,
+      });
+
+    expect(res.status).toBe(200);
+
+    const approverRow = await approverRowFor(INSTANCE_DEPT, DEPT_TARGET_ID);
+    expect(approverRow).not.toBeNull();
+    expect(approverRow.status).toBe("PENDING");
+    expect(approverRow.added_mid_flight).toBe(true);
+  });
+
+  it("propagates for every qualifying user in a multi-user batch, and skips one with no sources", async () => {
+    await insertPendingInstance({
+      instanceId: INSTANCE_MAP,
+      policyId: POLICY_MAP,
+      stepId: STEP_MAP,
+      hotelId: HOTEL_MAP,
+      poNumber: "PO-GAPB-SCOPE-BATCH",
+    });
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await client
+      .post(`/api/v1/hospitality/company/${IDS.hospitality.A}/map-users`)
+      .send({
+        mapping_type: 1,
+        hotel_id: HOTEL_MAP,
+        // The controller re-derives its own iteration order (see the note at
+        // NOROLE_ID), where NOROLE_ID lands ahead of TARGET2_ID — so a skip
+        // that short-circuits the batch loses TARGET2_ID and fails below.
+        user_ids: [TARGET_ID, NOROLE_ID, TARGET2_ID],
+        auto_map_projects: false,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+
+    // All three mappings written — propagation scoping must not touch the
+    // mapping write itself.
+    const mappings = await db.any(
+      `SELECT user_id FROM tbl_hospitality_user_mappings
+        WHERE user_id = ANY($1::int[]) AND hospitality_company_id = $2 AND hospitality_hotel_id = $3`,
+      [[TARGET_ID, NOROLE_ID, TARGET2_ID], IDS.hospitality.A, HOTEL_MAP]
+    );
+    expect(mappings.map((m) => Number(m.user_id)).sort()).toEqual(
+      [TARGET_ID, NOROLE_ID, TARGET2_ID].sort()
+    );
+
+    // Every user in the list who qualifies is added — not just the first.
+    for (const userId of [TARGET_ID, TARGET2_ID]) {
+      const row = await approverRowFor(INSTANCE_MAP, userId);
+      expect(row).not.toBeNull();
+      expect(row.status).toBe("PENDING");
+      expect(row.added_mid_flight).toBe(true);
+    }
+
+    // The user with no role scope and no department resolves nowhere.
+    expect(await approverRowFor(INSTANCE_MAP, NOROLE_ID)).toBeNull();
   });
 });
 

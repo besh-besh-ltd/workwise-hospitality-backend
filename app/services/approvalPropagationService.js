@@ -1493,6 +1493,108 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
 // ============================================================================
 
 /**
+ * The COMPLETE set of ROLE / DEPARTMENT approver-source ids that could ever
+ * resolve each of `userIds` inside `companyId` — i.e. the narrowest
+ * `changedRoleIds` / `changedDeptIds` a `scope_added` caller can pass to
+ * revalidateApproverMembership() without losing a single legitimate add.
+ *
+ * ── WHY THIS EXISTS ───────────────────────────────────────────────────────
+ * A grant that is not itself a role/department change (mapping a user into a
+ * hospitality company — hospitalityController.mapUsers,
+ * usersController.create_buyer_company_users) has no "changed role" to name, so
+ * it used to call the reconciler with neither list. PART 2 then appends NO
+ * source filter and its candidate set becomes EVERY PENDING ROLE- or
+ * DEPARTMENT-sourced instance step in the company (production: 215 PENDING
+ * instances in company 5), each one taken `FOR UPDATE` and re-resolved before
+ * the user is even known to qualify — serially, once per mapped user, against a
+ * 30s frontend timeout, while concurrent submitApprovalAction calls block on
+ * the same row locks.
+ *
+ * ── WHY NARROWING TO THESE IDS IS LOSSLESS ────────────────────────────────
+ * PART 2 only ever considers `ps.approver_source_type IN ('ROLE','DEPARTMENT')`
+ * and decides membership solely by `resolveApprovers()` (generalModel.js).
+ * Read those two branches:
+ *
+ *   ROLE       `JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+ *               AND urs.role_id = $1 AND urs.company_id = $2 ...`
+ *   DEPARTMENT `JOIN tbl_user_department ud ON u.id = ud.user_id
+ *               AND ud.department_id = $1`
+ *
+ * Both are HARD EQUALITY against the step's `approver_source_id`, with no
+ * NULL-as-wildcard escape on either side of either join:
+ *   - `tbl_approval_policy_steps.approver_source_id` is `integer NOT NULL`
+ *     (schema.sql), so there is no wildcard SOURCE — and even a hypothetical
+ *     NULL would resolve nobody, since `NULL = anything` is never true.
+ *   - `tbl_user_role_scopes.role_id` and `.company_id` are both
+ *     `integer NOT NULL`; `tbl_user_department.department_id` is
+ *     `integer NOT NULL`. There is no wildcard HOLDING either.
+ * So `resolveApprovers` returns `userId` for a ROLE step only if the user holds
+ * that exact role_id in that exact company, and for a DEPARTMENT step only if
+ * the user is a member of that exact department. Every step this narrowing
+ * drops is a step that would have resolved to a set NOT containing the user,
+ * i.e. one where PART 2's `if (resolvedIds.includes(userId))` was already going
+ * to be false. The lock + resolve was pure waste, not a decision.
+ *
+ * Note the DEPARTMENT list deliberately comes from `tbl_user_department` and
+ * NOT from `tbl_user_role_scopes.department_id`: department MEMBERSHIP (what
+ * a DEPARTMENT-sourced step resolves on) is a different relation from a role
+ * grant's department SCOPE (which only narrows a ROLE-sourced match). Reading
+ * the wrong one here would genuinely drop approvers.
+ *
+ * ── COMPANY-SCOPING INVARIANT (callers must honour) ───────────────────────
+ * The roles are filtered by `company_id = companyId` because `resolveApprovers`
+ * hard-equals `urs.company_id` to the instance's `hospitality_company_id`, and
+ * PART 2 pins `ai.hospitality_company_id = companyId`. That is only sound when
+ * the caller passes THE SAME `companyId` to this function and to
+ * revalidateApproverMembership(). Both current callers pass the identical
+ * variable to both. Pass `null` for a company-wide (unpinned) revalidation.
+ *
+ * ── NOT COVERED, BY PRE-EXISTING DESIGN ───────────────────────────────────
+ * `USER`-sourced steps. PART 2's candidate query has always excluded them
+ * (`IN ('ROLE','DEPARTMENT')`), so a mapping that newly satisfies
+ * `userHasHospitalityAccess` for a USER-sourced step was never propagated
+ * either before or after this narrowing. Unchanged here; recorded so it is a
+ * known gap rather than an assumed one.
+ *
+ * @param {Array<number>} userIds
+ * @param {number|null} companyId — hospitality company the revalidation is
+ *        pinned to; MUST match the `companyId` passed to the reconciler.
+ * @param {Object} [t] — optional tx/task context
+ * @returns {Promise<Map<number, {roleIds: number[], deptIds: number[]}>>}
+ *          keyed by user id; every requested id is present (possibly empty).
+ */
+export async function getApproverSourceScopesForUsers(userIds, companyId = null, t = db) {
+  const ids = [...new Set((userIds || []).map((u) => parseInt(u, 10)).filter(Number.isInteger))];
+  const scopes = new Map(ids.map((id) => [id, { roleIds: [], deptIds: [] }]));
+  if (!ids.length) return scopes;
+
+  const roleRows = await t.any(
+    `SELECT user_id, ARRAY_AGG(DISTINCT role_id) AS ids
+       FROM tbl_user_role_scopes
+      WHERE user_id = ANY($1::int[])
+        AND ($2::int IS NULL OR company_id = $2)
+      GROUP BY user_id`,
+    [ids, companyId ?? null]
+  );
+  for (const row of roleRows) {
+    scopes.get(parseInt(row.user_id, 10)).roleIds = (row.ids || []).map(Number);
+  }
+
+  const deptRows = await t.any(
+    `SELECT user_id, ARRAY_AGG(DISTINCT department_id) AS ids
+       FROM tbl_user_department
+      WHERE user_id = ANY($1::int[])
+      GROUP BY user_id`,
+    [ids]
+  );
+  for (const row of deptRows) {
+    scopes.get(parseInt(row.user_id, 10)).deptIds = (row.ids || []).map(Number);
+  }
+
+  return scopes;
+}
+
+/**
  * Revalidate approver membership after role/department/status changes.
  * Removes users who no longer qualify and adds users who now qualify.
  *

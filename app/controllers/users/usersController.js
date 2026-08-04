@@ -46,6 +46,7 @@ import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation
 import {
   simulateApproverImpact,
   revalidateApproverMembership,
+  getApproverSourceScopesForUsers,
   handleAutoCompletedInstances,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
@@ -984,14 +985,51 @@ create_buyer_company_users: async (req, res, next) => {
              row's own company/hotel. Best-effort — already inside this
              function's own try/catch, so a propagation failure is caught by
              the same handler as the mapping write and never fails user
-             creation. */
+             creation.
+
+             THIS PASS IS NOT REDUNDANT WITH THE 'role_added' PASS ABOVE, even
+             though that one names the same roles. Ordering decides it: the
+             role_added propagation runs BEFORE insertUserMappings, and
+             resolveApprovers INNER JOINs tbl_hospitality_user_mappings for both
+             ROLE and DEPARTMENT sources — so at that moment this user has no
+             mapping row and resolves to nothing, anywhere. This pass is the
+             only one that can actually add them.
+
+             SCOPED, NOT SWEEPING — same fix as hospitalityController.mapUsers:
+             with no changedRoleIds/changedDeptIds, PART 2's candidate set is
+             every PENDING ROLE-/DEPARTMENT-sourced step in the company, each
+             locked FOR UPDATE and re-resolved before the user is known to
+             qualify. The user's own role ids (in THIS mapping's company) and
+             department memberships are the exact set that can resolve them;
+             see getApproverSourceScopesForUsers for the losslessness argument.
+             Read per mapping row because the role filter is company-scoped. */
           for (const m of mappingRows) {
             try {
+              // parseInt, not createdUser.id directly: the scope map is keyed
+              // by integer user id, and a string key here would miss every
+              // time — silently turning this into "no sources, skip" and
+              // losing the propagation outright.
+              const newUserId = parseInt(createdUser.id, 10);
+              const scopes = await getApproverSourceScopesForUsers(
+                [newUserId],
+                m.hospitality_company_id
+              );
+              const { roleIds, deptIds } =
+                scopes.get(newUserId) || { roleIds: [], deptIds: [] };
+
+              // No role scope in this company and no department membership =>
+              // nothing can resolve this user. Skipping is required, not just
+              // cheaper: two empty lists make the reconciler append no source
+              // filter and fall back to the full unscoped sweep.
+              if (!roleIds.length && !deptIds.length) continue;
+
               const propResult = await db.tx(async (t) => {
                 return revalidateApproverMembership({
                   userId: createdUser.id,
                   changedBy: loginUserID,
                   changeType: 'scope_added',
+                  changedRoleIds: roleIds,
+                  changedDeptIds: deptIds,
                   companyId: m.hospitality_company_id,
                   hotelId: m.hospitality_hotel_id,
                   txContext: t
@@ -1001,7 +1039,10 @@ create_buyer_company_users: async (req, res, next) => {
                 dispatchPropagationEmails(propResult._emailData, loginUserID, 'scope_added');
               }
             } catch (propErr) {
-              logError('Error propagating mapping addition to approvals (user creation)', propErr);
+              logError(
+                `Error propagating mapping addition to approvals (user creation; user ${createdUser.id}, hospitality company ${m.hospitality_company_id}) — remaining mappings still processed`,
+                propErr
+              );
             }
           }
         }
