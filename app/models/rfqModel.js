@@ -4482,11 +4482,18 @@ LIMIT 2;
     if (!rfqList || rfqList.length === 0) return {};
 
     const APPROVAL_STAGES = ['RFQ_APPROVAL', 'TECHNICAL_APPROVING', 'QUOTATION_APPROVAL', 'PO_APPROVAL'];
+    // The bid-open stages (AWAITING_QUOTES / TECHNICAL_AWAITING_QUOTES) are
+    // deliberately ABSENT. While the window is open the server blanks every
+    // quote and returns 423 (quoteVisibility.js:41-94; quoteCompareViewModel.js
+    // states in code "Nothing is actionable or evaluatable before the
+    // deadline" and sets awaiting_me = false), so mapping AWAITING_QUOTES to
+    // quote-compare marked people pending on the one task the server refuses
+    // to serve them. Technical scoring IS available during the window, but the
+    // listing labels both bid-open stages "Awaiting Quotes", and a rule users
+    // cannot see is a rule they cannot trust — so both go.
     const PERMISSION_STAGE_CONFIG = {
-      TECHNICAL_AWAITING_QUOTES: { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
-      AWAITING_QUOTES:           { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
       PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
@@ -4501,15 +4508,27 @@ LIMIT 2;
 
     for (const rfq of rfqList) {
       const rfqId = parseInt(rfq.id);
+
+      // A closed (2) or withdrawn (5) RFQ has no pending action, full stop.
+      // computeLifecycleStages ignores tbl_rfq.status in 11 of its 15 CASE
+      // branches, so a closed RFQ keeps reporting COMMERCIAL_EVALUATION, and
+      // terminateRFQ (status 2 + is_published 0) even yields RFQ_APPROVAL.
+      // Approval-stage rows were protected only by accident — closeRFQ cancels
+      // the linked PENDING instances in-transaction — while permission-stage
+      // rows had no backstop at all. Guarding here fixes both the
+      // "Pending for me" tab and the per-row "who can act" tooltip in one place.
+      const rfqStatus = Number(rfq.status);
+      if (rfqStatus === 2 || rfqStatus === 5) { result[rfqId] = null; continue; }
+
       const stage = lifecycleMap[rfqId] || null;
       if (!stage) { result[rfqId] = null; continue; }
 
       if (APPROVAL_STAGES.includes(stage)) {
         approvalRfqs.push({ id: rfqId, is_tender: rfq.is_tender, stage });
       } else if (PERMISSION_STAGE_CONFIG[stage]) {
-        permissionRfqs.push({ id: rfqId, hotel_id: rfq.hotel_id, department_id: rfq.department_id, stage });
+        permissionRfqs.push({ id: rfqId, hotel_id: rfq.hotel_id, department_id: rfq.department_id, process_id: rfq.process_id, stage });
       } else {
-        result[rfqId] = null; // NEGOTIATION_ONGOING, APPROVED_COMPLETED, etc.
+        result[rfqId] = null; // NEGOTIATION_ONGOING, APPROVED_COMPLETED, bid-open, etc.
       }
     }
 
@@ -4621,6 +4640,9 @@ LIMIT 2;
           for (const rfq of approvalRfqs) {
             result[rfq.id] = {
               type: 'approval',
+              // `kind` is the "Pending for me" grouping axis. `type` is kept
+              // because the listing tooltip and label helpers already read it.
+              kind: 'approval',
               label: APPROVAL_LABEL,
               users: grouped[rfq.id]?.users || [],
               decision_rule: grouped[rfq.id]?.decision_rule || null,
@@ -4632,7 +4654,7 @@ LIMIT 2;
         } else {
           for (const rfq of approvalRfqs) {
             result[rfq.id] = {
-              type: 'approval', label: APPROVAL_LABEL, users: [], decision_rule: null,
+              type: 'approval', kind: 'approval', label: APPROVAL_LABEL, users: [], decision_rule: null,
               instance_id: null, entity_type: null, step_id: null
             };
           }
@@ -4648,12 +4670,16 @@ LIMIT 2;
     // --- 2. Batch resolve permission-stage action holders ---
     if (permissionRfqs.length > 0) {
       try {
-        // Deduplicate by (hotel_id, department_id|null, resource)
+        // Deduplicate by (hotel_id, department_id|null, process_id|null, resource)
         const lookupMap = new Map();
         for (const rfq of permissionRfqs) {
           const config = PERMISSION_STAGE_CONFIG[rfq.stage];
           const deptId = config.useDepartment && rfq.department_id ? parseInt(rfq.department_id) : null;
-          const key = `${rfq.hotel_id}|${deptId}|${config.resource}`;
+          // Process is the 4th RBAC scope axis. Passing it makes "who must act"
+          // agree with the canonical buildScopeExistsClause and with this
+          // model's own rfq.read filter, both of which already enforce it.
+          const procId = rfq.process_id != null ? parseInt(rfq.process_id) : null;
+          const key = `${rfq.hotel_id}|${deptId}|${procId}|${config.resource}`;
 
           if (!lookupMap.has(key)) {
             lookupMap.set(key, {
@@ -4661,6 +4687,7 @@ LIMIT 2;
               resource: config.resource,
               actions: config.actions,
               departmentId: deptId,
+              processId: procId,
               label: config.label,
               rfqIds: []
             });
@@ -4672,7 +4699,7 @@ LIMIT 2;
         const lookupResults = await Promise.all(
           [...lookupMap.values()].map(async (lookup) => {
             const users = await rbacModel.getUsersWithModuleActionsForHotels(
-              lookup.hotelIds, lookup.resource, lookup.actions, lookup.departmentId
+              lookup.hotelIds, lookup.resource, lookup.actions, lookup.departmentId, lookup.processId
             );
             return { rfqIds: lookup.rfqIds, label: lookup.label, users };
           })
@@ -4683,6 +4710,7 @@ LIMIT 2;
           for (const rfqId of lr.rfqIds) {
             result[rfqId] = {
               type: 'permission',
+              kind: 'evaluation',
               label: lr.label,
               users: lr.users.map(u => ({ id: u.id, name: u.name, email: u.email }))
             };
@@ -5515,7 +5543,11 @@ LIMIT 2;
         const permConfig = UPCOMING_PERMISSION_CONFIG[phase.key];
         if (permConfig && hotelIds.length > 0) {
           const pd = permConfig.useDepartment ? deptId : null;
-          const users = await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, permConfig.resource, permConfig.actions, pd).catch(() => []);
+          // Pass the process too, so the detail page's "who will act next"
+          // agrees with the listing's action holders. `processId` is already
+          // derived above for findBestMatchingPolicy; omitting it here made the
+          // two surfaces disagree the moment process-scoped roles are used.
+          const users = await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, permConfig.resource, permConfig.actions, pd, processId).catch(() => []);
           if (users.length > 0) actors.evaluators = users.map(u => ({ id: u.id, name: u.name }));
         }
 
