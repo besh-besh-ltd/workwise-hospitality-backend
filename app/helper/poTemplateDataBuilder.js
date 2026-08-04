@@ -527,6 +527,7 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
       JOIN tbl_approval_step_approvers SA ON SA.approval_instance_step_id = AIS.id
       JOIN tbl_users U ON U.id = SA.approver_user_id
       WHERE AIS.approval_instance_id = $1
+        AND SA.status <> 'REMOVED'
       ORDER BY AIS.step_order, SA.id
     `, [poData.approval_instance_id]);
 

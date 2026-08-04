@@ -1,4 +1,54 @@
 /**
+ * ⚠ OPERATOR NOTE — THIS SCRIPT BYPASSES APPROVAL RECONCILIATION ⚠
+ *
+ * This script builds its own standalone pg-promise connection straight from
+ * .env (see the DB block below) instead of importing app/config/dbConn.js,
+ * so it runs entirely outside the running app process and CANNOT call
+ * app/services/approvalPropagationService.js (revalidateApproverMembership).
+ * Every delete/insert below — the business-unit clean slate AND the
+ * per-user wipe-and-replace — mutates tbl_user_role_scopes,
+ * tbl_user_department and tbl_hospitality_user_mappings directly, with none
+ * of the mid-flight approval reconciliation that
+ * hospitalityController.deleteUserMapping / mapUsers and
+ * usersController.update_user_detail / create_buyer_company_users trigger
+ * on the same tables.
+ *
+ * CONSEQUENCE: any user this run drops from a business unit (present in the
+ * OLD scopes/mappings for this company_id/hotel_id, absent — or given a
+ * different role — in the sheet) KEEPS their PENDING rows in
+ * tbl_approval_step_approvers on every in-flight PO/RFQ/ARC approval
+ * instance in that business unit. They can still act as an approver
+ * (approve/reject, block an ANY-step, be required for an ALL-step) despite
+ * having lost the role/mapping that qualified them. Symmetrically, any user
+ * newly granted a role/mapping by this run is NOT added to matching live
+ * PENDING instances that were snapshotted before this run — approvals can
+ * stall short of the full intended approver set. This is the same "missing
+ * authority" vs. "retains authority" class documented on branch
+ * fix/removed-approver-visibility-and-reconciler, just triggered by a bulk
+ * script instead of a single API call, and at business-unit scale.
+ *
+ * WHAT AN OPERATOR MUST DO AFTERWARDS: run this script for real (not
+ * --dry-run) and DO NOT discard scripts/populate_users_report.xlsx — its
+ * "Removals" sheet lists exactly the users who net-lost a role scope or
+ * hotel mapping in this run, and the "Changes" sheet lists exactly who
+ * net-gained one. For every user_id in either sheet, reconcile in-flight
+ * approvals before treating the run as done:
+ *   - For a user in "Removals" (lost access): call
+ *     revalidateApproverMembership({ userId, changedBy: <admin>,
+ *     changeType: 'scope_removed', companyId, hotelId, txContext })
+ *     inside a db.tx(), using the real app DB connection
+ *     (app/config/dbConn.js) — NOT this script's standalone pg-promise
+ *     instance. Equivalently, re-run the existing
+ *     DELETE /api/v1/hospitality/user/:user_id/mapping flow for that user
+ *     (hospitalityController.deleteUserMapping already wires this).
+ *   - For a user in "Changes" who is newly added (gained access): call the
+ *     same function with changeType: 'scope_added' (or 'role_added' with the
+ *     new role ids), same DB connection, same per-user db.tx() wrapping.
+ *   - Do this for EVERY affected user_id before assuming the business
+ *     unit's approvals reflect the sheet — a bulk re-run of this script does
+ *     not do it for you, and the report sheets it produces are the exact,
+ *     already-computed input list for that follow-up pass.
+ *
  * Bulk User Role Population from Excel Matrix
  *
  * Ingests the "RFQ Based Hierarchy" sheet of an Excel matrix and populates:

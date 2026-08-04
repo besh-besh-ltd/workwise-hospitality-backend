@@ -1272,6 +1272,15 @@ async function buildAuditTrail(po, docRows = []) {
       `SELECT id, status, current_step FROM tbl_approval_instances WHERE id = $1`,
       [po.approval_instance_id]
     );
+    // Approvers with status='REMOVED' are tombstones left by the mid-flight
+    // reconciler (role revoked / policy changed etc.) — they no longer
+    // represent a live approver, so they are excluded from the aggregate
+    // here in SQL (rather than filtered per-use below) so every downstream
+    // read of `approvers` (names, count, rejecter/acted/pending lookups,
+    // the `by` fallback) is automatically correct with no risk of one
+    // call site being fixed while another is missed. This query result is
+    // only consumed locally in the loop right below, so there is no other
+    // consumer whose shape we'd be breaking.
     const steps = await db.any(
       `SELECT st.id, st.step_order, st.status, st.completed_at,
               COALESCE(
@@ -1279,7 +1288,7 @@ async function buildAuditTrail(po, docRows = []) {
                   JSON_BUILD_OBJECT('user_id', sa.approver_user_id, 'name', u.name,
                                     'status', sa.status, 'acted_at', sa.acted_at)
                   ORDER BY sa.id
-                ) FILTER (WHERE sa.id IS NOT NULL),
+                ) FILTER (WHERE sa.id IS NOT NULL AND sa.status <> 'REMOVED'),
                 '[]'
               ) AS approvers
        FROM tbl_approval_instance_steps st
@@ -1319,6 +1328,8 @@ async function buildAuditTrail(po, docRows = []) {
       let nodeStatus;
       if (st.status === "REJECTED") nodeStatus = "rejected";
       else if (st.status === "APPROVED") nodeStatus = "done";
+      else if (st.status === "SKIPPED") nodeStatus = "skipped";
+      else if (st.status === "REMOVED") nodeStatus = "removed";
       else if (st.status === "PENDING" && instance && st.step_order === instance.current_step && instance.status === "PENDING")
         nodeStatus = "current";
       else nodeStatus = "pending";

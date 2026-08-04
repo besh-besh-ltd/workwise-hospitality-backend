@@ -75,6 +75,7 @@ import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
+import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -6484,7 +6485,13 @@ const rfqController = {
           message: 'Draft RFQ not found or does not belong to the user!'
         });
       }
-      db.tx(async (t) => {
+      // Respond-AFTER-commit, and AWAIT the transaction. This used to be a bare
+      // `db.tx(...)` whose promise was never awaited and whose 200 was written
+      // from inside the callback, so (a) the success response raced the COMMIT
+      // and (b) a failing transaction produced an unhandled rejection and a
+      // request that never got any response at all — the catch below could not
+      // see it. Awaiting routes those failures to the 500 handler.
+      await db.tx(async (t) => {
         // Delete main RFQ
         await rfqModel.delete('tbl_rfq', { id });
 
@@ -6550,11 +6557,11 @@ const rfqController = {
 
         // Delete terms and conditions
         await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id }, t);
+      });
 
-        return res.status(200).json({
-          status: 1,
-          message: 'RFQ draft and all associated records deleted successfully'
-        });
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ draft and all associated records deleted successfully'
       });
     } catch (error) {
       logError('Error deleting RFQ draft', error);
@@ -9316,7 +9323,14 @@ const rfqController = {
           }
         }
 
-        return await db.tx(async (t) => {
+        // Respond-AFTER-commit: each exit inside this transaction returns a
+        // deferred-response marker rather than writing to `res`, and the HTTP
+        // response is emitted below, once COMMIT has happened. Writing the 200
+        // from inside the tx let a vendor's immediate re-read of their own quote
+        // miss it (different pooled connection, pre-commit snapshot), and made a
+        // failing COMMIT unreportable. The markers resolve the callback normally,
+        // so exactly the same work commits as before.
+        const quoteOutcome = await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -9533,27 +9547,21 @@ const rfqController = {
                 regret_reason
               );
 
-              return res
-                .status(200)
-                .json({
-                  status: 3,
-                  message: 'Your quote is regretted.',
-                  regret_reason: regret_reason,
-                  data: quote_rsp
-                })
-                .end();
+              return deferJson(200, {
+                status: 3,
+                message: 'Your quote is regretted.',
+                regret_reason: regret_reason,
+                data: quote_rsp
+              });
             }
 
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: 'Something went wrong!',
-                regret_reason: regret_reason,
-                data: null,
-                error: "Entry in table quote didn't exexuted as expected!"
-              })
-              .end();
+            return deferJson(400, {
+              status: 3,
+              message: 'Something went wrong!',
+              regret_reason: regret_reason,
+              data: null,
+              error: "Entry in table quote didn't exexuted as expected!"
+            });
           }
 
           // if quote item data is empty because of errors
@@ -9810,23 +9818,20 @@ const rfqController = {
             //   payload
             // );
 
-            return res
-              .status(200)
-              .json({
-                status: 1,
-                data: quotes_items[0]
-              })
-              .end();
+            return deferJson(200, {
+              status: 1,
+              data: quotes_items[0]
+            });
           } else {
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: Config.errorText.value
-              })
-              .end();
+            return deferJson(400, {
+              status: 3,
+              message: Config.errorText.value
+            });
           }
         });
+        // COMMIT has happened by here.
+        if (isDeferred(quoteOutcome)) return sendDeferred(res, quoteOutcome);
+        return quoteOutcome;
       } else {
         res
           .status(400)

@@ -38,7 +38,8 @@ import {
   getPendingInstancesForPolicy,
   getInstanceChangeHistory as getInstanceChangeHistoryService,
   simulateApproverImpact,
-  dispatchPropagationEmails
+  dispatchPropagationEmails,
+  roleStepPermissionVerdict
 } from '../../services/approvalPropagationService.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
@@ -537,6 +538,200 @@ async function resolveMutationCompany(req, res, requestedRaw, notFoundMessage) {
   return null;
 }
 
+/**
+ * Pick the ROLE steps a policy save must be validated against.
+ *
+ * ── WHY THIS DOES NOT USE computePolicyStepDiff ───────────────────────────
+ * That diff keys purely on `step_order`, and `step_order` is CLIENT-SUPPLIED,
+ * OPTIONAL (`insertPolicySteps` falls back to the array index) and NOT unique in
+ * the database. Both holes are exploitable, and both restore exactly the state
+ * the guard exists to prevent:
+ *
+ *   1. OMIT `step_order` entirely → every proposed step collapses onto the single
+ *      `undefined` key, so the map holds only the LAST element. Every stored step
+ *      reads as STEP_REMOVED (never validated) and one lone step reads as
+ *      STEP_ADDED. An unqualified ROLE step riding alongside a USER step is
+ *      persisted unchecked.
+ *   2. DUPLICATE a `step_order`, bad entry first → `Map.set` keeps the last, the
+ *      diff sees no change at that order, nothing is validated — and
+ *      `insertPolicySteps` happily writes BOTH rows.
+ *
+ * A third, quieter failure: send `step_order` as a STRING and the numeric keys
+ * stop matching, flipping every step to ADDED/REMOVED and making the legacy
+ * policies un-saveable — the precise outcome delta scope exists to avoid.
+ *
+ * So the delta is computed over something the client cannot forge: the multiset
+ * of ROLE approver sources the policy ALREADY carries. A proposed ROLE step is
+ * grandfathered if and only if an unconsumed identical source exists in the
+ * stored steps. Consequences, all intended:
+ *   • re-saving unchanged, reordering, renaming, or changing decision_rule →
+ *     nothing validated (legacy policies stay editable and repairable);
+ *   • naming a role the policy did not already use → validated;
+ *   • duplicating a role it did use, at an extra step → multiplicity rises →
+ *     validated (that IS a new bad step).
+ *
+ * `step_order` is still reported back to the admin, derived the same way
+ * `insertPolicySteps` derives it (`step.step_order || index + 1`), so the error
+ * points at the row they will actually see.
+ */
+function selectRoleStepsToValidate(oldSteps, proposedSteps, { revalidateAll = false } = {}) {
+  const withOrder = proposedSteps.map((s, i) => ({
+    ...s,
+    // Mirror insertPolicySteps exactly, including its `||` (so 0 → i + 1).
+    step_order: (s && s.step_order) || (i + 1)
+  }));
+  if (revalidateAll) return withOrder;
+
+  const grandfathered = new Map();
+  for (const s of oldSteps || []) {
+    if (!s || s.approver_source_type !== 'ROLE') continue;
+    const key = String(s.approver_source_id);
+    grandfathered.set(key, (grandfathered.get(key) || 0) + 1);
+  }
+
+  const out = [];
+  for (const step of withOrder) {
+    if (!step || step.approver_source_type !== 'ROLE') continue;
+    const key = String(step.approver_source_id);
+    const remaining = grandfathered.get(key) || 0;
+    if (remaining > 0) {
+      grandfathered.set(key, remaining - 1);
+      continue;
+    }
+    out.push(step);
+  }
+  return out;
+}
+
+/**
+ * Find ROLE-source policy steps whose role can never pass the read+approve gate
+ * that `createApprovalInstance` applies at instance-creation time.
+ *
+ * ── WHY THIS EXISTS AT SAVE TIME ──────────────────────────────────────────
+ * The gate is enforced silently and LATE: a ROLE step whose role lacks
+ * `<resource>.read` + `<resource>.approve` is dropped when the instance is
+ * built, and an instance whose every step is dropped is born
+ * `APPROVED, current_step = 0` — an approval nobody granted. Nothing at policy
+ * save time said a word. The admin Approval Wizard makes this easy to hit: it
+ * lists every role unfiltered and defaults each level to
+ * `approver_source_type: 'ROLE'`.
+ *
+ * ── WHY IT DOES NOT REJECT WHEN THE CATALOGUE CANNOT EXPRESS THE REQUIREMENT ─
+ * `roleStepPermissionVerdict` fails OPEN in two distinct situations, and this
+ * guard must honour both, because in neither of them is the ADMIN at fault:
+ *
+ *   RESOURCE_NOT_IN_CATALOGUE    — the resource has no read/approve rows at all
+ *                                  (INDENT → 'indent', not even a resource_type
+ *                                  label). A hole in the map.
+ *   RESOURCE_CANNOT_SATISFY_GATE — one of the two rows exists and the other does
+ *                                  not, so NO role can ever pass.
+ *
+ * The second is the one that bit: production's `tender` resource holds ONLY
+ * `approve`. `TENDER` is stage 1 of the Tender-process route in the admin
+ * Approval Wizard and its role dropdown is unfiltered, so an admin creating a new
+ * tender workflow and picking any role at Level 1 got a hard 400 they could not
+ * resolve through ANY UI — `tender.read` does not exist, so it cannot be granted
+ * to anything. The only escapes were switching to USER source or a DBA INSERT.
+ * Rejecting there punishes the admin for a modelling gap they cannot close.
+ *
+ * Failing open is not free, so it is LOGGED at warn (here, naming the policy,
+ * and again inside roleStepPermissionVerdict naming the resource): those ROLE
+ * steps WILL be dropped when an instance is created, and an instance whose every
+ * step is dropped is born APPROVED. Trading a visible 400 for a silent
+ * under-approval would defeat the point of this branch; saying so out loud does
+ * not.
+ *
+ * Still rejected, unchanged: the role lacks permissions that DO exist — naming
+ * `ARC Tech Evaluator` on an `ARC_TECH` policy, where `arc-tech.approve` exists
+ * and simply was not granted to it.
+ *
+ * Same verdict function the revocation reconciler uses, so save time and
+ * revocation time cannot disagree about a role.
+ *
+ * ── WHY THE TITLE LOOKUP IS SCOPED ───────────────────────────────────────
+ * The 400 echoes `role_title` back, so an unscoped `SELECT title FROM tbl_roles
+ * WHERE id = $1` would let an admin enumerate ANOTHER tenant's custom role names
+ * by probing ids. Harmless functionally — a cross-tenant role resolves to zero
+ * approvers anyway — but it is a disclosure the endpoint did not previously
+ * make. The lookup therefore applies exactly the visibility rule
+ * `rbacModel.getRoles` already enforces (`created_by IS NULL OR created_by =
+ * <me>`); anything outside it degrades to `Role <id>`, which still identifies
+ * the step well enough to fix it.
+ *
+ * @param {Object} [req] - request, used only for the caller identity above
+ * @returns {Promise<Array<{step_order, role_id, role_title, resource, missing_permissions}>>}
+ */
+async function findUnqualifiableRoleSteps(steps, entityType, req = null, t = db) {
+  const offenders = [];
+  if (!Array.isArray(steps) || steps.length === 0) return offenders;
+
+  const viewerId = req?.user?.id ?? null;
+  const verdictCache = new Map();
+  const warnedResources = new Set();
+  for (const step of steps) {
+    if (!step || step.approver_source_type !== 'ROLE') continue;
+    const roleId = parseInt(step.approver_source_id, 10);
+    if (!Number.isFinite(roleId)) continue;
+
+    const verdict = await roleStepPermissionVerdict(roleId, entityType, t, verdictCache);
+    if (verdict.permitted) {
+      // Fail-open for a modelling gap, not a clean pass. Say so once per
+      // resource — the admin is being allowed to save something that cannot
+      // actually collect an approval.
+      if (verdict.reason === 'RESOURCE_CANNOT_SATISFY_GATE' && !warnedResources.has(verdict.resource)) {
+        warnedResources.add(verdict.resource);
+        logger.warn(
+          `[PolicyGuard] ALLOWING a ROLE step on ${entityType} despite the gate being unsatisfiable: resource '${verdict.resource}' is missing ` +
+          `${(verdict.missing_actions || []).map(a => `${verdict.resource}.${a}`).join(' + ')} in tbl_permissions, so no role can ever pass it. ` +
+          `The admin cannot fix this from any UI, so the save is not blocked — but these ROLE steps WILL be dropped when an approval instance ` +
+          `is created, and an instance whose every step is dropped is born APPROVED with nobody having approved it. Seed the missing permission row.`
+        );
+      }
+      continue;
+    }
+
+    const role = await t.oneOrNone(
+      `SELECT id, title FROM tbl_roles
+        WHERE id = $1 AND (created_by IS NULL OR created_by = $2)`,
+      [roleId, viewerId]
+    );
+    const held = await t.any(
+      `SELECT p.action::text AS action
+         FROM tbl_role_permissions rp
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = $1 AND p.resource::text = $2 AND p.action IN ('read', 'approve')`,
+      [roleId, verdict.resource]
+    );
+    const heldActions = new Set(held.map(r => r.action));
+    const missing = ['read', 'approve'].filter(a => !heldActions.has(a));
+
+    offenders.push({
+      step_order: step.step_order ?? null,
+      role_id: roleId,
+      role_title: role?.title || `Role ${roleId}`,
+      resource: verdict.resource,
+      missing_permissions: missing.map(a => `${verdict.resource}.${a}`)
+    });
+  }
+  return offenders;
+}
+
+/** Build the coded 400 body for the offenders above. */
+function unqualifiableRoleStepsResponse(entityType, offenders) {
+  const detail = offenders
+    .map(o => `step ${o.step_order ?? '?'}: role "${o.role_title}" (id ${o.role_id}) is missing ${o.missing_permissions.join(' and ')}`)
+    .join('; ');
+  return {
+    status: 3,
+    code: 'APPROVER_ROLE_CANNOT_APPROVE',
+    message:
+      `This approval step names a role that cannot approve ${entityType}. ` +
+      `${detail}. Grant the missing permission(s) to the role, or pick a role that already holds them ` +
+      `— otherwise the step is dropped when the approval is created and the request auto-approves with nobody having approved it.`,
+    data: { entity_type: entityType, steps: offenders }
+  };
+}
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -604,6 +799,39 @@ const hospitalityApprovalController = {
         if (steps && steps.length > 0) {
           oldSteps = await snapshotPolicySteps(id);
           logger.info(`[PolicyUpdate] Old steps snapshot: ${oldSteps.length} steps, IDs: [${oldSteps.map(s => s.id).join(',')}], orders: [${oldSteps.map(s => s.step_order).join(',')}]`);
+        }
+
+        // ── PHASE 1b: reject ROLE steps whose role can never approve ──
+        // SCOPE: only the ROLE sources this save INTRODUCES — not every step the
+        // policy happens to carry. See selectRoleStepsToValidate for how the
+        // delta is computed (deliberately not from client-supplied step_order).
+        //
+        // Live policies already hold ROLE steps that fail this check: production
+        // policy 194 names Final Awarding P1/P2/P3 on entity_type ARC and those
+        // roles hold zero `arc.*`. Validating all steps would make such a policy
+        // unsaveable for ANY reason — renaming it, toggling is_active, moving a
+        // hotel, reordering a healthy step — which turns a hardening guard into
+        // an outage for exactly the admins who need to repair it. Validating the
+        // delta blocks every newly-named bad role while leaving the existing mess
+        // editable, one step at a time.
+        //
+        // The one case where everything is re-checked is an entity_type change:
+        // that re-points every step at a different permission resource, so every
+        // step is effectively new.
+        if (steps && steps.length > 0) {
+          const stored = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
+          const effectiveEntityType = entity_type !== undefined ? entity_type : stored?.entity_type;
+          const entityTypeChanged = entity_type !== undefined && stored?.entity_type !== undefined && entity_type !== stored.entity_type;
+
+          const stepsToValidate = selectRoleStepsToValidate(oldSteps, steps, { revalidateAll: entityTypeChanged });
+
+          if (effectiveEntityType && stepsToValidate.length > 0) {
+            const offenders = await findUnqualifiableRoleSteps(stepsToValidate, effectiveEntityType, req);
+            if (offenders.length > 0) {
+              logger.warn(`[PolicyUpdate] Rejecting policy ${id}: ${offenders.length} ROLE step(s) cannot approve ${effectiveEntityType} — ${JSON.stringify(offenders)}`);
+              return res.status(400).json(unqualifiableRoleStepsResponse(effectiveEntityType, offenders));
+            }
+          }
         }
 
         // ── PHASE 2: Pre-flight impact check ──
@@ -760,6 +988,21 @@ const hospitalityApprovalController = {
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
+
+        // Every step of a brand-new policy is a new step, so all of them are
+        // validated here (see the PHASE 1b note on the update branch for why the
+        // update path only validates the delta). `revalidateAll` also normalises
+        // step_order the way insertPolicySteps will, so the error message points
+        // at the row the admin will see even when the client omitted it.
+        if (steps && steps.length > 0) {
+          const allSteps = selectRoleStepsToValidate([], steps, { revalidateAll: true });
+          const offenders = await findUnqualifiableRoleSteps(allSteps, entity_type, req);
+          if (offenders.length > 0) {
+            logger.warn(`[PolicyCreate] Rejecting new ${entity_type} policy: ${offenders.length} ROLE step(s) cannot approve it — ${JSON.stringify(offenders)}`);
+            return res.status(400).json(unqualifiableRoleStepsResponse(entity_type, offenders));
+          }
+        }
+
         // Atomic create: policy row + steps in one tx, so a step-insert failure
         // doesn't leave an orphan policy behind.
         policy = await db.tx(async t => {

@@ -103,9 +103,20 @@ UsersRoutes.post('/verify-vendor-token', async (req, res) => {
 
 // use to create dufferent type of buyer company users,
 // like procurment, management, finance, engineering
+//
+// ACL GATE (was missing): this endpoint creates a user IN THE CALLER'S OWN
+// COMPANY and can assign it arbitrary role scopes, department memberships,
+// and hospitality company/hotel mappings — the same authority surface as
+// update-user-detail (gated `user_type === 7` in the controller) and every
+// hospitality company-admin route in hospitalityRoutes.js (all `acl([7])`).
+// Previously any authenticated user of any user_type could reach it and
+// grant role scopes to a brand-new account. acl([7]) matches the existing
+// sibling admin endpoint /company-users-detailed below and the isAdmin check
+// in update_user_detail — company admin only.
 UsersRoutes.post(
   '/create-buyer-company-user',
   passportSignIn,
+  acl([7]),
   validateDbBody.user_exists,
   UsersController.create_buyer_company_users
 );

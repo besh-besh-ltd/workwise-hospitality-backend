@@ -19,6 +19,7 @@ import pricingEngine from "../../services/pricingEngine.js";
 import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
+import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -467,7 +468,13 @@ export const approvePO = async (req, res) => {
       if (!(await isAssignedPoApprover(userId, po_id))) return sendPoAccessError(res, err);
     }
 
-    return db.tx(async t => {
+    // Respond-AFTER-commit. Every exit below returns a deferred-response marker
+    // instead of writing to `res` inside the transaction: emitting the response
+    // mid-tx flushes it before pg-promise issues COMMIT, so the approver's next
+    // read can still see the pre-approval PO, and a COMMIT failure could never
+    // be reported (headers already sent → the 500 below is unreachable). The
+    // markers resolve the callback normally, so the same work commits as before.
+    const txOutcome = await db.tx(async t => {
         // Check if PO uses new approval workflow (has approval_instance_id)
         const po = await t.oneOrNone(`
           SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
@@ -475,7 +482,7 @@ export const approvePO = async (req, res) => {
         `, [po_id]);
 
         if (!po) {
-          return res.status(404).json({
+          return deferJson(404, {
             status: 2,
             message: 'Purchase order not found.'
           });
@@ -526,7 +533,7 @@ export const approvePO = async (req, res) => {
             await handlePORejection(po, userId, t);
           }
 
-          return res.status(200).json({
+          return deferJson(200, {
             status: 1,
             message:
               actionResult.instance_status === 'APPROVED'
@@ -560,7 +567,7 @@ export const approvePO = async (req, res) => {
         );
 
         if (!trx) {
-          return res.status(404).json({
+          return deferJson(404, {
             status: 2,
             message: 'No approval request found for this PO.'
           });
@@ -605,7 +612,7 @@ export const approvePO = async (req, res) => {
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
 
-        return res.status(200).json({
+        return deferJson(200, {
           status: 1,
           message:
             decision === 'rejected'
@@ -616,6 +623,9 @@ export const approvePO = async (req, res) => {
           data: { ...result, approval_type: 'legacy' }
         });
     })
+    // COMMIT has happened by here — only now does anything reach the socket.
+    if (isDeferred(txOutcome)) return sendDeferred(res, txOutcome);
+    return txOutcome;
   } catch (error) {
     logError(error);
     return res.status(500).json({

@@ -34,8 +34,14 @@ const rbacModel = {
         WHERE urs.user_id = $1
           AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
           AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
-          AND p.resource = $3
-          AND p.action = $4
+          -- ::text, not a bare enum comparison. The resource value arrives
+          -- straight from ?resource= on GET /rbac/departments
+          -- (rbacController.getDepartments), so an uncast p.resource = $3 makes
+          -- Postgres coerce the PARAMETER to resource_type and any non-label
+          -- value raises "invalid input value for enum resource_type" -- a 500
+          -- from a query string. In text space it simply matches nothing.
+          AND p.resource::text = $3
+          AND p.action::text = $4
       )
       SELECT d.id, d.title
       FROM tbl_department d
@@ -169,7 +175,10 @@ const rbacModel = {
     let paramIdx = 3;
 
     if (key) {
-      moduleFilter = `AND p.resource = $${paramIdx}`;
+      // ::text for the same reason as getDepartmentsForUserScope above: `key`
+      // is the client's ?key= on GET /rbac/my-permissions, and a bare enum
+      // comparison turns an unknown value into a 500 instead of an empty result.
+      moduleFilter = `AND p.resource::text = $${paramIdx}`;
       params.push(key);
       paramIdx++;
     }
@@ -398,8 +407,18 @@ const rbacModel = {
       [roleId]
     );
   },
-  updateRole: async (roleId, { title, description }) => {
-    return db.none(
+  // The three functions below take an OPTIONAL transaction context, following
+  // the same convention as generalModel's createApprovalPolicy / insertPolicySteps.
+  //
+  // WHY IT MATTERS HERE: a role edit REPLACES its permissions
+  // (deleteRolePermissions then assignPermissionsToRole). Run on the root `db`
+  // those are two independent transactions, so between them the role visibly
+  // holds ZERO permissions. Any createApprovalInstance landing in that window
+  // fails roleHasReadAndApprovePermission (generalModel.js:2237) and silently
+  // drops the role's step — permanently, since instance steps are a snapshot
+  // and nothing rebuilds them. Passing one `t` through closes the window.
+  updateRole: async (roleId, { title, description }, t = db) => {
+    return t.none(
       `
       UPDATE tbl_roles
       SET title = $1,
@@ -409,8 +428,8 @@ const rbacModel = {
       [title.trim(), description || null, roleId]
     );
   },
-  deleteRolePermissions: async (roleId) => {
-    return db.none(
+  deleteRolePermissions: async (roleId, t = db) => {
+    return t.none(
       `
       DELETE FROM tbl_role_permissions
       WHERE role_id = $1
@@ -418,16 +437,16 @@ const rbacModel = {
       [roleId]
     );
   },
-  assignPermissionsToRole: async (roleId, permissionIds = []) => {
+  assignPermissionsToRole: async (roleId, permissionIds = [], t = null) => {
     if (!permissionIds.length) return;
 
     // Remove duplicates
     const uniqueIds = [...new Set(permissionIds)];
 
-    return db.tx(t =>
-      t.batch(
+    const run = (tx) =>
+      tx.batch(
         uniqueIds.map(pid =>
-          t.none(
+          tx.none(
             `
             INSERT INTO tbl_role_permissions (role_id, permission_id)
             VALUES ($1, $2)
@@ -435,8 +454,11 @@ const rbacModel = {
             [roleId, pid]
           )
         )
-      )
-    );
+      );
+
+    // Join the caller's transaction when given one; otherwise open our own, so
+    // the standalone callers (createRoleWithPermissions) are unchanged.
+    return t ? run(t) : db.tx(run);
   },
   getAllPermissions: () => {
     return db.any(`

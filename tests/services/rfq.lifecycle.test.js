@@ -4,6 +4,7 @@ import { db } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
 import { makeRfqVisibleToDashboard, addProductToRfq, cleanupRfqs } from "../helpers/dashboardSeed.js";
+import { makeRFQ } from "../factories/rfq.js";
 
 // Minimal getLifecycleSummary-shaped fixture.
 const summary = (overrides = {}) => ({
@@ -151,5 +152,113 @@ describe("GET /rfq/:rfqId/lifecycle", () => {
   it("rejects a tender id with 403", async () => {
     const res = await client.get(`/api/v1/rfq/${tenderId}/lifecycle`);
     expect(res.status).toBe(403);
+  });
+});
+
+// ── REMOVED-approver pass-through ───────────────────────────────────────────
+// formatApprovalInstances (rfqModel.js) serializes the approval trail this
+// endpoint feeds. It used to drop removed_at/removal_reason/added_mid_flight
+// even though the upstream query (generalModel.getApprovalInstanceDetails)
+// already supplies them — so a REMOVED approver arrived at the client
+// unlabelled, indistinguishable from a live pending one. This does NOT filter
+// REMOVED rows out (that stays the frontend's job, same as ApprovalTimeline);
+// it only proves the fields survive the trip.
+describe("GET /rfq/:rfqId/lifecycle — REMOVED approver pass-through", () => {
+  const CREATOR = IDS.users.a1_proc_buyer;
+  const inserted2 = { rfqIds: [], instanceIds: [], stepIds: [], approverIds: [] };
+
+  afterEach(async () => {
+    if (inserted2.approverIds.length) {
+      await db.none(`DELETE FROM tbl_approval_step_approvers WHERE id = ANY($1::int[])`, [inserted2.approverIds]);
+      inserted2.approverIds = [];
+    }
+    if (inserted2.stepIds.length) {
+      await db.none(`DELETE FROM tbl_approval_instance_steps WHERE id = ANY($1::int[])`, [inserted2.stepIds]);
+      inserted2.stepIds = [];
+    }
+    if (inserted2.instanceIds.length) {
+      await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [inserted2.instanceIds]);
+      inserted2.instanceIds = [];
+    }
+    if (inserted2.rfqIds.length) {
+      await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted2.rfqIds]);
+      await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted2.rfqIds]);
+      inserted2.rfqIds = [];
+    }
+  });
+
+  it("the 'overview' stage still carries a REMOVED approver's removal_reason + removed_at, alongside the live PENDING one", async () => {
+    // status=3/is_published=0 -> RFQ_APPROVAL is the current stage (not a
+    // draft short-circuit), so the 'overview' stage's approval_instances
+    // reflects a real, in-flight RFQ approval instance.
+    const { rfq_id } = await makeRFQ(db, {
+      createdBy: CREATOR, status: 3, is_published: 0, is_tender: 0,
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+      department: IDS.departments.proc, process: IDS.processes.A_P1,
+    });
+    inserted2.rfqIds.push(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0)`,
+      [rfq_id]
+    );
+
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status, current_step,
+          hospitality_company_id, hotel_id, department_id, initiated_by, process_id)
+       VALUES ('RFQ', $1, $2, 'PENDING', 1, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [rfq_id, IDS.policies.A1_P1_RFQ, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, CREATOR, IDS.processes.A_P1]
+    );
+    inserted2.instanceIds.push(inst.id);
+
+    const step = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+       VALUES ($1, 1, 'ANY', 'PENDING') RETURNING id`,
+      [inst.id]
+    );
+    inserted2.stepIds.push(step.id);
+
+    // Live, mid-flight-added PENDING approver.
+    const pendingRow = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, added_mid_flight)
+       VALUES ($1, $2, 'PENDING', true) RETURNING id`,
+      [step.id, IDS.users.a1_proc_finance]
+    );
+    inserted2.approverIds.push(pendingRow.id);
+
+    // Tombstoned approver whose role was revoked mid-flight (production
+    // shape: PO 138699 / RFQ 681, instance 3628).
+    const removedRow = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+       VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed') RETURNING id`,
+      [step.id, IDS.users.a1_proc_poApp]
+    );
+    inserted2.approverIds.push(removedRow.id);
+
+    const client = await httpClient(CREATOR);
+    const res = await client.get(`/api/v1/rfq/${rfq_id}/lifecycle`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+
+    const overview = res.body.data.stages.find((s) => s.key === "overview");
+    expect(overview).toBeDefined();
+    const instances = overview.phase.approval_instances;
+    expect(Array.isArray(instances)).toBe(true);
+    expect(instances.length).toBeGreaterThanOrEqual(1);
+
+    const approvers = instances[0].steps[0].approvers;
+    const removedApprover = approvers.find((a) => a.status === "REMOVED");
+    expect(removedApprover).toBeDefined();
+    expect(removedApprover.removal_reason).toBe("role_removed");
+    expect(removedApprover.removed_at).toBeTruthy();
+
+    const pendingApprover = approvers.find((a) => a.status === "PENDING");
+    expect(pendingApprover).toBeDefined();
+    expect(pendingApprover.added_mid_flight).toBe(true);
   });
 });

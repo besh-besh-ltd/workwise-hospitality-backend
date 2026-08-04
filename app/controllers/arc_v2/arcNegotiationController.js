@@ -16,6 +16,7 @@ import {
   scheduleArcNegotiationRoundExpiration,
   removeArcNegotiationRoundExpiration,
 } from '../../helper/cronManager.js';
+import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 /**
  * ARC Negotiation Controller
@@ -119,7 +120,7 @@ export async function createRound(req, res) {
     const result = await db.tx(async (t) => {
       // Reload ARC — scope source of truth (NEVER from body)
       const arc = await arcModel.getById(arcId, t);
-      if (!arc) return bad(res, 404, 'ARC not found', 2);
+      if (!arc) return deferBad(404, 'ARC not found', 2);
 
       const scope = {
         hospitality_company_id: arc.hospitality_company_id,
@@ -141,7 +142,7 @@ export async function createRound(req, res) {
       for (const entry of entries) {
         if (entry.is_arc_level) {
           if (!Array.isArray(entry.vendor_targets) || entry.vendor_targets.length === 0) {
-            return bad(res, 400, 'Arc-level entry must have at least one vendor target');
+            return deferBad(400, 'Arc-level entry must have at least one vendor target');
           }
           for (const vt of entry.vendor_targets) allVendorIds.add(Number(vt.vendor_id));
           // For arc-level: vendor must have a submitted, non-withdrawn quote
@@ -154,23 +155,23 @@ export async function createRound(req, res) {
               [arcId, vendorId]
             );
             if (!quote) {
-              return bad(res, 400, `Vendor ${vendorId} has no submitted quote for this ARC`);
+              return deferBad(400, `Vendor ${vendorId} has no submitted quote for this ARC`);
             }
             // §5.4 — arc-level: reject universally-failed vendor targets.
             if (universallyFailed.has(vendorId)) {
-              return bad(res, 400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
+              return deferBad(400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
             }
           }
         } else {
           const arcItemId = Number(entry.arc_item_id);
-          if (!arcItemId) return bad(res, 400, 'Product entry must have a valid arc_item_id');
+          if (!arcItemId) return deferBad(400, 'Product entry must have a valid arc_item_id');
           const item = await t.oneOrNone(
             `SELECT id FROM tbl_arc_item WHERE id = $1 AND arc_id = $2`,
             [arcItemId, arcId]
           );
-          if (!item) return bad(res, 400, `Item ${arcItemId} does not belong to ARC ${arcId}`);
+          if (!item) return deferBad(400, `Item ${arcItemId} does not belong to ARC ${arcId}`);
           if (!Array.isArray(entry.vendor_targets) || entry.vendor_targets.length === 0) {
-            return bad(res, 400, `Item ${arcItemId} must have at least one vendor target`);
+            return deferBad(400, `Item ${arcItemId} must have at least one vendor target`);
           }
           // Vendor qualification checks
           const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
@@ -182,7 +183,7 @@ export async function createRound(req, res) {
               `SELECT id FROM tbl_arc_invitation WHERE arc_id = $1 AND vendor_id = $2`,
               [arcId, vendorId]
             );
-            if (!invited) return bad(res, 400, `Vendor ${vendorId} is not invited to this ARC`);
+            if (!invited) return deferBad(400, `Vendor ${vendorId} is not invited to this ARC`);
             // submitted quote with a line for this item
             const line = await t.oneOrNone(
               `SELECT ql.id FROM tbl_arc_quote_line ql
@@ -192,17 +193,17 @@ export async function createRound(req, res) {
                   AND q.submitted_at IS NOT NULL AND q.withdrawn_at IS NULL`,
               [arcId, vendorId, arcItemId]
             );
-            if (!line) return bad(res, 400, `Vendor ${vendorId} has no submitted quote line for item ${arcItemId}`);
+            if (!line) return deferBad(400, `Vendor ${vendorId} has no submitted quote line for item ${arcItemId}`);
             // §5.4 — universal knockout: excluded from EVERY item, incl.
             // clause-less ones. Checked BEFORE the per-item qualification so a
             // globally-failed vendor gets the accurate ARC-wide reason.
             if (universallyFailed.has(vendorId)) {
-              return bad(res, 400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
+              return deferBad(400, `Vendor ${vendorId} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
             }
             // technical qualification (if clauses exist for this item)
             const allowed = qualifiedMap[arcItemId];
             if (allowed && !allowed.includes(vendorId)) {
-              return bad(res, 400, `Vendor ${vendorId} is not technically qualified for item ${arcItemId}`);
+              return deferBad(400, `Vendor ${vendorId} is not technically qualified for item ${arcItemId}`);
             }
           }
         }
@@ -220,14 +221,14 @@ export async function createRound(req, res) {
         }, t);
         if (overlap) {
           const scopeLabel = entry.is_arc_level ? 'ARC-level' : `item ${entry.arc_item_id}`;
-          return bad(res, 400, `A non-terminal round already exists for ${scopeLabel} (round #${overlap.round_number}). Close or wait for it to finish before creating a new one.`);
+          return deferBad(400, `A non-terminal round already exists for ${scopeLabel} (round #${overlap.round_number}). Close or wait for it to finish before creating a new one.`);
         }
       }
 
       // ── Policy resolution ──
       const policy = await resolveArcPolicy('ARC_NEGOTIATION', scope, t);
       if (!policy) {
-        return bad(res, 400, 'No approval policy configured for ARC negotiation in this scope.');
+        return deferBad(400, 'No approval policy configured for ARC negotiation in this scope.');
       }
 
       // ── Persistence shape ──
@@ -312,6 +313,9 @@ export async function createRound(req, res) {
       };
     });
 
+    // respond after commit — a validation guard inside the tx returns a marker
+    // rather than writing to `res`, so nothing reaches the socket until COMMIT.
+    if (isDeferred(result)) return sendDeferred(res, result);
     if (result && result.__round) {
       // Schedule expiration job post-commit
       scheduleArcNegotiationRoundExpiration(result.__round);
@@ -690,7 +694,7 @@ export async function submitVendorQuote(req, res) {
       // Get + lock the vendor's quote line FOR UPDATE
       const line = await arcNegotiationModel.getVendorQuoteLineForItem(arcId, vendorId, arcItemId, t);
       if (!line) {
-        return bad(res, 403, 'You do not have a submitted quote line for this item');
+        return deferBad(403, 'You do not have a submitted quote line for this item');
       }
 
       // In-tx re-check (authoritative duplicate guard): the FOR UPDATE lock above
@@ -752,6 +756,8 @@ export async function submitVendorQuote(req, res) {
       return { __quote: roundQuote, __line: updatedLine };
     });
 
+    // respond after commit — never from inside db.tx
+    if (isDeferred(txResult)) return sendDeferred(res, txResult);
     if (txResult && txResult.__quote) {
       // Notify comm-evaluators + creator post-commit
       await notifyArcEvent({

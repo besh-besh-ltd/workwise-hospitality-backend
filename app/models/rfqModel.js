@@ -5115,11 +5115,16 @@ LIMIT 2;
           steps: (d.steps || []).map(s => ({
             step_order: s.step_order, decision_rule: s.decision_rule,
             status: s.status, completed_at: s.completed_at,
+            added_mid_flight: s.added_mid_flight || false,
+            removed_mid_flight: s.removed_mid_flight || false,
             approvers: (s.approvers || []).map(a => ({
               user_id: a.user_id, user_name: a.user_name, user_email: a.user_email,
               user_designation: a.user_designation, user_department: a.user_department,
               employee_code: a.employee_code,
               status: a.status, acted_at: a.acted_at, comment: a.comment,
+              added_mid_flight: a.added_mid_flight || false,
+              removed_at: a.removed_at || null,
+              removal_reason: a.removal_reason || null,
             })),
           })),
         }));

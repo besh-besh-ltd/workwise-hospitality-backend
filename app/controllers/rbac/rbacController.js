@@ -1,6 +1,12 @@
 import rbacModel from "../../models/rbacModel.js";
+import db from "../../config/dbConn.js";
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
+import {
+  revalidateRolePermissionChange,
+  dispatchPropagationEmails,
+  handleAutoCompletedInstances
+} from '../../services/approvalPropagationService.js';
 
 /**
  * Aggregate rows of {resource, action, hotel_id, department_id, process_id}
@@ -203,15 +209,74 @@ const rbacController = {
       });
     }
 
-    // 2️⃣ Update role meta
-    await rbacModel.updateRole(roleId, {
-      title,
-      description
-    });
+    /* 2️⃣ + 3️⃣ + 4️⃣ — meta, permission REPLACE, and mid-flight reconciliation,
+       in ONE transaction.
 
-    // 3️⃣ Replace permissions
-    await rbacModel.deleteRolePermissions(roleId);
-    await rbacModel.assignPermissionsToRole(roleId, permission_ids);
+       WHY ONE TRANSACTION, and not the best-effort post-commit shape used by
+       usersController.update_user_detail:
+
+       (a) The replace itself has to be atomic. `deleteRolePermissions` followed
+           by `assignPermissionsToRole` on the root db is two transactions with
+           a window in between where the role holds NO permissions. Any
+           createApprovalInstance landing in that window silently drops this
+           role's policy step (generalModel.js:2238) and bakes the omission into
+           the instance forever — instance steps are a snapshot and nothing
+           rebuilds them.
+
+       (b) The reconciliation READS what the replace just wrote
+           (roleHasReadAndApprovePermission), so it has to see the post-write
+           state, and it must not be observable separately from it.
+
+       (c) It closes the same window from the other side. The snapshot in
+           tbl_approval_step_approvers IS the authorization — submitApprovalAction
+           re-checks no role and no permission — so between "approve was
+           revoked" and "the snapshot was reconciled" a revoked approver can
+           still approve. Post-commit propagation would leave that window open
+           by construction; here there is no interval to exploit.
+
+       FAILURE MODE, deliberately chosen: if reconciliation throws, the
+       permission write rolls back with it and the admin gets a 500 with the
+       role UNCHANGED. That is the safe direction — the alternative
+       (best-effort) leaves permissions revoked while their holders keep live
+       approval authority, which is precisely the defect being fixed. It is
+       logged loudly enough to diagnose rather than swallowed. */
+    let propagation;
+    try {
+      propagation = await db.tx(async (t) => {
+        await rbacModel.updateRole(roleId, { title, description }, t);
+        await rbacModel.deleteRolePermissions(roleId, t);
+        await rbacModel.assignPermissionsToRole(roleId, permission_ids, t);
+
+        return revalidateRolePermissionChange({
+          roleId,
+          changedBy: userId,
+          txContext: t
+        });
+      });
+    } catch (txErr) {
+      logError(`[UpdateRole ${roleId}] permission replace + approval reconciliation FAILED — role left UNCHANGED (nothing was committed)`, txErr);
+      logger.error(`[UpdateRole ${roleId}] rolled back by ${userId}: ${txErr?.message || txErr}`);
+      return res.status(500).json({
+        status: false,
+        message: "Failed to update role"
+      });
+    }
+
+    if (propagation?.stepsRemoved?.length > 0) {
+      logger.warn(`[UpdateRole ${roleId}] permission change retired ${propagation.stepsRemoved.length} live approval step(s) across ${propagation.instancesAffected} instance(s): ${JSON.stringify(propagation.stepsRemoved)}`);
+    }
+
+    // Post-commit, fire-and-forget — same ordering as every other propagation
+    // caller. A mail failure must never undo a committed reconciliation.
+    if (propagation?._emailData) {
+      dispatchPropagationEmails(propagation._emailData, userId, 'role_permissions_changed');
+    }
+    if (propagation?.autoCompletedInstanceIds?.length > 0) {
+      logger.warn(`[UpdateRole ${roleId}] instances auto-completed by the retirement: [${propagation.autoCompletedInstanceIds.join(',')}]`);
+      Promise.resolve(
+        handleAutoCompletedInstances(propagation.autoCompletedInstanceIds, userId, 'role_permissions_changed')
+      ).catch((err) => logError(`[UpdateRole ${roleId}] post-approval handlers failed for auto-completed instances`, err));
+    }
 
     return res.json({
       status: true,

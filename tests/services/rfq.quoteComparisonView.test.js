@@ -762,6 +762,63 @@ describe("GET /rfq/quote-comparison-view/:id — state 'pending'", () => {
     expect(last.status).toBe("pending");
     expect(last.title).toBe("Forwarded to the next stage");
   });
+
+  // Same defect family as po.dashboard.test.js's REMOVED-tombstone suite, but
+  // with an important split: approval_chain (fetchApprovalChain) is a
+  // count/name SUMMARY, so a REMOVED approver must not inflate its "N
+  // approvers" label or be picked as the named approver. The trail's
+  // per-step `approvers` list is a different contract: QuoteComparison.js's
+  // renderApprovalDrawer already splits it into activeApprovers (status !==
+  // 'REMOVED') and removedApprovers (status === 'REMOVED') and renders the
+  // latter muted/struck-through with the removal reason + date — so this
+  // array must KEEP carrying REMOVED rows (with removal_reason/removed_at),
+  // same "pass through, let the frontend distinguish" contract as the RFQ
+  // lifecycle payload. Filtering it out here would silently drop the
+  // drawer's removed-approver block.
+  it("approval_chain excludes a REMOVED approver from its count/name, but the trail's approvers list still carries it with removal_reason + removed_at", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { rfq_product_id, product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const qid = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+    await finalizeProduct(rfq_id, rfq_no, qid, product_variant_id, IDS.users.vendor_alpha);
+    const instId = await makeQuoteApproval({ rfq_product_id, status: "PENDING" });
+
+    // Tombstone a second approver on the same step.
+    const step = await db.one(
+      `SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    );
+    const removed = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+       VALUES ($1, $2, 'REMOVED', NOW(), 'role_removed') RETURNING id`,
+      [step.id, IDS.users.a1_proc_finance]
+    );
+    inserted.approverIds.push(removed.id);
+
+    const removedName = (await db.one(`SELECT name FROM tbl_users WHERE id=$1`, [IDS.users.a1_proc_finance])).name;
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    // approval_chain: only the one live approver remains -> never "2 approvers".
+    expect(res.body.approval_chain[0].name).not.toMatch(/approvers$/);
+    expect(res.body.approval_chain[0].name).not.toBe(removedName);
+
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    const l1 = product.approval.trail.find((n) => n.title === "L1 approval");
+    expect(l1).toBeDefined();
+    // The trail's `by` (single actor) is never the tombstone...
+    expect(l1.by).not.toBe(removedName);
+    // ...but the full approvers list still carries it, labelled.
+    const removedEntry = (l1.approvers || []).find((a) => a.name === removedName);
+    expect(removedEntry).toBeDefined();
+    expect(removedEntry.status).toBe("REMOVED");
+    expect(removedEntry.removal_reason).toBe("role_removed");
+    expect(removedEntry.removed_at).toBeTruthy();
+  });
 });
 
 // ===========================================================================

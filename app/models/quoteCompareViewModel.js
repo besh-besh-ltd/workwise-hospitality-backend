@@ -964,6 +964,17 @@ async function buildQuoteApprovalData(instanceIds) {
         WHERE ai.id = ANY($1::int[])`,
       [ids]
     );
+    // Approvers tombstoned by the mid-flight reconciler (status='REMOVED')
+    // are kept in this aggregate, NOT filtered out: this trail feeds the
+    // buyer's approval drawer (QuoteComparison.js renderApprovalDrawer),
+    // which already splits node.approvers into activeApprovers (status !==
+    // 'REMOVED') and removedApprovers (status === 'REMOVED') and renders the
+    // latter muted/struck-through with the removal reason + date — the same
+    // "pass through, let the frontend distinguish" contract as
+    // generalModel's getApprovalInstanceDetails / ApprovalTimeline. Filtering
+    // here would silently drop that removed block from the drawer, the
+    // opposite of the goal. `removal_reason` + `removed_at` are included so
+    // that tooltip has data to render.
     const steps = await db.any(
       `SELECT st.approval_instance_id, st.id, st.step_order, st.status, st.completed_at,
               COALESCE(
@@ -971,6 +982,7 @@ async function buildQuoteApprovalData(instanceIds) {
                   JSON_BUILD_OBJECT(
                     'user_id', sa.approver_user_id, 'name', u.name,
                     'status', sa.status, 'acted_at', sa.acted_at,
+                    'removal_reason', sa.removal_reason, 'removed_at', sa.removed_at,
                     'role', (SELECT rl.title FROM tbl_user_role_scopes urs
                                JOIN tbl_roles rl ON rl.id = urs.role_id
                               WHERE urs.user_id = sa.approver_user_id
@@ -1035,8 +1047,14 @@ async function buildQuoteApprovalData(instanceIds) {
       ];
       let current_approvers = [];
       for (const st of stepsByInst.get(instId) || []) {
+        // `approvers` now carries REMOVED tombstones too (see the query
+        // comment above) — but a REMOVED row must never be picked as the
+        // node's single `actor`/`by`, nor counted among `current_approvers`.
+        // Guard every single-slot selection below; the full unfiltered list
+        // is only exposed via `approvers: approvers.map(...)` further down,
+        // which is what the frontend splits into active/removed chips.
         const approvers = Array.isArray(st.approvers) ? st.approvers : [];
-        const acted = approvers.find((a) => a.acted_at);
+        const acted = approvers.find((a) => a.acted_at && a.status !== "REMOVED");
         const pendingApprover = approvers.find((a) => a.status === "PENDING");
         const rejecter = approvers.find((a) => (a.status || "").toUpperCase() === "REJECTED");
         const sStatus = (st.status || "").toUpperCase();
@@ -1044,11 +1062,13 @@ async function buildQuoteApprovalData(instanceIds) {
         let nodeStatus;
         if (sStatus === "REJECTED") nodeStatus = "rejected";
         else if (sStatus === "APPROVED") nodeStatus = "done";
+        else if (sStatus === "SKIPPED") nodeStatus = "skipped";
+        else if (sStatus === "REMOVED") nodeStatus = "removed";
         else if (sStatus === "PENDING" && st.step_order === inst.current_step && istatus === "PENDING")
           nodeStatus = "current";
         else nodeStatus = "pending";
 
-        const actor = rejecter || acted || pendingApprover || approvers[0] || null;
+        const actor = rejecter || acted || pendingApprover || approvers.find((a) => a.status !== "REMOVED") || null;
         let reason = null;
         if (nodeStatus === "rejected") {
           const rc = rejectByUserByInst.get(instId);
@@ -1060,7 +1080,7 @@ async function buildQuoteApprovalData(instanceIds) {
         }
         if (nodeStatus === "current") {
           const pend = approvers.filter((a) => (a.status || "").toUpperCase() === "PENDING");
-          current_approvers = (pend.length ? pend : approvers).map(personOf);
+          current_approvers = (pend.length ? pend : approvers.filter((a) => a.status !== "REMOVED")).map(personOf);
         }
 
         trail.push({
@@ -1072,7 +1092,13 @@ async function buildQuoteApprovalData(instanceIds) {
           role: actor ? actor.role || null : null,
           when: iso(st.completed_at),
           reason,
-          approvers: approvers.map((a) => ({ ...personOf(a), status: a.status })),
+          // removal_reason/removed_at ride along so the drawer's removed-chip
+          // tooltip (QuoteComparison.js renderApprovalDrawer) has data to show.
+          approvers: approvers.map((a) => ({
+            ...personOf(a), status: a.status,
+            removal_reason: a.removal_reason || null,
+            removed_at: a.removed_at || null,
+          })),
         });
       }
 
@@ -1412,6 +1438,11 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
     })();
 
     if (instanceId) {
+      // Exclude REMOVED (tombstoned) approvers — this chain feeds the
+      // buyer's approval-progress card ("N approvers" / who's next), and a
+      // removed approver should neither inflate that count nor be picked as
+      // the named approver (steps with zero remaining approvers still come
+      // through, via the sa.status IS NULL branch for the LEFT JOIN miss).
       const rows = await db.any(
         `SELECT st.step_order,
                 sa.approver_user_id, u.name AS approver_name,
@@ -1423,6 +1454,7 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
            LEFT JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = st.id
            LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
           WHERE st.approval_instance_id = $1
+            AND (sa.status IS NULL OR sa.status <> 'REMOVED')
           ORDER BY st.step_order ASC, sa.id ASC`,
         [instanceId]
       );
