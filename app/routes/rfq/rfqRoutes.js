@@ -195,9 +195,14 @@ RfqRoutes.get(
   rfqController.getLifecycleSummary
 );
 
+// Buyer-only: the payload carries the approver matrix (names, emails,
+// comments), evaluator names and vendor prices. The controller additionally
+// asserts (company × hotel × dept × process) scope — this acl is the cheap
+// outer gate that keeps vendors off it entirely.
 RfqRoutes.get(
   '/:rfqId/lifecycle',
   passportSignIn,
+  acl([2, 8]),
   rfqController.getRfqLifecycle
 );
 

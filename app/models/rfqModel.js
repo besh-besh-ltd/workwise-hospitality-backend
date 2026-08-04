@@ -5340,11 +5340,32 @@ LIMIT 2;
           summary = 'No approval configured';
         }
 
+        const approvalInstances = hasData ? formatApprovalInstances(rfqApprovalDetails) : null;
+
+        // Once the RFQ is published the publish approval decides nothing, and
+        // submitApprovalAction now refuses it outright (400). Clear the
+        // per-instance grant so the page never offers a decision the API will
+        // reject: the top-level user_can_approve is already suppressed for
+        // expired phases (see the `status === 'expired'` skip below), but this
+        // flag is what the decision card actually keys off.
+        if (isExpired && approvalInstances) {
+          approvalInstances.forEach((inst) => {
+            if (inst.status === 'PENDING') {
+              inst.can_user_approve = false;
+              inst.user_approval_step_id = null;
+            }
+          });
+        }
+
         phases.push({
           key: 'rfq_approval', label: 'RFQ Approval', status, summary,
           is_cancelled: latestInstance?.status === 'CANCELLED',
+          // True when the publish date arrived with the approval still open, so
+          // the RFQ went out unapproved. Derived, not stored — there is no
+          // auto_published column; it is (published AND instance still PENDING).
+          published_without_approval: isExpired,
           completed_at: latestInstance?.completed_at || null,
-          approval_instances: hasData ? formatApprovalInstances(rfqApprovalDetails) : null,
+          approval_instances: approvalInstances,
         });
       }
 

@@ -24,9 +24,16 @@ const summary = (overrides = {}) => ({
   ...overrides,
 });
 
+// A caller who can read every stage. The shaper redacts by permission now, so
+// tests about SHAPING must grant read or they end up asserting redaction.
+const ALL_READ = {
+  rfq: ["read"], te: ["read"], "quote-compare": ["read"],
+  negotiation: ["read"], awarding: ["read"],
+};
+
 describe("shapeRfqLifecycle", () => {
   test("maps 4 phases to the 4 timeline stages with renamed keys", () => {
-    const out = shapeRfqLifecycle(summary(), { permissions: {} });
+    const out = shapeRfqLifecycle(summary(), { permissions: ALL_READ });
     expect(out.stages.map((s) => s.key)).toEqual(STAGE_ORDER);
     expect(out.stages.map((s) => s.label)).toEqual([
       "Overview", "Technical Evaluation", "Negotiation & Award", "Purchase Order",
@@ -34,7 +41,7 @@ describe("shapeRfqLifecycle", () => {
   });
 
   test("maps phase.status to ARC state and picks default_stage = current phase's stage", () => {
-    const out = shapeRfqLifecycle(summary(), { permissions: {} });
+    const out = shapeRfqLifecycle(summary(), { permissions: ALL_READ });
     const byKey = Object.fromEntries(out.stages.map((s) => [s.key, s]));
     expect(byKey["overview"].state).toBe("complete");
     expect(byKey["technical"].state).toBe("skipped");
@@ -44,7 +51,7 @@ describe("shapeRfqLifecycle", () => {
   });
 
   test("attaches the action to the current stage", () => {
-    const out = shapeRfqLifecycle(summary(), { permissions: {} });
+    const out = shapeRfqLifecycle(summary(), { permissions: ALL_READ });
     const cur = out.stages.find((s) => s.key === "negotiation-award");
     // step_id / entity_type were added alongside instance_id so the client can
     // post an approval decision without re-deriving the step.
@@ -67,25 +74,138 @@ describe("shapeRfqLifecycle", () => {
         { key: "commercial", label: "Commercial", status: "completed" },
         { key: "purchase_order", label: "Purchase Order", status: "completed" },
       ],
-    }), { permissions: {} });
+    }), { permissions: ALL_READ });
     expect(out.default_stage).toBe("purchase-order");
     expect(out.stages.find((s) => s.key === "purchase-order").state).toBe("complete");
   });
 
-  test("expired RFQ-approval phase → overview active with reason", () => {
+  // An expired approval phase is OVER: the RFQ published without it, so nothing
+  // there awaits anyone. It used to map to `active`, which made it win
+  // default_stage (the first active stage) and pinned the page to Overview for
+  // the rest of the RFQ's life — in production, on 194 RFQs, 112 of which had
+  // already issued a purchase order.
+  test("expired RFQ-approval phase → overview ENDED, and never wins default_stage", () => {
     const out = shapeRfqLifecycle(summary({
-      current_stage: "RFQ_APPROVAL", current_phase: "rfq_approval",
+      current_stage: "COMMERCIAL_EVALUATION", current_phase: "commercial",
       phases: [
         { key: "rfq_approval", label: "RFQ Approval", status: "expired", summary: "Auto-published" },
-        { key: "technical", label: "Technical", status: "upcoming" },
-        { key: "commercial", label: "Commercial", status: "upcoming" },
+        { key: "technical", label: "Technical", status: "skipped" },
+        { key: "commercial", label: "Commercial", status: "current" },
         { key: "purchase_order", label: "Purchase Order", status: "upcoming" },
       ],
-    }), { permissions: {} });
+    }), { permissions: ALL_READ });
     const ov = out.stages.find((s) => s.key === "overview");
-    expect(ov.state).toBe("active");
+    expect(ov.state).toBe("ended");
     expect(ov.reason).toBe("expired_pending");
-    expect(out.default_stage).toBe("overview");
+    // The tab that opens is the one with live work.
+    expect(out.default_stage).toBe("negotiation-award");
+  });
+
+  test("an expired phase carries no action — the action belongs to the live stage", () => {
+    const out = shapeRfqLifecycle(summary({
+      current_stage: "COMMERCIAL_EVALUATION", current_phase: "commercial",
+      user_action_required: true,
+      phases: [
+        { key: "rfq_approval", label: "RFQ Approval", status: "expired", summary: "Auto-published" },
+        { key: "technical", label: "Technical", status: "skipped" },
+        { key: "commercial", label: "Commercial", status: "current" },
+        { key: "purchase_order", label: "Purchase Order", status: "upcoming" },
+      ],
+    }), { permissions: ALL_READ });
+    // The shaper hands the SAME action object to every "current" stage. While
+    // expired counted as current, Overview inherited it and rendered an amber
+    // "Action needed" chip for work owned by the commercial stage.
+    expect(out.stages.find((s) => s.key === "overview").action).toBeNull();
+    expect(out.stages.find((s) => s.key === "negotiation-award").action).not.toBeNull();
+  });
+
+  // The RFQ stage panels render straight from this payload — the PO list with
+  // vendor names and ₹ totals, per-product finalization and negotiation prices
+  // — unlike the ARC page, whose stages fetch from separately-gated endpoints.
+  // Hiding those panels client-side alone would leave the numbers in the JSON.
+  describe("stage redaction by permission", () => {
+    const withDetail = (perms) => shapeRfqLifecycle(summary({
+      current_stage: "AWAITING_PO", current_phase: "purchase_order",
+      phases: [
+        { key: "rfq_approval", label: "RFQ Approval", status: "completed", summary: "Approved by A" },
+        { key: "technical", label: "Technical", status: "completed", summary: "3 passed, 1 failed" },
+        { key: "commercial", label: "Commercial", status: "completed", summary: "1 product finalized",
+          products: [{ product_name: "Bed linen", finalized_vendor: "Alpha Textiles", value: 420000 }] },
+        { key: "purchase_order", label: "Purchase Order", status: "current", summary: "2 POs · ₹4,20,000",
+          purchase_orders: [{ id: 9, po_number: "PO/2026/9", vendor_name: "Alpha Textiles", total_amount: 420000 }] },
+      ],
+    }), { permissions: perms });
+
+    test("a caller with only rfq.read gets every other stage's detail stripped", () => {
+      const out = withDetail({ rfq: ["read"] });
+      const byKey = Object.fromEntries(out.stages.map((s) => [s.key, s]));
+
+      expect(byKey["overview"].can_read).toBe(true);
+      for (const key of ["technical", "negotiation-award", "purchase-order"]) {
+        expect(byKey[key].can_read).toBe(false);
+        expect(byKey[key].summary).toBeNull();
+        expect(byKey[key].action).toBeNull();
+        expect(byKey[key].phase.purchase_orders).toBeUndefined();
+        expect(byKey[key].phase.products).toBeUndefined();
+      }
+
+      // Nothing commercially sensitive survives anywhere in the payload.
+      const json = JSON.stringify(out);
+      expect(json).not.toMatch(/Alpha Textiles/);
+      expect(json).not.toMatch(/PO\/2026\/9/);
+      expect(json).not.toMatch(/420000/);
+      expect(json).not.toMatch(/4,20,000/);
+    });
+
+    test("never opens the page on a stage the caller cannot read", () => {
+      // purchase-order is the live stage, but this caller cannot see it.
+      const out = withDetail({ rfq: ["read"] });
+      expect(out.default_stage).toBe("overview");
+    });
+
+    test("awarding.read — not the non-existent po.read — opens the PO stage", () => {
+      const out = withDetail({ rfq: ["read"], awarding: ["read"] });
+      const byKey = Object.fromEntries(out.stages.map((s) => [s.key, s]));
+      expect(byKey["purchase-order"].can_read).toBe(true);
+      expect(byKey["purchase-order"].phase.purchase_orders).toHaveLength(1);
+      expect(out.default_stage).toBe("purchase-order");
+
+      // po.read cannot open it, because no such permission exists to hold.
+      const viaPo = withDetail({ rfq: ["read"], po: ["read"] });
+      expect(viaPo.stages.find((s) => s.key === "purchase-order").can_read).toBe(false);
+    });
+
+    test("te.read opens only the technical stage", () => {
+      const out = withDetail({ rfq: ["read"], te: ["read"] });
+      const byKey = Object.fromEntries(out.stages.map((s) => [s.key, s]));
+      expect(byKey["technical"].can_read).toBe(true);
+      expect(byKey["negotiation-award"].can_read).toBe(false);
+      expect(byKey["purchase-order"].can_read).toBe(false);
+    });
+
+    test("an approver named by policy alone can read the stage they must decide on", () => {
+      // No module role at all — the approval policy is the only thing putting
+      // this decision in front of them. Mirrors the ARC awarding stage.
+      const out = shapeRfqLifecycle(summary({
+        current_stage: "AWAITING_PO", current_phase: "purchase_order",
+        phases: [
+          { key: "rfq_approval", label: "RFQ Approval", status: "completed" },
+          { key: "technical", label: "Technical", status: "skipped" },
+          { key: "commercial", label: "Commercial", status: "completed" },
+          { key: "purchase_order", label: "Purchase Order", status: "current",
+            approval_instances: [{ id: 5, status: "PENDING", can_user_approve: true }] },
+        ],
+      }), { permissions: { rfq: ["read"] } });
+
+      const po = out.stages.find((s) => s.key === "purchase-order");
+      expect(po.can_read).toBe(true);
+      expect(po.phase.approval_instances).toHaveLength(1);
+    });
+
+    test("admin on a resource opens its stage", () => {
+      const out = withDetail({ rfq: ["read"], awarding: ["admin"] });
+      expect(out.stages.find((s) => s.key === "purchase-order").can_read).toBe(true);
+    });
   });
 
   test("passes through permissions and current_status", () => {
@@ -103,6 +223,10 @@ describe("GET /rfq/:rfqId/lifecycle", () => {
   let publishedId, draftId, tenderId;
 
   beforeAll(async () => {
+    // The route is acl([2, 8]) now — the payload carries the approver matrix,
+    // so vendors are kept off it entirely. Shared fixtures leave user_type NULL
+    // (tests/fixtures/users.js:31), so give this buyer a production-shaped type.
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
     client = await httpClient(BUYER);
     await db.tx(async (t) => {
       const pub = await makeRfqVisibleToDashboard(t, {
@@ -130,6 +254,7 @@ describe("GET /rfq/:rfqId/lifecycle", () => {
   afterAll(async () => {
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1)`, [rfqIds]);
     await cleanupRfqs(db, rfqIds);
+    await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = $1`, [BUYER]);
   });
 
   it("returns the 4 timeline stages + a default_stage + RFQ-scoped permissions", async () => {
@@ -168,6 +293,7 @@ describe("GET /rfq/:rfqId/lifecycle — REMOVED approver pass-through", () => {
   const inserted2 = { rfqIds: [], instanceIds: [], stepIds: [], approverIds: [] };
 
   afterEach(async () => {
+    await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = $1`, [CREATOR]);
     if (inserted2.approverIds.length) {
       await db.none(`DELETE FROM tbl_approval_step_approvers WHERE id = ANY($1::int[])`, [inserted2.approverIds]);
       inserted2.approverIds = [];
@@ -240,6 +366,7 @@ describe("GET /rfq/:rfqId/lifecycle — REMOVED approver pass-through", () => {
     );
     inserted2.approverIds.push(removedRow.id);
 
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [CREATOR]);
     const client = await httpClient(CREATOR);
     const res = await client.get(`/api/v1/rfq/${rfq_id}/lifecycle`);
     expect(res.status).toBe(200);

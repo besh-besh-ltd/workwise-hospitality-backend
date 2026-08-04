@@ -7973,6 +7973,21 @@ const rfqController = {
         return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
       }
 
+      // Tenant guard — the same one the sibling /rfq/lifecycle-summary/:rfqId
+      // already applies. This payload is not metadata: it carries the full
+      // approver matrix (names, emails, designations and approval comments),
+      // evaluator names, action-holder emails, vendor identities and prices.
+      // Without this the endpoint computed `permissions` below and then never
+      // gated on the result, so any authenticated user — a vendor included —
+      // could walk RFQ ids and read another tenant's approval chain.
+      if (userId) {
+        try { await assertCanReadParentRfq(userId, rfqId); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
       const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
       let permissions;
@@ -18073,6 +18088,17 @@ getClauses: async (req, res) => {
       }
 
       if (error.message?.includes('Cannot act on instance')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
+        });
+      }
+
+      // The RFQ published before this approval was decided, so the decision is
+      // moot (see the guard in submitApprovalAction). That is a stale-client
+      // problem — an old tab or an old deep link — not a server fault, so it
+      // must not fall through to the 500 below.
+      if (error.message?.includes('already been published')) {
         return res.status(400).json({
           status: 0,
           message: error.message
