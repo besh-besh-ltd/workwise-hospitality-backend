@@ -34,8 +34,14 @@ const rbacModel = {
         WHERE urs.user_id = $1
           AND urs.company_id = (SELECT hospitality_company_id FROM hotel_company)
           AND (urs.hotel_id IS NULL OR urs.hotel_id = $2)
-          AND p.resource = $3
-          AND p.action = $4
+          -- ::text, not a bare enum comparison. The resource value arrives
+          -- straight from ?resource= on GET /rbac/departments
+          -- (rbacController.getDepartments), so an uncast p.resource = $3 makes
+          -- Postgres coerce the PARAMETER to resource_type and any non-label
+          -- value raises "invalid input value for enum resource_type" -- a 500
+          -- from a query string. In text space it simply matches nothing.
+          AND p.resource::text = $3
+          AND p.action::text = $4
       )
       SELECT d.id, d.title
       FROM tbl_department d
@@ -169,7 +175,10 @@ const rbacModel = {
     let paramIdx = 3;
 
     if (key) {
-      moduleFilter = `AND p.resource = $${paramIdx}`;
+      // ::text for the same reason as getDepartmentsForUserScope above: `key`
+      // is the client's ?key= on GET /rbac/my-permissions, and a bare enum
+      // comparison turns an unknown value into a 500 instead of an empty result.
+      moduleFilter = `AND p.resource::text = $${paramIdx}`;
       params.push(key);
       paramIdx++;
     }

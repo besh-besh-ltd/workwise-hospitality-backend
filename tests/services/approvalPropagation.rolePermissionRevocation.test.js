@@ -78,19 +78,23 @@ const CO_ID = 86003;     // holds the CONTROL role — the "left completely unto
 const TWO_STEP_POLICY = 66001; // A2 / Engineering — step 1 dies, step 2 must survive
 const ONE_STEP_POLICY = 66002; // A3 / Engineering — the retired step is the only one
 const COMMITTEE_POLICY = 66003; // A2 / F&B — ARC_COMMITTEE, for the resource-map test
-const ALL_POLICIES = [TWO_STEP_POLICY, ONE_STEP_POLICY, COMMITTEE_POLICY];
+const TECH_POLICY = 66004; // A3 / F&B — ARC_TECH, for the resource-map test
+const ALL_POLICIES = [TWO_STEP_POLICY, ONE_STEP_POLICY, COMMITTEE_POLICY, TECH_POLICY];
 
 // Explicit policy-step ids (+ ON CONFLICT / delete-first) so a run killed before
 // afterEach cannot leave rows that trip idx_unique_step_order next time.
 const TWO_STEP_IDS = [66101, 66102];
 const ONE_STEP_IDS = [66201];
 const COMMITTEE_STEP_IDS = [66301];
-const ALL_STEP_IDS = [...TWO_STEP_IDS, ...ONE_STEP_IDS, ...COMMITTEE_STEP_IDS];
+const TECH_STEP_IDS = [66401];
+const ALL_STEP_IDS = [...TWO_STEP_IDS, ...ONE_STEP_IDS, ...COMMITTEE_STEP_IDS, ...TECH_STEP_IDS];
 
 let ARC_READ_ID;
 let ARC_APPROVE_ID;
 let COMMITTEE_READ_ID;
 let COMMITTEE_APPROVE_ID;
+let TECH_READ_ID;
+let TECH_APPROVE_ID;
 let CONTROL_ROLE_ID;          // permissions never touched — the untouched witness
 let createdRoleIds = [];      // per-test custom roles, torn down in afterEach
 let createdInstanceIds = [];
@@ -235,6 +239,10 @@ beforeAll(async () => {
   // here; the migrations/ tree is the authority for what production carries.
   COMMITTEE_READ_ID = await ensurePermission("arc-committee", "read");
   COMMITTEE_APPROVE_ID = await ensurePermission("arc-committee", "approve");
+  // 'arc-tech' read (20260611100000) + approve (20260803110000). Both exist in
+  // the reference seed now, so these resolve rather than insert.
+  TECH_READ_ID = await ensurePermission("arc-tech", "read");
+  TECH_APPROVE_ID = await ensurePermission("arc-tech", "approve");
 
   await db.none(
     `INSERT INTO tbl_users (id, name, email, mobile, password, user_type, status, company_id)
@@ -295,6 +303,7 @@ beforeAll(async () => {
     [TWO_STEP_POLICY, IDS.hotels.A2, IDS.departments.eng, "ARC"],
     [ONE_STEP_POLICY, IDS.hotels.A3, IDS.departments.eng, "ARC"],
     [COMMITTEE_POLICY, IDS.hotels.A2, IDS.departments.fb, "ARC_COMMITTEE"],
+    [TECH_POLICY, IDS.hotels.A3, IDS.departments.fb, "ARC_TECH"],
   ];
   for (const [policyId, hotelId, deptId, entityType] of policySpecs) {
     await db.none(
@@ -580,35 +589,67 @@ describe("ARC entity types resolve against the right permission resource", () =>
     expect((await approverStatusAt(instance.id, 1, TARGET_ID)).status).toBe("REMOVED");
   });
 
-  it("leaves ARC_TECH unmapped, and the gate fails OPEN on it rather than throwing", async () => {
-    // ARC_TECH is deliberately NOT mapped. 'arc-tech' carries `evaluate` and
-    // `read` but NO `approve` (migrations 20260608100800:54 + 20260611100000:19),
-    // so mapping it would convert today's loud crash into a SILENT step-skip for
-    // every ROLE step of every future ARC_TECH policy. That needs a product
-    // decision — seed `arc-tech.approve`, or teach the gate the `evaluate` verb —
-    // not a one-line map entry.
+  it("now maps ARC_TECH to arc-tech, and the reconciler judges it on that resource", async () => {
+    // THE PRODUCT DECISION THIS TEST USED TO WAIT FOR HAS BEEN MADE.
+    // The previous version of this case asserted `ARC_TECH` was deliberately
+    // UNMAPPED, because 'arc-tech' had no `approve` row and mapping it would
+    // have turned a loud crash into a silent step-skip. It said in as many words
+    // that it should fail and be rewritten once the decision landed.
     //
-    // WHEN THAT DECISION IS MADE, THIS TEST SHOULD FAIL and be rewritten. It is
-    // here so the omission reads as a decision rather than an oversight.
-    expect(ENTITY_APPROVE_RESOURCE_MAP.ARC_TECH).toBeUndefined();
+    // It landed: migration 20260803110000 seeds `arc-tech.approve` and the
+    // system role 'ARC Technical Approver' (arc-tech.read + arc-tech.approve),
+    // mirroring RFQ's role 7 'Technical Approver'. So the resource is now
+    // complete and the mapping is safe — see arc.approvers.stageRoles.test.js
+    // for the end-to-end ROLE path.
+    expect(ENTITY_APPROVE_RESOURCE_MAP.ARC_TECH).toBe("arc-tech");
 
     const client = await httpClient(ADMIN_ID);
-    const roleId = await createRoleViaApi(client, "Role Perm Tech", [ARC_READ_ID, ARC_APPROVE_ID]);
-
-    // The defensive `::text` catalogue probe is what keeps the RECONCILER safe on
-    // an unmapped type: it never reaches the enum comparison, so it cannot throw,
-    // and it declines to retire a live step on the strength of a map hole.
-    const verdict = await roleStepPermissionVerdict(roleId, "ARC_TECH", db);
-    expect(verdict).toEqual({
-      permitted: true,
-      resource: "arc_tech",
-      reason: "RESOURCE_NOT_IN_CATALOGUE",
+    // A role holding arc.read + arc.approve is the WRONG resource for ARC_TECH:
+    // the verdict must judge it against 'arc-tech', where it holds nothing.
+    const wrongResourceRole = await createRoleViaApi(client, "Role Perm Tech Wrong", [ARC_READ_ID, ARC_APPROVE_ID]);
+    expect(await roleStepPermissionVerdict(wrongResourceRole, "ARC_TECH", db)).toEqual({
+      permitted: false,
+      resource: "arc-tech",
+      reason: "MISSING_READ_OR_APPROVE",
     });
 
-    // The same probe protects any future unmapped type, not just this one.
+    // Now the full round trip, to the same depth as the ARC_COMMITTEE case
+    // above: create → live PENDING approver → revoke → step REMOVED. Anything
+    // shallower proves the map entry but not that the pair of gates agrees on it.
+    const roleId = await createRoleViaApi(client, "Role Perm Tech", [TECH_READ_ID, TECH_APPROVE_ID]);
+    await grantRole(TARGET_ID, roleId);
+    await insertPolicySteps(TECH_POLICY, [[TECH_STEP_IDS[0], 1, "ROLE", roleId]]);
+
+    const instance = await makeInstance(TECH_POLICY, IDS.hotels.A3, "ARC_TECH");
+
+    // It gated on 'arc-tech' rather than falling back: the role holds ONLY
+    // arc-tech.read/approve, and nothing named 'arc_tech' exists in the enum at
+    // all — under the old uncast comparison this call RAISED rather than
+    // producing a step. A surviving PENDING approver proves both.
+    expect((await approverStatusAt(instance.id, 1, TARGET_ID)).status).toBe("PENDING");
+    expect(await roleStepPermissionVerdict(roleId, "ARC_TECH", db)).toMatchObject({
+      permitted: true,
+      resource: "arc-tech",
+      reason: "OK",
+    });
+
+    // Revocation reaches it — creation gate and reconciliation gate agree.
+    expect((await updateRoleViaApi(client, roleId, [TECH_READ_ID])).status).toBe(200);
+    expect((await approverStatusAt(instance.id, 1, TARGET_ID)).status).toBe("REMOVED");
+
+    const steps = await stepsOf(instance.id);
+    expect(steps.map((s) => [s.step_order, s.status])).toEqual([[1, "REMOVED"]]);
+    expect((await auditTrail(instance.id)).map((a) => a.action)).toEqual(["STEP_REMOVED"]);
+
+    // The defensive `::text` catalogue probe still protects genuinely unmapped
+    // types: it never reaches the enum comparison, so it cannot throw, and it
+    // declines to retire a live step on the strength of a map hole.
     const unknown = await roleStepPermissionVerdict(roleId, "SOME_NEW_ENTITY", db);
-    expect(unknown.permitted).toBe(true);
-    expect(unknown.reason).toBe("RESOURCE_NOT_IN_CATALOGUE");
+    expect(unknown).toEqual({
+      permitted: true,
+      resource: "some_new_entity",
+      reason: "RESOURCE_NOT_IN_CATALOGUE",
+    });
   });
 });
 

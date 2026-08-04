@@ -115,6 +115,12 @@ MIGRATIONS=(
   # exists so a database rebuilt from this set gets the REMOVED mechanism.
   # Touches only the pre-arc-2.0 tbl_approval_* tables, so it is order-free.
   "approvals|20260803100000_approval_mid_flight_propagation.sql"
+  # ── Phase G: the missing ARC approver half ──
+  # arc-tech.approve / arc-comm.approve keys + the two ARC approver system roles
+  # + the arc.read row the legacy 'ARC Approver' role has always been missing.
+  # Must run AFTER 20260608100800 (enum labels + roles) and 20260611100000
+  # (arc-tech.read / arc-comm.read, which the new roles are granted alongside).
+  "rbac|20260803110000_arc_stage_approver_permissions.sql"
 )
 
 DRY_RUN=0

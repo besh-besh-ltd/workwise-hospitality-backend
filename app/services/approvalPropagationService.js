@@ -481,23 +481,45 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  *
  * ── WHY THIS FAILS OPEN ON AN UNKNOWN RESOURCE ──
  * `tbl_permissions.resource` is the `resource_type` ENUM, and
- * ENTITY_APPROVE_RESOURCE_MAP does not cover every entity type — ARC_TECH and
- * ARC_COMMITTEE fall back to `entity_type.toLowerCase()`, which is not even a
- * member of the enum (see the note at generalModel.js:27-31). Two consequences:
+ * ENTITY_APPROVE_RESOURCE_MAP still does not cover every entity type —
+ * ARC_AMENDMENT and INDENT, for instance, fall back to
+ * `entity_type.toLowerCase()`, which yields `arc_amendment` / `indent`, neither
+ * of them enum members. (ARC_TECH and ARC_COMMITTEE WERE in that group; both are
+ * mapped now — see the resource table on ENTITY_APPROVE_RESOURCE_MAP in
+ * generalModel.js.) A "false" for an unmapped resource says nothing about the
+ * role — it says the map has a hole.
  *
- *   1. `roleHasReadAndApprovePermission(role, 'arc_tech')` would THROW
- *      (`invalid input value for enum resource_type`), not return false;
- *   2. a "false" for an unmapped resource says nothing about the role. It says
- *      the map has a hole.
+ * `roleHasReadAndApprovePermission` no longer RAISES on such a value: it casts
+ * the column (`p.resource::text = $2`) so an unknown resource returns false.
+ * That fixed a 500 at creation time, but it does not make "false" meaningful
+ * here. Mid-flight, acting on a meaningless false would DESTROY a live step and
+ * advance an instance nobody approved — strictly worse than withholding an
+ * approval that was never collected.
  *
- * Creation can afford to fail closed on that hole — declining to create a step
- * merely withholds an approval that was never collected. Mid-flight the same
- * verdict would DESTROY a live step and advance an instance nobody approved,
- * which is the strictly worse outcome. So the catalogue is probed first (cast to
- * text so an unknown value cannot raise), and an entity type whose resource has
- * no permission rows at all is left alone and logged.
+ * ── TWO DISTINCT FAIL-OPEN REASONS, AND WHY THE SECOND ONE EXISTS ──
+ * The catalogue is probed first, and a "false" is only trusted when the
+ * catalogue can actually EXPRESS the requirement — i.e. when BOTH
+ * `<resource>.read` and `<resource>.approve` rows exist:
  *
- * @returns {{permitted: boolean, resource: string, reason: string}}
+ *   RESOURCE_NOT_IN_CATALOGUE   neither row exists (e.g. 'indent',
+ *                               'arc_amendment'). The map has a hole.
+ *   RESOURCE_CANNOT_SATISFY_GATE  one of the two exists, the other does not.
+ *
+ * The second case is not hypothetical: production's `tender` resource holds
+ * ONLY `approve` — there is no `tender.read` row anywhere — so
+ * `roleHasReadAndApprovePermission(<any role>, 'tender')` can never return true
+ * for any role that will ever exist. A "false" there is a statement about the
+ * PERMISSION CATALOGUE, not about the role, exactly like the first case; the
+ * only difference is that a partial resource used to slip past the "is it in the
+ * catalogue at all" probe and get treated as a real verdict. Downstream, that
+ * meant the policy-save guard rejected every ROLE step of every TENDER policy
+ * with a 400 an admin could not resolve through any UI, because `tender.read`
+ * does not exist and therefore cannot be granted to anything.
+ *
+ * Both fail OPEN and both log at warn: silence would trade a visible error for
+ * the invisible under-approval this whole branch exists to eliminate.
+ *
+ * @returns {{permitted: boolean, resource: string, reason: string, missing_actions?: string[]}}
  */
 export async function roleStepPermissionVerdict(roleId, entityType, t = db, cache = null) {
   const resource = ENTITY_APPROVE_RESOURCE_MAP[entityType] || String(entityType || '').toLowerCase();
@@ -505,15 +527,28 @@ export async function roleStepPermissionVerdict(roleId, entityType, t = db, cach
   if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
 
   let verdict;
-  const inCatalogue = await t.oneOrNone(
-    `SELECT 1 FROM tbl_permissions
-      WHERE resource::text = $1 AND action IN ('read', 'approve') LIMIT 1`,
+  // DISTINCT: 'arc' and 'tender' each carry a duplicate `approve` row in
+  // production, so a plain count would mis-read a partial resource as complete.
+  const rows = await t.any(
+    `SELECT DISTINCT p.action::text AS action
+       FROM tbl_permissions p
+      WHERE p.resource::text = $1 AND p.action IN ('read', 'approve')`,
     [resource]
   );
+  const present = new Set(rows.map(r => r.action));
+  const missingActions = ['read', 'approve'].filter(a => !present.has(a));
 
-  if (!inCatalogue) {
+  if (present.size === 0) {
     verdict = { permitted: true, resource, reason: 'RESOURCE_NOT_IN_CATALOGUE' };
     logger.warn(`[RolePermGate] entity_type ${entityType} maps to resource '${resource}', which has no read/approve rows in tbl_permissions — role ${roleId} left in place (failing OPEN; a map hole is not evidence about the role)`);
+  } else if (missingActions.length > 0) {
+    verdict = { permitted: true, resource, reason: 'RESOURCE_CANNOT_SATISFY_GATE', missing_actions: missingActions };
+    logger.warn(
+      `[RolePermGate] entity_type ${entityType} maps to resource '${resource}', which is MISSING ${missingActions.map(a => `${resource}.${a}`).join(' + ')} ` +
+      `in tbl_permissions — NO role can ever pass the read+approve gate for it, so role ${roleId} is left in place (failing OPEN). ` +
+      `Consequence: ROLE-source steps on ${entityType} policies WILL be dropped when an approval instance is created, and an instance ` +
+      `whose every step is dropped is born APPROVED with nobody having approved it. Seed the missing permission row to fix this properly.`
+    );
   } else {
     const ok = await roleHasReadAndApprovePermission(roleId, resource, t);
     verdict = { permitted: ok, resource, reason: ok ? 'OK' : 'MISSING_READ_OR_APPROVE' };

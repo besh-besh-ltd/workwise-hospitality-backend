@@ -19,68 +19,61 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // MR is the call-off/demand path — role approvers resolve against the same
   // 'awarding' permission as POs (USER-source steps bypass this map).
   'MR': 'awarding',
-  // ARC_NEGOTIATION: ROLE-source approver steps resolve against the 'arc-comm'
-  // resource. SEE THE WARNING BELOW — 'arc-comm' has no `approve` row, so this
-  // mapping does NOT do what the comment here used to claim.
+  // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
+  // approver steps resolve against 'arc-comm', which now carries both `read`
+  // (20260611100000) and `approve` (20260803110000). The qualifying system role
+  // is 'ARC Negotiation Approver'.
+  //
+  // History, because the previous comment here was wrong in three ways and the
+  // wrongness was load-bearing: it claimed 'arc-comm' already had read+approve
+  // (it had no `approve` row at all until 20260803110000), claimed parity with
+  // ARC_COMMITTEE (which maps to a different resource entirely), and described
+  // unmapped types as "silently dropped" (they threw — see the guard note on
+  // roleHasReadAndApprovePermission). Between the mapping being added and the
+  // `approve` row existing, EVERY ROLE step of an ARC_NEGOTIATION policy was
+  // dropped at creation, and an instance with every step dropped is born
+  // APPROVED — a negotiation round live with nobody having approved it.
   'ARC_NEGOTIATION': 'arc-comm',
+  // ARC_TECH: sign-off on the technical evaluation. 'arc-tech' carries `read`
+  // (20260611100000) and `approve` (20260803110000). The qualifying system role
+  // is 'ARC Technical Approver'.
+  //
+  // DELIBERATELY NOT the evaluator roles: 'ARC Tech Evaluator' holds
+  // arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass this
+  // gate — an evaluator must never be able to approve their own evaluation.
+  // Same for 'ARC Commercial Evaluator' against 'arc-comm' above.
+  'ARC_TECH': 'arc-tech',
   // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
   // BOTH `read` and `approve` (seeded together in
-  // migrations/20260608100800_permissions_seed.sql:56-57), so this is the one
-  // ARC v2 entity type whose resource is modelled the way
-  // roleHasReadAndApprovePermission expects. Mapped 2026-08-03; see below for
-  // why ARC_TECH is deliberately NOT mapped alongside it.
+  // migrations/20260608100800_permissions_seed.sql:56-57) — the only ARC v2
+  // stage resource that was modelled correctly from the start. Mapped 2026-08-03.
   'ARC_COMMITTEE': 'arc-committee',
 
-  // ── UNMAPPED ENTITY TYPES: THE REAL FAILURE MODE ───────────────────────────
-  // The NOTE that used to sit here said unmapped ARC types "silently drop those
-  // approvers". That is WRONG, and the correction matters because the two
-  // failure modes need opposite responses.
+  // ── THE FULL ARC-STAGE PERMISSION PICTURE (as of 20260803110000) ───────────
+  //   arc            read/create/admin (20260608100800) + approve (legacy)
+  //   arc-tech       evaluate (20260608100800) + read (20260611100000)
+  //                                            + approve (20260803110000)
+  //   arc-comm       evaluate (20260608100800) + read (20260611100000)
+  //                                            + approve (20260803110000)
+  //   arc-committee  read + approve (20260608100800)
   //
-  // `tbl_permissions.resource` is the `resource_type` ENUM. The fallback
-  // `entity_type.toLowerCase()` yields UNDERSCORES (`arc_tech`), while the enum
-  // members use HYPHENS (`arc-tech`). So `p.resource = $2` in
-  // roleHasReadAndApprovePermission does not return false — Postgres raises
-  // `invalid input value for enum resource_type`, and the whole
-  // createApprovalInstance call FAILS. An unmapped ARC entity type does not
-  // quietly lose its approvers; it cannot create an approval at all.
+  // The evaluate/approve split is the point: `evaluate` is doing the scoring,
+  // `approve` is signing it off, and no system role holds both verbs on the same
+  // resource. See migrations/20260803110000_arc_stage_approver_permissions.sql.
   //
-  // Loud and fail-closed, so nothing is silently under-approved — but it is
-  // still a crash, and it is why ARC_COMMITTEE is now mapped above.
+  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
+  // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES
+  // (`arc_amendment`) while the resource_type enum members use HYPHENS. Before
+  // the `::text` cast added to roleHasReadAndApprovePermission that comparison
+  // RAISED `invalid input value for enum resource_type` and took down the whole
+  // createApprovalInstance call — a 500 in the middle of submitTechEval. It now
+  // returns false, so an unknown resource skips the step instead of crashing.
   //
-  // ── ARC_TECH IS NOT MAPPED, ON PURPOSE ─────────────────────────────────────
-  // Mapping ARC_TECH → 'arc-tech' would convert that crash into a SILENT
-  // STEP-SKIP, which is strictly worse: every ROLE step of every future
-  // ARC_TECH policy would be dropped at creation with no error anywhere.
-  //
-  // The reason is that 'arc-tech' has no `approve` row to match. Verified
-  // 2026-08-03 by sweeping the whole migrations/ tree — these are ALL the rows
-  // that exist for the ARC-stage resources:
-  //
-  //   arc-committee  read (20260608100800:56) + approve (20260608100800:57)  ✅
-  //   arc-tech       evaluate (20260608100800:54) + read (20260611100000:19) ❌ no approve
-  //   arc-comm       evaluate (20260608100800:55) + read (20260611100000:20) ❌ no approve
-  //
-  // This is a MODELLING mismatch, not a missing row to backfill. The tech and
-  // commercial stages are authored as `evaluate` resources — that is what
-  // 20260611100000 is about ("adds the 'read' action so admins can grant
-  // view-only access to Technical / Commercial WITHOUT granting scoring
-  // rights"). roleHasReadAndApprovePermission only knows the verb `approve`.
-  // Mapping ARC_TECH therefore needs a product decision first: either seed
-  // `arc-tech.approve`, or teach the gate that some entity types qualify on
-  // `evaluate`. Do not add the mapping without one.
-  //
-  // ── KNOWN CONSEQUENCE FOR ARC_NEGOTIATION (pre-existing, unfixed) ──────────
-  // 'arc-comm' has the same shape as 'arc-tech', so the ARC_NEGOTIATION mapping
-  // above is ALREADY producing the silent skip described here: every ROLE-source
-  // step of an ARC_NEGOTIATION policy resolves against `arc-comm.read` +
-  // `arc-comm.approve`, the latter does not exist, and the step is dropped at
-  // creation. Untouched here because fixing it is the same product decision as
-  // ARC_TECH — but it is live today, not hypothetical.
-  //
-  // Verified read-only on production 2026-08-03: ZERO ARC_TECH and ZERO
-  // ARC_COMMITTEE policies exist (`ARC` itself has 2 policies / 3 ROLE steps /
-  // 1 USER step), so the ARC_COMMITTEE mapping added above changes no existing
-  // approval — it only removes a crash from a future one.
+  // A skipped step is recoverable; a mid-transaction 500 is not. But a skip is
+  // still not free: skip every step and the instance is born APPROVED. That is
+  // why createApprovalInstance now records WHY each step was skipped in
+  // `metadata.approval_diagnostics` and logs the zero-step case at error level —
+  // adding an entity type here without its permission rows is loud, not silent.
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -1985,6 +1978,23 @@ export async function deletePolicySteps(approval_policy_id, t = db) {
  * Checks if a role has BOTH read and approve permissions for a given resource.
  * Used to filter ROLE-based policy steps — a role with only `approve` (no `read`)
  * cannot meaningfully act, since it has no access to view the entity.
+ *
+ * ── WHY `p.resource::text = $2` AND NOT `p.resource = $2` ──────────────────
+ * `tbl_permissions.resource` is the `resource_type` ENUM. Comparing it against a
+ * text parameter makes Postgres coerce the PARAMETER to the enum, so a value
+ * that is not an enum label RAISES `invalid input value for enum resource_type`
+ * instead of matching nothing. Callers reach this with
+ * `ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()`, and
+ * that fallback produces underscores (`arc_tech`, `arc_amendment`) where the
+ * enum uses hyphens — so any unmapped entity type turned a step-eligibility
+ * question into a thrown error that aborted the entire createApprovalInstance
+ * transaction, i.e. a 500 in the middle of submitTechEval / round creation.
+ *
+ * Casting the COLUMN to text moves the comparison into text space: an unknown
+ * resource simply matches no row and the function returns false. A skipped step
+ * is recoverable and is now recorded (see the zero-step diagnostics in
+ * createApprovalInstance); a mid-transaction crash is not. Behaviour for every
+ * real enum label is unchanged — the labels are their own text representation.
  */
 export async function roleHasReadAndApprovePermission(roleId, resource, t = db) {
   if (!roleId || !resource) return false;
@@ -1993,9 +2003,9 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
     FROM tbl_role_permissions rp
     JOIN tbl_permissions p ON rp.permission_id = p.id
     WHERE rp.role_id = $1
-      AND p.resource = $2
+      AND p.resource::text = $2
       AND p.action IN ('read', 'approve')
-  `, [roleId, resource]);
+  `, [roleId, String(resource)]);
   return Number(result?.cnt || 0) === 2;
 }
 
@@ -2277,6 +2287,46 @@ export async function createApprovalInstance({
     const resolvedSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
+    // ── WHY EVERY SKIP IS RECORDED ────────────────────────────────────────────
+    // Both `continue`s below drop a policy step, and dropping EVERY step makes
+    // the instance auto-approve at section 6. That has two causes which look
+    // identical afterwards but mean opposite things:
+    //   (a) the initiator was the only resolved approver  → by design (section 8)
+    //   (b) no role qualified / no user resolved          → misconfiguration
+    // Production already holds 51 instances born APPROVED with current_step = 0
+    // (39 TECHNICAL, 10 RFQ, 2 PO) and nothing on the row says which. So the
+    // reason for each skip is captured here and written to the instance's
+    // metadata; the auto-approve BEHAVIOUR is unchanged (that has live blast
+    // radius and needs its own decision) — only its legibility is.
+    const skippedSteps = [];
+    const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
+    const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
+
+    // Probed lazily (only when a ROLE gate actually fails) and at most once, so
+    // the common path pays nothing. It answers a question the bare `hasBoth`
+    // false cannot: was this role NOT GRANTED something, or does the permission
+    // catalogue simply not contain it? Production's `tender` resource holds only
+    // `approve` — no `tender.read` row exists — so no role could ever pass that
+    // gate, and reporting it as "the role lacks permissions" would send whoever
+    // triages this instance looking for an RBAC edit that cannot be made.
+    let gateCatalogue = null;
+    const probeGateCatalogue = async () => {
+      if (gateCatalogue) return gateCatalogue;
+      // DISTINCT because 'arc' and 'tender' each carry a duplicate `approve` row.
+      const rows = await t.any(
+        `SELECT DISTINCT p.action::text AS action
+           FROM tbl_permissions p
+          WHERE p.resource::text = $1 AND p.action IN ('read', 'approve')`,
+        [String(roleResource)]
+      );
+      const present = new Set(rows.map(r => r.action));
+      gateCatalogue = {
+        present,
+        missing: ['read', 'approve'].filter(a => !present.has(a))
+      };
+      return gateCatalogue;
+    };
+
     // All entities are department-scoped. The department_id is always used for filtering.
     const resolveDeptId = department_id;
 
@@ -2285,9 +2335,35 @@ export async function createApprovalInstance({
       // for this entity type. A role with only `approve` cannot meaningfully act since
       // it has no access to view the entity.
       if (policyStep.approver_source_type === 'ROLE') {
-        const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase();
-        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, resource, t);
-        if (!hasBoth) continue;
+        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, roleResource, t);
+        if (!hasBoth) {
+          const { present, missing } = await probeGateCatalogue();
+          // Three genuinely different faults, three different fixes:
+          //   ENTITY_TYPE_NOT_IN_RESOURCE_MAP — add the entity type to the map
+          //   RESOURCE_CANNOT_SATISFY_GATE    — seed the missing permission row
+          //   ROLE_LACKS_READ_AND_APPROVE     — grant the role the permission
+          let reason;
+          if (present.size === 0) {
+            reason = resourceIsMapped ? 'RESOURCE_NOT_IN_CATALOGUE' : 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP';
+          } else if (missing.length > 0) {
+            reason = 'RESOURCE_CANNOT_SATISFY_GATE';
+          } else {
+            reason = 'ROLE_LACKS_READ_AND_APPROVE';
+          }
+          skippedSteps.push({
+            policy_step_id: policyStep.id,
+            step_order: policyStep.step_order,
+            approver_source_type: policyStep.approver_source_type,
+            approver_source_id: policyStep.approver_source_id,
+            resource: roleResource,
+            resource_mapped: resourceIsMapped,
+            reason,
+            ...(missing.length > 0 && present.size > 0
+              ? { missing_permissions: missing.map(a => `${roleResource}.${a}`) }
+              : {})
+          });
+          continue;
+        }
       }
 
       // Resolve approvers for this step (pass process_id so the user's process
@@ -2296,6 +2372,13 @@ export async function createApprovalInstance({
 
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {
+        skippedSteps.push({
+          policy_step_id: policyStep.id,
+          step_order: policyStep.step_order,
+          approver_source_type: policyStep.approver_source_type,
+          approver_source_id: policyStep.approver_source_id,
+          reason: 'NO_APPROVERS_RESOLVED'
+        });
         continue;
       }
 
@@ -2309,27 +2392,66 @@ export async function createApprovalInstance({
       });
     }
 
+    // Diagnostics travel on the instance itself so anyone reading an
+    // auto-approved row later can tell case (a) from case (b) without
+    // reconstructing the policy as it stood at creation time. `skipped_steps` is
+    // written even when the instance ends up PENDING — a partially-dropped
+    // policy is worth seeing too.
+    const diagnostics = {
+      policy_step_count: policySteps.length,
+      resolved_step_count: resolvedSteps.length,
+      skipped_steps: skippedSteps,
+      recorded_at: new Date().toISOString()
+    };
+    const instanceMetadata = { ...(metadata || {}) };
+    if (skippedSteps.length > 0) {
+      instanceMetadata.approval_diagnostics = diagnostics;
+    }
+
     // 5. Create the approval instance only after all approvers are known
     const instance = await t.one(`
       INSERT INTO tbl_approval_instances
       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
       VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
-    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(metadata)]);
+    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(instanceMetadata)]);
 
-    // 6. Handle case where all steps were skipped (creator was only approver for all steps)
+    // 6. Every step was dropped — CASE (b). Nobody was ever asked to approve
+    // this. The instance is still auto-approved (unchanged behaviour), but it is
+    // now labelled as such and logged at error level, because "approved" here
+    // means "no approver could be found", not "the approver was the initiator".
     if (resolvedSteps.length === 0) {
+      const autoApproval = {
+        case: 'NO_APPROVER_RESOLVED',
+        legitimate: false,
+        detail: 'Every policy step was dropped at creation — no role qualified and/or no user resolved. Nobody approved this instance.',
+        ...diagnostics
+      };
       await t.none(`
         UPDATE tbl_approval_instances
-        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
         WHERE id = $1
-      `, [instance.id]);
+      `, [instance.id, JSON.stringify({ auto_approval: autoApproval, approval_diagnostics: diagnostics })]);
+
+      logger.error(
+        `[ApprovalAutoApprove] MISCONFIGURATION — instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) ` +
+        `was born APPROVED because ALL ${policySteps.length} policy step(s) were dropped at creation. Nobody approved it. ` +
+        `Skipped: ${JSON.stringify(skippedSteps)}`
+      );
 
       return {
-        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        instance: {
+          ...instance,
+          status: 'APPROVED',
+          current_step: 0,
+          metadata: { ...instanceMetadata, auto_approval: autoApproval, approval_diagnostics: diagnostics }
+        },
         policy: { id: policy.id, entity_type: policy.entity_type },
         steps: [],
         totalSteps: 0,
-        autoApproved: true
+        autoApproved: true,
+        autoApprovalCase: 'NO_APPROVER_RESOLVED',
+        skippedSteps
       };
     }
 
@@ -2400,19 +2522,63 @@ export async function createApprovalInstance({
     const firstPendingStep = instanceSteps.find(s => s.status === 'PENDING');
 
     if (!firstPendingStep) {
-      // ALL steps auto-completed (initiator was sole/ANY-rule approver everywhere)
+      // ALL steps auto-completed — CASE (a). `stepAutoCompleted` is only ever set
+      // when `isInitiatorInStep`, so reaching here means the initiator was a
+      // resolved approver on every surviving step and either the rule was ANY or
+      // they were the sole approver. That is the by-design short-circuit, and the
+      // audit trail carries a real APPROVE row per step to back it up — unlike
+      // case (b) above, which has none.
+      // `legitimate` is gated on NOTHING having been dropped, not merely on
+      // reaching this branch. The mixed shape — policy [ROLE: unqualified,
+      // USER: initiator] — lands here with one step silently gone AND the
+      // initiator self-approving what remains. Calling that `legitimate: true`
+      // at info level would give the worst combination in the file the quietest
+      // treatment, and `legitimate` is precisely the boolean an alert would key
+      // off. The `case` stays INITIATOR_ONLY (the a/b taxonomy is about which
+      // exit was taken); the flag and the log level carry the contamination.
+      const cleanShortCircuit = skippedSteps.length === 0;
+      const autoApproval = {
+        case: 'INITIATOR_ONLY',
+        legitimate: cleanShortCircuit,
+        dropped_step_count: skippedSteps.length,
+        detail: cleanShortCircuit
+          ? 'Every resolved step auto-completed because the initiator was the (or an ANY-rule) approver on it.'
+          : `The initiator auto-approved every SURVIVING step, but ${skippedSteps.length} policy step(s) were dropped at creation and nobody approved those. This is not the by-design short-circuit.`,
+        ...diagnostics
+      };
       await t.none(`
         UPDATE tbl_approval_instances
-        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
         WHERE id = $1
-      `, [instance.id]);
+      `, [instance.id, JSON.stringify({ auto_approval: autoApproval })]);
+
+      if (cleanShortCircuit) {
+        logger.info(
+          `[ApprovalAutoApprove] instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) auto-approved: ` +
+          `initiator ${initiated_by} was the approver on all ${instanceSteps.length} resolved step(s)`
+        );
+      } else {
+        logger.warn(
+          `[ApprovalAutoApprove] MIXED — instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) auto-approved by ` +
+          `initiator ${initiated_by} on ${instanceSteps.length} surviving step(s), but ${skippedSteps.length} policy step(s) were DROPPED at creation ` +
+          `and nobody approved those. Skipped: ${JSON.stringify(skippedSteps)}`
+        );
+      }
 
       return {
-        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        instance: {
+          ...instance,
+          status: 'APPROVED',
+          current_step: 0,
+          metadata: { ...instanceMetadata, auto_approval: autoApproval }
+        },
         policy: { id: policy.id, entity_type: policy.entity_type },
         steps: instanceSteps,
         totalSteps: instanceSteps.length,
-        autoApproved: true
+        autoApproved: true,
+        autoApprovalCase: 'INITIATOR_ONLY',
+        skippedSteps
       };
     }
 
@@ -2453,11 +2619,22 @@ export async function createApprovalInstance({
       logError('Error sending approval step notification', emailError);
     }
 
+    // A PENDING instance can still have lost steps to the ROLE gate or to
+    // zero-resolution; surface them so callers/tests can see a partially
+    // dropped policy, not only a fully dropped one.
+    if (skippedSteps.length > 0) {
+      logger.warn(
+        `[ApprovalAutoApprove] instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) is PENDING but ` +
+        `${skippedSteps.length} of ${policySteps.length} policy step(s) were dropped at creation: ${JSON.stringify(skippedSteps)}`
+      );
+    }
+
     return {
       instance,
       policy: { id: policy.id, entity_type: policy.entity_type },
       steps: instanceSteps,
-      totalSteps: instanceSteps.length
+      totalSteps: instanceSteps.length,
+      skippedSteps
     };
   };
 
