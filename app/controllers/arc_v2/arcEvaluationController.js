@@ -14,6 +14,7 @@ import {
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import axios from 'axios';
 import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -1051,7 +1052,7 @@ export async function saveAllocation(req, res) {
     const lifecycle = await arcLifecycleModel.assertStageWritable(arcId, 'commercial', null, { blockLocked: true });
     const result = await db.tx(async (t) => {
       const item = await t.oneOrNone(`SELECT * FROM tbl_arc_item WHERE id = $1 AND arc_id = $2`, [item_id, arcId]);
-      if (!item) return bad(res, 404, 'item not found', 2);
+      if (!item) return deferBad(404, 'item not found', 2);
       // Empty allocations[] = explicit CLEAR — the item returns to pending.
       // Non-empty allocations must reconcile to the indicative qty and only
       // name vendors the (approved) technical evaluation qualified.
@@ -1059,7 +1060,7 @@ export async function saveAllocation(req, res) {
         const sum = allocations.reduce((s, a) => s + Number(a.allocated_qty || 0), 0);
         const target = Number(item.indicative_qty);
         if (Math.abs(sum - target) > 1e-6) {
-          return bad(res, 400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
+          return deferBad(400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
         }
         // §5.2 — universal (ARC-wide) knockout applies to EVERY item, incl.
         // clause-less ones. Check it FIRST so a globally-failed vendor gets the
@@ -1068,14 +1069,14 @@ export async function saveAllocation(req, res) {
         const universallyFailed = await arcEvalModel.universallyFailedVendorIds(arcId, t);
         const univFailedAlloc = allocations.find((a) => universallyFailed.has(Number(a.awarded_vendor_id)));
         if (univFailedAlloc) {
-          return bad(res, 400, `Vendor ${univFailedAlloc.awarded_vendor_id} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
+          return deferBad(400, `Vendor ${univFailedAlloc.awarded_vendor_id} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract`);
         }
         const qualifiedMap = await arcEvalModel.qualifiedVendorsByItem(arcId, t);
         const allowed = qualifiedMap[Number(item_id)];
         if (allowed) {
           const notQualified = allocations.find((a) => !allowed.includes(Number(a.awarded_vendor_id)));
           if (notQualified) {
-            return bad(res, 400, `Vendor ${notQualified.awarded_vendor_id} is not technically qualified for this item`);
+            return deferBad(400, `Vendor ${notQualified.awarded_vendor_id} is not technically qualified for this item`);
           }
         }
       }
@@ -1104,6 +1105,7 @@ export async function saveAllocation(req, res) {
     });
     // respond after commit — a response sent inside the tx races the
     // caller's next request against uncommitted state
+    if (isDeferred(result)) return sendDeferred(res, result);
     if (result && result.__data) {
       if (result.__commEvalOpened) {
         await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_OPENED, actorId: userId, payload: {} });
@@ -1124,12 +1126,12 @@ export async function finalizeCommEval(req, res) {
     await arcLifecycleModel.assertStageWritable(arcId, 'commercial', null, { blockLocked: true });
     const result = await db.tx(async (t) => {
       const arc = await arcModel.getById(arcId, t);
-      if (!arc) return bad(res, 404, 'ARC not found', 2);
+      if (!arc) return deferBad(404, 'ARC not found', 2);
       const items = await arcModel.listItems(arcId, t);
       const comm = await arcEvalModel.getCommEval(arcId, t);
-      if (!comm) return bad(res, 400, 'Commercial evaluation has not been started');
+      if (!comm) return deferBad(400, 'Commercial evaluation has not been started');
       if (comm.status === 'finalized') {
-        return res.status(409).json({
+        return deferJson(409, {
           status: 0, code: 'STAGE_IMMUTABLE',
           message: 'Commercial evaluation is already finalized',
         });
@@ -1149,7 +1151,7 @@ export async function finalizeCommEval(req, res) {
         }
       }
       if (itemsMissing.length > 0) {
-        return bad(res, 400, `Allocation incomplete for ${itemsMissing.length} item(s)`);
+        return deferBad(400, `Allocation incomplete for ${itemsMissing.length} item(s)`);
       }
       // Defense against stale awards saved before a technical re-evaluation:
       // every awarded vendor must still be qualified for their item AND must not
@@ -1161,7 +1163,7 @@ export async function finalizeCommEval(req, res) {
       // even on clause-bearing items (§5.3 — covers clause-less items too).
       const univFailedAward = awards.find((a) => universallyFailed.has(Number(a.awarded_vendor_id)));
       if (univFailedAward) {
-        return bad(res, 400,
+        return deferBad(400,
           `Vendor ${univFailedAward.awarded_vendor_id} failed the ARC-wide (universal) technical clauses and is excluded from the entire rate contract — re-allocate before finalizing`);
       }
       const staleAward = awards.find((a) => {
@@ -1169,7 +1171,7 @@ export async function finalizeCommEval(req, res) {
         return allowed && !allowed.includes(Number(a.awarded_vendor_id));
       });
       if (staleAward) {
-        return bad(res, 400,
+        return deferBad(400,
           `Vendor ${staleAward.awarded_vendor_id} is no longer technically qualified for item ${staleAward.arc_item_id} — re-allocate before finalizing`);
       }
 
@@ -1217,6 +1219,7 @@ export async function finalizeCommEval(req, res) {
         __autoApproved: engineResult.autoApproved === true,
       };
     });
+    if (isDeferred(result)) return sendDeferred(res, result);
     if (result && result.__data) {
       // Auto-approved at creation (finalizer is also the committee approver):
       // executeApprovalAction never runs, so fire the post-approval effects
@@ -1254,7 +1257,7 @@ export async function sendBackCommEvalToTech(req, res) {
     }
     const result = await db.tx(async (t) => {
       const comm = await arcEvalModel.getCommEval(arcId, t);
-      if (!comm) return bad(res, 404, 'comm eval not found', 2);
+      if (!comm) return deferBad(404, 'comm eval not found', 2);
 
       // Once the committee has approved, contracts exist — irreversible here.
       const committee = await t.oneOrNone(
@@ -1264,7 +1267,7 @@ export async function sendBackCommEvalToTech(req, res) {
         [arcId]
       );
       if (committee?.status === 'APPROVED') {
-        return res.status(409).json({
+        return deferJson(409, {
           status: 0, code: 'STAGE_IMMUTABLE',
           message: 'The committee has already approved — contracts are generated and the award is immutable',
         });
@@ -1276,7 +1279,7 @@ export async function sendBackCommEvalToTech(req, res) {
       // still be bounced back to technical.
       const hasTechClauses = await arcEvalModel.arcHasTechClauses(arcId, t);
       if (!hasTechClauses) {
-        return bad(res, 400, 'Technical evaluation was not performed for this contract — there is nothing to send it back to.');
+        return deferBad(400, 'Technical evaluation was not performed for this contract — there is nothing to send it back to.');
       }
 
       // A PENDING committee vote becomes moot when the evaluator pulls the
@@ -1312,6 +1315,7 @@ export async function sendBackCommEvalToTech(req, res) {
       return { __data: { comm_evaluation: updated } };
     });
     // respond after commit — never inside the tx
+    if (isDeferred(result)) return sendDeferred(res, result);
     if (result && result.__data) {
       await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK_TO_TECH, actorId: userId, payload: { reason } });
       return ok(res, result.__data, 'Sent back to technical evaluation');
@@ -1349,16 +1353,16 @@ async function resolveClarification(req, res, mode) {
 
     const result = await db.tx(async (t) => {
       const cl = await arcContractClarificationModel.getById(clarificationId, t);
-      if (!cl || Number(cl.arc_id) !== arcId) return bad(res, 404, 'Clarification not found', 2);
-      if (cl.status !== 'open') return bad(res, 409, `Clarification already ${cl.status}`);
+      if (!cl || Number(cl.arc_id) !== arcId) return deferBad(404, 'Clarification not found', 2);
+      if (cl.status !== 'open') return deferBad(409, `Clarification already ${cl.status}`);
       const comm = await arcEvalModel.getCommEval(arcId, t);
-      if (!comm) return bad(res, 400, 'Commercial evaluation has not been started');
+      if (!comm) return deferBad(400, 'Commercial evaluation has not been started');
 
       let oldValue = cl.old_value ?? null;
       let newValue = oldValue;
       if (mode === 'revise') {
         if (req.body?.value === undefined || req.body?.value === null || req.body?.value === '') {
-          return bad(res, 400, 'A revised value is required');
+          return deferBad(400, 'A revised value is required');
         }
         // Scoped to THIS vendor × item only — never touches any other award.
         const applied = await arcEvalModel.updateAwardField(
@@ -1427,6 +1431,7 @@ async function resolveClarification(req, res, mode) {
       }
       return { __data: { clarification: updated, open_remaining: remainingOpen }, __reapprove: reapprove, __vendorId: cl.vendor_id };
     });
+    if (isDeferred(result)) return sendDeferred(res, result);
     if (result && result.__data) {
       // Auto-approved committee (initiator is the configured approver): fire the
       // post-approval effects (regenerate the affected contract) AFTER commit.

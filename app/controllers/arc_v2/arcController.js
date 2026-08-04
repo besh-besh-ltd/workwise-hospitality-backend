@@ -209,7 +209,12 @@ export async function createDraft(req, res) {
       type: body.type || 'product',
       created_by: userId,
     };
-    return db.tx(async (t) => {
+    // Respond-AFTER-commit: build the payload inside the tx, send it only once
+    // the transaction has committed. Responding inside db.tx() races the COMMIT —
+    // the client can read back the new ARC on another connection and 404 on it,
+    // and a failing COMMIT can no longer surface as a 500 because the headers
+    // are already on the wire. Mirrors terminate() / verifyOtp().
+    const created = await db.tx(async (t) => {
       // Mint the FY-scoped serial inside the tx that creates the ARC row, so a
       // rollback never leaves the per-FY counter bumped without a matching ARC
       // (skipped serial on rollback is fine; a duplicate would not be).
@@ -231,8 +236,9 @@ export async function createDraft(req, res) {
         actorId: userId, payload: { items: createdItems.length },
         txContext: t,
       });
-      return ok(res, { arc, items: createdItems }, 'ARC draft created');
+      return { arc, items: createdItems };
     });
+    return ok(res, created, 'ARC draft created');
   } catch (err) {
     logger.error({ err }, '[arcController.createDraft]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -674,15 +680,20 @@ export async function withdraw(req, res) {
       }
     }
 
-    await db.tx(async (t) => {
-      const updated = await arcModel.setStatus(id, 'draft', {}, t);
+    // Respond-AFTER-commit: return the updated row from the tx and send the HTTP
+    // response only once it has committed. Responding inside db.tx() races the
+    // COMMIT, so a client (or a test on a second connection) that re-reads the
+    // ARC immediately can still see the pre-commit status. Mirrors terminate().
+    const updated = await db.tx(async (t) => {
+      const u = await arcModel.setStatus(id, 'draft', {}, t);
       await logArcEvent({
         arcId: id, eventType: ARC_EVENT_TYPES.WITHDRAWN,
         actorId: userId, payload: { previous_status: arc.status },
         txContext: t,
       });
-      ok(res, { arc: updated }, 'ARC withdrawn back to draft');
+      return u;
     });
+    ok(res, { arc: updated }, 'ARC withdrawn back to draft');
     // Notify invited vendors post-commit
     await notifyArcEvent({ arcId: id, eventType: ARC_EVENT_TYPES.WITHDRAWN, actorId: userId, payload: {} });
   } catch (err) {

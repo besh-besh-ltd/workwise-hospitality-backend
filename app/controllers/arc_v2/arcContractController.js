@@ -701,14 +701,17 @@ export async function declineContract(req, res) {
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     if (contract.vendor_id !== vendorUserId) return bad(res, 403, 'Not the contracted vendor');
-    await db.tx(async (t) => {
-      const updated = await arcContractModel.setStatus(id, 'declined', { terminated_reason: reason }, t);
+    // respond AFTER the commit — never inside db.tx, or the caller can read
+    // pre-commit state on its next request (mirrors verifyOtp above).
+    const updated = await db.tx(async (t) => {
+      const row = await arcContractModel.setStatus(id, 'declined', { terminated_reason: reason }, t);
       await logArcEvent({
         arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED,
         actorId: vendorUserId, payload: { contract_id: id, reason }, txContext: t,
       });
-      ok(res, { contract: updated }, 'Contract declined');
+      return row;
     });
+    ok(res, { contract: updated }, 'Contract declined');
     // Notify creator + comm evaluators (BOTH email) post-commit
     await notifyArcEvent({ arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED, actorId: vendorUserId, payload: {} });
   } catch (err) {

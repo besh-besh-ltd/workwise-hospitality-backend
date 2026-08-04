@@ -303,7 +303,11 @@ export async function createDraft(req, res) {
       });
     }
 
-    return db.tx(async (t) => {
+    // Respond-AFTER-commit: responding inside db.tx() puts the 200 on the wire
+    // before pg-promise issues COMMIT, so a client that immediately re-reads the
+    // new MR can 404 on it (the read lands on another pooled connection), and a
+    // failing COMMIT can no longer be reported as a 500.
+    const created = await db.tx(async (t) => {
       const mr = await mrModel.createDraft({
         mr_number: generateMrNumber(), // always server-generated (audit CO17)
         title,
@@ -321,8 +325,9 @@ export async function createDraft(req, res) {
       for (const it of validatedItems) {
         inserted.push(await mrModel.addItem(mr.id, it, t));
       }
-      return ok(res, { mr, items: inserted }, 'MR draft created');
+      return { mr, items: inserted };
     });
+    return ok(res, created, 'MR draft created');
   } catch (err) {
     logger.error({ err }, '[mrController.createDraft]');
     return bad(res, 500, err.message || 'Internal error', 3);

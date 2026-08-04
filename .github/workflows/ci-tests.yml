@@ -81,7 +81,7 @@ jobs:
   # no shard runs at all, rather than a green build with untested code.
   # ---------------------------------------------------------------------------
   shards:
-    name: Shard coverage
+    name: Static gates + shard coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -97,6 +97,19 @@ jobs:
 
       - name: Verify every suite is covered exactly once
         run: node scripts/check-shard-coverage.mjs
+
+      # Responding from inside a db.tx()/db.task() callback flushes the response
+      # before pg-promise issues COMMIT: the client can 404 on a record it just
+      # created (its re-read lands on another pooled connection and sees the
+      # pre-commit snapshot), and a failing COMMIT can no longer be reported
+      # because the headers are already sent. It is also what made arc-core-2
+      # fail intermittently with a rotating victim suite.
+      #
+      # Like the shard-coverage gate above this needs no dependencies and no
+      # database, so it stays in this ~10s fail-fast job rather than costing an
+      # npm ci. See scripts/check-response-in-tx.mjs for the scoping rules.
+      - name: Verify no HTTP response is emitted inside a transaction
+        run: node scripts/check-response-in-tx.mjs
 
       - name: Build job matrix
         id: plan
@@ -263,10 +276,10 @@ jobs:
     steps:
       - name: Assert every shard succeeded
         run: |
-          echo "shard coverage: ${{ needs.shards.result }}"
+          echo "static gates:  ${{ needs.shards.result }}"
           echo "test shards:    ${{ needs.test.result }}"
           if [ "${{ needs.shards.result }}" != "success" ]; then
-            echo "::error::Shard coverage check failed — the patterns in tests/shards.json no longer partition the suite."
+            echo "::error::A static gate failed — either tests/shards.json no longer partitions the suite, or an HTTP response is emitted inside a db.tx()/db.task() callback. Open the 'Static gates + shard coverage' job for which."
             exit 1
           fi
           if [ "${{ needs.test.result }}" != "success" ]; then
