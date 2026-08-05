@@ -74,6 +74,7 @@ import {
 import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
+import { buildNegotiationMetrics } from '../../services/quoteComparisonMetrics.js';
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
@@ -10202,6 +10203,27 @@ const rfqController = {
           .json({ status: 2, message: 'Quote comparison not found.' })
           .end();
       }
+
+      // Negotiation metrics for the summary export. Attached here rather than
+      // computed in the browser because "how much did negotiation move" has
+      // several competing definitions in this codebase, and only the ladder
+      // behind this helper is asserted to the rupee against the negotiation
+      // dashboard — a downloaded summary that disagreed with the dashboard on
+      // screen would be worse than no number at all.
+      //
+      // ⚠️ SECURITY: buildNegotiationMetrics applies no scope of its own. The
+      // id is safe here ONLY because it has already cleared the 4-axis
+      // assertCanReadParentRfq gate above. Do not hoist this call.
+      //
+      // Never fail the page for a metrics problem: the comparison sheet is the
+      // point of this endpoint, the summary export is an extra.
+      try {
+        view.negotiation_metrics = await buildNegotiationMetrics(req.params.id);
+      } catch (metricsErr) {
+        logError('quote comparison negotiation metrics failed', metricsErr);
+        view.negotiation_metrics = null;
+      }
+
       return res.status(200).json(view).end();
     } catch (error) {
       logError('getQuoteComparisonView failed', error);
