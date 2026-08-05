@@ -631,6 +631,31 @@ describe("Negotiation list-view — RFQ-first parent grouping", () => {
       .not.toContain(`RFQ:${rfq.STALE_APPROVAL.id}`);
   });
 
+  test("the deadline rule applies at ROUND grain too, not just parent", async () => {
+    // The round grain is what drives action_required on the rounds table, and
+    // therefore where a row routes — to the approve page or the read-only round
+    // page. Parent-grain coverage alone would leave the headline fix untested
+    // on the exact path the UI uses.
+    const res = await listView(clientA, { groupBy: "round", limit: 200 });
+    expect(res.status).toBe(200);
+
+    const rows = res.body.data.rows || [];
+    const staleRoundIds = new Set(rounds.STALE_APPROVAL.map(Number));
+    const stale = rows.filter((r) => staleRoundIds.has(Number(r.round_id)));
+
+    expect(stale.length).toBeGreaterThan(0);
+    for (const r of stale) {
+      expect(r.action_required).toBe(false);
+      expect(r.action_label).toBeNull();
+    }
+
+    // …while the open-window round on the same fixture family still is flagged.
+    const liveRoundIds = new Set(rounds.PENDING_LEGACY.map(Number));
+    const live = rows.filter((r) => liveRoundIds.has(Number(r.round_id)));
+    expect(live.length).toBeGreaterThan(0);
+    for (const r of live) expect(r.action_required).toBe(true);
+  });
+
   test("needs_attention and closed partition the set", async () => {
     const res = await listView(clientA);
     const c = res.body.data.tab_counts;
