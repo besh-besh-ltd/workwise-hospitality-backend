@@ -3,7 +3,7 @@ import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct,
   NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION,
-  NEG_PARENT_STATE_ORDER } from '../../models/negotiationModel.js';
+  NEG_PARENT_STATE_ORDER, NEG_PARENT_ACTION_STATES } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
@@ -2956,7 +2956,20 @@ const NegotiationController = {
       const groupBy = body.groupBy === 'round' ? 'round' : 'parent';
       const isParent = groupBy === 'parent';
       const BUCKETS = Object.values(NEG_STATE);
-      const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      // Grouped tabs. The strip carried eight sentence-length labels and wrapped
+      // onto a second line; per user the median number of NON-EMPTY status tabs
+      // is 2 (max 5). Membership is NEG_PARENT_ACTION_STATES — the same split
+      // the parent roll-up already uses — so the two can never drift.
+      //
+      // awaiting_approval and open_with_vendors read as 0 parents right now but
+      // are deliberately INSIDE needs_attention: they are short-lived (median
+      // dwell 133 min and 258 min) and are the only two states that ever need a
+      // human. Grouping them is fine; dropping them would not be.
+      const GROUPS = {
+        needs_attention: (b) => NEG_PARENT_ACTION_STATES.has(b),
+        closed: (b) => !NEG_PARENT_ACTION_STATES.has(b),
+      };
+      const tab = ['all', 'for_me', ...Object.keys(GROUPS), ...BUCKETS].includes(body.tab) ? body.tab : 'all';
       // Orthogonal to `tab`: a round's state and whether it waits on the caller
       // are different questions, so the toggle composes with any status tab.
       const needsMyApproval = body.needsMyApproval === true || body.needsMyApproval === 'true';
@@ -3063,13 +3076,19 @@ const NegotiationController = {
       }
 
       // 4. tab counts — over the searched set, so they sum to `all`.
-      const tab_counts = { all: rows.length, for_me: 0 };
+      const tab_counts = { all: rows.length, for_me: 0, needs_attention: 0, closed: 0 };
       for (const k of BUCKETS) tab_counts[k] = 0;
-      for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
+      for (const r of rows) {
+        tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+        if (GROUPS.needs_attention(r._bucket)) tab_counts.needs_attention++;
+        else tab_counts.closed++;
+        if (r._isMyAction) tab_counts.for_me++;
+      }
 
       // 5. tab scope.
       const byTab = tab === 'all' ? rows
         : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
+        : GROUPS[tab] ? rows.filter((r) => GROUPS[tab](r._bucket))
         : rows.filter((r) => r._bucket === tab);
       const tabRows = needsMyApproval ? byTab.filter((r) => r._isMyAction) : byTab;
 

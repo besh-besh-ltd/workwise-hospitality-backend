@@ -2148,12 +2148,27 @@ const negotiationModel = {
       `SELECT DISTINCT (${roundIdExpr}) AS round_id
          FROM tbl_approval_instances i
          ${negotiationModel.negotiationInstanceRoundJoinSql('i')}
+         -- The RESOLVED round, not _nrd. roundIdExpr's CASE prefers _nrm (the
+         -- legacy metadata shape) whenever the instance carries an rfq_id, and
+         -- _nrd can match an unrelated round whose id collides with the
+         -- entity_id. Reading _nrd.end_date directly gets the wrong round's
+         -- deadline on exactly the legacy shape this query exists to support.
+         LEFT JOIN tbl_negotiation_rounds _nrr ON _nrr.id = (${roundIdExpr})
          JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
          JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
         WHERE i.entity_type IN ('NEGOTIATION','ARC_NEGOTIATION') AND i.status = 'PENDING'
           AND (${roundIdExpr}) = ANY($1::int[])
           AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
-          AND sa.removed_at IS NULL`,
+          AND sa.removed_at IS NULL
+          -- The round's vendor window must still be open. ApproveRoundPage
+          -- already filters end_date > now, so without the same condition
+          -- here a round whose window closed renders "Approval needed" and
+          -- then lands the approver on "No rounds awaiting your approval" —
+          -- and approving it would publish a round to vendors who can no
+          -- longer answer. Six production instances leaked into exactly that
+          -- state in March 2026 when the deadline cron ended the round without
+          -- cancelling its approval instance.
+          AND (_nrr.end_date IS NULL OR _nrr.end_date > (now() AT TIME ZONE 'UTC'))`,
       [roundIds.map(Number), Number(userId)]
     );
     return rows.map((r) => Number(r.round_id)).filter(Number.isFinite);
@@ -2801,7 +2816,18 @@ const negotiationModel = {
           WHERE i.entity_type IN ('NEGOTIATION','ARC_NEGOTIATION') AND i.status = 'PENDING'
             AND sa.approver_user_id = $2 AND sa.status = 'PENDING'
             AND sa.removed_at IS NULL
+            -- The round's vendor window must still be open. ApproveRoundPage
+            -- filters end_date > now, so without the same condition here a
+            -- parent renders "Approval needed" and then lands the approver on
+            -- "No rounds awaiting your approval" — and approving would publish
+            -- a round to vendors who can no longer answer. Six production
+            -- instances leaked into that state in March 2026 when the deadline
+            -- cron ended the round without cancelling its approval instance.
+            AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC'))
          UNION
+         -- NO deadline condition on this branch. NEGOTIATION_QUOTE instances
+         -- are product-level award approvals with no round window at all —
+         -- 118 of them are live in production across 10 approvers.
          SELECT 'RFQ:' || rp.rfq_id AS parent_key
            FROM tbl_approval_instances i
            JOIN tbl_rfq_products rp ON rp.id = i.entity_id
