@@ -3500,6 +3500,27 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
           WHERE r.id = i.entity_id AND r.is_published = 1
         )
       )
+      -- Same rule the negotiation module applies: a round whose vendor window
+      -- has closed can no longer be approved (ApproveRoundPage filters
+      -- end_date > now, and approving would publish to vendors who can no
+      -- longer answer). Without this the header badge counts an approval the
+      -- module itself correctly reports as "nothing needs you", and clicking
+      -- it lands on an empty page.
+      --
+      -- The round id resolves the same two ways as everywhere else: entity_id
+      -- directly, or metadata->>'round_id' for the legacy shape.
+      AND NOT (
+        i.entity_type IN ('NEGOTIATION', 'ARC_NEGOTIATION')
+        AND EXISTS (
+          SELECT 1 FROM tbl_negotiation_rounds nr
+          WHERE nr.id = COALESCE(
+                  CASE WHEN (i.metadata->>'round_id') ~ '^[0-9]+$'
+                       THEN (i.metadata->>'round_id')::int END,
+                  i.entity_id)
+            AND nr.end_date IS NOT NULL
+            AND nr.end_date <= (now() AT TIME ZONE 'UTC')
+        )
+      )
     GROUP BY i.entity_type
   `;
 

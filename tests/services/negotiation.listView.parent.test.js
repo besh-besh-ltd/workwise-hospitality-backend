@@ -244,10 +244,17 @@ describe("Negotiation list-view — RFQ-first parent grouping", () => {
       ownedPolicy = true;
     }
 
-    const seedPendingApproval = async (key, { removed }) => {
+    // `endDate` defaults to the FUTURE. It used to be PAST(1), which made this
+    // fixture accidentally identical to the stale shape below — a round whose
+    // vendor window has closed but whose approval instance was never
+    // cancelled. Approving such a round would publish it to vendors who can no
+    // longer answer, so the flag now excludes them. These two fixtures guard
+    // the metadata-shape resolution and the removed-approver rule, both of
+    // which are orthogonal to the deadline.
+    const seedPendingApproval = async (key, { removed, endDate = D(5) }) => {
       await seedRfq(key, { hc: HC_A, hotel: A1, dept: PROC, title: key });
       const roundId = await addRound(key, {
-        status: "ENDED", endDate: PAST(1), withQuote: true, createdAgoDays: 2,
+        status: "ENDED", endDate, withQuote: true, createdAgoDays: 2,
       });
       const inst = await db.one(
         `INSERT INTO tbl_approval_instances
@@ -279,6 +286,10 @@ describe("Negotiation list-view — RFQ-first parent grouping", () => {
     };
     await seedPendingApproval("PENDING_LEGACY", { removed: false });
     await seedPendingApproval("REMOVED_APPROVER", { removed: true });
+    // The stale shape: PENDING approval on a round whose window closed. Six of
+    // these leaked into production in March 2026 when the deadline cron ended
+    // the round without cancelling its instance.
+    await seedPendingApproval("STALE_APPROVAL", { removed: false, endDate: PAST(1) });
 
     clientA = await httpClient(U_A);
     clientA1 = await httpClient(U_A1);
@@ -600,6 +611,85 @@ describe("Negotiation list-view — RFQ-first parent grouping", () => {
     const forMe = await listView(clientA, { tab: "for_me" });
     expect(forMe.body.data.rows.map((r) => String(r.parent_key)))
       .not.toContain(`RFQ:${rfq.REMOVED_APPROVER.id}`);
+  });
+
+  test("a PENDING approval on a round whose window has closed does NOT need my action", async () => {
+    // The approve page filters `end_date > now`, so without the same condition
+    // here the row renders "Approval needed" and then lands the approver on
+    // "No rounds awaiting your approval". Six production instances did exactly
+    // that for five months.
+    const res = await listView(clientA);
+    const row = res.body.data.rows.find(
+      (r) => String(r.parent_key) === `RFQ:${rfq.STALE_APPROVAL.id}`
+    );
+    expect(row).toBeDefined();
+    expect(row.action_required).toBe(false);
+    expect(row.action_label).toBeNull();
+
+    const forMe = await listView(clientA, { tab: "for_me" });
+    expect(forMe.body.data.rows.map((r) => String(r.parent_key)))
+      .not.toContain(`RFQ:${rfq.STALE_APPROVAL.id}`);
+  });
+
+  test("the deadline rule applies at ROUND grain too, not just parent", async () => {
+    // The round grain is what drives action_required on the rounds table, and
+    // therefore where a row routes — to the approve page or the read-only round
+    // page. Parent-grain coverage alone would leave the headline fix untested
+    // on the exact path the UI uses.
+    const res = await listView(clientA, { groupBy: "round", limit: 200 });
+    expect(res.status).toBe(200);
+
+    const rows = res.body.data.rows || [];
+    const staleRoundIds = new Set(rounds.STALE_APPROVAL.map(Number));
+    const stale = rows.filter((r) => staleRoundIds.has(Number(r.round_id)));
+
+    expect(stale.length).toBeGreaterThan(0);
+    for (const r of stale) {
+      expect(r.action_required).toBe(false);
+      expect(r.action_label).toBeNull();
+    }
+
+    // …while the open-window round on the same fixture family still is flagged.
+    const liveRoundIds = new Set(rounds.PENDING_LEGACY.map(Number));
+    const live = rows.filter((r) => liveRoundIds.has(Number(r.round_id)));
+    expect(live.length).toBeGreaterThan(0);
+    for (const r of live) expect(r.action_required).toBe(true);
+  });
+
+  test("needs_attention and closed partition the set", async () => {
+    const res = await listView(clientA);
+    const c = res.body.data.tab_counts;
+
+    expect(c.needs_attention).toEqual(expect.any(Number));
+    expect(c.closed).toEqual(expect.any(Number));
+    expect(c.needs_attention + c.closed).toBe(c.all);
+    // The groups are exactly the action states and their complement.
+    expect(c.needs_attention).toBe(c.awaiting_approval + c.open_with_vendors + c.ready_for_decision);
+    expect(c.closed).toBe(c.concluded + c.no_vendor_response + c.lapsed + c.cancelled);
+  });
+
+  test("the seven per-state counts still sum to all", async () => {
+    const c = (await listView(clientA)).body.data.tab_counts;
+    const seven = ["awaiting_approval", "open_with_vendors", "ready_for_decision",
+                   "concluded", "no_vendor_response", "lapsed", "cancelled"];
+    expect(seven.reduce((n, k) => n + Number(c[k] || 0), 0)).toBe(c.all);
+  });
+
+  test("selecting a group returns exactly its rows", async () => {
+    const c = (await listView(clientA)).body.data.tab_counts;
+    const res = await listView(clientA, { tab: "needs_attention", limit: 100 });
+
+    expect(res.body.data.total).toBe(c.needs_attention);
+    for (const r of res.body.data.rows) {
+      expect(["awaiting_approval", "open_with_vendors", "ready_for_decision"]).toContain(r.neg_status);
+    }
+  });
+
+  test("a group tab composes with the status facet", async () => {
+    const res = await listView(clientA, {
+      tab: "closed", filters: { status: ["cancelled"] }, limit: 100,
+    });
+    for (const r of res.body.data.rows) expect(r.neg_status).toBe("cancelled");
   });
 
   test("needsMyApproval composes with a status tab rather than replacing it", async () => {
