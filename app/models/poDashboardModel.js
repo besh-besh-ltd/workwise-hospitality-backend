@@ -932,7 +932,7 @@ export async function getPODetailFull(po_id, scope) {
 
   // Full lifecycle audit trail (internal approval → vendor → invoice →
   // dispatch → GRN → completion) + an enriched activity feed.
-  const { workflow, activity } = await buildAuditTrail(po, docRows);
+  const { workflow, activity } = await buildAuditTrail(po, docRows, { isVendorView: !!scope.vendorId });
 
   // Whose turn is it right now? Strictly: is the LOGGED-IN user a pending
   // approver of the CURRENT pending step. The detail page gates its action card
@@ -1202,6 +1202,43 @@ function buildKeyDates(po, milestones) {
   return dates;
 }
 
+// An approver row left at PENDING on a step that has ALREADY CLOSED will never
+// be acted on — but the row keeps saying "PENDING" forever, which is what made
+// the panel claim a finished level was still waiting on six people. Measured on
+// stage: 736 PENDING rows sit under APPROVED/ANY steps (the "ANY ONE rule
+// satisfied by someone else" case the client asked about) and 139 under
+// CANCELLED steps. This resolves that into the real outcomes; the raw `status`
+// is still emitted untouched beside it so nothing that reads the stored value
+// changes meaning.
+//
+// Exported because the RFQ lifecycle page's PO tiles count the same people from
+// the same rows (buildPODetail in rfqModel.js). One copy of the rule server-side
+// means the two pages cannot disagree about whether a given person is waiting.
+//
+// The return value is CLOSED over exactly six tokens:
+//   APPROVED · REJECTED · REMOVED · PENDING · NOT_REQUIRED · NOT_REACHED
+// Nothing else can come out of here, whatever is in the column. That matters
+// because the renderers switch on this value and label anything they do not
+// recognise "Awaiting" — the one claim that is wrong for every row this
+// function exists to reclassify. tbl_approval_step_approvers' CHECK currently
+// permits only PENDING/APPROVED/REJECTED/REMOVED, but the STEP table's CHECK
+// already permits SKIPPED and the engine writes it there, so SKIPPED is the
+// value most likely to arrive here next; it means "did not need to act".
+export function effectiveApproverStatus(rowStatus, stepStatus, rule) {
+  if (rowStatus === "APPROVED" || rowStatus === "REJECTED" || rowStatus === "REMOVED") return rowStatus;
+  if (rowStatus === "SKIPPED") return "NOT_REQUIRED";
+  // Everything else — PENDING, NULL, or a value added to the enum after this
+  // was written — is resolved from the step it sits on rather than passed
+  // through. An unrecognised token reaching a renderer is the failure mode.
+  if (stepStatus === "REJECTED" || stepStatus === "CANCELLED") return "NOT_REACHED";
+  // ALL + APPROVED + a PENDING row does not occur (an ALL step cannot close
+  // with someone outstanding), so it deliberately keeps the raw value rather
+  // than being asserted into a bucket we cannot justify.
+  if (stepStatus === "APPROVED") return rule === "ALL" ? "PENDING" : "NOT_REQUIRED";
+  if (stepStatus === "SKIPPED" || stepStatus === "REMOVED") return "NOT_REQUIRED";
+  return "PENDING";
+}
+
 // Full lifecycle audit trail for a PO: internal approval steps, then the
 // downstream vendor/logistics chain (sent → accepted/rejected → dispatched →
 // goods received → invoice → completed). Each node carries done/current/pending
@@ -1209,7 +1246,16 @@ function buildKeyDates(po, milestones) {
 // some downstream nodes have null `when`). Returns BOTH the timeline (workflow)
 // and a chronological, human-readable activity feed. All timestamps are ISO;
 // the frontend formats them.
-async function buildAuditTrail(po, docRows = []) {
+// `isVendorView` redacts the per-level approver roster. A vendor is an external
+// counterparty: the buyer's internal approval chain — who sits at each level,
+// their designation and department, when each acted, why one was removed, and
+// above all the free-text comment each approver wrote to the next — is none of
+// their business. The vendor still gets the trail's shape (level, status, when)
+// so "where is my PO" keeps working; they simply do not get the people.
+//
+// This mirrors the `comparison` gate in getPODetailFull, which suppresses
+// competitors' quote amounts on the same path for the same reason.
+async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) {
   const workflow = [];
   const activity = [];
   let stepCounter = 0;
@@ -1281,8 +1327,19 @@ async function buildAuditTrail(po, docRows = []) {
     // call site being fixed while another is missed. This query result is
     // only consumed locally in the loop right below, so there is no other
     // consumer whose shape we'd be breaking.
+    // SECOND aggregate (`roster`): the SAME approver rows with NO status
+    // predicate, so REMOVED tombstones survive. It exists because the trail
+    // used to collapse a whole level to one `by` name plus "N approvers" —
+    // a level with 7 approvers rendered a single name, and a removed approver
+    // vanished with no trace of when/why. `roster` is the only thing that
+    // feeds the new `approvers[]` node field; NOTHING derived (the `by` actor,
+    // the `policy` count, the rejecter/acted/pending lookups, the summary
+    // counts) reads it. That split is deliberate — see the paragraph above.
     const steps = await db.any(
       `SELECT st.id, st.step_order, st.status, st.completed_at,
+              st.decision_rule,
+              COALESCE(st.added_mid_flight, false)   AS added_mid_flight,
+              COALESCE(st.removed_mid_flight, false) AS removed_mid_flight,
               COALESCE(
                 JSON_AGG(
                   JSON_BUILD_OBJECT('user_id', sa.approver_user_id, 'name', u.name,
@@ -1290,19 +1347,42 @@ async function buildAuditTrail(po, docRows = []) {
                   ORDER BY sa.id
                 ) FILTER (WHERE sa.id IS NOT NULL AND sa.status <> 'REMOVED'),
                 '[]'
-              ) AS approvers
+              ) AS approvers,
+              COALESCE(
+                JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'user_id', sa.approver_user_id, 'name', u.name,
+                    'designation', u.designation, 'department', dept.title,
+                    'status', sa.status, 'acted_at', sa.acted_at,
+                    'removed_at', sa.removed_at, 'removal_reason', sa.removal_reason,
+                    'added_mid_flight', COALESCE(sa.added_mid_flight, false)
+                  )
+                  ORDER BY sa.id
+                ) FILTER (WHERE sa.id IS NOT NULL),
+                '[]'
+              ) AS roster
        FROM tbl_approval_instance_steps st
        LEFT JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = st.id
        LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
+       LEFT JOIN LATERAL (
+         SELECT d.title
+           FROM tbl_user_department ud
+           JOIN tbl_department d ON d.id = ud.department_id
+          WHERE ud.user_id = u.id
+          ORDER BY ud.id DESC
+          LIMIT 1
+       ) dept ON TRUE
        WHERE st.approval_instance_id = $1
        GROUP BY st.id
        ORDER BY st.step_order ASC`,
       [po.approval_instance_id]
     );
     // Fetch the approve/reject actions up-front so we can attach a rejecting
-    // approver's reason (the action comment) to the rejected step node.
+    // approver's reason (the action comment) to the rejected step node, and
+    // (below) each approver's own comment to their roster entry.
     const actionRows = await db.any(
-      `SELECT a.action, a.comment, a.created_at, a.approver_user_id, u.name AS actor_name
+      `SELECT a.action, a.comment, a.created_at, a.approver_user_id,
+              a.approval_instance_step_id, u.name AS actor_name
        FROM tbl_approval_actions a
        JOIN tbl_users u ON u.id = a.approver_user_id
        WHERE a.approval_instance_id = $1 AND a.action IN ('APPROVE', 'REJECT')
@@ -1317,6 +1397,28 @@ async function buildAuditTrail(po, docRows = []) {
         if (a.approver_user_id != null && a.comment) rejectCommentByUser.set(a.approver_user_id, a.comment);
       }
     }
+    // Per-approver comments for the roster, built off the rows already fetched
+    // above (no extra query). Keyed by step FIRST: the same person legitimately
+    // sits on more than one level (PO 29's instance 253 has Vineet I on both L1
+    // and L3), so an instance-wide user match would smear one level's comment
+    // across the other. `approval_instance_step_id` is nullable, so users whose
+    // actions carry no step id at all fall back to their latest instance-wide
+    // comment rather than silently losing it. Rows arrive created_at ASC, so
+    // the last write per key is the latest action.
+    const commentByStepUser = new Map();
+    const commentByUser = new Map();
+    const usersWithStepScopedActions = new Set();
+    for (const a of actionRows) {
+      if (a.approver_user_id == null) continue;
+      commentByUser.set(a.approver_user_id, a.comment || null);
+      if (a.approval_instance_step_id != null) {
+        usersWithStepScopedActions.add(a.approver_user_id);
+        commentByStepUser.set(`${a.approval_instance_step_id}:${a.approver_user_id}`, a.comment || null);
+      }
+    }
+    // The PENDING-row-on-a-closed-step rule lives at module scope
+    // (effectiveApproverStatus) because the RFQ lifecycle page counts the same
+    // rows through it.
 
     for (const st of steps) {
       const approvers = Array.isArray(st.approvers) ? st.approvers : [];
@@ -1330,6 +1432,11 @@ async function buildAuditTrail(po, docRows = []) {
       else if (st.status === "APPROVED") nodeStatus = "done";
       else if (st.status === "SKIPPED") nodeStatus = "skipped";
       else if (st.status === "REMOVED") nodeStatus = "removed";
+      // CANCELLED had no branch and fell through to "pending", so a cancelled
+      // level rendered as though it were still queued behind an approver. 84
+      // such steps exist on stage. Same defect class as the REMOVED-tombstone
+      // bug above; the frontend needs a matching `cancelled` case.
+      else if (st.status === "CANCELLED") nodeStatus = "cancelled";
       else if (st.status === "PENDING" && instance && st.step_order === instance.current_step && instance.status === "PENDING")
         nodeStatus = "current";
       else nodeStatus = "pending";
@@ -1348,6 +1455,76 @@ async function buildAuditTrail(po, docRows = []) {
         policy = reason; // surface the rejection reason as the node's sub-note
       }
 
+      // ---- the full per-level roster (additive; everything above is unchanged)
+      // Ordered acted-first (by acted_at asc), then still-live PENDING rows in
+      // sa.id order, then tombstones last. The frontend re-sorts for display,
+      // but the PDF and any other consumer inherits this order.
+      const roster = Array.isArray(st.roster) ? st.roster : [];
+      const rank = (a) => (a.status === "REMOVED" ? 2 : a.acted_at ? 0 : 1);
+      const approverRoster = roster
+        .map((a, i) => ({ a, i }))
+        .sort((x, y) => {
+          const rx = rank(x.a);
+          const ry = rank(y.a);
+          if (rx !== ry) return rx - ry;
+          if (rx === 0) {
+            const dx = new Date(x.a.acted_at).getTime();
+            const dy = new Date(y.a.acted_at).getTime();
+            if (dx !== dy) return dx - dy;
+          }
+          return x.i - y.i; // the aggregate is ORDER BY sa.id, so this is id order
+        })
+        .map(({ a }) => {
+          const key = `${st.id}:${a.user_id}`;
+          const comment = commentByStepUser.has(key)
+            ? commentByStepUser.get(key)
+            : usersWithStepScopedActions.has(a.user_id)
+              ? null
+              : commentByUser.get(a.user_id) ?? null;
+          return {
+            user_id: a.user_id ?? null,
+            name: a.name || null,
+            designation: a.designation || null,
+            department: a.department || null,
+            status: a.status || null,
+            effective_status: effectiveApproverStatus(a.status, st.status, st.decision_rule),
+            acted_at: iso(a.acted_at),
+            comment,
+            removed_at: iso(a.removed_at),
+            // RAW snake_case token ('policy_change' | 'role_removed'). The
+            // frontend owns the human label (removalReasonLabel) — labelling it
+            // here would create a second mapping that drifts from that one.
+            removal_reason: a.removal_reason || null,
+            added_mid_flight: !!a.added_mid_flight,
+          };
+        });
+      // Counts stay on the ACTIVE-only aggregate, exactly like `by` and
+      // `policy`: a tombstone appears in `approvers[]` so the panel can explain
+      // it, but it must never move a number. `removed` is the one count that
+      // reads the full roster, and it is reported separately for that reason.
+      //
+      // The buckets count EFFECTIVE statuses, not raw ones. Counting raw made
+      // the summary contradict the roster it summarises: PO 8's L1 (ANY,
+      // APPROVED, five approvers, one acted) reported `pending: 4` while every
+      // row beside it said NOT_REQUIRED, so an export built off the summary
+      // would claim four people were holding up an order that closed in April.
+      // `approved`/`rejected` are unaffected (those statuses pass straight
+      // through); the old `pending` bucket is what splits three ways, and the
+      // five active buckets sum to total_active by construction.
+      const effectiveActive = approvers.map((a) =>
+        effectiveApproverStatus(a.status, st.status, st.decision_rule)
+      );
+      const countEffective = (v) => effectiveActive.filter((s) => s === v).length;
+      const approverSummary = {
+        total_active: approvers.length,
+        approved: countEffective("APPROVED"),
+        rejected: countEffective("REJECTED"),
+        pending: countEffective("PENDING"),
+        not_required: countEffective("NOT_REQUIRED"),
+        not_reached: countEffective("NOT_REACHED"),
+        removed: roster.filter((a) => a.status === "REMOVED").length,
+      };
+
       workflow.push({
         step: ++stepCounter,
         status: nodeStatus,
@@ -1356,19 +1533,36 @@ async function buildAuditTrail(po, docRows = []) {
         when: iso(st.completed_at),
         policy,
         reason,
+        level: st.step_order,
+        decision_rule: st.decision_rule || "ANY",
+        // Redacted wholesale on the vendor path — see the note on this
+        // function. Omitted, not emptied: an empty array would read to a client
+        // as "this level has no approvers", which is a different claim.
+        ...(isVendorView ? {} : { approvers: approverRoster, approver_summary: approverSummary }),
+        step_added_mid_flight: !!st.added_mid_flight,
+        step_removed_mid_flight: !!st.removed_mid_flight,
       });
     }
     approvalComplete = !!instance && instance.status === "APPROVED";
     approvalRejected = !!instance && instance.status === "REJECTED";
-    for (const a of actionRows) {
-      const verb = a.action === "APPROVE" ? "approved" : "rejected";
-      const note = a.comment ? ` · “${a.comment}”` : "";
-      activity.push({
-        type: a.action === "APPROVE" ? "approval" : "rejection",
-        who: a.actor_name,
-        msg: `${verb} this purchase order${note}`,
-        when: iso(a.created_at),
-      });
+    // PRE-EXISTING LEAK, closed here: these entries name a buyer-side approver
+    // and quote their free-text note verbatim ("approved this purchase order ·
+    // “Rate looks high, approving under protest”"), and the vendor PO detail
+    // page renders `activity`. Internal approval chatter is not the vendor's to
+    // read. They keep the rest of the feed — created, initiated, sent,
+    // accepted, dispatched, GRN, invoice, completed — which is the part that
+    // actually answers "where has my order got to".
+    if (!isVendorView) {
+      for (const a of actionRows) {
+        const verb = a.action === "APPROVE" ? "approved" : "rejected";
+        const note = a.comment ? ` · “${a.comment}”` : "";
+        activity.push({
+          type: a.action === "APPROVE" ? "approval" : "rejection",
+          who: a.actor_name,
+          msg: `${verb} this purchase order${note}`,
+          when: iso(a.created_at),
+        });
+      }
     }
   } else {
     approvalComplete = ["approved", "acceptance_pending", "sent", "invoice_raised", "dispatched", "GRN", "completed"].includes(status);

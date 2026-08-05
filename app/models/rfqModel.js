@@ -7,6 +7,9 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+// The PO-detail page's rule for "is this approver actually waiting on us", used
+// by the lifecycle PO tiles so both surfaces answer that question identically.
+import { effectiveApproverStatus } from './poDashboardModel.js';
 
 
 // A bare (optionally schema-qualified) SQL identifier. Table names reaching
@@ -4893,12 +4896,22 @@ LIMIT 2;
           ORDER BY qf.timestamp
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: finalization data query failed`); return []; }),
 
-        // PO data (with product names)
+        // PO data (with product names).
+        //
+        // initiated_by / approval_instance_id are joined in here rather than
+        // fetched per PO: this query is on the RFQ detail page's critical path
+        // and buildPODetail() needs both for every row, which is exactly the
+        // N+1 this join avoids. approval_instance_id is consumed internally
+        // (it picks the governing instance out of poApprovalDetails) and is
+        // not emitted.
         db.any(`
           SELECT po.id, po.po_number, po.status, po.total_value,
             u_vendor.name AS vendor_name,
             COALESCE(u_vendor_c.company_name, u_vendor.organization_name) AS vendor_company,
             po.created_at,
+            po.initiated_by AS initiated_by_id,
+            u_initiator.name AS initiated_by_name,
+            po.approval_instance_id,
             (
               SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
               FROM tbl_purchase_order_product pop
@@ -4909,6 +4922,7 @@ LIMIT 2;
           FROM tbl_rfq_purchase_order po
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.finalized_vendor_id
           LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
+          LEFT JOIN tbl_users u_initiator ON u_initiator.id = po.initiated_by
           WHERE po.rfq_id = $1
           ORDER BY po.created_at
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO data query failed`); return []; }),
@@ -5287,15 +5301,181 @@ LIMIT 2;
       };
 
       // 8. Build PO detail
+      //
+      // A PO tile used to say only who the vendor is and how much it is for —
+      // never where the order actually sits or whether the person reading it is
+      // the one holding it up. stage_label / current_actors / awaiting_me /
+      // approval answer that. All four are derived from data already in hand:
+      // poApprovalDetails above, plus two columns joined onto the PO query. No
+      // extra round-trip is issued for them.
+
+      // public.po_status → the label the tile shows. `acceptance_pending` is
+      // the vendor's court; `approved` means the vendor has already accepted
+      // (acceptPO flips acceptance_pending → approved), so it reads as "with
+      // vendor", not "awaiting acceptance".
+      const PO_STATUS_LABEL = {
+        draft: 'Draft',
+        pending_approval: 'Pending Approval',
+        acceptance_pending: 'Awaiting Vendor Acceptance',
+        approved: 'Approved',
+        rejected: 'Rejected',
+        rejected_by_vendor: 'Rejected by Vendor',
+        sent: 'Sent',
+        GRN: 'Goods Received',
+        completed: 'Completed',
+        cancelled: 'Cancelled',
+        invoice_raised: 'Invoice Raised',
+        dispatched: 'Dispatched',
+      };
+      // Statuses where the order has left the buyer and the vendor is the one
+      // fulfilling it.
+      const PO_WITH_VENDOR_STATUSES = ['sent', 'approved', 'invoice_raised', 'dispatched', 'GRN'];
+
+      // The approval instance governing a PO. Prefer the FK the PO itself
+      // carries; otherwise the newest instance pointing at it — poApprovalDetails
+      // is ordered created_at ASC, so a re-initiated PO's live instance is last.
+      const approvalInstanceForPO = (po) => {
+        const forThisPO = poApprovalDetails.filter(d => Number(d.entity_id) === Number(po.id));
+        if (!forThisPO.length) return null;
+        if (po.approval_instance_id) {
+          const exact = forThisPO.find(d => Number(d.id) === Number(po.approval_instance_id));
+          if (exact) return exact;
+        }
+        return forThisPO[forThisPO.length - 1];
+      };
+
+      // The step an instance's numbers describe.
+      //
+      // `current_step` is a LIVE pointer and is only meaningful while the
+      // instance is PENDING; the engine leaves it behind once the instance
+      // settles. On stage 203 instances carry current_step = 0 (120 APPROVED,
+      // 83 CANCELLED) and a further 5 point at a step that closed, and NO step
+      // is ever stored with step_order = 0. Six of those zeroes are PO
+      // instances — PO 8 / instance 132 is APPROVED with current_step 0 and a
+      // single step at step_order 1 — so matching on the pointer verbatim found
+      // nothing, decision_rule and every count collapsed to null/0, and the
+      // tile rendered the literal string "LEVEL 0 OF 1" with no rule and no
+      // progress. Resolve the real step instead; never emit a step_order the
+      // instance does not have.
+      const resolveReportedStep = (inst) => {
+        // getApprovalInstanceDetails orders steps by step_order ASC.
+        const steps = (inst.steps || []).filter(s => s && s.step_order != null);
+        if (!steps.length) return null;
+        const pointedAt = steps.find(s => Number(s.step_order) === Number(inst.current_step)) || null;
+        if (inst.status === 'PENDING') {
+          // Live instance: the pointer is authoritative (it is what
+          // can_user_approve is computed against). It resolves to a PENDING
+          // step for every live instance on stage; the fallbacks exist only so
+          // a corrupt pointer degrades to the first step still open rather than
+          // to a level number nobody can act on.
+          return pointedAt || steps.find(s => s.status === 'PENDING') || steps[steps.length - 1];
+        }
+        // Concluded instance: there is no current level, so report the furthest
+        // step that actually resolved — the rejecting step when REJECTED, the
+        // step it died on when CANCELLED, the final step when APPROVED. A
+        // trailing step still marked PENDING was never reached and is not where
+        // the instance ended.
+        for (let i = steps.length - 1; i >= 0; i--) {
+          if (steps[i].status && steps[i].status !== 'PENDING') return steps[i];
+        }
+        return steps[steps.length - 1];
+      };
+
       const buildPODetail = () => {
         if (!poData.length) return null;
-        return poData.map(po => ({
-          id: po.id, po_number: po.po_number, status: po.status,
-          vendor_name: po.vendor_name, vendor_company: po.vendor_company,
-          total_amount: po.total_value ? parseFloat(po.total_value) : null,
-          product_names: po.product_names || null,
-          created_at: po.created_at,
-        }));
+        return poData.map(po => {
+          const inst = approvalInstanceForPO(po);
+          const reportedStep = inst ? resolveReportedStep(inst) : null;
+          // REMOVED approvers are tombstones, not participants: they are excluded
+          // from every count here and from current_actors. The unfiltered list
+          // (removals included, with removed_at/removal_reason) stays available on
+          // this phase's approval_instances — two aggregates, never one.
+          const activeApprovers = (reportedStep?.approvers || []).filter(a => a.status !== 'REMOVED');
+          // Counted by EFFECTIVE status, through the same function the PO
+          // details page uses, so the two surfaces cannot label the same person
+          // differently. A row left at PENDING under a step that already closed
+          // is not waiting on anybody: on PO 8's settled ANY step that turns
+          // "0 approved · 4 pending" into "1 of 5 approved · 4 not required".
+          const effective = activeApprovers.map(
+            a => effectiveApproverStatus(a.status, reportedStep?.status, reportedStep?.decision_rule)
+          );
+          const countOf = (v) => effective.filter(s => s === v).length;
+          const pendingApprovers = activeApprovers.filter((a, i) => effective[i] === 'PENDING');
+          // A settled instance has no current level. Rather than invent one,
+          // say so — the tile renders "Concluded · approved" off instance_status
+          // instead of a level number, and still gets real progress numbers
+          // because current_step now names the step those numbers came from.
+          const instanceStatus = inst?.status || null;
+
+          const approval = inst ? {
+            instance_id: inst.id,
+            instance_status: instanceStatus,
+            is_concluded: instanceStatus !== 'PENDING',
+            // Always a step_order this instance actually has (null only for the
+            // degenerate no-steps instance), never the raw pointer.
+            current_step: reportedStep ? reportedStep.step_order : null,
+            total_steps: inst.total_steps,
+            step_status: reportedStep?.status || null,
+            decision_rule: reportedStep?.decision_rule || null,
+            approved_count: countOf('APPROVED'),
+            pending_count: countOf('PENDING'),
+            rejected_count: countOf('REJECTED'),
+            not_required_count: countOf('NOT_REQUIRED'),
+            not_reached_count: countOf('NOT_REACHED'),
+            total_count: activeApprovers.length,
+          } : null;
+
+          const awaitingVendorAcceptance = po.status === 'acceptance_pending';
+          const withVendor = PO_WITH_VENDOR_STATUSES.includes(po.status);
+
+          // Exactly one label, terminal PO states first — a cancelled PO is
+          // cancelled no matter what its approval says.
+          let stageLabel;
+          if (po.status === 'cancelled') stageLabel = 'Cancelled';
+          else if (po.status === 'completed') stageLabel = 'Completed';
+          else if (po.status === 'rejected_by_vendor') stageLabel = 'Rejected by vendor';
+          else if (inst?.status === 'REJECTED' || po.status === 'rejected') stageLabel = 'Rejected in approval';
+          // Resolved step order, not the raw pointer: "Awaiting L0 approval" is
+          // the same defect as "LEVEL 0 OF 1" in a different sentence.
+          else if (inst?.status === 'PENDING')
+            stageLabel = `Awaiting L${reportedStep?.step_order ?? (Number(inst.current_step) || 1)} approval`;
+          else if (awaitingVendorAcceptance) stageLabel = 'Awaiting vendor acceptance';
+          else if (withVendor) stageLabel = `With vendor · ${PO_STATUS_LABEL[po.status] || po.status}`;
+          else if (!inst && po.status === 'draft') stageLabel = 'Draft — not yet initiated';
+          // Anything else (e.g. a draft that already has an instance) still gets
+          // a readable label rather than an empty tile.
+          else stageLabel = PO_STATUS_LABEL[po.status] || String(po.status ?? '');
+
+          // Who must act NOW. Vendors have no buyer-side user row on this
+          // payload, so user_id is null — the tile names the company, not a
+          // person to chase. Always an array; never null.
+          let currentActors = [];
+          if (inst?.status === 'PENDING') {
+            currentActors = pendingApprovers.map(a => ({ user_id: a.user_id, name: a.user_name || null }));
+          } else if (awaitingVendorAcceptance || withVendor) {
+            const vendorLabel = po.vendor_company || po.vendor_name;
+            if (vendorLabel) currentActors = [{ user_id: null, name: vendorLabel }];
+          }
+
+          return {
+            id: po.id, po_number: po.po_number, status: po.status,
+            vendor_name: po.vendor_name, vendor_company: po.vendor_company,
+            total_amount: po.total_value ? parseFloat(po.total_value) : null,
+            product_names: po.product_names || null,
+            created_at: po.created_at,
+            initiated_by: po.initiated_by_id
+              ? { user_id: po.initiated_by_id, name: po.initiated_by_name || null }
+              : null,
+            stage_label: stageLabel,
+            current_actors: currentActors,
+            // can_user_approve is computed by getApprovalInstanceDetails against
+            // the userId this function was called with — req.user.id, never a
+            // client-supplied id — and only for the instance's CURRENT step.
+            // Reuse it verbatim instead of re-deriving "is this me" here.
+            awaiting_me: !!(inst && inst.status === 'PENDING' && inst.can_user_approve),
+            approval,
+          };
+        });
       };
 
       const buildAwaitingQuotesSnapshot = () => ({
@@ -5512,7 +5692,10 @@ LIMIT 2;
         if (!hasData && status === 'completed') status = 'skipped';
 
         const purchaseOrders = buildPODetail();
-        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_value || 0), 0) : 0;
+        // buildPODetail() emits `total_amount` (parsed float), not `total_value` —
+        // reading the latter summed undefined to 0 on every RFQ, so the `· ₹X`
+        // half of the summary below never rendered for any purchase-order phase.
+        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_amount || 0), 0) : 0;
 
         let summary = null;
         if (purchaseOrders?.length > 0) {
