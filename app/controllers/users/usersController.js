@@ -109,6 +109,73 @@ const validateRoleScopeProcesses = async (rolesArray) => {
   }
 };
 
+/**
+ * Tenant guard for role-scope writes: every submitted `roles[].company_id`
+ * must be a hospitality company under the acting admin's OWN buyer parent.
+ *
+ * `tbl_user_role_scopes.company_id` is a hospitality company id
+ * (tbl_hospitality_companies.id). Nothing downstream re-derives it, so an id
+ * from another tenant lands in the table verbatim and starts resolving that
+ * tenant's approval steps. The only thing that ever enforced the boundary was
+ * the frontend: RoleScopeSelector fills its company dropdown from
+ * GET /hospitality/entities → getListedEntities, which is already scoped to
+ * `hc.buyer_company_id = req.user.company_id`. A hand-crafted request never
+ * touches the dropdown, so the same set has to be re-derived here.
+ *
+ * Deliberately mirrors getListedEntities' predicate rather than reusing
+ * generalController's resolveApprovalCompanyScope(): that one is a READ scope
+ * and unions in tbl_hospitality_user_mappings plus the caller's own role
+ * scopes, which is strictly wider than what an admin may GRANT. It also has to
+ * agree exactly with what the UI can offer, or legitimate saves start 400ing.
+ * hospitalityModel.getCompaniesWithHotels() computes the same set but returns
+ * a company→hotel tree (a row per hotel, re-shaped in JS); for a membership
+ * test we want one batch query returning bare ids, so the predicate is
+ * repeated here the way validateRoleScopeProcesses above already does.
+ *
+ * A non-existent id and another tenant's id fail identically, so the response
+ * cannot be used to probe which hospitality companies exist.
+ *
+ * @returns {number[]} the offending company ids ([] when the payload is clean)
+ */
+const findForeignRoleScopeCompanies = async (rolesArray, loggedInUser) => {
+  if (!Array.isArray(rolesArray) || rolesArray.length === 0) return [];
+
+  // Super admin (user_type 8): every company, no restriction. Spelled out
+  // rather than falling out of a falsy company_id, matching the convention in
+  // generalController's inCompanyScope() (scopeIds === null ⇒ all companies).
+  // Unreachable from update_user_detail today — that path is gated behind
+  // `user_type === 7` — and production has zero user_type-8 accounts. It lives
+  // here so the helper is correct on its own terms; note that widening the
+  // caller's admin test to include 8 would hand type-8 a cross-tenant write.
+  if (Number(loggedInUser?.user_type) === 8) return [];
+
+  const requested = [...new Set(rolesArray.map((r) => Number(r.company_id)))];
+
+  /* Fail closed when the admin has no buyer parent to validate against.
+     Production user 268 is an ACTIVE user_type 7 with company_id NULL; with no
+     parent there is no permitted set, so every id is foreign. Verified
+     read-only before choosing this: that account has never called this
+     endpoint (tbl_users.updated_by, stamped on every successful call, has 0
+     rows for 268 vs 111 for admin 150), and cross-user edits are already inert
+     for it because the UPDATE below is gated on
+     `company_id = <admin's company_id>` → `company_id = null` → no match. */
+  const buyerCompanyId = Number(loggedInUser?.company_id);
+  if (!Number.isInteger(buyerCompanyId) || buyerCompanyId <= 0) return requested;
+
+  // One batch query for the whole payload — never one per row.
+  const permitted = await db.any(
+    `SELECT id
+       FROM tbl_hospitality_companies
+      WHERE id = ANY($1::int[])
+        AND buyer_company_id = $2
+        AND COALESCE(is_deleted, 0) = 0`,
+    [requested, buyerCompanyId]
+  );
+
+  const permittedIds = new Set(permitted.map((r) => Number(r.id)));
+  return requested.filter((id) => !permittedIds.has(id));
+};
+
 try {
   webpush.setVapidDetails(
     process.env.WEB_PUSH_CONTACT,
@@ -2113,6 +2180,30 @@ update_user_detail: async (req, res, next) => {
           status: 3,
           code: 'ROLE_SCOPE_COMPANY_REQUIRED',
           message: 'Every role assignment must specify the hospitality company it applies to.'
+        });
+      }
+
+      /* ---- TENANT BOUNDARY ----
+         The company ids are now known to be positive integers; they are not
+         yet known to be OURS. Reject the whole payload if any entry names a
+         hospitality company outside the acting admin's buyer parent — a
+         partial write is worse than a rejection, and `roles` is a full
+         replace, so dropping the bad entries would silently rewrite the
+         user's grants into something nobody asked for.
+
+         Runs before the impact simulation and before every mutation, and only
+         when a non-empty `roles` array was actually submitted: a request that
+         omits `roles` (an ordinary profile edit, or an admin whose buyer
+         company has no hospitality entities at all) never reaches this, and
+         `roles: []` still falls through to the full-wipe backstop below. */
+      const foreignScopeCompanies = await findForeignRoleScopeCompanies(reqData.roles, loggedInUser);
+      if (foreignScopeCompanies.length > 0) {
+        logger.warn(`[UpdateUser ${targetUserId}] ⊘ blocked cross-tenant role scope — actor=${loggedInUser.id} buyerCompany=${loggedInUser.company_id} foreignCompanies=[${foreignScopeCompanies.join(',')}]`);
+        return res.status(400).json({
+          status: 3,
+          code: 'ROLE_SCOPE_COMPANY_FORBIDDEN',
+          message: 'One or more role assignments name a company that is not part of your organisation. Reload the page and pick the company again.',
+          data: { invalidCompanyIds: foreignScopeCompanies }
         });
       }
 
