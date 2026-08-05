@@ -1353,3 +1353,213 @@ describe("rfqController.update — restricted edit mode", () => {
     expect(row.has_received_quotes).toBe(true);
   });
 });
+
+// ===========================================================================
+//  Add Products via in-page modal (WH-69)
+//
+//  Scenario: user opens the "+ Add Products" modal on /rfq-management-edit,
+//  picks one or more products, clicks Save Changes. The FE dispatches them
+//  into Redux (rfqProductsFromStore) and then sends the full snapshot via
+//  PUT /rfq/update. New rows arrive as snapshot.products entries with
+//  id=null (or omitted) and the backend diff treats them as products.added.
+//
+//  Cases below isolate the *add* path on different RFQ states. Generic gates
+//  (closed RFQ, non-creator, bid_end_date past) already covered earlier.
+// ===========================================================================
+describe("rfqController.update — add products via in-page modal (WH-69)", () => {
+  // Local helper — mirrors the one inside the "restricted edit mode" block.
+  // Kept inline to avoid hoisting and to keep this block self-contained.
+  async function insertQuoteLocal(rfq_id, vendorId, { isRegret = false } = {}) {
+    const q = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, is_regret)
+       VALUES ($1, 1, $2, $2, $3) RETURNING id`,
+      [rfq_id, vendorId, isRegret ? 1 : 0]
+    );
+    return q.id;
+  }
+
+  // Quotes + tech-eval rows touched here are not auto-cleaned by the file's
+  // top-level afterEach. Sweep them so cascading RFQ delete doesn't FK-fail.
+  afterEach(async () => {
+    if (!inserted.rfqIds.length) return;
+    await db.none(
+      `DELETE FROM tbl_quote_items
+        WHERE quote_id IN (SELECT id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]))`,
+      [inserted.rfqIds]
+    );
+    await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  });
+
+  it("creator adds a new product to a PUBLISHED RFQ (no quotes yet) → row persists, specs persist, PRODUCT CREATE history written", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Mirror exactly what AddProductsModal → buildEditSnapshotPayload sends:
+    // id missing/null, specs as a flat object, files defaulted to empty arrays.
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products.push({
+      id: null,
+      product_variant_id: 2,
+      variant: 0,
+      product_name: "newly-added catalog item",
+      comment: "",
+      specs: { Quantity: "5", Unit: "NOS" },
+      files: { qap_file: [], spec_file: [], datasheet_file: [] },
+      vendors: [],
+      tech_eval_clauses: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const products = await db.any(
+      `SELECT product_variant_id FROM tbl_rfq_products WHERE rfq_id=$1 ORDER BY product_variant_id`,
+      [rfq_id]
+    );
+    expect(products.map((p) => p.product_variant_id)).toEqual([1, 2]);
+
+    // Specs for the new variant land in tbl_rfq_products_specs.
+    const specs = await db.any(
+      `SELECT title, value FROM tbl_rfq_products_specs
+        WHERE rfq_id=$1 AND product_variant_id=2 ORDER BY title`,
+      [rfq_id]
+    );
+    expect(specs).toEqual(
+      expect.arrayContaining([
+        { title: "Quantity", value: "5" },
+        { title: "Unit", value: "NOS" },
+      ])
+    );
+
+    // Audit row.
+    const created = await db.oneOrNone(
+      `SELECT change_type FROM tbl_rfq_change_history
+        WHERE rfq_id=$1 AND entity_type='PRODUCT' AND change_type='CREATE'`,
+      [rfq_id]
+    );
+    expect(created).not.toBeNull();
+  });
+
+  it("add new product + assign vendor in same snapshot → both persist + PRODUCT and PRODUCT_VENDOR history rows written under one edit_session_id", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products.push({
+      id: null,
+      product_variant_id: 3,
+      variant: 0,
+      product_name: "added with vendor",
+      comment: "",
+      specs: { Quantity: "1", Unit: "EA" },
+      files: { qap_file: [], spec_file: [], datasheet_file: [] },
+      vendors: [IDS.users.vendor_alpha],
+      tech_eval_clauses: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    // Product row + vendor row both present.
+    const vendorRow = await db.oneOrNone(
+      `SELECT user_id FROM tbl_rfq_product_vendors
+        WHERE rfq_id=$1 AND product_variant_id=3 AND user_id=$2`,
+      [rfq_id, IDS.users.vendor_alpha]
+    );
+    expect(vendorRow).not.toBeNull();
+
+    // Both history rows landed under the same edit_session_id (one save → one session).
+    const history = await db.any(
+      `SELECT entity_type, change_type, edit_session_id FROM tbl_rfq_change_history
+        WHERE rfq_id=$1 AND change_type='CREATE'
+          AND entity_type IN ('PRODUCT','PRODUCT_VENDOR')`,
+      [rfq_id]
+    );
+    const types = history.map((r) => r.entity_type).sort();
+    expect(types).toEqual(expect.arrayContaining(["PRODUCT", "PRODUCT_VENDOR"]));
+    const sessionIds = new Set(history.map((r) => r.edit_session_id));
+    expect(sessionIds.size).toBe(1);
+  });
+
+  it("restricted edit (RFQ has a non-regret quote) rejects adding a new product with 400 'Restricted edit'", async () => {
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    await attachOneProduct(rfq_id, 1);
+    await insertQuoteLocal(rfq_id, IDS.users.vendor_alpha);
+
+    const snap = await fetchSnapshot(rfq_id);
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products.push({
+      id: null,
+      product_variant_id: 99,
+      variant: 0,
+      product_name: "blocked addition",
+      comment: "",
+      specs: { Quantity: "1", Unit: "NOS" },
+      files: { qap_file: [], spec_file: [], datasheet_file: [] },
+      vendors: [],
+      tech_eval_clauses: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit/i);
+
+    // No PRODUCT CREATE row should exist for variant 99.
+    const phantom = await db.oneOrNone(
+      `SELECT id FROM tbl_rfq_products WHERE rfq_id=$1 AND product_variant_id=99`,
+      [rfq_id]
+    );
+    expect(phantom).toBeNull();
+  });
+
+  it("snapshot-staged add survives the FE-builder shape (product_variant_id fallback to product_id, missing id key entirely)", async () => {
+    // Defence-in-depth: AddProductsModal dispatches addRfqProduct which writes
+    // `product_id` to Redux; buildEditSnapshotPayload reads
+    // `Number(p.product_variant_id ?? p.product_id)`. Confirm that even if
+    // the FE shipped only product_variant_id and *omitted* the id key entirely
+    // (rather than nulling it), the backend still treats the row as a new add.
+    const rfq_id = await makeEditableRfq({ is_published: 1, status: 1 });
+    await attachOneProduct(rfq_id, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const tampered = JSON.parse(JSON.stringify(snap));
+    tampered.products.push({
+      // id key intentionally omitted (not null)
+      product_variant_id: 7,
+      variant: 0,
+      product_name: "id-omitted add",
+      comment: "",
+      specs: { Quantity: "2", Unit: "NOS" },
+      files: { qap_file: [], spec_file: [], datasheet_file: [] },
+      vendors: [],
+      tech_eval_clauses: [],
+    });
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: tampered },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const row = await db.oneOrNone(
+      `SELECT id FROM tbl_rfq_products WHERE rfq_id=$1 AND product_variant_id=7`,
+      [rfq_id]
+    );
+    expect(row).not.toBeNull();
+  });
+});

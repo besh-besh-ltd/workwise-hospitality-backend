@@ -2,14 +2,43 @@ import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 
-// Entity type → frontend link path mapping
+// Entity type → frontend link path mapping.
+//
+// `id` is the approval instance's entity_id, and its meaning is per entity
+// type: for NEGOTIATION_QUOTE it is an **rfq_product_id** (vendor finalization
+// is approved per product), for every other type it is the RFQ / PO id. A
+// builder may return null to say "I cannot construct a correct link" — callers
+// fall back to a generic destination rather than emitting a wrong one.
+//
+// The optional third argument lets a caller that only knows the RFQ (e.g. the
+// cancellation mail, whose instance is already gone) ask for the RFQ-level
+// link instead of a per-entity deep link.
 const ENTITY_LINK_MAP = {
   'RFQ': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
   'TENDER': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
   'TECHNICAL': (id) => `/dashboard/buyer/technical-evaluation?rfq_id=${id}`,
   'NEGOTIATION': (id, ctx) => `/dashboard/buyer/quote-compare?rfq=${ctx?.rfq_id || id}`,
-  'NEGOTIATION_QUOTE': (id, ctx) => `/dashboard/buyer/quote-compare?rfq=${ctx?.rfq_id || id}`,
+  'NEGOTIATION_QUOTE': (id, ctx, opts = {}) => {
+    const rfqId = ctx?.rfq_id;
+    // Upstream callers default extraContext.rfq_id to `metadata.rfq_id ||
+    // entity_id`, so an rfq_id equal to the entity id means metadata.rfq_id was
+    // missing and all we really hold is a product id. Refuse instead of
+    // emitting `?rfq=<product id>`, which would drop the approver into a
+    // completely different RFQ. (Verified against production 2026-07-30: all
+    // 1,770 live NEGOTIATION_QUOTE instances carry metadata.rfq_id and none has
+    // rfq_id == entity_id, so this is a latent guard, not a live path.)
+    if (!rfqId) return null;
+    if (!opts.idIsRfq && String(rfqId) === String(id)) return null;
+    const base = `/dashboard/buyer/quote-compare?rfq=${rfqId}`;
+    // The Approve control for a finalization lives on one product card deep in
+    // the comparison matrix. RFQ #536255 alone raises 47 of these instances —
+    // 47 separate mails — so without the product every link is identical and
+    // the approver has to hunt. Carry the product plus a focus hint the page
+    // uses to scroll/highlight that exact card.
+    return opts.idIsRfq ? base : `${base}&rfq_product_id=${id}&focus=approval`;
+  },
   'ARC': (id, ctx) => `/dashboard/buyer/arc-committee?rfq_id=${ctx?.rfq_id || id}`,
   'PO': (id, ctx) => `/dashboard/buyer/purchase-order?rfq=${ctx?.rfq_id || id}`,
 };
@@ -105,6 +134,24 @@ export const sendRfqCreationNotification = async ({
     }
 
     logger.info(`Sent ${entityLabel} creation notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: autoApproved ? 'rfq_ready_to_publish' : 'rfq_submitted_for_approval',
+        title: subject,
+        body: autoApproved
+          ? `${entityLabel} #${rfq_no} is ready to publish.`
+          : `${entityLabel} #${rfq_no} submitted by ${creatorName || 'a team member'} for approval.`,
+        data: { rfq_id, is_tender, auto_approved: autoApproved },
+        actionUrl: viewUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch rfq_creation failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending RFQ creation notification emails:", err);
@@ -142,7 +189,9 @@ export const sendApprovalStepNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : `/dashboard`;
+    // A builder returns null when it cannot name the right destination; send
+    // the approver to their dashboard rather than to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || `/dashboard`;
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
@@ -264,6 +313,22 @@ export const sendApprovalStepNotification = async ({
     }
 
     logger.info(`Sent approval step notifications to ${approvers.length} approvers for ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approval_step_required',
+        title: `Action required: Approve ${label} ${entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE' ? `— RFQ #${entityIdentifier}` : `#${entityIdentifier}`}`,
+        body: `Step ${stepOrder} of ${totalSteps} — initiated by ${initiatorName || 'a team member'}.`,
+        data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, total_steps: totalSteps, ...extraContext },
+        actionUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch approval_step_required failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending approval step notification emails:", err);
@@ -333,6 +398,22 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
     }
 
     logger.info(`Sent ready-to-publish notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'rfq_ready_to_publish_approved',
+        title: `${entityLabel} #${rfq_no} — Approved & Scheduled`,
+        body: `Publishing on ${publishDateFormatted}.`,
+        data: { rfq_id, is_tender, publish_date: tender_publish_date },
+        actionUrl: viewUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch rfq_ready_to_publish_approved failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending ready-to-publish notification emails:", err);
@@ -409,6 +490,24 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
     }
 
     logger.info(`[Published Email] Completed sending to ${users.length} users for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'rfq_published',
+        title: `${entityLabel} #${rfq_no} is now live`,
+        body: bidEndFormatted
+          ? `Vendors invited. Submission ends ${bidEndFormatted}.`
+          : `Vendors have been invited to submit their quotes.`,
+        data: { rfq_id, is_tender, bid_end_date },
+        actionUrl: viewUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch rfq_published failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("[Published Email] Error sending published notification emails:", err);
@@ -502,6 +601,25 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
     }
 
     logger.info(`Sent vendor notifications to ${vendors.length} vendors for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const recipients = vendors.map((v) => ({ id: v.user_id, email: v.email }));
+      const userIds = await resolveRecipientUserIds(recipients);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'rfq_vendor_invited',
+        title: `New ${entityLabel} #${rfq_no} from ${buyerName}`,
+        body: bidEndFormatted
+          ? `Submit your quote before ${bidEndFormatted}.`
+          : `You have a new ${entityLabel} to quote on.`,
+        data: { rfq_id, is_tender, buyer_name: buyerName },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfq_id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch rfq_vendor_invited failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError("Error sending vendor RFQ notification emails:", err);
@@ -591,6 +709,26 @@ export const sendVendorAutoAddedToRfqNotification = async ({
     });
 
     console.log(`[WH-67] Sent creator notification for ${rfqs.length} RFQ(s) to ${creator_email}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([{ email: creator_email }]);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'vendor_auto_added',
+        title: rfqs.length === 1
+          ? `New vendor registered — ${rfqs[0].is_tender === 1 ? 'Tender' : 'RFQ'} #${rfqs[0].rfq_no}`
+          : `New vendor registered — added to ${rfqs.length} RFQs`,
+        body: `A newly registered vendor was auto-added to your open RFQs based on their categories.`,
+        data: { rfqs: rfqs.map((r) => ({ rfq_id: r.rfq_id, rfq_no: r.rfq_no })) },
+        actionUrl: rfqs.length === 1
+          ? `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfqs[0].rfq_id}`
+          : `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-management`
+      });
+    } catch (notifyErr) {
+      logError('[WH-67] dispatch vendor_auto_added failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     console.error('[WH-67] Error sending creator notification email:', err);
@@ -675,6 +813,26 @@ export const sendVendorBulkRfqJoinNotification = async ({
     });
 
     console.log(`[WH-67] Sent bulk RFQ join notification (${rfqs.length} RFQs) to ${vendor_email}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds([{ email: vendor_email }]);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'vendor_bulk_rfq_joined',
+        title: rfqs.length === 1
+          ? `New RFQ Opportunity — #${rfqs[0].rfq_no}`
+          : `${rfqs.length} new RFQ opportunities`,
+        body: `You've been added to ${rfqs.length} open RFQ${rfqs.length > 1 ? 's' : ''} based on your registered categories.`,
+        data: { rfqs: rfqs.map((r) => ({ rfq_id: r.rfq_id, rfq_no: r.rfq_no })) },
+        actionUrl: rfqs.length === 1
+          ? `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfqs[0].rfq_id}`
+          : `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries`
+      });
+    } catch (notifyErr) {
+      logError('[WH-67] dispatch vendor_bulk_rfq_joined failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     console.error('[WH-67] Error sending vendor bulk RFQ notification:', err);
@@ -784,6 +942,22 @@ export const sendRfqClosedHeadsUpNotification = async ({
     }
 
     logger.info(`[RFQ Closed Heads-Up] Sent to ${users.length} BU members for ${entityLabel} #${rfq_no}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(users);
+      await dispatchNotification({
+        userIds,
+        category: 'rfq',
+        type: 'rfq_closed',
+        title: `${entityLabel} #${rfq_no} CLOSED — all actions restricted`,
+        body: `Closed by ${closedByName || 'the creator'}. Cannot be reopened.`,
+        data: { rfq_id, is_tender, closed_by: closedByName },
+        actionUrl: viewUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch rfq_closed failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[RFQ Closed Heads-Up] Error:', err);
@@ -815,9 +989,14 @@ export const sendApprovalCancelledNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn && extraContext?.rfq_id
-      ? linkFn(extraContext.rfq_id, extraContext)
-      : '/dashboard';
+    // This mail fires after the instance has been cancelled, so the caller only
+    // carries the RFQ — not the entity. `idIsRfq` tells per-entity builders to
+    // emit their RFQ-level link instead of synthesising a deep link out of an
+    // id that is not theirs (a per-product builder would otherwise publish the
+    // rfq_id as an rfq_product_id).
+    const linkPath = (linkFn && extraContext?.rfq_id
+      ? linkFn(extraContext.rfq_id, extraContext, { idIsRfq: true })
+      : null) || '/dashboard';
     const viewUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const subject = `Approval No Longer Required — ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`;
@@ -866,6 +1045,22 @@ export const sendApprovalCancelledNotification = async ({
     }
 
     logger.info(`[Approval Cancelled] Notified ${approvers.length} approver(s) for ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approval_cancelled',
+        title: `Approval no longer required — ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`,
+        body: reason || 'The approval request was cancelled. No action needed.',
+        data: { entity_type: entityType, ...extraContext },
+        actionUrl: viewUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch approval_cancelled failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[Approval Cancelled] Error:', err);
@@ -898,7 +1093,9 @@ export const sendPolicyChangeNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    // Null means the builder could not name a correct destination — prefer a
+    // generic landing over a link to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const reasonLabel = changeReason === 'policy_change' ? 'approval policy update'
@@ -957,6 +1154,22 @@ export const sendPolicyChangeNotification = async ({
     }
 
     logger.info(`[Policy Change] Notified ${approvers.length} remaining approvers for ${label} #${entityIdentifier}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approval_policy_changed',
+        title: `Approval policy updated — ${label} #${entityIdentifier}`,
+        body: `${summaryText}. Your approval is still required.`,
+        data: { entity_type: entityType, entity_id: entityId, change_reason: changeReason, summary: changeSummary },
+        actionUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch approval_policy_changed failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[Policy Change] Error sending notification:', err);
@@ -1029,6 +1242,22 @@ export const sendApproverRemovedNotification = async ({
     }
 
     logger.info(`[Approver Removed] Notified ${approvers.length} removed approver(s) for ${label} #${entityIdentifier}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approver_removed',
+        title: `You've been removed from approval — ${label} #${entityIdentifier}`,
+        body: `Reason: ${reasonLabel} by ${changedByName || 'an administrator'}.`,
+        data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, change_reason: changeReason },
+        actionUrl: '/dashboard'
+      });
+    } catch (notifyErr) {
+      logError('dispatch approver_removed failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[Approver Removed] Error sending notification:', err);
@@ -1108,6 +1337,22 @@ export const sendApprovalStandsNotification = async ({
     }
 
     logger.info(`[Approval Stands] Notified ${approvers.length} prior-approver(s) for ${label} #${entityIdentifier}`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approval_stands',
+        title: `Your prior approval still counts — ${label} #${entityIdentifier}`,
+        body: `Policy changed but your approval remains effective. No action required.`,
+        data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, change_reason: changeReason },
+        actionUrl: '/dashboard'
+      });
+    } catch (notifyErr) {
+      logError('dispatch approval_stands failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[Approval Stands] Error sending notification:', err);
@@ -1140,7 +1385,9 @@ export const sendApproverAddedMidFlightNotification = async ({
 
     const label = ENTITY_LABELS[entityType] || entityType;
     const linkFn = ENTITY_LINK_MAP[entityType];
-    const linkPath = linkFn ? linkFn(entityId, extraContext) : '/dashboard';
+    // Null means the builder could not name a correct destination — prefer a
+    // generic landing over a link to the wrong record.
+    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
     const reasonLabel = changeReason === 'policy_change' ? 'a policy update'
@@ -1198,6 +1445,22 @@ export const sendApproverAddedMidFlightNotification = async ({
     }
 
     logger.info(`[Approver Added Mid-Flight] Notified ${approvers.length} approver(s) for ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`);
+
+    try {
+      const userIds = await resolveRecipientUserIds(approvers);
+      await dispatchNotification({
+        userIds,
+        category: 'approval',
+        type: 'approver_added_midflight',
+        title: `Action required: Added as approver — ${label} #${entityIdentifier}`,
+        body: `Step ${stepOrder} of ${totalSteps}. Added by ${changedByName || 'an administrator'} due to ${reasonLabel}.`,
+        data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, total_steps: totalSteps, change_reason: changeReason },
+        actionUrl
+      });
+    } catch (notifyErr) {
+      logError('dispatch approver_added_midflight failed', notifyErr);
+    }
+
     return true;
   } catch (err) {
     logError('[Approver Added Mid-Flight] Error sending notification:', err);

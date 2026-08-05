@@ -27,6 +27,7 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { createApprovalInstance } from "../../app/models/generalModel.js";
 import negotiationController from "../../app/controllers/negotiation/negotiationController.js";
+import rfqController from "../../app/controllers/rfq/rfqController.js";
 
 afterAll(async () => { await closeDb(); });
 
@@ -395,5 +396,101 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — drafted PO preser
 
     // Hand math: line = 50 × 500 = 25,000; TCS 5% = 1,250; grand = 26,250.
     expect(Number(poRow.total_value)).toBe(26250);
+  });
+});
+
+// ===========================================================================
+// Wrong-vendor re-finalize guard (RFQ 493 / PO 138621).
+// The NEGOTIATION_QUOTE approval is keyed by rfq_product (product-level), so an
+// in-flight PENDING approval can belong to a PREVIOUSLY finalized vendor. Before
+// the fix, finalizing a DIFFERENT vendor left that stale approval (with a frozen
+// po_payload for the OLD vendor) in place — and once approved it drafted a PO for
+// the WRONG recipient. The guard cancels the stale approval, supersedes the old
+// vendor's finalization, and creates a fresh approval for the new vendor.
+// ===========================================================================
+describe("POST /rfq/finalize — wrong-vendor re-finalize guard", () => {
+  it("finalizing a different vendor cancels the old vendor's pending approval + supersedes its finalization, and opens a fresh approval for the new vendor", async () => {
+    const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, process_id, is_tender, title)
+       VALUES ($1, '<p>e2e</p>', '', 'b@a', 'A1', '+91', $2, 'Mumbai', 1, 1, $3, $3, NOW(),
+               $4, $5, $6, 0, 'wrong-vendor re-finalize test')
+       RETURNING id, rfq_no`,
+      [nextRfqNo(), oneDayAgo, IDS.users.a1_proc_buyer, IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1]
+    );
+    inserted.rfqIds.push(rfq.id);
+
+    const rfqProd = await db.one(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`,
+      [rfq.id]
+    );
+    inserted.rfqProductIds.push(rfqProd.id);
+
+    for (const v of [IDS.users.vendor_alpha, IDS.users.vendor_beta]) {
+      await db.none(`INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`, [rfq.id, v]);
+    }
+    const quoteA = await db.one(`INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp") VALUES ($1,$2,$3,$3,1,NOW()) RETURNING id`, [rfq.id, rfq.rfq_no, IDS.users.vendor_alpha]);
+    inserted.quoteIds.push(quoteA.id);
+    const qiA = await db.one(`INSERT INTO tbl_quote_items (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges) VALUES ($1,$2,$3,1,500,59000,0,18,0,0,'A','15','100','percentage','[]') RETURNING id`, [rfq.id, rfq.rfq_no, quoteA.id]);
+    const quoteB = await db.one(`INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp") VALUES ($1,$2,$3,$3,1,NOW()) RETURNING id`, [rfq.id, rfq.rfq_no, IDS.users.vendor_beta]);
+    inserted.quoteIds.push(quoteB.id);
+    const qiB = await db.one(`INSERT INTO tbl_quote_items (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price, tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges) VALUES ($1,$2,$3,1,450,53100,0,18,0,0,'B','15','100','percentage','[]') RETURNING id`, [rfq.id, rfq.rfq_no, quoteB.id]);
+
+    // a1_proc_buyer must be in the 'po' approval hierarchy for finalize to proceed
+    // (approval_level != -1 — a -1 row is a FINAL APPROVER, which finalize blocks).
+    const hier = await db.one(`INSERT INTO tbl_approval_hierarchy (company_id, user_id, approval_level, bypass_cap, hierarchy_type) VALUES ($1,$2,1,0,'po') RETURNING id`, [IDS.companies.A, IDS.users.a1_proc_buyer]);
+
+    // Stage: vendor A finalized + a PENDING NEGOTIATION_QUOTE approval for A.
+    await db.none(`INSERT INTO tbl_quote_finalization (rfq_id, rfq_no, product_variant_id, vendor_id, quote_id, created_by, variant) VALUES ($1,$2,1,$3,$4,$5,0)`, [rfq.id, rfq.rfq_no, IDS.users.vendor_alpha, qiA.id, IDS.users.a1_proc_buyer]);
+    const approvalA = await createApprovalInstance({
+      entity_type: "NEGOTIATION_QUOTE", entity_id: rfqProd.id,
+      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null, process_id: IDS.processes.A_P1,
+      initiated_by: IDS.users.a1_proc_buyer,
+      metadata: {
+        rfq_id: rfq.id, rfq_number: rfq.rfq_no, rfq_product_id: rfqProd.id, is_tender: 0,
+        product_variant_id: 1, variant: 0, vendor_id: IDS.users.vendor_alpha, quote_id: qiA.id, quote_item_id: qiA.id,
+        po_payload: { rfq_id: rfq.id, rfq_no: rfq.rfq_no, product_variant_id: 1, vendor_id: IDS.users.vendor_alpha, quote_id: qiA.id, quote_item_id: qiA.id, variant: 0, route_type: "PO" },
+        po_user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+      },
+    });
+    inserted.approvalInstanceIds.push(approvalA.instance.id);
+    expect(approvalA.instance.status).toBe("PENDING");
+
+    // ---- Act: buyer finalizes vendor B for the SAME product line ----
+    const req = {
+      user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+      params: {},
+      body: {
+        rfq_id: rfq.id, rfq_no: rfq.rfq_no, product_variant_id: 1, variant: 0,
+        vendor_id: IDS.users.vendor_beta, quote_id: qiB.id, quote_item_id: qiB.id,
+        route_type: "PO", comment: "switch to B",
+      },
+    };
+    const res = mockResponse();
+    await rfqController.finalize(req, res);
+    await db.none(`DELETE FROM tbl_approval_hierarchy WHERE id=$1`, [hier.id]); // cleanup seeded hierarchy
+    expect(res.calls.status).toBe(200);
+
+    // ---- Assert the fix ----
+    // 1. A's stale approval is CANCELLED — it can never draft A's PO.
+    const aInstance = await db.one(`SELECT status FROM tbl_approval_instances WHERE id=$1`, [approvalA.instance.id]);
+    expect(aInstance.status).toBe("CANCELLED");
+    // 2. A's finalization row is superseded (moved to history / removed).
+    const aFinal = await db.oneOrNone(`SELECT id FROM tbl_quote_finalization WHERE rfq_id=$1 AND product_variant_id=1 AND variant=0 AND vendor_id=$2`, [rfq.id, IDS.users.vendor_alpha]);
+    expect(aFinal).toBeNull();
+    // 3. B's finalization row exists.
+    const bFinal = await db.oneOrNone(`SELECT id FROM tbl_quote_finalization WHERE rfq_id=$1 AND product_variant_id=1 AND variant=0 AND vendor_id=$2`, [rfq.id, IDS.users.vendor_beta]);
+    expect(bFinal).not.toBeNull();
+    // 4. A fresh PENDING approval exists for the product, targeting the NEW vendor B.
+    const fresh = await db.oneOrNone(`SELECT id, metadata FROM tbl_approval_instances WHERE entity_type='NEGOTIATION_QUOTE' AND entity_id=$1 AND status='PENDING' ORDER BY id DESC LIMIT 1`, [rfqProd.id]);
+    expect(fresh).not.toBeNull();
+    expect(fresh.id).not.toBe(approvalA.instance.id);
+    const fm = typeof fresh.metadata === "string" ? JSON.parse(fresh.metadata) : fresh.metadata;
+    expect(Number(fm.vendor_id)).toBe(IDS.users.vendor_beta);
+    if (fresh) inserted.approvalInstanceIds.push(fresh.id);
   });
 });

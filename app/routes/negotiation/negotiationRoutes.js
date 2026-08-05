@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { acl } from '../../helper/common.js';
 import { can } from '../../middleware/auth.js';
 import negotiationController from '../../controllers/negotiation/negotiationController.js';
+import negotiationRoundDetailController from '../../controllers/negotiation/negotiationRoundDetailController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
 import passport from '../../middleware/passport.js';
 import noLogin from '../../middleware/noLogin.js';
@@ -9,6 +10,32 @@ import noLogin from '../../middleware/noLogin.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 const NegotiationRoutes = Router();
+
+// Buyer landing list — all RFQs in negotiation for the active company/hotel
+// context, grouped client-side by negotiation status. Distinct path from the
+// '/rounds/:rfq_id' routes; kept near the top for clarity.
+NegotiationRoutes.get(
+  '/rfqs',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management (buyer)
+  hospitalityMiddleware.attachHospitalityContext(),
+  negotiationController.listNegotiationRfqs
+);
+// Server-authoritative listing (search / facet / sort / paginate + Pending-for-me).
+//
+// ONE endpoint, TWO grains, selected by `groupBy` in the body:
+//   'parent' (DEFAULT) one row per RFQ / per ARC, with a rolled-up status,
+//                      round_count, state_counts and the savings block.
+//   'round'            one row per negotiation round — the historic shape.
+// Deliberately NOT two routes: a second endpoint is exactly how the listing and
+// the round-detail page ended up with two disagreeing status vocabularies.
+NegotiationRoutes.post(
+  '/list-view',
+  passportSignIn,
+  acl([2, 8]),
+  hospitalityMiddleware.attachHospitalityContext(),
+  negotiationController.getNegotiationListView
+);
 
 // Create negotiation round
 NegotiationRoutes.post(
@@ -105,6 +132,18 @@ NegotiationRoutes.post(
   // can('negotiation.update'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.closeRound
+);
+
+// Negotiation Command Center — everything about one round (or one cycle of
+// sibling rounds) in a single read. Distinct literal third segment, so it does
+// not collide with '/rounds/:rfq_id'. Tenant scope + quote-visibility are
+// enforced inside the controller (see its header comment for the ordering).
+NegotiationRoutes.get(
+  '/rounds/:id/detail',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management (buyer)
+  hospitalityMiddleware.checkHospitality(false),
+  negotiationRoundDetailController.getRoundDetail
 );
 
 // Get quotes for a round

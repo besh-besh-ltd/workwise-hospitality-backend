@@ -11,8 +11,9 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
+import { shapeRfqLifecycle } from '../../models/rfq/rfqLifecycleShaper.js';
 import userModel from '../../models/userModel.js';
-import { sendNotification } from '../../services/notificationService.js';
+import { sendNotification, dispatch as dispatchNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -43,10 +44,18 @@ import {
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import {
+  assertUserHasScope,
+  assertCanReadParentRfq,
+  AuthorizationError,
+  NoApprovalPolicyError,
+  sendScopeError
+} from '../../services/authorizationService.js';
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
+import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -62,12 +71,56 @@ import {
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
 } from '../../helper/quoteVisibility.js';
-import pricingEngine from '../../services/pricingEngine.js';
+import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
+import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
+import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
+import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
   new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * `tbl_users.user_type` values that may act on behalf of another user.
+ *
+ *   7 — company / hospitality administrator. This is the type the codebase
+ *       already treats as "admin": every genuinely admin-only route is gated
+ *       `acl([7])` (approval hierarchy + approval processes/policies in
+ *       app/routes/general.js, the whole hospitality company/hotel
+ *       administration surface in app/routes/hospitality/hospitalityRoutes.js —
+ *       33 routes in total), and, decisively, the one other endpoint in this
+ *       codebase with the *identical* "honour req.body.user_id" shape —
+ *       usersController.update_user_detail — gates it on exactly
+ *       `loggedInUser.user_type === 7` (app/controllers/users/usersController.js:1951).
+ *   8 — platform super admin. Documented as strictly-more-privileged than 7 at
+ *       three independent sites (mrController.isSuperAdmin,
+ *       arcController:765, and the comment on projectController.userCanAccessProject
+ *       explaining that 8 "keeps the cross-tenant reach it has everywhere else"
+ *       while 7 does not). Included because 8 is never denied where 7 is
+ *       allowed; note there are currently no user_type 8 rows in production, so
+ *       this arm grants nothing today.
+ *
+ * Deliberately NOT here: 2 (buyer, 262 prod users) and 3 (vendor, 428) — the
+ * two types that actually call the vendor listing.
+ */
+const ACT_AS_ADMIN_USER_TYPES = Object.freeze([7, 8]);
+const canActOnBehalfOfOtherUsers = (user) =>
+  ACT_AS_ADMIN_USER_TYPES.includes(Number(user?.user_type));
+
+/**
+ * Strict positive-integer coercion for an id arriving from the request body.
+ * Returns null for anything that is not a clean positive integer, so a payload
+ * like `'1 OR 1=1'`, `'1; DROP TABLE'`, `{}` or `['1']` can never become a
+ * user_id. `Number()` (not parseInt) on purpose: parseInt('1 OR 1=1') === 1,
+ * which would silently accept the injection string as the id it prefixes.
+ */
+const toPositiveIntId = (value) => {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+};
 
 const VENDORS_FILTER_KEYS = [
   'vendor_approved_by',
@@ -411,8 +464,8 @@ const getQUOTES = async ({ id }, user_id) => {
 
 const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret_reason) => {
   try {
-    const { name, email } = buyer;
-    const { name: vendor_name } = vendor;
+    const { id: buyer_id, name, email } = buyer;
+    const { id: vendor_id, name: vendor_name } = vendor;
 
     // Validate email addresses
     const allEmails = [email];
@@ -447,6 +500,16 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
     addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
     await sendMailWithRetry(mailRecipients);
+
+    dispatchNotification({
+      userIds: [buyer_id],
+      category: 'rfq',
+      type: 'vendor_quote_regret',
+      title: `${vendor_name} regretted RFQ #${rfqNumber}`,
+      body: regret_reason ? `Reason: ${regret_reason}` : 'The vendor has declined to quote.',
+      data: { rfq_id, vendor_id, regret_reason: regret_reason || null },
+      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}`
+    }).catch((err) => logError('dispatch vendor_quote_regret failed', err));
   } catch (error) {
     throw error;
   }
@@ -1107,6 +1170,16 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   // Sending the email
   sendMail(mailRecipients);
 
+  dispatchNotification({
+    userIds: [buyerDetails[0]?.id],
+    category: 'rfq',
+    type: 'vendor_quote_updated',
+    title: `Updated quotation for RFQ #${rfq_no}`,
+    body: `${vendorName} revised their quote. Review the changes.`,
+    data: { rfq_id, vendor_id: user?.id, changed_items: Array.isArray(quoteItemChanges) ? quoteItemChanges.length : 0 },
+    actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+  }).catch((err) => logError('dispatch vendor_quote_updated failed', err));
+
   // send updated quote message to buyer
   const payload = {
     mobile:buyerDetails[0]?.mobile,
@@ -1469,6 +1542,20 @@ const sendQuoteNotificationEmail = async (req) => {
       // Sending the email to the buyer
       sendMail(mailRecipients);
 
+      const vendorCompanyName =
+        req.user?.company_name || req.user?.organization_name || req.user?.name || 'A vendor';
+      const productCount = Array.isArray(req.body?.products) ? req.body.products.length : 0;
+
+      dispatchNotification({
+        userIds: [buyer.id],
+        category: 'rfq',
+        type: 'vendor_quote_submitted',
+        title: `New quotation for RFQ #${rfq_no}`,
+        body: `${vendorCompanyName} submitted a quote. Review and compare.`,
+        data: { rfq_id, vendor_id: req.user?.id, product_count: productCount },
+        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+      }).catch((err) => logError('dispatch vendor_quote_submitted failed', err));
+
       // console.log(`Quotation update email sent to buyer: ${buyer.email}`);
     }
   }
@@ -1676,7 +1763,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
     const vendor = vendor_details[0];
  
     const buyer_details = await userModel.user_profile_detail(buyer_id);
-    const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
+    const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [rfq_id] });
 
     try {
       const spocList = await vendorModel.getSpocDetails(vendor_id , rfq_id);
@@ -1970,6 +2057,16 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
     sendMail(mailRecipients);
 
+    dispatchNotification({
+      userIds: [vendor_id],
+      category: 'rfq',
+      type: 'vendor_finalized_winner',
+      title: `You've been finalized for RFQ #${rfQItem[0]?.rfq_no}`,
+      body: `${rfQItem[0]?.company_name || 'The buyer'} has selected your quote for ${winning_product[0]?.product_details[0]?.name || 'the product'}.`,
+      data: { rfq_id: rfQItem[0]?.id, product: winning_product[0]?.product_details[0]?.name },
+      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}`
+    }).catch((err) => logError('dispatch vendor_finalized_winner failed', err));
+
     // sendMail({
     //   from: Config.webmasterMail, // sender address
     //   to: winning_vendor_email, // list of receivers
@@ -2046,6 +2143,16 @@ const sendFinalizationRemovalMail = async (
     // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
     sendMail(mailRecipients);
+
+    dispatchNotification({
+      userIds: [vendor_id],
+      category: 'rfq',
+      type: 'vendor_de_finalized',
+      title: `Decision made for RFQ #${rfQItem[0]?.rfq_no}`,
+      body: `You're no longer finalized for ${product[0]?.product_details[0]?.name || 'the product'}. Check other open opportunities.`,
+      data: { rfq_id: rfQItem[0]?.id, product: product[0]?.product_details[0]?.name },
+      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}`
+    }).catch((err) => logError('dispatch vendor_de_finalized failed', err));
 
     return true;
   } catch (error) {
@@ -2126,12 +2233,100 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
-  // Validate hospitality context access if provided
-  if (hospitality_company_id) {
+  // ---------------------------------------------------------------------
+  // P0: "absent" is NOT "null".
+  //
+  // This handler used to build `rfqData` with `x: x || null` for every column
+  // and hand the whole object to rfqModel.updateWithTimestamp(), which derives
+  // its SET list from EVERY key present. An auto-save that simply omitted
+  // `hospitality_company_id` therefore wrote NULL over the RFQ's tenant
+  // anchor — and every buyer-visibility query gates on
+  // `urs.company_id = RFQ.hospitality_company_id`, so `x = NULL` is never TRUE
+  // and the RFQ disappeared from every buyer surface, direct URL included.
+  //
+  // Rule from here on: a key the caller did not send is left untouched; an
+  // EXPLICIT null still clears the column.
+  // ---------------------------------------------------------------------
+  const sentKey = (key) =>
+    Object.prototype.hasOwnProperty.call(reqBody, key) && reqBody[key] !== undefined;
+  // '' and the string forms of empty selects mean "cleared" for id columns.
+  const asId = (v) => {
+    if (v === null) return null;
+    if (v === '' || v === 'null' || v === 'undefined') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  // Current persisted context — the authority when the client omits a field.
+  const existingRfq = rfq_id
+    ? await db.oneOrNone(
+        `SELECT hospitality_company_id, hotel_id, department_id, process_id,
+                is_tender, reverse_auction
+           FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      )
+    : null;
+
+  // Effective entity type / auction mode. These drive cross-field invariants
+  // (tender_fees, ra_* dates) AND the ABAC resource, so an omitted flag must
+  // fall back to what the row already is — never to a hardcoded default.
+  // Absent `is_tender` used to be written as 0, silently converting a tender
+  // into an RFQ and rerouting its entire approval + ARC path.
+  const effIsTender = sentKey('is_tender')
+    ? (Number(is_tender) === 1 ? 1 : 0)
+    : (Number(existingRfq?.is_tender) === 1 ? 1 : 0);
+  const isReverseAuctionInput = (v) => v === 1 || v === '1' || v === true;
+  const effReverseAuction = sentKey('reverse_auction')
+    ? (isReverseAuctionInput(reverse_auction) ? 1 : 0)
+    : (Number(existingRfq?.reverse_auction) === 1 ? 1 : 0);
+
+  // Effective values = what the row will hold after this save.
+  let effHotelId = sentKey('hotel_id') ? asId(hotel_id) : (existingRfq?.hotel_id ?? null);
+  if (!effHotelId && Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+    effHotelId = asId(hotel_ids[0]);
+  }
+  if (!effHotelId && rfq_id) {
+    const mapped = await db.oneOrNone(
+      `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1 ORDER BY id LIMIT 1`,
+      [rfq_id]
+    );
+    effHotelId = mapped?.hotel_id ?? null;
+  }
+
+  let effCompanyId = sentKey('hospitality_company_id')
+    ? asId(hospitality_company_id)
+    : (existingRfq?.hospitality_company_id ?? null);
+
+  // Re-derive from the hotel exactly the way POST /rfq/create does, so an RFQ
+  // whose column was already wiped repairs itself on the next save instead of
+  // staying invisible.
+  let derivedCompanyName = null;
+  if (!effCompanyId && effHotelId) {
+    const hotelRecord = await db.oneOrNone(
+      `SELECT HCH.hospitality_company_id, HC.name AS hospitality_company_name
+         FROM tbl_hospitality_company_hotels HCH
+         JOIN tbl_hospitality_companies HC ON HC.id = HCH.hospitality_company_id
+        WHERE HCH.id = $1 AND HCH.is_deleted = 0`,
+      [effHotelId]
+    );
+    effCompanyId = hotelRecord?.hospitality_company_id || null;
+    derivedCompanyName = hotelRecord?.hospitality_company_name || null;
+  }
+
+  const effDepartmentId = sentKey('department_id')
+    ? asId(department_id)
+    : (existingRfq?.department_id ?? null);
+  const effProcessId = sentKey('process_id')
+    ? asId(process_id)
+    : (existingRfq?.process_id ?? null);
+
+  // Validate hospitality context access. Uses the EFFECTIVE company/hotel, so
+  // omitting the field can no longer skip the check.
+  if (effCompanyId) {
     const hasAccess = await hospitalityModel.userHasContext(
       user_id,
-      hospitality_company_id,
-      hotel_id || null
+      effCompanyId,
+      effHotelId || null
     );
     if (!hasAccess) {
       throw new Error(JSON.stringify({
@@ -2142,11 +2337,11 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   }
 
   // Validate process_id if provided
-  if (process_id && hospitality_company_id) {
+  if (effProcessId && effCompanyId) {
     // Get parent company from hospitality company
     const hospCompany = await db.oneOrNone(
       `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
-      [hospitality_company_id]
+      [effCompanyId]
     );
 
     if (!hospCompany) {
@@ -2160,7 +2355,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     const processExists = await db.oneOrNone(
       `SELECT id FROM tbl_approval_processes
        WHERE id = $1 AND company_id = $2 AND is_active = true`,
-      [process_id, hospCompany.company_id]
+      [effProcessId, hospCompany.company_id]
     );
 
     if (!processExists) {
@@ -2169,6 +2364,36 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
         status: 3
       }));
     }
+  }
+
+  // ABAC: 4-axis scope check (company / hotel / department / process). Fires
+  // for hospitality RFQs — non-hospitality RFQs (no company on the row and no
+  // hotel to derive one from) skip approval entirely (see startApprovalForRfq)
+  // and don't carry a process_id.
+  //
+  // FAIL CLOSED: the check keys off the EFFECTIVE company, not the request
+  // field. Omitting `hospitality_company_id` used to bypass this gate outright.
+  const resource = effIsTender === 1 ? 'boq' : 'rfq';
+  if (effCompanyId) {
+    await assertUserHasScope(user_id, `${resource}.create`, {
+      hospitality_company_id: effCompanyId,
+      hotel_id: effHotelId || null,
+      department_id: effDepartmentId || null,
+      process_id: effProcessId || null,
+    });
+  }
+  // Moving an RFQ to a different tenant requires scope on the company it is
+  // leaving as well as the one it is entering.
+  if (
+    existingRfq?.hospitality_company_id &&
+    Number(existingRfq.hospitality_company_id) !== Number(effCompanyId)
+  ) {
+    await assertUserHasScope(user_id, `${resource}.create`, {
+      hospitality_company_id: existingRfq.hospitality_company_id,
+      hotel_id: existingRfq.hotel_id || null,
+      department_id: existingRfq.department_id || null,
+      process_id: existingRfq.process_id || null,
+    });
   }
 
   const globalFilters = filters?.global;
@@ -2206,22 +2431,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   // Auto-assign or create a default project mapped to the selected hotel
   let effectiveProjectId = project_id;
   try {
-    if ((!effectiveProjectId || effectiveProjectId === '' || effectiveProjectId === -1) && hospitality_company_id && hotel_id) {
+    if ((!effectiveProjectId || effectiveProjectId === '' || effectiveProjectId === -1) && effCompanyId && effHotelId) {
       // 1 = hotel-level mapping
       const existingMappings = await hospitalityModel.getProjectMappingsForContext(
-        hospitality_company_id,
+        effCompanyId,
         1,
-        hotel_id
+        effHotelId
       );
 
       if (existingMappings && existingMappings.length > 0) {
         effectiveProjectId = existingMappings[0].project_id;
       } else {
         // Create a minimal default project for this hotel context
-        const defaultProjectName = `Auto Project - Hotel ${hotel_id}`;
+        const defaultProjectName = `Auto Project - Hotel ${effHotelId}`;
         const tbl_project_data = {
           name: defaultProjectName,
-          description: `Auto-created project for hotel ${hotel_id}`,
+          description: `Auto-created project for hotel ${effHotelId}`,
           location: null,
           ended_at: null,
           rfq_type,
@@ -2240,8 +2465,8 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           await hospitalityModel.insertProjectMappings([
             {
               project_id: newProjectId,
-              hospitality_company_id,
-              hospitality_hotel_id: hotel_id,
+              hospitality_company_id: effCompanyId,
+              hospitality_hotel_id: effHotelId,
               mapping_type: 1,
               created_by: user_id,
             },
@@ -2253,9 +2478,6 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     // Log but do not block RFQ creation if auto project logic fails
     logError(autoProjectErr);
   }
-
-  // Normalize reverse_auction to ensure consistent comparison
-  const isReverseAuction = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
 
   // Helper to normalize date values - convert empty strings to null,
   // and ensure bare YYYY-MM-DD dates get a T00:00:00 time component
@@ -2271,33 +2493,90 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     return dateValue;
   };
 
+  // Only these two are unconditional: saveRfqDraft always parks the row as an
+  // unpublished draft owned by whoever just saved it.
   const rfqData = {
-      comment,
-      company_name,
-      response_email,
-      contact_name,
-      contact_number,
-      // bid_end_date is `text NOT NULL` on tbl_rfq, so a draft with no
-      // deadline yet has to round-trip as an empty string. The GET handler
-      // (getDraftById) maps '' back to null when serialising the response.
-      bid_end_date: normalizeDate(bid_end_date) ?? '',
-      location,
-      rfq_type,
-      reverse_auction: isReverseAuction ? 1 : 0,
-      is_tender: is_tender !== undefined ? is_tender : 0,
-      tender_fees: is_tender === 1 ? (tender_fees || 0) : 0,
-      tender_publish_date: normalizeDate(tender_publish_date) || null,
-      vendor_clarification_date: normalizeDate(vendor_clarification_date) || null,
-      hospitality_company_id: hospitality_company_id || null,
-      hotel_id: hotel_id || null,
-      department_id: department_id || null,
-      process_id: process_id || null,
-      ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
-      ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
       updated_by: user_id,
-      title: title || null,
   };
+
+  // ---- Absent-key rule, applied to EVERY remaining column ----------------
+  // Verified in production: all 35 RFQs with bid_end_date = '' also had
+  // hospitality_company_id IS NULL — a 100% overlap, proving one partial
+  // save-draft wipes several columns in the same UPDATE. An empty
+  // bid_end_date is not cosmetic: the vendor backfill query casts
+  // r.bid_end_date::timestamp, and a single '' aborts the entire query
+  // (`invalid input syntax for type timestamp: ""`), emptying every newly
+  // registered vendor's dashboard.
+  //
+  // comment / company_name / contact_name / contact_number / location /
+  // response_email / bid_end_date are `text NOT NULL`, so writing an omitted
+  // key as NULL also raised a 23502 and turned a partial save into a 500.
+
+  // Plain passthrough columns: sent => write, absent => leave alone.
+  if (sentKey('comment')) rfqData.comment = comment;
+  if (sentKey('company_name')) rfqData.company_name = company_name;
+  if (sentKey('contact_name')) rfqData.contact_name = contact_name;
+  if (sentKey('contact_number')) rfqData.contact_number = contact_number;
+  if (sentKey('location')) rfqData.location = location;
+  if (sentKey('response_email')) rfqData.response_email = response_email;
+  if (sentKey('rfq_type')) rfqData.rfq_type = rfq_type;
+  if (sentKey('title')) rfqData.title = title || null;
+  if (sentKey('tender_publish_date')) {
+    rfqData.tender_publish_date = normalizeDate(tender_publish_date) || null;
+  }
+  if (sentKey('vendor_clarification_date')) {
+    rfqData.vendor_clarification_date = normalizeDate(vendor_clarification_date) || null;
+  }
+  // bid_end_date is `text NOT NULL`, so a draft with no deadline yet has to
+  // round-trip as an empty string. The GET handler (getDraftById) maps ''
+  // back to null when serialising the response. An EXPLICIT null/'' still
+  // clears it; an absent key must not.
+  if (sentKey('bid_end_date')) {
+    rfqData.bid_end_date = normalizeDate(bid_end_date) ?? '';
+  }
+  // When we just repaired the company from the hotel, refresh the denormalised
+  // company_name alongside it (mirrors POST /rfq/create).
+  if (derivedCompanyName && !sentKey('company_name')) {
+    rfqData.company_name = derivedCompanyName;
+  }
+
+  // Entity type + its dependent money field. tender_fees is only meaningful on
+  // a tender, so a non-tender is always forced to 0 (a real invariant); on a
+  // tender the fee is preserved unless the caller actually sent one.
+  if (sentKey('is_tender')) rfqData.is_tender = effIsTender;
+  if (effIsTender !== 1) {
+    rfqData.tender_fees = 0;
+  } else if (sentKey('tender_fees')) {
+    rfqData.tender_fees = tender_fees || 0;
+  }
+
+  // Reverse auction + its dependent window. Same shape: the ra_* dates are
+  // only meaningful while reverse_auction is on.
+  if (sentKey('reverse_auction')) rfqData.reverse_auction = effReverseAuction;
+  if (effReverseAuction !== 1) {
+    rfqData.ra_start_date = null;
+    rfqData.ra_end_date = null;
+  } else {
+    if (sentKey('ra_start_date')) rfqData.ra_start_date = normalizeDate(ra_start_date);
+    if (sentKey('ra_end_date')) rfqData.ra_end_date = normalizeDate(ra_end_date);
+  }
+
+  // Tenant/scope columns. An omitted key leaves the column untouched; an
+  // EXPLICIT null (or '') clears it. `effCompanyId` also carries the
+  // re-derived-from-hotel repair, so a previously-wiped row heals on save.
+  if (sentKey('hospitality_company_id') || effCompanyId !== (existingRfq?.hospitality_company_id ?? null)) {
+    rfqData.hospitality_company_id = effCompanyId;
+  }
+  if (sentKey('hotel_id') || effHotelId !== (existingRfq?.hotel_id ?? null)) {
+    rfqData.hotel_id = effHotelId;
+  }
+  if (sentKey('department_id')) {
+    rfqData.department_id = effDepartmentId;
+  }
+  if (sentKey('process_id')) {
+    rfqData.process_id = effProcessId;
+  }
 
   const errorObj = { vendorNotPresent: [] };
 
@@ -2365,9 +2644,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           delete products.updatable.specs[rfqProductId].variant;
           delete products.updatable.specs[rfqProductId].product_id;
 
-          let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
-            variant ?? '0'
-          })::INT`;
+          let whereClause = {
+            where: `rfq_id = $1::INT AND product_variant_id = $2::INT AND variant = $3::INT`,
+            values: [rfq_id, productId, variant ?? '0']
+          };
 
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
@@ -2377,7 +2657,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               const data = {
                 value
               };
-              const currentWhereClause = whereClause + ` AND title = '${spec}'`;
+              const currentWhereClause = {
+                where: whereClause.where + ` AND title = $${whereClause.values.length + 1}`,
+                values: [...whereClause.values, spec]
+              };
               const doesExist = await rfqModel.checkIfExists(
                 'tbl_rfq_products_specs',
                 currentWhereClause,
@@ -2413,7 +2696,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
-          let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+          let whereClause = {
+            where: `rfq_product_id = $1::INT`,
+            values: [rfqProductId]
+          };
 
           for (const fileType of Object.keys(
             products.updatable.files[rfqProductId]
@@ -2425,8 +2711,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
                 ? 'SPEC'
                 : 'TDS';
 
-            const currentWhereClause =
-              whereClause + ` AND file_type = '${transformedFileType}'`;
+            const currentWhereClause = {
+              where: whereClause.where + ` AND file_type = $${whereClause.values.length + 1}`,
+              values: [...whereClause.values, transformedFileType]
+            };
             const doesExist = await rfqModel.checkIfExists(
               'tbl_rfq_product_files',
               currentWhereClause,
@@ -2478,7 +2766,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             const variant = products.updatable.comment[rfqProductId].variant;
             const comment = products.updatable.comment[rfqProductId].comment;
 
-            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+            let whereClause = {
+              where: `rfq_id = $1::INT AND product_variant_id = $2::INT AND variant = $3::INT`,
+              values: [rfq_id, productId, variant]
+            };
 
             const data = {
               comment
@@ -2653,7 +2944,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
 
       const rfqFilterExists = await rfqModel.checkIfExists(
         'tbl_rfq_filters',
-        `rfq_id = ${rfq_id}`
+        { where: 'rfq_id = $1', values: [rfq_id] }
       );
 
     if(rfqFilterExists.length > 0){
@@ -2668,16 +2959,20 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     }
     
 
+      const localRfqProductIds = Object.keys(filters.local)
+        .map((key) => parseInt(key))
+        .filter(Boolean);
       const rfqProducts = await rfqModel.checkIfExists(
         'tbl_rfq_products',
-        `rfq_id = ${rfq_id} AND id IN (${Object.keys(filters.local)
-          .map((key) => parseInt(key))
-          .filter(Boolean)
-          .join(',')}) ${
-          sheet_id
-            ? ` AND sheet_id = ${sheet_id}`
-            : ` AND sheet_id IS NULL`
-        }`,
+        sheet_id
+          ? {
+              where: 'rfq_id = $1 AND id = ANY($2::int[]) AND sheet_id = $3',
+              values: [rfq_id, localRfqProductIds, sheet_id]
+            }
+          : {
+              where: 'rfq_id = $1 AND id = ANY($2::int[]) AND sheet_id IS NULL',
+              values: [rfq_id, localRfqProductIds]
+            },
         t
       );
 
@@ -2738,15 +3033,17 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             remainingVendors.map(async (vendor) => {
               const exists = await rfqModel.checkIfExists(
                 'tbl_rfq_product_vendors',
-                `rfq_id = ${rfq_id} AND product_variant_id = ${
-                  product.product_variant_id
-                } AND variant = '${product.variant}' AND user_id = ${
-                  vendor.user_id
-                } ${
-                  sheet_id
-                    ? ` AND sheet_id = ${sheet_id}`
-                    : ` AND sheet_id IS NULL`
-                }`
+                sheet_id
+                  ? {
+                      where:
+                        'rfq_id = $1 AND product_variant_id = $2 AND variant = $3 AND user_id = $4 AND sheet_id = $5',
+                      values: [rfq_id, product.product_variant_id, product.variant, vendor.user_id, sheet_id]
+                    }
+                  : {
+                      where:
+                        'rfq_id = $1 AND product_variant_id = $2 AND variant = $3 AND user_id = $4 AND sheet_id IS NULL',
+                      values: [rfq_id, product.product_variant_id, product.variant, vendor.user_id]
+                    }
               );
               return {
                 vendor,
@@ -2825,7 +3122,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           for (const vendor of deletable) {
             let productDetails = await rfqModel.checkIfExists(
               'tbl_product_variant',
-              `id = ${productId}`,
+              { where: 'id = $1', values: [productId] },
               t
             );
             if (!productDetails || productDetails.length === 0) continue;
@@ -3388,31 +3685,29 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   // Create the approval instance for tracking. createApprovalInstance handles
   // the "creator is final approver" auto-approval case end-to-end, including
   // persisting per-step + per-approver rows so the lifecycle UI can render
-  // the audit trail. Previously this site short-circuited via
-  // checkIfUserIsFinalApprover and inserted only the parent instance row,
-  // leaving zero tbl_approval_instance_steps / tbl_approval_step_approvers
-  // rows and producing the "No approval steps configured" lifecycle bug.
-  let result;
-  try {
-    result = await createApprovalInstance({
-      entity_type: entityType,
-      entity_id: rfqId,
-      hospitality_company_id: rfq.hospitality_company_id,
-      hotel_id: rfq.hotel_id,
-      department_id: rfq.department_id,
-      process_id: rfq.process_id,
-      initiated_by: userId,
-      metadata: {
-        rfq_number: rfq.rfq_no,
-        is_tender: rfq.is_tender,
-        company_name: rfq.company_name
-      },
-      txContext  // Pass transaction context to createApprovalInstance
-    });
-  } catch (approvalError) {
-    logger.warn(`[Approval] Could not create approval instance for ${entityType} ${rfqId}: ${approvalError.message}. Proceeding to publish anyway.`);
-    result = null;
-  }
+  // the audit trail.
+  //
+  // Missing-policy is a HARD FAIL — the previous silent catch let RFQs
+  // publish without approval tracking when no policy matched
+  // (company, hotel, dept, process). Now the error propagates as
+  // NoApprovalPolicyError so the controller returns 400
+  // NO_APPROVAL_POLICY_FOR_PROCESS and the UI can prompt the admin to
+  // configure a policy.
+  const result = await createApprovalInstance({
+    entity_type: entityType,
+    entity_id: rfqId,
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
+    process_id: rfq.process_id,
+    initiated_by: userId,
+    metadata: {
+      rfq_number: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      company_name: rfq.company_name
+    },
+    txContext  // Pass transaction context to createApprovalInstance
+  });
 
   // Set RFQ to READY_TO_PUBLISH (4). Publishing proceeds whether approval
   // auto-completed (creator was the final approver in every resolved step)
@@ -4687,6 +4982,287 @@ const sendVendorEditNotifications = async (rfq_id, userId, diff) => {
   });
 };
 
+// ===========================================================================
+// NEGOTIATION WRITE ALLOWLIST
+// ===========================================================================
+//
+// When a buyer opens a negotiation round they name exactly which fields the
+// vendor may move: `tbl_negotiation_rounds.vendor_approvals[].
+// negotiation_fields[]` on legacy single-product rounds, and
+// `products[].vendor_targets[].fields[]` on multi-product rounds. That list
+// was never enforced on the write side — the quote endpoints only asked "is
+// this product covered by an active round?", after which a vendor could
+// rewrite unit price, every charge, the tax rate, payment terms, comments and
+// documents at will. Everything below turns that list into a real allowlist.
+//
+// Field vocabulary observed in production (counts over all rounds):
+//   base_price 828, payment_terms 469, freight 135, loading_unloading 94,
+//   documents 83, packaging 64, comment 56, insurance 51, comments 31,
+//   testing_inspection 25, global_comment 9, tcs 3, transportation 3,
+//   delivery_period 2, commissioning_charges 2, handling 1.
+// Charge field names are exactly the `tbl_charge_names.slug` values, so a
+// charge ask maps 1:1 onto an entry of `other_charges[].slug`.
+
+// `base_price` is a UNIT price; on the quote it is stored in
+// tbl_quote_items.unit_price. Everything that DERIVES unit_price (the MRP
+// inputs, which the controller reverse-calculates into unit_price before this
+// check runs) is guarded by the same name — otherwise a vendor could switch a
+// line to MRP mode and move the price without ever touching `unit_price`.
+const NEGOTIABLE_BASE_PRICE = 'base_price';
+
+// Guarded fields with no negotiation-vocabulary name. A buyer cannot open
+// these, so under an active round they are frozen: the GST rate is statutory
+// and the quantity belongs to the RFQ, not to the vendor's response. Both
+// move the landed total, which is what the round is measured on.
+const ALWAYS_FROZEN_FIELDS = { tax: 'gst', quantity: 'quantity' };
+
+const negText = (v) => (v === null || v === undefined ? '' : String(v).trim());
+const negNum = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const negSameNum = (a, b) => {
+  const x = negNum(a);
+  const y = negNum(b);
+  if (x === null && y === null) return true;
+  if (x === null || y === null) return false;
+  return Math.abs(x - y) < 0.005;
+};
+const negSameText = (a, b) => negText(a) === negText(b);
+
+// A charge reduced to the shape a comparison cares about. `name` is excluded
+// on purpose: two charges with the same slug are the same charge, and buyers
+// rename them ("Freight" vs "FREIGHT CHARGES AS PER ACTUAL") without that
+// being a commercial change.
+const negChargeShape = (c) => ({
+  amount: negNum(c?.amount),
+  amount_mode: negText(c?.amount_mode),
+  tax: negNum(c?.tax),
+  tax_mode: negText(c?.tax_mode),
+  comment: negText(c?.comment)
+});
+const negSameCharge = (a, b) => {
+  const x = negChargeShape(a);
+  const y = negChargeShape(b);
+  return (
+    negSameNum(x.amount, y.amount) &&
+    x.amount_mode === y.amount_mode &&
+    negSameNum(x.tax, y.tax) &&
+    x.tax_mode === y.tax_mode &&
+    x.comment === y.comment
+  );
+};
+const negChargesBySlug = (charges) => {
+  const map = new Map();
+  for (const c of Array.isArray(charges) ? charges : []) {
+    const slug =
+      negText(c?.slug) || rfqController._generateChargeSlug(negText(c?.name));
+    if (slug) map.set(slug, c);
+  }
+  return map;
+};
+const negParseJsonb = (v) => {
+  if (v === null || v === undefined) return [];
+  if (Array.isArray(v)) return v;
+  try {
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+/** Every vendor id a round touches (vendor_ids is NULL on many rounds). */
+const negRoundVendorIds = (round) => {
+  const set = new Set();
+  for (const v of Array.isArray(round?.vendor_ids) ? round.vendor_ids : []) {
+    if (v != null) set.add(Number(v));
+  }
+  for (const va of Array.isArray(round?.vendor_approvals) ? round.vendor_approvals : []) {
+    if (va?.vendor_id != null) set.add(Number(va.vendor_id));
+  }
+  for (const p of Array.isArray(round?.products) ? round.products : []) {
+    for (const vt of Array.isArray(p?.vendor_targets) ? p.vendor_targets : []) {
+      if (vt?.vendor_id != null) set.add(Number(vt.vendor_id));
+    }
+  }
+  return set;
+};
+
+/**
+ * The fields one vendor may move on one product of one round. Mirrors
+ * negotiationModel.getVendorFieldsForProduct — kept local so the write-side
+ * guard cannot be silently loosened by an unrelated change to the read model.
+ */
+const negVendorFieldsForProduct = (round, vendorId, rfqProductId) => {
+  const products = Array.isArray(round?.products) ? round.products : [];
+  if (products.length > 0) {
+    const entry = products.find((p) =>
+      rfqProductId === 'RFQ_LEVEL'
+        ? p?.is_rfq_level === true
+        : Number(p?.rfq_product_id) === Number(rfqProductId)
+    );
+    const vt = (entry?.vendor_targets || []).find(
+      (v) => Number(v?.vendor_id) === Number(vendorId)
+    );
+    return (vt?.fields || []).map((f) => negText(f?.name)).filter(Boolean);
+  }
+  const va = (round?.vendor_approvals || []).find(
+    (v) => Number(v?.vendor_id) === Number(vendorId)
+  );
+  return (va?.negotiation_fields || []).map((f) => negText(f?.name)).filter(Boolean);
+};
+
+/**
+ * Load the write allowlist for one vendor on one RFQ.
+ *
+ * Returns:
+ *   active            — true when the vendor has at least one ACTIVE round
+ *   byRfqProductId    — Map<rfq_product_id, Set<field>> (per-product, strict)
+ *   rfqLevel          — Set<field> for the quote-level fields
+ *
+ * `rfqLevel` deliberately unions every field the vendor has open anywhere on
+ * this RFQ, not only the `is_rfq_level` entry: the quote-level fields
+ * (payment terms, global comment, global charges, T&C files) are shared by
+ * every product, so if a buyer opened `payment_terms` on any slot of any
+ * active round they meant for this vendor to be able to move them. Per-product
+ * asks stay strictly per-product.
+ */
+const loadNegotiationAllowlist = async (rfqId, vendorId, dbCon = db) => {
+  const rows = await dbCon.any(
+    `SELECT id, rfq_product_id, vendor_ids, vendor_approvals, products
+       FROM tbl_negotiation_rounds
+      WHERE rfq_id = $1
+        AND source_type = 'RFQ'
+        AND status = 'ACTIVE'
+        AND end_date > NOW()`,
+    [rfqId]
+  );
+
+  const byRfqProductId = new Map();
+  const rfqLevel = new Set();
+  let active = false;
+
+  for (const round of rows) {
+    if (!negRoundVendorIds(round).has(Number(vendorId))) continue;
+    active = true;
+
+    const coveredIds = [];
+    if (Array.isArray(round.products) && round.products.length > 0) {
+      for (const p of round.products) {
+        if (p?.rfq_product_id != null) coveredIds.push(Number(p.rfq_product_id));
+      }
+    } else if (round.rfq_product_id != null) {
+      coveredIds.push(Number(round.rfq_product_id));
+    }
+
+    for (const rfqProductId of coveredIds) {
+      const fields = negVendorFieldsForProduct(round, vendorId, rfqProductId);
+      if (!byRfqProductId.has(rfqProductId)) byRfqProductId.set(rfqProductId, new Set());
+      const bucket = byRfqProductId.get(rfqProductId);
+      for (const f of fields) {
+        bucket.add(f);
+        rfqLevel.add(f);
+      }
+    }
+
+    for (const f of negVendorFieldsForProduct(round, vendorId, 'RFQ_LEVEL')) {
+      rfqLevel.add(f);
+    }
+  }
+
+  return { active, byRfqProductId, rfqLevel };
+};
+
+/**
+ * Diff one submitted product line against what is currently stored and return
+ * the negotiation field names the vendor is trying to move. The submitted
+ * payload is the vendor's FULL quote on every save, so an unchanged field must
+ * never count as an attempted change — only real deltas are reported.
+ *
+ * `storedItem` may be undefined (the vendor is adding a line that was not part
+ * of their original quote); everything they supply then counts as a change.
+ */
+const negChangedProductFields = (product, storedItem) => {
+  const changed = new Set();
+
+  const incomingCharges = negChargesBySlug(product.other_charges);
+
+  // No stored line: the vendor is introducing a product they had not quoted.
+  // Everything they supply is new. Report it against the field it belongs to
+  // — the line's very existence is a price statement, so `base_price` — and
+  // skip gst/quantity, which are not independently chosen here and would only
+  // produce a confusing violation list.
+  if (!storedItem) {
+    if (negNum(product.unit_price)) changed.add(NEGOTIABLE_BASE_PRICE);
+    if (negText(product.comment)) changed.add('comment');
+    if (negText(product.delivery_period)) changed.add('delivery_period');
+    if (Array.isArray(product.document_files) && product.document_files.length > 0) {
+      changed.add('documents');
+    }
+    for (const slug of incomingCharges.keys()) changed.add(slug);
+    return changed;
+  }
+
+  const stored = storedItem;
+
+  if (!negSameNum(product.unit_price, stored.unit_price)) {
+    changed.add(NEGOTIABLE_BASE_PRICE);
+  }
+  // MRP inputs feed unit_price; the controller has already reverse-calculated
+  // them into it by the time this runs, but a mode flip on its own is still a
+  // change to how the price is stated.
+  if (
+    negText(product.pricing_method || 'TRADITIONAL') !==
+      negText(stored.pricing_method || 'TRADITIONAL') ||
+    !negSameNum(product.entered_mrp, stored.entered_mrp) ||
+    !negSameNum(product.mrp_discount, stored.mrp_discount)
+  ) {
+    changed.add(NEGOTIABLE_BASE_PRICE);
+  }
+
+  if (
+    !negSameNum(product.tax, stored.tax) ||
+    !negSameText(product.tax_mode, stored.tax_mode)
+  ) {
+    changed.add(ALWAYS_FROZEN_FIELDS.tax);
+  }
+  if (!negSameNum(product.quantity, stored.quantity)) {
+    changed.add(ALWAYS_FROZEN_FIELDS.quantity);
+  }
+  if (!negSameText(product.comment, stored.comment)) changed.add('comment');
+  if (!negSameText(product.delivery_period, stored.delivery_period)) {
+    changed.add('delivery_period');
+  }
+  // The endpoint only ever APPENDS per-product files (it never diffs them), so
+  // any non-empty list is an attempt to change the documents on this line.
+  if (Array.isArray(product.document_files) && product.document_files.length > 0) {
+    changed.add('documents');
+  }
+
+  const existing = negChargesBySlug(negParseJsonb(stored.other_charges));
+  for (const [slug, charge] of incomingCharges) {
+    if (!existing.has(slug) || !negSameCharge(charge, existing.get(slug))) changed.add(slug);
+  }
+  for (const slug of existing.keys()) {
+    if (!incomingCharges.has(slug)) changed.add(slug);
+  }
+
+  return changed;
+};
+
+/**
+ * `comment` and `comments` are the same ask spelled two ways in production
+ * (56 and 31 occurrences). Accept either spelling for either.
+ */
+const negFieldAllowed = (allowed, field) => {
+  if (allowed.has(field)) return true;
+  if (field === 'comment') return allowed.has('comments');
+  if (field === 'comments') return allowed.has('comment');
+  return false;
+};
+
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
     try {
@@ -5106,6 +5682,12 @@ const rfqController = {
       }
     } catch (error) {
       logError(error);
+
+      // Typed errors from authorizationService → structured 4xx with code
+      if (error instanceof AuthorizationError || error instanceof NoApprovalPolicyError) {
+        return sendScopeError(res, error);
+      }
+
       return res
         .status(400)
         .json({
@@ -5891,7 +6473,10 @@ const rfqController = {
 
       const rfqDraft = await rfqModel.checkIfExists(
         'tbl_rfq',
-        `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
+        {
+          where: 'id = $1 AND is_published = 0 AND created_by = $2',
+          values: [id, user_id]
+        }
       );
 
       if (!rfqDraft || rfqDraft.length === 0) {
@@ -5900,7 +6485,13 @@ const rfqController = {
           message: 'Draft RFQ not found or does not belong to the user!'
         });
       }
-      db.tx(async (t) => {
+      // Respond-AFTER-commit, and AWAIT the transaction. This used to be a bare
+      // `db.tx(...)` whose promise was never awaited and whose 200 was written
+      // from inside the callback, so (a) the success response raced the COMMIT
+      // and (b) a failing transaction produced an unhandled rejection and a
+      // request that never got any response at all — the catch below could not
+      // see it. Awaiting routes those failures to the 500 handler.
+      await db.tx(async (t) => {
         // Delete main RFQ
         await rfqModel.delete('tbl_rfq', { id });
 
@@ -5966,11 +6557,11 @@ const rfqController = {
 
         // Delete terms and conditions
         await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id }, t);
+      });
 
-        return res.status(200).json({
-          status: 1,
-          message: 'RFQ draft and all associated records deleted successfully'
-        });
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ draft and all associated records deleted successfully'
       });
     } catch (error) {
       logError('Error deleting RFQ draft', error);
@@ -5987,7 +6578,10 @@ const rfqController = {
       const { rfq_id} = req.params;
       const user_id = req.user.id;
       const response = await rfqModel.findAll("tbl_quote_activity", {rfq_id});
-      const rfqClosed = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}  AND status = 2`);
+      const rfqClosed = await rfqModel.checkIfExists('tbl_rfq', {
+        where: 'id = $1 AND status = 2',
+        values: [rfq_id]
+      });
 
       
       res.status(200).json({
@@ -6078,7 +6672,7 @@ const rfqController = {
       const sort = req.body.sort || 'DESC';
       const reverse_auction = req.body.reverse_auction || '-1';
       const rfq_type = req.body.rfq_type || '';
-      const rfq_no = req.body.rfq_no || null;
+      const rfq_no = req.body.search_val || req.body.rfq_no || null;
       const hotel_ids = req.body.hotel_ids || [];
 
       const result = await rfqModel.getAllDraftRfqs(
@@ -6208,7 +6802,7 @@ const rfqController = {
       }
 
       //  fetch rfq mapped hotels, create and assign the mapped hotels in draftData.mappedHotels
-       const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${id}`);
+       const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', { where: 'rfq_id = $1', values: [id] });
        draftData[0].mappedHotels = mappedHotels || [];
 
       // bid_end_date is text NOT NULL in the DB; the auto-create path stores
@@ -6251,7 +6845,7 @@ const rfqController = {
 
       const draftData = rfqModel.checkIfExists(
         'tbl_rfq',
-        `id = ${draftId} AND is_published = 0`
+        { where: 'id = $1 AND is_published = 0', values: [draftId] }
       );
       if (!draftData || draftData.length <= 0)
         return res.status(400).json({
@@ -6523,6 +7117,199 @@ const rfqController = {
       });
     }
   },
+
+  // Recommended products for the Start RFQ wizard.
+  // Combines: user history + staged-variant category similarity + popularity,
+  // filtered by vendor availability for the selected hotels.
+  getRecommendedProducts: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      const hotel_ids = Array.isArray(req.body.hotel_ids) ? req.body.hotel_ids : [];
+      const staged_variant_ids = Array.isArray(req.body.variant_ids)
+        ? req.body.variant_ids.map((v) => parseInt(v)).filter((n) => !isNaN(n))
+        : [];
+      const limit = parseInt(req.body.limit) || 4;
+
+      if (hotel_ids.length === 0) {
+        return res.status(200).json({ status: 1, data: [] });
+      }
+
+      const data = await rfqModel.getRecommendedProducts({
+        user_id,
+        hotel_ids,
+        staged_variant_ids,
+        limit,
+      });
+
+      return res.status(200).json({ status: 1, data });
+    } catch (error) {
+      logError('Error in getRecommendedProducts:', error);
+      return res.status(500).json({
+        status: 3,
+        message: 'Failed to fetch recommendations',
+      });
+    }
+  },
+
+  // Bulk variant of createOrUpdateRfqDraftWithProductVendors —
+  // creates a draft (or appends to an existing one) and adds an array
+  // of products to it in one round-trip. Frontend uses this when the
+  // user has staged multiple products and clicks "Create Draft".
+  createOrUpdateRfqDraftWithBulkProducts: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      const user = await userModel.userinfo(user_id);
+      if (!user) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      const is_tender = req.body.is_tender || 0;
+      const hotel_ids = req.body.hotel_ids || [];
+      const variants = Array.isArray(req.body.variants) ? req.body.variants : [];
+
+      if (variants.length === 0) {
+        return res.status(400).json({ status: 2, message: 'No products provided' });
+      }
+      if (!hotel_ids.length) {
+        return res.status(400).json({ status: 2, message: 'At least one business unit is required' });
+      }
+
+      let rfq_id;
+      let rfqData;
+      let isNew = false;
+
+      // Use existing draft if rfq_id provided, otherwise create new
+      if (req.body.rfq_id) {
+        const specificRfq = await rfqModel.findOne('tbl_rfq', {
+          id: req.body.rfq_id,
+          created_by: user_id,
+          is_published: 0,
+        });
+        if (!specificRfq) {
+          return res.status(404).json({
+            status: 2,
+            message: 'Specified draft not found or not authorized',
+          });
+        }
+        rfqData = specificRfq;
+        rfq_id = specificRfq.id;
+      } else {
+        const currentDate = new Date();
+        const bidEndDate = new Date();
+        bidEndDate.setDate(currentDate.getDate() + 30);
+
+        rfqData = {
+          company_name: user.organization_name || '',
+          response_email: user.email,
+          contact_name: user.name,
+          contact_number: user.mobile || '',
+          comment: '',
+          bid_end_date: bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
+          location: '',
+          is_published: 0,
+          created_by: user_id,
+          updated_by: user_id,
+          status: 1,
+          is_tender,
+        };
+
+        const nextRFQNumber = await getNextRfQNumber();
+        rfqData.rfq_no = nextRFQNumber;
+
+        const response = await rfqModel.insert('tbl_rfq', rfqData);
+        rfq_id = response[0].id;
+        isNew = true;
+
+        const rfqTerms = [];
+        for (let i = 1; i < 9; i++) {
+          rfqTerms.push({ rfq_id, terms_id: i });
+        }
+        await rfqModel.insertArray(
+          rfqTerms,
+          ['rfq_id', 'terms_id'],
+          'tbl_rfq_terms_map'
+        );
+      }
+
+      // Sync hotel mappings (works for both new and existing drafts)
+      await hospitalityModel.reconcileRFQHotels(rfq_id, hotel_ids, user_id);
+
+      // Pre-resolve eligible vendors per unique variant once to avoid
+      // re-querying for the same variant when added multiple times.
+      const variantVendorCache = new Map();
+
+      let added_count = 0;
+      const failed = [];
+
+      for (const v of variants) {
+        const variant_id = v.variant_id;
+        if (!variant_id) {
+          failed.push({ variant_id: null, reason: 'Missing variant_id' });
+          continue;
+        }
+
+        try {
+          // Get eligible vendors (cached per variant_id)
+          let vendorList = variantVendorCache.get(variant_id);
+          if (!vendorList) {
+            vendorList = await hospitalityModel.getEligibleVendorsForVariant(
+              variant_id,
+              hotel_ids
+            ) || [];
+            variantVendorCache.set(variant_id, vendorList);
+          }
+
+          const variantNum = await rfqModel.getNextVariant(rfq_id, variant_id);
+
+          await rfqModel.insert('tbl_rfq_products', {
+            rfq_id,
+            product_variant_id: variant_id,
+            variant: variantNum,
+            comment: '',
+            datasheet: '',
+            spec_file: '',
+            qap_file: '',
+            qap: '',
+            datasheet_file: '',
+            sheet_id: null,
+          });
+
+          for (const vendor of vendorList) {
+            await rfqModel.insert('tbl_rfq_product_vendors', {
+              rfq_id,
+              product_variant_id: variant_id,
+              user_id: vendor.id || vendor.vendor_id,
+              variant: variantNum,
+              sheet_id: null,
+            });
+          }
+
+          added_count++;
+        } catch (err) {
+          logError(`Error adding variant ${variant_id} to draft:`, err);
+          failed.push({ variant_id, reason: err?.message || 'Failed' });
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Products added to draft successfully',
+        data: {
+          rfq_id,
+          isNew,
+          added_count,
+          failed,
+        },
+      });
+    } catch (error) {
+      logError('Error in createOrUpdateRfqDraftWithBulkProducts:', error);
+      return res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request',
+      });
+    }
+  },
+
   fetchRfqFilters : async (req, res) => {
     try {
       const { rfq_id } = req.params;
@@ -7046,9 +7833,35 @@ const rfqController = {
   },
 
   getRfqByUser: async (req, res, next) => {
-    let user_id = req.user.id;
-    if (req.body.user_id) {
-      user_id = req.body.user_id;
+    // SCOPE IS DERIVED FROM req.user, NOT FROM THE BODY.
+    //
+    // This used to be `if (req.body.user_id) user_id = req.body.user_id`, with
+    // no check of any kind. `user_id` is the ONLY thing scoping this listing —
+    // it is both the row filter (`tbl_rfq_product_vendors.user_id`) and, until
+    // the companion fix in rfqModel.getRfqByUser, raw SQL text. So the body
+    // field was simultaneously an IDOR (any authenticated vendor could read any
+    // other vendor's RFQ list, quote statuses and counterparty names by posting
+    // someone else's id) and a SQL injection sink.
+    //
+    // The route's `validateDbBody.user_id_profileexists` guard does not help:
+    // it reads `req.user.id` (userDbValidation.js:241) and never looks at
+    // `req.body.user_id`.
+    //
+    // The override is kept — an administrator inspecting a vendor's RFQ list is
+    // a legitimate back-office action — but it is now gated on the caller's own
+    // user_type and the supplied id must be a clean positive integer. For
+    // everyone else the body field is ignored outright rather than rejected, so
+    // an existing client that harmlessly echoes its own id keeps working.
+    let user_id = toPositiveIntId(req.user.id);
+    if (req.body.user_id !== undefined && canActOnBehalfOfOtherUsers(req.user)) {
+      const requestedUserId = toPositiveIntId(req.body.user_id);
+      if (requestedUserId === null) {
+        return res
+          .status(400)
+          .json({ status: 0, message: 'Invalid user_id' })
+          .end();
+      }
+      user_id = requestedUserId;
     }
     try {
       let page,
@@ -7066,15 +7879,29 @@ const rfqController = {
         ? req.body.negotiation_filter
         : null;
 
-      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, negotiation_filter);
-      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, negotiation_filter);
+      // Server-side filters
+      const filters = {
+        search_val: req.body.search_val || null,
+        quote_status: req.body.quote_status || null,
+        rfq_status: req.body.rfq_status || null,
+        bid_ends_in: req.body.bid_ends_in || null,
+        hotel_ids: Array.isArray(req.body.hotel_ids) ? req.body.hotel_ids.filter(Boolean) : [],
+        negotiation_filter,
+      };
+
+      const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id, filters);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id, filters);
+
+      // Stats for dashboard cards
+      const stats = await rfqModel.getVendorRfqStats(user_id);
 
       res
         .status(200)
         .json({
           status: 1,
           data: listRfq,
-          totalRFQ
+          totalRFQ,
+          stats,
         })
         .end();
     } catch (error) {
@@ -7097,6 +7924,18 @@ const rfqController = {
         return res.status(200).json({ status: 0, message: 'Invalid RFQ ID' });
       }
 
+      // Defense-in-depth: deny direct-URL access to RFQs outside the user's
+      // (company × hotel × dept × process) scope. List endpoints already
+      // hide out-of-scope rows; this catches the case where a user knows
+      // the id and bypasses the list.
+      if (userId) {
+        try { await assertCanReadParentRfq(userId, rfqId); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const data = await rfqModel.getLifecycleSummary(rfqId, userId);
 
       if (!data || !data.current_stage) {
@@ -7107,6 +7946,68 @@ const rfqController = {
     } catch (err) {
       logError('getLifecycleSummary error', err);
       return res.status(200).json({ status: 3, message: 'Error fetching lifecycle summary' });
+    }
+  },
+
+  // GET /rfq/:rfqId/lifecycle — ARC-style stage lifecycle for the single RFQ
+  // workspace page. Shapes the existing getLifecycleSummary phases into 4
+  // navigable stages + adds tender guard, draft handling, and RFQ-scoped perms.
+  getRfqLifecycle: async (req, res) => {
+    try {
+      const rfqId = parseInt(req.params.rfqId, 10);
+      const userId = req.user?.id || null;
+      if (!rfqId || isNaN(rfqId)) {
+        return res.status(200).json({ status: 0, message: 'Invalid RFQ ID' });
+      }
+
+      // Basic row first — for tender guard + draft handling + permission scope.
+      const rfq = await db.oneOrNone(
+        `SELECT id, rfq_no, title, status, is_published, is_tender, hotel_id,
+                department_id, hospitality_company_id, created_by, bid_end_date,
+                ra_start_date, ra_end_date
+           FROM tbl_rfq WHERE id = $1`,
+        [rfqId]
+      );
+      if (!rfq) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      if (Number(rfq.is_tender) === 1) {
+        return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
+      }
+
+      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
+      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
+      let permissions;
+      if (Number(req.user?.user_type) === 8) {
+        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
+      } else {
+        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
+        if (rfq.hotel_id != null) {
+          const rows = await rbacModel
+            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
+            .catch(() => []);
+          for (const row of rows) {
+            const resource = String(row.resource);
+            if (permissions[resource]) permissions[resource].push(String(row.action));
+          }
+        }
+      }
+
+      // Draft (status 0 = not yet submitted) → redirectable shape so the shell
+      // sends the buyer to the edit/create flow instead of the stage page.
+      const summary = (Number(rfq.status) === 0)
+        ? null
+        : await rfqModel.getLifecycleSummary(rfqId, userId);
+      if (!summary || !summary.current_stage) {
+        return res.status(200).json({
+          status: 1,
+          data: { rfq: { ...rfq, status: 'draft' }, stages: [], default_stage: null, permissions },
+        });
+      }
+
+      const shaped = shapeRfqLifecycle(summary, { permissions });
+      return res.status(200).json({ status: 1, data: { ...shaped, rfq } });
+    } catch (err) {
+      logError('getRfqLifecycle error', err);
+      return res.status(200).json({ status: 3, message: 'Error fetching RFQ lifecycle' });
     }
   },
 
@@ -7132,7 +8033,10 @@ const rfqController = {
             await rfqModel.updateWhere(
               'tbl_rfq_product_vendors',
               { is_rfq_viewed: 1 },
-              `rfq_id = ${id} AND user_id = ${req.user.id} AND is_rfq_viewed = 0`
+              {
+                where: 'rfq_id = $1 AND user_id = $2 AND is_rfq_viewed = 0',
+                values: [id, req.user.id]
+              }
             );
           } catch (error) {
             logError('Error updating RFQ viewed status', error);
@@ -7499,7 +8403,11 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status, hotel_ids } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, search_val, is_tender, completed_status, hotel_ids } = req.body;
+      // Support unified search_val (searches both title and rfq_no)
+      if (search_val && !rfq_no) {
+        rfq_no = search_val;
+      }
       if (project_id == -1) {
         project_id = null;
       }
@@ -7585,6 +8493,231 @@ const rfqController = {
         .end();
     }
   },
+
+  // ── Server-side faceted + paginated RFQ management listing (mirrors the
+  //    rate-contracts /all listing). Fetches the buyer's scoped RFQs fresh,
+  //    computes lifecycle buckets + facet counts + tab counts in-process, then
+  //    returns ONE paginated page (default 20). The client renders exactly what
+  //    the server returns — no local filtering. RFQ-only (tenders live in ARC).
+  getRfqListView: async (req, res) => {
+    const user_id = req.user.id;
+    try {
+      const body = req.body || {};
+      // 'approval' = awaiting publish approval (status 3/4). It used to be
+      // folded into 'drafts', which sent approvers into the edit wizard.
+      const tab = ['all', 'pending', 'drafts', 'approval', 'ongoing', 'approved', 'closed'].includes(body.tab) ? body.tab : 'all';
+      const search = (body.search || body.search_val || '').toString().trim() || null;
+      const sort = ['recent', 'oldest', 'deadline'].includes(body.sort) ? body.sort : 'recent';
+      const page = Number(body.page) > 0 ? Number(body.page) : 1;
+      const limit = Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : 20;
+      const f = body.filters || {};
+      const asStrArr = (v) => (Array.isArray(v) ? v.map(String) : []);
+      // Accept an ISO calendar date "YYYY-MM-DD"; ignore anything else (never throw).
+      const asISODate = (v) => {
+        if (typeof v !== 'string') return null;
+        const s = v.trim();
+        return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+      };
+      const filters = {
+        status: asStrArr(f.status), buId: asStrArr(f.buId), categoryId: asStrArr(f.categoryId),
+        departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
+        dateFrom: asISODate(f.dateFrom),
+        dateTo: asISODate(f.dateTo),
+      };
+      const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
+
+      // 1. Fetch the buyer's scoped RFQs (RFQ-only). Big cap so faceting is
+      //    complete; search is pushed to SQL.
+      const FETCH_CAP = 1000;
+      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true);
+      const rows = Array.isArray(all) ? all : [];
+
+      // 2. Lifecycle stage → bucket + normalized status key.
+      let lifecycleMap = {};
+      if (rows.length > 0) lifecycleMap = await rfqModel.computeLifecycleStages(rows.map((r) => parseInt(r.id)));
+      const STAGE_BUCKET = {
+        // NOT 'drafts'. A pending-approval RFQ is somebody's to-do, not the
+        // creator's unfinished paperwork — the card must route to the detail
+        // page where the approver can act, and must not offer Edit/Delete only.
+        RFQ_APPROVAL: 'approval',
+        AWAITING_QUOTES: 'ongoing', TECHNICAL_AWAITING_QUOTES: 'ongoing', TECHNICAL_EVALUATING: 'ongoing',
+        TECHNICAL_APPROVING: 'ongoing', TECHNICAL_REJECTED: 'ongoing', RFQ_STUCK_TECHNICAL: 'ongoing',
+        RFQ_STUCK_COMMERCIAL: 'ongoing', COMMERCIAL_EVALUATION: 'ongoing', NEGOTIATION_ONGOING: 'ongoing',
+        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing',
+        APPROVED_COMPLETED: 'approved',
+      };
+      const statusKey = (r) => {
+        const s = Number(r.status);
+        if (s === 2) return 'CLOSED';
+        if (s === 5) return 'WITHDRAWN';
+        if (s === 0) return 'DRAFT';
+        // status 0 is unused in practice — a saved draft is an unpublished RFQ
+        // (is_published = 0) that isn't awaiting publish approval (status 3/4).
+        if (Number(r.is_published) === 0 && s !== 3 && s !== 4) return 'DRAFT';
+        if (r.lifecycle_stage) return r.lifecycle_stage;
+        if (s === 3 || s === 4) return 'RFQ_APPROVAL';
+        return 'AWAITING_QUOTES';
+      };
+      const bucketOf = (r) => {
+        const s = Number(r.status);
+        if (s === 2) return 'closed';
+        if (s === 0 || s === 5) return 'drafts';
+        // status 3 = PENDING_APPROVAL, 4 = READY_TO_PUBLISH. Both are
+        // is_published = 0, so this MUST be tested before the is_published
+        // short-circuit below — otherwise an RFQ an approver has to act on is
+        // filed as one of the creator's drafts (the P0 this fixes).
+        if (s === 3 || s === 4) return 'approval';
+        // Not yet published (and not closed / not awaiting approval) → a real
+        // draft: an unpublished status-1 RFQ.
+        if (Number(r.is_published) === 0) return 'drafts';
+        const stage = r.lifecycle_stage;
+        if (stage && STAGE_BUCKET[stage]) return STAGE_BUCKET[stage];
+        if (r.po_completed) return 'approved';
+        return 'ongoing';
+      };
+      for (const r of rows) {
+        r.lifecycle_stage = lifecycleMap[parseInt(r.id)] || null;
+        r._bucket = bucketOf(r);
+        r._statusKey = statusKey(r);
+      }
+
+      // Action holders for ALL scoped rows — powers both the "Pending for me"
+      // tab (filter + count) and the per-row lifecycle tooltip. The helper
+      // batches its approval + RBAC queries, so it stays bounded over the set.
+      let actionMap = {};
+      if (rows.length > 0) {
+        try { actionMap = await rfqModel.getActionHoldersForRFQs(rows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
+      }
+      for (const r of rows) {
+        const holders = actionMap[parseInt(r.id)];
+        const users = holders?.users || [];
+        r._isMyAction = users.some((u) => Number(u.id) === Number(user_id));
+        // Approval affordances for the card. `can_approve` is narrower than
+        // `_isMyAction`: it is true only when the pending action is an APPROVAL
+        // this user is a pending approver on (not, say, a tech-eval task).
+        r._canApprove = holders?.type === 'approval' && r._isMyAction;
+        r._approvalInstanceId = holders?.type === 'approval' ? (holders.instance_id ?? null) : null;
+        r._approvalStepId = holders?.type === 'approval' ? (holders.step_id ?? null) : null;
+        r._approvalEntityType = holders?.type === 'approval' ? (holders.entity_type || null) : null;
+      }
+
+      // Safe array accessors for the json columns.
+      const parseArr = (v) => {
+        if (Array.isArray(v)) return v;
+        if (typeof v === 'string') { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } }
+        return [];
+      };
+      const dedupe = (arr, keyFn) => { const seen = new Set(); const out = []; for (const x of arr) { const k = keyFn(x); if (k && !seen.has(k)) { seen.add(k); out.push(x); } } return out; };
+      const productPairs = (r) => dedupe(parseArr(r.products).map((p) => ({
+        id: String(p.product_id ?? p.id ?? ''),
+        name: (Array.isArray(p.product_details) && p.product_details[0] && p.product_details[0].name) || `Product ${p.product_id ?? p.id ?? ''}`,
+      })), (p) => p.id);
+      const vendorPairs = (r) => {
+        const out = [];
+        for (const p of parseArr(r.products)) for (const v of parseArr(p.vendor_details)) {
+          const id = String(v.user_id ?? v.id ?? '');
+          const name = (v.user_details && v.user_details.name) || '';
+          if (id) out.push({ id, name: name || `Vendor ${id}` });
+        }
+        return dedupe(out, (v) => v.id);
+      };
+      const categoryPairs = (r) => dedupe(parseArr(r.categories).map((c) => ({ id: String(c.id), title: c.title })), (c) => c.id);
+
+      // 3. tab counts (full scoped+search set).
+      const tab_counts = { all: rows.length, pending: 0, drafts: 0, approval: 0, ongoing: 0, approved: 0, closed: 0 };
+      for (const r of rows) {
+        tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+        if (r._isMyAction) tab_counts.pending++;
+      }
+
+      // 4. tab scope. "pending" cuts across buckets — every row needing my action.
+      const tabRows = tab === 'all' ? rows
+        : tab === 'pending' ? rows.filter((r) => r._isMyAction)
+        : rows.filter((r) => r._bucket === tab);
+
+      // 5. facets over the tab scope (not narrowed by facet selections).
+      const fm = { status: new Map(), buId: new Map(), categoryId: new Map(), departmentId: new Map(), productId: new Map(), vendorId: new Map() };
+      const bump = (m, key, label) => { const e = m.get(key) || { key, label: label || null, count: 0 }; e.count++; if (label && !e.label) e.label = label; m.set(key, e); };
+      for (const r of tabRows) {
+        bump(fm.status, r._statusKey, null);
+        if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+        if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
+        for (const c of categoryPairs(r)) bump(fm.categoryId, c.id, c.title);
+        for (const p of productPairs(r)) bump(fm.productId, p.id, p.name);
+        for (const v of vendorPairs(r)) bump(fm.vendorId, v.id, v.name);
+      }
+      const toFacet = (m) => Array.from(m.values()).sort((a, b) => b.count - a.count);
+      const facets = {
+        status: toFacet(fm.status), buId: toFacet(fm.buId), categoryId: toFacet(fm.categoryId),
+        departmentId: toFacet(fm.departmentId), productId: toFacet(fm.productId), vendorId: toFacet(fm.vendorId),
+      };
+
+      // FY / custom-range window (epoch ms). Inclusive of both calendar days.
+      const fromMs = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`).getTime() : null;
+      const toMs = filters.dateTo ? (new Date(`${filters.dateTo}T00:00:00`).getTime() + 86400000) : null; // exclusive upper
+
+      // 6. apply facet selections (OR within a facet, AND across facets).
+      const filtered = tabRows.filter((r) => {
+        if (filters.status.length && !filters.status.includes(r._statusKey)) return false;
+        if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+        if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
+        if (filters.categoryId.length && !categoryPairs(r).some((c) => filters.categoryId.includes(c.id))) return false;
+        if (filters.productId.length && !productPairs(r).some((p) => filters.productId.includes(p.id))) return false;
+        if (filters.vendorId.length && !vendorPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
+        // FY / custom creation-date window (server-authoritative; AND with other facets).
+        if (fromMs != null || toMs != null) {
+          const c = new Date(r.timestamp || 0).getTime();
+          if (fromMs != null && c < fromMs) return false;
+          if (toMs != null && c >= toMs) return false;
+        }
+        return true;
+      });
+
+      // 7. sort.
+      const ts = (r) => new Date(r.timestamp || 0).getTime();
+      const dl = (r) => new Date(r.bid_end_date || 0).getTime();
+      if (sort === 'oldest') filtered.sort((a, b) => ts(a) - ts(b));
+      else if (sort === 'deadline') filtered.sort((a, b) => (dl(a) || Infinity) - (dl(b) || Infinity));
+      else filtered.sort((a, b) => ts(b) - ts(a));
+
+      // 8. paginate.
+      const total = filtered.length;
+      const start = (page - 1) * limit;
+      const pageRows = filtered.slice(start, start + limit);
+
+      // 9. trim to the display payload (action holders already computed above).
+      const data = pageRows.map((r) => ({
+        id: r.id, rfq_no: r.rfq_no, title: r.title, status: r.status, is_published: r.is_published,
+        is_tender: r.is_tender, rfq_type: r.rfq_type, reverse_auction: r.reverse_auction,
+        lifecycle_stage: r.lifecycle_stage, bucket: r._bucket, status_key: r._statusKey,
+        hotel_id: r.hotel_id, hotel_name: r.hotel_name, department_id: r.department_id, department_title: r.department_title,
+        categories: categoryPairs(r), products: productPairs(r), vendors: vendorPairs(r),
+        project_name: r.project_name, contact_name: r.contact_name, created_by: r.created_by,
+        timestamp: r.timestamp, bid_end_date: r.bid_end_date,
+        invited_count: parseArr(r.vendors)[0] ? (parseArr(r.vendors)[0].total_vendors ?? 0) : 0,
+        submitted_count: parseArr(r.vendors)[0] ? (parseArr(r.vendors)[0].quote_received ?? 0) : 0,
+        unseen_query_count: r.unseen_query_count ?? 0,
+        is_finalized: r.is_finalized, po_completed: r.po_completed, can_edit: r.can_edit,
+        // Fields canEditRfq() needs so the client can gate the Edit button.
+        is_quotes_present: r.is_quotes_present, has_dead_end_product: r.has_dead_end_product,
+        has_tech_stuck_product: r.has_tech_stuck_product,
+        action_holders: actionMap[parseInt(r.id)] || null,
+        // Approval affordances — let the card render Approve/Review and deep
+        // link to the pending instance instead of falling back to Edit/Delete.
+        can_approve: !!r._canApprove,
+        is_pending_for_me: !!r._isMyAction,
+        approval_instance_id: r._approvalInstanceId ?? null,
+        approval_step_id: r._approvalStepId ?? null,
+        approval_entity_type: r._approvalEntityType ?? null,
+      }));
+
+      return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
+    } catch (error) {
+      logError('getRfqListView error', error);
+      return res.status(200).json({ status: 3, message: 'Error fetching RFQ listing' });
+    }
+  },
+
   // Get RFQs/Tenders where user is in the approval line (current pending step)
   getPendingApprovalRfqs: async (req, res, next) => {
     let user_id = req.user.id;
@@ -7599,7 +8732,8 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, search_val, is_tender, hotel_ids } = req.body;
+      if (search_val && !rfq_no) rfq_no = search_val;
       if (project_id == -1) {
         project_id = null;
       }
@@ -7624,7 +8758,8 @@ const rfqController = {
         reverse_auction,
         rfq_type,
         rfq_no,
-        is_tender
+        is_tender,
+        hotel_ids
       );
 
       let count = await rfqModel.getPendingApprovalRfqCount(
@@ -7633,7 +8768,8 @@ const rfqController = {
         rfq_type,
         reverse_auction,
         rfq_no,
-        is_tender
+        is_tender,
+        hotel_ids
       );
 
       // Enrich with lifecycle stage
@@ -7878,7 +9014,23 @@ const rfqController = {
           if (bidEndDateTime && now > bidEndDateTime) {
             // Check if any active negotiation round exists for this RFQ
             const activeNegotiationRounds = await db.any(
-              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+              `SELECT nr.id, cp.covered_product_id AS rfq_product_id
+             FROM tbl_negotiation_rounds nr
+             CROSS JOIN LATERAL (
+               SELECT nr.rfq_product_id AS covered_product_id
+               WHERE nr.rfq_product_id IS NOT NULL
+               UNION
+               SELECT (p_->>'rfq_product_id')::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE p_->>'rfq_product_id' IS NOT NULL
+               UNION
+               -- RFQ-level entries (payment terms / global charges) keep the
+               -- round registered as active even with no product entries.
+               SELECT NULL::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE (p_->>'is_rfq_level')::boolean IS TRUE
+             ) cp
+             WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
               [rfq_id]
             );
 
@@ -7945,7 +9097,10 @@ const rfqController = {
             // Get RFQ product ID from the database
             const rfqProductResult = await rfqModel.checkIfExists(
               'tbl_rfq_products',
-              `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
+              {
+                where: 'rfq_id = $1 AND product_variant_id = $2 AND variant = $3',
+                values: [rfq_id, product.product_id, product.variant]
+              }
             );
 
             if (rfqProductResult && rfqProductResult.length > 0) {
@@ -8091,9 +9246,50 @@ const rfqController = {
         };
         if (!req.body.is_regret) {
           for (const product of products) {
-            const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+            const productLabel = product.product_name || `Product ${product.product_id}`;
+            const err = validateProductChargeComments(product.other_charges, productLabel);
             if (err) {
               return res.status(400).json({ status: 0, message: err }).end();
+            }
+          }
+        }
+
+        // MRP-mode per-product validation: only applies to a priced MRP line
+        // (not regret, entered_mrp present). Blank discount ⇒ net = MRP (no
+        // validation needed). entered_mrp must be > 0; gst must be finite and
+        // >= 0 (0 allowed = MRP with no embedded GST); discount must never
+        // zero/negative the net.
+        if (!req.body.is_regret) {
+          for (const product of products) {
+            if (product.pricing_method !== 'MRP') continue;
+            const hasEnteredMrp =
+              product.entered_mrp !== undefined &&
+              product.entered_mrp !== null &&
+              product.entered_mrp !== '';
+            if (!hasEnteredMrp) continue;
+
+            const productLabel = product.product_name || `Product ${product.product_id}`;
+            const mrpNum = Number(product.entered_mrp);
+            if (!Number.isFinite(mrpNum) || mrpNum <= 0) {
+              return res.status(400).json({ status: 0, message: `${productLabel}: MRP must be greater than 0` }).end();
+            }
+
+            const taxNum = Number(product.tax);
+            if (!Number.isFinite(taxNum) || taxNum < 0) {
+              return res.status(400).json({ status: 0, message: `${productLabel}: GST must be zero or greater` }).end();
+            }
+
+            const discRaw = product.mrp_discount;
+            if (discRaw !== undefined && discRaw !== null && discRaw !== '') {
+              const discNum = Number(discRaw);
+              const discMode = product.mrp_discount_mode;
+              if (!Number.isFinite(discNum) || discNum < 0) {
+                return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` }).end();
+              }
+              const discAmt = discMode === 'percentage' ? (mrpNum * discNum) / 100 : discNum;
+              if (mrpNum - discAmt <= 0) {
+                return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` }).end();
+              }
             }
           }
         }
@@ -8105,7 +9301,36 @@ const rfqController = {
           }
         }
 
-        return await db.tx(async (t) => {
+        // MRP mode: reverse-calculate the tax-exclusive base from the entered
+        // MRP + discount, and store it into the existing unit_price column so
+        // all downstream branch-selection / engine recompute /
+        // negotiation-round-quote logic below works unchanged.
+        for (const product of products) {
+          if (product.pricing_method === 'MRP') {
+            const { base } = deriveMrpLine({
+              mrp: product.entered_mrp, discount: product.mrp_discount,
+              discount_mode: product.mrp_discount_mode, gst_pct: product.tax,
+            });
+            product.unit_price = base;          // derived exclusive base into the existing column
+            // GST on an MRP line is ALWAYS a percentage extracted from within the price.
+            // deriveMrpLine() derives the base as inclusive/(1+gst/100); the engine must
+            // therefore re-add tax as a percentage too, or the stored total stops
+            // reproducing the entered MRP. Force it here (authoritative) — never trust a
+            // client-sent absolute tax_mode on an MRP line. product.tax stays the entered gst%.
+            product.tax_mode = 'percentage';
+          } else {
+            product.pricing_method = 'TRADITIONAL';
+          }
+        }
+
+        // Respond-AFTER-commit: each exit inside this transaction returns a
+        // deferred-response marker rather than writing to `res`, and the HTTP
+        // response is emitted below, once COMMIT has happened. Writing the 200
+        // from inside the tx let a vendor's immediate re-read of their own quote
+        // miss it (different pooled connection, pre-commit snapshot), and made a
+        // failing COMMIT unreportable. The markers resolve the callback normally,
+        // so exactly the same work commits as before.
+        const quoteOutcome = await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -8118,19 +9343,27 @@ const rfqController = {
             regret_reason,
             payment_id: tenderPaymentId,
             gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null,
-            global_charges: JSON.stringify(enrichCharges(global_charges))
+            global_charges: JSON.stringify(enrichCharges(global_charges)),
+            pricing_method: req.body.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL'
           };
 
           // check quote is already exists or not
           // console.log("mukul 1870")
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quotes',
-            `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`,
+            {
+              where: 'rfq_id = $1 AND created_by = $2 LIMIT 1',
+              values: [rfq_id, user.id]
+            },
             t
           );
           if (alreadyExists.length > 0) {
             throw new Error('Quote is alredy present for this RFQ!');
           }
+
+          // Coerce blank ('' / undefined / null) MRP audit inputs to null so
+          // the numeric(15,2) columns never receive an empty string.
+          const numOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
 
           var quote_items_data = [];
           products.map(
@@ -8146,9 +9379,27 @@ const rfqController = {
               variant,
               document_files,
               tax_mode,
-              other_charges
+              other_charges,
+              pricing_method,
+              entered_mrp,
+              mrp_discount,
+              mrp_discount_mode
             }) => {
               const chargesJson = JSON.stringify(other_charges || []);
+              const isMrp = pricing_method === 'MRP';
+              const mrpAudit = isMrp
+                ? {
+                    pricing_method: 'MRP',
+                    entered_mrp: numOrNull(entered_mrp),
+                    mrp_discount: numOrNull(mrp_discount),
+                    mrp_discount_mode: mrp_discount_mode || null
+                  }
+                : {
+                    pricing_method: 'TRADITIONAL',
+                    entered_mrp: null,
+                    mrp_discount: null,
+                    mrp_discount_mode: null
+                  };
               if (unit_price != '') {
                 quote_items_data.push({
                   rfq_id,
@@ -8167,7 +9418,8 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  ...mrpAudit
                 });
               } else if (comment != '' || document_files?.length > 0) {
                 quote_items_data.push({
@@ -8187,7 +9439,8 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  ...mrpAudit
                 });
               } else if (is_regret) {
                 quote_items_data.push({
@@ -8207,7 +9460,11 @@ const rfqController = {
                   freight_mode: null,
                   package_mode: null,
                   tax_mode,
-                  other_charges: chargesJson
+                  other_charges: chargesJson,
+                  pricing_method: 'TRADITIONAL',
+                  entered_mrp: null,
+                  mrp_discount: null,
+                  mrp_discount_mode: null
                 });
               }
             }
@@ -8269,7 +9526,11 @@ const rfqController = {
                 'freight_mode',
                 'package_mode',
                 'tax_mode',
-                'other_charges'
+                'other_charges',
+                'pricing_method',
+                'entered_mrp',
+                'mrp_discount',
+                'mrp_discount_mode'
               ];
               await rfqModel.insertArray(
                 quote_items_data,
@@ -8286,27 +9547,21 @@ const rfqController = {
                 regret_reason
               );
 
-              return res
-                .status(200)
-                .json({
-                  status: 3,
-                  message: 'Your quote is regretted.',
-                  regret_reason: regret_reason,
-                  data: quote_rsp
-                })
-                .end();
+              return deferJson(200, {
+                status: 3,
+                message: 'Your quote is regretted.',
+                regret_reason: regret_reason,
+                data: quote_rsp
+              });
             }
 
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: 'Something went wrong!',
-                regret_reason: regret_reason,
-                data: null,
-                error: "Entry in table quote didn't exexuted as expected!"
-              })
-              .end();
+            return deferJson(400, {
+              status: 3,
+              message: 'Something went wrong!',
+              regret_reason: regret_reason,
+              data: null,
+              error: "Entry in table quote didn't exexuted as expected!"
+            });
           }
 
           // if quote item data is empty because of errors
@@ -8403,7 +9658,11 @@ const rfqController = {
               'freight_mode',
               'package_mode',
               'tax_mode',
-              'other_charges'
+              'other_charges',
+              'pricing_method',
+              'entered_mrp',
+              'mrp_discount',
+              'mrp_discount_mode'
             ];
             let quotes_items = await rfqModel.insertArray(
               quote_items_data,
@@ -8433,12 +9692,24 @@ const rfqController = {
               });
             }
 
-            // Save quotes to negotiation round quotes table if there's an active negotiation round
-            try {
+            // Save quotes to negotiation round quotes table if there's an
+            // active negotiation round.
+            //
+            // The try/catch that used to wrap this loop swallowed every
+            // failure so the quote would still "succeed" with nothing recorded
+            // against the round. It is gone: this block runs inside the same
+            // transaction as the quote itself, so a failure now rolls the
+            // whole submission back and the vendor is told (the outer catch
+            // returns 400 with the message). All-or-nothing beats a quote the
+            // buyer's negotiation screen will never show. The write is also
+            // idempotent now — a pre-existing row for this round + product is
+            // updated rather than skipped, which is what made a re-submission
+            // vanish before.
+            {
               for (const quoteItem of quotes_items) {
                 // Find the rfq_product_id for this quote item
                 const rfqProductResult = await t.oneOrNone(
-                  `SELECT id FROM tbl_rfq_products 
+                  `SELECT id FROM tbl_rfq_products
                    WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
                   [rfq_id, quoteItem.product_variant_id, quoteItem.variant]
                 );
@@ -8448,35 +9719,78 @@ const rfqController = {
 
                   // Check if there's an active negotiation round for this product
                   const activeRound = await t.oneOrNone(
-                    `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
-                     WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
-                     AND end_date > NOW()`,
+                    `SELECT id, rfq_product_id FROM tbl_negotiation_rounds nr
+                     WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE'
+                       AND nr.end_date > NOW()
+                       AND (nr.rfq_product_id = $2 OR EXISTS (
+                         SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                         WHERE (p_->>'rfq_product_id')::int = $2
+                       ))
+                     ORDER BY nr.round_number DESC
+                     LIMIT 1`,
                     [rfq_id, rfqProductId]
                   );
 
                   if (activeRound) {
-                    // Check if vendor has already submitted a quote for this round
-                    const existingNegotiationQuote = await t.oneOrNone(
-                      `SELECT id FROM tbl_negotiation_round_quotes 
-                       WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-                      [activeRound.id, user.id]
+                    // previous_price = the landed line total this response
+                    // replaces. On the create path the items above belong to
+                    // a brand-new tbl_quotes row, so the only possible prior
+                    // price is on an earlier quote by the same vendor for the
+                    // same RFQ + variant. Usually there is none and NULL is
+                    // the honest answer — but recording it when it exists
+                    // stops downstream consumers guessing the baseline.
+                    const priorItem = await t.oneOrNone(
+                      `SELECT qi.total_price
+                           FROM tbl_quote_items qi
+                           JOIN tbl_quotes q ON q.id = qi.quote_id
+                          WHERE q.rfq_id = $1
+                            AND q.created_by = $2
+                            AND qi.quote_id <> $3
+                            AND qi.product_variant_id = $4
+                            AND qi.variant = $5
+                          ORDER BY qi.id DESC
+                          LIMIT 1`,
+                      [
+                        rfq_id,
+                        user.id,
+                        created_quote_id,
+                        quoteItem.product_variant_id,
+                        quoteItem.variant
+                      ]
                     );
 
-                    if (!existingNegotiationQuote) {
-                      // Insert negotiation round quote
+                    const updatedRound = await t.result(
+                      `UPDATE tbl_negotiation_round_quotes
+                          SET quoted_price = $4,
+                              previous_price = COALESCE(previous_price, $5),
+                              submitted_at = NOW()
+                        WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+                      [
+                        activeRound.id,
+                        user.id,
+                        rfqProductId,
+                        quoteItem.total_price,
+                        priorItem?.total_price ?? null
+                      ]
+                    );
+
+                    if (updatedRound.rowCount === 0) {
                       await t.none(
-                        `INSERT INTO tbl_negotiation_round_quotes 
+                        `INSERT INTO tbl_negotiation_round_quotes
                           (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
-                         VALUES ($1, $2, $3, $4, NULL, NOW())`,
-                        [activeRound.id, user.id, rfqProductId, quoteItem.total_price]
+                         VALUES ($1, $2, $3, $4, $5, NOW())`,
+                        [
+                          activeRound.id,
+                          user.id,
+                          rfqProductId,
+                          quoteItem.total_price,
+                          priorItem?.total_price ?? null
+                        ]
                       );
                     }
                   }
                 }
               }
-            } catch (negotiationError) {
-              // Log but don't fail the main quote submission
-              logError('Error saving negotiation round quote', negotiationError);
             }
 
             await sendQuoteNotificationEmail(req);
@@ -8504,23 +9818,20 @@ const rfqController = {
             //   payload
             // );
 
-            return res
-              .status(200)
-              .json({
-                status: 1,
-                data: quotes_items[0]
-              })
-              .end();
+            return deferJson(200, {
+              status: 1,
+              data: quotes_items[0]
+            });
           } else {
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: Config.errorText.value
-              })
-              .end();
+            return deferJson(400, {
+              status: 3,
+              message: Config.errorText.value
+            });
           }
         });
+        // COMMIT has happened by here.
+        if (isDeferred(quoteOutcome)) return sendDeferred(res, quoteOutcome);
+        return quoteOutcome;
       } else {
         res
           .status(400)
@@ -8546,9 +9857,20 @@ const rfqController = {
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { TA_Vendors, no_freight, rfq_product_id, pageSource, include_negotiation } = req.query;
-    const { id, company_id } = req.user;
+    const { id, company_id, user_type } = req.user;
 
     try {
+      // Defense-in-depth: scope-check the parent RFQ. Skip for vendor
+      // user_type (they reach quotes via a different surface and have no
+      // tbl_user_role_scopes rows).
+      if (Number(user_type) !== 3) {
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
       let rfQItem;
 
@@ -8577,7 +9899,10 @@ const rfqController = {
       // 👇 Check if an entry already exists
       const existingActivity = await rfqModel.checkIfExists(
         'tbl_quote_activity',
-        `rfq_id = ${rfq_id} AND created_by = ${req.user.id} AND current_status = 'QC'`
+        {
+          where: `rfq_id = $1 AND created_by = $2 AND current_status = 'QC'`,
+          values: [rfq_id, req.user.id]
+        }
       );
 
       if (existingActivity.length === 0) {
@@ -8628,6 +9953,17 @@ const rfqController = {
     const { id, company_id, user_type, vendor_id } = req.user;
 
     try {
+      // Defense-in-depth: scope-check the parent RFQ. Skip for vendor
+      // user_type (they reach Quote Compare via a different surface and have
+      // no tbl_user_role_scopes rows).
+      if (Number(user_type) !== 3) {
+        try { await assertCanReadParentRfq(id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
       let products;
 
@@ -8660,7 +9996,10 @@ const rfqController = {
         try {
           const existing = await rfqModel.checkIfExists(
             'tbl_quote_activity',
-            `rfq_id = ${rfq_id} AND created_by = ${id} AND current_status = 'QC'`
+            {
+              where: `rfq_id = $1 AND created_by = $2 AND current_status = 'QC'`,
+              values: [rfq_id, id]
+            }
           );
           if (existing.length === 0) {
             await rfqModel.insertIntoQuoteActivity({
@@ -8685,6 +10024,109 @@ const rfqController = {
       return res
         .status(400)
         .json({ status: 3, message: Config.errorText.value })
+        .end();
+    }
+  },
+
+  // GET /rfq/quote-comparison-view/:id
+  // Single, flat, frontend-friendly "QC contract" for the buyer Quote
+  // Comparison UI. Reuses the existing comparison pipeline
+  // (rfqModel.getQuotesByRfqById2 + quoteCompareService.enrichQuoteCompareData)
+  // and reshapes it, layering on per-product state / finalized vendor /
+  // reject_info, vendor tech status, categories and the quote approval chain.
+  // Scope is derived from req.user + headers ONLY; out-of-scope/not-found -> 404.
+  // Query param freight=1 (default) returns landed totals incl. freight;
+  // freight=0 recomputes base totals (no_freight passthrough).
+  getQuoteComparisonView: async (req, res, next) => {
+    try {
+      // deriveQcScope is async — it MUST be awaited (every other caller does).
+      // Without await, `scope` is a Promise: the model's tenant gate reads
+      // `undefined` (cross-tenant leak) and scope.userId is undefined (empty
+      // negotiation history). See quoteCompareViewModel tenant gate.
+      const scope = await deriveQcScope(req);
+
+      // ---- RBAC scope gate ------------------------------------------------
+      // The model below gates on hospitality COMPANY only, which admits every
+      // business unit in the tenant: in prod that exposed 223 RFQs to a user
+      // whose RBAC scope covers 47, leaking competitor pricing and vendor
+      // names across hotels/departments. Enforce the same 4-axis scope tuple
+      // the sibling getQuoteComparison enforces. Skipped for vendor user_type
+      // (no tbl_user_role_scopes rows); the route's noAcl([3]) blocks them.
+      if (Number(req.user?.user_type) !== 3) {
+        let scopeError = null;
+        try {
+          await assertCanReadParentRfq(req.user.id, req.params.id);
+        } catch (e) {
+          if (!(e instanceof AuthorizationError)) throw e;
+          scopeError = e;
+        }
+
+        if (scopeError) {
+          const parent = await db.oneOrNone(
+            `SELECT hospitality_company_id, hotel_id, department_id, process_id
+               FROM tbl_rfq WHERE id = $1`,
+            [req.params.id]
+          );
+
+          // Cross-tenant callers must not learn the RFQ exists — mirror the
+          // model's company gate and answer 404 rather than 403.
+          const tenantOk =
+            !Array.isArray(scope?.hospitalityCompanyIds) ||
+            scope.hospitalityCompanyIds
+              .map(Number)
+              .includes(Number(parent?.hospitality_company_id));
+          if (!tenantOk) {
+            return res
+              .status(404)
+              .json({ status: 2, message: 'Quote comparison not found.' })
+              .end();
+          }
+
+          // assertCanReadParentRfq keys off rfq.read / boq.read. Commercial
+          // approvers and negotiators own this screen but their seeded roles
+          // carry quote-compare.read WITHOUT rfq.read, so the parent-RFQ gate
+          // alone would lock them out of the page they are meant to act on.
+          // Re-check the IDENTICAL 4-axis scope tuple against the permission
+          // that actually governs Quote Comparison.
+          try {
+            await assertUserHasScope(req.user.id, 'quote-compare.read', {
+              hospitality_company_id: parent?.hospitality_company_id,
+              hotel_id: parent?.hotel_id ?? null,
+              department_id: parent?.department_id ?? null,
+              process_id: parent?.process_id ?? null,
+            });
+          } catch (fallbackErr) {
+            if (fallbackErr instanceof AuthorizationError) {
+              return sendScopeError(res, scopeError);
+            }
+            throw fallbackErr;
+          }
+        }
+      }
+
+      // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
+      const freightParam = req.query.freight;
+      const noFreight =
+        freightParam === '0' || freightParam === 0 || freightParam === 'false' ? '1' : undefined;
+
+      const view = await quoteCompareViewModel.getQuoteComparisonView(
+        req.params.id,
+        scope,
+        { noFreight }
+      );
+
+      if (!view) {
+        return res
+          .status(404)
+          .json({ status: 2, message: 'Quote comparison not found.' })
+          .end();
+      }
+      return res.status(200).json(view).end();
+    } catch (error) {
+      logError('getQuoteComparisonView failed', error);
+      return res
+        .status(500)
+        .json({ status: 0, message: error.message || Config.errorText.value })
         .end();
     }
   },
@@ -9640,7 +11082,11 @@ const rfqController = {
           // Multiple vendors can be finalized for the same product
           let sameVendorExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
-            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND vendor_id=${vendor_id} LIMIT 1`,
+            {
+              where:
+                'rfq_id = $1 AND product_variant_id = $2 AND variant = $3 AND vendor_id = $4 LIMIT 1',
+              values: [rfq_id, product_variant_id, variant, vendor_id]
+            },
             t
           );
 
@@ -9717,7 +11163,56 @@ const rfqController = {
                 if (rfqProduct) {
                   // Check for existing pending NEGOTIATION_QUOTE approval
                   const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfqProduct.id, t);
-                  const existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
+                  let existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
+
+                  // Wrong-vendor re-finalize guard (RFQ 493 / PO 138621): the
+                  // NEGOTIATION_QUOTE approval is keyed by rfq_product (product-
+                  // level), so an in-flight PENDING approval may belong to a
+                  // PREVIOUSLY finalized vendor. If the buyer is now finalizing a
+                  // DIFFERENT vendor, that stale approval carries a FROZEN
+                  // po_payload for the OLD vendor and would, once approved, draft
+                  // a PO for the WRONG recipient. Cancel it within THIS tx (so a
+                  // rollback undoes it — cancelApprovalInstance opens its own tx
+                  // and would break atomicity) and supersede the old vendor's
+                  // finalization row for this exact line, then fall through to
+                  // create a fresh approval for the vendor now being finalized.
+                  if (existingPending) {
+                    const pendingMeta = typeof existingPending.metadata === 'string'
+                      ? JSON.parse(existingPending.metadata)
+                      : (existingPending.metadata || {});
+                    const pendingVendorId = Number(pendingMeta.vendor_id);
+                    if (pendingVendorId && pendingVendorId !== Number(vendor_id)) {
+                      await t.none(
+                        `UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1 AND status='PENDING'`,
+                        [existingPending.id]
+                      );
+                      await t.none(
+                        `UPDATE tbl_approval_instance_steps SET status='CANCELLED', completed_at=NOW() WHERE approval_instance_id=$1 AND status='PENDING'`,
+                        [existingPending.id]
+                      );
+                      const staleFinals = await rfqModel.checkIfExists(
+                        'tbl_quote_finalization',
+                        {
+                          where:
+                            'rfq_id = $1 AND product_variant_id = $2 AND variant = $3 AND vendor_id = $4',
+                          values: [rfq_id, product_variant_id, variant, pendingVendorId]
+                        },
+                        t
+                      );
+                      for (const sf of staleFinals) {
+                        await rfqModel.insert('tbl_quote_finalization_history', {
+                          rfq_id: sf.rfq_id, rfq_no: sf.rfq_no,
+                          product_variant_id: sf.product_variant_id,
+                          vendor_id: sf.vendor_id, quote_id: sf.quote_id,
+                          created_by: sf.created_by, timestamp: sf.timestamp,
+                          variant: sf.variant, changed_by: req.user.id,
+                          comment: sf.comment || null,
+                        }, t);
+                        await rfqModel.delete('tbl_quote_finalization', { id: sf.id }, t);
+                      }
+                      existingPending = null; // create a fresh approval for the new vendor below
+                    }
+                  }
 
                   if (existingPending) {
                     const existingPendingState = await t.one(`
@@ -9978,7 +11473,10 @@ const rfqController = {
       //Record the finalization activity with status 'FIN'
       const existingActivity = await rfqModel.checkIfExists(
         'tbl_quote_activity',
-        `rfq_id = ${rfq_id} AND current_status = 'FIN' AND created_by = ${req.user.id}`
+        {
+          where: `rfq_id = $1 AND current_status = 'FIN' AND created_by = $2`,
+          values: [rfq_id, req.user.id]
+        }
       );
       logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
@@ -9992,6 +11490,23 @@ const rfqController = {
         logger.debug('Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}');
       }
 
+        // Auto-initiate: if draftPurchaseOrder reported the RFQ is now
+        // fully awarded (every line finalized + no pending NEGOTIATION_QUOTE
+        // approvals), batch-initiate every draft PO spawned by this RFQ
+        // now that the finalize transaction has committed. Wrapped in
+        // try/catch so a failure here never breaks the finalize response.
+        let auto_initiate_summary = null;
+        if (response.result?.should_auto_initiate && response.result?.rfq_id) {
+          try {
+            auto_initiate_summary = await autoInitiateRFQPOs(
+              response.result.rfq_id,
+              req.user.id
+            );
+          } catch (e) {
+            logError('[finalize] auto-initiate batch failed', e);
+          }
+        }
+
         // If NEGOTIATION_QUOTE approval is pending, return appropriate message
         if (response.negotiationQuoteApprovalPending) {
           return res.status(200).json({
@@ -9999,7 +11514,8 @@ const rfqController = {
             message: 'Vendor finalized! Approval is required before Purchase Order can be created.',
             data: response.result,
             isRefinalized: response.reFinalized,
-            approvalPending: true
+            approvalPending: true,
+            auto_initiate_summary
           });
         }
 
@@ -10007,7 +11523,8 @@ const rfqController = {
           status: 1,
           message: 'A Purchase Order has been drafted successfully',
           data: response.result,
-          isRefinalized: response.reFinalized
+          isRefinalized: response.reFinalized,
+          auto_initiate_summary
         });
       } else {
         res
@@ -11707,13 +13224,13 @@ const rfqController = {
       ) {
         let rfqDetails = await rfqModel.checkIfExists(
           'tbl_rfq',
-          `id = ${rfqId}`
+          { where: 'id = $1', values: [rfqId] }
         );
         if (rfqDetails) {
           rfqDetails = rfqDetails[0];
           let sheetDetails = await rfqModel.checkIfExists(
             'tbl_rfq_draft_sheets',
-            `rfq_id = ${rfqId} AND id = ${sheetId}`
+            { where: 'rfq_id = $1 AND id = $2', values: [rfqId, sheetId] }
           );
           if (sheetDetails) {
             sheetDetails = sheetDetails[0];
@@ -11761,7 +13278,7 @@ const rfqController = {
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
         'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+        { where: 'id = ANY($1::int[])', values: [uniqueProductIds] }
       );
       const existingProductIdSet = new Set(existingProducts.map((p) => p.id));
 
@@ -11994,7 +13511,7 @@ const rfqController = {
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
         'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+        { where: 'id = ANY($1::int[])', values: [uniqueProductIds] }
       );
       const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
@@ -12104,7 +13621,7 @@ const rfqController = {
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
         'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+        { where: 'id = ANY($1::int[])', values: [uniqueProductIds] }
       );
       const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
@@ -12222,7 +13739,10 @@ const rfqController = {
 
   handleMagicSearchInsertion: async (file_name, type, id, raw_file_url) => {
     try {
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', {
+        where: `file_name = $1 AND status = 'processing' AND user_id = $2 AND type = $3`,
+        values: [file_name, id, type]
+      })
       if(processing && processing.length > 0) {
         processing = processing[0];
         logger.debug('FOUND ALREADY PROCESSING TASK!');
@@ -12391,7 +13911,7 @@ const rfqController = {
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
         'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+        { where: 'id = ANY($1::int[])', values: [uniqueProductIds] }
       );
       const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
@@ -12871,7 +14391,7 @@ sendFollowUpEmails: async (req, res) => {
       // Verify the sheet exists for this RFQ
       let sheetData = await rfqModel.checkIfExists(
         'tbl_rfq_draft_sheets',
-        `rfq_id = ${rfqId} AND id = ${sheetId}`
+        { where: 'rfq_id = $1 AND id = $2', values: [rfqId, sheetId] }
       );
 
       if (!sheetData || !sheetData.length > 0) {
@@ -12974,7 +14494,13 @@ sendFollowUpEmails: async (req, res) => {
   },
 
   updateQuoteItems: async (req, res, next) => {
-    const { quoteId } = req.params;
+    // The route guard (requirePositiveIntParam) has already proved this is a
+    // positive integer; coerce anyway so nothing downstream depends on the
+    // guard having run (this controller is also called directly in tests).
+    const quoteId = Number.parseInt(req.params.quoteId, 10);
+    if (!Number.isSafeInteger(quoteId) || quoteId <= 0) {
+      return res.status(400).json({ status: 0, message: 'Invalid quoteId.' });
+    }
     let {
       rfq_id,
       rfq_no,
@@ -13004,12 +14530,34 @@ sendFollowUpEmails: async (req, res) => {
       // matches, so the bare `if (!quoteExists)` guard never fires and the
       // next line crashes on quoteExists[0]. Treat array-length zero as
       // not-found and respond with 404.
-      const quoteExists = await rfqModel.checkIfExists(
-        'tbl_quotes',
-        `id = '${quoteId}'`
-      );
+      const quoteExists = await rfqModel.checkIfExists('tbl_quotes', {
+        where: 'id = $1',
+        values: [quoteId]
+      });
       if (!quoteExists || quoteExists.length === 0) {
         return res.status(404).json({ status: 0, message: 'Quote not found.' });
+      }
+
+      // OWNERSHIP. The quote was previously loaded by id and never checked
+      // against the caller — `created_by` was read only to preserve it on
+      // write — so any vendor could rewrite any other vendor's prices by id.
+      // Both entry paths to this route set req.user (JWT, or the no-login
+      // vendor token resolved to its vendor_id in noLogin.vendorTokenOrJwt),
+      // so one check covers both. Verified against production: 0 of 777
+      // tbl_quotes rows have updated_by <> created_by, i.e. the creator is
+      // the only identity that has ever written a quote.
+      const quoteOwnerId = Number(quoteExists[0].created_by);
+      if (!user || !user.id || Number(user.id) !== quoteOwnerId) {
+        logError(
+          'updateQuoteItems: ownership violation',
+          new Error(
+            `user ${user?.id ?? 'anonymous'} attempted to update quote ${quoteId} owned by ${quoteOwnerId}`
+          )
+        );
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not allowed to update this quote.'
+        });
       }
 
       // Get RFQ details to check dates
@@ -13074,7 +14622,23 @@ sendFollowUpEmails: async (req, res) => {
         if (bidEndDateTime && now > bidEndDateTime) {
           // Check if any active negotiation round exists for this RFQ
           const activeNegotiationRounds = await db.any(
-            `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+            `SELECT nr.id, cp.covered_product_id AS rfq_product_id
+             FROM tbl_negotiation_rounds nr
+             CROSS JOIN LATERAL (
+               SELECT nr.rfq_product_id AS covered_product_id
+               WHERE nr.rfq_product_id IS NOT NULL
+               UNION
+               SELECT (p_->>'rfq_product_id')::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE p_->>'rfq_product_id' IS NOT NULL
+               UNION
+               -- RFQ-level entries (payment terms / global charges) keep the
+               -- round registered as active even with no product entries.
+               SELECT NULL::int
+               FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               WHERE (p_->>'is_rfq_level')::boolean IS TRUE
+             ) cp
+             WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
             [quoteExists[0].rfq_id]
           );
 
@@ -13194,7 +14758,8 @@ sendFollowUpEmails: async (req, res) => {
       };
 
       for (const product of products) {
-        const err = validateProductChargeComments(product.other_charges, `Product ${product.product_id}`);
+        const productLabel = product.product_name || `Product ${product.product_id}`;
+        const err = validateProductChargeComments(product.other_charges, productLabel);
         if (err) {
           return res.status(400).json({ status: 0, message: err });
         }
@@ -13202,6 +14767,44 @@ sendFollowUpEmails: async (req, res) => {
       const globalChargeErr = validateGlobalChargeComments(global_charges, 'Global charges');
       if (globalChargeErr) {
         return res.status(400).json({ status: 0, message: globalChargeErr });
+      }
+
+      // MRP-mode per-product validation: only applies to a priced MRP line
+      // (entered_mrp present). Blank discount ⇒ net = MRP (no validation
+      // needed). entered_mrp must be > 0; gst must be finite and >= 0 (0
+      // allowed = MRP with no embedded GST); discount must never
+      // zero/negative the net.
+      for (const product of products) {
+        if (product.pricing_method !== 'MRP') continue;
+        const hasEnteredMrp =
+          product.entered_mrp !== undefined &&
+          product.entered_mrp !== null &&
+          product.entered_mrp !== '';
+        if (!hasEnteredMrp) continue;
+
+        const productLabel = product.product_name || `Product ${product.product_id}`;
+        const mrpNum = Number(product.entered_mrp);
+        if (!Number.isFinite(mrpNum) || mrpNum <= 0) {
+          return res.status(400).json({ status: 0, message: `${productLabel}: MRP must be greater than 0` });
+        }
+
+        const taxNum = Number(product.tax);
+        if (!Number.isFinite(taxNum) || taxNum < 0) {
+          return res.status(400).json({ status: 0, message: `${productLabel}: GST must be zero or greater` });
+        }
+
+        const discRaw = product.mrp_discount;
+        if (discRaw !== undefined && discRaw !== null && discRaw !== '') {
+          const discNum = Number(discRaw);
+          const discMode = product.mrp_discount_mode;
+          if (!Number.isFinite(discNum) || discNum < 0) {
+            return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` });
+          }
+          const discAmt = discMode === 'percentage' ? (mrpNum * discNum) / 100 : discNum;
+          if (mrpNum - discAmt <= 0) {
+            return res.status(400).json({ status: 0, message: `${productLabel}: discount is invalid` });
+          }
+        }
       }
 
       // Enrich other_charges with slugs for each product
@@ -13212,6 +14815,26 @@ sendFollowUpEmails: async (req, res) => {
       }
 
       const enrichedGlobalCharges = enrichCharges(global_charges);
+
+      // MRP mode: reverse-calculate the tax-exclusive base from the entered
+      // MRP + discount, and store it into the existing unit_price field so
+      // all downstream logic below (engine recompute, model persistence)
+      // works unchanged.
+      for (const product of products) {
+        if (product.pricing_method === 'MRP') {
+          const { base } = deriveMrpLine({
+            mrp: product.entered_mrp, discount: product.mrp_discount,
+            discount_mode: product.mrp_discount_mode, gst_pct: product.tax,
+          });
+          product.unit_price = base;          // derived exclusive base into the existing field
+          // GST on an MRP line is ALWAYS a percentage extracted from within the price;
+          // force it so the engine re-adds tax as a percentage and the stored total
+          // reproduces the entered MRP (never trust a client absolute tax_mode here).
+          product.tax_mode = 'percentage';
+        } else {
+          product.pricing_method = 'TRADITIONAL';
+        }
+      }
 
       // Server-authoritative recompute: discard the client-supplied
       // total_price on each product and derive it from the pricing engine.
@@ -13228,6 +14851,124 @@ sendFollowUpEmails: async (req, res) => {
             : [],
         });
         product.total_price = engineOut.total;
+      }
+
+      // ===================================================================
+      // NEGOTIATION WRITE ALLOWLIST
+      // ===================================================================
+      // A product under an ACTIVE round may only move the fields the buyer
+      // opened for THIS vendor. Nothing below fires unless such a round
+      // exists, so the ordinary quote-edit path stays fully editable — and a
+      // product that no active round covers stays fully editable even while a
+      // sibling product on the same RFQ is under negotiation.
+      //
+      // REJECT rather than silently ignore: this endpoint decides the number
+      // a buyer awards a PO against. Dropping an out-of-scope edit on the
+      // floor would leave the vendor believing they had offered a price the
+      // buyer will never see — the two sides would be negotiating over
+      // different numbers, which is exactly the failure mode a negotiation
+      // exists to prevent. A 400 naming the offending fields is auditable and
+      // tells the vendor to ask the buyer to widen the round.
+      const negAllowlist = await loadNegotiationAllowlist(
+        quoteExists[0].rfq_id,
+        user.id
+      );
+
+      if (negAllowlist.active) {
+        const storedItems = await db.any(
+          `SELECT product_variant_id, variant, unit_price, tax, tax_mode, quantity,
+                  comment, delivery_period, other_charges, pricing_method,
+                  entered_mrp, mrp_discount
+             FROM tbl_quote_items WHERE quote_id = $1`,
+          [quoteId]
+        );
+        const storedByKey = new Map(
+          storedItems.map((it) => [`${it.product_variant_id}::${it.variant}`, it])
+        );
+
+        const violations = [];
+
+        for (const product of products) {
+          if (!product.product_id) continue;
+          const rfqProductRow = await db.oneOrNone(
+            `SELECT id FROM tbl_rfq_products
+              WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+            [quoteExists[0].rfq_id, product.product_id, product.variant]
+          );
+          if (!rfqProductRow) continue;
+
+          const allowed = negAllowlist.byRfqProductId.get(Number(rfqProductRow.id));
+          if (!allowed) continue; // product is not under an active round
+
+          const storedItem = storedByKey.get(`${product.product_id}::${product.variant}`);
+          for (const field of negChangedProductFields(product, storedItem)) {
+            if (!negFieldAllowed(allowed, field)) {
+              violations.push({
+                product_id: product.product_id,
+                variant: product.variant,
+                field
+              });
+            }
+          }
+        }
+
+        // Quote-level fields. `gstin` is deliberately not guarded: it carries
+        // no price and has no negotiation-vocabulary name, so freezing it
+        // would block a legitimate correction for no security gain.
+        const quoteLevel = [];
+        if (!negSameText(globalPaymentTerms, quoteExists[0].global_payment_term)) {
+          quoteLevel.push('payment_terms');
+        }
+        const termList = global_payment_term_list || {};
+        if (
+          (termList.createdTerms || []).length > 0 ||
+          (termList.updatedTerms || []).length > 0 ||
+          (termList.deletedTerms || []).length > 0
+        ) {
+          quoteLevel.push('payment_terms');
+        }
+        if (!negSameText(globalComment, quoteExists[0].global_comment)) {
+          quoteLevel.push('global_comment');
+        }
+        if (Array.isArray(term_and_condition_files)) {
+          const storedTc = await db.any(
+            `SELECT file_url FROM tbl_quotes_files
+              WHERE quote_id = $1 AND file_type = 'term_and_condition'`,
+            [quoteId]
+          );
+          const before = new Set(storedTc.map((f) => negText(f.file_url)));
+          const after = new Set(term_and_condition_files.map((f) => negText(f)));
+          const same =
+            before.size === after.size && [...after].every((f) => before.has(f));
+          if (!same) quoteLevel.push('documents');
+        }
+        const incomingGlobal = negChargesBySlug(enrichedGlobalCharges);
+        const storedGlobal = negChargesBySlug(negParseJsonb(quoteExists[0].global_charges));
+        for (const [slug, charge] of incomingGlobal) {
+          if (!storedGlobal.has(slug) || !negSameCharge(charge, storedGlobal.get(slug))) {
+            quoteLevel.push(slug);
+          }
+        }
+        for (const slug of storedGlobal.keys()) {
+          if (!incomingGlobal.has(slug)) quoteLevel.push(slug);
+        }
+
+        for (const field of new Set(quoteLevel)) {
+          if (!negFieldAllowed(negAllowlist.rfqLevel, field)) {
+            violations.push({ product_id: null, variant: null, field });
+          }
+        }
+
+        if (violations.length > 0) {
+          const fieldNames = [...new Set(violations.map((v) => v.field))];
+          return res.status(400).json({
+            status: 3,
+            message:
+              `A negotiation round is active on this RFQ. You may only revise the fields the buyer opened for negotiation. ` +
+              `Not open for negotiation: ${fieldNames.join(', ')}.`,
+            data: { blocked_fields: fieldNames, violations }
+          });
+        }
       }
 
       let paymentTermAndCommentChanges = false;
@@ -13252,11 +14993,35 @@ sendFollowUpEmails: async (req, res) => {
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment,
           gstin: newGstin,
-          global_charges: JSON.stringify(enrichedGlobalCharges)
+          global_charges: JSON.stringify(enrichedGlobalCharges),
+          pricing_method: req.body.pricing_method === 'MRP' ? 'MRP' : 'TRADITIONAL'
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
         paymentTermAndCommentChanges = true;
+      }
+
+      // Snapshot the landed line total of every quote item BEFORE the update
+      // loop overwrites it. This is the same value rfqModel
+      // .updateQuoteItemWithHistory archives into tbl_quote_item_history, and
+      // it is what `previous_price` on a negotiation round quote is supposed to
+      // hold (0 of 520 production rows had it, forcing every consumer to guess
+      // the baseline from overwritten history). Keyed by
+      // "<product_variant_id>::<variant>" — product_variant_id alone is not
+      // unique within a quote.
+      const preUpdateLineTotals = new Map();
+      try {
+        const priorItems = await db.any(
+          `SELECT product_variant_id, variant, total_price
+             FROM tbl_quote_items WHERE quote_id = $1`,
+          [quoteId]
+        );
+        for (const it of priorItems) {
+          preUpdateLineTotals.set(`${it.product_variant_id}::${it.variant}`, it.total_price);
+        }
+      } catch (snapshotError) {
+        // Never block a quote update over the negotiation baseline.
+        logError('Error snapshotting pre-update quote item totals', snapshotError);
       }
 
       // Process each product in the request
@@ -13282,15 +15047,23 @@ sendFollowUpEmails: async (req, res) => {
 
       logger.debug({ data: quoteItemChanges }, 'QUOTE ITEM CHANGES:');
 
-      // Check if global terms & conditions file are uploaded
-      if (term_and_condition_files && term_and_condition_files.length > 0) {
-        const global_files = term_and_condition_files.map((url) => ({
+      // Replace the quote's global attachments. When the key is present we
+      // treat the incoming list as the full desired set: clear the existing
+      // rows first, then insert the new ones. This makes updates reflect both
+      // additions and removals (and avoids duplicating already-saved files on
+      // every re-save). An empty array clears all attachments; an absent key
+      // leaves them untouched.
+      if (Array.isArray(term_and_condition_files)) {
+        await rfqModel.deleteWithReturnIds('tbl_quotes_files', {
           quote_id: quoteId,
-          file_type: 'term_and_condition',
-          file_url: url
-        }));
-        for (const fileData of global_files) {
-          await rfqModel.insert('tbl_quotes_files', fileData);
+          file_type: 'term_and_condition'
+        });
+        for (const url of term_and_condition_files) {
+          await rfqModel.insert('tbl_quotes_files', {
+            quote_id: quoteId,
+            file_type: 'term_and_condition',
+            file_url: url
+          });
         }
       }
 
@@ -13360,50 +15133,84 @@ sendFollowUpEmails: async (req, res) => {
       // const changedProducts = quoteItemChanges.filter((result) =>  result.changed);
       // console.log(" quoteItemChanges ", changedProducts)
 
-      // Save quotes to negotiation round quotes table if there's an active negotiation round
-      try {
-        for (const prodItem of products) {
+      // Save quotes to negotiation round quotes table if there's an active
+      // negotiation round.
+      //
+      // This used to be fire-and-forget: one try/catch around the whole loop
+      // that logged and moved on, plus a "row already exists → skip" branch.
+      // Together those meant a vendor could revise their price during a round
+      // and have NOTHING reach the round — the buyer kept negotiating against
+      // a stale number, and neither side was told. Two changes:
+      //
+      //   1. The write is idempotent-and-updating. A revision now overwrites
+      //      `quoted_price`; `previous_price` keeps the baseline captured on
+      //      the first response of the round (COALESCE), because that is the
+      //      price the round is measured against.
+      //   2. Failures are collected per product and surfaced to the caller
+      //      below instead of being swallowed. The quote itself is already
+      //      persisted at this point, so the main path is untouched — and
+      //      because the write is now idempotent, the retry the vendor is
+      //      being asked to make is safe.
+      const negotiationWriteErrors = [];
+      for (const prodItem of products) {
+        try {
           // Find the rfq_product_id for this product
           const rfqProductResult = await db.oneOrNone(
-            `SELECT id FROM tbl_rfq_products 
+            `SELECT id FROM tbl_rfq_products
              WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
             [rfq_id, prodItem.product_id, prodItem.variant]
           );
+          if (!rfqProductResult) continue;
 
-          if (rfqProductResult) {
-            const rfqProductId = rfqProductResult.id;
+          const rfqProductId = rfqProductResult.id;
 
-            // Check if there's an active negotiation round for this product
-            const activeRound = await db.oneOrNone(
-              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
-               WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
-               AND end_date > NOW()`,
-              [rfq_id, rfqProductId]
+          // Check if there's an active negotiation round for this product
+          const activeRound = await db.oneOrNone(
+            `SELECT id, rfq_product_id FROM tbl_negotiation_rounds nr
+               WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE'
+                 AND nr.end_date > NOW()
+                 AND (nr.rfq_product_id = $2 OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+                   WHERE (p_->>'rfq_product_id')::int = $2
+                 ))
+               ORDER BY nr.round_number DESC
+               LIMIT 1`,
+            [rfq_id, rfqProductId]
+          );
+          if (!activeRound) continue;
+
+          // previous_price carries the pre-update landed line total captured
+          // above, so the baseline of this negotiation response is recorded at
+          // the moment it is known instead of being reconstructed later from
+          // history that gets overwritten in place.
+          const previousLineTotal =
+            preUpdateLineTotals.get(`${prodItem.product_id}::${prodItem.variant}`) ?? null;
+
+          const updated = await db.result(
+            `UPDATE tbl_negotiation_round_quotes
+                SET quoted_price = $4,
+                    previous_price = COALESCE(previous_price, $5),
+                    submitted_at = NOW()
+              WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+            [activeRound.id, user.id, rfqProductId, prodItem.total_price, previousLineTotal]
+          );
+
+          if (updated.rowCount === 0) {
+            await db.none(
+              `INSERT INTO tbl_negotiation_round_quotes
+                  (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
+               VALUES ($1, $2, $3, $4, $5, NOW())`,
+              [activeRound.id, user.id, rfqProductId, prodItem.total_price, previousLineTotal]
             );
-
-            if (activeRound) {
-              // Check if vendor has already submitted a quote for this round
-              const existingNegotiationQuote = await db.oneOrNone(
-                `SELECT id FROM tbl_negotiation_round_quotes 
-                 WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-                [activeRound.id, user.id]
-              );
-
-              if (!existingNegotiationQuote) {
-                // Insert negotiation round quote
-                await db.none(
-                  `INSERT INTO tbl_negotiation_round_quotes 
-                    (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
-                   VALUES ($1, $2, $3, $4, NULL, NOW())`,
-                  [activeRound.id, user.id, rfqProductId, prodItem.total_price]
-                );
-              }
-            }
           }
+        } catch (negotiationError) {
+          logError('Error saving negotiation round quote during update', negotiationError);
+          negotiationWriteErrors.push({
+            product_id: prodItem.product_id,
+            variant: prodItem.variant,
+            error: negotiationError.message
+          });
         }
-      } catch (negotiationError) {
-        // Log but don't fail the main quote update
-        logError('Error saving negotiation round quote during update', negotiationError);
       }
 
       let status = true;
@@ -13448,18 +15255,34 @@ sendFollowUpEmails: async (req, res) => {
         }
       }
 
+      const responseData = {
+        quoteItems: quoteItemChanges,
+        globalFilesAdded: fileUpdates,
+        globalTermComment: paymentTermAndCommentChanges
+          ? 'global comment and payment term is updated'
+          : 'global comment and payment term is remain unchanged'
+      };
+
+      // Everything else has completed (items persisted, timestamp bumped,
+      // notifications sent) — but the vendor's response never reached the
+      // negotiation round, so the buyer will keep seeing the old number. Say
+      // so instead of returning a green 200 over a silent data loss. The
+      // negotiation write is idempotent, so re-submitting is safe.
+      if (negotiationWriteErrors.length > 0) {
+        return res.status(500).json({
+          status: 0,
+          message:
+            'Your quote was saved, but your negotiation response could not be recorded against the active round. Please submit again so the buyer sees your revised price.',
+          data: { ...responseData, negotiationWriteErrors }
+        });
+      }
+
       return res.status(200).json({
         status: status,
         message: status
           ? 'Quote items updated successfully'
           : 'No updates made as the quotes and global terms remain unchanged',
-        data: {
-          quoteItems: quoteItemChanges,
-          globalFilesAdded: fileUpdates,
-          globalTermComment: paymentTermAndCommentChanges
-            ? 'global comment and payment term is updated'
-            : 'global comment and payment term is remain unchanged'
-        }
+        data: responseData
       });
     } catch (error) {
       logError('Failed to update quote items', error);
@@ -13633,6 +15456,19 @@ sendFollowUpEmails: async (req, res) => {
         }
 
         sendMail(mailRecipients);
+
+        dispatchNotification({
+          userIds: [receiver_id],
+          senderUserId: sender_id,
+          category: 'clarification',
+          type: sender_type == 3 ? 'clarification_from_vendor' : 'clarification_from_buyer',
+          title: sender_type == 3
+            ? `Vendor query on RFQ #${rfqNumber}`
+            : `Buyer query on RFQ #${rfqNumber}`,
+          body: `${senderCompanyName}: ${String(message_text || '').slice(0, 160)}`,
+          data: { rfq_id, message_id, sender_id, sender_type },
+          actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/${sender_type == 2 ? 'buyer' : 'vendor'}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? 'buyer' : 'vendor'}`
+        }).catch((err) => logError('dispatch clarification message failed', err));
 
         const notificationData = {
           type: 'New Message',
@@ -13856,7 +15692,10 @@ sendFollowUpEmails: async (req, res) => {
       // 👇 Check if an entry already exists
       const existingActivity = await rfqModel.checkIfExists(
         'tbl_quote_activity',
-        `rfq_id = ${rfq_id} AND current_status = 'NEG' AND created_by = ${req.user.id}`
+        {
+          where: `rfq_id = $1 AND current_status = 'NEG' AND created_by = $2`,
+          values: [rfq_id, req.user.id]
+        }
       );
       logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
@@ -13898,7 +15737,7 @@ sendFollowUpEmails: async (req, res) => {
       }
       const validate = await rfqModel.checkIfExists(
         'tbl_rfq_products',
-        `id = ${rfq_product_id}`
+        { where: 'id = $1', values: [rfq_product_id] }
       );
       if (!validate || validate.length === 0) {
         return res.status(404).json({
@@ -14223,7 +16062,10 @@ getClauses: async (req, res) => {
       // 👇 Check if an entry already exists
       const existingActivity = await rfqModel.checkIfExists(
         'tbl_quote_activity',
-        `rfq_id = ${rfq_id} AND current_status = 'TE' AND created_by = ${req.user.id}`
+        {
+          where: `rfq_id = $1 AND current_status = 'TE' AND created_by = $2`,
+          values: [rfq_id, req.user.id]
+        }
       );
       logger.debug({ data: existingActivity }, 'Existing activity check');
       if (existingActivity.length === 0) {
@@ -14274,7 +16116,7 @@ getClauses: async (req, res) => {
         text,
         file_url
       );
-     const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
+     const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', { where: 'id = $1', values: [clause_id] });
      const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
       if (response) {
@@ -15135,7 +16977,8 @@ getClauses: async (req, res) => {
         sort = 'DESC',
         is_tender,
         module_keys,
-        hotel_id
+        hotel_id,
+        search
       } = req.query;
 
       // Convert string query parameters to proper types
@@ -15149,6 +16992,9 @@ getClauses: async (req, res) => {
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
       rfq_id = rfq_id ? parseInt(rfq_id) : null;
       hotel_id = hotel_id ? parseInt(hotel_id) : null;
+      // Free-text search (case-insensitive) over rfq_no / title / project name.
+      // Trimmed to null when blank so it's a no-op for existing callers.
+      search = typeof search === 'string' && search.trim() !== '' ? search.trim() : null;
       is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
 
       // Parse module_keys into array of uppercase entity types
@@ -15179,7 +17025,8 @@ getClauses: async (req, res) => {
         is_tender,
         rfq_id,
         hotel_id,
-        quote_compare
+        quote_compare,
+        search
       );
 
       // Enrich each RFQ with approval_required flag
@@ -15896,12 +17743,29 @@ getClauses: async (req, res) => {
   getTechEvalStatus: async (req, res) => {
     try {
       const { rfq_product_id } = req.params;
+      const userId = req.user?.id;
 
       if (!rfq_product_id) {
         return res.status(400).json({
           status: 0,
           message: 'rfq_product_id is required'
         });
+      }
+
+      // Defense-in-depth: resolve the parent RFQ from rfq_product_id and
+      // scope-check before exposing tech-eval state.
+      if (userId) {
+        const parent = await db.oneOrNone(
+          `SELECT rfq_id FROM tbl_rfq_products WHERE id = $1`,
+          [parseInt(rfq_product_id)]
+        );
+        if (parent?.rfq_id) {
+          try { await assertCanReadParentRfq(userId, parent.rfq_id); }
+          catch (e) {
+            if (e instanceof AuthorizationError) return sendScopeError(res, e);
+            throw e;
+          }
+        }
       }
 
       const status = await rfqModel.getTechEvalStatusByProductId(parseInt(rfq_product_id));

@@ -4,12 +4,13 @@ import path from 'path';
 import Handlebars from 'handlebars';
 import puppeteer from 'puppeteer';
 import config from '../../config/app.config.js';
-import { sendMail } from '../../helper/common.js';
+import { sendMail, logError } from '../../helper/common.js';
 import { getLifecycleHistory } from '../../models/generalModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import userModel from '../../models/userModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import rfqModel from '../../models/rfqModel.js';
+import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 
 /**
  * Generate ARC Award Document PDF for a product
@@ -275,6 +276,20 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     };
 
     await sendMail(mailRecipients);
+
+    try {
+      await dispatchNotification({
+        userIds: [vendor.id],
+        category: 'arc',
+        type: 'arc_award_confirmed',
+        title: `ARC Award Confirmed — Tender #${productData.rfq_no}`,
+        body: `Your quote for ${productData.product_name} has been awarded.`,
+        data: { rfq_id: productData.rfq_id, rfq_product_id, document_url },
+        actionUrl: document_url || `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/order-book?rfq=${productData.rfq_id}`
+      });
+    } catch (notifyErr) {
+      logError('dispatch arc_award_confirmed failed', notifyErr);
+    }
   } catch (error) {
     throw error;
   }

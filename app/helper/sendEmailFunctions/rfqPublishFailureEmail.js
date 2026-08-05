@@ -3,6 +3,7 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
+import { dispatch as dispatchNotification } from "../../services/notificationService.js";
 
 const escapeHtml = (s) =>
   String(s ?? '')
@@ -107,6 +108,21 @@ export const sendRfqPublishFailureToCreator = async ({ rfq, failureReason }) => 
       { rfqId: rfq.id, rfq_no: rfq.rfq_no, creator: creator.email, sent: !!result },
       '[Publish Failure Email] Sent to creator'
     );
+
+    try {
+      await dispatchNotification({
+        userIds: [rfq.created_by],
+        category: 'rfq',
+        type: 'rfq_publish_failed',
+        title: `Action required: ${entityLabel} #${rfq.rfq_no} failed to auto-publish`,
+        body: `Auto-publish failed after retries. Use Force Publish to publish manually.`,
+        data: { rfq_id: rfq.id, is_tender: rfq.is_tender, reason: failureReason || null },
+        actionUrl: detailsUrl
+      });
+    } catch (notifyErr) {
+      logError('[Publish Failure] dispatch failed', notifyErr);
+    }
+
     return !!result;
   } catch (err) {
     logError('[Publish Failure Email] Error sending', err);

@@ -1,4 +1,5 @@
 import userModel from '../../models/userModel.js';
+import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import notificationModel from '../../models/notificationModel.js';
 import Config from '../../config/app.config.js';
 import {
@@ -27,6 +28,7 @@ import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
+import { dispatch as dispatchNotification, resolveRecipientUserIds } from '../../services/notificationService.js';
 import JWT from 'jsonwebtoken';
 import xlsx from 'xlsx';
 //var FCM = new fcm(certPath);
@@ -44,6 +46,7 @@ import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation
 import {
   simulateApproverImpact,
   revalidateApproverMembership,
+  getApproverSourceScopesForUsers,
   handleAutoCompletedInstances,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
@@ -51,6 +54,59 @@ const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
   return hash;
+};
+
+/**
+ * Validate that every process_id in a role-scope payload belongs to the parent
+ * (buyer) company of the row's hospitality_company_id. Throws a structured
+ * Error if any pair is mismatched or the process is inactive.
+ *
+ * tbl_approval_processes.company_id references tbl_company (the parent buyer
+ * company), while role-scope rows carry hospitality_company_id (which points
+ * to tbl_hospitality_companies). Bridge via tbl_hospitality_companies.buyer_company_id.
+ */
+const validateRoleScopeProcesses = async (rolesArray) => {
+  if (!Array.isArray(rolesArray)) return;
+  const pairs = rolesArray
+    .filter(r => r && r.process_id != null && r.process_id !== 0 && r.company_id)
+    .map(r => ({ process_id: Number(r.process_id), hospitality_company_id: Number(r.company_id) }));
+  if (pairs.length === 0) return;
+
+  const procIds = [...new Set(pairs.map(p => p.process_id))];
+  const hcIds = [...new Set(pairs.map(p => p.hospitality_company_id))];
+
+  const [hcCompanies, processes] = await Promise.all([
+    db.any(
+      `SELECT id, buyer_company_id FROM tbl_hospitality_companies WHERE id = ANY($1::int[])`,
+      [hcIds]
+    ),
+    db.any(
+      `SELECT id, company_id, is_active FROM tbl_approval_processes WHERE id = ANY($1::int[])`,
+      [procIds]
+    ),
+  ]);
+
+  const buyerByHc = new Map(hcCompanies.map(r => [Number(r.id), Number(r.buyer_company_id)]));
+  const procByPid = new Map(processes.map(r => [Number(r.id), r]));
+
+  for (const { process_id, hospitality_company_id } of pairs) {
+    const buyer = buyerByHc.get(hospitality_company_id);
+    const proc = procByPid.get(process_id);
+    if (!buyer) {
+      throw new Error(`Invalid hospitality_company_id ${hospitality_company_id} in role scope`);
+    }
+    if (!proc) {
+      throw new Error(`Process ${process_id} not found`);
+    }
+    if (!proc.is_active) {
+      throw new Error(`Process ${process_id} is inactive and cannot be assigned`);
+    }
+    if (Number(proc.company_id) !== buyer) {
+      throw new Error(
+        `Process ${process_id} does not belong to the parent company of hospitality company ${hospitality_company_id}`
+      );
+    }
+  }
 };
 
 try {
@@ -108,6 +164,23 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
 
         sendMail(mailRecipients);
 
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'buyer_account_created',
+              title: 'Welcome to Phileein Hospitality',
+              body: 'Your account has been created. Use the credentials emailed to you to log in.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch buyer_account_created failed', notifyErr);
+        }
+
         return accountLimitSaved
 }
 
@@ -141,6 +214,23 @@ const continueVendorCompanyRegistration = async (inputData, company_id)=>{
         }
 
         sendMail(mailRecipients);
+
+        try {
+          const userIds = await resolveRecipientUserIds([{ email: inputData.email }]);
+          if (userIds.length > 0) {
+            await dispatchNotification({
+              userIds,
+              category: 'account',
+              type: 'vendor_company_registered',
+              title: 'Registration received',
+              body: 'Your account is under review. We will notify you once it is approved.',
+              data: { company_id },
+              actionUrl: 'https://hospitality.letsworkwise.com'
+            });
+          }
+        } catch (notifyErr) {
+          logError('dispatch vendor_company_registered failed', notifyErr);
+        }
 }
 
 
@@ -823,10 +913,39 @@ create_buyer_company_users: async (req, res, next) => {
         role_id: r.role_id,
         company_id: r.company_id || companyID,
         hotel_id: r.hotel_id || null,
-        department_id: r.department_id || null
+        department_id: r.department_id || null,
+        process_id: r.process_id || null
       }));
 
+      await validateRoleScopeProcesses(roleScopes);
       await rbacModel.assignUserRoleScopes(roleScopes);
+
+      /* ---- PROPAGATE: newly granted role scopes may match live approvals ----
+         A freshly created user granted a role scope that resolveApprovers()
+         would already select for an existing PENDING instance (same
+         company/hotel/department, ROLE-sourced step) is never added to it —
+         the instance snapshotted its approver set before this user existed.
+         Mirrors update_user_detail's 'role_added' propagation branch
+         (usersController.js, update_user_detail) for symmetry. Best-effort:
+         a failure here is logged but must not fail user creation, since the
+         user and their role scopes already committed. */
+      try {
+        const newRoleIds = [...new Set(roleScopes.map((r) => r.role_id))];
+        const propResult = await db.tx(async (t) => {
+          return revalidateApproverMembership({
+            userId: createdUser.id,
+            changedBy: loginUserID,
+            changeType: 'role_added',
+            changedRoleIds: newRoleIds,
+            txContext: t
+          });
+        });
+        if (propResult?._emailData) {
+          dispatchPropagationEmails(propResult._emailData, loginUserID, 'role_added');
+        }
+      } catch (propErr) {
+        logError('Error propagating role-scope addition to approvals (user creation)', propErr);
+      }
     }
 
     /* -------------------- USER ↔ HOSPITALITY MAPPINGS -------------------- */
@@ -855,6 +974,77 @@ create_buyer_company_users: async (req, res, next) => {
 
         if (mappingRows.length) {
           await hospitalityModel.insertUserMappings(mappingRows);
+
+          /* ---- PROPAGATE: newly-mapped user may now qualify as approver ----
+             Same reasoning as hospitalityController.mapUsers: resolveApprovers()
+             INNER JOINs tbl_hospitality_user_mappings for both ROLE and
+             DEPARTMENT approver sources, so this mapping row is itself a grant
+             of approval authority for whatever role/department scopes this
+             new user was just given above. changeType 'scope_added' runs
+             PART 2 (add) of revalidateApproverMembership, scoped per mapping
+             row's own company/hotel. Best-effort — already inside this
+             function's own try/catch, so a propagation failure is caught by
+             the same handler as the mapping write and never fails user
+             creation.
+
+             THIS PASS IS NOT REDUNDANT WITH THE 'role_added' PASS ABOVE, even
+             though that one names the same roles. Ordering decides it: the
+             role_added propagation runs BEFORE insertUserMappings, and
+             resolveApprovers INNER JOINs tbl_hospitality_user_mappings for both
+             ROLE and DEPARTMENT sources — so at that moment this user has no
+             mapping row and resolves to nothing, anywhere. This pass is the
+             only one that can actually add them.
+
+             SCOPED, NOT SWEEPING — same fix as hospitalityController.mapUsers:
+             with no changedRoleIds/changedDeptIds, PART 2's candidate set is
+             every PENDING ROLE-/DEPARTMENT-sourced step in the company, each
+             locked FOR UPDATE and re-resolved before the user is known to
+             qualify. The user's own role ids (in THIS mapping's company) and
+             department memberships are the exact set that can resolve them;
+             see getApproverSourceScopesForUsers for the losslessness argument.
+             Read per mapping row because the role filter is company-scoped. */
+          for (const m of mappingRows) {
+            try {
+              // parseInt, not createdUser.id directly: the scope map is keyed
+              // by integer user id, and a string key here would miss every
+              // time — silently turning this into "no sources, skip" and
+              // losing the propagation outright.
+              const newUserId = parseInt(createdUser.id, 10);
+              const scopes = await getApproverSourceScopesForUsers(
+                [newUserId],
+                m.hospitality_company_id
+              );
+              const { roleIds, deptIds } =
+                scopes.get(newUserId) || { roleIds: [], deptIds: [] };
+
+              // No role scope in this company and no department membership =>
+              // nothing can resolve this user. Skipping is required, not just
+              // cheaper: two empty lists make the reconciler append no source
+              // filter and fall back to the full unscoped sweep.
+              if (!roleIds.length && !deptIds.length) continue;
+
+              const propResult = await db.tx(async (t) => {
+                return revalidateApproverMembership({
+                  userId: createdUser.id,
+                  changedBy: loginUserID,
+                  changeType: 'scope_added',
+                  changedRoleIds: roleIds,
+                  changedDeptIds: deptIds,
+                  companyId: m.hospitality_company_id,
+                  hotelId: m.hospitality_hotel_id,
+                  txContext: t
+                });
+              });
+              if (propResult?._emailData) {
+                dispatchPropagationEmails(propResult._emailData, loginUserID, 'scope_added');
+              }
+            } catch (propErr) {
+              logError(
+                `Error propagating mapping addition to approvals (user creation; user ${createdUser.id}, hospitality company ${m.hospitality_company_id}) — remaining mappings still processed`,
+                propErr
+              );
+            }
+          }
         }
       } catch (mapErr) {
         logError("Hospitality mapping failed (user was created)", mapErr);
@@ -1727,6 +1917,16 @@ get_company_users: async (req, res, next) => {
 
         sendMail(mailRecipients);
 
+        dispatchNotification({
+          userIds: [user_detail[0].id],
+          category: 'account',
+          type: 'forgot_password_otp_sent',
+          title: 'Password reset code sent',
+          body: 'Check your email for the verification code to reset your password.',
+          data: {},
+          actionUrl: verificationLink
+        }).catch((err) => logError('dispatch forgot_password_otp_sent failed', err));
+
         let updateOtp = {
           otp: otpseq,
           email: email
@@ -1879,7 +2079,8 @@ update_user_detail: async (req, res, next) => {
           `SELECT role_id,
                   COALESCE(company_id, 0)    AS company_id,
                   COALESCE(hotel_id, 0)      AS hotel_id,
-                  COALESCE(department_id, 0) AS department_id
+                  COALESCE(department_id, 0) AS department_id,
+                  COALESCE(process_id, 0)    AS process_id
            FROM tbl_user_role_scopes WHERE user_id = $1`,
           [targetUserId]
         ),
@@ -1896,16 +2097,36 @@ update_user_detail: async (req, res, next) => {
       const newDeptIds = Array.isArray(reqData.department_ids) ? reqData.department_ids : null;
       const newStatus = reqData.status;
 
+      /* `tbl_user_role_scopes.company_id` holds a HOSPITALITY company id
+         (tbl_hospitality_companies.id, 4-11 in production), while
+         loggedInUser.company_id is the buyer's PARENT company id (tbl_company,
+         13) — different number spaces entirely. The old
+         `r.company_id || loggedInUser.company_id` fallback silently wrote a
+         buyer id into a hospitality column, producing a scope row that matches
+         no hotel and no approval instance. It was inert only because the
+         frontend always sends company_id. Fail closed instead: every role scope
+         must name its own hospitality company. */
+      const roleScopeMissingCompany = Array.isArray(reqData.roles)
+        && reqData.roles.some(r => !Number.isInteger(Number(r.company_id)) || Number(r.company_id) <= 0);
+      if (roleScopeMissingCompany) {
+        return res.status(400).json({
+          status: 3,
+          code: 'ROLE_SCOPE_COMPANY_REQUIRED',
+          message: 'Every role assignment must specify the hospitality company it applies to.'
+        });
+      }
+
       const newRoleScopes = Array.isArray(reqData.roles)
         ? reqData.roles.map(r => ({
             role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id || 0,
+            company_id: Number(r.company_id),
             hotel_id: r.hotel_id || 0,
             department_id: r.department_id || 0,
+            process_id: r.process_id || 0,
           }))
         : null;
 
-      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}`;
+      const scopeKey = s => `${s.role_id}|${s.company_id}|${s.hotel_id}|${s.department_id}|${s.process_id || 0}`;
       const oldScopeKeySet = new Set(oldRoleScopes.map(scopeKey));
       const newScopeKeySet = newRoleScopes ? new Set(newRoleScopes.map(scopeKey)) : null;
 
@@ -1950,6 +2171,47 @@ update_user_detail: async (req, res, next) => {
 
       logger.info(`[UpdateUser ${targetUserId}] role scopes: old=${oldRoleScopes.length}, new=${newRoleScopes?.length ?? 'n/a'}, removedScopes=${removedScopes.length}, addedScopes=${addedScopes.length}`);
 
+      /* ---- FULL-WIPE BACKSTOP ----
+         `roles: []` / `department_ids: []` mean "replace everything with
+         nothing" — the update below deletes every one of this user's role
+         scopes and department memberships. That is a legitimate admin action
+         (removing someone's last role), but it is ALSO exactly what an edit
+         modal emits when its data never arrived: an empty form submitted
+         against a user who actually holds dozens of grants.
+
+         The two are indistinguishable from the payload alone — both are an
+         empty array. What distinguishes them is INTENT, which only a client
+         that has shown the real current state to a human can assert. So a
+         clear-to-empty of a NON-empty set requires `confirm_clear_all_scopes`;
+         a client that never loaded the data cannot honestly set it, and the
+         request fails closed with the scopes untouched.
+
+         Deliberately narrow: it only trips when the incoming array is EMPTY
+         and the user currently has rows. Removing 68 of 69 grants, or clearing
+         roles for a user who had none, passes straight through — this is a
+         tripwire on total erasure, not a general confirmation dialog. */
+      const clearingAllRoleScopes = Array.isArray(reqData.roles)
+        && reqData.roles.length === 0
+        && oldRoleScopes.length > 0;
+      const clearingAllDepartments = Array.isArray(reqData.department_ids)
+        && reqData.department_ids.length === 0
+        && oldDeptIds.length > 0;
+
+      if ((clearingAllRoleScopes || clearingAllDepartments) && reqData.confirm_clear_all_scopes !== true) {
+        logger.warn(`[UpdateUser ${targetUserId}] ⊘ blocked full-scope wipe — roleScopes=${oldRoleScopes.length}→0=${clearingAllRoleScopes}, departments=${oldDeptIds.length}→0=${clearingAllDepartments}`);
+        return res.status(400).json({
+          status: 3,
+          code: 'SCOPE_CLEAR_NOT_CONFIRMED',
+          message: 'This would remove every role and department assigned to this user. Re-open the account, confirm the list is correct, and try again.',
+          data: {
+            currentRoleScopeCount: oldRoleScopes.length,
+            currentDepartmentCount: oldDeptIds.length,
+            clearingAllRoleScopes,
+            clearingAllDepartments
+          }
+        });
+      }
+
       /* ---- PRE-FLIGHT CHECK for approval impact ----
          Only fires for actual REMOVALS — pure additions cannot disqualify
          the user from any pending approval. Scope-aware: removing
@@ -1966,17 +2228,22 @@ update_user_detail: async (req, res, next) => {
 
         logger.info(`[UpdateUser ${targetUserId}] running pre-flight check (changeType=${changeType})`);
 
-        // NOTE: do NOT pass loggedInUser.company_id here. simulateApproverImpact
-        // filters by tbl_approval_instances.hospitality_company_id (a hospitality
-        // entity ID), but loggedInUser.company_id is the buyer's parent company
-        // ID — different number space. Passing it here matches zero rows and the
-        // pre-flight check silently no-ops. The user mutation is global, so the
-        // impact check must be global too.
-        // Pass changedRoleIds/changedDeptIds so the simulation only checks steps
-        // tied to the roles/depts actually being removed (prevents false positives
-        // where user is an approver via a different, kept role).
+        // NOTE: do NOT pass the blanket companyId/hotelId options here.
+        // simulateApproverImpact filters those against
+        // tbl_approval_instances.hospitality_company_id (a hospitality entity
+        // ID), but loggedInUser.company_id is the buyer's PARENT company ID —
+        // a different number space. Passing it matches zero rows and the
+        // pre-flight check silently no-ops. Scoping comes from the removed
+        // scope tuples instead, which carry hospitality company IDs.
+        //
+        // Pass the full removed scope TUPLES, not bare role ids. Bare ids
+        // collapse "role 13 was removed at Fort Jadhavgadh" into "role 13 was
+        // removed somewhere", which surfaced every PENDING role-13 step on the
+        // platform — including instances belonging to other legal entities.
+        // Department MEMBERSHIP removals stay flat: tbl_user_department has no
+        // company/hotel axis, so those are genuinely global.
         const impact = await simulateApproverImpact(targetUserId, changeType, {
-          changedRoleIds: scopeRemoveContext.affectedRemovedRoleIds,
+          changedScopes: scopeRemoveContext.removedScopes,
           changedDeptIds: scopeRemoveContext.removedDeptIds
         });
 
@@ -2048,11 +2315,18 @@ update_user_detail: async (req, res, next) => {
         ? reqData.roles.map(r => ({
             user_id: targetUserId,
             role_id: r.role_id,
-            company_id: r.company_id || loggedInUser.company_id,
+            // Hospitality company id — never the buyer parent id. Guaranteed
+            // present by the ROLE_SCOPE_COMPANY_REQUIRED check above.
+            company_id: Number(r.company_id),
             hotel_id: r.hotel_id || null,
-            department_id: r.department_id || null
+            department_id: r.department_id || null,
+            process_id: r.process_id || null
           }))
         : null;
+
+      if (hasRoleUpdate) {
+        await validateRoleScopeProcesses(roleScopes);
+      }
 
       if (hasRoleUpdate) {
         logger.info(`[UpdateUser ${targetUserId}] persisting ${roleScopes.length} role scopes (replacing ${oldRoleScopes.length})`);
@@ -2095,7 +2369,10 @@ update_user_detail: async (req, res, next) => {
               userId: targetUserId,
               changedBy: loggedInUser.id,
               changeType,
-              changedRoleIds: ctx.statusDeactivating ? [] : ctx.affectedRemovedRoleIds,
+              // Same scope tuples the pre-flight simulation used, so discovery
+              // and mutation agree on the candidate set. resolveApprovers still
+              // has the final say per instance, so this only trims wasted work.
+              changedScopes: ctx.statusDeactivating ? [] : ctx.removedScopes,
               changedDeptIds: ctx.statusDeactivating ? [] : ctx.removedDeptIds,
               txContext: t
             });
@@ -3104,6 +3381,26 @@ publish_profile_reviews: async (req, res, next) => {
   },
 
 
+  // Engagement metrics for the buyer-facing vendor dossier (RFQs participated,
+  // contracts awarded, POs released, business value) — scoped to the requesting
+  // buyer's own RFQs + hospitality companies so it never exposes other tenants'
+  // dealings with the vendor.
+  vendor_engagement: async (req, res, next) => {
+    try {
+      const vendorId = Number(req.params.vendor_id);
+      const buyerUserId = req.user?.id;
+      if (!vendorId || !buyerUserId) {
+        return res.status(400).json({ status: 2, message: 'Invalid request' }).end();
+      }
+      const companyIds = await resolveHospitalityCompanyScope(req);
+      const stats = await userModel.getVendorEngagementStats(vendorId, buyerUserId, companyIds);
+      return res.status(200).json({ status: 1, data: stats }).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
   hospitalitySubscriptionPayment: async (req, res, next) => {
     try {
       const { user_key, categories, subcategories, hotels } = req.body;
@@ -3702,13 +3999,23 @@ publish_profile_reviews: async (req, res, next) => {
   },
   notificationDetail: async (req, res, next) => {
     try {
-      // let user_id = req.user.id;
-      let notification_id = req.params.notification_id;
+      // SECURITY: the owner check below used to be commented out and the model
+      // ran `select * from tbl_notifications where id = $1` with no owner
+      // filter, so any authenticated user (vendors reach this route too — it is
+      // passportSignIn-only) could walk the sequential ids and read every
+      // tenant's notifications. Scope is derived from req.user, never the
+      // request. A row that exists but belongs to someone else is
+      // indistinguishable from a missing one: both 404.
+      const user_id = req.user.id;
+      const notification_id = req.params.notification_id;
       const notificationDetail = await notificationModel.notificationDetail(
-        notification_id
+        notification_id,
+        user_id
       );
 
-      if (notificationDetail) {
+      // db.any() returns [] on a miss — and [] is truthy, which is why the old
+      // `if (notificationDetail)` branch always reported success.
+      if (Array.isArray(notificationDetail) && notificationDetail.length > 0) {
         res
           .status(200)
           .json({
@@ -3718,10 +4025,10 @@ publish_profile_reviews: async (req, res, next) => {
           .end();
       } else {
         res
-          .status(400)
+          .status(404)
           .json({
             status: 2,
-            message: 'User not exist'
+            message: 'Notification not found'
           })
           .end();
       }
@@ -3738,18 +4045,30 @@ publish_profile_reviews: async (req, res, next) => {
   },
   readNotification: async (req, res, next) => {
     try {
-      let user_id = req.user.id;
-      let notification_id = req.params.notification_id;
+      // SECURITY: companion defect to notificationDetail — `user_id` was read
+      // here but never passed to the model, so the UPDATE matched on id alone
+      // and any user could flip any tenant's notification to read.
+      const user_id = req.user.id;
+      const notification_id = req.params.notification_id;
 
-      let notification = await notificationModel.statusUpdateNotification(
-        notification_id
+      const updatedCount = await notificationModel.statusUpdateNotification(
+        notification_id,
+        user_id
       );
-      if (notification) {
+      if (updatedCount > 0) {
         res
           .status(200)
           .json({
             status: 1,
             message: 'Notification status read updated'
+          })
+          .end();
+      } else {
+        res
+          .status(404)
+          .json({
+            status: 2,
+            message: 'Notification not found'
           })
           .end();
       }

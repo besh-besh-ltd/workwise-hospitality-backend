@@ -3,15 +3,23 @@ import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertRfqPoListingAccess, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../../util/constants.js";
 import { sendApprovalNotification, sendPONotificationToVendor, sendPOAcceptanceRequestToVendor, sendVendorRejectionNotification, sendPOAcceptedNotificationToTeam } from "./purchaseOrderEmails.js";
 import rbacModel from "../../models/rbacModel.js";
+// NOTE: this controller no longer imports authorizationService directly. Every
+// per-PO gate now goes through purchaseOrderModel.assertPoAccess, which calls
+// assertUserHasScope internally — deliberately NOT assertCanReadParentRfq,
+// which allows when the parent RFQ's hospitality_company_id is NULL.
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 import pricingEngine from "../../services/pricingEngine.js";
+import { getPODetailFull } from "../../models/poDashboardModel.js";
+import { deriveScope } from "./poDashboardController.js";
+import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
+import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -26,11 +34,67 @@ class HttpError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SECURITY — per-PO tenant gate.
+//
+// Every handler below that addresses a purchase order by id (whether from the
+// URL or the request body) runs `assertPoAccess(req.user, po_id)` FIRST, before
+// any read or write. See the block comment at the top of purchaseOrderModel.js
+// for the full rationale; the short version is that the legacy PO surface
+// either had no authorization at all (GET /po/initiate/:po_id mutated state for
+// any authenticated caller), leaned on assertCanReadParentRfq — which allows
+// when the parent RFQ's hospitality_company_id is NULL — or filtered on a
+// tbl_company id that spans 8 hospitality companies in production.
+//
+// Out-of-scope answers 404, never 403: a 403 confirms the PO exists.
+// ---------------------------------------------------------------------------
+const sendPoAccessError = (res, err) =>
+  res.status(err?.status || 404).json({
+    status: 2,
+    message: err?.message || 'Purchase order not found.',
+    code: err?.code || 'PO_NOT_FOUND_OR_OUT_OF_SCOPE',
+  });
+
+/**
+ * Runs the gate and returns the resolved tenancy row, or null when the response
+ * has already been sent (caller must `return` immediately on null).
+ */
+const guardPo = async (req, res, po_id) => {
+  try {
+    return await assertPoAccess(req.user, po_id);
+  } catch (err) {
+    if (err instanceof PoAccessError) {
+      sendPoAccessError(res, err);
+      return null;
+    }
+    throw err;
+  }
+};
+
 export const getPOByRFQ = async (req, res) => {
     try {
         const { rfq_id } = req.params;
         const { page = 1, limit = 10, ...filters } = req.query;
         const { id, user_type } = req.user;
+
+        // SECURITY: scope-check the parent RFQ before listing its POs.
+        //
+        // This replaces assertCanReadParentRfq, which ALLOWS whenever the RFQ's
+        // hospitality_company_id is NULL (84 such rows in production) — and the
+        // model's only other predicate was `po.rfq_id = $1`, so that bypass
+        // handed over the RFQ's entire purchase-order book. assertRfqPoListingAccess
+        // runs the same 4-axis tuple but fails closed, and answers 404 so the
+        // existence of another tenant's RFQ is not leaked.
+        //
+        // Vendors are exempt from the RBAC gate by design: they hold no
+        // tbl_user_role_scopes rows at all, and getPOByRFQId scopes them to
+        // finalized_vendor_id. Applying the buyer gate to them 403'd every
+        // vendor's Order Book.
+        if (Number(user_type) !== 3) {
+            const gate = await assertRfqPoListingAccess(req.user, rfq_id).catch((e) => e);
+            if (gate instanceof PoAccessError) return sendPoAccessError(res, gate);
+            if (gate instanceof Error) throw gate;
+        }
 
         const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
 
@@ -51,10 +115,37 @@ export const getPODetails = async (req, res) => {
         const { po_id } = req.params;
         const { id } = req.user;
 
+        // SECURITY: the previous gate had two bypasses — it was skipped
+        // entirely when po.rfq_id IS NULL (call-off POs), and
+        // assertCanReadParentRfq itself allows when the parent RFQ's
+        // hospitality_company_id is NULL. assertPoAccess covers call-offs via
+        // the ARC, fails closed on an unresolvable company, and keeps the GRN
+        // token and vendor paths working.
+        if (!(await guardPo(req, res, po_id))) return;
+
         const result = await getPODetailsById(po_id, id);
+
+        // Additively merge the new contract-shaped detail-full object under a
+        // `detail` key so the new PO Detail page can consume the structured
+        // shape WITHOUT breaking any existing consumer of the legacy `data`
+        // payload. Scope is derived from req.user + headers; for GRN
+        // token-users (id = -1, no company scope) we skip the augmentation.
+        let detail = null;
+        if (!req.user.is_token_user && req.user.id > 0) {
+          try {
+            const scope = await deriveScope(req);
+            if (scope.hospitalityCompanyIds === null || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0) || scope.companyId) {
+              detail = await getPODetailFull(po_id, scope);
+            }
+          } catch (augErr) {
+            // Never fail the legacy response because of the augmentation.
+            logError('getPODetails detail-full augmentation failed', augErr);
+          }
+        }
 
         return res.json({
           data: result,
+          detail,
         });
 
     } catch (error) {
@@ -71,6 +162,10 @@ export const updatePO = async (req, res) => {
   try {
     const { po_id } = req.params;
     const { changes } = req.body;
+
+    // Tenant gate first; handleUpdatePO's creator/hierarchy check then decides
+    // WHO inside that tenant may edit.
+    if (!(await guardPo(req, res, po_id))) return;
 
     const updated = await handleUpdatePO(po_id, changes, req.user);
 
@@ -211,10 +306,24 @@ export const draftPO = async (poInfo, user, txn) => {
   }
 };
 
+/**
+ * Initiate a draft PO: draft -> pending_approval, creates the approval
+ * instance, regenerates the PDF and emails the approvers.
+ *
+ * SECURITY (P0): this handler previously ran with NO acl() and NO scope check
+ * whatsoever, over a GET. Any authenticated user could drive ANY tenant's draft
+ * PO into approval by guessing its id — a cross-company write. It is now
+ * gated by assertPoAccess and by noAcl([3]) at the route, and is additionally
+ * reachable over POST (see poRoutes.js) so the verb matches the effect. The GET
+ * binding is retained until the frontend's single call site
+ * (frontend/services/po.js -> handlePOInitialization) switches to POST.
+ */
 export const initiatePO = async (req, res) => {
   try {
     const { po_id } = req.params;
     const initiator = req.user;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const result = await db.tx(async t => {
       return await initiatePurchaseOrder(po_id, initiator, t);
@@ -303,6 +412,13 @@ export const mergePODrafts = async (req, res) => {
       return res.status(400).json({ status: 0, message: 'At least 2 distinct POs are required to merge' });
     }
 
+    // SECURITY: the model's own guard compares req.user.company_id against the
+    // POs' company_id — a tbl_company id, which spans 8 hospitality companies
+    // in production. Gate every participating PO on the 4-axis tuple first.
+    for (const id of uniqueIds) {
+      if (!(await guardPo(req, res, id))) return;
+    }
+
     const result = await mergeDraftPOs({
       keep_po_id: keepId,
       po_ids: Array.from(uniqueIds),
@@ -336,7 +452,29 @@ export const approvePO = async (req, res) => {
       });
     }
 
-    return db.tx(async t => {
+    // Tenant gate. The new-workflow path is separately protected
+    // (submitApprovalAction verifies the caller is a PENDING approver on the
+    // current step), but the legacy path only matched on tbl_company id, and
+    // neither stopped a cross-tenant caller from probing PO existence.
+    //
+    // An explicit approver assignment is itself a grant, and it does not always
+    // agree with the assignee's RBAC scope row — production has one live
+    // PENDING PO approval whose approver's only scope row sits on a different
+    // business unit. Scope OR assignment, so that approval stays actionable.
+    try {
+      await assertPoAccess(req.user, po_id);
+    } catch (err) {
+      if (!(err instanceof PoAccessError)) throw err;
+      if (!(await isAssignedPoApprover(userId, po_id))) return sendPoAccessError(res, err);
+    }
+
+    // Respond-AFTER-commit. Every exit below returns a deferred-response marker
+    // instead of writing to `res` inside the transaction: emitting the response
+    // mid-tx flushes it before pg-promise issues COMMIT, so the approver's next
+    // read can still see the pre-approval PO, and a COMMIT failure could never
+    // be reported (headers already sent → the 500 below is unreachable). The
+    // markers resolve the callback normally, so the same work commits as before.
+    const txOutcome = await db.tx(async t => {
         // Check if PO uses new approval workflow (has approval_instance_id)
         const po = await t.oneOrNone(`
           SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
@@ -344,7 +482,7 @@ export const approvePO = async (req, res) => {
         `, [po_id]);
 
         if (!po) {
-          return res.status(404).json({
+          return deferJson(404, {
             status: 2,
             message: 'Purchase order not found.'
           });
@@ -395,7 +533,7 @@ export const approvePO = async (req, res) => {
             await handlePORejection(po, userId, t);
           }
 
-          return res.status(200).json({
+          return deferJson(200, {
             status: 1,
             message:
               actionResult.instance_status === 'APPROVED'
@@ -429,7 +567,7 @@ export const approvePO = async (req, res) => {
         );
 
         if (!trx) {
-          return res.status(404).json({
+          return deferJson(404, {
             status: 2,
             message: 'No approval request found for this PO.'
           });
@@ -474,7 +612,7 @@ export const approvePO = async (req, res) => {
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
 
-        return res.status(200).json({
+        return deferJson(200, {
           status: 1,
           message:
             decision === 'rejected'
@@ -485,6 +623,9 @@ export const approvePO = async (req, res) => {
           data: { ...result, approval_type: 'legacy' }
         });
     })
+    // COMMIT has happened by here — only now does anything reach the socket.
+    if (isDeferred(txOutcome)) return sendDeferred(res, txOutcome);
+    return txOutcome;
   } catch (error) {
     logError(error);
     return res.status(500).json({
@@ -936,11 +1077,13 @@ export const acceptPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 
@@ -1008,6 +1151,7 @@ export const rejectPO = async (req, res) => {
     }
     const vendorUserId = req.user.id;
 
+    let callOffReject = null;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
       const po = await t.oneOrNone(
@@ -1020,11 +1164,13 @@ export const rejectPO = async (req, res) => {
       if (po.finalized_vendor_id !== vendorUserId) {
         throw new HttpError(403, 'You are not the assigned vendor for this PO.');
       }
-      if (po.status !== 'acceptance_pending') {
+      // 'sent' is the legacy synonym for 'acceptance_pending' (awaiting the
+      // vendor's accept/reject) — accept either.
+      if (!['acceptance_pending', 'sent'].includes(po.status)) {
         const alreadyActioned = ['approved', 'rejected_by_vendor'].includes(po.status);
         const message = alreadyActioned
           ? `PO has already been actioned (status: ${po.status}).`
-          : `PO is not in acceptance_pending state (current: ${po.status}).`;
+          : `PO is not awaiting acceptance (current: ${po.status}).`;
         throw new HttpError(409, message);
       }
 
@@ -1037,8 +1183,13 @@ export const rejectPO = async (req, res) => {
         WHERE id = $1
       `, [po_id, reason]);
 
-      // Definalize vendor — move from tbl_quote_finalization to history
-      await handlePORejection(po, vendorUserId, t);
+      // Call-off POs (no RFQ) reverse contract consumption + reopen the MR;
+      // RFQ POs run the de-finalization cascade (audit CO9).
+      if (po.is_call_off) {
+        callOffReject = await handleCallOffRejection(po_id, reason, t);
+      } else {
+        await handlePORejection(po, vendorUserId, t);
+      }
 
       await recordLifecycleEvent({
         entity_type: 'PO',
@@ -1057,10 +1208,20 @@ export const rejectPO = async (req, res) => {
       return po;
     });
 
-    // Send rejection notification to commercial evaluators (fire-and-forget)
-    sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
-      logError('Failed to send vendor rejection notification', err);
-    });
+    // Rejection notification (fire-and-forget). Call-offs notify the MR raiser;
+    // RFQ POs notify the commercial evaluators (audit CO9).
+    if (result.is_call_off) {
+      notifyCallOffRejected({
+        raisedBy: callOffReject?.raised_by,
+        mrNumber: callOffReject?.mr_number,
+        poNumber: result.po_number,
+        reason,
+      }).catch(err => logError('Failed to notify call-off rejection', err));
+    } else {
+      sendVendorRejectionNotification(result, vendorUserId, reason).catch(err => {
+        logError('Failed to send vendor rejection notification', err);
+      });
+    }
 
     return res.json({
       status: 1,
@@ -1080,6 +1241,8 @@ export const updateGST = async (req, res) => {
   try {
     const { po_id } = req.params;
     const { value } = req.body;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const updatedData = await updateGSTForPO(po_id, value);
     return res.json({
@@ -1103,6 +1266,8 @@ export const updateHSNForProduct = async (req, res) => {
     const { hsn_codes } = req.body;
     const { id } = req.user;
 
+    if (!(await guardPo(req, res, po_id))) return;
+
     const updatedData = await updateHSNCode(po_id, hsn_codes, id);
     return res.json({
       status: 1,
@@ -1123,6 +1288,8 @@ export const raiseInvoice = async (req, res) => {
   try {
     const { po_id, invoice_url } = req.body;
     const { id } = req.user;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const result = await handleRaiseInvoice(po_id, invoice_url, id);
     return res.json({
@@ -1145,6 +1312,12 @@ export const markGRN = async (req, res) => {
     const { po_id, grn_document_url, remarks } = req.body;
     const { id } = req.user;
 
+    // handleMarkGRN had NO ownership check of any kind: any authenticated
+    // caller could flip any tenant's PO to 'GRN' and attach a document.
+    // assertPoAccess also keeps the GRN site-rep token path working (that user
+    // is bound to exactly this po_id).
+    if (!(await guardPo(req, res, po_id))) return;
+
     const result = await handleMarkGRN(po_id, grn_document_url, id, remarks);
     return res.json({
       status: 1,
@@ -1165,6 +1338,8 @@ export const markDispatched = async (req, res) => {
   try {
     const { po_id } = req.body;
     const { id } = req.user;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const result = await handleMarkDispatched(po_id, id);
     return res.json({
@@ -1187,6 +1362,11 @@ export const addSiteRepresentative = async (req, res) => {
     const { po_id, name, email, phone } = req.body;
     const { id, company_id } = req.user;
 
+    // This endpoint mints a GRN login token and EMAILS it to a caller-supplied
+    // address. Without a tenant gate, any authenticated user could hand a
+    // third party standing access to another tenant's purchase order.
+    if (!(await guardPo(req, res, po_id))) return;
+
     const result = await handleAddSiteRepresentative(po_id, id, name, email, phone);
     return res.json({
       status: 1,
@@ -1203,11 +1383,21 @@ export const addSiteRepresentative = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
 // Payment Milestone Controllers
+//
+// SECURITY: these were gated on tbl_payment_milestone.company_id — a
+// tbl_company id, which in production spans 8 distinct hospitality companies —
+// and the mutation endpoints took a bare milestone id with no tenant predicate
+// at all (a textbook IDOR over sequential ids). Every one of them now resolves
+// the parent PO and runs assertPoAccess against it.
+// ---------------------------------------------------------------------------
 export const getMilestonesController = async (req, res) => {
   try {
     const { po_id } = req.params;
     const user = req.user;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const data = await getMilestonesByPOId(req.user.company_id, po_id, user.user_type == '8');
     return res.status(200).json({ success: true, data });
@@ -1219,6 +1409,8 @@ export const getMilestonesController = async (req, res) => {
 
 export const createMilestoneController = async (req, res) => {
   try {
+    if (!(await guardPo(req, res, req.body?.po_id))) return;
+
     let milestone = await createMilestone(req.body, req.user);
     if(milestone) {
       await scheduleMilestoneReminder(milestone)
@@ -1233,6 +1425,9 @@ export const createMilestoneController = async (req, res) => {
 
 export const updateMilestoneController = async (req, res) => {
   try {
+    const parentPoId = await getMilestoneParentPoId(req.params.id);
+    if (!(await guardPo(req, res, parentPoId))) return;
+
     const updated = await updateMilestone(req.params.id, req.body, req.user.id);
     if (updated) await rescheduleMilestoneReminder(updated);
 
@@ -1245,9 +1440,12 @@ export const updateMilestoneController = async (req, res) => {
 
 export const deleteMilestoneController = async (req, res) => {
   try {
+    const parentPoId = await getMilestoneParentPoId(req.params.id);
+    if (!(await guardPo(req, res, parentPoId))) return;
+
     const deleted = await deleteMilestone(req.params.id, req.user);
     if (deleted) removeMilestoneReminder(deleted.id);
-    
+
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
     logError('deleteMilestoneController failed', error);
@@ -1255,11 +1453,15 @@ export const deleteMilestoneController = async (req, res) => {
   }
 };
 
-// PO Tasks Controllers
+// ---------------------------------------------------------------------------
+// PO Tasks Controllers — same tenancy story as the milestones above.
+// ---------------------------------------------------------------------------
 export const getTasksController = async (req, res) => {
   try {
     const { po_id } = req.params;
     const { page = 1, limit = 10 } = req.query;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const [data, count] = await getTasksByPOId(req.user.company_id, po_id, page, limit);
     return res.status(200).json({ success: true, data, total: count });
@@ -1271,6 +1473,8 @@ export const getTasksController = async (req, res) => {
 
 export const createTaskController = async (req, res) => {
   try {
+    if (!(await guardPo(req, res, req.body?.po_id))) return;
+
     const milestone = await createTask(req.body, req.user);
 
     return res.status(201).json({ success: true, data: milestone });
@@ -1282,6 +1486,9 @@ export const createTaskController = async (req, res) => {
 
 export const updateTaskController = async (req, res) => {
   try {
+    const parentPoId = await getTaskParentPoId(req.params.id);
+    if (!(await guardPo(req, res, parentPoId))) return;
+
     const updated = await updateTask(req.params.id, req.body, req.user.id);
 
     return res.status(200).json({ success: true, data: updated });
@@ -1293,6 +1500,9 @@ export const updateTaskController = async (req, res) => {
 
 export const deleteTaskController = async (req, res) => {
   try {
+    const parentPoId = await getTaskParentPoId(req.params.id);
+    if (!(await guardPo(req, res, parentPoId))) return;
+
     const deleted = await deleteTask(req.params.id, req.user);
 
     return res.status(200).json({ success: true, data: deleted });
@@ -1305,6 +1515,8 @@ export const deleteTaskController = async (req, res) => {
 export const regeneratePO = async (req, res) => {
   try {
     const { po_id } = req.params;
+
+    if (!(await guardPo(req, res, po_id))) return;
 
     const newUrl = await regeneratePODocument(po_id);
 
@@ -1333,6 +1545,10 @@ export const regeneratePO = async (req, res) => {
 export const uploadPODocument = async (req, res) => {
   try {
     const { po_id } = req.params;
+
+    // Overwrites po_pdf_url on the header row — a cross-company write with no
+    // gate of any kind before this.
+    if (!(await guardPo(req, res, po_id))) return;
 
     if (!req.file || !req.file.location) {
       return res.status(400).json({

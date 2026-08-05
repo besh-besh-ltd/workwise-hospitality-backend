@@ -19,6 +19,8 @@
     "test:setup": "NODE_ENV=test node tests/setup/prepareTestDb.js",
     "test:teardown": "NODE_ENV=test node tests/setup/dropTestDb.js",
     "test:cleanup": "NODE_ENV=test node tests/setup/dropTestDb.js --orphans",
+    "test:shards": "node scripts/check-shard-coverage.mjs",
+    "check:tx-response": "node scripts/check-response-in-tx.mjs",
     "test:snapshot-staging": "node tests/setup/snapshotStaging.js"
   },
   "repository": {

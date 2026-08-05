@@ -2795,7 +2795,29 @@ INSERT INTO public.tbl_permissions VALUES
 	(29, 'awarding', 'approve', 5),
 	(32, 'tender', 'approve', 0),
 	(33, 'arc', 'approve', 0),
-	(34, 'awarding', 'regenerate', 5);
+	(34, 'awarding', 'regenerate', 5),
+-- ── HAND-MAINTAINED TAIL (ids 35+) — NOT part of the pg_dump ─────────────────
+-- Test databases NEVER run migrations: prepareTestDb.js builds them from
+-- schema.sql + this file only. Everything below therefore mirrors, by hand, the
+-- RBAC rows that real environments get from migrations. Changing one side
+-- without the other makes the test DB lie about production.
+--   ids 35-46  ← migrations/20260608100800_permissions_seed.sql
+--                 + migrations/20260611100000_arc_eval_read_permissions.sql
+--   ids 47-48  ← migrations/20260803110000_arc_stage_approver_permissions.sql
+	(35, 'arc', 'read', 0),
+	(36, 'arc', 'create', 0),
+	(37, 'arc', 'admin', 0),
+	(38, 'arc-tech', 'evaluate', 0),
+	(39, 'arc-comm', 'evaluate', 0),
+	(40, 'arc-committee', 'read', 0),
+	(41, 'arc-committee', 'approve', 0),
+	(42, 'mr', 'read', 0),
+	(43, 'mr', 'create', 0),
+	(44, 'mr', 'approve', 0),
+	(45, 'arc-tech', 'read', 0),
+	(46, 'arc-comm', 'read', 0),
+	(47, 'arc-tech', 'approve', 0),
+	(48, 'arc-comm', 'approve', 0);
 
 
 --
@@ -50918,7 +50940,56 @@ INSERT INTO public.tbl_role_permissions VALUES
 	(278, 19, 10),
 	(289, 20, 33),
 	(290, 21, 26),
-	(291, 21, 34);
+	(291, 21, 34),
+-- ── HAND-MAINTAINED TAIL (ids 292+) — NOT part of the pg_dump ────────────────
+-- Grants for the hand-maintained roles/permissions above. Mirrors, in order:
+--   292-308  (17 rows) ← migrations/20260608100800_permissions_seed.sql (Step 4)
+--   309-317  ( 9 rows) ← migrations/20260611100000_arc_eval_read_permissions.sql
+--   318-322  ( 5 rows) ← migrations/20260803110000_arc_stage_approver_permissions.sql
+--
+-- SEPARATION OF DUTIES: 'ARC Tech Evaluator' (23), 'ARC Commercial Evaluator'
+-- (24) and 'ARC Admin' (26) deliberately do NOT hold arc-tech.approve (47) or
+-- arc-comm.approve (48) — they are the roles whose tech/commercial work gets
+-- approved.
+--
+-- That is NOT a claim that 'ARC Admin' approves nothing. Rows 303-304 below give
+-- it arc-committee.read + arc-committee.approve (from 20260608100800), which is
+-- exactly what the ARC_COMMITTEE award gate checks — while row 302
+-- (arc-comm.evaluate) is what lets it finalize commercial and SPAWN that gate as
+-- initiator. One ARC Admin can therefore award, finalize, and approve the same
+-- award. Pre-existing, deliberately left alone here, pinned by
+-- tests/services/arc.approvers.stageRoles.test.js. See the migration header.
+	(292, 22, 35),  -- ARC Creator              → arc.read
+	(293, 22, 36),  -- ARC Creator              → arc.create
+	(294, 23, 38),  -- ARC Tech Evaluator       → arc-tech.evaluate
+	(295, 24, 39),  -- ARC Commercial Evaluator → arc-comm.evaluate
+	(296, 25, 40),  -- ARC Committee Member     → arc-committee.read
+	(297, 25, 41),  -- ARC Committee Member     → arc-committee.approve
+	(298, 26, 35),  -- ARC Admin                → arc.read
+	(299, 26, 36),  -- ARC Admin                → arc.create
+	(300, 26, 37),  -- ARC Admin                → arc.admin
+	(301, 26, 38),  -- ARC Admin                → arc-tech.evaluate
+	(302, 26, 39),  -- ARC Admin                → arc-comm.evaluate
+	(303, 26, 40),  -- ARC Admin                → arc-committee.read
+	(304, 26, 41),  -- ARC Admin                → arc-committee.approve
+	(305, 27, 42),  -- MR Raiser                → mr.read
+	(306, 27, 43),  -- MR Raiser                → mr.create
+	(307, 28, 42),  -- MR Approver              → mr.read
+	(308, 28, 44),  -- MR Approver              → mr.approve
+	(309, 22, 45),  -- ARC Creator              → arc-tech.read
+	(310, 22, 46),  -- ARC Creator              → arc-comm.read
+	(311, 23, 45),  -- ARC Tech Evaluator       → arc-tech.read
+	(312, 24, 46),  -- ARC Commercial Evaluator → arc-comm.read
+	(313, 24, 45),  -- ARC Commercial Evaluator → arc-tech.read
+	(314, 25, 45),  -- ARC Committee Member     → arc-tech.read
+	(315, 25, 46),  -- ARC Committee Member     → arc-comm.read
+	(316, 26, 45),  -- ARC Admin                → arc-tech.read
+	(317, 26, 46),  -- ARC Admin                → arc-comm.read
+	(318, 29, 45),  -- ARC Technical Approver   → arc-tech.read
+	(319, 29, 47),  -- ARC Technical Approver   → arc-tech.approve
+	(320, 30, 46),  -- ARC Negotiation Approver → arc-comm.read
+	(321, 30, 48),  -- ARC Negotiation Approver → arc-comm.approve
+	(322, 16, 35);  -- ARC Approver (legacy)    → arc.read  ← the one row it was missing
 
 
 --
@@ -50946,7 +51017,21 @@ INSERT INTO public.tbl_roles VALUES
 	(18, 'Report Download', 'Can download reports across all stages', NULL),
 	(19, 'CEO', 'Company CEO', 402),
 	(20, 'TEST 123 !!!', 'test qwerty', 402),
-	(21, 'PO Regenerator', 'Person Who Regenerates PO', 402);
+	(21, 'PO Regenerator', 'Person Who Regenerates PO', 402),
+-- ── HAND-MAINTAINED TAIL (ids 22+) — NOT part of the pg_dump ─────────────────
+-- Mirrors the system roles that real environments get from migrations (test DBs
+-- never run migrations — see the note on tbl_permissions above).
+--   ids 22-28  ← migrations/20260608100800_permissions_seed.sql
+--   ids 29-30  ← migrations/20260803110000_arc_stage_approver_permissions.sql
+	(22, 'ARC Creator', 'Can create and float Annual Rate Contracts.', NULL),
+	(23, 'ARC Tech Evaluator', 'Evaluates the technical responses on Annual Rate Contracts.', NULL),
+	(24, 'ARC Commercial Evaluator', 'Runs commercial evaluation and reconciles split-vendor awards on ARCs.', NULL),
+	(25, 'ARC Committee Member', 'Sits on the ARC committee that approves finalised awards and amendments.', NULL),
+	(26, 'ARC Admin', 'Operational owner of the ARC module — handles terminations, escalations, manual overrides.', NULL),
+	(27, 'MR Raiser', 'Raises Material Requisitions for contracted items within their hotel/department scope.', NULL),
+	(28, 'MR Approver', 'Approves Material Requisitions at any configured step on the MR approval policy.', NULL),
+	(29, 'ARC Technical Approver', 'Approves technical evaluations on Annual Rate Contracts.', NULL),
+	(30, 'ARC Negotiation Approver', 'Approves the launch of negotiation rounds on Annual Rate Contracts.', NULL);
 
 
 --
@@ -50974,7 +51059,7 @@ SELECT pg_catalog.setval('public.tbl_country_code_id_seq', 249, true);
 -- Name: tbl_permissions_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public.tbl_permissions_id_seq', 34, true);
+SELECT pg_catalog.setval('public.tbl_permissions_id_seq', 48, true);
 
 
 --
@@ -50988,14 +51073,14 @@ SELECT pg_catalog.setval('public.tbl_product_variant_id_seq', 13090, true);
 -- Name: tbl_role_permissions_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public.tbl_role_permissions_id_seq', 291, true);
+SELECT pg_catalog.setval('public.tbl_role_permissions_id_seq', 322, true);
 
 
 --
 -- Name: tbl_roles_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
 --
 
-SELECT pg_catalog.setval('public.tbl_roles_id_seq', 21, true);
+SELECT pg_catalog.setval('public.tbl_roles_id_seq', 30, true);
 
 
 --

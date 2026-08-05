@@ -7,7 +7,7 @@ import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
 import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
-import { acl, verifyAIWebhookBody } from '../../helper/common.js';
+import { acl, noAcl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { can } from '../../middleware/auth.js';
@@ -16,6 +16,27 @@ import hospitalityMiddleware from '../../middleware/hospitality.js';
 
 
 const RfqRoutes = Router();
+
+/**
+ * Reject any route param that is not a positive integer BEFORE it reaches a
+ * controller. First line of defence for id-shaped params: `/quote/update/
+ * :quoteId` had none, and the raw value flowed into a string-interpolated
+ * WHERE clause (see rfqModel.checkIfExists).
+ *
+ * The param is normalised to its canonical decimal form so downstream string
+ * concatenation cannot be surprised by leading zeros or whitespace.
+ */
+const requirePositiveIntParam = (name) => (req, res, next) => {
+  const raw = req.params?.[name];
+  if (typeof raw !== 'string' || !/^[0-9]{1,15}$/.test(raw) || Number(raw) <= 0) {
+    return res.status(400).json({
+      status: 0,
+      message: `Invalid ${name}.`
+    });
+  }
+  req.params[name] = String(Number(raw));
+  next();
+};
 
 RfqRoutes.post(
   '/create',
@@ -55,6 +76,22 @@ RfqRoutes.post(
   passportSignIn,
   acl([2, 8]),
   rfqController.createOrUpdateRfqDraftWithProductVendors
+);
+
+// Bulk variant — accepts variants: [{ variant_id }, ...] and adds them all
+RfqRoutes.post(
+  '/add-products-to-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.createOrUpdateRfqDraftWithBulkProducts
+);
+
+// Recommended products for Start RFQ wizard
+RfqRoutes.post(
+  '/recommended-products',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getRecommendedProducts
 );
 
 RfqRoutes.get(
@@ -159,6 +196,12 @@ RfqRoutes.get(
 );
 
 RfqRoutes.get(
+  '/:rfqId/lifecycle',
+  passportSignIn,
+  rfqController.getRfqLifecycle
+);
+
+RfqRoutes.get(
   '/getRfqById/:id',
   noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
@@ -199,6 +242,13 @@ RfqRoutes.post(
   validateDbBody.user_id_profileexists,
   validateBody(projectSchemas.get_buyer_body_validation),
   rfqController.getBuyerRfq
+);
+
+// Server-side faceted + paginated RFQ management listing (rate-contracts-style).
+RfqRoutes.post(
+  '/list-view',
+  passportSignIn,
+  rfqController.getRfqListView
 );
 
 // Get RFQs/Tenders where user is in the approval line (current pending step)
@@ -246,6 +296,7 @@ RfqRoutes.post(
 
 RfqRoutes.put(
   '/quote/update/:quoteId',
+  requirePositiveIntParam('quoteId'),
   noLogin.vendorTokenOrJwt,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.updateQuoteItems
@@ -267,6 +318,14 @@ RfqRoutes.get(
   validateDbBody.user_id_profileexists,
   acl([2, 8, 10]),
   rfqController.getQuoteComparison
+);
+// Buyer Quote Comparison UI: single flat "QC contract" reshape of the
+// comparison data (see quoteCompareViewModel). Read-only, buyer-facing.
+RfqRoutes.get(
+  '/quote-comparison-view/:id',
+  passportSignIn,
+  noAcl([3]),
+  rfqController.getQuoteComparisonView
 );
 RfqRoutes.get(
   '/download-quote-results/:id',

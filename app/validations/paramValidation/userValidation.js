@@ -367,6 +367,7 @@ const schemas = {
         company_id: Joi.number().optional().allow(null),
         hotel_id: Joi.number().optional().allow(null),
         department_id: Joi.number().optional().allow(null),
+        process_id: Joi.number().integer().optional().allow(null),
         permissions: Joi.object().optional()
       })
     ).optional(),
@@ -378,6 +379,12 @@ const schemas = {
     // so the role/dept change actually applies (and propagates to pending
     // approvals) instead of looping back to WARNING forever.
     confirmed_approval_impact: Joi.boolean().optional(),
+    // Asserts "I displayed this user's real current roles/departments to an
+    // admin and they deliberately emptied the list". Required before an empty
+    // roles[]/department_ids[] is allowed to erase a non-empty set — see the
+    // full-wipe backstop in usersController.update_user_detail. A client whose
+    // fetches failed or never landed cannot truthfully set it.
+    confirm_clear_all_scopes: Joi.boolean().optional(),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile

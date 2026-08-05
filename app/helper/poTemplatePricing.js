@@ -159,7 +159,10 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
       lineChargesTax += cd.tax_raw;
     }
 
-    const lineTaxAmount = roundCurrency(baseTaxAmount + lineChargesTax);
+    // GST column shows BASE GST only (exclusive of per-charge taxes). The
+    // per-charge taxes are folded into the "Total Charges (incl. of tax)"
+    // summary line instead, so the GST figure reconciles with the GST % shown.
+    const lineTaxAmount = roundCurrency(baseTaxAmount);
     const effectiveTaxRate = baseAmount > 0 ? (baseTaxAmount / baseAmount) * 100 : 0;
 
     totalBasic += baseAmount;
@@ -204,8 +207,12 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
   });
 
   const roundedBasic = roundCurrency(totalBasic);
-  const roundedChargesAmount = roundCurrency(totalChargesAmount);
-  const roundedTotalTax = roundCurrency(totalBaseTax + totalChargesTax);
+  // "Total Charges" is shown INCLUSIVE of per-charge taxes; "GST" is BASE GST
+  // only. The identity (Total Basic + Total Charges-incl-tax + base GST ==
+  // Subtotal) still holds, because the per-charge taxes simply move from the
+  // GST bucket into the charges bucket.
+  const roundedChargesInclTax = roundCurrency(totalChargesAmount + totalChargesTax);
+  const roundedBaseTax = roundCurrency(totalBaseTax);
   const roundedSubtotal = roundCurrency(totalSubtotal);
 
   // Resolve PO-level global charges (Insurance, Handling, Discount applied
@@ -265,11 +272,11 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
     items: enrichedItems,
     taxMode,
     basicAmount: formatAmount(roundedBasic),
-    totalCharges: roundedChargesAmount > 0 ? formatAmount(roundedChargesAmount) : null,
-    gstAmount: formatAmount(roundedTotalTax),
+    totalCharges: roundedChargesInclTax > 0 ? formatAmount(roundedChargesInclTax) : null,
+    gstAmount: formatAmount(roundedBaseTax),
     totalSubtotal: formatAmount(roundedSubtotal),
     globalCharges: resolvedGlobalCharges.length > 0 ? resolvedGlobalCharges : null,
     totalPrice: formatAmount(totalPOValue),
-    summaryTaxRows: buildTaxSummaryRows(taxMode, roundedTotalTax, roundedBasic),
+    summaryTaxRows: buildTaxSummaryRows(taxMode, roundedBaseTax, roundedBasic),
   };
 };

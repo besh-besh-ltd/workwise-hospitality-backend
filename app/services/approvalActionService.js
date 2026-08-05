@@ -64,15 +64,50 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval),
     REJECTED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePORejectionByInstance),
   },
-  ARC: {
-    APPROVED: () => import('../controllers/arc/arcController.js').then(m => m.handleArcPostApproval),
+  // ARC v2 — separate entity types per plan §5.5. The legacy single 'ARC'
+  // entity type is intentionally NOT registered here; any leftover v1 ARC
+  // approval instances no-op and are expected to be cleaned up post-migration.
+  ARC_TECH: {
+    APPROVED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechPostApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechRejection),
+  },
+  ARC_COMMITTEE: {
+    APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeRejection),
+  },
+  // ARC publish-approval gate. The INSTANCE entity_type is ARC_PUBLISH (its
+  // policy is matched as plain 'ARC'). Registering ARC_PUBLISH — and NOT bare
+  // 'ARC' — is the collision guard: a legacy tender 'ARC' instance reaching a
+  // terminal state finds no registry entry and no-ops, so it can never mis-fire
+  // the publish float/reject hooks.
+  ARC_PUBLISH: {
+    APPROVED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishRejection),
+  },
+  ARC_AMENDMENT: {
+    APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentRejection),
+  },
+  MR: {
+    APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval),
+    REJECTED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrRejection),
   },
   NEGOTIATION: {
     APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval),
     REJECTED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationRejection),
   },
+  ARC_NEGOTIATION: {
+    APPROVED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationApproval),
+    REJECTED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationRejection),
+  },
+  // REJECTED was missing here until fix/negotiation-search-and-reject — this was
+  // the only entity type with an APPROVED handler and no rejection pair, so a
+  // reject taken from the generic action endpoint (the entity-agnostic approval
+  // card on the RFQ details page) flipped the instance to REJECTED but left the
+  // product finalized to the refused vendor, with nothing on the lifecycle.
   NEGOTIATION_QUOTE: {
     APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval),
+    REJECTED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuoteRejection),
   },
 };
 
@@ -93,25 +128,39 @@ export async function executeApprovalAction(args) {
 
   // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
-    try {
-      const instance = await getApprovalInstanceById(args.approval_instance_id);
-      const lookup = postActionRegistry[instance?.entity_type];
-      const loader = lookup?.[result.instance_status];
-      if (loader) {
-        const handler = await loader();
-        if (typeof handler === 'function') {
-          await handler(args.approval_instance_id, args.approver_user_id, {
-            comment: args.comment,
-            instance,
-          });
-        }
-      }
-    } catch (postErr) {
-      // Post-actions must never fail the approval itself — log and swallow,
-      // matching the behaviour of the existing inline try/catch blocks.
-      logError(`Post-approval handler failed for instance ${args.approval_instance_id}`, postErr);
-    }
+    await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
+      status: result.instance_status,
+      comment: args.comment,
+    });
   }
 
   return result;
+}
+
+/**
+ * Fire the entity-specific post-action for an instance that reached a
+ * terminal status. Exported because instances can ALSO terminally transition
+ * at CREATION time — createApprovalInstance auto-approves every step whose
+ * only required approver is the initiator, returning `autoApproved: true`
+ * WITHOUT any executeApprovalAction call. Callers that create instances must
+ * invoke this when that happens, or side effects (contract generation,
+ * status flips) silently never run.
+ *
+ * Post-actions must never fail the approval itself — errors are logged and
+ * swallowed, matching the behaviour of the entity handlers' own try/catch.
+ */
+export async function dispatchPostApprovalAction(approvalInstanceId, actorUserId, { status, comment } = {}) {
+  try {
+    const instance = await getApprovalInstanceById(approvalInstanceId);
+    const lookup = postActionRegistry[instance?.entity_type];
+    const loader = lookup?.[status];
+    if (loader) {
+      const handler = await loader();
+      if (typeof handler === 'function') {
+        await handler(approvalInstanceId, actorUserId, { comment, instance });
+      }
+    }
+  } catch (postErr) {
+    logError(`Post-approval handler failed for instance ${approvalInstanceId}`, postErr);
+  }
 }

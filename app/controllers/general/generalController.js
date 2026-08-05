@@ -23,8 +23,12 @@ import generalModel, {
   updateApprovalProcess,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
-  checkIfUserIsFinalApprover
+  checkIfUserIsFinalApprover,
+  getApprovalPolicyTenant,
+  getApprovalInstanceTenant,
+  getApprovalProcessTenant
 } from '../../models/generalModel.js';
+import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import {
   snapshotPolicySteps,
@@ -34,7 +38,8 @@ import {
   getPendingInstancesForPolicy,
   getInstanceChangeHistory as getInstanceChangeHistoryService,
   simulateApproverImpact,
-  dispatchPropagationEmails
+  dispatchPropagationEmails,
+  roleStepPermissionVerdict
 } from '../../services/approvalPropagationService.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
@@ -366,6 +371,367 @@ const generalController = {
 
 // --- Hospitality Approval Engine Controllers Start ---
 
+// ===========================================================================
+// Tenant scope for the approval endpoints.
+// ---------------------------------------------------------------------------
+// Every handler below derives its company scope from req.user via these two
+// helpers. A client-supplied `hospitality_company_id` may only NARROW the
+// result; it can never widen it.
+// ===========================================================================
+
+/**
+ * Companies this request may read approval config for.
+ *   null      → super admin (user_type 8): every company.
+ *   number[]  → exactly these companies ([] = no access).
+ *
+ * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
+ * already refuses client widening for non-admins. Two active production
+ * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
+ * we union in tbl_user_role_scopes.company_id — still derived entirely from
+ * req.user, and it keeps those users from losing their own tenant's policies.
+ */
+async function resolveApprovalCompanyScope(req) {
+  // Memoised per request: several handlers below need the scope more than once
+  // (guard + mutation-target resolution) and it costs two queries to build.
+  if (req.__approvalCompanyScope !== undefined) return req.__approvalCompanyScope;
+
+  const scope = await computeApprovalCompanyScope(req);
+  req.__approvalCompanyScope = scope;
+  return scope;
+}
+
+async function computeApprovalCompanyScope(req) {
+  const mapped = await resolveHospitalityCompanyScope(req);
+  if (mapped === null) return null; // super admin (user_type 8)
+
+  const scoped = (await db.any(
+    `SELECT DISTINCT company_id
+       FROM tbl_user_role_scopes
+      WHERE user_id = $1 AND company_id IS NOT NULL`,
+    [req.user?.id || null]
+  )).map((r) => Number(r.company_id));
+
+  // Hospitality admins (user_type 7) own every business unit under their OWN
+  // parent buyer company and carry NEITHER a hospitality mapping NOR an RBAC
+  // role scope — verified in production: all three user_type-7 users have zero
+  // rows in both tables. Without this union the scope collapses to [] for the
+  // only role that may reach the Approval Wizard (POST /policies is acl([7])),
+  // so it could neither list nor save a single policy.
+  //
+  // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
+  // is still derived entirely from req.user — never from a header or the body.
+  // It is the same tenancy edge hospitalityController.js enforces everywhere as
+  // `record.buyer_company_id !== company.id`.
+  let administered = [];
+  if (Number(req.user?.user_type) === 7 && req.user?.company_id) {
+    administered = (await db.any(
+      `SELECT id
+         FROM tbl_hospitality_companies
+        WHERE buyer_company_id = $1
+          AND COALESCE(is_deleted, 0) = 0`,
+      [Number(req.user.company_id)]
+    )).map((r) => Number(r.id));
+  }
+
+  return [...new Set([...(mapped || []), ...scoped, ...administered])];
+}
+
+/** True when `companyId` is inside the request's server-derived scope. */
+function inCompanyScope(scopeIds, companyId) {
+  if (scopeIds === null) return true; // super admin
+  if (companyId === null || companyId === undefined) return false;
+  return scopeIds.includes(Number(companyId));
+}
+
+/**
+ * Resolve a policy id to its owning company and 404 when it belongs to another
+ * tenant. Returns the policy tenant row, or null after the response is sent.
+ */
+async function guardPolicyTenant(req, res, policyId) {
+  const scopeIds = await resolveApprovalCompanyScope(req);
+  const tenant = await getApprovalPolicyTenant(policyId);
+  if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Policy not found' });
+    return null;
+  }
+  return tenant;
+}
+
+/** Same as guardPolicyTenant, for approval instances. */
+async function guardInstanceTenant(req, res, instanceId) {
+  const scopeIds = await resolveApprovalCompanyScope(req);
+  const tenant = await getApprovalInstanceTenant(instanceId);
+  if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Approval instance not found' });
+    return null;
+  }
+  return tenant;
+}
+
+/**
+ * Same as guardPolicyTenant, for approval PROCESSES.
+ *
+ * Processes hang off the PARENT buyer company (tbl_approval_processes.company_id
+ * -> tbl_company.id), not off a hospitality company — createProcess already
+ * derives it as req.user.company_id and never accepts it from the body. The
+ * update/delete siblings matched on `WHERE id = $1` alone, so an admin in one
+ * tenant could rename or deactivate another tenant's procurement process and
+ * silently break every policy routed through it.
+ */
+async function guardProcessTenant(req, res, processId) {
+  const proc = await getApprovalProcessTenant(processId);
+  const notFound = () => {
+    res.status(404).json({ status: 2, message: 'Process not found' });
+    return null;
+  };
+  if (!proc) return notFound();
+
+  // Super admin (user_type 8) acts across every company. Kept explicit rather
+  // than as a gap in the logic — note it is unreachable over HTTP here because
+  // these routes are acl([7]), and production has zero user_type-8 users.
+  if (Number(req.user?.user_type) === 8) return proc;
+
+  const ownCompanyId = req.user?.company_id ? Number(req.user.company_id) : null;
+  if (ownCompanyId === null || Number(proc.company_id) !== ownCompanyId) return notFound();
+  return proc;
+}
+
+/**
+ * The hospitality company a MUTATION must be written into.
+ *
+ * The body may only ever NARROW to a company the caller already owns; it can
+ * never widen. Returns the company id, or null once the response has been sent.
+ */
+async function resolveMutationCompany(req, res, requestedRaw, notFoundMessage) {
+  const scopeIds = await resolveApprovalCompanyScope(req);
+  const hasRequest = requestedRaw !== undefined && requestedRaw !== null && requestedRaw !== '';
+  const requested = hasRequest ? parseInt(requestedRaw, 10) : null;
+
+  // Super admin (user_type 8): scopeIds === null means "every company". Spelled
+  // out deliberately so the bypass survives future edits to inCompanyScope.
+  if (scopeIds === null) {
+    if (requested === null || !Number.isFinite(requested)) {
+      res.status(400).json({ status: 3, message: 'hospitality_company_id is required' });
+      return null;
+    }
+    return requested;
+  }
+
+  if (requested !== null) {
+    if (!Number.isFinite(requested) || !inCompanyScope(scopeIds, requested)) {
+      // 404, not 403 — same convention as the read fixes, so a probing caller
+      // cannot tell "exists but not yours" from "does not exist".
+      res.status(404).json({ status: 2, message: notFoundMessage });
+      return null;
+    }
+    return requested;
+  }
+
+  // Nothing supplied → derive it. Unambiguous only when the caller owns exactly
+  // one company; with several we ask rather than guess, and with none we refuse.
+  if (scopeIds.length === 1) return scopeIds[0];
+  if (scopeIds.length === 0) {
+    res.status(404).json({ status: 2, message: notFoundMessage });
+    return null;
+  }
+  res.status(400).json({ status: 3, message: 'hospitality_company_id is required' });
+  return null;
+}
+
+/**
+ * Pick the ROLE steps a policy save must be validated against.
+ *
+ * ── WHY THIS DOES NOT USE computePolicyStepDiff ───────────────────────────
+ * That diff keys purely on `step_order`, and `step_order` is CLIENT-SUPPLIED,
+ * OPTIONAL (`insertPolicySteps` falls back to the array index) and NOT unique in
+ * the database. Both holes are exploitable, and both restore exactly the state
+ * the guard exists to prevent:
+ *
+ *   1. OMIT `step_order` entirely → every proposed step collapses onto the single
+ *      `undefined` key, so the map holds only the LAST element. Every stored step
+ *      reads as STEP_REMOVED (never validated) and one lone step reads as
+ *      STEP_ADDED. An unqualified ROLE step riding alongside a USER step is
+ *      persisted unchecked.
+ *   2. DUPLICATE a `step_order`, bad entry first → `Map.set` keeps the last, the
+ *      diff sees no change at that order, nothing is validated — and
+ *      `insertPolicySteps` happily writes BOTH rows.
+ *
+ * A third, quieter failure: send `step_order` as a STRING and the numeric keys
+ * stop matching, flipping every step to ADDED/REMOVED and making the legacy
+ * policies un-saveable — the precise outcome delta scope exists to avoid.
+ *
+ * So the delta is computed over something the client cannot forge: the multiset
+ * of ROLE approver sources the policy ALREADY carries. A proposed ROLE step is
+ * grandfathered if and only if an unconsumed identical source exists in the
+ * stored steps. Consequences, all intended:
+ *   • re-saving unchanged, reordering, renaming, or changing decision_rule →
+ *     nothing validated (legacy policies stay editable and repairable);
+ *   • naming a role the policy did not already use → validated;
+ *   • duplicating a role it did use, at an extra step → multiplicity rises →
+ *     validated (that IS a new bad step).
+ *
+ * `step_order` is still reported back to the admin, derived the same way
+ * `insertPolicySteps` derives it (`step.step_order || index + 1`), so the error
+ * points at the row they will actually see.
+ */
+function selectRoleStepsToValidate(oldSteps, proposedSteps, { revalidateAll = false } = {}) {
+  const withOrder = proposedSteps.map((s, i) => ({
+    ...s,
+    // Mirror insertPolicySteps exactly, including its `||` (so 0 → i + 1).
+    step_order: (s && s.step_order) || (i + 1)
+  }));
+  if (revalidateAll) return withOrder;
+
+  const grandfathered = new Map();
+  for (const s of oldSteps || []) {
+    if (!s || s.approver_source_type !== 'ROLE') continue;
+    const key = String(s.approver_source_id);
+    grandfathered.set(key, (grandfathered.get(key) || 0) + 1);
+  }
+
+  const out = [];
+  for (const step of withOrder) {
+    if (!step || step.approver_source_type !== 'ROLE') continue;
+    const key = String(step.approver_source_id);
+    const remaining = grandfathered.get(key) || 0;
+    if (remaining > 0) {
+      grandfathered.set(key, remaining - 1);
+      continue;
+    }
+    out.push(step);
+  }
+  return out;
+}
+
+/**
+ * Find ROLE-source policy steps whose role can never pass the read+approve gate
+ * that `createApprovalInstance` applies at instance-creation time.
+ *
+ * ── WHY THIS EXISTS AT SAVE TIME ──────────────────────────────────────────
+ * The gate is enforced silently and LATE: a ROLE step whose role lacks
+ * `<resource>.read` + `<resource>.approve` is dropped when the instance is
+ * built, and an instance whose every step is dropped is born
+ * `APPROVED, current_step = 0` — an approval nobody granted. Nothing at policy
+ * save time said a word. The admin Approval Wizard makes this easy to hit: it
+ * lists every role unfiltered and defaults each level to
+ * `approver_source_type: 'ROLE'`.
+ *
+ * ── WHY IT DOES NOT REJECT WHEN THE CATALOGUE CANNOT EXPRESS THE REQUIREMENT ─
+ * `roleStepPermissionVerdict` fails OPEN in two distinct situations, and this
+ * guard must honour both, because in neither of them is the ADMIN at fault:
+ *
+ *   RESOURCE_NOT_IN_CATALOGUE    — the resource has no read/approve rows at all
+ *                                  (INDENT → 'indent', not even a resource_type
+ *                                  label). A hole in the map.
+ *   RESOURCE_CANNOT_SATISFY_GATE — one of the two rows exists and the other does
+ *                                  not, so NO role can ever pass.
+ *
+ * The second is the one that bit: production's `tender` resource holds ONLY
+ * `approve`. `TENDER` is stage 1 of the Tender-process route in the admin
+ * Approval Wizard and its role dropdown is unfiltered, so an admin creating a new
+ * tender workflow and picking any role at Level 1 got a hard 400 they could not
+ * resolve through ANY UI — `tender.read` does not exist, so it cannot be granted
+ * to anything. The only escapes were switching to USER source or a DBA INSERT.
+ * Rejecting there punishes the admin for a modelling gap they cannot close.
+ *
+ * Failing open is not free, so it is LOGGED at warn (here, naming the policy,
+ * and again inside roleStepPermissionVerdict naming the resource): those ROLE
+ * steps WILL be dropped when an instance is created, and an instance whose every
+ * step is dropped is born APPROVED. Trading a visible 400 for a silent
+ * under-approval would defeat the point of this branch; saying so out loud does
+ * not.
+ *
+ * Still rejected, unchanged: the role lacks permissions that DO exist — naming
+ * `ARC Tech Evaluator` on an `ARC_TECH` policy, where `arc-tech.approve` exists
+ * and simply was not granted to it.
+ *
+ * Same verdict function the revocation reconciler uses, so save time and
+ * revocation time cannot disagree about a role.
+ *
+ * ── WHY THE TITLE LOOKUP IS SCOPED ───────────────────────────────────────
+ * The 400 echoes `role_title` back, so an unscoped `SELECT title FROM tbl_roles
+ * WHERE id = $1` would let an admin enumerate ANOTHER tenant's custom role names
+ * by probing ids. Harmless functionally — a cross-tenant role resolves to zero
+ * approvers anyway — but it is a disclosure the endpoint did not previously
+ * make. The lookup therefore applies exactly the visibility rule
+ * `rbacModel.getRoles` already enforces (`created_by IS NULL OR created_by =
+ * <me>`); anything outside it degrades to `Role <id>`, which still identifies
+ * the step well enough to fix it.
+ *
+ * @param {Object} [req] - request, used only for the caller identity above
+ * @returns {Promise<Array<{step_order, role_id, role_title, resource, missing_permissions}>>}
+ */
+async function findUnqualifiableRoleSteps(steps, entityType, req = null, t = db) {
+  const offenders = [];
+  if (!Array.isArray(steps) || steps.length === 0) return offenders;
+
+  const viewerId = req?.user?.id ?? null;
+  const verdictCache = new Map();
+  const warnedResources = new Set();
+  for (const step of steps) {
+    if (!step || step.approver_source_type !== 'ROLE') continue;
+    const roleId = parseInt(step.approver_source_id, 10);
+    if (!Number.isFinite(roleId)) continue;
+
+    const verdict = await roleStepPermissionVerdict(roleId, entityType, t, verdictCache);
+    if (verdict.permitted) {
+      // Fail-open for a modelling gap, not a clean pass. Say so once per
+      // resource — the admin is being allowed to save something that cannot
+      // actually collect an approval.
+      if (verdict.reason === 'RESOURCE_CANNOT_SATISFY_GATE' && !warnedResources.has(verdict.resource)) {
+        warnedResources.add(verdict.resource);
+        logger.warn(
+          `[PolicyGuard] ALLOWING a ROLE step on ${entityType} despite the gate being unsatisfiable: resource '${verdict.resource}' is missing ` +
+          `${(verdict.missing_actions || []).map(a => `${verdict.resource}.${a}`).join(' + ')} in tbl_permissions, so no role can ever pass it. ` +
+          `The admin cannot fix this from any UI, so the save is not blocked — but these ROLE steps WILL be dropped when an approval instance ` +
+          `is created, and an instance whose every step is dropped is born APPROVED with nobody having approved it. Seed the missing permission row.`
+        );
+      }
+      continue;
+    }
+
+    const role = await t.oneOrNone(
+      `SELECT id, title FROM tbl_roles
+        WHERE id = $1 AND (created_by IS NULL OR created_by = $2)`,
+      [roleId, viewerId]
+    );
+    const held = await t.any(
+      `SELECT p.action::text AS action
+         FROM tbl_role_permissions rp
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = $1 AND p.resource::text = $2 AND p.action IN ('read', 'approve')`,
+      [roleId, verdict.resource]
+    );
+    const heldActions = new Set(held.map(r => r.action));
+    const missing = ['read', 'approve'].filter(a => !heldActions.has(a));
+
+    offenders.push({
+      step_order: step.step_order ?? null,
+      role_id: roleId,
+      role_title: role?.title || `Role ${roleId}`,
+      resource: verdict.resource,
+      missing_permissions: missing.map(a => `${verdict.resource}.${a}`)
+    });
+  }
+  return offenders;
+}
+
+/** Build the coded 400 body for the offenders above. */
+function unqualifiableRoleStepsResponse(entityType, offenders) {
+  const detail = offenders
+    .map(o => `step ${o.step_order ?? '?'}: role "${o.role_title}" (id ${o.role_id}) is missing ${o.missing_permissions.join(' and ')}`)
+    .join('; ');
+  return {
+    status: 3,
+    code: 'APPROVER_ROLE_CANNOT_APPROVE',
+    message:
+      `This approval step names a role that cannot approve ${entityType}. ` +
+      `${detail}. Grant the missing permission(s) to the role, or pick a role that already holds them ` +
+      `— otherwise the step is dropped when the approval is created and the request auto-approves with nobody having approved it.`,
+    data: { entity_type: entityType, steps: offenders }
+  };
+}
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -391,9 +757,41 @@ const hospitalityApprovalController = {
         return res.status(401).json({ status: 3, message: 'User authentication required' });
       }
 
+      // ARC is process-free BY DESIGN: ARC entities carry process_id = NULL, so
+      // findBestMatchingPolicyTx reduces to `process_id IS NULL` for them. An ARC
+      // policy saved with a non-NULL process could NEVER match → silent 400 at
+      // publish/eval time. Force process_id = NULL for every ARC entity type
+      // server-side, regardless of what the client sent.
+      const isArcEntity = typeof entity_type === 'string' && (entity_type === 'ARC' || entity_type.startsWith('ARC_'));
+      const effectiveProcessId = isArcEntity ? null : process_id;
+
       let policy;
       let propagationResult = null;
       if (id) {
+        // ── PHASE 0: TENANT GATE ──
+        // SECURITY (P0, cross-tenant WRITE): the update branch previously took
+        // the caller's `id` and rewrote the policy row AND every one of its
+        // steps with no tenant check at all — i.e. company A could redirect who
+        // approves company B's spend to approvers of its own choosing. The gate
+        // has to run BEFORE Phase 1/2 as well, because snapshotPolicySteps() and
+        // getPendingInstancesForPolicy() read the victim's approver chain and
+        // echo their pending RFQ/PO identifiers back in the impact warning.
+        const scopeIds = await resolveApprovalCompanyScope(req);
+        const tenant = await guardPolicyTenant(req, res, parseInt(id));
+        if (!tenant) return;
+
+        // The tenant is pinned to the row that actually exists. A body-supplied
+        // company may only move the policy WITHIN the caller's own scope;
+        // anything else is a cross-tenant move and 404s like the read paths.
+        let effectiveCompanyId = Number(tenant.hospitality_company_id);
+        if (hospitality_company_id !== undefined && hospitality_company_id !== null && hospitality_company_id !== '') {
+          const requestedCompanyId = parseInt(hospitality_company_id, 10);
+          if (!Number.isFinite(requestedCompanyId) || !inCompanyScope(scopeIds, requestedCompanyId)) {
+            return res.status(404).json({ status: 2, message: 'Policy not found' });
+          }
+          effectiveCompanyId = requestedCompanyId;
+        }
+
         logger.info(`[PolicyUpdate] Starting update for policy ${id}, steps provided: ${!!(steps && steps.length > 0)}, step count: ${steps?.length || 0}, confirmed_approval_impact: ${!!confirmed_approval_impact}`);
 
         // ── PHASE 1: Snapshot old steps BEFORE any mutations ──
@@ -401,6 +799,39 @@ const hospitalityApprovalController = {
         if (steps && steps.length > 0) {
           oldSteps = await snapshotPolicySteps(id);
           logger.info(`[PolicyUpdate] Old steps snapshot: ${oldSteps.length} steps, IDs: [${oldSteps.map(s => s.id).join(',')}], orders: [${oldSteps.map(s => s.step_order).join(',')}]`);
+        }
+
+        // ── PHASE 1b: reject ROLE steps whose role can never approve ──
+        // SCOPE: only the ROLE sources this save INTRODUCES — not every step the
+        // policy happens to carry. See selectRoleStepsToValidate for how the
+        // delta is computed (deliberately not from client-supplied step_order).
+        //
+        // Live policies already hold ROLE steps that fail this check: production
+        // policy 194 names Final Awarding P1/P2/P3 on entity_type ARC and those
+        // roles hold zero `arc.*`. Validating all steps would make such a policy
+        // unsaveable for ANY reason — renaming it, toggling is_active, moving a
+        // hotel, reordering a healthy step — which turns a hardening guard into
+        // an outage for exactly the admins who need to repair it. Validating the
+        // delta blocks every newly-named bad role while leaving the existing mess
+        // editable, one step at a time.
+        //
+        // The one case where everything is re-checked is an entity_type change:
+        // that re-points every step at a different permission resource, so every
+        // step is effectively new.
+        if (steps && steps.length > 0) {
+          const stored = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
+          const effectiveEntityType = entity_type !== undefined ? entity_type : stored?.entity_type;
+          const entityTypeChanged = entity_type !== undefined && stored?.entity_type !== undefined && entity_type !== stored.entity_type;
+
+          const stepsToValidate = selectRoleStepsToValidate(oldSteps, steps, { revalidateAll: entityTypeChanged });
+
+          if (effectiveEntityType && stepsToValidate.length > 0) {
+            const offenders = await findUnqualifiableRoleSteps(stepsToValidate, effectiveEntityType, req);
+            if (offenders.length > 0) {
+              logger.warn(`[PolicyUpdate] Rejecting policy ${id}: ${offenders.length} ROLE step(s) cannot approve ${effectiveEntityType} — ${JSON.stringify(offenders)}`);
+              return res.status(400).json(unqualifiableRoleStepsResponse(effectiveEntityType, offenders));
+            }
+          }
         }
 
         // ── PHASE 2: Pre-flight impact check ──
@@ -464,15 +895,27 @@ const hospitalityApprovalController = {
           // the same policy will block here until this tx commits/rolls back.
           await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);
 
-          const updatedPolicy = await updateApprovalPolicy(id, {
-            entity_type,
-            hospitality_company_id,
-            hotel_id,
-            department_id,
-            process_id,
-            is_active,
-            is_master
-          }, t);
+          // Only patch columns the client actually sent. updateApprovalPolicy
+          // keys off hasOwnProperty, and pg-promise renders `undefined` as
+          // NULL — so passing every key unconditionally wrote NULL for each
+          // omitted field. On the three NOT NULL columns (entity_type,
+          // hospitality_company_id, is_master) that turned into a hard 400 on
+          // every save from the legacy Approval Hierarchy page, whose payload
+          // carries neither is_master nor process_id; the undefined process_id
+          // additionally tripped the "Process does not belong to this company"
+          // validation. Same class of defect as the saveRfqDraft data loss.
+          const patch = { hospitality_company_id: effectiveCompanyId };
+          if (entity_type !== undefined) patch.entity_type = entity_type;
+          if (hotel_id !== undefined) patch.hotel_id = hotel_id;
+          if (department_id !== undefined) patch.department_id = department_id;
+          if (is_active !== undefined) patch.is_active = is_active;
+          if (is_master !== undefined) patch.is_master = is_master;
+          // ARC stays process-free by design: force NULL whenever the entity
+          // type says ARC, otherwise only touch process_id if it was sent.
+          if (isArcEntity) patch.process_id = null;
+          else if (process_id !== undefined) patch.process_id = effectiveProcessId;
+
+          const updatedPolicy = await updateApprovalPolicy(id, patch, t);
 
           let newSteps = [];
           if (steps && steps.length > 0) {
@@ -517,30 +960,58 @@ const hospitalityApprovalController = {
         }
       } else {
         // Create new policy
-        if (!entity_type || !hospitality_company_id) {
+        if (!entity_type) {
           return res.status(400).json({
             status: 3,
             message: 'entity_type and hospitality_company_id are required'
           });
         }
 
-        // Validate entity_type
-        const validEntityTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE'];
+        // SECURITY (P0, cross-tenant WRITE): hospitality_company_id came
+        // straight off the body, so a policy could be planted inside another
+        // tenant's approval config. Server-derive it; the body may only narrow
+        // to a company the caller already owns.
+        const createCompanyId = await resolveMutationCompany(
+          req, res, hospitality_company_id, 'Policy not found'
+        );
+        if (createCompanyId === null) return;
+
+        // Validate entity_type. Includes the process-free ARC (Rate Contract)
+        // v2 stage types so the admin wizard can create per-stage ARC policies.
+        const validEntityTypes = [
+          'RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE',
+          'ARC_TECH', 'ARC_NEGOTIATION', 'ARC_COMMITTEE', 'ARC_AMENDMENT', 'ARC_PUBLISH',
+        ];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({
             status: 3,
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
+
+        // Every step of a brand-new policy is a new step, so all of them are
+        // validated here (see the PHASE 1b note on the update branch for why the
+        // update path only validates the delta). `revalidateAll` also normalises
+        // step_order the way insertPolicySteps will, so the error message points
+        // at the row the admin will see even when the client omitted it.
+        if (steps && steps.length > 0) {
+          const allSteps = selectRoleStepsToValidate([], steps, { revalidateAll: true });
+          const offenders = await findUnqualifiableRoleSteps(allSteps, entity_type, req);
+          if (offenders.length > 0) {
+            logger.warn(`[PolicyCreate] Rejecting new ${entity_type} policy: ${offenders.length} ROLE step(s) cannot approve it — ${JSON.stringify(offenders)}`);
+            return res.status(400).json(unqualifiableRoleStepsResponse(entity_type, offenders));
+          }
+        }
+
         // Atomic create: policy row + steps in one tx, so a step-insert failure
         // doesn't leave an orphan policy behind.
         policy = await db.tx(async t => {
           const newPolicy = await createApprovalPolicy({
             entity_type,
-            hospitality_company_id,
+            hospitality_company_id: createCompanyId,
             hotel_id,
             department_id,
-            process_id: process_id ? parseInt(process_id) : null,
+            process_id: effectiveProcessId ? parseInt(effectiveProcessId) : null,
             created_by,
             is_active,
             is_master: is_master || false
@@ -577,8 +1048,22 @@ const hospitalityApprovalController = {
   async getApprovalPolicies(req, res) {
     try {
       const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include } = req.query;
+
+      // SECURITY: the company scope is SERVER-DERIVED and mandatory. Previously
+      // the model seeded its WHERE with 'TRUE' and applied the company filter
+      // only when the client happened to send the query param, so dropping the
+      // param dumped every tenant's policies. The client-sent id below is now
+      // only a narrowing facet (the Approval Wizard always sends the BU it is
+      // editing) and is discarded when it falls outside the user's own scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const requested = hospitality_company_id ? parseInt(hospitality_company_id) : undefined;
+      const narrow = requested !== undefined && inCompanyScope(scopeIds, requested)
+        ? requested
+        : undefined;
+
       const filters = {
-        hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
+        hospitality_company_ids: scopeIds,
+        hospitality_company_id: narrow,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
@@ -602,6 +1087,9 @@ const hospitalityApprovalController = {
   async getApprovalPolicy(req, res) {
     try {
       const { id } = req.params;
+      // SECURITY: getApprovalPolicyWithSteps matches on `WHERE p.id = $1` only.
+      // Resolve the owning tenant first and 404 on a cross-tenant id.
+      if (!(await guardPolicyTenant(req, res, parseInt(id)))) return;
       const data = await getApprovalPolicyWithSteps(parseInt(id));
       res.json({ status: 1, data });
     } catch (e) {
@@ -616,6 +1104,10 @@ const hospitalityApprovalController = {
    */
   async deleteApprovalPolicy(req, res) {
     try {
+      // SECURITY: same missing-tenant-column defect as the read endpoints, but
+      // destructive — a cross-tenant id would deactivate another company's
+      // approval policy.
+      if (!(await guardPolicyTenant(req, res, parseInt(req.params.id)))) return;
       await deleteApprovalPolicy(parseInt(req.params.id));
       res.json({ status: 1, message: 'Policy deactivated successfully' });
     } catch (e) {
@@ -647,17 +1139,28 @@ const hospitalityApprovalController = {
         return res.status(401).json({ status: 3, message: 'User authentication required' });
       }
 
-      if (!entity_type || !entity_id || !hospitality_company_id) {
+      if (!entity_type || !entity_id) {
         return res.status(400).json({
           status: 3,
           message: 'entity_type, entity_id, and hospitality_company_id are required'
         });
       }
 
+      // SECURITY (P0, cross-tenant WRITE): hospitality_company_id was taken
+      // from the request body, so a caller could open an approval instance
+      // inside another tenant — binding that tenant's approvers to an entity
+      // they do not own. The company is now server-derived from req.user; a
+      // body value that disagrees with the caller's scope is refused outright
+      // (404, matching the read paths) rather than silently honoured.
+      const companyId = await resolveMutationCompany(
+        req, res, hospitality_company_id, 'No approval policy found for this scope'
+      );
+      if (companyId === null) return;
+
       const result = await createApprovalInstance({
         entity_type,
         entity_id: parseInt(entity_id),
-        hospitality_company_id: parseInt(hospitality_company_id),
+        hospitality_company_id: companyId,
         hotel_id: hotel_id ? parseInt(hotel_id) : null,
         department_id: department_id ? parseInt(department_id) : null,
         process_id: process_id ? parseInt(process_id) : null,
@@ -681,6 +1184,11 @@ const hospitalityApprovalController = {
     try {
       const { id } = req.params;
       const user_id = req.user?.id;
+      // SECURITY: getApprovalInstanceDetails matches on `WHERE i.id = $1` and
+      // returns approver names + emails plus company/hotel names. Guard at the
+      // HTTP boundary (the model function is shared with ARC/MR/PO/negotiation
+      // flows that already scope their own entity).
+      if (!(await guardInstanceTenant(req, res, parseInt(id)))) return;
       const data = await getApprovalInstanceDetails(parseInt(id), user_id);
       res.json({ status: 1, data });
     } catch (e) {
@@ -745,6 +1253,13 @@ const hospitalityApprovalController = {
       if (!instance_id) {
         return res.status(400).json({ status: 3, message: 'instance_id is required' });
       }
+
+      // SECURITY (P0, cross-tenant WRITE): cancelApprovalInstance matches on
+      // `WHERE id = $1` only, and this route carried no acl() either — so any
+      // authenticated user could walk sequential ids and CANCEL another
+      // tenant's pending approvals (3,846 instances / 361 pending in prod),
+      // stalling their procurement without leaving an obvious trace.
+      if (!(await guardInstanceTenant(req, res, parseInt(instance_id)))) return;
 
       const result = await cancelApprovalInstance(parseInt(instance_id), cancelled_by, reason);
       res.json({ status: 1, data: result });
@@ -812,7 +1327,12 @@ const hospitalityApprovalController = {
   async getEntityApprovals(req, res) {
     try {
       const { entity_type, entity_id } = req.params;
-      const data = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
+      // SECURITY: this route had no acl() at all (vendors reached it) and no
+      // tenant column in the WHERE. The role gate now lives on the route; here
+      // we drop any instance outside the caller's server-derived company scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const rows = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
+      const data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -833,6 +1353,14 @@ const hospitalityApprovalController = {
           status: 3,
           message: 'entity_type and hospitality_company_id are required'
         });
+      }
+
+      // SECURITY: hospitality_company_id came straight off req.query on a route
+      // that had no acl() whatsoever. The role gate now lives on the route;
+      // here the requested company must be inside the caller's own scope.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      if (!inCompanyScope(scopeIds, parseInt(hospitality_company_id))) {
+        return res.status(404).json({ status: 2, message: 'No matching policy found' });
       }
 
       const policy = await findBestMatchingPolicy({
@@ -859,6 +1387,9 @@ const hospitalityApprovalController = {
     try {
       const { id } = req.params;
       const { hospitality_company_id, hotel_id } = req.query;
+
+      // SECURITY: policy id was unscoped (`WHERE id = $1`).
+      if (!(await guardPolicyTenant(req, res, parseInt(id)))) return;
 
       const result = await getDepartmentSubGraphPreview(
         parseInt(id),
@@ -887,6 +1418,9 @@ const hospitalityApprovalController = {
       if (!policyId || isNaN(policyId)) {
         return res.status(400).json({ status: 3, message: 'Invalid policy ID' });
       }
+      // SECURITY: policy id was unscoped (`WHERE id = $1`); the payload leaks
+      // RFQ/PO identifiers from whichever tenant owns the policy.
+      if (!(await guardPolicyTenant(req, res, policyId))) return;
       const instances = await getPendingInstancesForPolicy(policyId);
       logger.info(`[PendingImpact] Found ${instances.length} pending instances for policy ${policyId}`);
 
@@ -917,6 +1451,8 @@ const hospitalityApprovalController = {
   async getInstanceChangeHistory(req, res) {
     try {
       const instanceId = parseInt(req.params.id);
+      // SECURITY: instance id was unscoped (`WHERE i.id = $1`).
+      if (!(await guardInstanceTenant(req, res, instanceId))) return;
       const history = await getInstanceChangeHistoryService(instanceId);
       return res.json({ status: 1, data: history });
     } catch (err) {
@@ -1067,11 +1603,79 @@ const processController = {
    */
   async getProcesses(req, res) {
     try {
-      const { include_inactive, process_type } = req.query;
-      const { company_id } = req.user;
+      const { include_inactive, process_type, company_id: queryCompanyId } = req.query;
+      const { company_id, user_type } = req.user;
+
+      // Server-derived tenant scope for the query below. `null` is the model's
+      // EXPLICIT cross-tenant bypass and is only ever set on the super-admin
+      // branch — it is never what a missing value degrades into.
+      let effectiveCompanyId;
+
+      // Hospitality admins (user_type=7) configuring scope for OTHER business
+      // units pass company_id explicitly — and what they pass is a HOSPITALITY
+      // company id (tbl_hospitality_companies.id), because that is the id space
+      // the Approval Hierarchy page and RoleScopeSelector work in and the one
+      // tbl_approval_policies.hospitality_company_id is keyed by.
+      //
+      // Processes live in a DIFFERENT id space: tbl_approval_processes.company_id
+      // -> tbl_company.id, the PARENT buyer company (createProcess derives it as
+      // req.user.company_id). Feeding the hospitality id straight into the query
+      // matched zero rows — in production no hospitality company has an id equal
+      // to its own buyer_company_id, so the workflow list rendered blank for every
+      // tenant while the policy-fed KPI row still counted stages.
+      //
+      // It was also a cross-tenant read: nothing verified ownership of the param,
+      // so wherever the two id spaces collided numerically (hospitality company 13
+      // is owned by buyer 90, yet buyer company 13 also exists) an admin saw
+      // another tenant's process catalog. Verify against the request's
+      // server-derived scope first — 404 on a miss, as the policy/instance guards
+      // above already do — then bridge to the buyer id.
+      if (queryCompanyId && Number(user_type) === 7) {
+        const notFound = () =>
+          res.status(404).json({ status: 2, message: 'Company not found' });
+
+        const hospitalityCompanyId = parseInt(queryCompanyId, 10);
+        if (!Number.isFinite(hospitalityCompanyId)) return notFound();
+
+        const scopeIds = await resolveApprovalCompanyScope(req);
+        if (!inCompanyScope(scopeIds, hospitalityCompanyId)) return notFound();
+
+        const owner = await db.oneOrNone(
+          `SELECT buyer_company_id
+             FROM tbl_hospitality_companies
+            WHERE id = $1
+              AND COALESCE(is_deleted, 0) = 0`,
+          [hospitalityCompanyId]
+        );
+        if (!owner || owner.buyer_company_id === null) return notFound();
+
+        effectiveCompanyId = Number(owner.buyer_company_id);
+      } else if (Number(user_type) === 8) {
+        // Super admin reads across every company. Kept explicit — the bypass has
+        // to be ASKED for, never inherited from a value we failed to work out.
+        // (Unreachable over HTTP today: this route is acl([7, 2]) and production
+        // has zero user_type-8 users. Stated rather than left as a gap in the
+        // logic, matching guardProcessTenant above.)
+        effectiveCompanyId = null;
+      } else {
+        // Everyone else reads their own parent buyer company. CreateRFQ.js calls
+        // this endpoint with no params at all and relies on exactly this, and it
+        // is also the whole of the user_type=2 branch.
+        //
+        // A caller with NO parent company used to fall through as `undefined`,
+        // which made the model drop its company predicate and hand back every
+        // tenant's catalog. Production has one active user_type-7 admin with
+        // tbl_users.company_id NULL, so that was a live cross-tenant read. No
+        // company → no catalog.
+        const ownCompanyId = company_id ? parseInt(company_id) : NaN;
+        if (!Number.isFinite(ownCompanyId)) {
+          return res.json({ status: 1, data: [] });
+        }
+        effectiveCompanyId = ownCompanyId;
+      }
 
       const data = await getApprovalProcesses({
-        company_id: company_id ? parseInt(company_id) : undefined,
+        company_id: effectiveCompanyId,
         include_inactive: include_inactive === 'true',
         process_type: process_type || null
       });
@@ -1091,6 +1695,9 @@ const processController = {
     try {
       const { id } = req.params;
       const { name, description, is_active, process_type } = req.body;
+
+      // SECURITY: tbl_approval_processes was mutable by id across tenants.
+      if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
 
       const patch = {};
       if (name !== undefined) patch.name = name;
@@ -1118,6 +1725,9 @@ const processController = {
   async deleteProcess(req, res) {
     try {
       const { id } = req.params;
+      // SECURITY: same cross-tenant hole as updateProcess, but destructive —
+      // deactivating a process silently unroutes every policy hanging off it.
+      if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
       await deleteApprovalProcess(parseInt(id));
       res.json({ status: 1, message: 'Process deactivated successfully' });
     } catch (e) {

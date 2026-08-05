@@ -1,8 +1,48 @@
 name: Backend CI - Integration Tests
 
-# Runs the Jest integration suite on every PR targeting main / qa.
-# A green check here is the merge gate — no need to run tests locally before review.
+# Runs the Jest integration suite on every PR targeting main / qa, split across
+# parallel per-domain shards. A green `CI gate` check is the merge gate — no
+# need to run tests locally before review.
 #
+# ---------------------------------------------------------------------------
+# WHY THIS IS SHARDED (do not collapse it back into one job)
+#
+# Each suite retains ~29 MB that is never released — every one of them imports
+# the whole app (express + pg-promise + aws-sdk + handlebars) and the module
+# registry is held for the life of the process. Measured locally:
+#     suite   1 ->   218 MB
+#     suite  90 -> 2,814 MB   (peak 2,946 MB)
+# All 167 suites in a single process projects to ~5,060 MB against Node 20's
+# ~4,096 MB default heap, so the old single-job CI died with
+# "Ineffective mark-compacts near heap limit" and ZERO `FAIL` lines — a
+# deterministic arithmetic failure that looked like a flake. Every shard below
+# peaks 3-5x under that ceiling.
+#
+# WHY ONE JOB PER SHARD, RATHER THAN RAISING jest --maxWorkers
+#
+# All suites in a Jest process share ONE database and isolate from each other
+# via per-test transactional rollback. Concurrent workers would interleave
+# transactions on the same rows. The unit of parallelism therefore has to be
+# one database per Jest process, which means one per job. `maxWorkers: 1` in
+# jest.config.js is load-bearing — leave it alone.
+#
+# HOW EACH SHARD GETS ITS OWN DATABASE (no harness changes)
+#
+# tests/setup/envguard.js:52 reads TEST_RUN_ID before falling back to
+# GITHUB_RUN_ID, so setting TEST_RUN_ID=ci_<run_id>_<shard> below yields
+# hospitality_test_ci_<run_id>_<shard>, which still satisfies the prefix guard
+# and the safe-name regex. Each matrix job also gets its own runner and its own
+# Postgres service container, so the shards cannot see each other's databases
+# even in principle.
+#
+# ADDING A TEST FILE
+#
+# Shard patterns live in tests/shards.json. The `shards` job below fails the
+# whole build if any suite matches zero shards (it would silently never run) or
+# more than one. Fix the pattern there — the guard is the only thing keeping
+# domain sharding honest.
+#
+# ---------------------------------------------------------------------------
 # Required repo secret:
 #   ENV_TEST  - full contents of .env.test, with CI-appropriate Postgres creds.
 #               Example minimum (matches the service container below):
@@ -19,10 +59,6 @@ name: Backend CI - Integration Tests
 #                   ... (plus the JWT / SMTP / AWS / Razorpay placeholders
 #                        from the committed .env.test — required to boot
 #                        the app under test)
-#
-# The DB name is computed automatically as hospitality_test_ci_<run_id>
-# via envguard.js (GITHUB_RUN_ID is set by Actions), so concurrent runs
-# do not collide and the safety regex still matches.
 
 on:
   pull_request:
@@ -38,10 +74,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Integration tests (Jest)
+  # ---------------------------------------------------------------------------
+  # Gate + fan-out. Proves the shard patterns are an exact partition of the
+  # suite, then emits the job matrix from the same file. Needs no dependencies
+  # and no database, so it costs ~10s and fails fast: a broken partition means
+  # no shard runs at all, rather than a green build with untested code.
+  # ---------------------------------------------------------------------------
+  shards:
+    name: Static gates + shard coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify every suite is covered exactly once
+        run: node scripts/check-shard-coverage.mjs
+
+      # Responding from inside a db.tx()/db.task() callback flushes the response
+      # before pg-promise issues COMMIT: the client can 404 on a record it just
+      # created (its re-read lands on another pooled connection and sees the
+      # pre-commit snapshot), and a failing COMMIT can no longer be reported
+      # because the headers are already sent. It is also what made arc-core-2
+      # fail intermittently with a rotating victim suite.
+      #
+      # Like the shard-coverage gate above this needs no dependencies and no
+      # database, so it stays in this ~10s fail-fast job rather than costing an
+      # npm ci. See scripts/check-response-in-tx.mjs for the scoping rules.
+      - name: Verify no HTTP response is emitted inside a transaction
+        run: node scripts/check-response-in-tx.mjs
+
+      - name: Build job matrix
+        id: plan
+        run: echo "matrix=$(node scripts/check-shard-coverage.mjs --matrix)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # One job per shard. Each is a fully independent runner + Postgres + database.
+  # ---------------------------------------------------------------------------
+  test:
+    name: ${{ matrix.name }} (${{ matrix.suites }} suites)
+    needs: shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      # A red domain must not cancel the other shards — losing the other results
+      # would forfeit exactly the failure attribution this split exists to give.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.shards.outputs.matrix) }}
 
     services:
       postgres:
@@ -68,6 +155,31 @@ jobs:
       PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
       # Belt-and-suspenders. jestEnv.js / envguard.js also force this.
       NODE_ENV: test
+      # Pin the POSTGRES SESSION timezone to UTC, matching production (verified:
+      # prod's current_setting('TimeZone') is UTC, and the app never sets one).
+      #
+      # This is not cosmetic. `tbl_rfq.bid_end_date` is text holding a naive IST
+      # wall-clock string, so every comparison against NOW()/CURRENT_DATE resolves
+      # through the session timezone. A local Homebrew Postgres inherits the
+      # developer's system zone — Asia/Kolkata — where those comparisons are
+      # accidentally correct and the bug is INVISIBLE. Production is UTC, where it
+      # is wrong by 5h30m (or a whole calendar day, 18:30-24:00 UTC).
+      #
+      # That divergence is precisely why this bug class kept reaching production.
+      # postgres:17 already defaults to UTC, but relying on a container default
+      # leaves it implicit and silently changeable; pinning it makes CI reproduce
+      # production's frame on purpose.
+      #
+      # To reproduce an IST boundary bug locally, override it per-run:
+      #   PGOPTIONS="-c timezone=UTC" npm test -- --testPathPatterns "..."
+      # Note TZ= does NOT work: that is a Node setting and never reaches Postgres.
+      # Note also the error is (5h30m - session_offset), so it CHANGES SIGN east
+      # of IST — test both UTC and e.g. Asia/Singapore to catch both directions.
+      PGOPTIONS: '-c timezone=UTC'
+      # Gives this shard its own database — see the header. Non-alphanumerics
+      # are collapsed to '_' by envguard's sanitize(), so 'po-pricing' becomes
+      # hospitality_test_ci_<run_id>_po_pricing.
+      TEST_RUN_ID: ci_${{ github.run_id }}_${{ matrix.name }}
 
     steps:
       - name: Checkout
@@ -106,32 +218,72 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
 
-      - name: Install Postgres client (for readiness probe)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null
-
       - name: Wait for Postgres
-        env:
-          PGPASSWORD: postgres
+        # Actions already blocks the first step until the service container's
+        # own --health-cmd passes, so this is belt-and-suspenders only. It uses
+        # the `pg` package (already present via pg-promise) instead of
+        # apt-get installing postgresql-client, which cost ~20s in every job.
         run: |
-          for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U postgres -d postgres >/dev/null 2>&1; then
-              echo "Postgres is ready (attempt $i)"
-              psql -h localhost -U postgres -d postgres -c 'SELECT version();'
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::Postgres did not become ready in time"
-          exit 1
+          node -e '
+            const pg = require("pg");
+            const deadline = Date.now() + 60000;
+            (async () => {
+              for (;;) {
+                try {
+                  const c = new pg.Client({ host: "localhost", port: 5432, user: "postgres", password: "postgres", database: "postgres" });
+                  await c.connect();
+                  console.log((await c.query("SELECT version()")).rows[0].version);
+                  await c.end();
+                  return;
+                } catch (e) {
+                  if (Date.now() > deadline) { console.error("::error::Postgres did not become ready in time"); process.exit(1); }
+                  await new Promise((r) => setTimeout(r, 2000));
+                }
+              }
+            })();
+          '
 
       - name: Run integration tests
-        run: npm test -- --ci --colors
-        # Jest config pins maxWorkers=1, so --runInBand is redundant.
-        # `npm test` already exports NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test.
+        env:
+          SHARD_PATTERN: ${{ matrix.pattern }}
+          JEST_SHARD: ${{ matrix.jestShard }}
+        # `npm test` already exports NODE_OPTIONS=--experimental-vm-modules and
+        # NODE_ENV=test. Jest config pins maxWorkers=1, so --runInBand is
+        # redundant. Jest exits non-zero when a pattern matches no suites
+        # (passWithNoTests defaults to false), so a typo'd pattern fails loudly
+        # rather than passing vacuously.
+        run: |
+          if [ -n "$JEST_SHARD" ]; then
+            npm test -- --ci --colors --testPathPatterns "$SHARD_PATTERN" --shard "$JEST_SHARD"
+          else
+            npm test -- --ci --colors --testPathPatterns "$SHARD_PATTERN"
+          fi
 
-      - name: Drop orphan test databases (cleanup)
-        if: always()
-        run: npm run test:cleanup
-        continue-on-error: true
+      # No test-database cleanup step: the Postgres service container is
+      # destroyed with the runner, so `npm run test:cleanup` was always a no-op
+      # here. It remains the right command for local development.
+
+  # ---------------------------------------------------------------------------
+  # The single required status check. Branch protection points at THIS job, so
+  # adding, renaming or splitting a shard never means editing branch protection.
+  # ---------------------------------------------------------------------------
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [shards, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert every shard succeeded
+        run: |
+          echo "static gates:  ${{ needs.shards.result }}"
+          echo "test shards:    ${{ needs.test.result }}"
+          if [ "${{ needs.shards.result }}" != "success" ]; then
+            echo "::error::A static gate failed — either tests/shards.json no longer partitions the suite, or an HTTP response is emitted inside a db.tx()/db.task() callback. Open the 'Static gates + shard coverage' job for which."
+            exit 1
+          fi
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "::error::At least one test shard failed. Open the matrix above; the failing job is named for its domain."
+            exit 1
+          fi
+          echo "All shards green."

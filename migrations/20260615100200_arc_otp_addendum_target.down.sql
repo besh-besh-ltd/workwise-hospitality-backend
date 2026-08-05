@@ -1,0 +1,1 @@
+ALTER TABLE public.tbl_arc_contract_signature_otp DROP COLUMN IF EXISTS arc_amendment_document_id;

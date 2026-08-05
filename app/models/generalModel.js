@@ -12,6 +12,68 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   'NEGOTIATION_QUOTE': 'quote-compare',
   'PO': 'awarding',
   'ARC': 'arc',
+  // ARC_PUBLISH is the publish-approval gate INSTANCE type; its policy is
+  // authored as plain 'ARC', so ROLE-source approver steps resolve against the
+  // same 'arc' permission resource (USER-source steps bypass this map).
+  'ARC_PUBLISH': 'arc',
+  // MR is the call-off/demand path — role approvers resolve against the same
+  // 'awarding' permission as POs (USER-source steps bypass this map).
+  'MR': 'awarding',
+  // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
+  // approver steps resolve against 'arc-comm', which now carries both `read`
+  // (20260611100000) and `approve` (20260803110000). The qualifying system role
+  // is 'ARC Negotiation Approver'.
+  //
+  // History, because the previous comment here was wrong in three ways and the
+  // wrongness was load-bearing: it claimed 'arc-comm' already had read+approve
+  // (it had no `approve` row at all until 20260803110000), claimed parity with
+  // ARC_COMMITTEE (which maps to a different resource entirely), and described
+  // unmapped types as "silently dropped" (they threw — see the guard note on
+  // roleHasReadAndApprovePermission). Between the mapping being added and the
+  // `approve` row existing, EVERY ROLE step of an ARC_NEGOTIATION policy was
+  // dropped at creation, and an instance with every step dropped is born
+  // APPROVED — a negotiation round live with nobody having approved it.
+  'ARC_NEGOTIATION': 'arc-comm',
+  // ARC_TECH: sign-off on the technical evaluation. 'arc-tech' carries `read`
+  // (20260611100000) and `approve` (20260803110000). The qualifying system role
+  // is 'ARC Technical Approver'.
+  //
+  // DELIBERATELY NOT the evaluator roles: 'ARC Tech Evaluator' holds
+  // arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass this
+  // gate — an evaluator must never be able to approve their own evaluation.
+  // Same for 'ARC Commercial Evaluator' against 'arc-comm' above.
+  'ARC_TECH': 'arc-tech',
+  // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
+  // BOTH `read` and `approve` (seeded together in
+  // migrations/20260608100800_permissions_seed.sql:56-57) — the only ARC v2
+  // stage resource that was modelled correctly from the start. Mapped 2026-08-03.
+  'ARC_COMMITTEE': 'arc-committee',
+
+  // ── THE FULL ARC-STAGE PERMISSION PICTURE (as of 20260803110000) ───────────
+  //   arc            read/create/admin (20260608100800) + approve (legacy)
+  //   arc-tech       evaluate (20260608100800) + read (20260611100000)
+  //                                            + approve (20260803110000)
+  //   arc-comm       evaluate (20260608100800) + read (20260611100000)
+  //                                            + approve (20260803110000)
+  //   arc-committee  read + approve (20260608100800)
+  //
+  // The evaluate/approve split is the point: `evaluate` is doing the scoring,
+  // `approve` is signing it off, and no system role holds both verbs on the same
+  // resource. See migrations/20260803110000_arc_stage_approver_permissions.sql.
+  //
+  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
+  // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES
+  // (`arc_amendment`) while the resource_type enum members use HYPHENS. Before
+  // the `::text` cast added to roleHasReadAndApprovePermission that comparison
+  // RAISED `invalid input value for enum resource_type` and took down the whole
+  // createApprovalInstance call — a 500 in the middle of submitTechEval. It now
+  // returns false, so an unknown resource skips the step instead of crashing.
+  //
+  // A skipped step is recoverable; a mid-transaction 500 is not. But a skip is
+  // still not free: skip every step and the instance is born APPROVED. That is
+  // why createApprovalInstance now records WHY each step was skipped in
+  // `metadata.approval_diagnostics` and logs the zero-step case at error level —
+  // adding an entity type here without its permission rows is loud, not silent.
 };
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -19,6 +81,7 @@ import s3Client from "../config/s3config.js";
 import fs from "fs";
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
+import { NoApprovalPolicyError } from '../services/authorizationService.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -1300,7 +1363,9 @@ export async function createApprovalProcess({
 /**
  * Get approval processes with optional filtering
  * @param {Object} params - Filter parameters
- * @param {number|null} params.company_id - Filter by parent company
+ * @param {number|null} params.company_id - REQUIRED server-derived tenant scope
+ *   (the PARENT buyer company, tbl_company.id). Pass `null` ONLY for the
+ *   deliberate super-admin bypass; omitting it throws.
  * @param {boolean} params.include_inactive - Include inactive processes
  * @param {string|null} params.process_type - Filter by process_type ('RFQ', 'TENDER', 'ARC'); e.g. 'RFQ' for wizard (Tender/ARC excluded)
  */
@@ -1309,14 +1374,28 @@ export async function getApprovalProcesses({
   include_inactive = false,
   process_type = null
 }) {
+  // Tenant scope must be supplied by the caller and derived from req.user.
+  // This used to be `if (company_id)`, so any falsy value — notably the
+  // `undefined` the controller produced for a user whose tbl_users.company_id is
+  // NULL — dropped the company predicate and returned EVERY tenant's catalog.
+  // Same fail-open shape already closed in getApprovalPolicies below; keeping the
+  // two consistent is what stops it reappearing.
+  if (company_id === undefined) {
+    throw new Error(
+      'getApprovalProcesses: company_id is required (server-derived tenant scope; pass null only for the super-admin bypass)'
+    );
+  }
+
   const conditions = [];
   const vals = [];
   let paramIdx = 1;
 
-  if (company_id) {
+  if (company_id !== null) {
+    // Seed with the SERVER-DERIVED company predicate rather than nothing.
     conditions.push(`p.company_id = $${paramIdx++}`);
     vals.push(company_id);
   }
+  // company_id === null → super admin, no company filter.
 
   if (!include_inactive) {
     conditions.push('p.is_active = true');
@@ -1561,13 +1640,53 @@ export async function updateApprovalPolicy(id, patch, t = db) {
 /**
  * Get approval policies with optional filtering
  * Returns policies ordered by specificity (most specific first)
+ *
+ * SECURITY (tenant scope is MANDATORY, not optional):
+ *   This function used to seed `conditions` with `'TRUE'` and add the company
+ *   filter only `if (hospitality_company_id)`. Callers that omitted the id got
+ *   EVERY tenant's policies back — in production that was 137 active policies
+ *   across 10 hospitality companies / 2 tenants, complete with company names,
+ *   hotel names and creator names.
+ *
+ *   `hospitality_company_ids` is now REQUIRED and must be derived server-side
+ *   from req.user (see resolveHospitalityCompanyScope):
+ *     - number[]  → restrict to exactly these companies
+ *     - []        → the user has no company access → no rows
+ *     - null      → super admin (user_type 8) bypass: no company filter.
+ *                   Spelled out explicitly so the "see everything" path can
+ *                   never be reached by simply forgetting to pass a scope.
+ *     - undefined → programming error → throw (fail closed).
+ *
+ *   `hospitality_company_id` remains available as a NARROWING filter (the
+ *   Approval Wizard passes the BU it is editing); it is intersected with the
+ *   server-derived set, never used in place of it.
  */
-export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
-  const conditions = ['TRUE'];
+export async function getApprovalPolicies({ hospitality_company_ids, hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
+  if (hospitality_company_ids === undefined) {
+    throw new Error(
+      'getApprovalPolicies: hospitality_company_ids is required (server-derived tenant scope; pass null only for the super-admin bypass)'
+    );
+  }
+  // No accessible company → no rows. Never degrade to "all".
+  if (Array.isArray(hospitality_company_ids) && hospitality_company_ids.length === 0) {
+    return [];
+  }
+
+  const conditions = [];
   const vals = [];
   let paramIdx = 1;
 
+  if (Array.isArray(hospitality_company_ids)) {
+    // Seed with the SERVER-DERIVED company predicate rather than 'TRUE'.
+    conditions.push(`p.hospitality_company_id = ANY($${paramIdx++}::int[])`);
+    vals.push(hospitality_company_ids);
+  } else {
+    // hospitality_company_ids === null → super admin, no company filter.
+    conditions.push('TRUE');
+  }
+
   if (hospitality_company_id) {
+    // Client-supplied narrowing, intersected with the scope above.
     conditions.push(`p.hospitality_company_id = $${paramIdx++}`);
     vals.push(hospitality_company_id);
   }
@@ -1697,6 +1816,52 @@ export async function getApprovalPoliciesWithSteps(filters) {
   return policies.map(p => ({ ...p, steps: stepsByPolicy[p.id] || [] }));
 }
 
+// ===========================================================================
+// Tenant-ownership lookups for the per-id approval endpoints.
+// ---------------------------------------------------------------------------
+// The /policies/:id, /:id/department-preview, /:id/pending-impact,
+// /instance/:id, /instance/:id/change-history and /entity/:type/:id handlers
+// all matched on `WHERE p.id = $1` / `WHERE i.id = $1` with no tenant column —
+// a straight IDOR over 137 policies and 3,846 live approval instances that
+// return approver names + emails and company/hotel names.
+//
+// These two helpers return JUST the owning company id so a controller can 404
+// before any payload is assembled. They deliberately do NOT enforce anything
+// themselves: getApprovalInstanceDetails() is shared with the ARC, MR, PO,
+// negotiation and RFQ flows, so the guard belongs at the HTTP boundary rather
+// than buried in a function a dozen internal callers depend on.
+// ===========================================================================
+
+/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+export async function getApprovalPolicyTenant(policy_id) {
+  return db.oneOrNone(
+    `SELECT id, hospitality_company_id FROM tbl_approval_policies WHERE id = $1`,
+    [policy_id]
+  );
+}
+
+/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+export async function getApprovalInstanceTenant(instance_id) {
+  return db.oneOrNone(
+    `SELECT id, hospitality_company_id FROM tbl_approval_instances WHERE id = $1`,
+    [instance_id]
+  );
+}
+
+/**
+ * Owning tenant of an approval PROCESS. Unlike policies and instances, a
+ * process hangs off the PARENT buyer company (tbl_company.id) — that is what
+ * createApprovalProcess writes from req.user.company_id.
+ *
+ * @returns {Promise<{id:number, company_id:number|null}|null>}
+ */
+export async function getApprovalProcessTenant(process_id) {
+  return db.oneOrNone(
+    `SELECT id, company_id FROM tbl_approval_processes WHERE id = $1`,
+    [process_id]
+  );
+}
+
 /**
  * Get a policy with all its steps
  */
@@ -1813,6 +1978,23 @@ export async function deletePolicySteps(approval_policy_id, t = db) {
  * Checks if a role has BOTH read and approve permissions for a given resource.
  * Used to filter ROLE-based policy steps — a role with only `approve` (no `read`)
  * cannot meaningfully act, since it has no access to view the entity.
+ *
+ * ── WHY `p.resource::text = $2` AND NOT `p.resource = $2` ──────────────────
+ * `tbl_permissions.resource` is the `resource_type` ENUM. Comparing it against a
+ * text parameter makes Postgres coerce the PARAMETER to the enum, so a value
+ * that is not an enum label RAISES `invalid input value for enum resource_type`
+ * instead of matching nothing. Callers reach this with
+ * `ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()`, and
+ * that fallback produces underscores (`arc_tech`, `arc_amendment`) where the
+ * enum uses hyphens — so any unmapped entity type turned a step-eligibility
+ * question into a thrown error that aborted the entire createApprovalInstance
+ * transaction, i.e. a 500 in the middle of submitTechEval / round creation.
+ *
+ * Casting the COLUMN to text moves the comparison into text space: an unknown
+ * resource simply matches no row and the function returns false. A skipped step
+ * is recoverable and is now recorded (see the zero-step diagnostics in
+ * createApprovalInstance); a mid-transaction crash is not. Behaviour for every
+ * real enum label is unchanged — the labels are their own text representation.
  */
 export async function roleHasReadAndApprovePermission(roleId, resource, t = db) {
   if (!roleId || !resource) return false;
@@ -1821,9 +2003,9 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
     FROM tbl_role_permissions rp
     JOIN tbl_permissions p ON rp.permission_id = p.id
     WHERE rp.role_id = $1
-      AND p.resource = $2
+      AND p.resource::text = $2
       AND p.action IN ('read', 'approve')
-  `, [roleId, resource]);
+  `, [roleId, String(resource)]);
   return Number(result?.cnt || 0) === 2;
 }
 
@@ -1835,14 +2017,20 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  * @param {number} hospitality_company_id - Hospitality Company ID for scoping
  * @param {number|null} hotel_id - Hotel ID for scoping (optional)
  * @param {number|null} department_id - Department ID for filtering (optional)
+ * @param {number|null} process_id - Process ID for filtering (optional). NULL =
+ *   "any process applies" (legacy / no-process entity). When a specific process
+ *   is supplied, only users whose role scope covers that process (or is the NULL
+ *   wildcard) qualify as approvers.
  * @returns {Array<number>} Array of user IDs
  */
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
     if (department_id) {
-      // Validate company/hotel access + user has role scope covering this department
+      // Validate company/hotel access + user has role scope covering this
+      // department AND process. Process filter is permissive when not provided
+      // (process_id arg NULL = "any process applies" e.g. legacy paths).
       const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
       const hasDeptScope = await t.oneOrNone(`
         SELECT 1 FROM tbl_user_role_scopes urs
@@ -1850,24 +2038,36 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           AND urs.company_id = $2
           AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
           AND (urs.department_id IS NULL OR urs.department_id = $4)
+          AND ($5::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $5)
         LIMIT 1
-      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id]);
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id, process_id]);
       if (hasCompanyAccess && hasDeptScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     } else {
-      // No department filter: just validate company/hotel access
+      // No department filter: just validate company/hotel access + process scope
       const hasAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      if (hasAccess) {
+      const hasProcessScope = process_id == null
+        ? true
+        : !!(await t.oneOrNone(`
+            SELECT 1 FROM tbl_user_role_scopes urs
+            WHERE urs.user_id = $1
+              AND urs.company_id = $2
+              AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+              AND (urs.process_id IS NULL OR urs.process_id = $4)
+            LIMIT 1
+          `, [step.approver_source_id, hospitality_company_id, hotel_id, process_id]));
+      if (hasAccess && hasProcessScope) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     }
   } else if (step.approver_source_type === 'ROLE') {
-    // A user qualifies if their role scope covers this department:
+    // A user qualifies if their role scope covers this department AND process:
     //   1. role grant is explicitly scoped to this department, OR
     //   2. role grant is unrestricted (urs.department_id IS NULL) = all-department access
+    // Process axis: NULL = wildcard; otherwise must match the instance's process_id.
     const deptClause = department_id
       ? `AND (urs.department_id = $5 OR urs.department_id IS NULL)`
       : '';
@@ -1879,6 +2079,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
        AND urs.role_id = $1
        AND urs.company_id = $2
        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+       AND ($6::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $6)
        ${deptClause}
       JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
       WHERE u.status = 1
@@ -1888,7 +2089,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           OR (hum.hospitality_hotel_id = $3)
           OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
         )
-    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
+    `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id, process_id]);
     userIds.push(...users.map(u => u.id));
   } else if (step.approver_source_type === 'DEPARTMENT') {
     // DEPARTMENT type: always resolve to users in the specified department
@@ -2028,7 +2229,10 @@ export async function createApprovalInstance({
     // because multiple rounds can exist per product and each needs its own approval.
     // For NEGOTIATION_QUOTE, allow re-approval because a vendor may reject a PO,
     // requiring re-finalization and a fresh approval cycle while preserving the old approved instance.
-    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE';
+    // ARC_COMMITTEE is the same shape: a vendor clarification on an awarded rate
+    // contract re-routes the (revised) award through a fresh awarding approval
+    // while the original approved instance stays in history.
+    const allowReapproval = entity_type === 'NEGOTIATION' || entity_type === 'NEGOTIATION_QUOTE' || entity_type === 'ARC_COMMITTEE';
     const blockingStatuses = allowReapproval ? ['PENDING'] : ['PENDING', 'APPROVED'];
 
     const existingInstance = await t.oneOrNone(`
@@ -2060,7 +2264,10 @@ export async function createApprovalInstance({
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
-        throw new Error(`No approval policy found for ${entity_type} in this scope`);
+        throw new NoApprovalPolicyError(
+          `No approval policy found for ${entity_type} in this scope`,
+          { entity_type, hospitality_company_id, hotel_id, department_id, process_id }
+        );
       }
     }
 
@@ -2080,6 +2287,46 @@ export async function createApprovalInstance({
     const resolvedSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
+    // ── WHY EVERY SKIP IS RECORDED ────────────────────────────────────────────
+    // Both `continue`s below drop a policy step, and dropping EVERY step makes
+    // the instance auto-approve at section 6. That has two causes which look
+    // identical afterwards but mean opposite things:
+    //   (a) the initiator was the only resolved approver  → by design (section 8)
+    //   (b) no role qualified / no user resolved          → misconfiguration
+    // Production already holds 51 instances born APPROVED with current_step = 0
+    // (39 TECHNICAL, 10 RFQ, 2 PO) and nothing on the row says which. So the
+    // reason for each skip is captured here and written to the instance's
+    // metadata; the auto-approve BEHAVIOUR is unchanged (that has live blast
+    // radius and needs its own decision) — only its legibility is.
+    const skippedSteps = [];
+    const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
+    const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
+
+    // Probed lazily (only when a ROLE gate actually fails) and at most once, so
+    // the common path pays nothing. It answers a question the bare `hasBoth`
+    // false cannot: was this role NOT GRANTED something, or does the permission
+    // catalogue simply not contain it? Production's `tender` resource holds only
+    // `approve` — no `tender.read` row exists — so no role could ever pass that
+    // gate, and reporting it as "the role lacks permissions" would send whoever
+    // triages this instance looking for an RBAC edit that cannot be made.
+    let gateCatalogue = null;
+    const probeGateCatalogue = async () => {
+      if (gateCatalogue) return gateCatalogue;
+      // DISTINCT because 'arc' and 'tender' each carry a duplicate `approve` row.
+      const rows = await t.any(
+        `SELECT DISTINCT p.action::text AS action
+           FROM tbl_permissions p
+          WHERE p.resource::text = $1 AND p.action IN ('read', 'approve')`,
+        [String(roleResource)]
+      );
+      const present = new Set(rows.map(r => r.action));
+      gateCatalogue = {
+        present,
+        missing: ['read', 'approve'].filter(a => !present.has(a))
+      };
+      return gateCatalogue;
+    };
+
     // All entities are department-scoped. The department_id is always used for filtering.
     const resolveDeptId = department_id;
 
@@ -2088,16 +2335,50 @@ export async function createApprovalInstance({
       // for this entity type. A role with only `approve` cannot meaningfully act since
       // it has no access to view the entity.
       if (policyStep.approver_source_type === 'ROLE') {
-        const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase();
-        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, resource, t);
-        if (!hasBoth) continue;
+        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, roleResource, t);
+        if (!hasBoth) {
+          const { present, missing } = await probeGateCatalogue();
+          // Three genuinely different faults, three different fixes:
+          //   ENTITY_TYPE_NOT_IN_RESOURCE_MAP — add the entity type to the map
+          //   RESOURCE_CANNOT_SATISFY_GATE    — seed the missing permission row
+          //   ROLE_LACKS_READ_AND_APPROVE     — grant the role the permission
+          let reason;
+          if (present.size === 0) {
+            reason = resourceIsMapped ? 'RESOURCE_NOT_IN_CATALOGUE' : 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP';
+          } else if (missing.length > 0) {
+            reason = 'RESOURCE_CANNOT_SATISFY_GATE';
+          } else {
+            reason = 'ROLE_LACKS_READ_AND_APPROVE';
+          }
+          skippedSteps.push({
+            policy_step_id: policyStep.id,
+            step_order: policyStep.step_order,
+            approver_source_type: policyStep.approver_source_type,
+            approver_source_id: policyStep.approver_source_id,
+            resource: roleResource,
+            resource_mapped: resourceIsMapped,
+            reason,
+            ...(missing.length > 0 && present.size > 0
+              ? { missing_permissions: missing.map(a => `${roleResource}.${a}`) }
+              : {})
+          });
+          continue;
+        }
       }
 
-      // Resolve approvers for this step
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by);
+      // Resolve approvers for this step (pass process_id so the user's process
+      // scope is honored when picking who qualifies).
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
 
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {
+        skippedSteps.push({
+          policy_step_id: policyStep.id,
+          step_order: policyStep.step_order,
+          approver_source_type: policyStep.approver_source_type,
+          approver_source_id: policyStep.approver_source_id,
+          reason: 'NO_APPROVERS_RESOLVED'
+        });
         continue;
       }
 
@@ -2111,27 +2392,66 @@ export async function createApprovalInstance({
       });
     }
 
+    // Diagnostics travel on the instance itself so anyone reading an
+    // auto-approved row later can tell case (a) from case (b) without
+    // reconstructing the policy as it stood at creation time. `skipped_steps` is
+    // written even when the instance ends up PENDING — a partially-dropped
+    // policy is worth seeing too.
+    const diagnostics = {
+      policy_step_count: policySteps.length,
+      resolved_step_count: resolvedSteps.length,
+      skipped_steps: skippedSteps,
+      recorded_at: new Date().toISOString()
+    };
+    const instanceMetadata = { ...(metadata || {}) };
+    if (skippedSteps.length > 0) {
+      instanceMetadata.approval_diagnostics = diagnostics;
+    }
+
     // 5. Create the approval instance only after all approvers are known
     const instance = await t.one(`
       INSERT INTO tbl_approval_instances
       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
       VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
-    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(metadata)]);
+    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(instanceMetadata)]);
 
-    // 6. Handle case where all steps were skipped (creator was only approver for all steps)
+    // 6. Every step was dropped — CASE (b). Nobody was ever asked to approve
+    // this. The instance is still auto-approved (unchanged behaviour), but it is
+    // now labelled as such and logged at error level, because "approved" here
+    // means "no approver could be found", not "the approver was the initiator".
     if (resolvedSteps.length === 0) {
+      const autoApproval = {
+        case: 'NO_APPROVER_RESOLVED',
+        legitimate: false,
+        detail: 'Every policy step was dropped at creation — no role qualified and/or no user resolved. Nobody approved this instance.',
+        ...diagnostics
+      };
       await t.none(`
         UPDATE tbl_approval_instances
-        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
         WHERE id = $1
-      `, [instance.id]);
+      `, [instance.id, JSON.stringify({ auto_approval: autoApproval, approval_diagnostics: diagnostics })]);
+
+      logger.error(
+        `[ApprovalAutoApprove] MISCONFIGURATION — instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) ` +
+        `was born APPROVED because ALL ${policySteps.length} policy step(s) were dropped at creation. Nobody approved it. ` +
+        `Skipped: ${JSON.stringify(skippedSteps)}`
+      );
 
       return {
-        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        instance: {
+          ...instance,
+          status: 'APPROVED',
+          current_step: 0,
+          metadata: { ...instanceMetadata, auto_approval: autoApproval, approval_diagnostics: diagnostics }
+        },
         policy: { id: policy.id, entity_type: policy.entity_type },
         steps: [],
         totalSteps: 0,
-        autoApproved: true
+        autoApproved: true,
+        autoApprovalCase: 'NO_APPROVER_RESOLVED',
+        skippedSteps
       };
     }
 
@@ -2202,19 +2522,63 @@ export async function createApprovalInstance({
     const firstPendingStep = instanceSteps.find(s => s.status === 'PENDING');
 
     if (!firstPendingStep) {
-      // ALL steps auto-completed (initiator was sole/ANY-rule approver everywhere)
+      // ALL steps auto-completed — CASE (a). `stepAutoCompleted` is only ever set
+      // when `isInitiatorInStep`, so reaching here means the initiator was a
+      // resolved approver on every surviving step and either the rule was ANY or
+      // they were the sole approver. That is the by-design short-circuit, and the
+      // audit trail carries a real APPROVE row per step to back it up — unlike
+      // case (b) above, which has none.
+      // `legitimate` is gated on NOTHING having been dropped, not merely on
+      // reaching this branch. The mixed shape — policy [ROLE: unqualified,
+      // USER: initiator] — lands here with one step silently gone AND the
+      // initiator self-approving what remains. Calling that `legitimate: true`
+      // at info level would give the worst combination in the file the quietest
+      // treatment, and `legitimate` is precisely the boolean an alert would key
+      // off. The `case` stays INITIATOR_ONLY (the a/b taxonomy is about which
+      // exit was taken); the flag and the log level carry the contamination.
+      const cleanShortCircuit = skippedSteps.length === 0;
+      const autoApproval = {
+        case: 'INITIATOR_ONLY',
+        legitimate: cleanShortCircuit,
+        dropped_step_count: skippedSteps.length,
+        detail: cleanShortCircuit
+          ? 'Every resolved step auto-completed because the initiator was the (or an ANY-rule) approver on it.'
+          : `The initiator auto-approved every SURVIVING step, but ${skippedSteps.length} policy step(s) were dropped at creation and nobody approved those. This is not the by-design short-circuit.`,
+        ...diagnostics
+      };
       await t.none(`
         UPDATE tbl_approval_instances
-        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
         WHERE id = $1
-      `, [instance.id]);
+      `, [instance.id, JSON.stringify({ auto_approval: autoApproval })]);
+
+      if (cleanShortCircuit) {
+        logger.info(
+          `[ApprovalAutoApprove] instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) auto-approved: ` +
+          `initiator ${initiated_by} was the approver on all ${instanceSteps.length} resolved step(s)`
+        );
+      } else {
+        logger.warn(
+          `[ApprovalAutoApprove] MIXED — instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) auto-approved by ` +
+          `initiator ${initiated_by} on ${instanceSteps.length} surviving step(s), but ${skippedSteps.length} policy step(s) were DROPPED at creation ` +
+          `and nobody approved those. Skipped: ${JSON.stringify(skippedSteps)}`
+        );
+      }
 
       return {
-        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        instance: {
+          ...instance,
+          status: 'APPROVED',
+          current_step: 0,
+          metadata: { ...instanceMetadata, auto_approval: autoApproval }
+        },
         policy: { id: policy.id, entity_type: policy.entity_type },
         steps: instanceSteps,
         totalSteps: instanceSteps.length,
-        autoApproved: true
+        autoApproved: true,
+        autoApprovalCase: 'INITIATOR_ONLY',
+        skippedSteps
       };
     }
 
@@ -2255,11 +2619,22 @@ export async function createApprovalInstance({
       logError('Error sending approval step notification', emailError);
     }
 
+    // A PENDING instance can still have lost steps to the ROLE gate or to
+    // zero-resolution; surface them so callers/tests can see a partially
+    // dropped policy, not only a fully dropped one.
+    if (skippedSteps.length > 0) {
+      logger.warn(
+        `[ApprovalAutoApprove] instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) is PENDING but ` +
+        `${skippedSteps.length} of ${policySteps.length} policy step(s) were dropped at creation: ${JSON.stringify(skippedSteps)}`
+      );
+    }
+
     return {
       instance,
       policy: { id: policy.id, entity_type: policy.entity_type },
       steps: instanceSteps,
-      totalSteps: instanceSteps.length
+      totalSteps: instanceSteps.length,
+      skippedSteps
     };
   };
 
@@ -2614,6 +2989,7 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
     JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
     JOIN tbl_users u ON asa.approver_user_id = u.id
     WHERE ai.entity_type = $1 AND ai.entity_id = $2
+      AND asa.status <> 'REMOVED'
       AND u.email IS NOT NULL AND u.email LIKE '%@%'
     UNION
     SELECT u.id AS user_id, u.name, u.email
@@ -3353,15 +3729,30 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       removedFinalizations++;
     }
 
-    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id)
+    // 3. Cancel NEGOTIATION approval instances (entity_id = round_id).
+    // Covered-product predicate: multi-product rounds (products JSONB) are
+    // matched too. NOTE: cancelling a multi-product round's approval affects
+    // EVERY product it covers — round-scoped approvals can't be partially
+    // cancelled. Logged loudly below so support can trace it.
     const negInstances = await t.any(`
       SELECT id, status FROM tbl_approval_instances
       WHERE entity_type = 'NEGOTIATION'
         AND entity_id IN (
-          SELECT id FROM tbl_negotiation_rounds WHERE rfq_product_id = $1
+          SELECT nr.id FROM tbl_negotiation_rounds nr
+          WHERE nr.rfq_product_id = $1 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $1
+          )
         )
         AND status IN ('PENDING', 'APPROVED')
     `, [rfq_product_id]);
+
+    if (negInstances.length > 0) {
+      console.warn(
+        `[sendback] Cancelling ${negInstances.length} NEGOTIATION approval instance(s) for product ${rfq_product_id}. ` +
+        `Multi-product rounds covering this product are cancelled for ALL their products.`
+      );
+    }
 
     for (const instance of negInstances) {
       if (instance.status === 'PENDING') {
@@ -3376,22 +3767,33 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       cancelledInstances++;
     }
 
-    // 4. Handle rounds based on target stage
+    // 4. Handle rounds based on target stage (covered-product predicate —
+    // multi-product rounds covering this product are affected as a whole).
     if (isEarlyStage) {
       // Early stage: Cancel ALL rounds (complete reset to before negotiation)
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'CANCELLED', closed_at = NOW()
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status != 'CANCELLED'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status != 'CANCELLED'
       `, [rfq_id, rfq_product_id]);
       cancelledRounds = result.rowCount;
     } else {
       // Mid stage (NEGOTIATION, QUOTE_FINALIZED, etc.): Keep rounds intact
       // Just make sure any ACTIVE rounds are marked as COMPLETED so new ones can be created
       const result = await t.result(`
-        UPDATE tbl_negotiation_rounds
+        UPDATE tbl_negotiation_rounds nr
         SET status = 'COMPLETED', closed_at = COALESCE(closed_at, NOW())
-        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE'
+        WHERE nr.rfq_id = $1
+          AND (nr.rfq_product_id = $2 OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+            WHERE (p_->>'rfq_product_id')::int = $2
+          ))
+          AND nr.status = 'ACTIVE'
       `, [rfq_id, rfq_product_id]);
       // Don't count these as "cancelled" - they're completed
     }

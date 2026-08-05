@@ -241,6 +241,41 @@ const getErrorText = (err) => {
 };
 
 const sendMail = (mailOptions) => {
+  // Optional in-app/push notification piggy-back. Callers can include
+  // `notification: { title, body, category, type, actionUrl, recipients?, userIds?, data? }`
+  // on their existing mail options. We fire it lazily so this module stays
+  // free of circular-import risk on the notification service.
+  if (mailOptions && mailOptions.notification && mailOptions.notification.title) {
+    const n = mailOptions.notification;
+    import('../services/notificationService.js')
+      .then(async ({ dispatch, resolveRecipientUserIds }) => {
+        try {
+          let userIds = n.userIds;
+          if ((!userIds || userIds.length === 0) && n.recipients) {
+            userIds = await resolveRecipientUserIds(n.recipients);
+          }
+          if ((!userIds || userIds.length === 0) && mailOptions.to) {
+            const toArr = Array.isArray(mailOptions.to) ? mailOptions.to : [mailOptions.to];
+            userIds = await resolveRecipientUserIds(toArr.map((email) => ({ email })));
+          }
+          if (userIds && userIds.length > 0) {
+            await dispatch({
+              userIds,
+              category: n.category || null,
+              type: n.type || null,
+              title: n.title,
+              body: n.body || mailOptions.subject || '',
+              data: n.data || {},
+              actionUrl: n.actionUrl || null
+            });
+          }
+        } catch (err) {
+          logger.error({ err }, '[MAIL] notification piggy-back failed');
+        }
+      })
+      .catch((err) => logger.error({ err }, '[MAIL] notificationService import failed'));
+  }
+
   return new Promise((resolve, reject) => {
     logger.info('[MAIL] sendMail called');
     logger.debug({ to: mailOptions.to, from: mailOptions.from, subject: mailOptions.subject }, '[MAIL] Mail options');

@@ -8,7 +8,273 @@ import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES 
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
 import pricingEngine from "../services/pricingEngine.js";
+import { dispatch as dispatchNotification } from "../services/notificationService.js";
+import {
+  assertUserHasScope,
+  AuthorizationError,
+  buildScopeExistsClause,
+} from "../services/authorizationService.js";
 import fs from 'fs';
+
+// ===========================================================================
+// SECURITY — legacy Purchase Order authorization gate
+// ---------------------------------------------------------------------------
+// The legacy PO surface (this model + purchaseOrderController) historically
+// authorized by one of three broken means, or by nothing at all:
+//
+//   * nothing            — GET /po/initiate/:po_id had no acl() and no scope
+//                          check while MUTATING state (draft -> pending
+//                          approval + approval instance + PDF + approver mail).
+//                          Same for updateGST / updateHSN / regenerate /
+//                          upload-pdf / markGRN / addSiteRepresentative and the
+//                          milestone + task mutations, all of which took an id
+//                          straight off the URL or body and wrote.
+//   * po.rfq_id = $1     — getPOByRFQId's ENTIRE tenant filter.
+//   * tbl_company.id     — the milestone/task queries. In production
+//                          buyer_company_id 13 owns 8 distinct hospitality
+//                          companies (4..11), so a tbl_company predicate does
+//                          not isolate legal entities.
+//
+// Everything now routes through assertPoAccess(), which resolves the PO's
+// tenancy from its parent RFQ (or, for call-off POs, its ARC) and evaluates the
+// canonical company x hotel x department x process tuple — the same predicate
+// commit 92604b60 adopted for the PO dashboard (poDashboardModel.js).
+//
+// Permission choice mirrors that commit: `awarding.read` OR `rfq.read` OR
+// `boq.read`. In production 3 users hold awarding.read without rfq.read and 1
+// holds the reverse; gating on any single one strands real users. All three
+// enforce the identical 4-axis scope, so the OR widens *who* may act, never
+// *which* PO any one of them reaches.
+//
+// NULL semantics — deliberately FAIL CLOSED. authorizationService's
+// assertCanReadParentRfq (line ~222) silently `return`s (i.e. ALLOWS) when the
+// parent RFQ carries a NULL hospitality_company_id; 84 such RFQs still exist in
+// production awaiting the scripted data repair, so that bypass is reachable.
+// Here the company is first re-derived from the RFQ's own hotel (the same
+// recovery saveRfqDraft uses), and if it still cannot be established access is
+// DENIED. Verified against production: 0 of 385 POs hang off an RFQ with a NULL
+// hospitality_company_id, so nothing legitimate is lost.
+//
+// Out-of-scope always answers 404, never 403, so the existence of another
+// tenant's purchase order is never leaked.
+// ===========================================================================
+export const PO_SCOPE_PERMISSIONS = ["awarding.read", "rfq.read", "boq.read"];
+
+export class PoAccessError extends Error {
+  constructor(message = "Purchase order not found.") {
+    super(message);
+    this.name = "PoAccessError";
+    this.status = 404;
+    this.code = "PO_NOT_FOUND_OR_OUT_OF_SCOPE";
+  }
+}
+
+/**
+ * OR-composition of the canonical EXISTS clause across PO_SCOPE_PERMISSIONS for
+ * one entity alias, for use inside a LIST query's WHERE. Mirrors
+ * poDashboardModel.scopedExistsFor. Mutates `values`; returns the next $N.
+ */
+export function buildPoScopeExists(userId, alias, values, startIndex) {
+  let i = startIndex;
+  const clauses = [];
+  for (const perm of PO_SCOPE_PERMISSIONS) {
+    const built = buildScopeExistsClause(userId, perm, alias, i);
+    clauses.push(built.clause);
+    values.push(...built.params);
+    i += built.paramsConsumed;
+  }
+  return { clause: `(${clauses.join(" OR ")})`, nextIndex: i };
+}
+
+// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
+const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
+  for (const perm of PO_SCOPE_PERMISSIONS) {
+    try {
+      await assertUserHasScope(userId, perm, tuple, dbCtx);
+      return true;
+    } catch (err) {
+      if (!(err instanceof AuthorizationError)) throw err;
+    }
+  }
+  return false;
+};
+
+/**
+ * Resolve a PO's tenancy tuple. RFQ-backed POs source it from tbl_rfq;
+ * call-off POs (rfq_id NULL) from their ARC via tbl_arc_contract. When the RFQ
+ * carries a NULL hospitality_company_id the company is re-derived from the
+ * RFQ's own hotel, matching the recovery saveRfqDraft performs.
+ *
+ * Returns null when the PO does not exist.
+ */
+export const resolvePoTenancy = async (po_id, dbCtx = db) => {
+  const id = Number(po_id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return dbCtx.oneOrNone(
+    `SELECT po.id,
+            po.company_id,
+            po.rfq_id,
+            po.arc_contract_id,
+            po.is_call_off,
+            po.finalized_vendor_id,
+            po.initiated_by,
+            po.status,
+            COALESCE(r.hospitality_company_id, hh.hospitality_company_id,
+                     a.hospitality_company_id)              AS hospitality_company_id,
+            COALESCE(r.hotel_id, a.hotel_id)                AS hotel_id,
+            COALESCE(r.department_id, a.department_id)      AS department_id,
+            COALESCE(r.process_id, a.process_id)            AS process_id
+       FROM tbl_rfq_purchase_order po
+       LEFT JOIN tbl_rfq r                          ON r.id  = po.rfq_id
+       LEFT JOIN tbl_hospitality_company_hotels hh  ON hh.id = r.hotel_id
+       LEFT JOIN tbl_arc_contract ac                ON ac.id = po.arc_contract_id
+       LEFT JOIN tbl_arc a                          ON a.id  = ac.arc_id
+      WHERE po.id = $1`,
+    [id]
+  );
+};
+
+/**
+ * THE gate for every per-PO legacy endpoint. Throws PoAccessError (404) when
+ * the caller may not touch this PO; returns the resolved tenancy row otherwise.
+ *
+ * Three caller classes, all derived from req.user — never from body/query:
+ *   - GRN site representative (token login): bound to exactly one po_id, which
+ *     auth.authUserOrGRNToken already validated; the binding is re-asserted.
+ *   - Vendor (user_type 3): vendors hold NO tbl_user_role_scopes rows at all
+ *     (0 of 424 in production), so their tenancy key is finalized_vendor_id.
+ *   - Buyer side: the 4-axis RBAC tuple, fail-closed on an unresolvable
+ *     hospitality company.
+ */
+export const assertPoAccess = async (user, po_id, dbCtx = db) => {
+  const po = await resolvePoTenancy(po_id, dbCtx);
+  if (!po) throw new PoAccessError();
+
+  if (user?.is_token_user) {
+    if (Number(user.entityId) !== Number(po.id)) throw new PoAccessError();
+    return po;
+  }
+
+  const userId = Number(user?.id);
+  if (!Number.isFinite(userId) || userId <= 0) throw new PoAccessError();
+
+  if (Number(user?.user_type) === 3) {
+    if (Number(po.finalized_vendor_id) !== userId) throw new PoAccessError();
+    return po;
+  }
+
+  // Super admin — parity with poDashboardModel, where a null hospitality
+  // company scope means "every company".
+  if (Number(user?.user_type) === 8) return po;
+
+  if (!po.hospitality_company_id) throw new PoAccessError();
+
+  const allowed = await hasAnyPoScope(userId, {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoAccessError();
+
+  return po;
+};
+
+/**
+ * Fail-closed replacement for authorizationService.assertCanReadParentRfq on
+ * the PO-by-RFQ listing. Same 4-axis tuple, but a NULL hospitality_company_id
+ * denies instead of allowing, and the company is re-derived from the hotel
+ * first. Throws PoAccessError (404) so the endpoint does not leak existence.
+ */
+export const assertRfqPoListingAccess = async (user, rfq_id, dbCtx = db) => {
+  const id = Number(rfq_id);
+  if (!Number.isFinite(id) || id <= 0) throw new PoAccessError();
+
+  const rfq = await dbCtx.oneOrNone(
+    `SELECT r.id,
+            COALESCE(r.hospitality_company_id, hh.hospitality_company_id) AS hospitality_company_id,
+            r.hotel_id, r.department_id, r.process_id
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = r.hotel_id
+      WHERE r.id = $1`,
+    [id]
+  );
+  if (!rfq) throw new PoAccessError();
+  if (Number(user?.user_type) === 8) return rfq;
+  if (!rfq.hospitality_company_id) throw new PoAccessError();
+
+  const allowed = await hasAnyPoScope(Number(user?.id), {
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
+    process_id: rfq.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoAccessError();
+  return rfq;
+};
+
+/**
+ * True when the user is an EXPLICITLY ASSIGNED approver on this PO — either an
+ * approver row on its approval instance (new workflow) or a member of its
+ * legacy approval hierarchy.
+ *
+ * Why this exists: an approver's assignment is itself an authorization grant,
+ * and it does not always agree with their RBAC scope row. Verified in
+ * production: user 405's only scope row sits on hospitality company 13 while
+ * they are a PENDING approver on a PO in hospitality company 12. Gating the
+ * approve endpoint on scope ALONE would leave that live approval unactionable.
+ * Used only to widen the approve path — never for reads or for any other write.
+ */
+export const isAssignedPoApprover = async (userId, po_id, dbCtx = db) => {
+  const uid = Number(userId);
+  const pid = Number(po_id);
+  if (!Number.isFinite(uid) || uid <= 0 || !Number.isFinite(pid) || pid <= 0) return false;
+
+  const row = await dbCtx.oneOrNone(
+    `SELECT 1
+       FROM tbl_rfq_purchase_order po
+      WHERE po.id = $1
+        AND (
+          EXISTS (
+            SELECT 1
+              FROM tbl_approval_instance_steps tais
+              JOIN tbl_approval_step_approvers tasa
+                ON tasa.approval_instance_step_id = tais.id
+             WHERE tais.approval_instance_id = po.approval_instance_id
+               AND tasa.approver_user_id = $2
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM tbl_approval_hierarchy_transactions trx
+              JOIN tbl_approval_hierarchy ah
+                ON ah.hierarchy_id = trx.hierarchy_id
+               AND ah.hierarchy_type = 'po'
+             WHERE trx.hierarchy_type = 'po'
+               AND trx.target_entity_id = po.id
+               AND ah.user_id = $2
+          )
+        )
+      LIMIT 1`,
+    [pid, uid]
+  );
+  return !!row;
+};
+
+/** Resolve the parent po_id of a payment milestone (null when absent). */
+export const getMilestoneParentPoId = async (id, dbCtx = db) => {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const row = await dbCtx.oneOrNone(`SELECT po_id FROM tbl_payment_milestone WHERE id = $1`, [n]);
+  return row ? row.po_id : null;
+};
+
+/** Resolve the parent po_id of a PO task (null when absent). */
+export const getTaskParentPoId = async (id, dbCtx = db) => {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const row = await dbCtx.oneOrNone(`SELECT po_id FROM tbl_purchase_order_tasks WHERE id = $1`, [n]);
+  return row ? row.po_id : null;
+};
 
 // Statuses at which the rendered PO PDF must stay sealed. The PDF is generated
 // at draft time so the buyer can preview, but it is intended for the vendor —
@@ -30,15 +296,22 @@ const resolvePoPdfVisibility = (status, url) => {
 };
 
 const getNextPONumber = async () => {
-  return new Promise(async function (resolve, reject) {
-    const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
-    const response = await db.oneOrNone(query);
-    if (response) {
-      resolve(parseInt(response.po_number) + 1);
-    } else {
-      resolve(Math.floor(100000 + Math.random() * 900000));
-    }
-  });
+  // Next sequential number = (max existing NUMERIC po_number) + 1. We must
+  // ignore non-numeric po_numbers — legacy/seeded values like
+  // "PO-STG-2095943-228-8-2" — and pick the MAX rather than the latest row by
+  // created_at. The previous version took `ORDER BY created_at DESC LIMIT 1`
+  // and did `parseInt(po_number) + 1`, which produced the string "NaN" whenever
+  // the most recent PO happened to carry a non-numeric number.
+  const row = await db.oneOrNone(
+    `SELECT MAX(po_number::bigint) AS maxnum
+       FROM tbl_rfq_purchase_order
+      WHERE po_number ~ '^[0-9]+$'`
+  );
+  if (row && row.maxnum != null) {
+    return Number(row.maxnum) + 1;
+  }
+  // No numeric PO numbers yet — seed with a random 6-digit base.
+  return Math.floor(100000 + Math.random() * 900000);
 };
 
 const getItemTotalWOFreight = (item) => {
@@ -213,6 +486,35 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
       let po = null;
 
+      // Auto-merge: if the caller did not nominate a merge target, look for an
+      // existing draft PO on this RFQ for the same vendor that shares the same
+      // project + selected_hierarchy. If found, treat the new line as an
+      // append onto that PO. SELECT ... FOR UPDATE serializes concurrent
+      // finalize transactions targeting the same (rfq, vendor, project,
+      // hierarchy), so the "at most one draft PO per tuple" invariant holds
+      // even under parallel awards. selected_hierarchy is compared via ::text
+      // to be agnostic to json/jsonb/text storage; IS NOT DISTINCT FROM keeps
+      // NULL == NULL so legacy rows without a hierarchy can still merge.
+      // Restricted to status='draft' — pending-approval POs are mid-review
+      // and must not absorb new lines (would invalidate approval context).
+      if (!existing_po_id && finalized_vendor_id) {
+        const mergeTarget = await t.oneOrNone(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1
+              AND finalized_vendor_id = $2
+              AND project_id IS NOT DISTINCT FROM $3
+              AND selected_hierarchy::text IS NOT DISTINCT FROM $4::text
+              AND status = $5
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE`,
+          [rfq_id, finalized_vendor_id, project_id, selected_hierarchy, PO_STATUSES.DRAFT]
+        );
+        if (mergeTarget) {
+          existing_po_id = mergeTarget.id;
+        }
+      }
+
       if(existing_po_id) {
         if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
@@ -263,14 +565,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         else if (typeof rawGc === 'string' && rawGc.trim()) {
           try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
         }
-        let gcTotal = 0;
-        for (const gc of snapshotGlobals) {
-          const norm = pricingEngine.normalizeGlobalCharge(gc);
-          if (!norm) continue;
-          gcTotal += pricingEngine.applyChargeMode(
-            norm.amount, norm.amount_mode, lineSubtotal
-          );
-        }
+        // Includes each charge's additional_tax (e.g. GST on TCS). Delegating to
+        // the engine keeps this in lock-step with calculateDocumentTotals —
+        // previously this hand-rolled loop applied only norm.amount and dropped
+        // additional_tax, so merged (multi-product) POs undercounted total_value.
+        const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
         // Quantise to 2dp, matching pricingEngine.calculateDocumentTotals
         // (which is what the new-PO branch uses). Keeping rounding consistent
         // across the new-PO path and the merge path means the stored
@@ -326,10 +625,21 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         )
       }
 
+      // Auto-initiate eligibility probe — runs inside the same tx so the
+      // just-inserted line is visible. The result is returned to the
+      // caller (rfqController.finalize / negotiationQuotePostApproval),
+      // which fires `autoInitiateRFQPOs(rfq_id, user_id)` AFTER its
+      // transaction commits. Initiating inside `t` would couple PDF
+      // generation and approver emails to the line-insert atomicity,
+      // which we explicitly don't want.
+      const should_auto_initiate = await isRfqFullyAwarded(rfq_id, t);
+
       return {
         po_id: po.id,
         status: true,
-        message: "PO has been drafted successfully!"
+        message: "PO has been drafted successfully!",
+        should_auto_initiate,
+        rfq_id,
       };
     } catch (error) {
       throw error;
@@ -504,12 +814,9 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     else if (typeof rawGc === 'string' && rawGc.trim()) {
       try { snapshotGlobals = JSON.parse(rawGc); } catch (_e) { snapshotGlobals = []; }
     }
-    let gcTotal = 0;
-    for (const gc of snapshotGlobals) {
-      const norm = pricingEngine.normalizeGlobalCharge(gc);
-      if (!norm) continue;
-      gcTotal += pricingEngine.applyChargeMode(norm.amount, norm.amount_mode, lineSubtotal);
-    }
+    // Includes each charge's additional_tax — same engine helper as the
+    // draft-merge branch, so a kept PO's recomputed total can't drift either.
+    const gcTotal = pricingEngine.sumGlobalCharges(snapshotGlobals, lineSubtotal);
     const grandTotal = Math.round((lineSubtotal + gcTotal) * 100) / 100;
 
     // Refresh derived header columns from the current line set. quote_id /
@@ -630,6 +937,20 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     if(!purchaseOrder) {
       throw new Error("No Purchase Order found by id:", po_id);
+    }
+
+    // Idempotency guard: initiate is a draft→pending-approval transition.
+    // If the PO has already moved past draft (auto-initiate already ran,
+    // or a parallel Force Initiate landed first) this call is a no-op.
+    // Returning early prevents duplicate approval-instance creation and
+    // duplicate PDF regeneration.
+    if (purchaseOrder.status !== PO_STATUSES.DRAFT) {
+      return {
+        status: false,
+        already_initiated: true,
+        message: `Purchase Order already initiated (status=${purchaseOrder.status})`,
+        po_id,
+      };
     }
 
     const { rfq_id, project_id, finalized_vendor_id } = purchaseOrder;
@@ -776,6 +1097,179 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
   }
 };
 
+/**
+ * Eligibility check for auto-initiate. An RFQ is "fully awarded" — and
+ * therefore eligible for system-driven PO initiation — when:
+ *
+ *   1. Every line item in `tbl_rfq_products` (one per (product_variant_id,
+ *      variant) on the RFQ) has at least one matching row in
+ *      `tbl_quote_finalization`. Multi-vendor split awards count as
+ *      finalized; the only thing that blocks is an unawarded line item.
+ *
+ *   2. No NEGOTIATION_QUOTE approval instance for any of this RFQ's
+ *      products is still PENDING. This is the load-bearing condition that
+ *      makes auto-initiate compatible with auto-merge: a pending
+ *      NEGOTIATION_QUOTE means a draft PO has not yet been created for
+ *      that line, so initiating now would lock out the future merge
+ *      target. We wait until every approval has settled (APPROVED or
+ *      REJECTED) before firing.
+ *
+ * `dbCtx` is either a pg-promise task `t` (when called inside a
+ * transaction) or the top-level `db` (when called standalone). Read-only
+ * — no side effects.
+ */
+export const isRfqFullyAwarded = async (rfq_id, dbCtx = db) => {
+  try {
+    const row = await dbCtx.oneOrNone(
+      `WITH unfinalized_lines AS (
+         SELECT 1
+         FROM tbl_rfq_products rp
+         WHERE rp.rfq_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM tbl_quote_finalization qf
+             WHERE qf.rfq_id = $1
+               AND qf.product_variant_id = rp.product_variant_id
+               AND qf.variant = rp.variant
+           )
+         LIMIT 1
+       ),
+       pending_quote_approvals AS (
+         SELECT 1
+         FROM tbl_approval_instances ai
+         WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+           AND ai.status = 'PENDING'
+           AND ai.entity_id IN (
+             SELECT id FROM tbl_rfq_products WHERE rfq_id = $1
+           )
+         LIMIT 1
+       )
+       SELECT
+         NOT EXISTS (SELECT 1 FROM unfinalized_lines) AS all_lines_finalized,
+         NOT EXISTS (SELECT 1 FROM pending_quote_approvals) AS no_pending_quote_approvals`,
+      [rfq_id]
+    );
+    return !!(row && row.all_lines_finalized && row.no_pending_quote_approvals);
+  } catch (error) {
+    logError('isRfqFullyAwarded check failed', error);
+    return false;
+  }
+};
+
+/**
+ * Auto-initiate every draft PO spawned by an RFQ. Called *outside* the
+ * triggering transaction, after the caller's commit, so that PDF
+ * generation, approval-instance creation, and approver emails happen in
+ * their own transactions and never block the parent request.
+ *
+ * Concurrency: the SELECT … FOR UPDATE serialises parallel batches for
+ * the same RFQ. If two awards land "fully awarded = true" simultaneously,
+ * both invoke this function; the second sees zero draft rows under the
+ * lock and returns a clean no-op.
+ *
+ * Failure handling: best-effort. Each PO is initiated independently.
+ * If `initiatePurchaseOrder` throws (commonly: "No approval policy
+ * found"), we catch, log, leave that PO in `draft`, and continue with
+ * the rest. Returns a summary the caller can surface in the response.
+ *
+ * @param {number} rfq_id
+ * @param {number} triggering_user_id  Whoever caused the eligibility
+ *   transition (the awarder or the final NEGOTIATION_QUOTE approver).
+ *   Stored on `tbl_notifications.sender_user_id` for the in-app summary.
+ *   The PO's own `initiated_by` (its creator) is reused as the initiator
+ *   passed to `initiatePurchaseOrder`, mirroring the data model.
+ * @returns {Promise<{initiated:number[],skipped_no_policy:number[],failed:Array<{po_id:number,reason:string}>,rfq_no:string|null}>}
+ */
+export const autoInitiateRFQPOs = async (rfq_id, triggering_user_id = null) => {
+  const summary = { initiated: [], skipped_no_policy: [], failed: [], rfq_no: null };
+  try {
+    // Lock and read draft POs for this RFQ in one fresh transaction.
+    // Initiation itself runs in separate transactions per PO so a single
+    // failure can't poison the rest of the batch.
+    const draftPOs = await db.tx(async (t) => {
+      const rfqRow = await t.oneOrNone(
+        `SELECT rfq_no FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+      summary.rfq_no = rfqRow?.rfq_no || null;
+      return await t.any(
+        `SELECT id, initiated_by
+           FROM tbl_rfq_purchase_order
+          WHERE rfq_id = $1 AND status = $2
+          ORDER BY created_at ASC
+          FOR UPDATE`,
+        [rfq_id, PO_STATUSES.DRAFT]
+      );
+    });
+
+    if (draftPOs.length === 0) return summary;
+
+    // Initiate each PO sequentially. `initiatePurchaseOrder` runs inside
+    // its own short-lived transaction via the `t` it receives — the early
+    // status guard inside it makes the call idempotent should two batches
+    // race past the FOR UPDATE.
+    for (const po of draftPOs) {
+      try {
+        const initiator = await db.oneOrNone(
+          `SELECT id, name, email, company_id, mobile FROM tbl_users WHERE id = $1`,
+          [po.initiated_by]
+        );
+        if (!initiator) {
+          summary.failed.push({ po_id: po.id, reason: 'Initiator user not found' });
+          continue;
+        }
+
+        await db.tx(async (t) => {
+          const result = await initiatePurchaseOrder(po.id, initiator, t);
+          if (result?.already_initiated) {
+            // Another batch beat us to it — not an error, just skip.
+            return;
+          }
+          await t.none(
+            `UPDATE tbl_rfq_purchase_order SET auto_initiated = TRUE WHERE id = $1`,
+            [po.id]
+          );
+        });
+        summary.initiated.push(po.id);
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (msg.includes('No approval policy found')) {
+          summary.skipped_no_policy.push(po.id);
+          logger.info({ po_id: po.id, rfq_id }, '[autoInitiateRFQPOs] skipped: no approval policy');
+        } else {
+          summary.failed.push({ po_id: po.id, reason: msg });
+          logError(`[autoInitiateRFQPOs] failed for po ${po.id}`, err);
+        }
+      }
+    }
+
+    // In-app notification: surface the batch outcome to the user whose
+    // action tripped the eligibility flip. Silent on empty batches.
+    if (triggering_user_id && (summary.initiated.length || summary.skipped_no_policy.length || summary.failed.length)) {
+      try {
+        const rfqLabel = summary.rfq_no ? `RFQ #${summary.rfq_no}` : `RFQ ${rfq_id}`;
+        const parts = [];
+        if (summary.initiated.length) parts.push(`${summary.initiated.length} auto-initiated`);
+        if (summary.skipped_no_policy.length) parts.push(`${summary.skipped_no_policy.length} skipped (no approval policy)`);
+        if (summary.failed.length) parts.push(`${summary.failed.length} failed`);
+        await dispatchNotification({
+          userIds: [Number(triggering_user_id)],
+          category: 'PO',
+          type: 'PO_AUTO_INITIATED',
+          title: `${rfqLabel}: purchase orders auto-initiated`,
+          body: `${rfqLabel} is fully awarded · ${parts.join(' · ')}.`,
+          data: { rfq_id, ...summary },
+          actionUrl: '/dashboard/buyer/purchase-orders',
+        });
+      } catch (notifyErr) {
+        logError('[autoInitiateRFQPOs] notification dispatch failed', notifyErr);
+      }
+    }
+  } catch (err) {
+    logError('[autoInitiateRFQPOs] outer failure', err);
+  }
+  return summary;
+};
+
 export const getPOItemDetails = async (purchase_order, t) => {
   try {
     const q = `
@@ -851,9 +1345,24 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
   try {
     const offset = (page - 1) * limit;
 
+    // SECURITY: `po.rfq_id = $1` used to be the ENTIRE tenant filter here — no
+    // company, hotel, department or process predicate at all. Anyone who could
+    // guess an RFQ id got that RFQ's full purchase-order book (vendor
+    // identities, unit prices, PO values). The controller-level gate is now
+    // fail-closed (assertRfqPoListingAccess), and the same 4-axis predicate is
+    // ALSO applied in SQL here so the model is safe for any direct caller.
+    // Vendors are exempt: they hold no tbl_user_role_scopes rows, and their own
+    // predicate (finalized_vendor_id, below) is the correct tenancy key.
     const conditions = ["po.rfq_id = $1"];
     const values = [rfq_id, user_id];
     let paramIndex = 3; // Next available $ index
+
+    const applyRbacScope = Number(user_type) !== 3 && Number(user_type) !== 8;
+    if (applyRbacScope) {
+      const scoped = buildPoScopeExists(user_id, "BUYER_RFQ", values, paramIndex);
+      conditions.push(scoped.clause);
+      paramIndex = scoped.nextIndex;
+    }
 
     // Search by PO Number
     if (filters.poNumber) {
@@ -1051,9 +1560,13 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
         };
       })
 
+      // The scope predicate correlates against the joined RFQ alias, so the
+      // count query needs the same join as the data query (tbl_rfq_purchase_order
+      // carries no hotel/department/process columns of its own).
       const count = await t.one(
         `SELECT COUNT(*) AS total
          FROM tbl_rfq_purchase_order po
+         JOIN tbl_rfq BUYER_RFQ ON BUYER_RFQ.id = po.rfq_id
          ${whereClause}`,
         values
       );
@@ -1495,13 +2008,14 @@ export const getPODetailsById = async (po_id, user_id) => {
          ON tai.id = po.approval_instance_id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_users TU ON TU.id = po.initiated_by
+       -- LEFT so call-off POs (initiated_by NULL, rfq_id NULL) still load (CO5).
+       LEFT JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id
-       JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
+       LEFT JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
        LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
        LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
        WHERE po.id = $1`,
@@ -1751,14 +2265,23 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       else if (typeof rawGc === 'string' && rawGc.trim()) {
         try { globalCharges = JSON.parse(rawGc); } catch (_e) { globalCharges = []; }
       }
-      let globalChargesTotal = 0;
-      for (const gc of globalCharges) {
-        const norm = pricingEngine.normalizeGlobalCharge(gc);
-        if (!norm) continue;
-        globalChargesTotal += pricingEngine.applyChargeMode(
-          norm.amount, norm.amount_mode, lineSubtotal
-        );
-      }
+      // Delegates to the engine — same helper the draft-merge branch
+      // (draftPurchaseOrder) and mergeDraftPOs use, so an edited PO can never
+      // disagree with a freshly drafted or merged one.
+      //
+      // This used to hand-roll the loop and apply ONLY norm.amount, silently
+      // dropping each charge's `additional_tax` (e.g. the 18% GST levied on a
+      // 7% Transportation charge). A PO was therefore correct the moment it
+      // was drafted and became wrong the first time anybody edited it.
+      // Production PO 440 / 138712: 6 lines summing ₹16,939 with
+      // "Transportation 7% + additional_tax 18%" stored ₹18,124.73 instead of
+      // ₹18,338.16 — the ₹213.43 additional_tax leg was missing. The printed
+      // PO always showed the correct figure, because poTemplatePricing
+      // recomputes from the lines and does apply additional_tax.
+      const globalChargesTotal = pricingEngine.sumGlobalCharges(globalCharges, lineSubtotal);
+      // Quantise at this boundary only (the engine returns a raw sum), matching
+      // draftPurchaseOrder/mergeDraftPOs so the stored total_value can't drift
+      // by a paisa depending on which path last wrote it.
       const grandTotal = Math.round((lineSubtotal + globalChargesTotal) * 100) / 100;
 
       await t.none(
@@ -1867,15 +2390,24 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
   });
 };
 
+// Tenancy for milestones is enforced by assertPoAccess(po_id) in the
+// controller, NOT by company_id: tbl_payment_milestone.company_id is a
+// tbl_company id, and in production buyer_company_id 13 owns 8 distinct
+// hospitality companies — so a company_id predicate does not isolate legal
+// entities. The PO is the tenancy anchor; every row here belongs to it.
+//
+// (This query also used to emit `WHERE company_id = $2 WHERE po_id = $1 ...` —
+// two WHERE clauses — so GET /po/:po_id/milestones raised a syntax error and
+// answered 500 for every caller. Production has 0 milestone rows, which is
+// consistent with the endpoint never having worked.)
 export const getMilestonesByPOId = async (company_id, po_id, includeDeleted = false) => {
-  let condition = 'WHERE po_id = $1'
-  condition += includeDeleted ? '' : ` AND status != 'deleted'`;
+  const condition = includeDeleted ? '' : ` AND status != 'deleted'`;
 
   return db.any(
-    `SELECT * FROM tbl_payment_milestone 
-     WHERE company_id = $2 ${condition}
+    `SELECT * FROM tbl_payment_milestone
+     WHERE po_id = $1 ${condition}
      ORDER BY due_date ASC`,
-    [po_id, company_id]
+    [po_id]
   );
 };
 
@@ -1932,32 +2464,36 @@ export const deleteMilestone = async (id, user) => {
   return result;
 };
 
+// As with getMilestonesByPOId: the PO is the tenancy anchor (enforced by
+// assertPoAccess in the controller). The old `company_id = $2` predicate is a
+// tbl_company id that spans 8 hospitality companies in production and so
+// isolated nothing; it also silently hid rows whose creator sat under a
+// different tbl_company (e.g. a vendor-created task).
 export const getTasksByPOId = async (company_id, po_id, page, limit) => {
   const offset = (page - 1) * limit;
-  let condition = 'AND po_id = $1'
 
   const [pos, { total }] = await db.tx(async t => {
     const data = await t.any(
-      `SELECT pot.id, 
-        pot.rfq_id, 
-        pot.po_id, 
-        pot.company_id, 
-        pot.task_name, 
-        pot.completion_date::date, 
-        pot.status, 
+      `SELECT pot.id,
+        pot.rfq_id,
+        pot.po_id,
+        pot.company_id,
+        pot.task_name,
+        pot.completion_date::date,
+        pot.status,
         pot.task_description
       FROM tbl_purchase_order_tasks pot
-      WHERE company_id = $2 ${condition}
+      WHERE pot.po_id = $1
       ORDER BY completion_date DESC
-      LIMIT $3 OFFSET $4`,
-      [po_id, company_id, limit, offset]
+      LIMIT $2 OFFSET $3`,
+      [po_id, limit, offset]
     );
 
     const count = await t.one(
       `SELECT COUNT(*) AS total
         FROM tbl_purchase_order_tasks
-        WHERE company_id = $2 ${condition}`,
-      [po_id, company_id]
+        WHERE po_id = $1`,
+      [po_id]
     );
 
     return [data, count]
@@ -2006,10 +2542,10 @@ export const updateTask = async (id, updates, user_id) => {
 
 export const deleteTask = async (id, user) => {
   const result = await db.oneOrNone(
-    `DELETE FROM tbl_purchase_order_tasks 
-      WHERE id = $1 
+    `DELETE FROM tbl_purchase_order_tasks
+      WHERE id = $1
       RETURNING *`,
-    [id, user.id]
+    [id]
   );
 
   return result;

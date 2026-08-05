@@ -230,21 +230,51 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     const trailing = html.substring(lastIndex).trim();
     if (trailing) segments.push({ type: 'text', html: trailing });
 
+    // Split a text fragment into its top-level block elements (paragraphs,
+    // divs, headings) so each becomes its OWN numbered T&C item — the buyer's
+    // custom rich-text continues the numbered list (e.g. predefined ends at 9 →
+    // custom paragraphs become 10, 11, …) instead of collapsing into one number
+    // with trailing paragraphs rendered unnumbered. Empty blocks (e.g.
+    // `<p><br></p>`, whitespace, &nbsp;) are dropped. Plain text with no block
+    // wrappers stays a single block.
+    const splitHtmlBlocks = (frag) => {
+      const blocks = [];
+      const blockRe = /<(p|div|h[1-6]|blockquote)\b[^>]*>[\s\S]*?<\/\1>/gi;
+      let last = 0; let m;
+      while ((m = blockRe.exec(frag)) !== null) {
+        const before = frag.substring(last, m.index).trim();
+        if (before) blocks.push(before);
+        blocks.push(m[0]);
+        last = m.index + m[0].length;
+      }
+      const tail = frag.substring(last).trim();
+      if (tail) blocks.push(tail);
+      const isEmpty = (b) => b.replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, '').trim() === '';
+      return blocks.filter((b) => !isEmpty(b));
+    };
+
     // Walk segments and build rfqTerms entries
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
 
       if (seg.type === 'text') {
         const next = segments[i + 1];
+        const blocks = splitHtmlBlocks(seg.html);
         if (next && next.type === 'list') {
-          // Text + list → merge into one row; convert <ul> to <ol> for numbering
+          // Text + list → the LAST block heads the following list (converted to
+          // <ol> for numbering); any earlier blocks are standalone numbered items.
           const numberedList = next.html
             .replace(/<ul([^>]*)>/gi, '<ol$1>')
             .replace(/<\/ul>/gi, '</ol>');
-          rfqTerms.push({ id: null, term_content: seg.html + numberedList });
+          const heading = blocks.length ? blocks[blocks.length - 1] : seg.html;
+          for (const b of blocks.slice(0, -1)) rfqTerms.push({ id: null, term_content: b });
+          rfqTerms.push({ id: null, term_content: heading + numberedList });
           i++; // skip the list segment
         } else {
-          rfqTerms.push({ id: null, term_content: seg.html });
+          // Each paragraph/block becomes its own numbered item.
+          for (const b of (blocks.length ? blocks : [seg.html])) {
+            rfqTerms.push({ id: null, term_content: b });
+          }
         }
       } else {
         // List without preceding text → flatten each <li>
@@ -497,6 +527,7 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
       JOIN tbl_approval_step_approvers SA ON SA.approval_instance_step_id = AIS.id
       JOIN tbl_users U ON U.id = SA.approver_user_id
       WHERE AIS.approval_instance_id = $1
+        AND SA.status <> 'REMOVED'
       ORDER BY AIS.step_order, SA.id
     `, [poData.approval_instance_id]);
 
