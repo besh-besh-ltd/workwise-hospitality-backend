@@ -3041,6 +3041,32 @@ export async function submitApprovalAction({
       };
     }
 
+    // 1b. A publish approval stops being decidable once the RFQ has published.
+    // Publication does not wait for the approval — when the publish date
+    // arrives the RFQ goes out and the instance is simply left PENDING. From
+    // that moment the decision gates nothing: APPROVE would backdate consent
+    // for something that already happened, and REJECT would stamp REJECTED on
+    // a live RFQ that vendors are bidding on (in production, many of them with
+    // a purchase order already issued) without un-publishing it, because
+    // handleRFQRejection's `SET status = 1` is a no-op on an RFQ that is
+    // already status 1.
+    //
+    // The pending-approval counts and dashboard widgets already exclude these
+    // (see getPendingApprovalCounts / dashboardModel); this closes the write
+    // path so the whole system agrees. Mirrors the ARC equivalent in
+    // arcController.publishApprovalDecide.
+    if (['RFQ', 'TENDER'].includes(instance.entity_type)) {
+      const parentRfq = await t.oneOrNone(
+        `SELECT is_published FROM tbl_rfq WHERE id = $1`,
+        [instance.entity_id]
+      );
+      if (parentRfq?.is_published === 1) {
+        throw new Error(
+          'This RFQ has already been published — the publish approval no longer gates it, so no further action can be taken'
+        );
+      }
+    }
+
     // 2. Get the current step
     const currentStep = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instance_steps
@@ -3389,6 +3415,18 @@ export async function getPendingApprovalsForUser(user_id, { hospitality_company_
     LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
     LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
     WHERE ${conditions.join(' AND ')}
+      -- A publish approval on an already-published RFQ is not actionable: the
+      -- RFQ went out without it and submitApprovalAction now refuses the
+      -- decision. getPendingApprovalCounts has excluded these for a while, but
+      -- this list did not, so the badge said 0 while the list it opened still
+      -- offered rows that dead-end. Keep the two clauses identical.
+      AND NOT (
+        i.entity_type IN ('RFQ', 'TENDER')
+        AND EXISTS (
+          SELECT 1 FROM tbl_rfq r
+          WHERE r.id = i.entity_id AND r.is_published = 1
+        )
+      )
     ORDER BY i.created_at ASC
   `, params);
 }
