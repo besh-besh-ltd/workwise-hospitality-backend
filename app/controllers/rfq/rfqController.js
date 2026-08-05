@@ -76,6 +76,12 @@ import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
+import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
+
+// "Pending for me" grouping precedence. An approval is the most specific and
+// most blocking claim on this user; a response is personal and usually blocks
+// vendors; an evaluation is the shared-pool baseline.
+const PENDING_KIND_ORDER = { approval: 0, response: 1, evaluation: 2 };
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -8581,21 +8587,64 @@ const rfqController = {
         r._statusKey = statusKey(r);
       }
 
-      // Action holders for ALL scoped rows — powers both the "Pending for me"
-      // tab (filter + count) and the per-row lifecycle tooltip. The helper
-      // batches its approval + RBAC queries, so it stays bounded over the set.
+      // Action holders for ALL scoped rows — powers the per-row lifecycle
+      // tooltip and the approval/evaluation halves of "Pending for me". The
+      // helper batches its approval + RBAC queries, so it stays bounded.
       let actionMap = {};
       if (rows.length > 0) {
         try { actionMap = await rfqModel.getActionHoldersForRFQs(rows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
       }
+
+      // Per-caller personal work: open clarifications, unread vendor queries,
+      // stuck RFQs, expired negotiation rounds. None of these notify today, so
+      // this listing is the only surface that can show them.
+      let personalMap = {};
+      if (rows.length > 0) {
+        try { personalMap = await getPersonalPendingForRFQs(rows, user_id, lifecycleMap); } catch (e) { logError('getRfqListView personal pending', e); }
+      }
+
       for (const r of rows) {
         const holders = actionMap[parseInt(r.id)];
         const users = holders?.users || [];
-        r._isMyAction = users.some((u) => Number(u.id) === Number(user_id));
+        const inHolders = users.some((u) => Number(u.id) === Number(user_id));
+        const holderKind = holders?.kind || (holders?.type === 'approval' ? 'approval' : 'evaluation');
+
+        // One row joins exactly ONE group, by precedence, but carries every
+        // reason so the card can show the rest as secondary chips.
+        const reasons = [];
+        if (inHolders && holderKind === 'approval') {
+          reasons.push({
+            kind: 'approval',
+            code: r.lifecycle_stage || 'RFQ_APPROVAL',
+            label: 'Your approval',
+            count: 1,
+            instance_id: holders.instance_id ?? null,
+            step_id: holders.step_id ?? null,
+            entity_type: holders.entity_type || null,
+            decision_rule: holders.decision_rule || null,
+          });
+        }
+        for (const p of (personalMap[parseInt(r.id)] || [])) {
+          reasons.push({ kind: 'response', code: p.code, label: p.label, count: p.count ?? 1 });
+        }
+        if (inHolders && holderKind === 'evaluation') {
+          reasons.push({
+            kind: 'evaluation',
+            code: r.lifecycle_stage || null,
+            label: holders.label || 'Your evaluation',
+            count: 1,
+          });
+        }
+        reasons.sort((a, b) => PENDING_KIND_ORDER[a.kind] - PENDING_KIND_ORDER[b.kind]);
+
+        r._pendingReasons = reasons;
+        r._pendingKind = reasons.length ? reasons[0].kind : null;
+        r._isMyAction = reasons.length > 0;
+
         // Approval affordances for the card. `can_approve` is narrower than
         // `_isMyAction`: it is true only when the pending action is an APPROVAL
         // this user is a pending approver on (not, say, a tech-eval task).
-        r._canApprove = holders?.type === 'approval' && r._isMyAction;
+        r._canApprove = holders?.type === 'approval' && inHolders;
         r._approvalInstanceId = holders?.type === 'approval' ? (holders.instance_id ?? null) : null;
         r._approvalStepId = holders?.type === 'approval' ? (holders.step_id ?? null) : null;
         r._approvalEntityType = holders?.type === 'approval' ? (holders.entity_type || null) : null;
@@ -8625,10 +8674,15 @@ const rfqController = {
 
       // 3. tab counts (full scoped+search set).
       const tab_counts = { all: rows.length, pending: 0, drafts: 0, approval: 0, ongoing: 0, approved: 0, closed: 0 };
+      const pending_breakdown = { approval: 0, evaluation: 0, response: 0 };
       for (const r of rows) {
         tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
-        if (r._isMyAction) tab_counts.pending++;
+        if (r._isMyAction) {
+          tab_counts.pending++;
+          pending_breakdown[r._pendingKind] = (pending_breakdown[r._pendingKind] || 0) + 1;
+        }
       }
+      tab_counts.pending_breakdown = pending_breakdown;
 
       // 4. tab scope. "pending" cuts across buckets — every row needing my action.
       const tabRows = tab === 'all' ? rows
@@ -8680,6 +8734,13 @@ const rfqController = {
       else if (sort === 'deadline') filtered.sort((a, b) => (dl(a) || Infinity) - (dl(b) || Infinity));
       else filtered.sort((a, b) => ts(b) - ts(a));
 
+      // The pending tab groups by kind, so page 1 always leads with the
+      // decisions. Within a group the requested sort above is preserved
+      // (Array#sort is stable in V8) — this partitions, it does not re-sort.
+      if (tab === 'pending') {
+        filtered.sort((a, b) => (PENDING_KIND_ORDER[a._pendingKind] ?? 9) - (PENDING_KIND_ORDER[b._pendingKind] ?? 9));
+      }
+
       // 8. paginate.
       const total = filtered.length;
       const start = (page - 1) * limit;
@@ -8706,6 +8767,11 @@ const rfqController = {
         // link to the pending instance instead of falling back to Edit/Delete.
         can_approve: !!r._canApprove,
         is_pending_for_me: !!r._isMyAction,
+        // Which of the three "Pending for me" groups this row joins, and the
+        // reasons that put it there (the non-primary ones render as secondary
+        // chips on the card).
+        pending_kind: r._pendingKind ?? null,
+        pending_reasons: r._pendingReasons || [],
         approval_instance_id: r._approvalInstanceId ?? null,
         approval_step_id: r._approvalStepId ?? null,
         approval_entity_type: r._approvalEntityType ?? null,
