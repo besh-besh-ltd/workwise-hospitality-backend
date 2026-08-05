@@ -34,6 +34,13 @@ import { logError } from "../helper/common.js";
 import rfqModel from "./rfqModel.js";
 import { enrichQuoteCompareData } from "../services/quoteCompareService.js";
 import { buildQuoteVisibilityMeta } from "../helper/quoteVisibility.js";
+import {
+  getCoveredProductIds,
+  getVendorFieldsForProduct,
+  getRoundVendorIds,
+  deriveNegotiationState,
+  NEGOTIATION_TEXT_TARGET_FIELDS,
+} from "./negotiationModel.js";
 
 const toNum = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -287,6 +294,55 @@ function buildCellHistory(quote, merged, allRounds = [], rfqProductId = null, ve
   });
 }
 
+// Charges that represent getting the goods to site. Matched on canonical slug,
+// falling back to a normalised name. Production carries three of these —
+// freight (235 non-zero items), loading_unloading (22) and
+// transportation_charges (2) — and the old `slug === 'freight'` match silently
+// kept the latter two inside the price. packaging and insurance are
+// deliberately NOT delivery: they stay in the number in both toggle states.
+export const DELIVERY_CHARGE_SLUGS = new Set([
+  'freight', 'transportation', 'transportation_charges', 'loading_unloading',
+]);
+
+const normaliseChargeSlug = (c) =>
+  String(c?.slug || c?.name || '').trim().toLowerCase().replace(/[\s/-]+/g, '_');
+
+const isDeliveryCharge = (c) => DELIVERY_CHARGE_SLUGS.has(normaliseChargeSlug(c));
+
+// Sum of every delivery-class charge subtotal on an engine breakdown. The
+// engine subtotal already includes each charge's own tax, so subtracting this
+// from the grand total leaves base + base tax + non-delivery charges intact.
+function deliverySubtotal(engine) {
+  const charges = engine?.charges || [];
+  return charges.reduce((s, c) => (isDeliveryCharge(c) ? s + num0(c.subtotal) : s), 0);
+}
+
+// Delivery charges can ALSO arrive as quote-level globals. 16 production
+// quotes carry { slug: 'transportation', is_global: true } worth 0.6%-26% of
+// the quote, and every one of them has NO line-level delivery charge — so
+// classifying only line charges would hide the toggle entirely on those RFQs
+// while the charge sat silently in the price. Same predicate, both carriers.
+function globalDeliverySubtotal(quote) {
+  const resolved = Array.isArray(quote?.engine_global_charges) ? quote.engine_global_charges : null;
+  const list = resolved && resolved.length
+    ? resolved
+    : (Array.isArray(quote?.global_charges) ? quote.global_charges : []);
+  return list.reduce(
+    (s, c) => (isDeliveryCharge(c) ? s + num0(c?.amount ?? c?.tax) : s),
+    0
+  );
+}
+
+// Drop delivery-class entries from the cell's global charges when excluded, so
+// the client's own global-charge roll-up stays consistent with `total`.
+function parseGlobalChargesFiltered(quote, excludeDelivery) {
+  const all = parseGlobalCharges(quote);
+  if (!excludeDelivery) return all;
+  return all.filter((c) => !isDeliveryCharge({ name: c.label }));
+}
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 // Extract the engine charge subtotal for a given canonical slug from a detail's
 // engine breakdown (engine.charges[] carries { slug, name, subtotal }).
 function chargeSubtotal(engine, slug) {
@@ -321,8 +377,12 @@ function findEngineCharge(engine, savedCharge) {
 // quote (it's a line-item column), while the engine breakdown sits on the
 // `detail` (quote_details) object after enrichment. So we read saved charges
 // from the merged row and the engine from `detail`.
-function parseOtherCharges(merged, detail) {
-  const saved = Array.isArray(merged?.other_charges) ? merged.other_charges : [];
+// `excludeDelivery` drops delivery-class charges at the SOURCE, while the saved
+// entries still carry slug/name. The mapped output is {label, amount} only, so
+// classification is impossible after this point.
+function parseOtherCharges(merged, detail, excludeDelivery = false) {
+  const savedAll = Array.isArray(merged?.other_charges) ? merged.other_charges : [];
+  const saved = excludeDelivery ? savedAll.filter((c) => !isDeliveryCharge(c)) : savedAll;
   const engine = detail?.engine || {};
   return saved
     .map((c) => {
@@ -383,7 +443,7 @@ function paymentTermsText(merged) {
 // ---------------------------------------------------------------------------
 // Main entry: build the QC contract object, or null when out-of-scope / not found.
 // ---------------------------------------------------------------------------
-export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
+export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = false } = {}) {
   const id = parseInt(rfqId, 10);
   if (!Number.isInteger(id) || id <= 0) return null;
 
@@ -425,14 +485,17 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   }
 
   // ---- 2) Reuse the existing comparison pipeline. ----
-  // no_freight passes straight through to the model/engine so totals recompute
-  // base-only when freight=0.
+  // Delivery exclusion is NOT done here. It happens in the cell assembly below,
+  // where the engine charge breakdown is available and delivery-class slugs can
+  // be classified. This call used to pass a `no_freight` argument that
+  // getQuotesByRfqById2 declared and silently ignored, which is why the toggle
+  // returned byte-identical numbers in both states.
   const rawProducts = await rfqModel.getQuotesByRfqById2(
     id,
     scope ? scope.userId : null,
     rfq.hospitality_company_id || (scope ? scope.companyId : null),
     "TA",
-    noFreight,
+    null,
     null,
     false,
     null
@@ -448,6 +511,14 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   const finalizationByRfqProduct = await fetchFinalizations(id, products);
   const roundByRfqProduct = await fetchActiveRounds(rfqProductIds);
   const allRounds = await fetchAllRounds(id);
+  // Negotiation state for the comparison rows. Separate from the two lookups
+  // above: those serve the legacy `p.round` block and the cell history modal.
+  const { byProduct: negRoundByProduct, rfqLevel: rfqLevelRounds } =
+    await fetchRoundsByProduct(id, rfqProductIds);
+  const negResponses = await fetchRoundResponses(
+    [...new Set([...negRoundByProduct.values()].map((h) => Number(h.round.id)))]
+  );
+  const rfqLevelAsks = rfqLevelAsksOf(rfqLevelRounds);
   const docCountByQuote = await fetchQuoteDocCounts(id);
   const techByVendor = await fetchVendorTech(id);
   const techByProduct = await fetchProductTech(id);
@@ -545,6 +616,9 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
   // ---- 6) Products[] in the contract shape. ----
   const contractProducts = products.map((p) => {
     const rfqProductId = Number(p.id);
+    // Resolved up here because the per-vendor cell loop below needs it, and
+    // that loop runs before the product-level negotiation block is assembled.
+    const negHit = negRoundByProduct.get(rfqProductId) || null;
     const pd = Array.isArray(p.product_details) ? p.product_details[0] : p.product_details;
     const name = pd?.product_name || pd?.name || `Product ${rfqProductId}`;
 
@@ -593,11 +667,21 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       // a common signal the buyer must clarify before comparing landed cost.
       const missing = freight <= 0;
 
+      // Delivery-class subtotal for this cell, and the grand total with or
+      // without it depending on the caller's toggle.
+      const delivery_charges = round2(deliverySubtotal(engine) + globalDeliverySubtotal(q));
+      const grandTotal = num0(q.engine_grand_total ?? q.engine_total ?? engine.total);
+
       quotesByVendor[String(vId)] = {
         base,
         subtotal,
         freight,
         packaging,
+        // Everything the "Include delivery charges" toggle controls. Reported
+        // separately so the client can show the difference without having to
+        // classify charge names itself — it cannot, because vendors name
+        // freight freely ("Transportation", "Logistics", ...).
+        delivery_charges,
         tax_pct: taxPct,
         tax_amt,
         delivery: toNum(merged.delivery_period),
@@ -606,12 +690,23 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
         comment: merged.comment || merged.global_comment || null,
         docs,
         missing,
-        total: num0(q.engine_grand_total ?? q.engine_total ?? engine.total),
+        // base / subtotal / tax_amt are pre-charge and never move; only the
+        // delivery-class charges come off.
+        total: excludeDelivery ? round2(grandTotal - delivery_charges) : grandTotal,
         // Per-item other_charges (engine-computed rupee values).
-        other_charges: parseOtherCharges(merged, detail),
+        //
+        // When the caller asked to exclude delivery we also REMOVE those
+        // entries here, so the cell is internally consistent: every client-side
+        // helper that re-derives a figure by summing other_charges (the price,
+        // the vendor grand total, the L1 roll-up, the rank basis, the savings
+        // KPI, the category subtotals) lands on the same number as `total`
+        // without needing to know the toggle exists. Threading a flag through
+        // each of those call sites was tried and missed several — this cannot
+        // be partially applied.
+        other_charges: parseOtherCharges(merged, detail, excludeDelivery),
         // Per-vendor quote-level global_charges (same across that vendor's
         // products); carried on each cell so the breakdown can render them.
-        global_charges: parseGlobalCharges(q),
+        global_charges: parseGlobalChargesFiltered(q, excludeDelivery),
         // Everything the FE needs to FINALIZE this cell, so it no longer has to
         // make a second (legacy) round-trip. Mirrors the old buildFinalizePayload
         // sources exactly (raw quote line, not the engine-landed values).
@@ -635,6 +730,20 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
         // (final update only), oldest→newest with savings delta. Powers the
         // history modal. See buildCellHistory for the timestamp→round bucketing.
         history: buildCellHistory(q, merged, allRounds, Number(p.id), vId),
+        // This vendor's position in the current round: did they reply, what
+        // were they asked, and what did they come back with.
+        negotiation: negHit ? (() => {
+          const row = negResponses.get(`${negHit.round.id}:${vId}:${rfqProductId}`);
+          return {
+            responded: !!row,
+            quoted_at: row ? iso(row.submitted_at) : null,
+            // LINE TOTAL for RFQ rounds. A base_price target is per UNIT —
+            // never compare the two without going through amount_basis.
+            quoted_price: row ? num0(row.quoted_price) : null,
+            amount_basis: "line_total",
+            asks: (getVendorFieldsForProduct(negHit.round, vId, rfqProductId) || []).map(toAsk),
+          };
+        })() : null,
       };
     }
     // Every vendor in vendors[] gets an explicit null when they didn't quote.
@@ -680,6 +789,75 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
     const appr = approvalByRfqProduct.get(rfqProductId) || null;
     const { state, reject_info } = deriveState(fin, appr);
     const finalized_vendor = fin ? fin.vendor_id : null;
+
+    // ---- Negotiation for this product's row. ----
+    let negForProduct = null;
+    if (negHit) {
+      const nr = negHit.round;
+      // Invited vendors FOR THIS PRODUCT. A multi-product round can ask
+      // different vendors on different lines — production round 896 asks two
+      // vendors overall but only one on products 3709 and 3710, so the
+      // round-wide list would render "0 of 2 replied" where the true
+      // denominator is 1. Fall back to the round-wide list only when the round
+      // carries no per-product targets at all (the legacy single-product shape).
+      const roundWide = getRoundVendorIds(nr) || [];
+      const askedHere = roundWide.filter(
+        (vid) => (getVendorFieldsForProduct(nr, vid, rfqProductId) || []).length > 0
+      );
+      const invited = askedHere.length > 0 ? askedHere : roundWide;
+      const respondedCount = vendors.filter((v) =>
+        negResponses.has(`${nr.id}:${v.id}:${rfqProductId}`)
+      ).length;
+      negForProduct = {
+        // Seven derived states over four raw values — raw status alone is
+        // insufficient, and an ACTIVE round past its end_date is really over
+        // (the expiry cron is one-shot per round and a missed tick leaves the
+        // row ACTIVE indefinitely).
+        state: deriveNegotiationState({
+          status: nr.status,
+          endDate: nr.end_date,
+          responseCount: respondedCount,
+          hasApprovedQuote: state === "approved",
+        }),
+        round_position: negHit.position,
+        round_id: Number(nr.id),
+        ends_at: iso(nr.end_date || nr.closed_at),
+        invited_count: invited.length,
+        responded_count: respondedCount,
+        asks: dedupeAsks(
+          invited.flatMap((vid) =>
+            (getVendorFieldsForProduct(nr, vid, rfqProductId) || []).map(toAsk)
+          )
+        ),
+        rfq_level_asks: rfqLevelAsks,
+      };
+    } else if (rfqLevelAsks.length > 0) {
+      // A PURELY RFQ-level round — the wizard's "RFQ-level negotiation" option,
+      // which produces a products JSONB containing only { is_rfq_level: true }
+      // and therefore covers no product id at all (getCoveredProductIds returns
+      // []). Without this branch the whole-RFQ ask would render on no row
+      // anywhere, silently dropping the feature for its most natural creation
+      // path. The row carries the ask and the round's state; the per-product
+      // counters stay null because the round is not about this product.
+      const nr = rfqLevelRounds[rfqLevelRounds.length - 1];
+      const invited = getRoundVendorIds(nr) || [];
+      negForProduct = {
+        state: deriveNegotiationState({
+          status: nr.status,
+          endDate: nr.end_date,
+          responseCount: 0,
+          hasApprovedQuote: false,
+        }),
+        round_position: null,
+        round_id: Number(nr.id),
+        ends_at: iso(nr.end_date || nr.closed_at),
+        invited_count: invited.length,
+        responded_count: 0,
+        asks: [],
+        rfq_level_asks: rfqLevelAsks,
+      };
+    }
+
     // It's THIS user's turn to approve this product (current pending step).
     const awaiting_me = !!(
       appr &&
@@ -731,6 +909,10 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       },
       state,
       finalized_vendor,
+      // Who awarded it, and when. Null when the product is not finalized.
+      finalized_by: fin ? (fin.finalized_by || null) : null,
+      // Full negotiation state for this row. Null when no round covers it.
+      negotiation: negForProduct,
       reject_info,
       awaiting_me,
       approval,
@@ -783,6 +965,11 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
       }
       // Nothing is actionable or evaluatable before the deadline.
       p.finalized_vendor = null;
+      // Who awarded it, and the buyer's negotiation asks, are decision data of
+      // exactly the same kind as the fields around them — they must not survive
+      // the lock just because they were added later.
+      p.finalized_by = null;
+      p.negotiation = null;
       p.awaiting_me = false;
       p.reject_info = null;
       p.state = "open";
@@ -817,6 +1004,16 @@ export async function getQuoteComparisonView(rfqId, scope, { noFreight } = {}) {
     categories,
     products: contractProducts,
     approval_chain: approvalChain,
+    // Does ANY cell on this RFQ carry a delivery charge? 76% of production RFQs
+    // do not, and on those the toggle can only ever be a no-op — the client
+    // hides it rather than offering a control that visibly does nothing.
+    //
+    // Deliberately false while quotes are locked: the redaction above has
+    // already replaced every cell with { locked: true }, and there is nothing
+    // to compare before the deadline anyway.
+    has_delivery_charges: !quotesLocked && contractProducts.some((p) =>
+      Object.values(p.quotes || {}).some((c) => c && num0(c.delivery_charges) > 0)
+    ),
   };
 }
 
@@ -1179,11 +1376,18 @@ async function fetchFinalizations(rfqId, products) {
   const map = new Map();
   try {
     const rows = await db.any(
-      `SELECT DISTINCT ON (product_variant_id, COALESCE(variant, 0))
-              product_variant_id, COALESCE(variant, 0) AS variant, vendor_id, "timestamp"
-         FROM tbl_quote_finalization
-        WHERE rfq_id = $1
-        ORDER BY product_variant_id, COALESCE(variant, 0), "timestamp" DESC`,
+      `SELECT DISTINCT ON (f.product_variant_id, COALESCE(f.variant, 0))
+              f.product_variant_id,
+              COALESCE(f.variant, 0) AS variant,
+              f.vendor_id,
+              f."timestamp",
+              f.created_by,
+              u.name AS finalized_by_name,
+              f.comment AS finalize_comment
+         FROM tbl_quote_finalization f
+         LEFT JOIN tbl_users u ON u.id = f.created_by
+        WHERE f.rfq_id = $1
+        ORDER BY f.product_variant_id, COALESCE(f.variant, 0), f."timestamp" DESC`,
       [rfqId]
     );
     const byVariant = new Map();
@@ -1192,7 +1396,20 @@ async function fetchFinalizations(rfqId, products) {
       const pvid = Number(p.product_variant_id);
       const variant = Number(p.variant || 0);
       const hit = byVariant.get(`${pvid}:${variant}`);
-      if (hit) map.set(Number(p.id), { vendor_id: Number(hit.vendor_id) });
+      if (hit) map.set(Number(p.id), {
+        vendor_id: Number(hit.vendor_id),
+        // created_by is the buyer who finalized. NOTE: on the post-approval
+        // path (negotiationController) it is overwritten with the APPROVER's
+        // id when a product is re-finalized, so this is labelled "Finalized by"
+        // and never "Awarded by".
+        finalized_by: hit.finalized_by_name
+          ? {
+              name: hit.finalized_by_name,
+              at: iso(hit.timestamp),
+              comment: hit.finalize_comment || null,
+            }
+          : null,
+      });
     }
   } catch (e) {
     logError("quoteCompareView fetchFinalizations failed", e);
@@ -1219,6 +1436,128 @@ async function fetchAllRounds(rfqId) {
     return [];
   }
 }
+
+// Rounds for the whole RFQ, mapped onto the products each one actually covers.
+//
+// Replaces a query that filtered `WHERE rfq_product_id = ANY(...)`. That
+// silently dropped every multi-product and RFQ-level round, because those store
+// their coverage in the `products` JSONB with rfq_product_id NULL — so they
+// rendered as "no negotiation at all". getCoveredProductIds reconciles both
+// carriers; never read the columns directly.
+//
+// `position` is the round's DISPLAY number, counted per product in creation
+// order. It is deliberately not the stored `round_number`: the legacy allocator
+// restarted at 1 per product, so one production RFQ has 138 rounds whose stored
+// maximum is 4.
+async function fetchRoundsByProduct(rfqId, rfqProductIds) {
+  const byProduct = new Map();
+  const rfqLevel = [];
+  if (!rfqProductIds.length) return { byProduct, rfqLevel };
+  try {
+    const rounds = await db.any(
+      `SELECT id, rfq_id, round_number, target_price, end_date, closed_at, status,
+              rfq_product_id, vendor_ids, vendor_approvals, products, created_at
+         FROM tbl_negotiation_rounds
+        WHERE rfq_id = $1 AND source_type = 'RFQ'
+        ORDER BY created_at ASC, id ASC`,
+      [rfqId]
+    );
+    const allowed = new Set(rfqProductIds.map(Number));
+    const seq = new Map();
+    for (const r of rounds) {
+      const entries = Array.isArray(r.products) ? r.products : [];
+      if (entries.some((e) => e && e.is_rfq_level === true)) rfqLevel.push(r);
+      for (const pid of getCoveredProductIds(r)) {
+        const key = Number(pid);
+        if (!allowed.has(key)) continue;
+        const n = (seq.get(key) || 0) + 1;
+        seq.set(key, n);
+        // Last write wins, so byProduct ends up holding the LATEST round.
+        byProduct.set(key, { round: r, position: n });
+      }
+    }
+  } catch (e) {
+    logError("quoteCompareView fetchRoundsByProduct failed", e);
+  }
+  return { byProduct, rfqLevel };
+}
+
+// Per-(round, vendor, product) response rows. Presence of a row IS the
+// "this vendor replied in this round" fact — submitted_at and quoted_price are
+// populated on 100% of production rows.
+async function fetchRoundResponses(roundIds) {
+  const map = new Map();
+  if (!roundIds.length) return map;
+  try {
+    const rows = await db.any(
+      `SELECT negotiation_round_id, vendor_id, rfq_product_id, quoted_price, submitted_at
+         FROM tbl_negotiation_round_quotes
+        WHERE negotiation_round_id = ANY($1::int[])`,
+      [roundIds]
+    );
+    for (const r of rows) {
+      map.set(`${r.negotiation_round_id}:${r.vendor_id}:${r.rfq_product_id}`, r);
+    }
+  } catch (e) {
+    logError("quoteCompareView fetchRoundResponses failed", e);
+  }
+  return map;
+}
+
+// Built-in field slugs. Everything else is a tenant-defined charge name from
+// tbl_charge_names — the set is OPEN, so unknown slugs get title-cased rather
+// than dropped. Sentence case, matching negotiationStates.js.
+const SYSTEM_FIELD_LABELS = {
+  base_price: "Base price",
+  delivery_period: "Delivery period",
+  payment_terms: "Payment terms",
+  vendor_tc: "Vendor T&C",
+  comments: "Comments",
+  comment: "Comment",
+  global_comment: "Global comment",
+  documents: "Documents",
+  // Charge slugs that title-casing gets wrong. Everything else falls through
+  // to the title-case fallback, which reads fine ("Loading Unloading",
+  // "Testing Inspection"); "Tcs" does not.
+  tcs: "TCS",
+  tds: "TDS",
+  igst: "IGST",
+};
+
+const fieldLabel = (name) =>
+  SYSTEM_FIELD_LABELS[name] ||
+  String(name || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+
+// One buyer ask. `is_text` marks fields with no number to score against —
+// payment terms, comments, and documents (which always store an empty target
+// and carry only a free-text `demand`).
+const toAsk = (f) => ({
+  field: f?.name || null,
+  label: fieldLabel(f?.name),
+  target: f?.target ?? null,
+  mode: f?.mode || null,
+  demand: f?.demand || null,
+  is_text: NEGOTIATION_TEXT_TARGET_FIELDS.has(f?.name),
+});
+
+const dedupeAsks = (list) => {
+  const seen = new Set();
+  return list.filter((a) => (a.field && !seen.has(a.field) ? (seen.add(a.field), true) : false));
+};
+
+// RFQ-level asks are the same for every product by definition, so they are
+// resolved once and repeated onto each row by the client.
+const rfqLevelAsksOf = (rounds) => {
+  const out = [];
+  for (const r of rounds) {
+    for (const vid of getRoundVendorIds(r)) {
+      for (const f of (getVendorFieldsForProduct(r, vid, "RFQ_LEVEL") || [])) out.push(toAsk(f));
+    }
+  }
+  return dedupeAsks(out);
+};
 
 async function fetchActiveRounds(rfqProductIds) {
   const map = new Map();
