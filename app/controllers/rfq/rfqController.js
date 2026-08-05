@@ -10104,15 +10104,17 @@ const rfqController = {
         }
       }
 
-      // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
-      const freightParam = req.query.freight;
-      const noFreight =
-        freightParam === '0' || freightParam === 0 || freightParam === 'false' ? '1' : undefined;
+      // freight=1 (default) => delivery charges included. freight=0 => excluded.
+      // Accept 1/0 and true/false in any case: the client sends '0', while the
+      // old (dead) implementation tested for the string 'true', so neither
+      // spelling actually worked. Normalised to a real boolean here.
+      const fp = String(req.query.freight ?? '').trim().toLowerCase();
+      const excludeDelivery = fp === '0' || fp === 'false';
 
       const view = await quoteCompareViewModel.getQuoteComparisonView(
         req.params.id,
         scope,
-        { noFreight }
+        { excludeDelivery }
       );
 
       if (!view) {

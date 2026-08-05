@@ -6652,7 +6652,14 @@ LIMIT 2;
     user_id,
     company_id,
     TA_Vendors,
-    no_freight,
+    // IGNORED — kept only to preserve the positional signature for existing
+    // callers. This function has never read it: the quote comparison view's
+    // "Include delivery charges" toggle passed its flag here for months and
+    // silently got identical numbers back. Delivery exclusion now happens in
+    // quoteCompareViewModel's cell assembly, where the engine charge breakdown
+    // is available and delivery-class slugs can actually be classified. Do not
+    // wire this up — remove it when the positional callers are refactored.
+    _no_freight_unused,
     rfq_product_id,
     include_negotiation = false,
     vendor_filter_id = null
