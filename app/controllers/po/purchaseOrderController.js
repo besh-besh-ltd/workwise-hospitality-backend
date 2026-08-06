@@ -3,7 +3,7 @@ import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -181,6 +181,58 @@ export const getPODetails = async (req, res) => {
             error
         });
     }
+};
+
+/**
+ * GET /api/v1/po/:po_id/initiators — "who can initiate THIS purchase order?"
+ *
+ * The write gate on /po/initiate/:po_id tells a user they may not initiate, but
+ * not who may, which leaves them stuck. This is that answer: the exact inverse
+ * of assertPoInitiateAccess, so every name here genuinely passes it.
+ *
+ * SECURITY: the response carries personal data — names, employee codes, emails
+ * and mobile numbers — so guardPo (assertPoAccess) runs FIRST and unconditionally.
+ * Only someone who may already SEE this PO may see who can initiate it, and an
+ * out-of-scope caller gets the same 404 as every other PO read, so the PO's
+ * existence is not leaked either. (A lifecycle endpoint in this codebase once
+ * began returning PII without its tenant guard; that is the mistake being
+ * deliberately not repeated here.)
+ *
+ * Vendors are blocked at the route by noAcl([3]); the GRN site-representative
+ * token user is refused here, since a delivery contact has no business being
+ * handed the buyer's internal phone book.
+ */
+export const getPoInitiators = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+
+    const po = await guardPo(req, res, po_id);
+    if (!po) return;
+
+    if (req.user?.is_token_user || Number(req.user?.user_type) === 3) {
+      return res.status(403).json({
+        status: 3,
+        message: 'You do not have permission to view this.',
+        code: 'PO_WRITE_PERMISSION_REQUIRED',
+      });
+    }
+
+    const data = await listPoInitiators(po, req.user);
+
+    return res.json({
+      status: 1,
+      message: data.total
+        ? 'Users who can initiate this purchase order.'
+        : 'No user with permission to initiate this purchase order was found.',
+      data,
+    });
+  } catch (error) {
+    logError('getPoInitiators failed', error);
+    return res.status(500).json({
+      status: 0,
+      message: error?.message || 'An error occurred while fetching PO initiators.',
+    });
+  }
 };
 
 export const updatePO = async (req, res) => {

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getPoInitiators, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics } from "../../controllers/po/poDashboardController.js";
 import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf } from "../../controllers/po/poVendorController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
@@ -38,6 +38,18 @@ PORoutes.get('/vendor/detail/:po_id', passportSignIn, acl([3]), vendorPoDetail);
 PORoutes.get('/vendor/detail/:po_id/pdf', passportSignIn, acl([3]), vendorPoPdf);
 
 PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
+// "Who can initiate THIS purchase order?" — the read-side companion to the
+// write gate on /initiate/:po_id below. A user the gate refuses is otherwise
+// left with a disabled button and no idea whose desk to walk to; this names the
+// people who WOULD pass, derived from the same predicate so the list and the
+// gate cannot disagree (purchaseOrderModel.listPoInitiators).
+//
+// Same middleware as the other buyer-side PO reads: JWT + noAcl([3]). The
+// response carries names, emails and mobile numbers, so the controller runs
+// assertPoAccess before anything else — out-of-scope still answers 404, and
+// the PII is only ever shown to someone who could already open the PO. No
+// can() here, per the same reasoning as the initiate routes.
+PORoutes.get('/:po_id/initiators', passportSignIn, noAcl([3]), getPoInitiators);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
 // check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
 // vendor user_types at the route layer.
