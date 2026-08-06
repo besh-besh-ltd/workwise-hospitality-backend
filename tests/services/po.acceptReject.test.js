@@ -443,6 +443,18 @@ describe("rejectPO — gates", () => {
 //  Resolves several Task 30 todos using the new approval helper.
 // ===========================================================================
 
+// Initiating a PO is a WRITE: purchaseOrderModel.assertPoInitiateAccess demands
+// `awarding.create` (or `awarding.update`) on the PO's own scope, on top of the
+// read gate. a1_proc_buyer — the RFQ/PO creator these fixtures use — holds only
+// rfq.read / boq.read, which mirrors production, where most people who finalise
+// a vendor cannot initiate the resulting draft. companyA_admin holds CEO at
+// company A with a wildcard hotel, so they carry awarding.create everywhere in
+// the tenant, and are deliberately NOT an approver on IDS.policies.A1_P1_PO —
+// an initiator who is also an approver would trip the step-skip path and change
+// what these tests observe.
+// The gate itself is covered by tests/services/security.poInitiateWriteGate.test.js.
+const INITIATOR = IDS.users.companyA_admin;
+
 describe("initiatePO — creates PO approval instance against the PO policy", () => {
   it("draft PO under A1/P1 → POST /po/initiate creates a PENDING PO approval instance against IDS.policies.A1_P1_PO", async () => {
     const { rfq_id, rfq_product_id, product_variant_id, quote_id } =
@@ -455,7 +467,7 @@ describe("initiatePO — creates PO approval instance against the PO policy", ()
     await attachProductToPo(po_id, rfq_product_id, quote_id);
 
     const m = mockExpress({
-      user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+      user: { id: INITIATOR, company_id: IDS.companies.A },
       params: { po_id: String(po_id) },
     });
     await poController.initiatePO(m.req, m.res);
@@ -497,7 +509,7 @@ describe("approvePO — multi-step approval drives handlePOPostApproval", () => 
 
     // Initiate.
     const init = mockExpress({
-      user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+      user: { id: INITIATOR, company_id: IDS.companies.A },
       params: { po_id: String(po_id) },
     });
     await poController.initiatePO(init.req, init.res);
@@ -527,7 +539,7 @@ describe("approvePO — multi-step approval drives handlePOPostApproval", () => 
     await attachProductToPo(po_id, rfq_product_id, quote_id);
 
     const init = mockExpress({
-      user: { id: IDS.users.a1_proc_buyer, company_id: IDS.companies.A },
+      user: { id: INITIATOR, company_id: IDS.companies.A },
       params: { po_id: String(po_id) },
     });
     await poController.initiatePO(init.req, init.res);

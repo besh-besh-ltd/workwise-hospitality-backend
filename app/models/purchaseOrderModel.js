@@ -86,9 +86,11 @@ export function buildPoScopeExists(userId, alias, values, startIndex) {
   return { clause: `(${clauses.join(" OR ")})`, nextIndex: i };
 }
 
-// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
-const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
-  for (const perm of PO_SCOPE_PERMISSIONS) {
+// True when the user's grant on ANY of `permissions` covers the tuple. One
+// helper for every PO predicate so the scope evaluation (and its NULL
+// semantics) is written once — only the permission list varies.
+const hasAnyScopeOf = async (userId, permissions, tuple, dbCtx = db) => {
+  for (const perm of permissions) {
     try {
       await assertUserHasScope(userId, perm, tuple, dbCtx);
       return true;
@@ -98,6 +100,10 @@ const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
   }
   return false;
 };
+
+// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
+const hasAnyPoScope = (userId, tuple, dbCtx = db) =>
+  hasAnyScopeOf(userId, PO_SCOPE_PERMISSIONS, tuple, dbCtx);
 
 /**
  * Resolve a PO's tenancy tuple. RFQ-backed POs source it from tbl_rfq;
@@ -176,6 +182,91 @@ export const assertPoAccess = async (user, po_id, dbCtx = db) => {
     process_id: po.process_id,
   }, dbCtx);
   if (!allowed) throw new PoAccessError();
+
+  return po;
+};
+
+// ===========================================================================
+// SECURITY — initiating a PO is a WRITE and must not ride on a READ grant.
+// ---------------------------------------------------------------------------
+// assertPoAccess above answers one question: "may this user SEE this purchase
+// order?" Its predicate is PO_SCOPE_PERMISSIONS — awarding.read OR rfq.read OR
+// boq.read. (The only other thing standing in front of initiate was
+// initiatePurchaseOrder's `status = draft` idempotency guard, which is a
+// state check, not an authorization one.) Initiating is a different
+// question entirely: it flips draft -> pending_approval, creates the approval
+// instance, regenerates the PDF and emails the approvers. Until this gate
+// existed the server asked for nothing beyond the read grant, and the only
+// thing standing between a read-only user and that write was a disabled button
+// in the browser (PODetail.js) — i.e. no server-side authorization at all.
+//
+// PREDICATE: `awarding.create` OR `awarding.update`, evaluated against the PO's
+// OWN company x hotel x department x process tuple — the very tuple
+// assertPoAccess already resolved from the parent RFQ (or, for call-offs, the
+// ARC). Never the viewer's hotel mappings: a create grant held at some *other*
+// hotel is not a grant on this PO.
+//
+// WHY BOTH create AND update: PODetail.js gates the Force Initiate button on
+// `canWrite = canUpdate || canCreate`. A server that accepted only `create`
+// would 403 a button the UI had enabled for anyone holding update alone — a
+// regression, not a fix. tbl_permissions carries no `awarding.update` row today
+// (only read / create / approve / regenerate), so in production the OR is inert
+// and the effective gate is exactly `awarding.create`; that is precisely what
+// makes it cheap insurance against the two gates drifting apart if the row is
+// ever seeded.
+//
+// 403, NOT 404: the read gate has already passed by the time this runs, so the
+// caller has demonstrably been shown that this PO exists — there is nothing
+// left to leak. Answering 404 would disguise a permissions problem as a missing
+// record and send the user hunting for the wrong thing.
+//
+// NOT GATED HERE: autoInitiateRFQPOs, which drives the same transition from the
+// award / NEGOTIATION_QUOTE-approval path. That is a system action whose
+// authorization is the award it follows, and it re-uses each PO's own
+// `initiated_by` as the initiator rather than acting for a request user.
+// ===========================================================================
+export const PO_INITIATE_PERMISSIONS = ["awarding.create", "awarding.update"];
+
+export class PoWritePermissionError extends Error {
+  constructor(message = "You do not have permission to initiate this purchase order.") {
+    super(message);
+    this.name = "PoWritePermissionError";
+    this.status = 403;
+    this.code = "PO_WRITE_PERMISSION_REQUIRED";
+  }
+}
+
+/**
+ * THE gate for initiating a purchase order. Additive on top of assertPoAccess:
+ * the caller must still be able to SEE the PO (404 when not), and must then
+ * ALSO hold a write grant on the PO's own scope tuple (403 when not).
+ *
+ * Returns the resolved tenancy row, like assertPoAccess.
+ */
+export const assertPoInitiateAccess = async (user, po_id, dbCtx = db) => {
+  // Read gate first — preserves the existing 404-on-out-of-scope semantics and
+  // resolves the tuple we are about to evaluate the write grant against.
+  const po = await assertPoAccess(user, po_id, dbCtx);
+
+  // Vendors and GRN site-representative token users never initiate. noAcl([3])
+  // already blocks vendors at the route and the GRN token never reaches this
+  // route at all; both are re-asserted here so the model is safe standalone.
+  if (user?.is_token_user || Number(user?.user_type) === 3) {
+    throw new PoWritePermissionError();
+  }
+
+  // Super admin — parity with assertPoAccess, where a null hospitality scope
+  // means "every company". Super admins hold no tbl_user_role_scopes rows, so
+  // any scope-based predicate would refuse them outright.
+  if (Number(user?.user_type) === 8) return po;
+
+  const allowed = await hasAnyScopeOf(Number(user?.id), PO_INITIATE_PERMISSIONS, {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoWritePermissionError();
 
   return po;
 };

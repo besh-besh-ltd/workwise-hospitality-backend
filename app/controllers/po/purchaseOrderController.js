@@ -3,7 +3,7 @@ import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertRfqPoListingAccess, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -65,6 +65,31 @@ const guardPo = async (req, res, po_id) => {
   } catch (err) {
     if (err instanceof PoAccessError) {
       sendPoAccessError(res, err);
+      return null;
+    }
+    throw err;
+  }
+};
+
+/**
+ * guardPo + the WRITE grant required to initiate. Same contract: returns the
+ * resolved tenancy row, or null once the response has been sent.
+ *
+ * Two distinct refusals, deliberately distinguishable by the caller:
+ *   404 PO_NOT_FOUND_OR_OUT_OF_SCOPE  — cannot see the PO (unchanged).
+ *   403 PO_WRITE_PERMISSION_REQUIRED  — can see it, may not initiate it.
+ * See assertPoInitiateAccess in purchaseOrderModel.js for the predicate.
+ */
+const guardPoInitiate = async (req, res, po_id) => {
+  try {
+    return await assertPoInitiateAccess(req.user, po_id);
+  } catch (err) {
+    if (err instanceof PoAccessError) {
+      sendPoAccessError(res, err);
+      return null;
+    }
+    if (err instanceof PoWritePermissionError) {
+      res.status(err.status).json({ status: 3, message: err.message, code: err.code });
       return null;
     }
     throw err;
@@ -349,13 +374,19 @@ export const draftPO = async (poInfo, user, txn) => {
  * reachable over POST (see poRoutes.js) so the verb matches the effect. The GET
  * binding is retained until the frontend's single call site
  * (frontend/services/po.js -> handlePOInitialization) switches to POST.
+ *
+ * SECURITY (follow-up): that fix closed the cross-tenant hole but left a
+ * READ-permission gate on a WRITE action — any user who could merely see the
+ * PO could initiate it, because `awarding.create` was enforced only by the
+ * browser (PODetail.js `canWrite`). guardPoInitiate now requires a write grant
+ * on the PO's own scope tuple on the server too.
  */
 export const initiatePO = async (req, res) => {
   try {
     const { po_id } = req.params;
     const initiator = req.user;
 
-    if (!(await guardPo(req, res, po_id))) return;
+    if (!(await guardPoInitiate(req, res, po_id))) return;
 
     const result = await db.tx(async t => {
       return await initiatePurchaseOrder(po_id, initiator, t);
