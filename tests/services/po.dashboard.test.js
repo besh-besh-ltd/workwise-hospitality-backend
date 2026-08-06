@@ -525,6 +525,32 @@ describe("GET /po/detail/:po_id", () => {
     expect(Array.isArray(d.activity)).toBe(true);
     expect(Array.isArray(d.comparison)).toBe(true);
   });
+
+  // The PO's OWN scope keys. A client deciding whether to offer a write action
+  // on this purchase order (the Force Initiate button on the detail page) has
+  // to resolve the user's grants against THIS entity's hotel/department — the
+  // same tuple assertPoAccess evaluates. Without these two ids the only scope
+  // the frontend could reach for was the viewer's hospitality_mappings, which
+  // answers a different question: a create grant sitting at the PO's hotel
+  // disappears from the reply whenever the viewer's mapping snapshot doesn't
+  // cover that hotel, which is how a draft PO lost its Initiate button.
+  it("carries the PO's own hotel_id and department_id so a client can scope write actions to it", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor({
+      hotel: IDS.hotels.A1,
+      department: IDS.departments.proc,
+    });
+    const po_id = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    expect(res.status).toBe(200);
+    // Sourced from the parent RFQ, not from the caller — the same COALESCE
+    // the scope predicate uses, so a call-off PO reports its ARC's hotel.
+    expect(res.body.data.hotel_id).toBe(IDS.hotels.A1);
+    expect(res.body.data.department_id).toBe(IDS.departments.proc);
+  });
 });
 
 // ===========================================================================

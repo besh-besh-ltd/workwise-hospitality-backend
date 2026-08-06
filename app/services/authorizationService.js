@@ -49,6 +49,66 @@ export class NoApprovalPolicyError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE scope predicate — written ONCE, read in both directions.
+// ---------------------------------------------------------------------------
+// Two questions share this predicate and must never be able to disagree:
+//
+//   forward — assertUserHasScope(userId, perm, tuple)  "may THIS user act?"
+//   inverse — listUsersWithAnyScope(perms, tuple)      "WHO may act?"
+//
+// The inverse is what powers "who can initiate this PO?" (purchaseOrderModel
+// .listPoInitiators). A name shown there that then 403s when its owner tries is
+// worse than showing no name at all, so the two are not allowed to be two
+// hand-written copies of the same WHERE clause. They are one string, below.
+//
+// The only difference between the two call sites is what binds `urs.user_id`:
+// the forward direction binds it to a parameter, the inverse leaves it free and
+// groups by it.
+//
+// Parameters, in order, starting at $base:
+//   $base+0  hospitality_company_id   $base+3  process_id
+//   $base+1  hotel_id                 $base+4  permissions  (text[])
+//   $base+2  department_id            $base+5  process_type (text|null)
+//
+// `permissions` is an ARRAY even in the forward direction, where it always
+// carries exactly one element. `x = ANY(ARRAY[p])` and `x = p` are the same
+// predicate, and the array is what lets the inverse ask about awarding.create
+// OR awarding.update in a single pass instead of once per permission.
+const SCOPE_MATCH_FROM = `
+    FROM tbl_user_role_scopes urs
+    JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+    JOIN tbl_permissions p ON p.id = rp.permission_id
+    LEFT JOIN tbl_approval_processes proc ON proc.id = urs.process_id`;
+
+// Predicate semantics (matches rbacModel.getUserPermissions + the EXISTS
+// clauses in rfqModel for backwards compatibility):
+//   - hotel_id: strict. Specific-hotel user cannot act on no-hotel entity;
+//     entity-hotel must match user's hotel OR user must be wildcard (NULL).
+//   - department_id: permissive when entity has NULL dept (no-dept entity
+//     pre-dates dept scoping); otherwise specific-dept match OR wildcard.
+//   - process_id: strict. Specific-process user cannot act on no-process
+//     entity; entity-process must match OR user must be wildcard (NULL).
+//     This is the new axis — gating is intentional (see plan §5).
+//   - process_type strictness: only enforced when both the user's scope row
+//     binds a specific process AND the caller supplies an expected type.
+const scopeMatchWhere = (base) => `
+      urs.company_id = $${base}
+      AND (urs.hotel_id IS NULL OR urs.hotel_id = $${base + 1})
+      AND ($${base + 2}::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $${base + 2})
+      AND (urs.process_id IS NULL OR urs.process_id = $${base + 3})
+      AND (p.resource || '.' || p.action) = ANY($${base + 4}::text[])
+      AND ($${base + 5}::text IS NULL OR urs.process_id IS NULL OR proc.process_type = $${base + 5})`;
+
+const scopeMatchParams = (scope, permissions) => [
+  scope.hospitality_company_id,
+  scope.hotel_id ?? null,
+  scope.department_id ?? null,
+  scope.process_id ?? null,
+  permissions,
+  scope.process_type ?? null,
+];
+
 /**
  * Throws AuthorizationError if the user lacks the (permission × scope) grant.
  *
@@ -83,34 +143,25 @@ export async function assertUserHasScope(userId, requiredPermission, scope, dbCo
     throw new Error(`assertUserHasScope: requiredPermission must be 'resource.action', got: ${requiredPermission}`);
   }
 
-  // Predicate semantics (matches rbacModel.getUserPermissions + the EXISTS
-  // clauses in rfqModel for backwards compatibility):
-  //   - hotel_id: strict. Specific-hotel user cannot act on no-hotel entity;
-  //     entity-hotel must match user's hotel OR user must be wildcard (NULL).
-  //   - department_id: permissive when entity has NULL dept (no-dept entity
-  //     pre-dates dept scoping); otherwise specific-dept match OR wildcard.
-  //   - process_id: strict. Specific-process user cannot act on no-process
-  //     entity; entity-process must match OR user must be wildcard (NULL).
-  //     This is the new axis — gating is intentional (see plan §5).
-  //   - process_type strictness: only enforced when both the user's scope row
-  //     binds a specific process AND the caller supplies an expected type.
+  // The WHERE body is scopeMatchWhere() — see the block comment above it for
+  // the NULL/wildcard semantics of each axis. It is shared verbatim with
+  // listUsersWithAnyScope so the "may this user act?" and "who may act?"
+  // answers are computed by the same predicate.
   const row = await dbContext.oneOrNone(
     `
     SELECT 1
-    FROM tbl_user_role_scopes urs
-    JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-    JOIN tbl_permissions p ON p.id = rp.permission_id
-    LEFT JOIN tbl_approval_processes proc ON proc.id = urs.process_id
+    ${SCOPE_MATCH_FROM}
     WHERE urs.user_id = $1
-      AND urs.company_id = $2
-      AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
-      AND ($4::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $4)
-      AND (urs.process_id IS NULL OR urs.process_id = $5)
-      AND (p.resource || '.' || p.action) = $6
-      AND ($7::text IS NULL OR urs.process_id IS NULL OR proc.process_type = $7)
+      AND ${scopeMatchWhere(2)}
     LIMIT 1
     `,
-    [userId, hospitality_company_id, hotel_id, department_id, process_id, requiredPermission, process_type]
+    [
+      userId,
+      ...scopeMatchParams(
+        { hospitality_company_id, hotel_id, department_id, process_id, process_type },
+        [requiredPermission]
+      ),
+    ]
   );
 
   if (!row) {
@@ -126,6 +177,49 @@ export async function assertUserHasScope(userId, requiredPermission, scope, dbCo
       }
     );
   }
+}
+
+/**
+ * THE INVERSE of assertUserHasScope: every user whose grant on ANY of
+ * `permissions` covers `scope`. Same predicate, same NULL/wildcard semantics —
+ * scopeMatchWhere() is shared verbatim, so a user appears here if and only if
+ * assertUserHasScope would admit them for at least one of `permissions`.
+ *
+ * Returns one row per user (not per grant): the role is the LOWEST role_id
+ * among the roles through which they qualify, which is deterministic and
+ * stable across requests.
+ *
+ * Emits ids and role titles only — NO personal data. Every caller is expected
+ * to join tbl_users itself and apply its own visibility rules (active-only,
+ * exclude the caller, …); this function is not an authorization boundary.
+ *
+ * @param {string[]} permissions - e.g. ['awarding.create', 'awarding.update']
+ * @param {Object} scope - same shape as assertUserHasScope's
+ * @param {Object} [dbContext]
+ * @returns {Promise<Array<{user_id:number, role_id:number, role_title:string}>>}
+ */
+export async function listUsersWithAnyScope(permissions, scope, dbContext = db) {
+  const perms = (Array.isArray(permissions) ? permissions : [permissions])
+    .filter((p) => typeof p === 'string' && p.includes('.'));
+  if (!perms.length) return [];
+  // Mirrors assertUserHasScope's own guard: no company, no grant. Returning []
+  // rather than throwing keeps this usable as "who can act?" on an entity whose
+  // tenancy could not be resolved — the honest answer there is "nobody known".
+  if (!scope?.hospitality_company_id) return [];
+
+  return dbContext.any(
+    `
+    SELECT DISTINCT ON (urs.user_id)
+           urs.user_id,
+           urs.role_id,
+           rl.title AS role_title
+    ${SCOPE_MATCH_FROM}
+    JOIN tbl_roles rl ON rl.id = urs.role_id
+    WHERE ${scopeMatchWhere(1)}
+    ORDER BY urs.user_id, urs.role_id ASC
+    `,
+    scopeMatchParams(scope, perms)
+  );
 }
 
 /**
