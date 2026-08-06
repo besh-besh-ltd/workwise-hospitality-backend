@@ -70,6 +70,8 @@ import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
+  getBidEndMomentIst,
+  istNow,
 } from '../../helper/quoteVisibility.js';
 import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
@@ -3866,9 +3868,15 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       txContext: t
     });
 
-    // Check if publish date has already passed - if so, publish immediately after approval
-    const publishDatePassed = rfq.tender_publish_date
-      && new Date(rfq.tender_publish_date) <= new Date();
+    // Check if publish date has already passed - if so, publish immediately after approval.
+    //
+    // `tender_publish_date` is a naive `timestamp without time zone` holding an
+    // IST wall-clock value. `new Date(...)` would resolve it in the NODE PROCESS
+    // timezone (UTC in production), so an approval landing after the intended IST
+    // publish moment but within 5h30m of it read as "not yet due" — the RFQ was
+    // parked at READY_TO_PUBLISH and handed EventBridge an already-past `at()`.
+    const publishAtIst = getBidEndMomentIst(rfq.tender_publish_date);
+    const publishDatePassed = !!publishAtIst && !publishAtIst.isAfter(istNow());
 
     if (publishDatePassed) {
       // Publish date already passed - publish directly within this transaction
@@ -3963,7 +3971,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
 
     // Send "Ready to Publish" notification for RFQs/tenders with future publish date
     // RFQs without a publish date are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
-    if (rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
+    if (publishAtIst && publishAtIst.isAfter(istNow())) {
       try {
         const rfqFull = await t.oneOrNone('SELECT title FROM tbl_rfq WHERE id = $1', [rfq_id]);
         const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
@@ -4032,8 +4040,49 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
       return null;
     }
 
-    // Reset status to 1 (draft) so the RFQ moves back to the drafts list
-    await t.none(`UPDATE tbl_rfq SET status = 1 WHERE id = $1`, [rfq_id]);
+    // Reset to the draft state so the RFQ moves back to the drafts list.
+    //
+    // The draft state is the PAIR (status = 1, is_published = 0) — that is
+    // exactly how a new RFQ is inserted (rfqModel.saveMagicSearchInDraft) and
+    // what the buyer surfaces read: the Drafts widget is `is_published = 0 AND
+    // status NOT IN (5, 2)` (dashboardModel.getMyDraftsData) and the management
+    // listing surfaces drafts via `is_published = 0 AND created_by = me`
+    // (rfqModel.getAllBuyerRfq, include_drafts). status alone is NOT the
+    // discriminator: status = 1 WITH is_published = 1 is the "live" predicate
+    // (rfqModel.getRfqByUser, vendorDashboardModel, dashboardModel). So the
+    // status write has to carry is_published with it, or "back to drafts" and
+    // "live to vendors" are the same row.
+    //
+    // Writing is_published = 0 is a backstop rather than a live un-publish:
+    // submitApprovalAction refuses to decide a publish approval once the RFQ
+    // has published, so a rejection cannot land on a live RFQ. It is asserted
+    // anyway so the invariant "REJECTED ⇒ not live" holds by construction.
+    await t.none(
+      `UPDATE tbl_rfq SET status = 1, is_published = 0 WHERE id = $1`,
+      [rfq_id]
+    );
+
+    // Disarm the publish schedule armed at submit time.
+    //
+    // Publishing does not wait for approval: startApprovalForRFQ parks the RFQ
+    // at status 4 and calls scheduleRfqPublish, which creates an EventBridge
+    // schedule for tender_publish_date. Rejection unwinds the status but the
+    // schedule stayed armed — and publishRfqById treats status 1 as
+    // publishable (`if (rfq.status !== 4 && rfq.status !== 1) skip`), so when
+    // the schedule fired it published the rejected RFQ: status 1 +
+    // is_published 1, live and quotable, carrying a REJECTED approval. The
+    // status write above cannot prevent that on its own; the schedule has to
+    // go. Same teardown withdrawPublish/terminateRFQ already do.
+    //
+    // Best-effort by design: a scheduler failure must not fail the rejection.
+    // The residual risk is bounded — the stuck-publish watchdog only picks up
+    // status = 4, so a rejected RFQ is never re-armed from this side.
+    try {
+      const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+      await removeRfqPublishJob(rfq_id);
+    } catch (scheduleErr) {
+      logError(`Failed to remove publish schedule for rejected RFQ ${rfq_id}`, scheduleErr);
+    }
 
     // Record lifecycle event for rejection
     await recordLifecycleEvent({
@@ -9240,36 +9289,18 @@ const rfqController = {
         }
 
         // Clarification period validation (IST-based).
-        // Treat vendor_clarification_date as an IST datetime and convert to a UTC Date
-        // so that 6:30 PM IST is respected regardless of server timezone.
+        // `vendor_clarification_date` is a naive `timestamp without time zone`
+        // holding an IST wall-clock value, so it must be resolved in IST rather
+        // than in the Node process timezone. This used to be a local hand-rolled
+        // split/Date.UTC/-330min conversion; it is the same computation
+        // getBidEndMomentIst performs for bid_end_date, so it collapses onto the
+        // shared helper — one IST parser for every naive deadline column instead
+        // of one per call site.
         if (rfqDetails[0].vendor_clarification_date) {
-          const rawClar = String(rfqDetails[0].vendor_clarification_date).trim();
-          let datePart;
-          let timePart;
-
-          if (rawClar.includes('T')) {
-            [datePart, timePart] = rawClar.split('T');
-          } else if (rawClar.includes(' ')) {
-            [datePart, timePart] = rawClar.split(' ');
-          } else {
-            datePart = rawClar;
-            timePart = '00:00:00';
-          }
-
-          const [year, month, day] = datePart.split('-').map((v) => parseInt(v, 10));
-          const [hourStr, minuteStr, secondStr] = (timePart || '00:00:00').split(':');
-          const hour = parseInt(hourStr || '0', 10);
-          const minute = parseInt(minuteStr || '0', 10);
-          const second = parseInt((secondStr || '0').split('.')[0] || '0', 10);
-
-          const IST_OFFSET_MINUTES = 330; // +05:30
-          const clarificationEnd = new Date(
-            Date.UTC(year, month - 1, day, hour, minute, second) -
-              IST_OFFSET_MINUTES * 60 * 1000
+          const clarificationEndIst = getBidEndMomentIst(
+            rfqDetails[0].vendor_clarification_date
           );
-
-          const now = new Date();
-          if (!isNaN(clarificationEnd.getTime()) && now < clarificationEnd) {
+          if (clarificationEndIst && clarificationEndIst.isAfter(istNow())) {
             return res.status(400).json({
               status: 3,
               message:
@@ -17319,27 +17350,43 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Validate clarification period
-      const now = new Date();
-      const publishDate = rfq.tender_publish_date
-        ? new Date(rfq.tender_publish_date)
+      // Validate clarification period — anchored to IST, not to the Node
+      // process timezone.
+      //
+      // `tender_publish_date` and `vendor_clarification_date` are naive
+      // `timestamp without time zone` columns holding IST WALL-CLOCK values
+      // (dbConn.js parses OID 1114 straight back as a string, so what lands
+      // here is e.g. "2026-08-06 10:00:00" with no offset). `new Date(...)`
+      // resolves that string in the NODE PROCESS timezone — UTC in
+      // production — placing the instant 5h30m late. Both guards below were
+      // therefore wrong for a 5h30m window in opposite directions:
+      //
+      //   - the publish guard rejected with "Clarification period has not
+      //     started yet" for 5h30m AFTER the RFQ actually went live, and
+      //   - the end guard kept the window open for 5h30m after it closed.
+      //
+      // Same convention and the same fix as bid_end_date (quoteVisibility.js)
+      // and the publish path.
+      const nowIst = istNow();
+      const publishAtIst = rfq.tender_publish_date
+        ? getBidEndMomentIst(rfq.tender_publish_date)
         : null;
-      const clarificationEndDate = rfq.vendor_clarification_date
-        ? new Date(rfq.vendor_clarification_date)
+      const clarificationEndIst = rfq.vendor_clarification_date
+        ? getBidEndMomentIst(rfq.vendor_clarification_date)
         : null;
 
-      // If tender is already published (status = 1 or is_published = 1), 
+      // If tender is already published (status = 1 or is_published = 1),
       // only check vendor_clarification_date, not tender_publish_date
       const isPublished = rfq.status === 1 || rfq.is_published === 1;
 
-      if (!isPublished && publishDate && now < publishDate) {
+      if (!isPublished && publishAtIst && publishAtIst.isAfter(nowIst)) {
         return res.status(400).json({
           status: 0,
           message: 'Clarification period has not started yet'
         });
       }
 
-      if (clarificationEndDate && now > clarificationEndDate) {
+      if (clarificationEndIst && nowIst.isAfter(clarificationEndIst)) {
         return res.status(400).json({
           status: 0,
           message: 'Clarification period has ended'
@@ -18261,9 +18308,19 @@ getClauses: async (req, res) => {
       // Compare publish time in SQL so the timezone handling matches what the
       // watchdog uses — relying on `new Date(timestampWithoutTimeZone)` in JS
       // would re-interpret the value in the Node process's local TZ.
+      //
+      // The comparison must be anchored to IST, not to `NOW()`:
+      // `tender_publish_date` is a naive column holding IST wall-clock, and
+      // `NOW()` promotes it through the POSTGRES SESSION timezone (UTC on RDS).
+      // With plain NOW() this guard rejected force-publish with "Scheduled
+      // publish time has not yet passed" for 5h30m after the intended moment —
+      // i.e. force publish, the documented escape hatch for a stuck RFQ, was
+      // blocked during exactly the window in which RFQs get stuck.
       const rfq = await db.oneOrNone(
         `SELECT id, rfq_no, is_tender, status, is_published, created_by, tender_publish_date,
-                (tender_publish_date IS NULL OR tender_publish_date >= NOW()) AS publish_time_not_passed
+                (tender_publish_date IS NULL
+                 OR tender_publish_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                ) AS publish_time_not_passed
          FROM tbl_rfq WHERE id = $1`,
         [rfqId]
       );

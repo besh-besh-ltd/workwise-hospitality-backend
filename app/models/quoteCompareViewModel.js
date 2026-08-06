@@ -522,6 +522,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
   const docCountByQuote = await fetchQuoteDocCounts(id);
   const techByVendor = await fetchVendorTech(id);
   const techByProduct = await fetchProductTech(id);
+  // Why each empty cell is empty, for the cells the technical gate emptied.
+  const techBlockedByProduct = await fetchTechBlockedQuoters(id);
   const approvalChain = await fetchApprovalChain(rfq, approvalByRfqProduct, scope);
 
   // Which PENDING quote-approval instances are awaiting THIS user's action —
@@ -746,9 +748,33 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
         })() : null,
       };
     }
-    // Every vendor in vendors[] gets an explicit null when they didn't quote.
+    // Every vendor in vendors[] gets an explicit null when they have no usable
+    // quote here. `null` is load-bearing: every downstream consumer — the FE's
+    // rank/L1/coverage/grand-total helpers, the award-selection guards, the
+    // finalize payload builder (which needs cell.finalize) and the Excel
+    // exports — treats a falsy cell as "not comparable, not awardable". A
+    // truthy sentinel object would silently make a disqualified vendor
+    // selectable via "give all to vendor" and would let their (incomplete)
+    // grand total be ranked against complete ones. So the DISCRIMINATOR lives
+    // in a sibling map keyed the same way, and the cell stays null.
     for (const v of vendors) {
       if (!(String(v.id) in quotesByVendor)) quotesByVendor[String(v.id)] = null;
+    }
+
+    // Why a null cell is null, for the only case where "no cell" does not mean
+    // "no response": the technical gate. Keyed by vendor id exactly like
+    // `quotes`, present only for vendors who DID submit a quote for this
+    // product. Absence of a key = genuine non-response. See
+    // fetchTechBlockedQuoters for the two statuses and why suppression stays.
+    const blockedHere = techBlockedByProduct.get(rfqProductId) || null;
+    const quotesAbsence = {};
+    if (blockedHere) {
+      for (const v of vendors) {
+        const key = String(v.id);
+        if (quotesByVendor[key] != null) continue; // has a live cell — nothing to explain
+        const hit = blockedHere.get(key);
+        if (hit) quotesAbsence[key] = hit;
+      }
     }
 
     // LPR. `rate`/`date` are the last-purchase BASE unit price + when. We ALSO
@@ -917,6 +943,7 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
       awaiting_me,
       approval,
       quotes: quotesByVendor,
+      quotes_absence: quotesAbsence,
     };
   });
 
@@ -975,6 +1002,10 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
       p.state = "open";
       p.target = null;
       p.tech = { configured: !!p.tech?.configured, scores: {} };
+      // Same class of data as `tech.scores`, which is redacted one line up: it
+      // names a vendor and reveals a verdict against them. Nothing is evaluated
+      // before the deadline anyway.
+      p.quotes_absence = {};
       p.approval = { current_approvers: [], trail: [] };
     }
   }
@@ -1662,6 +1693,80 @@ async function fetchVendorTech(rfqId) {
     }
   } catch (e) {
     logError("quoteCompareView fetchVendorTech failed", e);
+  }
+  return map;
+}
+
+// rfqProductId -> Map(vendorId(string) -> { status, tech_score, min_score }).
+//
+// WHY THIS EXISTS. rfqModel.getQuotesByRfqById2 is called with TA_Vendors='TA',
+// which appends a SQL gate (rfqModel.js L6911-6939) that DROPS a vendor's whole
+// quotation for a product unless the vendor has a cleared_vendors row with
+// status = 1 against that product's technical evaluation. The quote row simply
+// never arrives, so the cell assembly below writes `quotes[vendorId] = null` —
+// byte-identical to a vendor that never responded at all. The buyer's primary
+// commercial screen then reads "Awaiting quote" over a vendor who competed and
+// was disqualified by the buyer's OWN technical gate, and the vendor column
+// counts that line as un-quoted ("Partial — 2 of 3 items quoted").
+//
+// Suppressing the PRICE is correct and stays: a disqualified vendor must not be
+// commercially comparable or awardable. What was missing is the REASON. This
+// lookup recovers it — for each product with a technical evaluation, which
+// vendors actually submitted a (non-regret) quote line for it but were held out
+// by the gate, and why:
+//
+//   TECH_FAILED  — a verdict row exists and it is not a pass (status <> 1)
+//   TECH_PENDING — no verdict row yet; the gate excludes them by default, so
+//                  they read as unresponsive even though nobody has judged them
+//
+// Vendors with no quote line for the product are deliberately absent: they ARE
+// genuine non-responses and must keep the "Awaiting quote" placeholder.
+//
+// The quote-line existence test mirrors the gated query exactly (same
+// rfq/variant join, same is_regret exclusion), so a vendor is marked here iff
+// the gate is the only reason their cell is empty.
+async function fetchTechBlockedQuoters(rfqId) {
+  const map = new Map();
+  try {
+    const rows = await db.any(
+      `SELECT DISTINCT ON (te.tbl_rfq_product_id, quoters.vendor_id)
+              te.tbl_rfq_product_id           AS rfq_product_id,
+              quoters.vendor_id               AS vendor_id,
+              te.minimum_passing_score        AS min_score,
+              cv.status                       AS status,
+              cv.calculated_score             AS calculated_score
+         FROM tbl_rfq_product_tech_evaluation te
+         JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+         JOIN LATERAL (
+                SELECT DISTINCT q.created_by AS vendor_id
+                  FROM tbl_quote_items qi
+                  JOIN tbl_quotes q ON q.id = qi.quote_id
+                 WHERE qi.rfq_id = te.rfq_id
+                   AND qi.product_variant_id = rp.product_variant_id
+                   AND qi.variant = rp.variant
+                   AND (q.is_regret IS NULL OR q.is_regret <> 1)
+              ) quoters ON TRUE
+         LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
+                ON cv.tbl_rfq_product_tech_evaluation_id = te.id
+               AND cv.vendor_id = quoters.vendor_id
+        WHERE te.rfq_id = $1
+        ORDER BY te.tbl_rfq_product_id, quoters.vendor_id, cv.id DESC`,
+      [rfqId]
+    );
+    for (const r of rows) {
+      // A pass is the ONLY state that lets the quote through the gate, so it is
+      // the only state with a visible cell — nothing to explain.
+      if (Number(r.status) === 1) continue;
+      const pid = Number(r.rfq_product_id);
+      if (!map.has(pid)) map.set(pid, new Map());
+      map.get(pid).set(String(r.vendor_id), {
+        status: r.status == null ? "TECH_PENDING" : "TECH_FAILED",
+        tech_score: r.calculated_score != null ? Math.round(Number(r.calculated_score)) : null,
+        min_score: r.min_score != null ? Number(r.min_score) : null,
+      });
+    }
+  } catch (e) {
+    logError("quoteCompareView fetchTechBlockedQuoters failed", e);
   }
   return map;
 }
