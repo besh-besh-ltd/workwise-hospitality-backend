@@ -1177,8 +1177,14 @@ async function fetchQuoteApprovals(rfqProductIds) {
 // Map(instanceId -> { current_approvers:[{name,initials,role}], trail:[node] }).
 // Each trail node mirrors poDashboardModel.buildAuditTrail:
 //   { key, status:'done'|'rejected'|'current'|'pending', title, by, initials,
-//     role, when, reason, approvers:[{name,initials,role,status}] }
+//     role, when, reason, decision_rule:'ANY'|'ALL',
+//     approvers:[{user_id,name,initials,role,status,acted_at,
+//                 removal_reason,removed_at}] }
 // A leading "Sent for approval" node uses the instance initiator + created_at.
+// The whole payload sits BEHIND the pre-deadline lock: step 8 of buildQuote-
+// ComparisonView replaces `p.approval` wholesale with { current_approvers: [],
+// trail: [] } while quotes are locked, so none of these fields — identities,
+// user ids, act times — are reachable before bid_end_date passes.
 async function buildQuoteApprovalData(instanceIds) {
   const out = new Map();
   const ids = (instanceIds || []).map(Number).filter((x) => Number.isInteger(x) && x > 0);
@@ -1205,6 +1211,7 @@ async function buildQuoteApprovalData(instanceIds) {
     // that tooltip has data to render.
     const steps = await db.any(
       `SELECT st.approval_instance_id, st.id, st.step_order, st.status, st.completed_at,
+              st.decision_rule,
               COALESCE(
                 JSON_AGG(
                   JSON_BUILD_OBJECT(
@@ -1320,10 +1327,26 @@ async function buildQuoteApprovalData(instanceIds) {
           role: actor ? actor.role || null : null,
           when: iso(st.completed_at),
           reason,
+          // The step's ANY/ALL rule, mirroring poDashboardModel's workflow node.
+          // Without it the drawer cannot tell "blocked behind this person" from
+          // "moot": under ANY, one approver clearing SATISFIES the step, so the
+          // other PENDING rows are not blockers and must not render as live
+          // pending — the same defect class already fixed for the PO panel
+          // (see effectiveApproverStatus in poDashboardModel). Defaulted to
+          // 'ANY' to match the column default and that shaper.
+          decision_rule: st.decision_rule || "ANY",
           // removal_reason/removed_at ride along so the drawer's removed-chip
           // tooltip (QuoteComparison.js renderApprovalDrawer) has data to show.
+          // user_id is the stable identity (React key + dedupe — the same
+          // person can sit on more than one level); acted_at timestamps and
+          // orders "already acted". acted_at goes through `iso()` so it shares
+          // one convention with this node's own `when` (also a naive
+          // `timestamp without time zone`) and with poDashboardModel's roster —
+          // mixing raw and ISO in one node would silently break any sort.
           approvers: approvers.map((a) => ({
             ...personOf(a), status: a.status,
+            user_id: a.user_id ?? null,
+            acted_at: iso(a.acted_at),
             removal_reason: a.removal_reason || null,
             removed_at: a.removed_at || null,
           })),

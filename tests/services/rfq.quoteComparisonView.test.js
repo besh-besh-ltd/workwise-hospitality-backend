@@ -263,6 +263,11 @@ async function seedProductTech(rfq_id, rfq_product_id, scores = [], minScore = 0
 // with one step + one approver, mirroring po.dashboard.test.js's shape.
 // `status`: PENDING | APPROVED | REJECTED. If REJECTED and reason is provided,
 // also seed the REJECT action carrying the comment (read by fetchQuoteApprovals).
+// `decisionRule` / `stampActedAt` are additive and default to the historic
+// behaviour ('ANY', no acted_at), so every pre-existing caller is unchanged.
+// acted_at is `timestamp without time zone` holding naive IST wall-clock, so it
+// is stamped with (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') rather than
+// NOW() — CI runs a UTC session and NOW() would write a UTC wall-clock.
 async function makeQuoteApproval({
   rfq_product_id,
   status,
@@ -270,6 +275,8 @@ async function makeQuoteApproval({
   reason = null,
   hospitality = IDS.hospitality.A,
   hotel = IDS.hotels.A1,
+  decisionRule = "ANY",
+  stampActedAt = false,
 }) {
   const stepStatus = status === "PENDING" ? "PENDING" : status;
   const inst = await db.one(
@@ -288,16 +295,19 @@ async function makeQuoteApproval({
   const step = await db.one(
     `INSERT INTO tbl_approval_instance_steps
        (approval_instance_id, step_order, decision_rule, status)
-     VALUES ($1, 1, 'ANY', $2) RETURNING id`,
-    [inst.id, stepStatus]
+     VALUES ($1, 1, $3, $2) RETURNING id`,
+    [inst.id, stepStatus, decisionRule]
   );
   inserted.approvalStepIds.push(step.id);
 
   const appr = await db.one(
     `INSERT INTO tbl_approval_step_approvers
-       (approval_instance_step_id, approver_user_id, status)
-     VALUES ($1, $2, $3) RETURNING id`,
-    [step.id, approverUserId, stepStatus]
+       (approval_instance_step_id, approver_user_id, status, acted_at)
+     VALUES ($1, $2, $3,
+             CASE WHEN $4::boolean
+                  THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                  ELSE NULL END) RETURNING id`,
+    [step.id, approverUserId, stepStatus, stampActedAt]
   );
   inserted.approverIds.push(appr.id);
 
@@ -1386,5 +1396,247 @@ describe("GET /rfq/quote-comparison-view/:id — awaiting_me + LPR fields", () =
     if (product.lpr.landed_unit != null) {
       expect(typeof product.lpr.landed_unit).toBe("number");
     }
+  });
+});
+
+// ===========================================================================
+// 12) Approval trail — the step's decision rule + per-approver identity/time.
+// ---------------------------------------------------------------------------
+// The buyer's Negotiation & Award drawer has to answer three questions at a
+// glance: who has ALREADY acted, who is the CURRENT action taker, and who is
+// genuinely BLOCKED behind them. The trail payload could not express any of
+// them:
+//
+//   - `decision_rule` was never selected. Without the step's ANY/ALL rule a
+//     client cannot tell "blocked" from "moot": under ANY, one approver
+//     clearing SATISFIES the step, so the untouched PENDING rows beside them
+//     were never blockers and must not render as live pending. Rendering them
+//     as pending is the exact defect already fixed on the PO panel
+//     (poDashboardModel.effectiveApproverStatus + PODetail.js) — this is the
+//     data that lets the same rule be applied here.
+//   - `acted_at` was selected but dropped on the way out, so "already acted"
+//     had no timestamp and no ordering key.
+//   - `user_id` was likewise dropped, leaving the list with no stable identity
+//     (index keys only) and no way to dedupe a person who sits on two levels.
+//
+// These assert the SHAPED PAYLOAD only — never how the frontend renders it.
+// ===========================================================================
+describe("GET /rfq/quote-comparison-view/:id — approval trail decision rule + approver identity", () => {
+  // Finalize a product and hang an approval instance off it, returning the
+  // shaped L1 trail node the drawer reads.
+  async function l1NodeFor({ status, decisionRule, stampActedAt }) {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { rfq_product_id, product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const qid = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+    await finalizeProduct(rfq_id, rfq_no, qid, product_variant_id, IDS.users.vendor_alpha);
+    const instId = await makeQuoteApproval({ rfq_product_id, status, decisionRule, stampActedAt });
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    const node = product.approval.trail.find((n) => n.title === "L1 approval");
+    expect(node).toBeDefined();
+    return { node, instId, rfq_id, rfq_product_id, res };
+  }
+
+  // Add a second approver to an existing instance's L1 step.
+  async function addApprover(instId, userId, { status, stampActedAt = false }) {
+    const step = await db.one(
+      `SELECT id FROM tbl_approval_instance_steps
+        WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    );
+    const row = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, acted_at)
+       VALUES ($1, $2, $3,
+               CASE WHEN $4::boolean
+                    THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                    ELSE NULL END) RETURNING id`,
+      [step.id, userId, status, stampActedAt]
+    );
+    inserted.approverIds.push(row.id);
+    return row.id;
+  }
+
+  it("an ANY step carries decision_rule 'ANY' and every approver carries user_id + acted_at", async () => {
+    const { node } = await l1NodeFor({
+      status: "APPROVED", decisionRule: "ANY", stampActedAt: true,
+    });
+
+    expect(node.decision_rule).toBe("ANY");
+
+    const entry = node.approvers.find((a) => a.user_id === IDS.users.a1_proc_commApp);
+    expect(entry).toBeDefined();
+    expect(entry.status).toBe("APPROVED");
+    // A real, parseable instant — not just a truthy string.
+    expect(entry.acted_at).toBeTruthy();
+    expect(Number.isNaN(Date.parse(entry.acted_at))).toBe(false);
+    // The pre-existing fields are untouched by the addition.
+    expect(entry.name).toBeTruthy();
+    expect(entry).toHaveProperty("initials");
+    expect(entry).toHaveProperty("role");
+  });
+
+  it("an ALL step carries decision_rule 'ALL', with acted_at set on whoever acted and null on the approver still outstanding", async () => {
+    const { node, instId } = await l1NodeFor({
+      status: "PENDING", decisionRule: "ALL", stampActedAt: false,
+    });
+    expect(node.decision_rule).toBe("ALL");
+
+    // Re-fetch after adding the second approver so both rows are in the trail:
+    // one has cleared, one has not. Under ALL the outstanding one IS a blocker.
+    await db.none(
+      `UPDATE tbl_approval_step_approvers
+          SET status = 'APPROVED',
+              acted_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+        WHERE approval_instance_step_id =
+              (SELECT id FROM tbl_approval_instance_steps
+                WHERE approval_instance_id = $1 AND step_order = 1)
+          AND approver_user_id = $2`,
+      [instId, IDS.users.a1_proc_commApp]
+    );
+    await addApprover(instId, IDS.users.a1_proc_finance, { status: "PENDING" });
+
+    const inst = await db.one(
+      `SELECT entity_id FROM tbl_approval_instances WHERE id = $1`, [instId]
+    );
+    const rfqId = (await db.one(
+      `SELECT rfq_id FROM tbl_rfq_products WHERE id = $1`, [inst.entity_id]
+    )).rfq_id;
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res2 = await client.get(VIEW(rfqId));
+    expect(res2.status).toBe(200);
+    const p2 = res2.body.products.find((p) => p.id === Number(inst.entity_id));
+    const n2 = p2.approval.trail.find((n) => n.title === "L1 approval");
+
+    expect(n2.decision_rule).toBe("ALL");
+
+    const cleared = n2.approvers.find((a) => a.user_id === IDS.users.a1_proc_commApp);
+    const outstanding = n2.approvers.find((a) => a.user_id === IDS.users.a1_proc_finance);
+    expect(cleared).toBeDefined();
+    expect(outstanding).toBeDefined();
+
+    expect(cleared.status).toBe("APPROVED");
+    expect(cleared.acted_at).toBeTruthy();
+    expect(Number.isNaN(Date.parse(cleared.acted_at))).toBe(false);
+
+    // Never acted -> explicitly null, so "has acted" is a payload fact rather
+    // than something the client has to infer from the status string.
+    expect(outstanding.status).toBe("PENDING");
+    expect(outstanding.acted_at).toBeNull();
+  });
+
+  it("an ANY step that has already closed still reports its untouched approver, and decision_rule 'ANY' is what marks that row moot rather than blocking", async () => {
+    // The P0 shape: step APPROVED under ANY, one approver acted, another left
+    // PENDING forever. Both rows must be present AND the rule must be readable
+    // — otherwise the second person renders as a live pending approver on a
+    // step that closed months ago.
+    const { node, instId } = await l1NodeFor({
+      status: "APPROVED", decisionRule: "ANY", stampActedAt: true,
+    });
+    expect(node.decision_rule).toBe("ANY");
+
+    await addApprover(instId, IDS.users.a1_proc_finance, { status: "PENDING" });
+
+    const inst = await db.one(
+      `SELECT entity_id FROM tbl_approval_instances WHERE id = $1`, [instId]
+    );
+    const rfqId = (await db.one(
+      `SELECT rfq_id FROM tbl_rfq_products WHERE id = $1`, [inst.entity_id]
+    )).rfq_id;
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res2 = await client.get(VIEW(rfqId));
+    const p2 = res2.body.products.find((p) => p.id === Number(inst.entity_id));
+    const n2 = p2.approval.trail.find((n) => n.title === "L1 approval");
+
+    expect(n2.status).toBe("done");
+    expect(n2.decision_rule).toBe("ANY");
+
+    const untouched = n2.approvers.find((a) => a.user_id === IDS.users.a1_proc_finance);
+    expect(untouched).toBeDefined();
+    expect(untouched.status).toBe("PENDING");
+    expect(untouched.acted_at).toBeNull();
+
+    const acted = n2.approvers.find((a) => a.user_id === IDS.users.a1_proc_commApp);
+    expect(acted.acted_at).toBeTruthy();
+  });
+
+  it("a REMOVED approver still carries removal_reason + removed_at, now alongside user_id and a null acted_at", async () => {
+    // The tombstone contract is unchanged by the addition: REMOVED rows are
+    // still passed through (never filtered here) and keep their reason/date,
+    // which is what the drawer's muted removed-chip tooltip renders.
+    const { instId } = await l1NodeFor({
+      status: "PENDING", decisionRule: "ALL", stampActedAt: false,
+    });
+    const step = await db.one(
+      `SELECT id FROM tbl_approval_instance_steps
+        WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    );
+    // removed_at is `timestamp with time zone`, so NOW() is correct here (it is
+    // acted_at, a naive column, that needs the explicit IST cast).
+    const removed = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, removed_at, removal_reason)
+       VALUES ($1, $2, 'REMOVED', NOW(), 'policy_change') RETURNING id`,
+      [step.id, IDS.users.a1_proc_finance]
+    );
+    inserted.approverIds.push(removed.id);
+
+    const inst = await db.one(
+      `SELECT entity_id FROM tbl_approval_instances WHERE id = $1`, [instId]
+    );
+    const rfqId = (await db.one(
+      `SELECT rfq_id FROM tbl_rfq_products WHERE id = $1`, [inst.entity_id]
+    )).rfq_id;
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfqId));
+    expect(res.status).toBe(200);
+    const product = res.body.products.find((p) => p.id === Number(inst.entity_id));
+    const node = product.approval.trail.find((n) => n.title === "L1 approval");
+
+    const tombstone = node.approvers.find((a) => a.user_id === IDS.users.a1_proc_finance);
+    expect(tombstone).toBeDefined();
+    expect(tombstone.status).toBe("REMOVED");
+    expect(tombstone.removal_reason).toBe("policy_change");
+    expect(tombstone.removed_at).toBeTruthy();
+    expect(tombstone.acted_at).toBeNull();
+
+    // The tombstone must not become the node's single actor.
+    const removedName = (await db.one(
+      `SELECT name FROM tbl_users WHERE id = $1`, [IDS.users.a1_proc_finance]
+    )).name;
+    expect(node.by).not.toBe(removedName);
+  });
+
+  it("does not leak the trail before the bid deadline — the pre-deadline lock blanks approval wholesale, new fields included", async () => {
+    // Approver identities, their user ids and act times sit BEHIND the same
+    // gate as quotes and tech scores: while quotes are locked the shaper
+    // replaces `p.approval` with { current_approvers: [], trail: [] }. This
+    // pins that the additions did not widen what is visible pre-deadline.
+    const { rfq_id, rfq_no } = await makeViewableRfq({ bidEndOffsetMs: 86400_000 });
+    const { rfq_product_id, product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const qid = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+    await finalizeProduct(rfq_id, rfq_no, qid, product_variant_id, IDS.users.vendor_alpha);
+    await makeQuoteApproval({
+      rfq_product_id, status: "APPROVED", decisionRule: "ALL", stampActedAt: true,
+    });
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    expect(product.approval).toEqual({ current_approvers: [], trail: [] });
+    // No decision_rule, user_id or acted_at survives the lock anywhere.
+    expect(JSON.stringify(product.approval)).not.toMatch(/decision_rule|user_id|acted_at/);
   });
 });
