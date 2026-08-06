@@ -1008,17 +1008,20 @@ describe("pricingEngine.deriveMrpLine", () => {
     expect(engineOut.total).toBe(1180);
   });
 
-  it("fractional case round-trips within the accepted 0.01 tolerance (mrp 100 @ 18% → base 84.75 → total 100.01)", () => {
-    const { base } = deriveMrpLine({ mrp: 100, gst_pct: 18 });
-    expect(base).toBe(84.75);
+  it("fractional case round-trips EXACTLY (mrp 100 @ 18% → total 100.00, not 100.01)", () => {
+    // 100 / 1.18 = 84.745762711... — a repeating decimal. Quantising that rate
+    // before multiplying used to yield 84.75 * 1.18 = 100.01, i.e. the buyer was
+    // shown a paisa more than the vendor offered. The rate now keeps its full
+    // precision, so the entered MRP is reproduced to the paisa.
+    const { base, base_2dp } = deriveMrpLine({ mrp: 100, gst_pct: 18 });
+    expect(base_2dp).toBe(84.75); // display/storage-shaped rate is still 2dp
     const engineOut = calculateLineTotal({
       unit_price: base,
       quantity: 1,
       tax: 18,
       tax_mode: "percentage",
     });
-    expect(engineOut.total).toBe(100.01);
-    expect(Math.abs(engineOut.total - 100)).toBeLessThanOrEqual(0.011); // spec's stated 0.01 tolerance, with float-repr slack
+    expect(engineOut.total).toBe(100);
   });
 
   it("gst = 0 in MRP mode: base === net_inclusive, gst_amount = 0 (valid — not an error)", () => {
@@ -1048,11 +1051,12 @@ describe("pricingEngine.deriveMrpLine", () => {
   });
 
   it("absolute (₹) discount is applied to MRP before GST extraction", () => {
-    // mrp 1180, ₹180 absolute discount → net = 1000; base = 1000/1.18 = 847.46 (q2'd).
+    // mrp 1180, ₹180 absolute discount → net = 1000; base = 1000/1.18 = 847.4576…
     const out = deriveMrpLine({ mrp: 1180, discount: 180, discount_mode: "absolute", gst_pct: 18 });
     expect(out.discount_amount).toBe(180);
     expect(out.net_inclusive).toBe(1000);
-    expect(out.base).toBe(847.46);
+    expect(out.base).toBeCloseTo(847.4576271, 6);
+    expect(out.base_2dp).toBe(847.46);
   });
 
   it("blank discount ⇒ net = MRP (discount is optional)", () => {
@@ -1075,15 +1079,18 @@ describe("pricingEngine.deriveMrpLine", () => {
     expect(out.base).toBeGreaterThanOrEqual(0);
   });
 
-  it("base is quantised to 2dp exactly once (matches numeric(15,2) columns)", () => {
+  it("base keeps FULL precision; base_2dp carries the quantised rate for display/storage", () => {
     const out = deriveMrpLine({ mrp: 100, gst_pct: 18 });
-    // 100 / 1.18 = 84.745762711... → q2'd to 84.75.
-    expect(out.base).toBe(84.75);
-    expect(Number.isInteger(out.base * 100)).toBe(true); // no more than 2dp
+    // 100 / 1.18 = 84.745762711... Rounding this per-unit is what leaked money
+    // once a quantity multiplied it, so `base` must NOT be pre-quantised.
+    expect(Number.isInteger(out.base * 100)).toBe(false);
+    expect(out.base).toBeCloseTo(84.7457627, 6);
+    expect(out.base_2dp).toBe(84.75);
+    expect(Number.isInteger(out.base_2dp * 100)).toBe(true);
   });
 
   it("empty/undefined input object defaults every field to 0", () => {
     const out = deriveMrpLine();
-    expect(out).toEqual({ net_inclusive: 0, base: 0, gst_amount: 0, discount_amount: 0 });
+    expect(out).toEqual({ net_inclusive: 0, base: 0, base_2dp: 0, gst_amount: 0, discount_amount: 0 });
   });
 });

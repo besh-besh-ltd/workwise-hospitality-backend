@@ -6524,6 +6524,14 @@ LIMIT 2;
       // Filter for technically accepted vendors only
       // Two conditions ANDed: (1) vendor passed at least 1 product in RFQ, (2) vendor passed THIS product
       // Each condition falls through if no tech eval exists at that level
+      //
+      // TWIN — services/technicalQualificationService.js enforces this SAME
+      // predicate on the WRITE side (every path that inserts into
+      // tbl_quote_finalization: POST /rfq/finalize and the negotiation-quote
+      // approval routes). This one only HIDES a disqualified vendor's rows from
+      // the comparison screen; on its own it stops nothing. If you change the
+      // rule here, change it there in the same commit, or the buyer will be
+      // shown a vendor the server then refuses to award (or worse, the reverse).
       const vendorCondition = `
         AND (
           -- Condition 1: Vendor passed at least one product in this RFQ (or no tech eval in RFQ)
@@ -6772,6 +6780,17 @@ LIMIT 2;
                             'tax_mode', TQI.tax_mode,
                             'other_charges', TQI.other_charges,
                             'quantity', TQI.quantity,
+                            -- MRP (tax-inclusive) audit inputs. The comparison
+                            -- recomputes every line through the pricing engine,
+                            -- and for an MRP line the stored numeric(15,2)
+                            -- unit_price is a rounded echo of a repeating
+                            -- decimal. Without these the buyer would compare
+                            -- vendors on totals a few paise off the amounts
+                            -- actually offered (and off the resulting PO).
+                            'pricing_method', TQI.pricing_method,
+                            'entered_mrp', TQI.entered_mrp,
+                            'mrp_discount', TQI.mrp_discount,
+                            'mrp_discount_mode', TQI.mrp_discount_mode,
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
                                 SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
@@ -6908,6 +6927,14 @@ LIMIT 2;
       // Filter for technically accepted vendors only
       // Two conditions ANDed: (1) vendor passed at least 1 product in RFQ, (2) vendor passed THIS product
       // Each condition falls through if no tech eval exists at that level
+      //
+      // TWIN — services/technicalQualificationService.js enforces this SAME
+      // predicate on the WRITE side (every path that inserts into
+      // tbl_quote_finalization: POST /rfq/finalize and the negotiation-quote
+      // approval routes). This one only HIDES a disqualified vendor's rows from
+      // the comparison screen; on its own it stops nothing. If you change the
+      // rule here, change it there in the same commit, or the buyer will be
+      // shown a vendor the server then refuses to award (or worse, the reverse).
       const vendorCondition = `
       AND (
         -- Condition 1: Vendor passed at least one product in this RFQ (or no tech eval in RFQ)

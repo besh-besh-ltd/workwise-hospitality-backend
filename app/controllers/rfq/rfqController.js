@@ -61,7 +61,8 @@ import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
-import negotiationModel from '../../models/negotiationModel.js';
+import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
+import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
@@ -11121,15 +11122,46 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
-      // Check for active negotiation round blocking finalization
+      // Check for active negotiation round blocking finalization.
+      //
+      // COVERAGE must come from coversProductSql, never the rfq_product_id
+      // column. A round either targets ONE product (legacy shape:
+      // rfq_product_id set) or MANY (multi-product / RFQ-level shape:
+      // rfq_product_id NULL, coverage carried in the `products` JSONB — see
+      // negotiationController.js L979-1001, `isMultiShape`). Reading the column
+      // alone therefore matched legacy rounds ONLY and silently let every
+      // modern multi-product and RFQ-level round through: the buyer's sheet
+      // rendered the line as under negotiation while this guard waved the
+      // award past, so a product could be awarded mid-round.
+      // quoteCompareViewModel.fetchRoundsByProduct carries the identical
+      // warning about the identical mistake — "never read the columns
+      // directly". coversProductSql is the single shared predicate (6 other
+      // call sites in negotiationModel).
+      //
+      // THE OPEN-WINDOW TEST mirrors negotiationStateCaseSql's
+      // OPEN_WITH_VENDORS branch (negotiationModel.js L512-514) exactly, since
+      // that is the state the buyer's UI paints as "under negotiation":
+      //   * `end_date IS NULL OR ...` — an ACTIVE round with no deadline is
+      //     open-ended, hence still ongoing.
+      //   * `now() AT TIME ZONE 'UTC'` — end_date is a NAIVE column holding
+      //     UTC wall clock (written through moment.utc at L832, read back
+      //     through parseAsUTC at L22-28). Session-TZ NOW() was wrong by the
+      //     session's offset. NOTE for future edits: unlike tbl_rfq's naive
+      //     date columns, which hold IST, this one is UTC — do NOT "correct"
+      //     it toward Asia/Kolkata.
       const rfqProductForNego = await db.oneOrNone(
         `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
         [rfq_id, product_variant_id, variant]
       );
       if (rfqProductForNego) {
         const activeNegotiationRound = await db.oneOrNone(
-          `SELECT id FROM tbl_negotiation_rounds
-           WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' AND end_date > NOW()`,
+          `SELECT nr.id FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = $1
+              AND nr.source_type = 'RFQ'
+              AND nr.status = 'ACTIVE'
+              AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC'))
+              AND ${coversProductSql('$2')}
+            LIMIT 1`,
           [rfq_id, rfqProductForNego.id]
         );
         if (activeNegotiationRound) {
@@ -11138,6 +11170,36 @@ const rfqController = {
             message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
           });
         }
+      }
+
+      // ---------------------------------------------------------------------
+      // Technical-evaluation guard on the AWARD itself.
+      //
+      // Until this landed, the technical gate lived ENTIRELY at the read layer:
+      // rfqModel.getQuotesByRfqById2 is called with TA_Vendors='TA', which
+      // appends `vendorCondition` (rfqModel.js L6527 / L6911) to drop a
+      // disqualified vendor's quotation rows, so the comparison screen renders
+      // the cell as unselectable and the FE never builds a finalize payload for
+      // them. But suppression at the read layer is a UI affordance, not an
+      // authorization check — a crafted or replayed POST /rfq/finalize carrying
+      // {rfq_id, product_variant_id, vendor_id, quote_id, quote_item_id, ...}
+      // reached the INSERT with nothing consulting the technical verdict, and
+      // awarded a real contract to a vendor the buyer's own gate had failed.
+      //
+      // The predicate itself, its three verdict states and the reason each
+      // message is worded the way it is now live in ONE place —
+      // services/technicalQualificationService.js — because this is not the only
+      // write path that can create an award. The negotiation-quote approval
+      // routes reach tbl_quote_finalization through
+      // negotiationController.addQuotesToFinalization and consume the identical
+      // helper. Copying the SQL is how the sibling active-negotiation guard
+      // silently stopped firing for multi-product rounds; do not do it again.
+      const techQualification = await evaluateVendorTechnicalQualification(
+        { rfq_id, vendor_id, product_variant_id, variant },
+        db
+      );
+      if (!techQualification.qualified) {
+        return res.status(400).json({ status: 2, message: techQualification.message });
       }
 
       const vendor_details = await userModel.user_profile_detail(vendor_id);
