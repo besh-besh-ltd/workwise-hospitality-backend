@@ -236,13 +236,16 @@ async function finalizeProduct(rfq_id, rfq_no, quote_id, productVariantId, vendo
 }
 
 // Configure technical evaluation for one product and seed per-vendor scores.
-// scores: [{ vendorId, score, status }] (status 1 = passed/cleared). Presence of
+// scores: [{ vendorId, score, status }] (status 1 = passed/cleared, anything
+// else = failed; omit a vendor entirely to leave them unevaluated). Presence of
 // the te row makes product.tech.configured true; calculated_score drives T-rank.
-async function seedProductTech(rfq_id, rfq_product_id, scores = []) {
+// `minScore` is the product's minimum_passing_score, surfaced on the contract's
+// quotes_absence entries so the buyer sees "scored X against a minimum of Y".
+async function seedProductTech(rfq_id, rfq_product_id, scores = [], minScore = 0) {
   const te = await db.one(
     `INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score)
-     VALUES ($1, $2, 0) RETURNING id`,
-    [rfq_id, rfq_product_id]
+     VALUES ($1, $2, $3) RETURNING id`,
+    [rfq_id, rfq_product_id, minScore]
   );
   inserted.techEvalIds.push(te.id);
   for (const s of scores) {
@@ -500,6 +503,214 @@ describe("GET /rfq/quote-comparison-view/:id — per-product technical scores", 
     const product = res.body.products.find((p) => p.id === rfq_product_id);
     expect(product.tech.configured).toBe(false);
     expect(product.tech.scores).toEqual({});
+  });
+});
+
+// ===========================================================================
+// 1b-ii) quotes_absence — WHY a cell is empty.
+//
+// The bug this locks down: getQuotesByRfqById2 is called with TA_Vendors='TA',
+// whose SQL gate drops the whole quotation of a vendor who failed THIS
+// product's technical evaluation. The cell then collapsed to a bare `null` —
+// indistinguishable from a vendor who never responded — so the buyer's primary
+// commercial screen rendered "Awaiting quote" over a vendor who competed and
+// was disqualified by the buyer's own technical gate, and the vendor column
+// counted that line as un-quoted ("Partial — 2 of 3 items quoted").
+//
+// The price stays suppressed (a disqualified vendor must remain non-comparable
+// and non-awardable — quotes[vendor] is still null, so there is no `finalize`
+// payload and no selectable cell). Only the REASON is added, in a sibling map.
+//
+// Reproduced from RFQ 363 (#535917) on staging: vendor 429 quoted a LAPTOP
+// SCREEN line at ₹1,14,000.04, scored 20 against a 50 minimum, and was recorded
+// FAIL — while passing the other two products, which is what keeps them in the
+// vendors[] column set at all.
+// ===========================================================================
+describe("GET /rfq/quote-comparison-view/:id — quotes_absence (why a cell is empty)", () => {
+  // Three vendors, ONE product, three different reasons for the cell's state.
+  // Every vendor also quotes a second product they pass, because the 'TA' gate
+  // additionally requires a vendor to clear at least one product in the RFQ —
+  // otherwise they vanish from vendors[] entirely and have no column to explain.
+  async function seedThreeCases() {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const A = await addProduct(rfq_id, VARIANT_A);          // the product under test
+    const B = await addProduct(rfq_id, VARIANT_B, 0);       // the "carrier" product
+
+    // --- product A: alpha quotes and passes, beta quotes and FAILS ---
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 600, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    // gamma NEVER quotes product A — the genuine non-response.
+
+    // --- product B: beta + gamma quote and pass, which puts both in vendors[] ---
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 700, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_gamma, {
+      unitPrice: 800, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_alpha, score: 80, status: 1 },
+      { vendorId: IDS.users.vendor_beta, score: 20, status: 0 },
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 70, status: 1 },
+      { vendorId: IDS.users.vendor_gamma, score: 60, status: 1 },
+    ], 50);
+
+    return { rfq_id, A, B };
+  }
+
+  it("distinguishes quoted-and-passed, quoted-but-tech-failed and never-quoted on the SAME product", async () => {
+    const { rfq_id, A } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+    expect(product).toBeDefined();
+
+    const alpha = String(IDS.users.vendor_alpha);
+    const beta = String(IDS.users.vendor_beta);
+    const gamma = String(IDS.users.vendor_gamma);
+
+    // All three are columns on the sheet — otherwise there is nothing to label.
+    const vendorIds = res.body.vendors.map((v) => String(v.id));
+    expect(vendorIds).toEqual(expect.arrayContaining([alpha, beta, gamma]));
+
+    // 1) quoted AND passed -> a real, priced cell.
+    expect(product.quotes[alpha]).not.toBeNull();
+    expect(product.quotes[alpha].base).toBeGreaterThan(0);
+    expect(product.quotes_absence[alpha]).toBeUndefined();
+
+    // 2) quoted BUT technically failed -> price still suppressed, reason carried.
+    expect(product.quotes[beta]).toBeNull();
+    expect(product.quotes_absence[beta]).toEqual({
+      status: "TECH_FAILED",
+      tech_score: 20,
+      min_score: 50,
+    });
+
+    // 3) never quoted -> no cell AND no reason. This is what "Awaiting quote"
+    //    is allowed to mean, and the only case that may still say it.
+    expect(product.quotes[gamma]).toBeNull();
+    expect(product.quotes_absence[gamma]).toBeUndefined();
+  });
+
+  it("keeps the disqualified vendor non-awardable: the null cell carries no finalize payload", async () => {
+    const { rfq_id, A } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+
+    // The FE builds its award payload from cell.finalize (quote_id /
+    // quote_item_id / vendor_id). A disqualified vendor must never expose one —
+    // this is what makes the suppression real rather than cosmetic.
+    expect(product.quotes[String(IDS.users.vendor_beta)]).toBeNull();
+    expect(product.quotes_absence[String(IDS.users.vendor_beta)].status).toBe("TECH_FAILED");
+    // …while the vendor who passed still has one.
+    expect(product.quotes[String(IDS.users.vendor_alpha)].finalize.quote_id).toEqual(expect.any(Number));
+  });
+
+  it("suppression is per-product: the same vendor keeps a live cell on a product they passed", async () => {
+    const { rfq_id, B } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const productB = res.body.products.find((p) => p.id === B.rfq_product_id);
+
+    expect(productB.quotes[String(IDS.users.vendor_beta)]).not.toBeNull();
+    expect(productB.quotes_absence).toEqual({});
+  });
+
+  it("marks a vendor with no technical verdict yet as TECH_PENDING, not as a non-response", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const A = await addProduct(rfq_id, VARIANT_A);
+    const B = await addProduct(rfq_id, VARIANT_B, 0);
+
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    // delta quotes product A but nobody has scored them on it yet.
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_delta, {
+      unitPrice: 650, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_delta, {
+      unitPrice: 900, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_alpha, score: 80, status: 1 },
+      // deliberately NO row for delta
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_delta, score: 75, status: 1 },
+    ], 50);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+    expect(product.quotes[String(IDS.users.vendor_delta)]).toBeNull();
+    expect(product.quotes_absence[String(IDS.users.vendor_delta)]).toEqual({
+      status: "TECH_PENDING",
+      tech_score: null,
+      min_score: 50,
+    });
+  });
+
+  it("is empty for an RFQ with no technical evaluation at all", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { rfq_product_id, product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    expect(product.quotes_absence).toEqual({});
+  });
+
+  it("redacts quotes_absence before the deadline, like tech.scores", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq({ bidEndOffsetMs: 86400_000 });
+    const A = await addProduct(rfq_id, VARIANT_A);
+    const B = await addProduct(rfq_id, VARIANT_B, 0);
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 600, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 700, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 20, status: 0 },
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 70, status: 1 },
+    ], 50);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.body.quotes_locked).toBe(true);
+    for (const p of res.body.products) {
+      expect(p.quotes_absence).toEqual({});
+    }
   });
 });
 

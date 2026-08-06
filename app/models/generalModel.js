@@ -3045,11 +3045,13 @@ export async function submitApprovalAction({
     // Publication does not wait for the approval — when the publish date
     // arrives the RFQ goes out and the instance is simply left PENDING. From
     // that moment the decision gates nothing: APPROVE would backdate consent
-    // for something that already happened, and REJECT would stamp REJECTED on
-    // a live RFQ that vendors are bidding on (in production, many of them with
-    // a purchase order already issued) without un-publishing it, because
-    // handleRFQRejection's `SET status = 1` is a no-op on an RFQ that is
-    // already status 1.
+    // for something that already happened, and REJECT would land on a live RFQ
+    // that vendors are bidding on (in production, many of them with a purchase
+    // order already issued). Neither outcome of that REJECT is acceptable —
+    // before, `SET status = 1` was a no-op on an already-status-1 RFQ and left
+    // it live while stamped REJECTED; now handleRFQRejection also writes
+    // is_published = 0, which would yank a live RFQ out from under bidders
+    // mid-flight. The decision has to be refused, not repaired.
     //
     // The pending-approval counts and dashboard widgets already exclude these
     // (see getPendingApprovalCounts / dashboardModel); this closes the write
