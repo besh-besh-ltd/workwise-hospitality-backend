@@ -811,7 +811,7 @@ describe("MRP (tax-inclusive) quoting — createQuote", () => {
     expect(parseFloat(item.total_price)).toBe(1180);
   });
 
-  it("fractional MRP round-trips to the entered inclusive within 0.01", async () => {
+  it("fractional MRP round-trips to the entered inclusive EXACTLY", async () => {
     const { rfq_id } = await makeRfqWithProducts();
     const m = mockExpress({
       user: vendorUser(),
@@ -837,12 +837,11 @@ describe("MRP (tax-inclusive) quoting — createQuote", () => {
        WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
       [rfq_id]
     );
-    // deriveMrpLine({mrp:100, gst_pct:18}).base === 84.75 (q2'd once in the helper).
+    // The stored unit_price is the 2dp rate the numeric(15,2) column can hold.
     expect(parseFloat(item.unit_price)).toBe(84.75);
-    // Engine round-trip: 84.75 * 1.18 = 100.005 → q2 → 100.01, within the spec's
-    // accepted 0.01 tolerance of the entered 100.
-    expect(parseFloat(item.total_price)).toBe(100.01);
-    expect(Math.abs(parseFloat(item.total_price) - 100)).toBeLessThanOrEqual(0.011);
+    // The total is the amount actually offered — exactly 100, not 100.01. The
+    // rate is no longer rounded BEFORE the engine multiplies it out.
+    expect(parseFloat(item.total_price)).toBe(100);
   });
 
   it("applies a percentage discount to MRP before extracting GST", async () => {
@@ -875,6 +874,86 @@ describe("MRP (tax-inclusive) quoting — createQuote", () => {
     expect(parseFloat(item.unit_price)).toBe(900);
     expect(parseFloat(item.mrp_discount)).toBe(10);
     expect(item.mrp_discount_mode).toBe("percentage");
+  });
+
+  // -------------------------------------------------------------------------
+  // Money-accuracy regression: the amount the vendor offered must survive the
+  // quantity multiplication. These are the three lines measured live on RFQ 363
+  // (#535917), where the buyer-facing total drifted from the vendor's intent
+  // because the reverse-calculated per-unit base was rounded to 2dp BEFORE it
+  // was multiplied out (400/1.18 = 338.9830… stored as 338.98, then
+  // 338.98 × 75 × 1.18 = 29,999.73). The drift scaled with quantity and reached
+  // tbl_purchase_order_product and the printed PO.
+  // -------------------------------------------------------------------------
+  describe.each([
+    { label: "MOUSE — MRP ₹500 less 20% × 75",          mrp: 500,  discount: 20, qty: 75, gst: 18, intended: 30000,  wasBefore: 29999.73 },
+    { label: "KEYBOARD — MRP ₹1,300 less 15% × 50",     mrp: 1300, discount: 15, qty: 50, gst: 18, intended: 55250,  wasBefore: 55249.96 },
+    { label: "LAPTOP SCREEN — MRP ₹6,000 less 5% × 20", mrp: 6000, discount: 5,  qty: 20, gst: 18, intended: 114000, wasBefore: 114000.04 },
+  ])("MRP line total reproduces the vendor's intent exactly", ({ label, mrp, discount, qty, gst, intended, wasBefore }) => {
+    it(`${label} = ₹${intended} (was ₹${wasBefore})`, async () => {
+      const { rfq_id } = await makeRfqWithProducts();
+      const m = mockExpress({
+        user: vendorUser(),
+        body: {
+          rfq_id, rfq_no: 12345, status: 1,
+          pricing_method: "MRP",
+          products: [
+            {
+              product_id: 1, variant: 0,
+              pricing_method: "MRP",
+              entered_mrp: mrp, mrp_discount: discount, mrp_discount_mode: "percentage",
+              unit_price: "", tax: gst, total_price: 0,
+              comment: "", delivery_period: "7d", quantity: String(qty),
+              tax_mode: "percentage", other_charges: [],
+            },
+          ],
+        },
+      });
+      await rfqController.createQuote(m.req, m.res, m.next);
+      expect(m.calls.status).toBe(200);
+
+      const item = await db.one(
+        `SELECT unit_price, total_price FROM tbl_quote_items
+         WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+        [rfq_id]
+      );
+      // MRP less discount, times quantity — to the paisa.
+      expect(parseFloat(item.total_price)).toBe(intended);
+      expect(parseFloat(item.total_price)).not.toBe(wasBefore);
+    });
+  });
+
+  it("preserves a genuine decimal rather than rounding MRP totals to whole rupees", async () => {
+    // MRP 99.99 less 3% = 96.9903/unit; × 7 = 678.9321 → 678.93. The requirement
+    // is to keep what the vendor meant, NOT to force whole rupees — a total that
+    // genuinely works out to a decimal must stay a decimal.
+    const { rfq_id } = await makeRfqWithProducts();
+    const m = mockExpress({
+      user: vendorUser(),
+      body: {
+        rfq_id, rfq_no: 12345, status: 1,
+        products: [
+          {
+            product_id: 1, variant: 0,
+            pricing_method: "MRP",
+            entered_mrp: 99.99, mrp_discount: 3, mrp_discount_mode: "percentage",
+            unit_price: "", tax: 12, total_price: 0,
+            comment: "", delivery_period: "7d", quantity: "7",
+            tax_mode: "percentage", other_charges: [],
+          },
+        ],
+      },
+    });
+    await rfqController.createQuote(m.req, m.res, m.next);
+    expect(m.calls.status).toBe(200);
+
+    const item = await db.one(
+      `SELECT total_price FROM tbl_quote_items
+       WHERE quote_id = (SELECT id FROM tbl_quotes WHERE rfq_id=$1)`,
+      [rfq_id]
+    );
+    expect(parseFloat(item.total_price)).toBe(678.93);
+    expect(Number.isInteger(parseFloat(item.total_price))).toBe(false);
   });
 
   it("a Traditional (no pricing_method) line is unaffected — backward compatible", async () => {

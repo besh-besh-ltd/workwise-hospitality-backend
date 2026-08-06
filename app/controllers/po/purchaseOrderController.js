@@ -15,7 +15,7 @@ import rbacModel from "../../models/rbacModel.js";
 // assertUserHasScope internally — deliberately NOT assertCanReadParentRfq,
 // which allows when the parent RFQ's hospitality_company_id is NULL.
 import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
-import pricingEngine from "../../services/pricingEngine.js";
+import pricingEngine, { deriveMrpLine } from "../../services/pricingEngine.js";
 import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
@@ -201,7 +201,10 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
       `SELECT qi.freight_price, qi.freight_mode,
               qi.package_price, qi.package_mode,
               qi.tax, qi.tax_mode,
-              qi.other_charges
+              qi.other_charges,
+              qi.unit_price,
+              qi.pricing_method, qi.entered_mrp,
+              qi.mrp_discount, qi.mrp_discount_mode
        FROM tbl_quote_items qi
        WHERE qi.id = $1`,
       [quoteItemId]
@@ -212,17 +215,46 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
       return poInfo;
     }
 
+    // unit_price is money and must come from the quote the vendor actually
+    // submitted, not from the request body. The award payload carries a
+    // client-supplied unit_price (rfqValidation requires it) which nothing
+    // downstream re-checked, so a stale or altered value would flow straight
+    // into the PO line and its printed PDF — both of which recompute from
+    // unit_price rather than from any stored total.
+    let unitPrice = dbRow.unit_price;
+
+    // MRP (tax-inclusive) lines: tbl_quote_items.unit_price is a numeric(15,2)
+    // column, so the stored exclusive rate is a rounded echo of a repeating
+    // decimal and pricing the PO from it reintroduces the per-unit drift.
+    // Re-derive it at full precision from the audit inputs the vendor actually
+    // entered. tbl_purchase_order_product.unit_price is unconstrained numeric,
+    // so the exact rate persists — which is what keeps every later PO recompute
+    // (PO edit, and the PDF, both of which re-run the engine off unit_price)
+    // reproducing "MRP less discount x qty" to the paisa without needing MRP
+    // columns on the PO tables at all.
+    if (dbRow.pricing_method === 'MRP' && Number(dbRow.entered_mrp) > 0) {
+      unitPrice = deriveMrpLine({
+        mrp: dbRow.entered_mrp,
+        discount: dbRow.mrp_discount,
+        discount_mode: dbRow.mrp_discount_mode,
+        gst_pct: dbRow.tax,
+      }).base;
+    }
+
     return {
       ...poInfo,
       product_info: {
         ...poInfo.product_info,
+        unit_price: unitPrice,
         charges_meta: {
           freight_price: dbRow.freight_price,
           freight_mode: dbRow.freight_mode,
           package_price: dbRow.package_price,
           package_mode: dbRow.package_mode,
           tax: dbRow.tax,
-          tax_mode: dbRow.tax_mode,
+          // GST on an MRP line is always a percentage extracted from within the
+          // price — force it so the PO can never be priced with an absolute tax.
+          tax_mode: dbRow.pricing_method === 'MRP' ? 'percentage' : dbRow.tax_mode,
           other_charges: dbRow.other_charges || []
         }
       }
@@ -1208,10 +1240,23 @@ export const rejectPO = async (req, res) => {
       return po;
     });
 
-    // Rejection notification (fire-and-forget). Call-offs notify the MR raiser;
+    // Rejection notification, post-commit. Call-offs notify the MR raiser;
     // RFQ POs notify the commercial evaluators (audit CO9).
+    //
+    // The call-off notification is AWAITED, not fire-and-forget. A call-off PO
+    // has no RFQ and no commercial evaluators, so this in-app row is the ONLY
+    // signal the MR raiser ever gets that their requisition bounced back and
+    // its contract quantity was released — and this response already claims
+    // "The buyer has been notified." Left dangling, the insert races the
+    // response: the request could return (or the process could be recycled)
+    // before the row lands, silently dropping the raiser's only notice.
+    // Awaiting matches the release side, where notifyCallOffReleased is
+    // likewise awaited inside handleMrPostApproval (mrController.js) before
+    // the approve request answers. notifyCallOffRejected swallows its own
+    // errors and leaves SMTP fire-and-forget, so awaiting it cannot turn a
+    // committed rejection into a failed request; the .catch is belt-and-braces.
     if (result.is_call_off) {
-      notifyCallOffRejected({
+      await notifyCallOffRejected({
         raisedBy: callOffReject?.raised_by,
         mrNumber: callOffReject?.mr_number,
         poNumber: result.po_number,

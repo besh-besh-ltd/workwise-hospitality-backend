@@ -135,13 +135,31 @@ const isoMinutesFromNow = (mins) =>
   new Date(Date.now() + mins * 60_000).toISOString().replace("T", " ").slice(0, 19);
 
 /**
- * Set tender_publish_date via SQL using NOW() ± interval. This sidesteps
- * the timezone-interpretation ambiguity of `timestamp without time zone`
- * columns and matches what production SQL queries observe.
+ * Set tender_publish_date via SQL to an IST wall clock ± interval.
+ *
+ * `tender_publish_date` is `timestamp without time zone` holding a NAIVE IST
+ * WALL-CLOCK value, and the watchdog / force-publish guards now compare it
+ * against `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`. The fixture has to
+ * be minted in that same frame.
+ *
+ * This used to write `NOW() ± interval`. Assigning a timestamptz to a naive
+ * column casts it through the POSTGRES SESSION timezone, so under CI's
+ * `PGOPTIONS=-c timezone=UTC` it stored the UTC wall clock — 5h30m BEHIND the
+ * IST wall clock the column means. Every offset was therefore silently shifted
+ * by 5h30m: "30 seconds ago" landed 5h30m30s ago (outside the watchdog's
+ * 2-minute grace) and "60 minutes ahead" landed 4h30m in the past. On a local
+ * Homebrew Postgres, whose session zone is Asia/Kolkata, the same code was
+ * accidentally correct — which is exactly why this stayed invisible.
+ *
+ * `AT TIME ZONE 'Asia/Kolkata'` is session-zone invariant, so the fixture now
+ * means the same thing under every configuration. Same idiom as `istWall()` in
+ * rfq.publishTimezone.test.js and rfq.clarificationTimezone.test.js.
  */
 async function setTenderPublishDate(rfq_id, intervalSql) {
   await db.none(
-    `UPDATE tbl_rfq SET tender_publish_date = NOW() ${intervalSql} WHERE id = $1`,
+    `UPDATE tbl_rfq
+        SET tender_publish_date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') ${intervalSql}
+      WHERE id = $1`,
     [rfq_id]
   );
 }

@@ -13,6 +13,7 @@ import negotiationModel, { getCoveredProductIds } from '../models/negotiationMod
 import rbacModel from '../models/rbacModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from './common.js';
+import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -545,23 +546,33 @@ export const scheduleRfqPublish = async (rfq, txContext = null) => {
     return;
   }
 
-  const publishAt = new Date(tender_publish_date);
-  const now = new Date();
+  // `tender_publish_date` is `timestamp without time zone` holding an IST
+  // WALL-CLOCK value (same convention as bid_end_date / the ARC submission
+  // window). `new Date("2026-08-06 01:10:00")` would parse it in the NODE
+  // PROCESS timezone — UTC in production — making the instant 5h30m later
+  // than intended. An RFQ whose IST publish moment had just passed then looked
+  // "in the future", so instead of publishing immediately we handed EventBridge
+  // an `at()` expression that was already in the past and the RFQ never
+  // published until the watchdog caught it hours later.
+  const publishAtIst = getBidEndMomentIst(tender_publish_date);
+  if (!publishAtIst) {
+    throw new Error(
+      `[RFQ Publisher] Unparseable tender_publish_date for RFQ ${rfq_no}: ${tender_publish_date}`
+    );
+  }
 
-  // If publish date is in the past or now, publish immediately
-  if (publishAt <= now) {
+  // If publish date is in the past or now (in IST), publish immediately
+  if (!publishAtIst.isAfter(istNow())) {
     logger.info({ rfq_no }, '[RFQ Publisher] Publish date passed, publishing now');
     await publishRfq(rfq, txContext);
     return;
   }
 
-  // Format the date for EventBridge (IST timezone): YYYY-MM-DDTHH:mm:ss
-  // tender_publish_date may come as "2026-02-03 16:55:00" (space) or ISO format
-  // Normalize to YYYY-MM-DDTHH:mm:ss format
-  const scheduledTimeIST = tender_publish_date
-    .replace(/\.\d{3}Z$/, '')  // Remove .000Z if present
-    .replace('Z', '')           // Remove trailing Z if present
-    .replace(' ', 'T');         // Replace space with T for DB format
+  // Format the date for EventBridge (IST timezone): YYYY-MM-DDTHH:mm:ss.
+  // createScheduleForRfqPublish declares ScheduleExpressionTimezone
+  // 'Asia/Kolkata', so this must be the IST wall-clock rendering — which is
+  // exactly what the column holds and what the IST moment re-formats to.
+  const scheduledTimeIST = publishAtIst.format('YYYY-MM-DDTHH:mm:ss');
 
   logger.info({ rfq_no, scheduledTimeIST }, '[RFQ Publisher] Scheduling publish');
 
@@ -634,6 +645,19 @@ const RFQ_PUBLISH_WATCHDOG = {
 };
 
 /**
+ * "Now" pinned to IST, for comparing against `tender_publish_date`.
+ *
+ * `tender_publish_date` is `timestamp without time zone` holding IST
+ * wall-clock. Compared against `NOW()` (timestamptz) it is promoted using the
+ * POSTGRES SESSION timezone, which is UTC on RDS — so `2026-08-06 01:10:00`,
+ * which means 01:10 IST (= 2026-08-05 19:40 UTC), was not treated as "past"
+ * until 01:10 UTC, i.e. 06:40 IST: 5h30m late. Vendors could not see or quote
+ * the RFQ for that whole window and the buyer's page sat on READY TO PUBLISH.
+ * Same idiom as IST_NOW in app/models/dashboardModel.js.
+ */
+const IST_NOW_SQL = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')";
+
+/**
  * One tick of the watchdog. Exported separately so tests can drive it
  * deterministically without waiting on cron.schedule.
  */
@@ -646,7 +670,7 @@ export const runRfqStuckPublishWatchdogTick = async () => {
       WHERE status = 4
         AND is_published = 0
         AND tender_publish_date IS NOT NULL
-        AND tender_publish_date < NOW() - ($1::text || ' minutes')::interval
+        AND tender_publish_date < ${IST_NOW_SQL} - ($1::text || ' minutes')::interval
       ORDER BY tender_publish_date ASC
       LIMIT $2
     `, [String(RFQ_PUBLISH_WATCHDOG.GRACE_MINUTES), RFQ_PUBLISH_WATCHDOG.BATCH_LIMIT]);

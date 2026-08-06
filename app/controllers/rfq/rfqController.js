@@ -61,7 +61,8 @@ import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
-import negotiationModel from '../../models/negotiationModel.js';
+import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
+import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
@@ -70,12 +71,21 @@ import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
   sanitizeQuoteProductsForLockedState,
+  getBidEndMomentIst,
+  istNow,
 } from '../../helper/quoteVisibility.js';
 import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { enrichQuoteCompareData } from '../../services/quoteCompareService.js';
 import quoteCompareViewModel from '../../models/quoteCompareViewModel.js';
+import { buildNegotiationMetrics } from '../../services/quoteComparisonMetrics.js';
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
+import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
+
+// "Pending for me" grouping precedence. An approval is the most specific and
+// most blocking claim on this user; a response is personal and usually blocks
+// vendors; an evaluation is the shared-pool baseline.
+const PENDING_KIND_ORDER = { approval: 0, response: 1, evaluation: 2 };
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -3859,9 +3869,15 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       txContext: t
     });
 
-    // Check if publish date has already passed - if so, publish immediately after approval
-    const publishDatePassed = rfq.tender_publish_date
-      && new Date(rfq.tender_publish_date) <= new Date();
+    // Check if publish date has already passed - if so, publish immediately after approval.
+    //
+    // `tender_publish_date` is a naive `timestamp without time zone` holding an
+    // IST wall-clock value. `new Date(...)` would resolve it in the NODE PROCESS
+    // timezone (UTC in production), so an approval landing after the intended IST
+    // publish moment but within 5h30m of it read as "not yet due" — the RFQ was
+    // parked at READY_TO_PUBLISH and handed EventBridge an already-past `at()`.
+    const publishAtIst = getBidEndMomentIst(rfq.tender_publish_date);
+    const publishDatePassed = !!publishAtIst && !publishAtIst.isAfter(istNow());
 
     if (publishDatePassed) {
       // Publish date already passed - publish directly within this transaction
@@ -3956,7 +3972,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
 
     // Send "Ready to Publish" notification for RFQs/tenders with future publish date
     // RFQs without a publish date are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
-    if (rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
+    if (publishAtIst && publishAtIst.isAfter(istNow())) {
       try {
         const rfqFull = await t.oneOrNone('SELECT title FROM tbl_rfq WHERE id = $1', [rfq_id]);
         const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
@@ -4025,8 +4041,49 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
       return null;
     }
 
-    // Reset status to 1 (draft) so the RFQ moves back to the drafts list
-    await t.none(`UPDATE tbl_rfq SET status = 1 WHERE id = $1`, [rfq_id]);
+    // Reset to the draft state so the RFQ moves back to the drafts list.
+    //
+    // The draft state is the PAIR (status = 1, is_published = 0) — that is
+    // exactly how a new RFQ is inserted (rfqModel.saveMagicSearchInDraft) and
+    // what the buyer surfaces read: the Drafts widget is `is_published = 0 AND
+    // status NOT IN (5, 2)` (dashboardModel.getMyDraftsData) and the management
+    // listing surfaces drafts via `is_published = 0 AND created_by = me`
+    // (rfqModel.getAllBuyerRfq, include_drafts). status alone is NOT the
+    // discriminator: status = 1 WITH is_published = 1 is the "live" predicate
+    // (rfqModel.getRfqByUser, vendorDashboardModel, dashboardModel). So the
+    // status write has to carry is_published with it, or "back to drafts" and
+    // "live to vendors" are the same row.
+    //
+    // Writing is_published = 0 is a backstop rather than a live un-publish:
+    // submitApprovalAction refuses to decide a publish approval once the RFQ
+    // has published, so a rejection cannot land on a live RFQ. It is asserted
+    // anyway so the invariant "REJECTED ⇒ not live" holds by construction.
+    await t.none(
+      `UPDATE tbl_rfq SET status = 1, is_published = 0 WHERE id = $1`,
+      [rfq_id]
+    );
+
+    // Disarm the publish schedule armed at submit time.
+    //
+    // Publishing does not wait for approval: startApprovalForRFQ parks the RFQ
+    // at status 4 and calls scheduleRfqPublish, which creates an EventBridge
+    // schedule for tender_publish_date. Rejection unwinds the status but the
+    // schedule stayed armed — and publishRfqById treats status 1 as
+    // publishable (`if (rfq.status !== 4 && rfq.status !== 1) skip`), so when
+    // the schedule fired it published the rejected RFQ: status 1 +
+    // is_published 1, live and quotable, carrying a REJECTED approval. The
+    // status write above cannot prevent that on its own; the schedule has to
+    // go. Same teardown withdrawPublish/terminateRFQ already do.
+    //
+    // Best-effort by design: a scheduler failure must not fail the rejection.
+    // The residual risk is bounded — the stuck-publish watchdog only picks up
+    // status = 4, so a rejected RFQ is never re-armed from this side.
+    try {
+      const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+      await removeRfqPublishJob(rfq_id);
+    } catch (scheduleErr) {
+      logError(`Failed to remove publish schedule for rejected RFQ ${rfq_id}`, scheduleErr);
+    }
 
     // Record lifecycle event for rejection
     await recordLifecycleEvent({
@@ -7973,6 +8030,21 @@ const rfqController = {
         return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
       }
 
+      // Tenant guard — the same one the sibling /rfq/lifecycle-summary/:rfqId
+      // already applies. This payload is not metadata: it carries the full
+      // approver matrix (names, emails, designations and approval comments),
+      // evaluator names, action-holder emails, vendor identities and prices.
+      // Without this the endpoint computed `permissions` below and then never
+      // gated on the result, so any authenticated user — a vendor included —
+      // could walk RFQ ids and read another tenant's approval chain.
+      if (userId) {
+        try { await assertCanReadParentRfq(userId, rfqId); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
       const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
       let permissions;
@@ -8581,21 +8653,64 @@ const rfqController = {
         r._statusKey = statusKey(r);
       }
 
-      // Action holders for ALL scoped rows — powers both the "Pending for me"
-      // tab (filter + count) and the per-row lifecycle tooltip. The helper
-      // batches its approval + RBAC queries, so it stays bounded over the set.
+      // Action holders for ALL scoped rows — powers the per-row lifecycle
+      // tooltip and the approval/evaluation halves of "Pending for me". The
+      // helper batches its approval + RBAC queries, so it stays bounded.
       let actionMap = {};
       if (rows.length > 0) {
         try { actionMap = await rfqModel.getActionHoldersForRFQs(rows, lifecycleMap); } catch (e) { logError('getRfqListView action holders', e); }
       }
+
+      // Per-caller personal work: open clarifications, unread vendor queries,
+      // stuck RFQs, expired negotiation rounds. None of these notify today, so
+      // this listing is the only surface that can show them.
+      let personalMap = {};
+      if (rows.length > 0) {
+        try { personalMap = await getPersonalPendingForRFQs(rows, user_id, lifecycleMap); } catch (e) { logError('getRfqListView personal pending', e); }
+      }
+
       for (const r of rows) {
         const holders = actionMap[parseInt(r.id)];
         const users = holders?.users || [];
-        r._isMyAction = users.some((u) => Number(u.id) === Number(user_id));
+        const inHolders = users.some((u) => Number(u.id) === Number(user_id));
+        const holderKind = holders?.kind || (holders?.type === 'approval' ? 'approval' : 'evaluation');
+
+        // One row joins exactly ONE group, by precedence, but carries every
+        // reason so the card can show the rest as secondary chips.
+        const reasons = [];
+        if (inHolders && holderKind === 'approval') {
+          reasons.push({
+            kind: 'approval',
+            code: r.lifecycle_stage || 'RFQ_APPROVAL',
+            label: 'Your approval',
+            count: 1,
+            instance_id: holders.instance_id ?? null,
+            step_id: holders.step_id ?? null,
+            entity_type: holders.entity_type || null,
+            decision_rule: holders.decision_rule || null,
+          });
+        }
+        for (const p of (personalMap[parseInt(r.id)] || [])) {
+          reasons.push({ kind: 'response', code: p.code, label: p.label, count: p.count ?? 1 });
+        }
+        if (inHolders && holderKind === 'evaluation') {
+          reasons.push({
+            kind: 'evaluation',
+            code: r.lifecycle_stage || null,
+            label: holders.label || 'Your evaluation',
+            count: 1,
+          });
+        }
+        reasons.sort((a, b) => PENDING_KIND_ORDER[a.kind] - PENDING_KIND_ORDER[b.kind]);
+
+        r._pendingReasons = reasons;
+        r._pendingKind = reasons.length ? reasons[0].kind : null;
+        r._isMyAction = reasons.length > 0;
+
         // Approval affordances for the card. `can_approve` is narrower than
         // `_isMyAction`: it is true only when the pending action is an APPROVAL
         // this user is a pending approver on (not, say, a tech-eval task).
-        r._canApprove = holders?.type === 'approval' && r._isMyAction;
+        r._canApprove = holders?.type === 'approval' && inHolders;
         r._approvalInstanceId = holders?.type === 'approval' ? (holders.instance_id ?? null) : null;
         r._approvalStepId = holders?.type === 'approval' ? (holders.step_id ?? null) : null;
         r._approvalEntityType = holders?.type === 'approval' ? (holders.entity_type || null) : null;
@@ -8625,10 +8740,15 @@ const rfqController = {
 
       // 3. tab counts (full scoped+search set).
       const tab_counts = { all: rows.length, pending: 0, drafts: 0, approval: 0, ongoing: 0, approved: 0, closed: 0 };
+      const pending_breakdown = { approval: 0, evaluation: 0, response: 0 };
       for (const r of rows) {
         tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
-        if (r._isMyAction) tab_counts.pending++;
+        if (r._isMyAction) {
+          tab_counts.pending++;
+          pending_breakdown[r._pendingKind] = (pending_breakdown[r._pendingKind] || 0) + 1;
+        }
       }
+      tab_counts.pending_breakdown = pending_breakdown;
 
       // 4. tab scope. "pending" cuts across buckets — every row needing my action.
       const tabRows = tab === 'all' ? rows
@@ -8680,6 +8800,13 @@ const rfqController = {
       else if (sort === 'deadline') filtered.sort((a, b) => (dl(a) || Infinity) - (dl(b) || Infinity));
       else filtered.sort((a, b) => ts(b) - ts(a));
 
+      // The pending tab groups by kind, so page 1 always leads with the
+      // decisions. Within a group the requested sort above is preserved
+      // (Array#sort is stable in V8) — this partitions, it does not re-sort.
+      if (tab === 'pending') {
+        filtered.sort((a, b) => (PENDING_KIND_ORDER[a._pendingKind] ?? 9) - (PENDING_KIND_ORDER[b._pendingKind] ?? 9));
+      }
+
       // 8. paginate.
       const total = filtered.length;
       const start = (page - 1) * limit;
@@ -8706,6 +8833,11 @@ const rfqController = {
         // link to the pending instance instead of falling back to Edit/Delete.
         can_approve: !!r._canApprove,
         is_pending_for_me: !!r._isMyAction,
+        // Which of the three "Pending for me" groups this row joins, and the
+        // reasons that put it there (the non-primary ones render as secondary
+        // chips on the card).
+        pending_kind: r._pendingKind ?? null,
+        pending_reasons: r._pendingReasons || [],
         approval_instance_id: r._approvalInstanceId ?? null,
         approval_step_id: r._approvalStepId ?? null,
         approval_entity_type: r._approvalEntityType ?? null,
@@ -9158,36 +9290,18 @@ const rfqController = {
         }
 
         // Clarification period validation (IST-based).
-        // Treat vendor_clarification_date as an IST datetime and convert to a UTC Date
-        // so that 6:30 PM IST is respected regardless of server timezone.
+        // `vendor_clarification_date` is a naive `timestamp without time zone`
+        // holding an IST wall-clock value, so it must be resolved in IST rather
+        // than in the Node process timezone. This used to be a local hand-rolled
+        // split/Date.UTC/-330min conversion; it is the same computation
+        // getBidEndMomentIst performs for bid_end_date, so it collapses onto the
+        // shared helper — one IST parser for every naive deadline column instead
+        // of one per call site.
         if (rfqDetails[0].vendor_clarification_date) {
-          const rawClar = String(rfqDetails[0].vendor_clarification_date).trim();
-          let datePart;
-          let timePart;
-
-          if (rawClar.includes('T')) {
-            [datePart, timePart] = rawClar.split('T');
-          } else if (rawClar.includes(' ')) {
-            [datePart, timePart] = rawClar.split(' ');
-          } else {
-            datePart = rawClar;
-            timePart = '00:00:00';
-          }
-
-          const [year, month, day] = datePart.split('-').map((v) => parseInt(v, 10));
-          const [hourStr, minuteStr, secondStr] = (timePart || '00:00:00').split(':');
-          const hour = parseInt(hourStr || '0', 10);
-          const minute = parseInt(minuteStr || '0', 10);
-          const second = parseInt((secondStr || '0').split('.')[0] || '0', 10);
-
-          const IST_OFFSET_MINUTES = 330; // +05:30
-          const clarificationEnd = new Date(
-            Date.UTC(year, month - 1, day, hour, minute, second) -
-              IST_OFFSET_MINUTES * 60 * 1000
+          const clarificationEndIst = getBidEndMomentIst(
+            rfqDetails[0].vendor_clarification_date
           );
-
-          const now = new Date();
-          if (!isNaN(clarificationEnd.getTime()) && now < clarificationEnd) {
+          if (clarificationEndIst && clarificationEndIst.isAfter(istNow())) {
             return res.status(400).json({
               status: 3,
               message:
@@ -10104,15 +10218,17 @@ const rfqController = {
         }
       }
 
-      // freight=1 (default) => landed (no_freight falsy). freight=0 => no_freight true.
-      const freightParam = req.query.freight;
-      const noFreight =
-        freightParam === '0' || freightParam === 0 || freightParam === 'false' ? '1' : undefined;
+      // freight=1 (default) => delivery charges included. freight=0 => excluded.
+      // Accept 1/0 and true/false in any case: the client sends '0', while the
+      // old (dead) implementation tested for the string 'true', so neither
+      // spelling actually worked. Normalised to a real boolean here.
+      const fp = String(req.query.freight ?? '').trim().toLowerCase();
+      const excludeDelivery = fp === '0' || fp === 'false';
 
       const view = await quoteCompareViewModel.getQuoteComparisonView(
         req.params.id,
         scope,
-        { noFreight }
+        { excludeDelivery }
       );
 
       if (!view) {
@@ -10121,6 +10237,27 @@ const rfqController = {
           .json({ status: 2, message: 'Quote comparison not found.' })
           .end();
       }
+
+      // Negotiation metrics for the summary export. Attached here rather than
+      // computed in the browser because "how much did negotiation move" has
+      // several competing definitions in this codebase, and only the ladder
+      // behind this helper is asserted to the rupee against the negotiation
+      // dashboard — a downloaded summary that disagreed with the dashboard on
+      // screen would be worse than no number at all.
+      //
+      // ⚠️ SECURITY: buildNegotiationMetrics applies no scope of its own. The
+      // id is safe here ONLY because it has already cleared the 4-axis
+      // assertCanReadParentRfq gate above. Do not hoist this call.
+      //
+      // Never fail the page for a metrics problem: the comparison sheet is the
+      // point of this endpoint, the summary export is an extra.
+      try {
+        view.negotiation_metrics = await buildNegotiationMetrics(req.params.id);
+      } catch (metricsErr) {
+        logError('quote comparison negotiation metrics failed', metricsErr);
+        view.negotiation_metrics = null;
+      }
+
       return res.status(200).json(view).end();
     } catch (error) {
       logError('getQuoteComparisonView failed', error);
@@ -10985,15 +11122,46 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
-      // Check for active negotiation round blocking finalization
+      // Check for active negotiation round blocking finalization.
+      //
+      // COVERAGE must come from coversProductSql, never the rfq_product_id
+      // column. A round either targets ONE product (legacy shape:
+      // rfq_product_id set) or MANY (multi-product / RFQ-level shape:
+      // rfq_product_id NULL, coverage carried in the `products` JSONB — see
+      // negotiationController.js L979-1001, `isMultiShape`). Reading the column
+      // alone therefore matched legacy rounds ONLY and silently let every
+      // modern multi-product and RFQ-level round through: the buyer's sheet
+      // rendered the line as under negotiation while this guard waved the
+      // award past, so a product could be awarded mid-round.
+      // quoteCompareViewModel.fetchRoundsByProduct carries the identical
+      // warning about the identical mistake — "never read the columns
+      // directly". coversProductSql is the single shared predicate (6 other
+      // call sites in negotiationModel).
+      //
+      // THE OPEN-WINDOW TEST mirrors negotiationStateCaseSql's
+      // OPEN_WITH_VENDORS branch (negotiationModel.js L512-514) exactly, since
+      // that is the state the buyer's UI paints as "under negotiation":
+      //   * `end_date IS NULL OR ...` — an ACTIVE round with no deadline is
+      //     open-ended, hence still ongoing.
+      //   * `now() AT TIME ZONE 'UTC'` — end_date is a NAIVE column holding
+      //     UTC wall clock (written through moment.utc at L832, read back
+      //     through parseAsUTC at L22-28). Session-TZ NOW() was wrong by the
+      //     session's offset. NOTE for future edits: unlike tbl_rfq's naive
+      //     date columns, which hold IST, this one is UTC — do NOT "correct"
+      //     it toward Asia/Kolkata.
       const rfqProductForNego = await db.oneOrNone(
         `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
         [rfq_id, product_variant_id, variant]
       );
       if (rfqProductForNego) {
         const activeNegotiationRound = await db.oneOrNone(
-          `SELECT id FROM tbl_negotiation_rounds
-           WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' AND end_date > NOW()`,
+          `SELECT nr.id FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = $1
+              AND nr.source_type = 'RFQ'
+              AND nr.status = 'ACTIVE'
+              AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC'))
+              AND ${coversProductSql('$2')}
+            LIMIT 1`,
           [rfq_id, rfqProductForNego.id]
         );
         if (activeNegotiationRound) {
@@ -11002,6 +11170,36 @@ const rfqController = {
             message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
           });
         }
+      }
+
+      // ---------------------------------------------------------------------
+      // Technical-evaluation guard on the AWARD itself.
+      //
+      // Until this landed, the technical gate lived ENTIRELY at the read layer:
+      // rfqModel.getQuotesByRfqById2 is called with TA_Vendors='TA', which
+      // appends `vendorCondition` (rfqModel.js L6527 / L6911) to drop a
+      // disqualified vendor's quotation rows, so the comparison screen renders
+      // the cell as unselectable and the FE never builds a finalize payload for
+      // them. But suppression at the read layer is a UI affordance, not an
+      // authorization check — a crafted or replayed POST /rfq/finalize carrying
+      // {rfq_id, product_variant_id, vendor_id, quote_id, quote_item_id, ...}
+      // reached the INSERT with nothing consulting the technical verdict, and
+      // awarded a real contract to a vendor the buyer's own gate had failed.
+      //
+      // The predicate itself, its three verdict states and the reason each
+      // message is worded the way it is now live in ONE place —
+      // services/technicalQualificationService.js — because this is not the only
+      // write path that can create an award. The negotiation-quote approval
+      // routes reach tbl_quote_finalization through
+      // negotiationController.addQuotesToFinalization and consume the identical
+      // helper. Copying the SQL is how the sibling active-negotiation guard
+      // silently stopped firing for multi-product rounds; do not do it again.
+      const techQualification = await evaluateVendorTechnicalQualification(
+        { rfq_id, vendor_id, product_variant_id, variant },
+        db
+      );
+      if (!techQualification.qualified) {
+        return res.status(400).json({ status: 2, message: techQualification.message });
       }
 
       const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -17214,27 +17412,43 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Validate clarification period
-      const now = new Date();
-      const publishDate = rfq.tender_publish_date
-        ? new Date(rfq.tender_publish_date)
+      // Validate clarification period — anchored to IST, not to the Node
+      // process timezone.
+      //
+      // `tender_publish_date` and `vendor_clarification_date` are naive
+      // `timestamp without time zone` columns holding IST WALL-CLOCK values
+      // (dbConn.js parses OID 1114 straight back as a string, so what lands
+      // here is e.g. "2026-08-06 10:00:00" with no offset). `new Date(...)`
+      // resolves that string in the NODE PROCESS timezone — UTC in
+      // production — placing the instant 5h30m late. Both guards below were
+      // therefore wrong for a 5h30m window in opposite directions:
+      //
+      //   - the publish guard rejected with "Clarification period has not
+      //     started yet" for 5h30m AFTER the RFQ actually went live, and
+      //   - the end guard kept the window open for 5h30m after it closed.
+      //
+      // Same convention and the same fix as bid_end_date (quoteVisibility.js)
+      // and the publish path.
+      const nowIst = istNow();
+      const publishAtIst = rfq.tender_publish_date
+        ? getBidEndMomentIst(rfq.tender_publish_date)
         : null;
-      const clarificationEndDate = rfq.vendor_clarification_date
-        ? new Date(rfq.vendor_clarification_date)
+      const clarificationEndIst = rfq.vendor_clarification_date
+        ? getBidEndMomentIst(rfq.vendor_clarification_date)
         : null;
 
-      // If tender is already published (status = 1 or is_published = 1), 
+      // If tender is already published (status = 1 or is_published = 1),
       // only check vendor_clarification_date, not tender_publish_date
       const isPublished = rfq.status === 1 || rfq.is_published === 1;
 
-      if (!isPublished && publishDate && now < publishDate) {
+      if (!isPublished && publishAtIst && publishAtIst.isAfter(nowIst)) {
         return res.status(400).json({
           status: 0,
           message: 'Clarification period has not started yet'
         });
       }
 
-      if (clarificationEndDate && now > clarificationEndDate) {
+      if (clarificationEndIst && nowIst.isAfter(clarificationEndIst)) {
         return res.status(400).json({
           status: 0,
           message: 'Clarification period has ended'
@@ -18079,6 +18293,17 @@ getClauses: async (req, res) => {
         });
       }
 
+      // The RFQ published before this approval was decided, so the decision is
+      // moot (see the guard in submitApprovalAction). That is a stale-client
+      // problem — an old tab or an old deep link — not a server fault, so it
+      // must not fall through to the 500 below.
+      if (error.message?.includes('already been published')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
+        });
+      }
+
       return res.status(500).json({
         status: 0,
         message: 'Error processing RFQ approval action',
@@ -18145,9 +18370,19 @@ getClauses: async (req, res) => {
       // Compare publish time in SQL so the timezone handling matches what the
       // watchdog uses — relying on `new Date(timestampWithoutTimeZone)` in JS
       // would re-interpret the value in the Node process's local TZ.
+      //
+      // The comparison must be anchored to IST, not to `NOW()`:
+      // `tender_publish_date` is a naive column holding IST wall-clock, and
+      // `NOW()` promotes it through the POSTGRES SESSION timezone (UTC on RDS).
+      // With plain NOW() this guard rejected force-publish with "Scheduled
+      // publish time has not yet passed" for 5h30m after the intended moment —
+      // i.e. force publish, the documented escape hatch for a stuck RFQ, was
+      // blocked during exactly the window in which RFQs get stuck.
       const rfq = await db.oneOrNone(
         `SELECT id, rfq_no, is_tender, status, is_published, created_by, tender_publish_date,
-                (tender_publish_date IS NULL OR tender_publish_date >= NOW()) AS publish_time_not_passed
+                (tender_publish_date IS NULL
+                 OR tender_publish_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                ) AS publish_time_not_passed
          FROM tbl_rfq WHERE id = $1`,
         [rfqId]
       );

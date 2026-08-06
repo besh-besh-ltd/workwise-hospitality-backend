@@ -25,12 +25,28 @@ import { ROLE_IDS } from "../fixtures/users.js";
 const ADMIN_ID = 88001;
 const TARGET_ID = 88002;
 
+/* The "other company" side of every isolation assertion below.
+   This used to be the shared fixture's IDS.hospitality.B — but that entity
+   hangs off buyer parent B, while ADMIN_ID belongs to parent A, so a single
+   update-user-detail payload spanning both is a cross-tenant write that the
+   controller now refuses outright (ROLE_SCOPE_COMPANY_FORBIDDEN). That was
+   never a legal production operation: in production one buyer parent owns
+   EIGHT hospitality companies and an admin routinely grants across all of
+   them, which is exactly the shape modelled here — a second hospitality
+   company under the SAME parent as the admin. The property under test
+   (impact analysis must not leak across companies) is unchanged; only the
+   tenancy of the second company is now realistic.
+   IDs sit in the documented fixture ranges (10001..10099 / 10101..10199) at
+   the top end, where the shared fixtures do not reach. */
+const HOSPITALITY_C = 10091; // second hospitality entity under buyer parent A
+const HOTEL_C1 = 10191; // its only hotel
+
 const ROLE_R = ROLE_IDS.FINAL_AWARDING_P1; // 13 — the role being moved
 const ROLE_R2 = ROLE_IDS.TENDER_APPROVER; //  4 — the role it is swapped to
 
 const POLICY_A1 = 68001; // PO policy @ (hospitality A, hotel A1)
 const POLICY_A2 = 68002; // PO policy @ (hospitality A, hotel A2)
-const POLICY_B1 = 68003; // PO policy @ (hospitality B, hotel B1)
+const POLICY_B1 = 68003; // PO policy @ (hospitality C, hotel C1)
 
 const STEP_A1 = 68101;
 const STEP_A2 = 68102;
@@ -48,7 +64,7 @@ let createdInstanceIds = [];
 let nextInstanceId = 68201;
 
 const SCOPE_A1 = { role_id: ROLE_R, company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1 };
-const SCOPE_B1 = { role_id: ROLE_R, company_id: IDS.hospitality.B, hotel_id: IDS.hotels.B1 };
+const SCOPE_B1 = { role_id: ROLE_R, company_id: HOSPITALITY_C, hotel_id: HOTEL_C1 };
 
 /** Insert a PENDING PO approval instance whose step 1 is sourced from ROLE_R. */
 async function makePendingPoInstance({ policyId, stepId, step2Id, companyId, hotelId, metadata }) {
@@ -113,6 +129,22 @@ function rolesPayload(scopes) {
 }
 
 beforeAll(async () => {
+  // Second hospitality entity under buyer parent A, owned by this suite (the
+  // shared fixtures only reach 10002 / 10105). Both of ADMIN_ID's grant
+  // targets therefore sit inside its own tenant, as they do in production.
+  await db.none(
+    `INSERT INTO tbl_hospitality_companies (id, buyer_company_id, name)
+     VALUES ($1, $2, 'Hospitality C (scopedImpact)')
+     ON CONFLICT (id) DO NOTHING`,
+    [HOSPITALITY_C, IDS.companies.A]
+  );
+  await db.none(
+    `INSERT INTO tbl_hospitality_company_hotels (id, hospitality_company_id, name)
+     VALUES ($1, $2, 'Hotel C-1 (scopedImpact)')
+     ON CONFLICT (id) DO NOTHING`,
+    [HOTEL_C1, HOSPITALITY_C]
+  );
+
   // Two users under the same buyer parent company (the admin's UPDATE is
   // gated on `company_id = <admin's company_id>`).
   await db.none(
@@ -131,8 +163,8 @@ beforeAll(async () => {
             ($2, $3, $6, 1),
             ($2, $4, $7, 1)
      ON CONFLICT DO NOTHING`,
-    [ADMIN_ID, TARGET_ID, IDS.hospitality.A, IDS.hospitality.B,
-      IDS.hotels.A1, IDS.hotels.A2, IDS.hotels.B1]
+    [ADMIN_ID, TARGET_ID, IDS.hospitality.A, HOSPITALITY_C,
+      IDS.hotels.A1, IDS.hotels.A2, HOTEL_C1]
   );
 
   // The target user keeps one department throughout — so `department_ids`
@@ -147,7 +179,7 @@ beforeAll(async () => {
   const policies = [
     [POLICY_A1, IDS.hospitality.A, IDS.hotels.A1, STEP_A1, STEP2_A1],
     [POLICY_A2, IDS.hospitality.A, IDS.hotels.A2, STEP_A2, STEP2_A2],
-    [POLICY_B1, IDS.hospitality.B, IDS.hotels.B1, STEP_B1, STEP2_B1],
+    [POLICY_B1, HOSPITALITY_C, HOTEL_C1, STEP_B1, STEP2_B1],
   ];
   for (const [policyId, companyId, hotelId, stepId, step2Id] of policies) {
     await db.none(
@@ -204,6 +236,9 @@ afterAll(async () => {
     [[ADMIN_ID, TARGET_ID]]
   );
   await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [[ADMIN_ID, TARGET_ID]]);
+  // Suite-owned hospitality entity — drop the hotel first (FK).
+  await db.none(`DELETE FROM tbl_hospitality_company_hotels WHERE id = $1`, [HOTEL_C1]);
+  await db.none(`DELETE FROM tbl_hospitality_companies WHERE id = $1`, [HOSPITALITY_C]);
 });
 
 async function approverStatusFor(instanceId) {
@@ -227,8 +262,8 @@ describe("pre-flight approval impact is scoped to the changed role scope", () =>
       policyId: POLICY_B1,
       stepId: STEP_B1,
       step2Id: STEP2_B1,
-      companyId: IDS.hospitality.B,
-      hotelId: IDS.hotels.B1,
+      companyId: HOSPITALITY_C,
+      hotelId: HOTEL_C1,
       metadata: { po_number: "PO-B1-001", rfq_no: 9999001 },
     });
 
@@ -261,8 +296,8 @@ describe("pre-flight approval impact is scoped to the changed role scope", () =>
       policyId: POLICY_B1,
       stepId: STEP_B1,
       step2Id: STEP2_B1,
-      companyId: IDS.hospitality.B,
-      hotelId: IDS.hotels.B1,
+      companyId: HOSPITALITY_C,
+      hotelId: HOTEL_C1,
       metadata: { po_number: "PO-B1-002", rfq_no: 9999003 },
     });
 
@@ -381,7 +416,7 @@ describe("empty-payload wipe guard", () => {
       `SELECT company_id FROM tbl_user_role_scopes WHERE user_id = $1`,
       [TARGET_ID]
     );
-    expect(remaining.map((r) => r.company_id)).toEqual([IDS.hospitality.B]);
+    expect(remaining.map((r) => r.company_id)).toEqual([HOSPITALITY_C]);
   });
 
   it("rejects a role scope that does not name its hospitality company", async () => {

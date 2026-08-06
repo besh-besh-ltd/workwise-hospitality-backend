@@ -38,6 +38,20 @@ export const getBidEndMomentIst = (raw) => {
   return loose.isValid() ? loose : null;
 };
 
+/**
+ * "Now" as an IST moment — the JS twin of the SQL idiom
+ * `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')` (see IST_NOW /
+ * IST_TODAY in app/models/dashboardModel.js).
+ *
+ * Every naive `timestamp without time zone` column in this schema that the
+ * product treats as a wall-clock deadline (`bid_end_date`,
+ * `tender_publish_date`, `vendor_clarification_date`, the ARC submission
+ * window) stores IST. Comparing one of those against `new Date()` resolves
+ * through the NODE PROCESS timezone, which is UTC in production — a 5h30m
+ * error. Pair this with `getBidEndMomentIst` instead.
+ */
+export const istNow = () => moment.tz(QUOTE_VISIBILITY_TIMEZONE);
+
 export const buildQuoteVisibilityMeta = (rfqOrBidEndDate) => {
   const bidEndDate =
     typeof rfqOrBidEndDate === 'object' && rfqOrBidEndDate !== null

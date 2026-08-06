@@ -398,9 +398,16 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
 
 /**
  * Notify the MR raiser that a vendor rejected their call-off PO (audit CO9).
- * Post-commit + best-effort — in-app via notificationService + email. The
- * RFQ-side sendVendorRejectionNotification is skipped for call-offs (it targets
+ * Post-commit — in-app via notificationService + email. The RFQ-side
+ * sendVendorRejectionNotification is skipped for call-offs (it targets
  * commercial evaluators, which a call-off has none of).
+ *
+ * TOTAL BY CONSTRUCTION: every step swallows its own errors, so this function
+ * never rejects. That is a contract, not an accident — rejectPO AWAITS it
+ * before answering (so the raiser's only notice is durable before the vendor
+ * is told the rejection succeeded), and an awaited call that could throw would
+ * turn a committed rejection into a 400. SMTP stays fire-and-forget so the
+ * response never waits on the mail server.
  */
 export async function notifyCallOffRejected({ raisedBy, mrNumber, poNumber, reason }) {
   if (!raisedBy) return;
@@ -417,14 +424,20 @@ export async function notifyCallOffRejected({ raisedBy, mrNumber, poNumber, reas
   } catch (err) {
     logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] in-app notify failed');
   }
-  const raiser = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [raisedBy]);
-  if (raiser?.email) {
-    sendMail({
-      to: raiser.email,
-      subject: `Call-off PO ${poNumber || ''} rejected by vendor`,
-      html: `<p>Hello ${raiser.name || ''},</p>
-             <p>The vendor has <strong>rejected</strong> call-off purchase order <strong>${poNumber || ''}</strong> raised from requisition <strong>${mrNumber || ''}</strong>${reason ? ` with the reason: <em>${reason}</em>` : ''}.</p>
-             <p>The contracted quantity has been released back to the rate contract. You may raise a fresh requisition if the materials are still required.</p>`,
-    }).catch((err) => logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] email failed'));
+  try {
+    const raiser = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [raisedBy]);
+    if (raiser?.email) {
+      sendMail({
+        to: raiser.email,
+        subject: `Call-off PO ${poNumber || ''} rejected by vendor`,
+        html: `<p>Hello ${raiser.name || ''},</p>
+               <p>The vendor has <strong>rejected</strong> call-off purchase order <strong>${poNumber || ''}</strong> raised from requisition <strong>${mrNumber || ''}</strong>${reason ? ` with the reason: <em>${reason}</em>` : ''}.</p>
+               <p>The contracted quantity has been released back to the rate contract. You may raise a fresh requisition if the materials are still required.</p>`,
+      }).catch((err) => logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] email failed'));
+    }
+  } catch (err) {
+    // The raiser lookup is the one step that was previously unguarded; a DB
+    // blip here must not propagate now that the caller awaits this function.
+    logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] raiser lookup failed');
   }
 }

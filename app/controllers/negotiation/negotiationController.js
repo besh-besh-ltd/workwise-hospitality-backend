@@ -3,7 +3,7 @@ import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct,
   NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION,
-  NEG_PARENT_STATE_ORDER } from '../../models/negotiationModel.js';
+  NEG_PARENT_STATE_ORDER, NEG_PARENT_ACTION_STATES } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
@@ -36,6 +36,10 @@ import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } 
 import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification, sendNegotiationRoundVendorNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
+import {
+  assertVendorsTechnicallyQualified,
+  screenVendorsForTechnicalQualification,
+} from '../../services/technicalQualificationService.js';
 
 // Server-derived id for the RBAC read matrix. NEVER read from the body/query/
 // headers. Returns null for super admins (user_type 8), which the model treats
@@ -424,9 +428,49 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
     // selected_quotes and expect the award to be written here. Rounds created
     // by createRound never do (their metadata has no selected_quotes), so for
     // those this block is a no-op.
+    //
+    // DEADNESS ASSESSMENT (why this is guarded rather than deleted):
+    //   1. The entity-type re-validation above means only entity_type
+    //      'NEGOTIATION' instances reach this block.
+    //   2. The ONLY writer of NEGOTIATION instances is
+    //      startApprovalForNegotiationRound (L584), whose metadata has no
+    //      selected_quotes key at all.
+    //   3. Both dispatch registries (approvalActionService.js L96,
+    //      approvalPropagationService.js L425) route NEGOTIATION/APPROVED here
+    //      and nowhere else.
+    // So nothing the current code writes can reach these INSERTs. It is
+    // unreachable-by-construction, but only for rows created by TODAY's code —
+    // a historical instance could still carry the key, and that could not be
+    // ruled out from this machine. Deleting the block would change behaviour
+    // for such a row from "award, unguarded" to "silently no award"; guarding it
+    // fails closed instead, and is a strict no-op if the block really is dead.
     if (rfq_id && metadata.selected_quotes && metadata.selected_quotes.length > 0) {
+      // Same wholesale rule as every other award path. The difference is the
+      // failure channel: this whole function's errors are caught and swallowed
+      // below by design (a post-approval hook must not fail the approval that
+      // already committed), so a throw here would ALSO skip the round
+      // activation that is this function's actual job. Skipping just the award
+      // block and logging is therefore the only fail-closed option available —
+      // there is no HTTP response to attach a reason to.
+      const legacyScreen = await screenVendorsForTechnicalQualification(
+        {
+          rfq_id,
+          rfq_product_id,
+          vendor_ids: metadata.selected_quotes.map(q => q.vendor_id),
+        },
+        t
+      );
+      if (!legacyScreen.ok) {
+        logError(
+          `Legacy NEGOTIATION post-approval award BLOCKED on technical qualification ` +
+          `(approval_instance_id=${approval_instance_id}, rfq_id=${rfq_id}, ` +
+          `rfq_product_id=${rfq_product_id}): ${legacyScreen.message}`
+        );
+      }
       // Get RFQ data
-      const rfq = await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+      const rfq = legacyScreen.ok
+        ? await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id])
+        : null;
 
       if (rfq) {
         // Get product details
@@ -701,10 +745,41 @@ const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqD
 
   // Get product details using model
   const product = await rfqModel.getRfqProductById(rfqProductId, rfqId, t);
-  
+
   if (!product) {
     throw new Error('RFQ product not found');
   }
+
+  // ---------------------------------------------------------------------------
+  // Technical-qualification guard on the AWARD.
+  //
+  // This function is the chokepoint: every negotiation-quote award — the
+  // auto-approve branch of POST /negotiation/quotes/submit-for-approval, and
+  // both the tender and non-tender branches of
+  // POST /negotiation/quotes/:rfq_product_id/approve (the latter also drafts
+  // POs) — writes tbl_quote_finalization through here, for an ARBITRARY-LENGTH
+  // list of vendors, and until now validated nothing but the existence of the
+  // product row. POST /rfq/finalize grew a technical gate; this sibling had
+  // none, so the gate was bypassable by awarding through negotiation instead —
+  // and multi-vendor, so the hole was wider.
+  //
+  // The check lives HERE, on top of the INSERT, so it also covers callers
+  // written later. The two HTTP routes additionally pre-flight the same helper
+  // before committing anything, so the normal refusal is a clean 400 rather
+  // than a rolled-back transaction; this throw is the backstop, not the UX.
+  //
+  // Refusal is WHOLESALE, not filter-and-continue — see the rationale on
+  // screenVendorsForTechnicalQualification. Since we are inside the caller's
+  // transaction, the throw rolls back the whole award rather than leaving a
+  // partial one.
+  await assertVendorsTechnicallyQualified(
+    {
+      rfq_id: rfqId,
+      rfq_product_id: rfqProductId,
+      vendor_ids: quotes.map(q => q.vendor_id),
+    },
+    t
+  );
 
   for (const quote of quotes) {
     // Check if this vendor is already finalized using model
@@ -2285,6 +2360,26 @@ const NegotiationController = {
         }
       }
 
+      // 5c. Technical-qualification pre-flight.
+      //
+      // addQuotesToFinalization enforces this too (it is the write chokepoint),
+      // but doing it here as well matters for two reasons. First, the refusal
+      // becomes a clean 400 carrying the reason instead of a rolled-back
+      // transaction surfacing through the generic error formatter. Second — and
+      // this is the substantive part — it blocks a technically disqualified
+      // vendor from being put in FRONT OF AN APPROVER at all, not merely from
+      // being awarded at the end. Without it, a non-auto-approving policy would
+      // happily route the request to an approver whose approval could then never
+      // be honoured, which is a dead end the buyer cannot clear from the UI.
+      const techScreen = await screenVendorsForTechnicalQualification({
+        rfq_id,
+        rfq_product_id,
+        vendor_ids: quotes.map(q => q.vendor_id),
+      });
+      if (!techScreen.ok) {
+        return res.status(400).json({ status: 2, message: techScreen.message });
+      }
+
       // 6. Execute in transaction
       const result = await db.tx(async (t) => {
         // Create approval instance
@@ -2564,6 +2659,54 @@ const NegotiationController = {
         });
       }
 
+      // 1b. Technical-qualification pre-flight — BEFORE the approval action.
+      //
+      // ORDERING IS THE WHOLE POINT. submitApprovalAction below COMMITS the
+      // approval; the award is only written afterwards, in a separate db.tx.
+      // A refusal raised from inside that later transaction would roll back the
+      // award but NOT the approval, leaving the instance APPROVED with nothing
+      // finalized — a state no screen can explain and no action can clear.
+      // Checking first means a disqualified vendor costs the approver a 400 and
+      // nothing else.
+      //
+      // This is not redundant with the check at submit time. A vendor can pass
+      // technical evaluation when the quotes are submitted and be failed before
+      // the approver acts (evaluation reopened, verdict corrected), and
+      // approvals created by older code paths never passed a technical check at
+      // all. The verdict that binds is the one standing at the moment of award.
+      //
+      // Both award-carrying metadata shapes are screened:
+      //   - selected_quotes[]        — the negotiation multi-vendor award,
+      //                                which flows into addQuotesToFinalization.
+      //   - po_payload + vendor_id   — the single vendor parked here by
+      //                                rfqController.finalize, which drafts a PO
+      //                                directly and never touches
+      //                                addQuotesToFinalization, so the
+      //                                chokepoint guard would miss it.
+      const guardMeta = typeof pendingInstance.metadata === 'string'
+        ? JSON.parse(pendingInstance.metadata)
+        : (pendingInstance.metadata || {});
+      const guardVendorIds = Array.isArray(guardMeta.selected_quotes) && guardMeta.selected_quotes.length > 0
+        ? guardMeta.selected_quotes.map(q => q.vendor_id)
+        : (guardMeta.vendor_id ? [guardMeta.vendor_id] : []);
+      if (guardVendorIds.length > 0) {
+        // entity_id IS the rfq_product_id for NEGOTIATION_QUOTE, so prefer the
+        // route param over metadata and fall back to the product row for rfq_id
+        // — older instances do not all carry rfq_id in metadata.
+        const guardRfqId = guardMeta.rfq_id
+          || (await rfqModel.getRfqProductById(rfq_product_id))?.rfq_id;
+        if (guardRfqId) {
+          const techScreen = await screenVendorsForTechnicalQualification({
+            rfq_id: guardRfqId,
+            rfq_product_id,
+            vendor_ids: guardVendorIds,
+          });
+          if (!techScreen.ok) {
+            return res.status(400).json({ status: 2, message: techScreen.message });
+          }
+        }
+      }
+
       // 2. Submit approval action
       const result = await submitApprovalAction({
         approval_instance_id: pendingInstance.id,
@@ -2741,9 +2884,40 @@ const NegotiationController = {
               if (product) {
                 for (const selectedQuote of metadata.selected_quotes) {
                   try {
-                    // Get vendor's original quote item for quantity/unit
+                    // Get vendor's original quote item for quantity/unit.
+                    //
+                    // `qi.unit` USED TO BE SELECTED HERE AND DOES NOT EXIST.
+                    // tbl_quote_items has no unit-of-measure column (see
+                    // tests/setup/schema.sql — the pg_dump of the real
+                    // database), so this query raised 42703 "column qi.unit does
+                    // not exist" on EVERY execution. The consequences were much
+                    // worse than a missing unit, because of where the failure
+                    // landed:
+                    //
+                    //   1. submitApprovalAction has already committed the
+                    //      approval on its own connection — the instance is
+                    //      APPROVED for good.
+                    //   2. This query runs inside the surrounding db.tx, AFTER
+                    //      addQuotesToFinalization has inserted the award and
+                    //      recordLifecycleEvent has logged it.
+                    //   3. It throws. The `catch (poError)` below swallows the
+                    //      JS error — but a failed statement has already put
+                    //      POSTGRES into an aborted transaction, which no JS
+                    //      catch can undo. pg-promise's COMMIT degrades to a
+                    //      ROLLBACK, silently discarding the award and the
+                    //      lifecycle row written in steps 2.
+                    //   4. The endpoint still answers 200 "Quotes fully approved
+                    //      and finalized".
+                    //
+                    // Net effect in production: on this branch the approval was
+                    // recorded, the caller was told the award succeeded, and
+                    // tbl_quote_finalization got nothing at all. Dropping the
+                    // phantom column is the whole fix — `unit` was already
+                    // written as `vendorQuoteItem.unit || 'N/A'` below, and the
+                    // fallback is now simply always taken, which is the value
+                    // the column could ever have produced anyway.
                     const vendorQuoteItem = await t.oneOrNone(
-                      `SELECT qi.quantity, qi.unit, qi.unit_price, qi.id as quote_item_id,
+                      `SELECT qi.quantity, qi.unit_price, qi.id as quote_item_id,
                               qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
                               qi.other_charges
                        FROM tbl_quote_items qi
@@ -2956,7 +3130,20 @@ const NegotiationController = {
       const groupBy = body.groupBy === 'round' ? 'round' : 'parent';
       const isParent = groupBy === 'parent';
       const BUCKETS = Object.values(NEG_STATE);
-      const tab = ['all', 'for_me', ...BUCKETS].includes(body.tab) ? body.tab : 'all';
+      // Grouped tabs. The strip carried eight sentence-length labels and wrapped
+      // onto a second line; per user the median number of NON-EMPTY status tabs
+      // is 2 (max 5). Membership is NEG_PARENT_ACTION_STATES — the same split
+      // the parent roll-up already uses — so the two can never drift.
+      //
+      // awaiting_approval and open_with_vendors read as 0 parents right now but
+      // are deliberately INSIDE needs_attention: they are short-lived (median
+      // dwell 133 min and 258 min) and are the only two states that ever need a
+      // human. Grouping them is fine; dropping them would not be.
+      const GROUPS = {
+        needs_attention: (b) => NEG_PARENT_ACTION_STATES.has(b),
+        closed: (b) => !NEG_PARENT_ACTION_STATES.has(b),
+      };
+      const tab = ['all', 'for_me', ...Object.keys(GROUPS), ...BUCKETS].includes(body.tab) ? body.tab : 'all';
       // Orthogonal to `tab`: a round's state and whether it waits on the caller
       // are different questions, so the toggle composes with any status tab.
       const needsMyApproval = body.needsMyApproval === true || body.needsMyApproval === 'true';
@@ -3063,13 +3250,19 @@ const NegotiationController = {
       }
 
       // 4. tab counts — over the searched set, so they sum to `all`.
-      const tab_counts = { all: rows.length, for_me: 0 };
+      const tab_counts = { all: rows.length, for_me: 0, needs_attention: 0, closed: 0 };
       for (const k of BUCKETS) tab_counts[k] = 0;
-      for (const r of rows) { tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1; if (r._isMyAction) tab_counts.for_me++; }
+      for (const r of rows) {
+        tab_counts[r._bucket] = (tab_counts[r._bucket] || 0) + 1;
+        if (GROUPS.needs_attention(r._bucket)) tab_counts.needs_attention++;
+        else tab_counts.closed++;
+        if (r._isMyAction) tab_counts.for_me++;
+      }
 
       // 5. tab scope.
       const byTab = tab === 'all' ? rows
         : tab === 'for_me' ? rows.filter((r) => r._isMyAction)
+        : GROUPS[tab] ? rows.filter((r) => GROUPS[tab](r._bucket))
         : rows.filter((r) => r._bucket === tab);
       const tabRows = needsMyApproval ? byTab.filter((r) => r._isMyAction) : byTab;
 

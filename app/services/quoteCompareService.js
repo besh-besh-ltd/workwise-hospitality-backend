@@ -109,6 +109,15 @@ const buildEngineLineInput = (product, quote, detail) => {
     tax: merged.tax,
     tax_mode: merged.tax_mode || "percentage",
     other_charges: buildEngineCharges(merged),
+    // MRP (tax-inclusive) lines: the engine prices these from the amount the
+    // vendor actually offered (MRP less discount x qty) rather than from the
+    // rounded exclusive unit_price, so the comparison agrees to the paisa with
+    // the vendor's quote and with the PO the award produces. Absent on
+    // Traditional lines, where the engine ignores them entirely.
+    pricing_method: merged.pricing_method,
+    entered_mrp: merged.entered_mrp,
+    mrp_discount: merged.mrp_discount,
+    mrp_discount_mode: merged.mrp_discount_mode,
   };
 };
 

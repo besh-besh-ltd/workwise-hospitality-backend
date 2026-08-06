@@ -236,13 +236,16 @@ async function finalizeProduct(rfq_id, rfq_no, quote_id, productVariantId, vendo
 }
 
 // Configure technical evaluation for one product and seed per-vendor scores.
-// scores: [{ vendorId, score, status }] (status 1 = passed/cleared). Presence of
+// scores: [{ vendorId, score, status }] (status 1 = passed/cleared, anything
+// else = failed; omit a vendor entirely to leave them unevaluated). Presence of
 // the te row makes product.tech.configured true; calculated_score drives T-rank.
-async function seedProductTech(rfq_id, rfq_product_id, scores = []) {
+// `minScore` is the product's minimum_passing_score, surfaced on the contract's
+// quotes_absence entries so the buyer sees "scored X against a minimum of Y".
+async function seedProductTech(rfq_id, rfq_product_id, scores = [], minScore = 0) {
   const te = await db.one(
     `INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score)
-     VALUES ($1, $2, 0) RETURNING id`,
-    [rfq_id, rfq_product_id]
+     VALUES ($1, $2, $3) RETURNING id`,
+    [rfq_id, rfq_product_id, minScore]
   );
   inserted.techEvalIds.push(te.id);
   for (const s of scores) {
@@ -504,6 +507,214 @@ describe("GET /rfq/quote-comparison-view/:id — per-product technical scores", 
 });
 
 // ===========================================================================
+// 1b-ii) quotes_absence — WHY a cell is empty.
+//
+// The bug this locks down: getQuotesByRfqById2 is called with TA_Vendors='TA',
+// whose SQL gate drops the whole quotation of a vendor who failed THIS
+// product's technical evaluation. The cell then collapsed to a bare `null` —
+// indistinguishable from a vendor who never responded — so the buyer's primary
+// commercial screen rendered "Awaiting quote" over a vendor who competed and
+// was disqualified by the buyer's own technical gate, and the vendor column
+// counted that line as un-quoted ("Partial — 2 of 3 items quoted").
+//
+// The price stays suppressed (a disqualified vendor must remain non-comparable
+// and non-awardable — quotes[vendor] is still null, so there is no `finalize`
+// payload and no selectable cell). Only the REASON is added, in a sibling map.
+//
+// Reproduced from RFQ 363 (#535917) on staging: vendor 429 quoted a LAPTOP
+// SCREEN line at ₹1,14,000.04, scored 20 against a 50 minimum, and was recorded
+// FAIL — while passing the other two products, which is what keeps them in the
+// vendors[] column set at all.
+// ===========================================================================
+describe("GET /rfq/quote-comparison-view/:id — quotes_absence (why a cell is empty)", () => {
+  // Three vendors, ONE product, three different reasons for the cell's state.
+  // Every vendor also quotes a second product they pass, because the 'TA' gate
+  // additionally requires a vendor to clear at least one product in the RFQ —
+  // otherwise they vanish from vendors[] entirely and have no column to explain.
+  async function seedThreeCases() {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const A = await addProduct(rfq_id, VARIANT_A);          // the product under test
+    const B = await addProduct(rfq_id, VARIANT_B, 0);       // the "carrier" product
+
+    // --- product A: alpha quotes and passes, beta quotes and FAILS ---
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 600, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    // gamma NEVER quotes product A — the genuine non-response.
+
+    // --- product B: beta + gamma quote and pass, which puts both in vendors[] ---
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 700, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_gamma, {
+      unitPrice: 800, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_alpha, score: 80, status: 1 },
+      { vendorId: IDS.users.vendor_beta, score: 20, status: 0 },
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 70, status: 1 },
+      { vendorId: IDS.users.vendor_gamma, score: 60, status: 1 },
+    ], 50);
+
+    return { rfq_id, A, B };
+  }
+
+  it("distinguishes quoted-and-passed, quoted-but-tech-failed and never-quoted on the SAME product", async () => {
+    const { rfq_id, A } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+    expect(product).toBeDefined();
+
+    const alpha = String(IDS.users.vendor_alpha);
+    const beta = String(IDS.users.vendor_beta);
+    const gamma = String(IDS.users.vendor_gamma);
+
+    // All three are columns on the sheet — otherwise there is nothing to label.
+    const vendorIds = res.body.vendors.map((v) => String(v.id));
+    expect(vendorIds).toEqual(expect.arrayContaining([alpha, beta, gamma]));
+
+    // 1) quoted AND passed -> a real, priced cell.
+    expect(product.quotes[alpha]).not.toBeNull();
+    expect(product.quotes[alpha].base).toBeGreaterThan(0);
+    expect(product.quotes_absence[alpha]).toBeUndefined();
+
+    // 2) quoted BUT technically failed -> price still suppressed, reason carried.
+    expect(product.quotes[beta]).toBeNull();
+    expect(product.quotes_absence[beta]).toEqual({
+      status: "TECH_FAILED",
+      tech_score: 20,
+      min_score: 50,
+    });
+
+    // 3) never quoted -> no cell AND no reason. This is what "Awaiting quote"
+    //    is allowed to mean, and the only case that may still say it.
+    expect(product.quotes[gamma]).toBeNull();
+    expect(product.quotes_absence[gamma]).toBeUndefined();
+  });
+
+  it("keeps the disqualified vendor non-awardable: the null cell carries no finalize payload", async () => {
+    const { rfq_id, A } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+
+    // The FE builds its award payload from cell.finalize (quote_id /
+    // quote_item_id / vendor_id). A disqualified vendor must never expose one —
+    // this is what makes the suppression real rather than cosmetic.
+    expect(product.quotes[String(IDS.users.vendor_beta)]).toBeNull();
+    expect(product.quotes_absence[String(IDS.users.vendor_beta)].status).toBe("TECH_FAILED");
+    // …while the vendor who passed still has one.
+    expect(product.quotes[String(IDS.users.vendor_alpha)].finalize.quote_id).toEqual(expect.any(Number));
+  });
+
+  it("suppression is per-product: the same vendor keeps a live cell on a product they passed", async () => {
+    const { rfq_id, B } = await seedThreeCases();
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const productB = res.body.products.find((p) => p.id === B.rfq_product_id);
+
+    expect(productB.quotes[String(IDS.users.vendor_beta)]).not.toBeNull();
+    expect(productB.quotes_absence).toEqual({});
+  });
+
+  it("marks a vendor with no technical verdict yet as TECH_PENDING, not as a non-response", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const A = await addProduct(rfq_id, VARIANT_A);
+    const B = await addProduct(rfq_id, VARIANT_B, 0);
+
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    // delta quotes product A but nobody has scored them on it yet.
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_delta, {
+      unitPrice: 650, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_delta, {
+      unitPrice: 900, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_alpha, score: 80, status: 1 },
+      // deliberately NO row for delta
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_delta, score: 75, status: 1 },
+    ], 50);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+
+    const product = res.body.products.find((p) => p.id === A.rfq_product_id);
+    expect(product.quotes[String(IDS.users.vendor_delta)]).toBeNull();
+    expect(product.quotes_absence[String(IDS.users.vendor_delta)]).toEqual({
+      status: "TECH_PENDING",
+      tech_score: null,
+      min_score: 50,
+    });
+  });
+
+  it("is empty for an RFQ with no technical evaluation at all", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { rfq_product_id, product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+    });
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    expect(product.quotes_absence).toEqual({});
+  });
+
+  it("redacts quotes_absence before the deadline, like tech.scores", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq({ bidEndOffsetMs: 86400_000 });
+    const A = await addProduct(rfq_id, VARIANT_A);
+    const B = await addProduct(rfq_id, VARIANT_B, 0);
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 600, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: A.product_variant_id,
+    });
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_beta, {
+      unitPrice: 700, quantity: 5, tax: 18, otherCharges: FREIGHT_CHARGE,
+      productVariantId: B.product_variant_id,
+    });
+    await seedProductTech(rfq_id, A.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 20, status: 0 },
+    ], 50);
+    await seedProductTech(rfq_id, B.rfq_product_id, [
+      { vendorId: IDS.users.vendor_beta, score: 70, status: 1 },
+    ], 50);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.body.quotes_locked).toBe(true);
+    for (const p of res.body.products) {
+      expect(p.quotes_absence).toEqual({});
+    }
+  });
+});
+
+// ===========================================================================
 // 1c) Pre-deadline lock — quotes hidden until bid_end_date passes.
 // ===========================================================================
 describe("GET /rfq/quote-comparison-view/:id — pre-deadline lock", () => {
@@ -550,6 +761,15 @@ describe("GET /rfq/quote-comparison-view/:id — pre-deadline lock", () => {
 
     // No leaked per-product technical scores either.
     expect(product.tech.scores).toEqual({});
+
+    // The two fields added for the award badge and the in-row negotiation are
+    // decision data of exactly the same kind as the fields above, and must not
+    // survive the lock just because they were added later.
+    expect(product.finalized_by).toBeNull();
+    expect(product.negotiation).toBeNull();
+
+    // And there is nothing to toggle when every cell is a placeholder.
+    expect(body.has_delivery_charges).toBe(false);
   });
 
   it("is unlocked (real numbers present) once the deadline has passed", async () => {
@@ -884,36 +1104,185 @@ describe("GET /rfq/quote-comparison-view/:id — state 'rejected' / 'approved'",
 });
 
 // ===========================================================================
-// 6) Freight param — ?freight=0 returns 200 with totals <= the landed total.
+// 6) Delivery-charge toggle — ?freight=0 must actually remove delivery charges.
 // ===========================================================================
-describe("GET /rfq/quote-comparison-view/:id — ?freight param", () => {
-  it("freight=0 and default both respond 200 with numeric totals; freight=0 total is <= landed", async () => {
+// This suite previously asserted only `noFreight.total <= landed.total`, which
+// passes on IDENTICAL values — and they were identical, because the flag was
+// dead: getQuoteComparisonView forwarded it to getQuotesByRfqById2, which
+// declared `no_freight` and never read it. That permissive assertion is why the
+// broken toggle shipped. Every assertion here is now strict.
+describe("GET /rfq/quote-comparison-view/:id — delivery-charge toggle", () => {
+  const cellOf = (res) => res.body.products[0].quotes[String(IDS.users.vendor_alpha)];
+
+  async function seedRfq(otherCharges) {
     const { rfq_id, rfq_no } = await makeViewableRfq();
     const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
     await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
-      unitPrice: 500, quantity: 10, tax: 18, otherCharges: FREIGHT_CHARGE, productVariantId: product_variant_id,
+      unitPrice: 500, quantity: 10, tax: 18, otherCharges, productVariantId: product_variant_id,
+    });
+    return rfq_id;
+  }
+
+  it("removes the delivery charge from the total, leaving base and tax untouched", async () => {
+    const rfq_id = await seedRfq(FREIGHT_CHARGE);
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+
+    const landed = await client.get(VIEW(rfq_id));
+    const exDelivery = await client.get(`${VIEW(rfq_id)}?freight=0`);
+    expect(landed.status).toBe(200);
+    expect(exDelivery.status).toBe(200);
+
+    const a = cellOf(landed);
+    const b = cellOf(exDelivery);
+
+    expect(a.delivery_charges).toBeGreaterThan(0);
+    // STRICTLY less — not `<=`.
+    expect(b.total).toBeLessThan(a.total);
+    // Only delivery-class charges come off; the pre-charge figures are stable.
+    expect(b.base).toBe(a.base);
+    expect(b.subtotal).toBe(a.subtotal);
+    expect(b.tax_amt).toBe(a.tax_amt);
+    expect(a.total - b.total).toBeCloseTo(a.delivery_charges, 2);
+  });
+
+  it("removes loading/unloading and transportation too, but keeps packaging and insurance", async () => {
+    // The old chargeSubtotal(engine,'freight') matched ONLY the literal freight
+    // slug, so these two logistics charges stayed silently inside the price.
+    const rfq_id = await seedRfq([
+      { name: "Freight", slug: "freight", amount: 100, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+      { name: "Loading/Unloading", slug: "loading_unloading", amount: 50, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+      { name: "Transportation", slug: "transportation_charges", amount: 25, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+      { name: "Packaging", slug: "packaging", amount: 10, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+      { name: "Insurance", slug: "insurance", amount: 5, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+    ]);
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+
+    const a = cellOf(await client.get(VIEW(rfq_id)));
+    const b = cellOf(await client.get(`${VIEW(rfq_id)}?freight=0`));
+
+    expect(a.delivery_charges).toBeCloseTo(175, 2);
+    expect(a.total - b.total).toBeCloseTo(175, 2);
+  });
+
+  it("also STRIPS the delivery entries from other_charges when excluded", async () => {
+    // Load-bearing for the client. Every frontend helper re-derives figures by
+    // summing other_charges — the price, the vendor grand total, the L1
+    // roll-up, the rank basis, the savings KPI, the category subtotals. If the
+    // entries survived here, `total` and those derived figures would disagree
+    // and the toggle would appear to work in some places and not others.
+    const rfq_id = await seedRfq([
+      { name: "Freight", slug: "freight", amount: 100, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+      { name: "Packaging", slug: "packaging", amount: 10, amount_mode: "absolute", tax: 0, tax_mode: "percentage", comment: "" },
+    ]);
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+
+    const a = cellOf(await client.get(VIEW(rfq_id)));
+    const b = cellOf(await client.get(`${VIEW(rfq_id)}?freight=0`));
+
+    expect(a.other_charges.map((c) => c.label)).toEqual(expect.arrayContaining(["Freight", "Packaging"]));
+    expect(b.other_charges.map((c) => c.label)).not.toContain("Freight");
+    expect(b.other_charges.map((c) => c.label)).toContain("Packaging");
+
+    // And the cell stays internally consistent: subtotal + tax + remaining
+    // charges reconciles to the reported total.
+    const remaining = b.other_charges.reduce((s, c) => s + c.amount, 0);
+    expect(b.subtotal + b.tax_amt + remaining).toBeCloseTo(b.total, 2);
+  });
+
+  it("counts a QUOTE-LEVEL transportation charge as delivery too", async () => {
+    // 16 production quotes carry { slug:'transportation', is_global:true } worth
+    // 0.6%-26% of the quote, and NONE of them has a line-level delivery charge.
+    // Classifying only line charges hid the toggle entirely on 9 RFQs while the
+    // charge sat silently inside the price, and on 7 more moved every column
+    // except the one that actually had the charge.
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const quote_id = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, productVariantId: product_variant_id,
+    });
+    await db.none(
+      `UPDATE tbl_quotes SET global_charges = $2::jsonb WHERE id = $1`,
+      [quote_id, JSON.stringify([
+        { slug: "transportation", name: "Transportation", amount: 300, amount_mode: "absolute", is_global: true },
+      ])]
+    );
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const withAll = await client.get(VIEW(rfq_id));
+    const exDelivery = await client.get(`${VIEW(rfq_id)}?freight=0`);
+
+    expect(withAll.body.has_delivery_charges).toBe(true);
+    const a = cellOf(withAll);
+    const b = cellOf(exDelivery);
+    expect(a.delivery_charges).toBeGreaterThan(0);
+    expect(b.total).toBeLessThan(a.total);
+    // And the entry itself is gone from the roll-up the client sums.
+    expect(b.global_charges.map((c) => c.label)).not.toContain("Transportation");
+  });
+
+  it("reports has_delivery_charges true when a cell carries one, false when none do", async () => {
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+
+    const withFreight = await client.get(VIEW(await seedRfq(FREIGHT_CHARGE)));
+    expect(withFreight.body.has_delivery_charges).toBe(true);
+
+    const without = await client.get(VIEW(await seedRfq([])));
+    expect(without.body.has_delivery_charges).toBe(false);
+  });
+
+  it("accepts 1/0 and true/false for the freight param", async () => {
+    const rfq_id = await seedRfq(FREIGHT_CHARGE);
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+
+    for (const [on, off] of [["1", "0"], ["true", "false"]]) {
+      const a = cellOf(await client.get(`${VIEW(rfq_id)}?freight=${on}`));
+      const b = cellOf(await client.get(`${VIEW(rfq_id)}?freight=${off}`));
+      expect(b.total).toBeLessThan(a.total);
+    }
+  });
+});
+
+// ===========================================================================
+// 6b) Finalizer identity — "who awarded this" must reach the cell.
+// ===========================================================================
+// The client could not tell an awarded cell from a merely-cheapest one. Half of
+// that is colour, half is that the payload never carried WHO finalized: the
+// name is fetched by getQuotesByRfqById2 (as finalization.finilized_by, sic)
+// and discarded, and fetchFinalizations re-queried the table without
+// created_by. tbl_quote_finalization.created_by is populated on 100% of 1,672
+// production rows, so this needs no migration and no backfill.
+describe("GET /rfq/quote-comparison-view/:id — finalizer identity", () => {
+  it("exposes the finalizer's name on a finalized product", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    const quote_id = await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, productVariantId: product_variant_id,
+    });
+    await finalizeProduct(rfq_id, rfq_no, quote_id, product_variant_id, IDS.users.vendor_alpha);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    const p = res.body.products[0];
+
+    expect(p.finalized_vendor).toBe(IDS.users.vendor_alpha);
+    expect(p.finalized_by).toBeTruthy();
+    expect(typeof p.finalized_by.name).toBe("string");
+    expect(p.finalized_by.name.length).toBeGreaterThan(0);
+    expect(p.finalized_by.at).toEqual(expect.any(String));
+  });
+
+  it("returns finalized_by null for a product that was never finalized", async () => {
+    const { rfq_id, rfq_no } = await makeViewableRfq();
+    const { product_variant_id } = await addProduct(rfq_id, VARIANT_A);
+    await plantQuote(rfq_id, rfq_no, IDS.users.vendor_alpha, {
+      unitPrice: 500, quantity: 10, tax: 18, productVariantId: product_variant_id,
     });
 
     const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const p = (await client.get(VIEW(rfq_id))).body.products[0];
 
-    // Default (freight=1) -> landed totals including freight.
-    const landed = await client.get(VIEW(rfq_id));
-    expect(landed.status).toBe(200);
-    const landedCell = landed.body.products[0].quotes[String(IDS.users.vendor_alpha)];
-    expect(typeof landedCell.total).toBe("number");
-    expect(landedCell.total).toBeGreaterThan(0);
-
-    // freight=0 -> still 200 with a numeric total (no_freight passthrough only
-    // zeroes legacy freight_price columns, so other_charges-based freight may
-    // persist; the contract guarantees a numeric total either way).
-    const noFreight = await client.get(`${VIEW(rfq_id)}?freight=0`);
-    expect(noFreight.status).toBe(200);
-    const noFreightCell = noFreight.body.products[0].quotes[String(IDS.users.vendor_alpha)];
-    expect(typeof noFreightCell.total).toBe("number");
-    expect(noFreightCell.total).toBeGreaterThan(0);
-
-    // Dropping freight can only lower (or leave equal) the landed total.
-    expect(noFreightCell.total).toBeLessThanOrEqual(landedCell.total);
+    expect(p.finalized_vendor).toBeNull();
+    expect(p.finalized_by).toBeNull();
   });
 });
 

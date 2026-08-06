@@ -1,5 +1,4 @@
-import moment from 'moment-timezone';
-import { getBidEndMomentIst, QUOTE_VISIBILITY_TIMEZONE } from './quoteVisibility.js';
+import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
 
 /**
  * ARC v2 — IST submission-window time helpers.
@@ -33,7 +32,7 @@ export const arcMomentIst = (raw) => getBidEndMomentIst(raw);
  * Current instant as a moment in IST.
  * @returns {import('moment-timezone').Moment}
  */
-export const nowIst = () => moment.tz(QUOTE_VISIBILITY_TIMEZONE);
+export const nowIst = () => istNow();
 
 /**
  * Returns true when the submission window has NOT opened yet:

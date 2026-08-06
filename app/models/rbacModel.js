@@ -519,16 +519,24 @@ const rbacModel = {
   },
 
   /**
-   * Get users who have all required actions for a module/resource within hotel + department scope.
+   * Get users who have all required actions for a module/resource within
+   * hotel + department + process scope.
    * This mirrors the permission evaluation used by the frontend `useModulePermissions` hook.
+   *
+   * `processId` is the 4th RBAC scope axis. It is optional and trailing so the
+   * existing call sites are unaffected: omitting it yields NULL and the
+   * predicate short-circuits to TRUE. Pass it wherever the entity carries a
+   * process, so this helper agrees with buildScopeExistsClause
+   * (authorizationService.js) and with getAllBuyerRfq's rfq.read filter, both
+   * of which already enforce the axis.
    */
-  getUsersWithModuleActionsForHotels: async (hotelIds = [], resource = null, actions = [], departmentId = null) => {
+  getUsersWithModuleActionsForHotels: async (hotelIds = [], resource = null, actions = [], departmentId = null, processId = null) => {
     if (!hotelIds || hotelIds.length === 0 || !resource || !actions.length) {
       return [];
     }
 
     const requiredPermissionKeys = actions.map((action) => `${resource}.${action}`);
-    const params = [hotelIds, requiredPermissionKeys, departmentId, requiredPermissionKeys.length];
+    const params = [hotelIds, requiredPermissionKeys, departmentId, requiredPermissionKeys.length, processId];
 
     return db.any(
       `
@@ -550,6 +558,9 @@ const rbacModel = {
       JOIN tbl_permissions p ON p.id = rp.permission_id
       WHERE u.is_deleted = 0
         AND u.status = 1
+        -- Exclude vendors. NULL-safe on purpose: user_type is nullable, and a
+        -- bare inequality would evaluate to NULL and silently drop those rows.
+        AND (u.user_type IS NULL OR u.user_type <> 3)
         AND urs.company_id IN (SELECT hospitality_company_id FROM hotel_companies)
         AND (
           urs.hotel_id IS NULL
@@ -559,6 +570,11 @@ const rbacModel = {
           $3::int IS NULL
           OR urs.department_id = $3
           OR urs.department_id IS NULL
+        )
+        AND (
+          $5::int IS NULL
+          OR urs.process_id IS NULL
+          OR urs.process_id = $5
         )
       GROUP BY u.id, u.name, u.email
       HAVING COUNT(DISTINCT CASE
