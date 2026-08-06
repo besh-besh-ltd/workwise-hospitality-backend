@@ -72,12 +72,53 @@ const hasExplicitChargeTax = (charge) =>
   charge?.tax !== undefined &&
   charge?.tax !== "";
 
+// An MRP (tax-inclusive) line is one the vendor priced by entering an MRP and a
+// discount. Detected from the audit inputs that travel with the line, so any
+// caller that forwards the row as-read from the DB gets the correct math for
+// free. `entered_mrp` must be present — a line flagged MRP but stripped of its
+// inputs (e.g. a projection that didn't select the audit columns) falls back to
+// the Traditional path rather than silently pricing at zero.
+const isMrpLine = (line) =>
+  line?.pricing_method === "MRP" &&
+  line.entered_mrp !== null &&
+  line.entered_mrp !== undefined &&
+  line.entered_mrp !== "" &&
+  toNumber(line.entered_mrp) > 0;
+
+// The GST-INCLUSIVE amount the vendor actually offered for ONE unit:
+// MRP less discount. This is the authoritative figure on an MRP line.
+const mrpNetInclusiveUnit = (line) => {
+  const m = toNumber(line.entered_mrp);
+  const discount = applyChargeMode(line.mrp_discount, line.mrp_discount_mode, m);
+  return Math.max(0, m - discount);
+};
+
 // Compute one line's total. Returns the engine output that callers persist
 // and that the frontend renders.
+//
+// Two pricing methods share this function:
+//
+//   Traditional — `unit_price` is the tax-EXCLUSIVE rate. base = unit * qty,
+//   tax is added on top. Unchanged since the engine was written.
+//
+//   MRP — the vendor's offer is the tax-INCLUSIVE amount (MRP less discount).
+//   That inclusive amount is authoritative and `unit_price` is a lossy 2dp
+//   echo of a reverse-calculated rate, so we must NOT price from it: the
+//   exclusive base is a repeating decimal (400/1.18 = 338.9830508…) and
+//   rounding it per-unit before multiplying by quantity loses up to half a
+//   paisa per unit — an error that scales with qty and reaches the PO.
+//   Instead the line is priced from `net_inclusive * qty`, and the base/tax
+//   split is derived from that total (see below).
 export const calculateLineTotal = (line = {}) => {
-  const unitPrice = toNumber(line.unit_price);
   const quantity = toNumber(line.quantity);
-  const base = unitPrice * quantity;
+  const mrpLine = isMrpLine(line);
+
+  // The intended, exactly-reproducible line amount for an MRP line.
+  const netInclusiveLine = mrpLine ? mrpNetInclusiveUnit(line) * quantity : 0;
+
+  const base = mrpLine
+    ? deriveBaseFromInclusive(netInclusiveLine, line.tax)
+    : toNumber(line.unit_price) * quantity;
 
   if (base <= 0) {
     return {
@@ -89,8 +130,19 @@ export const calculateLineTotal = (line = {}) => {
     };
   }
 
-  const taxMode = line.tax_mode ?? DEFAULT_MODE;
-  const baseTax = applyChargeMode(line.tax, taxMode, base);
+  // GST on an MRP line is always a percentage extracted from within the price,
+  // never an absolute amount — forcing it here means the engine stays correct
+  // even if a caller forwards a stale/tampered tax_mode.
+  const taxMode = mrpLine ? "percentage" : (line.tax_mode ?? DEFAULT_MODE);
+  // On an MRP line the tax is the RESIDUAL (inclusive total minus the rounded
+  // base), not an independently-rounded percentage. The true split of a
+  // repeating decimal cannot be represented at 2dp, so rounding both halves
+  // separately can leave them failing to sum to the amount offered. Taking one
+  // side as the balance guarantees base + base_tax == the intended total, to
+  // the paisa, always.
+  const baseTax = mrpLine
+    ? q2(netInclusiveLine) - q2(base)
+    : applyChargeMode(line.tax, taxMode, base);
   const baseTaxRateForInherit =
     taxMode === "percentage" ? toNumber(line.tax) : 0;
 
@@ -140,7 +192,11 @@ export const calculateLineTotal = (line = {}) => {
     charges.push(chargeOut);
   }
 
-  const total = base + baseTax + chargesTotal;
+  // For MRP, base + base_tax IS the amount offered (already quantised), so the
+  // line total is that exact figure plus any charges stacked on top of it.
+  const total = mrpLine
+    ? q2(netInclusiveLine) + chargesTotal
+    : base + baseTax + chargesTotal;
 
   return {
     base: q2(base),
@@ -591,19 +647,32 @@ export const deriveBaseFromInclusive = (inclusive, gstPct) => {
 // Resolve raw MRP-mode inputs into the canonical exclusive line numbers.
 // discount is applied to MRP FIRST (percentage-of-MRP or absolute, via the
 // existing applyChargeMode), then GST is extracted from the net inclusive price.
-// Returns { net_inclusive, base, gst_amount, discount_amount } — base is
-// QUANTISED to 2dp (matches the numeric(15,2) columns and guarantees the value
-// stored == the value fed to the engine == the value any downstream reader
-// recomputes from, so persist-time and read-time totals never diverge). The
-// other fields are raw (for display + audit).
+//
+// Returns { net_inclusive, base, base_2dp, gst_amount, discount_amount }.
+//
+// `net_inclusive` (MRP less discount) is the AUTHORITATIVE figure — it is what
+// the vendor actually offered, and `net_inclusive * qty` is the amount the buyer
+// must be shown and the PO must state.
+//
+// `base` is the reverse-calculated tax-exclusive rate at FULL precision. It is
+// deliberately NOT rounded here: for most GST rates the exclusive rate is a
+// repeating decimal (400/1.18 = 338.9830508…), and quantising it per-unit before
+// a caller multiplies by quantity throws away up to half a paisa on every unit —
+// an error that scales with quantity and used to reach the printed PO
+// (75 units × ₹400 showed ₹29,999.73 instead of ₹30,000.00). Callers that
+// persist this into a numeric(15,2) column still get a clean 2dp value, because
+// Postgres rounds on write; callers that feed it straight to the engine now get
+// the exact total.
+//
+// `base_2dp` is the same rate quantised, for callers that need a display- or
+// storage-shaped unit rate explicitly rather than relying on column rounding.
 export const deriveMrpLine = ({ mrp, discount, discount_mode, gst_pct } = {}) => {
   const m = toNumber(mrp);
   const discount_amount = applyChargeMode(discount, discount_mode, m); // % of MRP or absolute
   const net_inclusive = Math.max(0, m - discount_amount);
-  const baseRaw = deriveBaseFromInclusive(net_inclusive, gst_pct);
-  const base = q2(baseRaw);
+  const base = deriveBaseFromInclusive(net_inclusive, gst_pct);
   const gst_amount = net_inclusive - base;
-  return { net_inclusive, base, gst_amount, discount_amount };
+  return { net_inclusive, base, base_2dp: q2(base), gst_amount, discount_amount };
 };
 
 export default {
