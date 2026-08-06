@@ -330,8 +330,36 @@ export async function reEvaluateInstanceStep(instanceStepId, t) {
     [instanceStepId]
   );
 
-  // No approvers left → auto-complete
+  // No approvers left → auto-complete.
+  //
+  // But FIRST distinguish the two ways a step can have nobody on it, because
+  // they mean opposite things:
+  //
+  //   * It HAD approvers and they were all removed mid-flight. Auto-completing
+  //     is the established behaviour — the step existed and was overtaken by a
+  //     membership change.
+  //   * It NEVER had a single approver row. That is a step that was added but
+  //     could not be filled — it is BLOCKED, waiting for somebody to hold the
+  //     role. Auto-approving it would manufacture consent nobody gave, and
+  //     would silently undo the blocking behaviour in applyDiffToInstance.
+  //
+  // The filtered query above cannot tell them apart (a fully-removed step and a
+  // never-populated step both return zero), so count the tombstones too.
   if (approvers.length === 0) {
+    const everHad = await t.one(
+      `SELECT count(*)::int AS n FROM tbl_approval_step_approvers
+        WHERE approval_instance_step_id = $1`,
+      [instanceStepId]
+    );
+
+    if (everHad.n === 0) {
+      logger.warn(
+        { instance_step_id: instanceStepId },
+        '[ApprovalPropagation] step has never had an approver — leaving it PENDING (blocked) rather than auto-approving an authority nobody exercised'
+      );
+      return { completed: false, status: 'PENDING', blocked: true };
+    }
+
     await t.none(
       `UPDATE tbl_approval_instance_steps SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`,
       [instanceStepId]
@@ -1091,14 +1119,67 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       );
 
       if (newResolvedIds.length === 0) {
-        // No approvers — insert as SKIPPED (same as createApprovalInstance)
-        await t.one(
+        // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
+        // vanish. It is inserted PENDING with zero approvers so the instance
+        // stalls until somebody is granted the role.
+        //
+        // This used to insert SKIPPED, and the comment claimed it matched
+        // createApprovalInstance. It does not: creation DROPS such a step (it
+        // never exists and never consumes a step number), whereas this path
+        // wrote a terminal row that silently satisfied a mandatory level.
+        //
+        // That difference voided the final authority on two production POs
+        // (138699 / 138701). An admin added a 4th approval level at 20:57 and
+        // granted the role ten hours later; the level had already been written
+        // SKIPPED, the add-approver reconciler only looks at PENDING steps
+        // (see revalidateApproverMembership PART 2), so the grant could never
+        // reach it, and both POs completed without their final approver.
+        //
+        // Inserting PENDING is what makes this recoverable: the same reconciler
+        // now finds the step the moment the role is granted and fills it in.
+        // Failing closed on a financial control is the right trade — a stalled
+        // approval is visible and fixable; a bypassed one is neither.
+        const blockedStep = await t.one(
           `INSERT INTO tbl_approval_instance_steps
-           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight, completed_at)
-           VALUES ($1, $2, $3, 'SKIPPED', $4, true, NOW()) RETURNING id`,
+           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight)
+           VALUES ($1, $2, $3, 'PENDING', $4, true) RETURNING id`,
           [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
         );
-        result.stepsAdded.push({ step_order: insertPosition, status: 'SKIPPED' });
+
+        // Say so loudly. The old path emitted nothing — no log, no audit row,
+        // only an undifferentiated count in the change summary — which is why
+        // this went unnoticed for a week.
+        logger.error(
+          {
+            instance_id: instance.id,
+            entity_type: instance.entity_type,
+            entity_id: instance.entity_id,
+            step_order: insertPosition,
+            policy_step_id: d.newStep.id,
+            approver_source_type: d.newStep.approver_source_type,
+            approver_source_id: d.newStep.approver_source_id,
+          },
+          '[ApprovalPropagation] BLOCKED: a policy step was added to a live instance but resolves to no approvers. The approval cannot proceed until somebody holds that role in scope.'
+        );
+
+        await t.none(
+          `INSERT INTO tbl_approval_actions
+             (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+           VALUES ($1, $2, $3, 'STEP_ADDED', $4)`,
+          [
+            instance.id,
+            blockedStep.id,
+            instance.initiated_by,
+            `Step ${insertPosition} added by a policy change but resolves to no approver in this scope — approval is blocked here until the role is granted.`,
+          ]
+        );
+
+        result.stepsAdded.push({
+          step_order: insertPosition,
+          status: 'PENDING',
+          blocked: true,
+          reason: 'NO_APPROVERS_RESOLVED',
+        });
       } else {
         const newInstStep = await t.one(
           `INSERT INTO tbl_approval_instance_steps

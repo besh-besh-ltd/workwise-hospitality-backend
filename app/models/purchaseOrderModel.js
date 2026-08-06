@@ -13,6 +13,7 @@ import {
   assertUserHasScope,
   AuthorizationError,
   buildScopeExistsClause,
+  listUsersWithAnyScope,
 } from "../services/authorizationService.js";
 import fs from 'fs';
 
@@ -86,9 +87,11 @@ export function buildPoScopeExists(userId, alias, values, startIndex) {
   return { clause: `(${clauses.join(" OR ")})`, nextIndex: i };
 }
 
-// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
-const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
-  for (const perm of PO_SCOPE_PERMISSIONS) {
+// True when the user's grant on ANY of `permissions` covers the tuple. One
+// helper for every PO predicate so the scope evaluation (and its NULL
+// semantics) is written once — only the permission list varies.
+const hasAnyScopeOf = async (userId, permissions, tuple, dbCtx = db) => {
+  for (const perm of permissions) {
     try {
       await assertUserHasScope(userId, perm, tuple, dbCtx);
       return true;
@@ -98,6 +101,10 @@ const hasAnyPoScope = async (userId, tuple, dbCtx = db) => {
   }
   return false;
 };
+
+// True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
+const hasAnyPoScope = (userId, tuple, dbCtx = db) =>
+  hasAnyScopeOf(userId, PO_SCOPE_PERMISSIONS, tuple, dbCtx);
 
 /**
  * Resolve a PO's tenancy tuple. RFQ-backed POs source it from tbl_rfq;
@@ -178,6 +185,229 @@ export const assertPoAccess = async (user, po_id, dbCtx = db) => {
   if (!allowed) throw new PoAccessError();
 
   return po;
+};
+
+// ===========================================================================
+// SECURITY — initiating a PO is a WRITE and must not ride on a READ grant.
+// ---------------------------------------------------------------------------
+// assertPoAccess above answers one question: "may this user SEE this purchase
+// order?" Its predicate is PO_SCOPE_PERMISSIONS — awarding.read OR rfq.read OR
+// boq.read. (The only other thing standing in front of initiate was
+// initiatePurchaseOrder's `status = draft` idempotency guard, which is a
+// state check, not an authorization one.) Initiating is a different
+// question entirely: it flips draft -> pending_approval, creates the approval
+// instance, regenerates the PDF and emails the approvers. Until this gate
+// existed the server asked for nothing beyond the read grant, and the only
+// thing standing between a read-only user and that write was a disabled button
+// in the browser (PODetail.js) — i.e. no server-side authorization at all.
+//
+// PREDICATE: `awarding.create` OR `awarding.update`, evaluated against the PO's
+// OWN company x hotel x department x process tuple — the very tuple
+// assertPoAccess already resolved from the parent RFQ (or, for call-offs, the
+// ARC). Never the viewer's hotel mappings: a create grant held at some *other*
+// hotel is not a grant on this PO.
+//
+// WHY BOTH create AND update: PODetail.js gates the Force Initiate button on
+// `canWrite = canUpdate || canCreate`. A server that accepted only `create`
+// would 403 a button the UI had enabled for anyone holding update alone — a
+// regression, not a fix. tbl_permissions carries no `awarding.update` row today
+// (only read / create / approve / regenerate), so in production the OR is inert
+// and the effective gate is exactly `awarding.create`; that is precisely what
+// makes it cheap insurance against the two gates drifting apart if the row is
+// ever seeded.
+//
+// 403, NOT 404: the read gate has already passed by the time this runs, so the
+// caller has demonstrably been shown that this PO exists — there is nothing
+// left to leak. Answering 404 would disguise a permissions problem as a missing
+// record and send the user hunting for the wrong thing.
+//
+// NOT GATED HERE: autoInitiateRFQPOs, which drives the same transition from the
+// award / NEGOTIATION_QUOTE-approval path. That is a system action whose
+// authorization is the award it follows, and it re-uses each PO's own
+// `initiated_by` as the initiator rather than acting for a request user.
+// ===========================================================================
+export const PO_INITIATE_PERMISSIONS = ["awarding.create", "awarding.update"];
+
+export class PoWritePermissionError extends Error {
+  constructor(message = "You do not have permission to initiate this purchase order.") {
+    super(message);
+    this.name = "PoWritePermissionError";
+    this.status = 403;
+    this.code = "PO_WRITE_PERMISSION_REQUIRED";
+  }
+}
+
+/**
+ * THE gate for initiating a purchase order. Additive on top of assertPoAccess:
+ * the caller must still be able to SEE the PO (404 when not), and must then
+ * ALSO hold a write grant on the PO's own scope tuple (403 when not).
+ *
+ * Returns the resolved tenancy row, like assertPoAccess.
+ */
+export const assertPoInitiateAccess = async (user, po_id, dbCtx = db) => {
+  // Read gate first — preserves the existing 404-on-out-of-scope semantics and
+  // resolves the tuple we are about to evaluate the write grant against.
+  const po = await assertPoAccess(user, po_id, dbCtx);
+
+  // Vendors and GRN site-representative token users never initiate. noAcl([3])
+  // already blocks vendors at the route and the GRN token never reaches this
+  // route at all; both are re-asserted here so the model is safe standalone.
+  if (user?.is_token_user || Number(user?.user_type) === 3) {
+    throw new PoWritePermissionError();
+  }
+
+  // Super admin — parity with assertPoAccess, where a null hospitality scope
+  // means "every company". Super admins hold no tbl_user_role_scopes rows, so
+  // any scope-based predicate would refuse them outright.
+  if (Number(user?.user_type) === 8) return po;
+
+  const allowed = await hasAnyScopeOf(Number(user?.id), PO_INITIATE_PERMISSIONS, {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  }, dbCtx);
+  if (!allowed) throw new PoWritePermissionError();
+
+  return po;
+};
+
+// ===========================================================================
+// "Who can initiate THIS purchase order?" — the INVERSE of the gate above.
+// ---------------------------------------------------------------------------
+// The write gate is correct but it leaves the refused user blind: the button is
+// disabled, the server says no, and nothing tells them whose desk to walk to.
+// This is the answer to that question, and its ONE correctness property is:
+//
+//   every name returned must genuinely pass assertPoInitiateAccess for this PO.
+//
+// A name that 403s when its owner tries is worse than no name at all, so the
+// list is not a hand-written re-statement of the gate. It reads the SAME
+// predicate from the other side: authorizationService.listUsersWithAnyScope is
+// the inverse of assertUserHasScope and shares its WHERE clause verbatim.
+//
+// The gate is a CONJUNCTION and the list must be too. assertPoInitiateAccess
+// runs assertPoAccess first, so passing it needs BOTH:
+//
+//   read  — awarding.read OR rfq.read OR boq.read   (PO_SCOPE_PERMISSIONS)
+//   write — awarding.create OR awarding.update      (PO_INITIATE_PERMISSIONS)
+//
+// on the PO's own tuple. A role carrying awarding.create but none of the three
+// reads passes the write half and is refused 404 by the read half; listing such
+// a user would be exactly the false positive this endpoint must never produce.
+// Hence the intersection below rather than a single query on the write perms.
+//
+// SUPER ADMINS (user_type 8) are included, narrowed to the PO's own buyer
+// company. They do pass the gate — assertPoInitiateAccess returns early for
+// them and they hold no tbl_user_role_scopes rows at all — so omitting them
+// would make the list incomplete on exactly the POs where it matters most (a
+// hospitality company with no awarding.create holder would answer "nobody").
+// The gate itself is company-blind for them, but this list is not: user_type 8
+// is "Top Management" of ONE buyer company (see userModel.getBuyerAccountLimits),
+// and narrowing to that company keeps a name useful ("someone in your own
+// organisation") while refusing to hand another tenant's personal mobile number
+// to a stranger. Narrowing only ever REMOVES names, so it cannot introduce a
+// false positive. Staging currently has zero user_type 8 rows.
+//
+// ACTIVE ONLY. status = 1, is_deleted = 0. A blocked or still-pending user
+// cannot log in, so naming them as the person to call is a dead end.
+// Vendors (user_type 3) are excluded outright — assertPoInitiateAccess refuses
+// them regardless of any scope row they might somehow hold.
+//
+// This function does NOT authorize anything. It returns names, emails and
+// mobile numbers, so its caller MUST have run assertPoAccess first; see
+// getPoInitiators in purchaseOrderController.js.
+// ===========================================================================
+export const PO_INITIATORS_LIMIT = 25;
+
+/** The role title shown for a user_type 8 initiator, who holds no role row. */
+const TOP_MANAGEMENT_ROLE_TITLE = "Top Management";
+
+/**
+ * @param {object} po      a tenancy row from assertPoAccess/resolvePoTenancy
+ * @param {object} caller  req.user — excluded from the list, and the subject of
+ *                         `can_initiate`
+ * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
+ */
+export const listPoInitiators = async (po, caller, dbCtx = db) => {
+  // can_initiate reuses the REAL predicate rather than re-deriving it, so the
+  // flag and the button and the write route can never disagree.
+  let can_initiate = false;
+  try {
+    await assertPoInitiateAccess(caller, po.id, dbCtx);
+    can_initiate = true;
+  } catch (err) {
+    if (!(err instanceof PoAccessError) && !(err instanceof PoWritePermissionError)) throw err;
+  }
+
+  const tuple = {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  };
+
+  // The two halves of the gate, then their intersection.
+  const [readers, writers] = await Promise.all([
+    listUsersWithAnyScope(PO_SCOPE_PERMISSIONS, tuple, dbCtx),
+    listUsersWithAnyScope(PO_INITIATE_PERMISSIONS, tuple, dbCtx),
+  ]);
+  const readerIds = new Set(readers.map((r) => Number(r.user_id)));
+
+  // role_title comes from the WRITE grant — the role through which they hold
+  // the power to initiate, which is the one worth naming. listUsersWithAnyScope
+  // already picked the lowest qualifying role_id per user.
+  const roleTitleById = new Map();
+  for (const w of writers) {
+    if (readerIds.has(Number(w.user_id))) roleTitleById.set(Number(w.user_id), w.role_title || null);
+  }
+
+  // Super admins of this PO's own buyer company.
+  if (po.hospitality_company_id) {
+    const admins = await dbCtx.any(
+      `SELECT u.id AS user_id
+         FROM tbl_users u
+         JOIN tbl_hospitality_companies hc ON hc.buyer_company_id = u.company_id
+        WHERE hc.id = $1
+          AND hc.is_deleted = 0
+          AND u.user_type = 8`,
+      [po.hospitality_company_id]
+    );
+    for (const a of admins) {
+      if (!roleTitleById.has(Number(a.user_id))) {
+        roleTitleById.set(Number(a.user_id), TOP_MANAGEMENT_ROLE_TITLE);
+      }
+    }
+  }
+
+  const callerId = Number(caller?.id);
+  const candidateIds = [...roleTitleById.keys()].filter((id) => id !== callerId);
+  if (!candidateIds.length) return { can_initiate, initiators: [], total: 0 };
+
+  // Hydrate + apply the active-user filter in SQL, ordered by name so the cap
+  // below always takes the same 25 people.
+  const rows = await dbCtx.any(
+    `SELECT u.id AS user_id, u.name, u.employee_code, u.email, u.mobile
+       FROM tbl_users u
+      WHERE u.id = ANY($1::int[])
+        AND u.status = 1
+        AND u.is_deleted = 0
+        AND COALESCE(u.user_type, 0) <> 3
+      ORDER BY LOWER(COALESCE(u.name, '')) ASC, u.id ASC`,
+    [candidateIds]
+  );
+
+  const initiators = rows.slice(0, PO_INITIATORS_LIMIT).map((r) => ({
+    user_id: Number(r.user_id),
+    name: r.name || null,
+    employee_code: r.employee_code || null,
+    email: r.email || null,
+    mobile: r.mobile || null,
+    role_title: roleTitleById.get(Number(r.user_id)) || null,
+  }));
+
+  // `total` is the TRUE uncapped count, so the UI can say "and N others".
+  return { can_initiate, initiators, total: rows.length };
 };
 
 /**

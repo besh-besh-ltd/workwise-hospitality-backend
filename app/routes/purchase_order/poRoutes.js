@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getPoInitiators, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics } from "../../controllers/po/poDashboardController.js";
 import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf } from "../../controllers/po/poVendorController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
@@ -38,6 +38,18 @@ PORoutes.get('/vendor/detail/:po_id', passportSignIn, acl([3]), vendorPoDetail);
 PORoutes.get('/vendor/detail/:po_id/pdf', passportSignIn, acl([3]), vendorPoPdf);
 
 PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
+// "Who can initiate THIS purchase order?" — the read-side companion to the
+// write gate on /initiate/:po_id below. A user the gate refuses is otherwise
+// left with a disabled button and no idea whose desk to walk to; this names the
+// people who WOULD pass, derived from the same predicate so the list and the
+// gate cannot disagree (purchaseOrderModel.listPoInitiators).
+//
+// Same middleware as the other buyer-side PO reads: JWT + noAcl([3]). The
+// response carries names, emails and mobile numbers, so the controller runs
+// assertPoAccess before anything else — out-of-scope still answers 404, and
+// the PII is only ever shown to someone who could already open the PO. No
+// can() here, per the same reasoning as the initiate routes.
+PORoutes.get('/:po_id/initiators', passportSignIn, noAcl([3]), getPoInitiators);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
 // check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
 // vendor user_types at the route layer.
@@ -49,15 +61,32 @@ PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
 // Initiate a draft PO (draft -> pending_approval + approval instance + PDF +
 // approver emails). This is a STATE-CHANGING operation that shipped as a GET
 // with no acl() and no scope check at all, so any authenticated user could
-// initiate any tenant's PO. Fixed in three places:
-//   1. noAcl([3])       — vendors can never initiate (the vendor Order Book
-//                         passes a handleInitiatePO prop that is destructured
-//                         but never rendered, so nothing breaks).
-//   2. assertPoAccess   — inside the controller, 4-axis tenant scope.
-//   3. POST binding     — the correct verb for the effect.
+// initiate any tenant's PO. Fixed in four places:
+//   1. noAcl([3])            — vendors can never initiate (the vendor Order
+//                              Book wires a handleInitiatePO prop down to
+//                              POListing / PODetails, but both only destructure
+//                              it and never render a control for it, so nothing
+//                              breaks).
+//   2. assertPoAccess        — inside the controller, 4-axis tenant scope. This
+//                              is a READ predicate (awarding.read OR rfq.read
+//                              OR boq.read), so on its own it let anyone who
+//                              could merely SEE a draft PO initiate it.
+//   3. assertPoInitiateAccess — the WRITE grant, additive on top of (2):
+//                              `awarding.create` OR `awarding.update` on the
+//                              PO's OWN company x hotel x department x process
+//                              tuple. Matches PODetail.js's
+//                              `canWrite = canUpdate || canCreate`, so the
+//                              enabled button and the server agree. Refuses
+//                              with 403 (the read gate already proved the PO
+//                              exists), where (2) refuses with 404.
+//   4. POST binding          — the correct verb for the effect.
+// The permission is enforced in the controller, not via can() middleware:
+// can() resolves scope from x-headers, which are unreliable, whereas
+// assertPoInitiateAccess derives the tuple from the PO row itself.
 // The GET binding is kept ONLY for backwards compatibility with the deployed
 // frontend, whose single call site is frontend/services/po.js
 // (handlePOInitialization). Once that switches to POST, delete the GET line.
+// Both verbs land on the same handler, so both carry the same gate.
 PORoutes.get('/initiate/:po_id', passportSignIn, noAcl([3]), initiatePO);
 PORoutes.post('/initiate/:po_id', passportSignIn, noAcl([3]), initiatePO);
 // Bulk-merge multiple draft POs of the same vendor on the same RFQ into one.

@@ -1106,6 +1106,16 @@ export async function getPODetailFull(po_id, scope) {
     status_label: humanizeStatus(po.status),
     total_value: po.total_value != null ? Number(po.total_value) : 0,
     is_call_off: !!po.is_call_off,
+    // The PO's OWN scope keys, sourced from its parent RFQ or (call-off) its
+    // ARC — the same COALESCE the scope predicate above evaluates. A client
+    // deciding whether to offer a write action on THIS purchase order has to
+    // resolve the user's grants against THIS entity's hotel/department, not
+    // against whatever hotels the viewer happens to be mapped to; without
+    // these two ids the only scope the frontend could reach for was the
+    // viewer's own mapping list, which is a different question with a
+    // different answer (see PODetail's Force Initiate gate).
+    hotel_id: po.hotel_id != null ? Number(po.hotel_id) : null,
+    department_id: po.department_id != null ? Number(po.department_id) : null,
     // Call-off provenance (null for regular RFQ-sourced POs) — lets the detail
     // page link back to the originating ARC and material requisition.
     call_off: po.is_call_off

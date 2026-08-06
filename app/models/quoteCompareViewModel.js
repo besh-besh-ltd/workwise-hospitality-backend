@@ -34,6 +34,7 @@ import { logError } from "../helper/common.js";
 import rfqModel from "./rfqModel.js";
 import { enrichQuoteCompareData } from "../services/quoteCompareService.js";
 import { buildQuoteVisibilityMeta } from "../helper/quoteVisibility.js";
+import { shapeStageActors } from "./rfq/rfqLifecycleShaper.js";
 import {
   getCoveredProductIds,
   getVendorFieldsForProduct,
@@ -484,6 +485,13 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     }
   }
 
+  // Whether the pre-deadline lock is in force. Derived here, at the top, rather
+  // than where it is applied (step 8) because it also has to SUPPRESS work, not
+  // just blank results: the stage-actor lookup below is skipped outright while
+  // quotes are locked, so those identities are never even loaded, let alone
+  // serialised. Applied to the cells and vendor rows unchanged in step 8.
+  const quotesLocked = buildQuoteVisibilityMeta(rfq).locked;
+
   // ---- 2) Reuse the existing comparison pipeline. ----
   // Delivery exclusion is NOT done here. It happens in the cell assembly below,
   // where the engine charge breakdown is available and delivery-class slugs can
@@ -525,6 +533,13 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
   // Why each empty cell is empty, for the cells the technical gate emptied.
   const techBlockedByProduct = await fetchTechBlockedQuoters(id);
   const approvalChain = await fetchApprovalChain(rfq, approvalByRfqProduct, scope);
+
+  // Who has the ball on this RFQ right now, in full, and whether the caller is
+  // one of them. Skipped entirely while quotes are locked: before the deadline
+  // nothing on this sheet is actionable, and naming the people who will later
+  // evaluate or approve it would put identities on the wrong side of the same
+  // gate that already blanks `p.approval`.
+  const stageActors = quotesLocked ? null : await fetchStageActors(id, scope);
 
   // Which PENDING quote-approval instances are awaiting THIS user's action —
   // drives per-product `awaiting_me` (the FE auto-selects approver vs evaluator).
@@ -980,8 +995,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
   // the column/row structure, but never leak any number or vendor identity. The
   // FE blurs the placeholders and shows a "locked until deadline" banner.
   // Use the SHARED visibility rule (IST, inclusive boundary) so the lock matches
-  // the legacy quote-compare page exactly.
-  const quotesLocked = buildQuoteVisibilityMeta(rfq).locked;
+  // the legacy quote-compare page exactly. `quotesLocked` is resolved at the top
+  // of this function — see the note there.
 
   for (const p of contractProducts) {
     const n = Object.values(p.quotes).filter((c) => c != null).length;
@@ -1035,6 +1050,10 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     categories,
     products: contractProducts,
     approval_chain: approvalChain,
+    // Live action-takers for this RFQ's current lifecycle stage — every one of
+    // them, by name, with `is_me` already decided server-side. null when nothing
+    // is live (stage complete) or while quotes are locked. See fetchStageActors.
+    stage_actors: stageActors,
     // Does ANY cell on this RFQ carry a delivery charge? 76% of production RFQs
     // do not, and on those the toggle can only ever be a no-op — the client
     // hides it rather than offering a control that visibly does nothing.
@@ -1177,8 +1196,14 @@ async function fetchQuoteApprovals(rfqProductIds) {
 // Map(instanceId -> { current_approvers:[{name,initials,role}], trail:[node] }).
 // Each trail node mirrors poDashboardModel.buildAuditTrail:
 //   { key, status:'done'|'rejected'|'current'|'pending', title, by, initials,
-//     role, when, reason, approvers:[{name,initials,role,status}] }
+//     role, when, reason, decision_rule:'ANY'|'ALL',
+//     approvers:[{user_id,name,initials,role,status,acted_at,
+//                 removal_reason,removed_at}] }
 // A leading "Sent for approval" node uses the instance initiator + created_at.
+// The whole payload sits BEHIND the pre-deadline lock: step 8 of buildQuote-
+// ComparisonView replaces `p.approval` wholesale with { current_approvers: [],
+// trail: [] } while quotes are locked, so none of these fields — identities,
+// user ids, act times — are reachable before bid_end_date passes.
 async function buildQuoteApprovalData(instanceIds) {
   const out = new Map();
   const ids = (instanceIds || []).map(Number).filter((x) => Number.isInteger(x) && x > 0);
@@ -1205,6 +1230,7 @@ async function buildQuoteApprovalData(instanceIds) {
     // that tooltip has data to render.
     const steps = await db.any(
       `SELECT st.approval_instance_id, st.id, st.step_order, st.status, st.completed_at,
+              st.decision_rule,
               COALESCE(
                 JSON_AGG(
                   JSON_BUILD_OBJECT(
@@ -1320,10 +1346,26 @@ async function buildQuoteApprovalData(instanceIds) {
           role: actor ? actor.role || null : null,
           when: iso(st.completed_at),
           reason,
+          // The step's ANY/ALL rule, mirroring poDashboardModel's workflow node.
+          // Without it the drawer cannot tell "blocked behind this person" from
+          // "moot": under ANY, one approver clearing SATISFIES the step, so the
+          // other PENDING rows are not blockers and must not render as live
+          // pending — the same defect class already fixed for the PO panel
+          // (see effectiveApproverStatus in poDashboardModel). Defaulted to
+          // 'ANY' to match the column default and that shaper.
+          decision_rule: st.decision_rule || "ANY",
           // removal_reason/removed_at ride along so the drawer's removed-chip
           // tooltip (QuoteComparison.js renderApprovalDrawer) has data to show.
+          // user_id is the stable identity (React key + dedupe — the same
+          // person can sit on more than one level); acted_at timestamps and
+          // orders "already acted". acted_at goes through `iso()` so it shares
+          // one convention with this node's own `when` (also a naive
+          // `timestamp without time zone`) and with poDashboardModel's roster —
+          // mixing raw and ISO in one node would silently break any sort.
           approvers: approvers.map((a) => ({
             ...personOf(a), status: a.status,
+            user_id: a.user_id ?? null,
+            acted_at: iso(a.acted_at),
             removal_reason: a.removal_reason || null,
             removed_at: a.removed_at || null,
           })),
@@ -1962,6 +2004,62 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
   } catch (e) {
     logError("quoteCompareView fetchApprovalChain failed", e);
     return [];
+  }
+}
+
+// One role title per user — the same "first scope row wins" convention already
+// used for the approval trail and the approval chain above, so the role beside a
+// name is consistent wherever this RFQ shows that person. Map(user_id -> title).
+async function fetchPrimaryRoles(userIds) {
+  const map = new Map();
+  const ids = [...new Set((userIds || []).map(Number))].filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return map;
+  try {
+    const rows = await db.any(
+      `SELECT DISTINCT ON (urs.user_id) urs.user_id, rl.title
+         FROM tbl_user_role_scopes urs
+         JOIN tbl_roles rl ON rl.id = urs.role_id
+        WHERE urs.user_id = ANY($1::int[])
+        ORDER BY urs.user_id, urs.id ASC`,
+      [ids]
+    );
+    for (const r of rows) map.set(Number(r.user_id), r.title || null);
+  } catch (e) {
+    logError("quoteCompareView fetchPrimaryRoles failed", e);
+  }
+  return map;
+}
+
+// Who must act on this RFQ now (and who is next), for the banner above the
+// comparison sheet.
+//
+// The source is rfqModel.getLifecycleSummary — the SAME call behind
+// GET /rfq/:id/lifecycle and behind the RFQ page's action-now/up-next strip.
+// Deriving it here from a second, private query would let the two surfaces
+// disagree about who the approver is, which is precisely the confusion the
+// banner exists to remove. Note what is NOT used: the negotiation approval
+// bundle, which has no tenant or RBAC gate of its own.
+//
+// The caller has already cleared this endpoint's 4-axis scope gate, so no
+// further authorization happens here; what is emitted is names, ids and role
+// titles only. Failure-tolerant — a lifecycle hiccup drops the banner, it does
+// not fail the comparison sheet.
+async function fetchStageActors(rfqId, scope) {
+  try {
+    const userId = scope && scope.userId != null ? Number(scope.userId) : null;
+    const summary = await rfqModel.getLifecycleSummary(rfqId, userId);
+    const shaped = shapeStageActors(summary, { userId });
+    if (!shaped) return null;
+
+    // Role titles are not part of the lifecycle summary, so they are layered on
+    // afterwards in one query over exactly the people the banner will name.
+    const everyone = [...shaped.actors, ...(shaped.next ? shaped.next.actors : [])];
+    const roles = await fetchPrimaryRoles(everyone.map((a) => a.user_id));
+    for (const a of everyone) a.role = roles.get(a.user_id) || null;
+    return shaped;
+  } catch (e) {
+    logError("quoteCompareView fetchStageActors failed", e);
+    return null;
   }
 }
 

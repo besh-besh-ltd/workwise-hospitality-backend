@@ -294,10 +294,15 @@ describe("SECURITY: /po/initiate/:po_id refuses a foreign PO and changes no stat
     expect(denied.status).toBe(404);
     expect(await poStatus(po_id)).toBe("draft");
 
-    // In-scope caller over POST: authorization passes, so the response is
-    // whatever the initiate flow produces — never a routing 404.
+    // In-scope caller over POST: the TENANT gate passes, so the response is
+    // whatever comes after it — never a routing 404. It is not a 200 either:
+    // a1_proc_buyer holds rfq.read/boq.read but no awarding.create, and
+    // initiating is a write (see security.poInitiateWriteGate.test.js), so the
+    // permission gate refuses them with a 403 that names the reason.
     const allowed = await buyerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
     expect(allowed.status).not.toBe(404);
+    expect(allowed.status).toBe(403);
+    expect(allowed.body?.code).toBe("PO_WRITE_PERMISSION_REQUIRED");
   });
 });
 

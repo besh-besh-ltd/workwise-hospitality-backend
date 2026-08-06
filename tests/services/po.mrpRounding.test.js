@@ -34,10 +34,16 @@
 // withTx rollback. Every id inserted is tracked and deleted in afterEach.
 
 import { describe, it, expect, afterEach, afterAll } from "@jest/globals";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import Handlebars from "handlebars";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { draftPO, buildAuthoritativePOPayload } from "../../app/controllers/po/purchaseOrderController.js";
 import { buildPOTemplatePricing } from "../../app/helper/poTemplatePricing.js";
+
+const BACKEND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 afterAll(async () => { await closeDb(); });
 
@@ -286,5 +292,203 @@ describe("MRP rounding — the PO states the amount the vendor offered", () => {
     expect(Number(poLine.total_price)).toBe(29999.73);
     expect(Number(header.total_value)).toBe(29999.73);
     expect(Number(poLine.unit_price)).toBe(338.98);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+//  PRESENTATION REGRESSION (production, PO 61 / #108217, RFQ 364 / #535918)
+//
+//  The fix above is what made the money right, and it is also what made the
+//  document ugly. Keeping full precision on tbl_purchase_order_product.unit_price
+//  is the whole point — but the PO PDF printed that column verbatim, so the
+//  vendor's copy showed a Rate of:
+//
+//      338.98305084745766
+//
+//  next to a perfectly correct Basic 13,559.32 / GST 2,440.68 / Total 16,000.00.
+//  The money was never wrong; only the printed rate was unformatted.
+//
+//  The fix is a render-boundary one: poTemplatePricing exposes
+//  `unit_price_display` (2dp, same plain formatting as every other money column
+//  on the document) and the templates print THAT. Nothing stored changes and no
+//  total moves — these tests assert both halves of that at once.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Every PO template that can actually be selected and printed. */
+const PO_TEMPLATE_DIR = path.join(BACKEND_DIR, "app", "helper", "poTemplates");
+const DEFAULT_PO_TEMPLATE = path.join(BACKEND_DIR, "app", "helper", "poTemplate.hbs");
+const shippingPoTemplates = () => [
+  DEFAULT_PO_TEMPLATE,
+  // selectPOTemplate() will pick up ANY {company}_{hospitality}_{hotel}.hbs
+  // dropped in here, so enumerate the directory rather than naming files.
+  ...fs.readdirSync(PO_TEMPLATE_DIR)
+    .filter((f) => f.endsWith(".hbs"))
+    .map((f) => path.join(PO_TEMPLATE_DIR, f)),
+];
+
+/**
+ * Compile + render a REAL PO template off disk.
+ *
+ * The helper set mirrors the one seoController.poPDF registers on the shared
+ * Handlebars instance immediately before compiling. None of them touch the Rate
+ * cell — that is a bare field reference — so they exist only to let the
+ * template render at all. Rendering the shipping .hbs file (rather than a copy
+ * of its markup) is the point: it catches a template that prints the wrong
+ * field, which is exactly what this defect was.
+ */
+const renderPoTemplate = (templateSource, data) => {
+  Handlebars.registerHelper("inc", (i) => Number(i) + 1);
+  Handlebars.registerHelper("add", (a, b) => Number(a) + Number(b));
+  Handlebars.registerHelper("eq", function (a, b, options) {
+    return a === b ? options.fn(this) : options.inverse(this);
+  });
+  Handlebars.registerHelper("capitalize", (s) =>
+    (s ? String(s).charAt(0).toUpperCase() + String(s).slice(1).toLowerCase() : ""));
+  Handlebars.registerHelper("formatCurrency", (num) =>
+    Number(num || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  Handlebars.registerHelper("nl2br", (text) => {
+    if (!text) return "";
+    const escaped = Handlebars.escapeExpression(text);
+    return new Handlebars.SafeString(escaped.replace(/\r\n|\r|\n/g, "<br/>"));
+  });
+  return Handlebars.compile(templateSource)(data);
+};
+
+/** The document data the PDF is rendered from, for one awarded PO line. */
+const pricingForPoLine = (poLine, gst) =>
+  buildPOTemplatePricing(
+    [{
+      quantity: poLine.quantity,
+      unit_price: poLine.unit_price,
+      tax: gst,
+      tax_mode: "percentage",
+      other_charges: [],
+    }],
+    "gst",
+    []
+  );
+
+describe("MRP rate formatting — the printed PO shows 338.98, not 338.98305084745766", () => {
+  // The live line: NovaTech / KEYBOARD, MRP 500 less 20% = 400 incl. x 40.
+  //   400 x 40        = 16,000.00  total PO value
+  //   16,000 / 1.18   = 13,559.32  basic
+  //   the remainder   =  2,440.68  GST
+  const LIVE = { mrp: 500, discount: 20, qty: 40, gst: 18 };
+  const RAW_RATE = /338\.9830/;
+
+  it("keeps the stored rate at full precision but prints it at 2dp, totals still reconciling to 16000.00", async () => {
+    const { poLine, header } = await awardLineToPo({ pricing_method: "MRP", ...LIVE });
+
+    // 1. NOTHING STORED CHANGED. The column still carries the exact rate — that
+    //    is what makes the totals come out right, and it must stay that way.
+    expect(String(poLine.unit_price)).toMatch(RAW_RATE);
+    expect(Number(poLine.unit_price)).toBeCloseTo(400 / 1.18, 10);
+    expect(Number(poLine.total_price)).toBe(16000);
+    expect(Number(header.total_value)).toBe(16000);
+
+    const item = pricingForPoLine(poLine, LIVE.gst).items[0];
+
+    // 2. The document data carries BOTH: raw for arithmetic, 2dp for print.
+    expect(String(item.unit_price)).toMatch(RAW_RATE);
+    expect(item.unit_price_display).toBe("338.98");
+  });
+
+  it("no total moves: Basic 13559.32 + GST 2440.68 = 16000.00", async () => {
+    const { poLine } = await awardLineToPo({ pricing_method: "MRP", ...LIVE });
+    const pricing = pricingForPoLine(poLine, LIVE.gst);
+
+    expect(pricing.items[0].basic_amount).toBe("13559.32");
+    expect(pricing.items[0].tax_amount).toBe("2440.68");
+    expect(pricing.items[0].subtotal).toBe("16000.00");
+    expect(pricing.basicAmount).toBe("13559.32");
+    expect(pricing.summaryTaxRows[0].amount).toBe("2440.68");
+    expect(pricing.totalPrice).toBe("16000.00");
+  });
+
+  it("every shipping PO template renders the Rate cell as 338.98 and the raw rate nowhere", async () => {
+    const { poLine } = await awardLineToPo({ pricing_method: "MRP", ...LIVE });
+    const pricing = pricingForPoLine(poLine, LIVE.gst);
+
+    for (const templatePath of shippingPoTemplates()) {
+      const label = path.basename(templatePath);
+      const html = renderPoTemplate(
+        fs.readFileSync(templatePath, "utf8"),
+        { po_number: "108217", ...pricing }
+      );
+
+      // The Rate cell, exactly as it reaches the vendor's PDF.
+      expect({ label, rateCell: html.includes('<td class="right">338.98</td>') })
+        .toEqual({ label, rateCell: true });
+      // ...and the unformatted rate appears NOWHERE on the document.
+      expect({ label, leaksRawRate: RAW_RATE.test(html) })
+        .toEqual({ label, leaksRawRate: false });
+      // ...while the money the vendor agreed to is still printed unchanged.
+      expect(html).toContain('<td class="right">13559.32</td>');
+      expect(html).toContain('<td class="right">16000.00</td>');
+    }
+  });
+
+  it("is caused by the template field, not the data — printing the raw field reproduces the defect", async () => {
+    // Proves this suite would have FAILED before the fix, without needing to
+    // check out the old template: take the shipping template and put the raw
+    // field back exactly where it used to be. The document data is identical;
+    // only the field the Rate column reads changes.
+    const { poLine } = await awardLineToPo({ pricing_method: "MRP", ...LIVE });
+    const pricing = pricingForPoLine(poLine, LIVE.gst);
+
+    const preFixSource = fs
+      .readFileSync(DEFAULT_PO_TEMPLATE, "utf8")
+      .replace("{{unit_price_display}}", "{{unit_price}}");
+    const preFixHtml = renderPoTemplate(preFixSource, { po_number: "108217", ...pricing });
+
+    expect(preFixHtml).toContain("338.98305084745766");   // the defect, reproduced
+    expect(preFixHtml).toContain('<td class="right">16000.00</td>'); // money was always right
+
+    // Same data through the shipping template: formatted, and still 16,000.00.
+    const shippedHtml = renderPoTemplate(
+      fs.readFileSync(DEFAULT_PO_TEMPLATE, "utf8"),
+      { po_number: "108217", ...pricing }
+    );
+    expect(shippedHtml).not.toContain("338.98305084745766");
+    expect(shippedHtml).toContain('<td class="right">338.98</td>');
+    expect(shippedHtml).toContain('<td class="right">16000.00</td>');
+  });
+
+  it("a Traditional line is unaffected — its rate is already 2dp and prints unchanged", async () => {
+    // tbl_quote_items.unit_price is numeric(15,2) and the Traditional branch of
+    // buildAuthoritativePOPayload copies it verbatim (only the MRP branch
+    // re-derives at full precision), so there is no precision to leak here.
+    const { poLine } = await awardLineToPo({
+      pricing_method: "TRADITIONAL", unit_price: 338.98, qty: 40, gst: 18,
+    });
+
+    expect(Number(poLine.unit_price)).toBe(338.98);
+    expect(String(poLine.unit_price)).not.toMatch(RAW_RATE);
+
+    const pricing = pricingForPoLine(poLine, 18);
+    expect(pricing.items[0].unit_price_display).toBe("338.98");
+    // 338.98 x 40 = 13,559.20, +18% = 15,999.86 — deliberately NOT 16,000: a
+    // Traditional quote of 338.98 EXCLUSIVE is a different offer from an MRP of
+    // 500 less 20%. The formatting change must not blur the two.
+    expect(pricing.items[0].subtotal).toBe("15999.86");
+
+    const html = renderPoTemplate(
+      fs.readFileSync(DEFAULT_PO_TEMPLATE, "utf8"),
+      { po_number: "T-1", ...pricing }
+    );
+    expect(html).toContain('<td class="right">338.98</td>');
+    expect(html).toContain('<td class="right">15999.86</td>');
+  });
+
+  it("no PO template prints the raw stored rate (guards templates added later)", () => {
+    // selectPOTemplate resolves per-company overrides out of poTemplates/, so a
+    // new {company}_{hospitality}_{hotel}.hbs copied from an old one would
+    // silently reintroduce this defect for that company alone.
+    for (const templatePath of shippingPoTemplates()) {
+      const label = path.basename(templatePath);
+      const src = fs.readFileSync(templatePath, "utf8");
+      expect({ label, printsRawUnitPrice: /\{\{\s*unit_price\s*\}\}/.test(src) })
+        .toEqual({ label, printsRawUnitPrice: false });
+    }
   });
 });

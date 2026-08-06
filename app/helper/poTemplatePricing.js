@@ -175,6 +175,14 @@ export const buildPOTemplatePricing = (items = [], taxMode = 'gst', globalCharge
       ...item,
       comment,
       total_price: lineSubtotal,
+      // `unit_price` stays RAW on the payload — the engine, the stored column
+      // and every numeric consumer need its full precision. MRP lines derive
+      // the exclusive rate from a tax-inclusive amount, so it is routinely a
+      // repeating decimal (500 less 20% at 18% GST -> 338.98305084745766).
+      // `unit_price_display` is the only thing a document may print: 2dp, same
+      // plain formatting as Basic / Subtotal / the cost breakup, so the Rate
+      // column reads 338.98 while the totals keep reconciling exactly.
+      unit_price_display: formatAmount(item.unit_price),
       subtotal: formatAmount(lineSubtotal),
       delivery_period_display: formatDeliveryPeriodLabel(item.delivery_period),
       basic_amount: formatAmount(baseAmount),

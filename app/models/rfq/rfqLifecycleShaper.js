@@ -157,3 +157,127 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
     stages,
   };
 }
+
+// ---------------------------------------------------------------------------
+// stage_actors — "who has the ball right now, by name, all of them"
+// ---------------------------------------------------------------------------
+//
+// The RFQ workspace already carries a one-line strip built from this same
+// lifecycle summary (StageShared.js `LifecycleContext`). That strip truncates to
+// three names + "+N", which is exactly the information a buyer standing in front
+// of the comparison sheet needs in full: WHO must act, and whether they are one
+// of them. This shaper answers that question from the identical source, so the
+// banner and the strip can never disagree, and it never truncates.
+//
+// Resolution order per phase mirrors StageShared.actorsOf exactly:
+//   1. action_holders          — the LIVE holders (pending approvers on the
+//                                open instance, or the permission-holders for
+//                                an evaluation stage). Only ever populated on a
+//                                phase whose status is 'current'.
+//   2. upcoming_actors.approver_steps[0] — the policy-resolved first approval
+//                                step, for a phase that has not started.
+//   3. upcoming_actors.evaluators        — the permission-resolved evaluators.
+//
+// Identity: every source above already carries a stable `id` from tbl_users, so
+// "is this me?" is an id comparison, never a name comparison. `is_me` is decided
+// here, server-side, from the authenticated caller.
+//
+// NOTE the deliberate asymmetry with shapeRfqLifecycle: this function does NOT
+// apply that function's per-stage permission redaction. It is called from
+// endpoints that have already gated the caller on the RFQ itself, and it emits
+// names + ids only — never emails, never any commercial figure.
+
+const ROLE_LABEL_APPROVERS  = "Approvers";
+const ROLE_LABEL_EVALUATORS = "Evaluators";
+
+// { role_label, decision_rule, users:[{id,name}] } | null for one phase.
+function phaseActors(phase) {
+  if (!phase) return null;
+
+  const ah = phase.action_holders;
+  if (ah && Array.isArray(ah.users) && ah.users.length) {
+    return {
+      role_label: ah.label || "Action holders",
+      decision_rule: ah.decision_rule || null,
+      users: ah.users,
+    };
+  }
+
+  const ua = phase.upcoming_actors;
+  if (ua && Array.isArray(ua.approver_steps) && ua.approver_steps.length) {
+    const step = ua.approver_steps[0];
+    return {
+      role_label: ROLE_LABEL_APPROVERS,
+      decision_rule: step.decision_rule || null,
+      users: Array.isArray(step.approvers) ? step.approvers : [],
+    };
+  }
+  if (ua && Array.isArray(ua.evaluators) && ua.evaluators.length) {
+    return { role_label: ROLE_LABEL_EVALUATORS, decision_rule: null, users: ua.evaluators };
+  }
+  return null;
+}
+
+// Dedupe by user id (the same person can sit on several sources), drop anything
+// without an id — a nameless or idless actor is not something a banner can name
+// or match against — and order by name so the list is stable across requests.
+function normalizeActors(users, { userId = null, withIsMe = false } = {}) {
+  const seen = new Set();
+  const out = [];
+  for (const u of users || []) {
+    const id = Number(u?.id ?? u?.user_id);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    // `role` is a slot, not a value: the lifecycle summary carries no role
+    // titles, so callers that want them fill this in afterwards.
+    const actor = { user_id: id, name: u?.name || null, role: u?.role || null };
+    if (withIsMe) actor.is_me = userId != null && Number(userId) === id;
+    out.push(actor);
+  }
+  out.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  return out;
+}
+
+/**
+ * @param {object} summary  rfqModel.getLifecycleSummary() output
+ * @param {{userId?: number|null}} opts  userId — the authenticated caller, for `is_me`.
+ * @returns {{stage_label, role_label, decision_rule, actors, next}|null}
+ *          null when nothing is live: no current phase, or a current phase with
+ *          no resolvable actor (e.g. an RFQ still collecting quotes).
+ */
+export function shapeStageActors(summary, { userId = null } = {}) {
+  const phases = Array.isArray(summary?.phases) ? summary.phases : [];
+  const byKey = Object.fromEntries(phases.map((p) => [p.key, p]));
+  const ordered = PHASE_ORDER.map((k) => byKey[k]).filter(Boolean);
+
+  const activeIdx = ordered.findIndex((p) => p.status === "current");
+  if (activeIdx < 0) return null;
+
+  const active = ordered[activeIdx];
+  const now = phaseActors(active);
+  if (!now) return null;
+
+  // "Up next" is the nearest LATER phase that is neither skipped nor actorless —
+  // a skipped technical stage must not be announced as the next thing anyone
+  // does. Same selection the RFQ-page strip makes.
+  let next = null;
+  for (const p of ordered.slice(activeIdx + 1)) {
+    if (p.status === "skipped") continue;
+    const a = phaseActors(p);
+    if (!a) continue;
+    next = {
+      stage_label: PHASE_TO_STAGE[p.key]?.label || p.label || null,
+      role_label: a.role_label,
+      actors: normalizeActors(a.users),
+    };
+    break;
+  }
+
+  return {
+    stage_label: PHASE_TO_STAGE[active.key]?.label || active.label || null,
+    role_label: now.role_label,
+    decision_rule: now.decision_rule,
+    actors: normalizeActors(now.users, { userId, withIsMe: true }),
+    next,
+  };
+}
