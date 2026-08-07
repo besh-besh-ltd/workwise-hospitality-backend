@@ -3,56 +3,31 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import {
+  approvalActionUrl,
+  entityLabel,
+  buyerRfqDetail,
+  buyerRfqList,
+  vendorRfqDetail,
+  vendorRfqList,
+  buyerHome,
+  vendorHome,
+  toAbsoluteUrl
+} from "../../services/notificationLinks.js";
 
-// Entity type → frontend link path mapping.
+// Entity routing and labels live in the shared link registry
+// (app/services/notificationLinks.js). They used to be two literals in this
+// file covering seven entity types while twelve were live, so every ARC_* and
+// MR approver was told "Action required: Approve ARC_PUBLISH #ID-12" and sent
+// to a bare /dashboard — which is itself a "Coming Soon" placeholder.
 //
-// `id` is the approval instance's entity_id, and its meaning is per entity
-// type: for NEGOTIATION_QUOTE it is an **rfq_product_id** (vendor finalization
-// is approved per product), for every other type it is the RFQ / PO id. A
-// builder may return null to say "I cannot construct a correct link" — callers
-// fall back to a generic destination rather than emitting a wrong one.
+// `entityId` means different things per type: for NEGOTIATION_QUOTE it is an
+// rfq_product_id (finalization is approved per product), elsewhere the RFQ / PO
+// / ARC / MR id. approvalActionUrl() returns null when it cannot name the right
+// record, and callers fall back to the approver's home rather than guessing.
 //
-// The optional third argument lets a caller that only knows the RFQ (e.g. the
-// cancellation mail, whose instance is already gone) ask for the RFQ-level
-// link instead of a per-entity deep link.
-const ENTITY_LINK_MAP = {
-  'RFQ': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
-  'TENDER': (id) => `/dashboard/vendor/inquiries-details?type=buyer-view&id=${id}`,
-  'TECHNICAL': (id) => `/dashboard/buyer/technical-evaluation?rfq_id=${id}`,
-  'NEGOTIATION': (id, ctx) => `/dashboard/buyer/quote-compare?rfq=${ctx?.rfq_id || id}`,
-  'NEGOTIATION_QUOTE': (id, ctx, opts = {}) => {
-    const rfqId = ctx?.rfq_id;
-    // Upstream callers default extraContext.rfq_id to `metadata.rfq_id ||
-    // entity_id`, so an rfq_id equal to the entity id means metadata.rfq_id was
-    // missing and all we really hold is a product id. Refuse instead of
-    // emitting `?rfq=<product id>`, which would drop the approver into a
-    // completely different RFQ. (Verified against production 2026-07-30: all
-    // 1,770 live NEGOTIATION_QUOTE instances carry metadata.rfq_id and none has
-    // rfq_id == entity_id, so this is a latent guard, not a live path.)
-    if (!rfqId) return null;
-    if (!opts.idIsRfq && String(rfqId) === String(id)) return null;
-    const base = `/dashboard/buyer/quote-compare?rfq=${rfqId}`;
-    // The Approve control for a finalization lives on one product card deep in
-    // the comparison matrix. RFQ #536255 alone raises 47 of these instances —
-    // 47 separate mails — so without the product every link is identical and
-    // the approver has to hunt. Carry the product plus a focus hint the page
-    // uses to scroll/highlight that exact card.
-    return opts.idIsRfq ? base : `${base}&rfq_product_id=${id}&focus=approval`;
-  },
-  'ARC': (id, ctx) => `/dashboard/buyer/arc-committee?rfq_id=${ctx?.rfq_id || id}`,
-  'PO': (id, ctx) => `/dashboard/buyer/purchase-order?rfq=${ctx?.rfq_id || id}`,
-};
-
-// Entity type → display label
-const ENTITY_LABELS = {
-  'RFQ': 'RFQ',
-  'TENDER': 'Tender',
-  'TECHNICAL': 'Technical Evaluation',
-  'NEGOTIATION': 'Negotiation',
-  'NEGOTIATION_QUOTE': 'Vendor Finalization',
-  'ARC': 'ARC',
-  'PO': 'Purchase Order',
-};
+// In-app rows store the RELATIVE path so one row works on local, staging and
+// production; only the email body is absolutised.
 
 /**
  * Send RFQ/Tender creation notification to project team members
@@ -76,7 +51,8 @@ export const sendRfqCreationNotification = async ({
 
     const { id: rfq_id, rfq_no, is_tender, title } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
-    const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq_id}`;
+    const linkPath = buyerRfqDetail(rfq_id) || buyerHome();
+    const viewUrl = toAbsoluteUrl(linkPath);
 
     const subject = autoApproved
       ? `${entityLabel} #${rfq_no} — Created & Ready to Publish`
@@ -146,7 +122,7 @@ export const sendRfqCreationNotification = async ({
           ? `${entityLabel} #${rfq_no} is ready to publish.`
           : `${entityLabel} #${rfq_no} submitted by ${creatorName || 'a team member'} for approval.`,
         data: { rfq_id, is_tender, auto_approved: autoApproved },
-        actionUrl: viewUrl
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch rfq_creation failed', notifyErr);
@@ -187,12 +163,12 @@ export const sendApprovalStepNotification = async ({
       return false;
     }
 
-    const label = ENTITY_LABELS[entityType] || entityType;
-    const linkFn = ENTITY_LINK_MAP[entityType];
-    // A builder returns null when it cannot name the right destination; send
-    // the approver to their dashboard rather than to the wrong record.
-    const linkPath = (linkFn && linkFn(entityId, extraContext)) || `/dashboard`;
-    const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+    const label = entityLabel(entityType);
+    // A null from the registry means the right record cannot be named; send the
+    // approver to their own home rather than to the wrong one.
+    const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
+    const actionUrl = linkPath;
+    const emailUrl = toAbsoluteUrl(linkPath);
 
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
     const isNegotiationRound = entityType === 'NEGOTIATION';
@@ -289,7 +265,7 @@ export const sendApprovalStepNotification = async ({
           ${committeeNudgeHtml}
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${actionUrl}"
+            <a href="${emailUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
               ${ctaLabel}
             </a>
@@ -348,7 +324,8 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
 
     const { id: rfq_id, rfq_no, is_tender, title, tender_publish_date } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
-    const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq_id}`;
+    const linkPath = buyerRfqDetail(rfq_id) || buyerHome();
+    const viewUrl = toAbsoluteUrl(linkPath);
 
     const publishDateFormatted = tender_publish_date
       ? new Date(tender_publish_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
@@ -408,7 +385,7 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
         title: `${entityLabel} #${rfq_no} — Approved & Scheduled`,
         body: `Publishing on ${publishDateFormatted}.`,
         data: { rfq_id, is_tender, publish_date: tender_publish_date },
-        actionUrl: viewUrl
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch rfq_ready_to_publish_approved failed', notifyErr);
@@ -436,7 +413,8 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
 
     const { id: rfq_id, rfq_no, is_tender, title, bid_end_date, hotel_name, hospitality_company_name } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
-    const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq_id}`;
+    const linkPath = buyerRfqDetail(rfq_id) || buyerHome();
+    const viewUrl = toAbsoluteUrl(linkPath);
 
     const bidEndFormatted = bid_end_date
       ? new Date(bid_end_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
@@ -502,7 +480,7 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
           ? `Vendors invited. Submission ends ${bidEndFormatted}.`
           : `Vendors have been invited to submit their quotes.`,
         data: { rfq_id, is_tender, bid_end_date },
-        actionUrl: viewUrl
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch rfq_published failed', notifyErr);
@@ -614,7 +592,7 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
           ? `Submit your quote before ${bidEndFormatted}.`
           : `You have a new ${entityLabel} to quote on.`,
         data: { rfq_id, is_tender, buyer_name: buyerName },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfq_id}`
+        actionUrl: vendorRfqDetail(rfq_id) || vendorHome()
       });
     } catch (notifyErr) {
       logError('dispatch rfq_vendor_invited failed', notifyErr);
@@ -649,7 +627,7 @@ export const sendVendorAutoAddedToRfqNotification = async ({
 
     const rfqListHTML = rfqs.map(rfq => {
       const label = rfq.is_tender === 1 ? 'Tender' : 'RFQ';
-      const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq.rfq_id}`;
+      const viewUrl = toAbsoluteUrl(buyerRfqDetail(rfq.rfq_id) || buyerHome());
       const products = (rfq.product_names || []).join(', ') || '—';
       return `
         <tr>
@@ -721,9 +699,7 @@ export const sendVendorAutoAddedToRfqNotification = async ({
           : `New vendor registered — added to ${rfqs.length} RFQs`,
         body: `A newly registered vendor was auto-added to your open RFQs based on their categories.`,
         data: { rfqs: rfqs.map((r) => ({ rfq_id: r.rfq_id, rfq_no: r.rfq_no })) },
-        actionUrl: rfqs.length === 1
-          ? `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfqs[0].rfq_id}`
-          : `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-management`
+        actionUrl: (rfqs.length === 1 ? buyerRfqDetail(rfqs[0].rfq_id) : null) || buyerRfqList()
       });
     } catch (notifyErr) {
       logError('[WH-67] dispatch vendor_auto_added failed', notifyErr);
@@ -825,9 +801,9 @@ export const sendVendorBulkRfqJoinNotification = async ({
           : `${rfqs.length} new RFQ opportunities`,
         body: `You've been added to ${rfqs.length} open RFQ${rfqs.length > 1 ? 's' : ''} based on your registered categories.`,
         data: { rfqs: rfqs.map((r) => ({ rfq_id: r.rfq_id, rfq_no: r.rfq_no })) },
-        actionUrl: rfqs.length === 1
-          ? `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfqs[0].rfq_id}`
-          : `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries`
+        // The multi-RFQ fallback used to point at /dashboard/vendor/inquiries,
+        // which is not a route — the listing is `inquiries-received`.
+        actionUrl: (rfqs.length === 1 ? vendorRfqDetail(rfqs[0].rfq_id) : null) || vendorRfqList()
       });
     } catch (notifyErr) {
       logError('[WH-67] dispatch vendor_bulk_rfq_joined failed', notifyErr);
@@ -864,7 +840,8 @@ export const sendRfqClosedHeadsUpNotification = async ({
 
     const { id: rfq_id, rfq_no, is_tender, title, hotel_name, company_name } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
-    const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}`;
+    const linkPath = buyerRfqDetail(rfq_id) || buyerHome();
+    const viewUrl = toAbsoluteUrl(linkPath);
 
     const subject = `Heads up: ${entityLabel} #${rfq_no} has been CLOSED — all actions are now restricted`;
 
@@ -952,7 +929,7 @@ export const sendRfqClosedHeadsUpNotification = async ({
         title: `${entityLabel} #${rfq_no} CLOSED — all actions restricted`,
         body: `Closed by ${closedByName || 'the creator'}. Cannot be reopened.`,
         data: { rfq_id, is_tender, closed_by: closedByName },
-        actionUrl: viewUrl
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch rfq_closed failed', notifyErr);
@@ -987,17 +964,13 @@ export const sendApprovalCancelledNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = ENTITY_LABELS[entityType] || entityType;
-    const linkFn = ENTITY_LINK_MAP[entityType];
-    // This mail fires after the instance has been cancelled, so the caller only
-    // carries the RFQ — not the entity. `idIsRfq` tells per-entity builders to
-    // emit their RFQ-level link instead of synthesising a deep link out of an
-    // id that is not theirs (a per-product builder would otherwise publish the
-    // rfq_id as an rfq_product_id).
-    const linkPath = (linkFn && extraContext?.rfq_id
-      ? linkFn(extraContext.rfq_id, extraContext, { idIsRfq: true })
-      : null) || '/dashboard';
-    const viewUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+    const label = entityLabel(entityType);
+    // The instance is already gone here, so only the RFQ-level link is safe.
+    const linkPath = (extraContext?.rfq_id
+      ? approvalActionUrl(entityType, extraContext.rfq_id, extraContext, { idIsRfq: true })
+      : approvalActionUrl(entityType, entityId, extraContext)) || buyerHome();
+    const viewUrl = toAbsoluteUrl(linkPath);
+    const actionUrl = linkPath;
 
     const subject = `Approval No Longer Required — ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`;
 
@@ -1055,7 +1028,7 @@ export const sendApprovalCancelledNotification = async ({
         title: `Approval no longer required — ${label}${entityIdentifier ? ` #${entityIdentifier}` : ''}`,
         body: reason || 'The approval request was cancelled. No action needed.',
         data: { entity_type: entityType, ...extraContext },
-        actionUrl: viewUrl
+        actionUrl
       });
     } catch (notifyErr) {
       logError('dispatch approval_cancelled failed', notifyErr);
@@ -1091,12 +1064,12 @@ export const sendPolicyChangeNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = ENTITY_LABELS[entityType] || entityType;
-    const linkFn = ENTITY_LINK_MAP[entityType];
-    // Null means the builder could not name a correct destination — prefer a
-    // generic landing over a link to the wrong record.
-    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
-    const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+    const label = entityLabel(entityType);
+    // A null from the registry means the right record cannot be named; send the
+    // approver to their own home rather than to the wrong one.
+    const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
+    const actionUrl = linkPath;
+    const emailUrl = toAbsoluteUrl(linkPath);
 
     const reasonLabel = changeReason === 'policy_change' ? 'approval policy update'
       : changeReason === 'role_removed' || changeReason === 'role_added' ? 'role assignment change'
@@ -1132,7 +1105,7 @@ export const sendPolicyChangeNotification = async ({
           <p><strong>Your approval is still required.</strong> Please review the updated workflow and take action.</p>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${actionUrl}"
+            <a href="${emailUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
               Review & Approve
             </a>
@@ -1196,7 +1169,7 @@ export const sendApproverRemovedNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = ENTITY_LABELS[entityType] || entityType;
+    const label = entityLabel(entityType);
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'your role assignment was changed'
@@ -1252,7 +1225,7 @@ export const sendApproverRemovedNotification = async ({
         title: `You've been removed from approval — ${label} #${entityIdentifier}`,
         body: `Reason: ${reasonLabel} by ${changedByName || 'an administrator'}.`,
         data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, change_reason: changeReason },
-        actionUrl: '/dashboard'
+        actionUrl: buyerHome()
       });
     } catch (notifyErr) {
       logError('dispatch approver_removed failed', notifyErr);
@@ -1287,7 +1260,7 @@ export const sendApprovalStandsNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = ENTITY_LABELS[entityType] || entityType;
+    const label = entityLabel(entityType);
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'a role assignment was changed'
@@ -1347,7 +1320,7 @@ export const sendApprovalStandsNotification = async ({
         title: `Your prior approval still counts — ${label} #${entityIdentifier}`,
         body: `Policy changed but your approval remains effective. No action required.`,
         data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, change_reason: changeReason },
-        actionUrl: '/dashboard'
+        actionUrl: buyerHome()
       });
     } catch (notifyErr) {
       logError('dispatch approval_stands failed', notifyErr);
@@ -1383,12 +1356,12 @@ export const sendApproverAddedMidFlightNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = ENTITY_LABELS[entityType] || entityType;
-    const linkFn = ENTITY_LINK_MAP[entityType];
-    // Null means the builder could not name a correct destination — prefer a
-    // generic landing over a link to the wrong record.
-    const linkPath = (linkFn && linkFn(entityId, extraContext)) || '/dashboard';
-    const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
+    const label = entityLabel(entityType);
+    // A null from the registry means the right record cannot be named; send the
+    // approver to their own home rather than to the wrong one.
+    const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
+    const actionUrl = linkPath;
+    const emailUrl = toAbsoluteUrl(linkPath);
 
     const reasonLabel = changeReason === 'policy_change' ? 'a policy update'
       : changeReason === 'role_added' ? 'a role assignment change'
@@ -1423,7 +1396,7 @@ export const sendApproverAddedMidFlightNotification = async ({
           <p><strong>Your approval is required.</strong> Please review and take action.</p>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${actionUrl}"
+            <a href="${emailUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
               Review & Approve
             </a>

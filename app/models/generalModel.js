@@ -2,6 +2,7 @@ import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
+import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificationLinks.js';
 
 // Maps entity_type to the permission resource used in tbl_permissions
 export const ENTITY_APPROVE_RESOURCE_MAP = {
@@ -3329,7 +3330,11 @@ export async function submitApprovalAction({
  * Cancel a pending approval instance
  */
 export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null) {
-  return db.tx(async t => {
+  // Approvers still holding this as a live task need to be told it is moot.
+  // Without it the item sits in "pending for me" forever, and the only call
+  // site that notified was closeRFQ — the ARC publish-withdrawal, the generic
+  // cancel endpoint and the four sendback cascades all went silent.
+  const outcome = await db.tx(async t => {
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
       WHERE id = $1
@@ -3363,8 +3368,66 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       VALUES ($1, $2, 'REJECT', $3)
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
 
-    return { status: 'CANCELLED', message: 'Approval instance cancelled' };
+    // Collected inside the transaction, notified after it commits.
+    const pendingApprovers = await t.any(`
+      SELECT DISTINCT sa.approver_user_id AS id
+      FROM tbl_approval_step_approvers sa
+      JOIN tbl_approval_instance_steps st ON st.id = sa.approval_instance_step_id
+      WHERE st.approval_instance_id = $1
+        AND sa.status NOT IN ('REMOVED', 'APPROVED', 'REJECTED')
+    `, [instance_id]);
+
+    return {
+      status: 'CANCELLED',
+      message: 'Approval instance cancelled',
+      __instance: instance,
+      __approvers: pendingApprovers.map(a => Number(a.id)).filter(Boolean),
+    };
   });
+
+  await notifyApprovalCancelled(outcome, cancelled_by, reason);
+
+  return { status: outcome.status, message: outcome.message };
+}
+
+/**
+ * Post-commit fan-out for a cancelled approval. Total — a notification failure
+ * must never make a committed cancellation look like it failed.
+ */
+async function notifyApprovalCancelled(outcome, cancelledBy, reason) {
+  try {
+    const recipients = (outcome.__approvers || []).filter(
+      id => Number(id) !== Number(cancelledBy)
+    );
+    if (recipients.length === 0) return;
+
+    const instance = outcome.__instance || {};
+    const metadata = instance.metadata || {};
+    const label = entityLabel(instance.entity_type);
+    const identifier =
+      metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
+
+    const { dispatch } = await import('../services/notificationService.js');
+    await dispatch({
+      userIds: recipients,
+      senderUserId: cancelledBy || null,
+      category: 'approval',
+      type: 'approval_cancelled',
+      title: `No longer needed: ${label} #${identifier}`,
+      body: reason
+        ? `The approval request was cancelled — ${reason}`
+        : 'The approval request was cancelled.',
+      data: {
+        entity_type: instance.entity_type,
+        entity_id: instance.entity_id,
+        approval_instance_id: instance.id,
+      },
+      actionUrl:
+        approvalActionUrl(instance.entity_type, instance.entity_id, metadata) || buyerHome(),
+    });
+  } catch (err) {
+    logError('approval_cancelled notification failed', err);
+  }
 }
 
 /**

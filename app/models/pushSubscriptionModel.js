@@ -34,6 +34,16 @@ const pushSubscriptionModel = {
     );
   },
 
+  // Unsubscribe path for a logged-in user. Endpoints are bearer-ish strings, so
+  // an unscoped delete lets anyone who learns one silence that user's push
+  // notifications; the owner predicate makes the endpoint alone insufficient.
+  deleteByEndpointForUser: async (endpoint, user_id) => {
+    return db.result(
+      `DELETE FROM tbl_push_subscriptions WHERE endpoint = $1 AND user_id = $2`,
+      [endpoint, user_id]
+    );
+  },
+
   deleteById: async (id) => {
     return db.result(
       `DELETE FROM tbl_push_subscriptions WHERE id = $1`,

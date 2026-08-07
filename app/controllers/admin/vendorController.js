@@ -24,6 +24,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { isNumber } from 'razorpay/dist/utils/razorpay-utils.js';
 import { pgp } from '../../config/dbConn.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import { vendorHome } from '../../services/notificationLinks.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -397,7 +398,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
             title: `${companyNames} added you as a vendor`,
             body: `You can now receive RFQs from ${companyNames}. Log in to manage enquiries.`,
             data: { vendor_id: vendorId, buyer_company_ids: buyerCompanyIds || [] },
-            actionUrl: 'https://hospitality.letsworkwise.com'
+            actionUrl: vendorHome()
           }).catch((err) => logError('dispatch vendor_added_by_buyer failed', err));
         } else {
           const emailHeader = ` <h2>Dear ${name} </h2>`
@@ -432,7 +433,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
               title: 'Welcome to Phileein Hospitality',
               body: `Your account is under review. We'll notify you once it's approved.`,
               data: { vendor_id: vendorId },
-              actionUrl: 'https://hospitality.letsworkwise.com'
+              actionUrl: vendorHome()
             }).catch((err) => logError('dispatch vendor_self_registered failed', err));
         }
 
@@ -1085,7 +1086,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           ? 'Please contact support if you believe this is in error.'
           : 'You can now receive enquiries and submit quotes.',
         data: { vendor_id: vendorId, status },
-        actionUrl: 'https://hospitality.letsworkwise.com'
+        actionUrl: vendorHome()
       }).catch((err) => logError('dispatch vendor_approval_status failed', err));
 
       res

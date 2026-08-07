@@ -13,6 +13,7 @@ import {
 import { dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import rbacModel from '../../models/rbacModel.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import { buyerMrDetail, buyerMrList, buyerPoDetail, vendorPoDetail } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
 import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
 
@@ -21,20 +22,28 @@ import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
 // notification failure must never undo the release.
 async function notifyCallOffReleased(mr, released) {
   for (const { po, group } of released) {
-    const recipients = [Number(group.vendor_id), Number(mr.raised_by)].filter(Boolean);
-    try {
-      await dispatchNotification({
-        userIds: recipients,
-        senderUserId: mr.raised_by || null,
-        category: 'CALL_OFF',
-        type: 'CALL_OFF_RELEASED',
-        title: 'Released PO awaiting acceptance',
-        body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr.mr_number} and is awaiting vendor acceptance.`,
-        data: { po_id: po.id, mr_id: mr.id, po_number: po.po_number },
-        actionUrl: `/dashboard/buyer/purchase-orders/${po.id}`,
-      });
-    } catch (err) {
-      logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] in-app notify failed');
+    // The vendor and the raiser act on the same PO from opposite sides of the
+    // app, so they cannot share one link — the buyer PO page is not reachable
+    // by a vendor account. Two dispatches, one destination each.
+    const audiences = [
+      { userId: Number(group.vendor_id), actionUrl: vendorPoDetail(po.id) },
+      { userId: Number(mr.raised_by),    actionUrl: buyerPoDetail(po.id) },
+    ].filter((a) => a.userId && a.actionUrl);
+    for (const { userId, actionUrl } of audiences) {
+      try {
+        await dispatchNotification({
+          userIds: [userId],
+          senderUserId: mr.raised_by || null,
+          category: 'mr',
+          type: 'CALL_OFF_RELEASED',
+          title: 'Released PO awaiting acceptance',
+          body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr.mr_number} and is awaiting vendor acceptance.`,
+          data: { po_id: po.id, mr_id: mr.id, po_number: po.po_number },
+          actionUrl,
+        });
+      } catch (err) {
+        logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] in-app notify failed');
+      }
     }
     const vendorEmail = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [group.vendor_id]);
     if (vendorEmail?.email) {
@@ -789,12 +798,12 @@ export async function handleMrPostApproval(approvalInstanceId, approverUserId, o
             : 'an unexpected error';
         await dispatchNotification({
           userIds: [Number(failedMr.raised_by)],
-          category: 'CALL_OFF',
+          category: 'mr',
           type: 'CALL_OFF_RELEASE_FAILED',
           title: 'Call-off PO could not be released',
           body: `Requisition ${failedMr.mr_number || ''} was approved but its call-off PO could not be released (${why}). Please review the requisition.`,
           data: { mr_id: mrId, reason: err.code || 'error' },
-          actionUrl: '/dashboard/buyer/material-requisitions',
+          actionUrl: buyerMrDetail(mrId) || buyerMrList({ tab: 'for_me' }),
         });
       }
     } catch (notifyErr) {

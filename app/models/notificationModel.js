@@ -205,15 +205,95 @@ const notificationModel = {
     );
   },
 
-  getByRecipient: async (recipient_user_id, limit, offset) => {
+  // The bell endpoints below all resolve ownership with the same
+  // COALESCE(recipient_user_id, sender_user_id) predicate documented above
+  // notificationDetail. They used to filter on `recipient_user_id` alone, which
+  // silently hid every legacy row from the bell while the older
+  // /notification-list endpoint still returned it — one user, two different
+  // inboxes. Sharing the predicate collapses them back into one.
+
+  // Dismissed rows are excluded everywhere the inbox is read or counted — a
+  // dismissed notification that still drove the badge would be indistinguishable
+  // from a bug.
+  getByRecipient: async (recipient_user_id, limit, offset, { category = null, unreadOnly = false } = {}) => {
     return db.any(
       `SELECT id, sender_user_id, recipient_user_id, type, title, message,
-              additional_data, category, action_url, is_read, created_at
+              additional_data, category, action_url, is_read, created_at,
+              delivered_at
          FROM tbl_notifications
-        WHERE recipient_user_id = $1
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+          ${category ? 'AND LOWER(category) = LOWER($4)' : ''}
+          ${unreadOnly ? 'AND (is_read = 0 OR is_read IS NULL)' : ''}
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3`,
-      [recipient_user_id, limit, offset]
+      category
+        ? [recipient_user_id, limit, offset, category]
+        : [recipient_user_id, limit, offset]
+    );
+  },
+
+  // One round trip for both counters the bell needs:
+  //   undelivered → the badge ("new since you last looked")
+  //   unread      → how many rows still render highlighted
+  getCounts: async (recipient_user_id) => {
+    const row = await db.oneOrNone(
+      `SELECT COUNT(*) FILTER (WHERE delivered_at IS NULL)::int        AS undelivered,
+              COUNT(*) FILTER (WHERE is_read = 0 OR is_read IS NULL)::int AS unread,
+              COUNT(*)::int                                              AS total
+         FROM tbl_notifications
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL`,
+      [recipient_user_id]
+    );
+    return {
+      undelivered: row ? row.undelivered : 0,
+      unread: row ? row.unread : 0,
+      total: row ? row.total : 0
+    };
+  },
+
+  // Per-category unread tallies, so the inbox can offer a filter that states
+  // what is actually in it rather than a fixed list of tabs.
+  getCategoryCounts: async (recipient_user_id) => {
+    const rows = await db.any(
+      `SELECT COALESCE(LOWER(category), 'other') AS category,
+              COUNT(*)::int                                              AS total,
+              COUNT(*) FILTER (WHERE is_read = 0 OR is_read IS NULL)::int AS unread
+         FROM tbl_notifications
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+        GROUP BY 1
+        ORDER BY 1`,
+      [recipient_user_id]
+    );
+    return rows;
+  },
+
+  // Soft delete. These rows are the only record that a given approver was asked
+  // to act, so tidying the list must not destroy the audit trail.
+  dismiss: async (notification_id, recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET dismissed_at = NOW(),
+              delivered_at = COALESCE(delivered_at, NOW())
+        WHERE id = $1
+          AND COALESCE(recipient_user_id, sender_user_id) = $2
+          AND dismissed_at IS NULL`,
+      [notification_id, recipient_user_id]
+    );
+  },
+
+  // Undo for a misclick. Delivery is deliberately NOT reset: the user has
+  // demonstrably seen the row, so resurrecting the badge would be a lie.
+  markUnread: async (notification_id, recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET is_read = 0, is_read_at = NULL
+        WHERE id = $1
+          AND COALESCE(recipient_user_id, sender_user_id) = $2
+          AND dismissed_at IS NULL`,
+      [notification_id, recipient_user_id]
     );
   },
 
@@ -221,17 +301,48 @@ const notificationModel = {
     const row = await db.oneOrNone(
       `SELECT COUNT(*)::int AS count
          FROM tbl_notifications
-        WHERE recipient_user_id = $1 AND (is_read = 0 OR is_read IS NULL)`,
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+          AND (is_read = 0 OR is_read IS NULL)`,
       [recipient_user_id]
     );
     return row ? row.count : 0;
   },
 
+  // Opening the bell delivers everything outstanding, not just the page on
+  // screen — otherwise the badge would still show a residue the user has no
+  // obvious way to clear. `notification_ids` narrows it when a caller wants to
+  // deliver an explicit subset.
+  markDelivered: async (recipient_user_id, notification_ids = null) => {
+    const ids = Array.isArray(notification_ids)
+      ? notification_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+      : null;
+
+    if (ids && ids.length === 0) return 0;
+
+    const result = await db.result(
+      `UPDATE tbl_notifications
+          SET delivered_at = NOW()
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+          AND delivered_at IS NULL
+          ${ids ? 'AND id IN ($2:csv)' : ''}`,
+      ids ? [recipient_user_id, ids] : [recipient_user_id]
+    );
+    return result.rowCount;
+  },
+
+  // Reading implies delivery — a row can never be read but undelivered, and
+  // leaving delivered_at NULL here would keep the badge lit for something the
+  // user just opened.
   markRead: async (notification_id, recipient_user_id) => {
     return db.result(
       `UPDATE tbl_notifications
-          SET is_read = 1, is_read_at = NOW()
-        WHERE id = $1 AND recipient_user_id = $2`,
+          SET is_read = 1,
+              is_read_at = NOW(),
+              delivered_at = COALESCE(delivered_at, NOW())
+        WHERE id = $1
+          AND COALESCE(recipient_user_id, sender_user_id) = $2`,
       [notification_id, recipient_user_id]
     );
   },
@@ -239,8 +350,12 @@ const notificationModel = {
   markAllRead: async (recipient_user_id) => {
     return db.result(
       `UPDATE tbl_notifications
-          SET is_read = 1, is_read_at = NOW()
-        WHERE recipient_user_id = $1 AND (is_read = 0 OR is_read IS NULL)`,
+          SET is_read = 1,
+              is_read_at = NOW(),
+              delivered_at = COALESCE(delivered_at, NOW())
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+          AND (is_read = 0 OR is_read IS NULL)`,
       [recipient_user_id]
     );
   },

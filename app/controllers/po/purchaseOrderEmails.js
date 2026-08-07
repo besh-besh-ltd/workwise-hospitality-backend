@@ -8,13 +8,20 @@ import vendorModel from "../../models/vendorModel.js";
 import rbacModel from "../../models/rbacModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
 import { dispatch as dispatchNotification } from "../../services/notificationService.js";
+import {
+  buyerPoApproval,
+  buyerQuoteComparison,
+  toAbsoluteUrl,
+  vendorPoDetail,
+  vendorPoList
+} from "../../services/notificationLinks.js";
 
+// Root-relative on purpose: the in-app row resolves it against whichever origin
+// the reader is on. Email bodies wrap the same path with toAbsoluteUrl().
 const poActionUrl = (purchaseOrder, role = 'buyer') => {
-  const base = process.env.FRONT_END_WEBSITE || '';
-  const path = role === 'vendor'
-    ? `/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`
-    : `/dashboard/buyer/purchase-order?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
-  return `${base}${path}`;
+  return role === 'vendor'
+    ? vendorPoDetail(purchaseOrder.id) || vendorPoList()
+    : buyerPoApproval(purchaseOrder.id, purchaseOrder.rfq_id);
 };
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
@@ -41,6 +48,9 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
     const headerContent = `<h2>Hello ${user.name},</h2>`;
 
+    const linkPath = poActionUrl(purchaseOrder, 'buyer');
+    const emailUrl = toAbsoluteUrl(linkPath);
+
     const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
             <p>
@@ -62,9 +72,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
                 Please ensure the necessary actions are taken to proceed the Purchase Order.
             </p>
 
-            <a href="${
-            process.env.FRONT_END_WEBSITE
-            }/dashboard/buyer/purchase-order?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}" 
+            <a href="${emailUrl}"
             style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600; margin: 20px auto;">
             View Purchase Order
             </a>
@@ -94,7 +102,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
       title: `PO #${purchaseOrder.po_number || purchaseOrder.id} needs your approval`,
       body: `A purchase order is awaiting your approval.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
-      actionUrl: poActionUrl(purchaseOrder, 'buyer')
+      actionUrl: linkPath
     }).catch((err) => logError('dispatch po_approval_needed failed', err));
 
     resolve(true);
@@ -236,7 +244,8 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
 
     const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
 
-    const reviewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+    const linkPath = poActionUrl(purchaseOrder, 'vendor');
+    const reviewUrl = toAbsoluteUrl(linkPath);
 
     const containerContent = `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -292,7 +301,7 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
       title: `Action required: PO #${purchaseOrder.po_number}`,
       body: `Please accept or reject this Purchase Order.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
-      actionUrl: poActionUrl(purchaseOrder, 'vendor')
+      actionUrl: linkPath
     }).catch((err) => logError('dispatch po_acceptance_request failed', err));
 
     logger.info(`Sent PO acceptance request email to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
@@ -342,7 +351,8 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
       return;
     }
 
-    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq_id=${purchaseOrder.rfq_id}`;
+    const linkPath = buyerQuoteComparison(purchaseOrder.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(linkPath);
 
     for (const user of evaluators) {
       const headerContent = `<h2>Hello ${user.name},</h2>`;
@@ -397,7 +407,7 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
       title: `Vendor rejected PO #${purchaseOrder.po_number} — action needed`,
       body: `${vendorName} has rejected PO #${purchaseOrder.po_number}. Please finalize an alternative vendor.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reason: reason || null },
-      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq_id=${purchaseOrder.rfq_id}`
+      actionUrl: linkPath
     }).catch((err) => logError('dispatch po_vendor_rejected failed', err));
 
     logger.info(`Sent vendor rejection notifications to ${evaluators.length} commercial evaluators for PO ${purchaseOrder.po_number}`);
@@ -458,7 +468,8 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
     };
 
     const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
-    const reviewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/order-book?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+    const linkPath = poActionUrl(purchaseOrder, 'vendor');
+    const reviewUrl = toAbsoluteUrl(linkPath);
 
     const containerContent = `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -508,7 +519,7 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
       title: subjects[reminderNumber] || subjects[1],
       body: `PO #${purchaseOrder.po_number} still requires your action.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reminder: reminderNumber },
-      actionUrl: poActionUrl(purchaseOrder, 'vendor')
+      actionUrl: linkPath
     }).catch((err) => logError(`dispatch po_acceptance_reminder_${reminderNumber} failed`, err));
 
     logger.info(`Sent PO acceptance reminder #${reminderNumber} to vendor ${vendor.email} for PO ${purchaseOrder.po_number}`);
@@ -570,7 +581,8 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
       return;
     }
 
-    const poUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq=${purchaseOrder.rfq_id}&po=${purchaseOrder.id}`;
+    const linkPath = poActionUrl(purchaseOrder, 'buyer');
+    const poUrl = toAbsoluteUrl(linkPath);
 
     for (const user of usersToNotify) {
       const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
@@ -636,7 +648,7 @@ export const sendPOAcceptedNotificationToTeam = async (purchaseOrder, rfqDetails
       title: `Vendor accepted PO #${purchaseOrder.po_number}`,
       body: `${vendorName} has accepted the Purchase Order.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
-      actionUrl: poActionUrl(purchaseOrder, 'buyer')
+      actionUrl: linkPath
     }).catch((err) => logError('dispatch po_vendor_accepted failed', err));
 
     logger.info(`Sent PO accepted notifications to ${usersToNotify.length} users for PO ${purchaseOrder.po_number}`);

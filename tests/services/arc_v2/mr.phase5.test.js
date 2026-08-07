@@ -56,7 +56,7 @@ describe("MR call-off mediums (CO11/CO12/CO13)", () => {
 
   afterAll(async () => {
     const cs = [cActive, cExpiring, cZero];
-    await db.none(`DELETE FROM tbl_notifications WHERE category='CALL_OFF'`);
+    await db.none(`DELETE FROM tbl_notifications WHERE category IN ('CALL_OFF','mr')`);
     await db.none(`DELETE FROM tbl_purchase_order_product WHERE purchase_order_id IN (SELECT id FROM tbl_rfq_purchase_order WHERE arc_contract_id = ANY($1::int[]))`, [cs]);
     await db.none(`DELETE FROM tbl_arc_callof_po WHERE arc_contract_id = ANY($1::int[])`, [cs]);
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE arc_contract_id = ANY($1::int[])`, [cs]);

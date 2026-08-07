@@ -4,6 +4,8 @@ import {
 } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
+import { dispatch as dispatchNotification } from './notificationService.js';
+import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.js';
 
 /**
  * Approval Action Service
@@ -132,9 +134,77 @@ export async function executeApprovalAction(args) {
       status: result.instance_status,
       comment: args.comment,
     });
+    await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
+      status: result.instance_status,
+      comment: args.comment,
+    });
   }
 
   return result;
+}
+
+/**
+ * Tell the person who raised an approval how it ended.
+ *
+ * Rejection was silent for every entity type except the ARC family, which has
+ * its own notifier. An RFQ was pushed back to draft and its publish schedule
+ * disarmed, a PO was rejected and its vendor de-finalized, a material
+ * requisition was refused, a negotiation round was cancelled with every vendor
+ * flipped to REJECTED — and in each case the initiator was told nothing. They
+ * found out by noticing the state had changed.
+ *
+ * Sits here rather than in the eight per-entity rejection handlers so there is
+ * one place to keep correct, and runs post-commit for the same reason the
+ * entity handlers do.
+ *
+ * Never throws: a notification failure must not make a committed approval look
+ * like it failed.
+ */
+export async function notifyApprovalOutcome(approvalInstanceId, actorUserId, { status, comment } = {}) {
+  try {
+    const instance = await getApprovalInstanceById(approvalInstanceId);
+    if (!instance || !instance.initiated_by) return;
+
+    // The actor already knows — they are the one who just decided.
+    if (Number(instance.initiated_by) === Number(actorUserId)) return;
+
+    // ARC entity types run their own richer notifier (arcNotificationService),
+    // which knows about stages, committees and vendor audiences. Notifying here
+    // too would double up.
+    if (String(instance.entity_type || '').startsWith('ARC')) return;
+
+    const label = entityLabel(instance.entity_type);
+    const metadata = instance.metadata || {};
+    const identifier =
+      metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
+
+    const rejected = status === 'REJECTED';
+
+    await dispatchNotification({
+      userIds: [Number(instance.initiated_by)],
+      senderUserId: actorUserId || null,
+      category: 'approval',
+      type: rejected ? 'approval_rejected' : 'approval_approved',
+      title: rejected
+        ? `Rejected: ${label} #${identifier}`
+        : `Approved: ${label} #${identifier}`,
+      body: rejected
+        ? comment
+          ? `Your ${label.toLowerCase()} was rejected — "${comment}"`
+          : `Your ${label.toLowerCase()} was rejected.`
+        : `Your ${label.toLowerCase()} cleared all approval steps.`,
+      data: {
+        entity_type: instance.entity_type,
+        entity_id: instance.entity_id,
+        approval_instance_id: approvalInstanceId,
+        status,
+      },
+      actionUrl:
+        approvalActionUrl(instance.entity_type, instance.entity_id, metadata) || buyerHome(),
+    });
+  } catch (notifyErr) {
+    logError(`Approval outcome notification failed for instance ${approvalInstanceId}`, notifyErr);
+  }
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   getApproverSourceScopesForUsers,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
+import { buyerHome } from '../../services/notificationLinks.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -2664,7 +2665,7 @@ const HospitalityController = {
             ? 'Use the credentials emailed to you. Change your password after first login.'
             : 'Log in with your existing password.',
           data: { hotel_id: hotel.id, hotel_name: hotel.name },
-          actionUrl: 'https://hospitality.letsworkwise.com'
+          actionUrl: buyerHome()
         }).catch((err) => logError('dispatch bu_account_active failed', err));
 
         emailsSent++;

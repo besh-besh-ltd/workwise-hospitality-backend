@@ -3,6 +3,7 @@ import { logger } from '../util/logger.js';
 import { resolveCurrentPrice } from './arcPricingResolver.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
+import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
 import pricingEngine from './pricingEngine.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
@@ -409,17 +410,28 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
  * turn a committed rejection into a 400. SMTP stays fire-and-forget so the
  * response never waits on the mail server.
  */
-export async function notifyCallOffRejected({ raisedBy, mrNumber, poNumber, reason }) {
+export async function notifyCallOffRejected({ raisedBy, mrId = null, mrNumber, poNumber, reason }) {
   if (!raisedBy) return;
+  // The raiser has to act on the requisition, so name it. The caller carries
+  // only the MR number today; it is unique, so it resolves the id exactly.
+  let targetMrId = Number(mrId) || null;
+  if (!targetMrId && mrNumber) {
+    try {
+      const row = await db.oneOrNone(`SELECT id FROM tbl_material_requisition WHERE mr_number = $1`, [mrNumber]);
+      targetMrId = row ? Number(row.id) : null;
+    } catch (err) {
+      logger.error({ err, mrNumber }, '[callOffPo.notifyCallOffRejected] requisition lookup failed');
+    }
+  }
   try {
     await dispatchNotification({
       userIds: [Number(raisedBy)],
-      category: 'CALL_OFF',
+      category: 'mr',
       type: 'CALL_OFF_REJECTED',
       title: 'Call-off PO rejected by vendor',
       body: `The vendor rejected call-off PO ${poNumber || ''} (from requisition ${mrNumber || ''})${reason ? `: ${reason}` : ''}. The contract quantity has been released back.`,
-      data: { mr_number: mrNumber, po_number: poNumber, reason: reason || null },
-      actionUrl: '/dashboard/buyer/material-requisitions',
+      data: { mr_id: targetMrId, mr_number: mrNumber, po_number: poNumber, reason: reason || null },
+      actionUrl: buyerMrDetail(targetMrId) || buyerMrList({ tab: 'for_me' }),
     });
   } catch (err) {
     logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] in-app notify failed');

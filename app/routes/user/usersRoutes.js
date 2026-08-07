@@ -197,6 +197,26 @@ UsersRoutes.get(
   passportSignIn,
   userNotificationController.unreadCount
 );
+UsersRoutes.get(
+  '/notifications/categories',
+  passportSignIn,
+  userNotificationController.categories
+);
+UsersRoutes.post(
+  '/notifications/mark-delivered',
+  passportSignIn,
+  userNotificationController.markDelivered
+);
+UsersRoutes.post(
+  '/notifications/dismiss/:id',
+  passportSignIn,
+  userNotificationController.dismiss
+);
+UsersRoutes.post(
+  '/notifications/mark-unread/:id',
+  passportSignIn,
+  userNotificationController.markUnread
+);
 UsersRoutes.post(
   '/notifications/mark-read/:id',
   passportSignIn,
