@@ -198,6 +198,11 @@ UsersRoutes.get(
   userNotificationController.unreadCount
 );
 UsersRoutes.post(
+  '/notifications/mark-delivered',
+  passportSignIn,
+  userNotificationController.markDelivered
+);
+UsersRoutes.post(
   '/notifications/mark-read/:id',
   passportSignIn,
   userNotificationController.markRead

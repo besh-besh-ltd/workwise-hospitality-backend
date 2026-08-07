@@ -66,6 +66,7 @@ import { evaluateVendorTechnicalQualification } from '../../services/technicalQu
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
+import { vendorRfqDetail, vendorRfqList, queryThread, buyerRfqDetail, buyerQuoteComparison } from '../../services/notificationLinks.js';
 import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification, sendRfqClosedHeadsUpNotification, sendApprovalCancelledNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 import {
   buildQuoteVisibilityMeta,
@@ -518,7 +519,7 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
       title: `${vendor_name} regretted RFQ #${rfqNumber}`,
       body: regret_reason ? `Reason: ${regret_reason}` : 'The vendor has declined to quote.',
       data: { rfq_id, vendor_id, regret_reason: regret_reason || null },
-      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}`
+      actionUrl: buyerRfqDetail(rfq_id)
     }).catch((err) => logError('dispatch vendor_quote_regret failed', err));
   } catch (error) {
     throw error;
@@ -1187,7 +1188,7 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
     title: `Updated quotation for RFQ #${rfq_no}`,
     body: `${vendorName} revised their quote. Review the changes.`,
     data: { rfq_id, vendor_id: user?.id, changed_items: Array.isArray(quoteItemChanges) ? quoteItemChanges.length : 0 },
-    actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+    actionUrl: buyerQuoteComparison(rfq_id)
   }).catch((err) => logError('dispatch vendor_quote_updated failed', err));
 
   // send updated quote message to buyer
@@ -1432,6 +1433,26 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
     body: `RFQ Response Pending `
   };
 
+  // The bell counterpart to the reminder mail. The legacy sendNotification call
+  // below passes no recipient list, so it only ever fired web-push — a vendor
+  // who had not granted push permission got no in-app trace of the reminder at
+  // all, and unlike the invite there is no other path that covers it.
+  try {
+    await dispatchNotification({
+      userIds: [Number(vendor.user_id)],
+      category: 'rfq',
+      type: 'rfq_response_reminder',
+      title: `Reminder: quote pending for RFQ #${rfqBasicDetails?.rfq_no || rfq_id}`,
+      body: remainingProductsArray.length === 1
+        ? `1 product is still awaiting your quote.`
+        : `${remainingProductsArray.length} products are still awaiting your quote.`,
+      data: { rfq_id, pending_products: remainingProductsArray.length },
+      actionUrl: vendorRfqDetail(rfq_id) || vendorRfqList()
+    });
+  } catch (notifyErr) {
+    logError('dispatch rfq_response_reminder failed', notifyErr);
+  }
+
   if (vendor.endpoint) {
     try {
       const parsedEndpoint =
@@ -1563,7 +1584,7 @@ const sendQuoteNotificationEmail = async (req) => {
         title: `New quotation for RFQ #${rfq_no}`,
         body: `${vendorCompanyName} submitted a quote. Review and compare.`,
         data: { rfq_id, vendor_id: req.user?.id, product_count: productCount },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+        actionUrl: buyerQuoteComparison(rfq_id)
       }).catch((err) => logError('dispatch vendor_quote_submitted failed', err));
 
       // console.log(`Quotation update email sent to buyer: ${buyer.email}`);
@@ -2074,7 +2095,7 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
       title: `You've been finalized for RFQ #${rfQItem[0]?.rfq_no}`,
       body: `${rfQItem[0]?.company_name || 'The buyer'} has selected your quote for ${winning_product[0]?.product_details[0]?.name || 'the product'}.`,
       data: { rfq_id: rfQItem[0]?.id, product: winning_product[0]?.product_details[0]?.name },
-      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}`
+      actionUrl: vendorRfqDetail(rfQItem[0]?.id) || vendorRfqList()
     }).catch((err) => logError('dispatch vendor_finalized_winner failed', err));
 
     // sendMail({
@@ -2161,7 +2182,7 @@ const sendFinalizationRemovalMail = async (
       title: `Decision made for RFQ #${rfQItem[0]?.rfq_no}`,
       body: `You're no longer finalized for ${product[0]?.product_details[0]?.name || 'the product'}. Check other open opportunities.`,
       data: { rfq_id: rfQItem[0]?.id, product: product[0]?.product_details[0]?.name },
-      actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}`
+      actionUrl: vendorRfqDetail(rfQItem[0]?.id) || vendorRfqList()
     }).catch((err) => logError('dispatch vendor_de_finalized failed', err));
 
     return true;
@@ -15665,7 +15686,7 @@ sendFollowUpEmails: async (req, res) => {
             : `Buyer query on RFQ #${rfqNumber}`,
           body: `${senderCompanyName}: ${String(message_text || '').slice(0, 160)}`,
           data: { rfq_id, message_id, sender_id, sender_type },
-          actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/${sender_type == 2 ? 'buyer' : 'vendor'}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? 'buyer' : 'vendor'}`
+          actionUrl: queryThread(rfq_id, sender_type == 2 ? 'buyer' : 'vendor')
         }).catch((err) => logError('dispatch clarification message failed', err));
 
         const notificationData = {

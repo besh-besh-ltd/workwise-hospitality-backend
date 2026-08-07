@@ -3,9 +3,11 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import { buyerQuoteComparison, buyerRfqList, toAbsoluteUrl, vendorRfqDetail, vendorRfqList } from "../../services/notificationLinks.js";
 
-const buildQuoteCompareUrl = (rfq_id) =>
-  `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`;
+// Root-relative for the in-app row; email bodies wrap these with toAbsoluteUrl().
+const buildQuoteCompareUrl = (rfq_id) => buyerQuoteComparison(rfq_id) || buyerRfqList();
+const buildVendorRfqUrl = (rfq_id) => vendorRfqDetail(rfq_id) || vendorRfqList();
 
 /**
  * Format a DB timestamp as IST display string.
@@ -379,7 +381,8 @@ export const sendNegotiationExpiredNotification = async ({
       return false;
     }
 
-    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${round.rfq_id}`;
+    const linkPath = buildQuoteCompareUrl(round.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(linkPath);
     const subject = `Negotiation Round Expired — RFQ #${rfqNo}`;
 
     const headerContent = `<h2>Hello ${initiator.name || 'User'},</h2>`;
@@ -445,7 +448,7 @@ export const sendNegotiationExpiredNotification = async ({
         title: `Negotiation Round Expired — RFQ #${rfqNo}`,
         body: `Round ${round.round_number || ''} expired before approval. A new round will be needed.`,
         data: { rfq_id: round.rfq_id, round_number: round.round_number, product_name: productName },
-        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch negotiation_round_expired failed', notifyErr);
@@ -488,7 +491,8 @@ export const sendNegotiationRoundEndedNotification = async ({
       return false;
     }
 
-    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${round.rfq_id}`;
+    const linkPath = buildQuoteCompareUrl(round.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(linkPath);
     const subject = `Negotiation Round Ended — RFQ #${rfqNo}`;
 
     const quotesMessage = quoteCount > 0
@@ -562,7 +566,7 @@ export const sendNegotiationRoundEndedNotification = async ({
           ? `${quoteCount} quote(s) received in Round ${round.round_number || ''}. Review now.`
           : `No quotes received in Round ${round.round_number || ''}. Consider another round.`,
         data: { rfq_id: round.rfq_id, round_number: round.round_number, quote_count: quoteCount },
-        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch negotiation_round_ended failed', notifyErr);
@@ -606,7 +610,8 @@ export const sendNegotiationRoundCreatedNotification = async ({
       return false;
     }
 
-    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${round.rfq_id}`;
+    const linkPath = buildQuoteCompareUrl(round.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(linkPath);
 
     const subject = autoApproved
       ? `Negotiation Round Live — RFQ #${rfqNo}`
@@ -677,7 +682,7 @@ export const sendNegotiationRoundCreatedNotification = async ({
           ? `Round ${round.round_number || ''} auto-approved and live. Vendors can submit.`
           : `Round ${round.round_number || ''} awaiting approval from the committee.`,
         data: { rfq_id: round.rfq_id, round_number: round.round_number, auto_approved: autoApproved },
-        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch negotiation_round_created failed', notifyErr);
@@ -720,10 +725,13 @@ export const sendNegotiationRoundVendorNotification = async ({
 
     const subject = `Negotiation Round — RFQ #${rfqNo}`;
 
+    const linkPath = buildVendorRfqUrl(round.rfq_id);
+
     for (const vendor of vendors) {
+      // The single-use token only rides along on the emailed link.
       const viewUrl = vendor.token
-        ? `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${round.rfq_id}&token=${vendor.token}`
-        : `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?rfq=${round.rfq_id}`;
+        ? `${toAbsoluteUrl(linkPath)}&token=${vendor.token}`
+        : toAbsoluteUrl(linkPath);
 
       const headerContent = `<h2>Hello ${vendor.name || 'Vendor'},</h2>`;
 
@@ -787,7 +795,7 @@ export const sendNegotiationRoundVendorNotification = async ({
         title: `Negotiation Round — RFQ #${rfqNo}`,
         body: `You've been added to Round ${round.round_number || ''}. Submit your revised quote before the deadline.`,
         data: { rfq_id: round.rfq_id, round_number: round.round_number, product_name: productName },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?rfq=${round.rfq_id}`
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch negotiation_round_active_vendor failed', notifyErr);
@@ -830,7 +838,8 @@ export const sendNegotiationRoundApprovedNotification = async ({
       return false;
     }
 
-    const quoteCompareUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${round.rfq_id}`;
+    const linkPath = buildQuoteCompareUrl(round.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(linkPath);
     const subject = `Negotiation Round Approved & Live — RFQ #${rfqNo}`;
 
     const headerContent = `<h2>Hello ${initiator.name || 'User'},</h2>`;
@@ -892,7 +901,7 @@ export const sendNegotiationRoundApprovedNotification = async ({
         title: `Negotiation Round Approved & Live — RFQ #${rfqNo}`,
         body: `Round ${round.round_number || ''} is approved. Vendors can submit quotes.`,
         data: { rfq_id: round.rfq_id, round_number: round.round_number },
-        actionUrl: buildQuoteCompareUrl(round.rfq_id)
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch negotiation_round_approved failed', notifyErr);

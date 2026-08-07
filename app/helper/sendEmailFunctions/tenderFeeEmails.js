@@ -5,6 +5,7 @@ import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from "../paymentDocuments.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import { toAbsoluteUrl, vendorRfqDetail, vendorRfqList } from "../../services/notificationLinks.js";
 
 /**
  * Send tender fee payment confirmation email with invoice to vendor
@@ -29,6 +30,9 @@ export const sendTenderFeePaymentConfirmation = async ({
     const vendorName = vendorDetails?.organization_name || vendorDetails?.name || 'Vendor';
     const amountInRupees = (paymentDetails?.amount || 0) / 100;
     const paymentDate = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+    const linkPath = vendorRfqDetail(rfqDetails?.id) || vendorRfqList();
+    const quoteUrl = toAbsoluteUrl(linkPath);
 
     const headerContent = `<h2>Hello ${vendorName},</h2>`;
 
@@ -114,7 +118,7 @@ export const sendTenderFeePaymentConfirmation = async ({
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?rfq=${rfqDetails?.id}"
+          <a href="${quoteUrl}"
              style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             Submit Your Quote
           </a>
@@ -192,7 +196,7 @@ export const sendTenderFeePaymentConfirmation = async ({
         title: `Payment confirmed — Tender #${rfqDetails?.rfq_no || ''}`,
         body: `Your tender participation fee of Rs. ${amountInRupees.toLocaleString('en-IN')} has been received. You can now submit your quote.`,
         data: { rfq_id: rfqDetails?.id, payment_id: paymentDetails?.payment_id },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?rfq=${rfqDetails?.id}`
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch tender_fee_paid failed', notifyErr);

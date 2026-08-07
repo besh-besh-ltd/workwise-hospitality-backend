@@ -9,6 +9,7 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { userCanAccessArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
 import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/arcTime.js';
 import { currentFinancialYearIst } from '../../helper/financialYear.js';
@@ -85,7 +86,7 @@ export async function notifyVendorsOfFloat(arc, invitations, actorId) {
         ? `${arc.title} is open for quotes until ${deadline}.`
         : `${arc.title} is open for quotes.`,
       data: { arc_id: arc.id, arc_number: arc.arc_number },
-      actionUrl: '/dashboard/vendor/rate-contracts/requests',
+      actionUrl: arcVendorRequests(),
     });
   } catch (err) {
     logger.error({ err, arcId: arc.id }, '[arcController.publish] in-app vendor notify failed');

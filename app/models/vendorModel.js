@@ -5,6 +5,7 @@ import { sendMail, logError } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from '../services/notificationService.js';
+import { vendorProfile } from '../services/notificationLinks.js';
 
 const vendorModel = {
   // Helper function to escape SQL strings
@@ -1410,7 +1411,7 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
               title: `You've been added as a SPOC for ${creatorOrganizationName}`,
               body: `Role: ${spoc.role}. You'll receive all related communication.`,
               data: { spoc_id: spoc.id, vendor_user_id: userId },
-              actionUrl: 'https://hospitality.letsworkwise.com'
+              actionUrl: vendorProfile()
             });
           }
           if (lookupId) {
@@ -1421,7 +1422,7 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
               title: 'New SPOC added to your profile',
               body: `${spoc.name} (${spoc.role}) is now a SPOC on your profile.`,
               data: { spoc_id: spoc.id, spoc_name: spoc.name },
-              actionUrl: 'https://hospitality.letsworkwise.com'
+              actionUrl: vendorProfile()
             });
           }
         } catch (notifyErr) {

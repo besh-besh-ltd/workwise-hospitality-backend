@@ -13,7 +13,22 @@ export const emitToUser = (userId, event, payload) => {
 };
 
 export const SocketConfig = (SERVER) => {
-  const io = new Server(SERVER, { cors: ['https://letsworkwise.com'] });
+  // socket.io expects `cors: { origin: [...] }`; a bare array is ignored, so
+  // this option silently did nothing and the permissive default applied.
+  const io = new Server(SERVER, {
+    cors: {
+      origin: (
+        process.env.SOCKET_CORS_ORIGINS ||
+        [process.env.FRONT_END_WEBSITE, 'https://hospitality.letsworkwise.com']
+          .filter(Boolean)
+          .join(',')
+      )
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean),
+      credentials: true
+    }
+  });
   ioInstance = io;
   let online_users = [];
   let users = {}
@@ -58,16 +73,22 @@ export const SocketConfig = (SERVER) => {
     });
 
     // Handle events from clients
-    socket.on('addNewUser', (userId) => {
+    //
+    // SECURITY: the room to join comes from the verified handshake token, never
+    // from the payload. This used to `socket.join('user:' + userId)` with the
+    // client-supplied id, so any connected socket could subscribe to any user's
+    // `notification:new` stream simply by naming them.
+    socket.on('addNewUser', () => {
+      const userId = socket.userId;
+      if (userId == null) return;
+
       !online_users.some((user) => user.userId === userId) &&
         online_users.push({
           userId,
           socketId: socket.id
         });
 
-      if (userId != null) {
-        socket.join(`user:${userId}`);
-      }
+      socket.join(`user:${userId}`);
 
       logger.debug({ online_users }, 'Online users updated');
       io.emit('getOnlineUsers', online_users);
