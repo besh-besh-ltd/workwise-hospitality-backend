@@ -212,16 +212,24 @@ const notificationModel = {
   // /notification-list endpoint still returned it — one user, two different
   // inboxes. Sharing the predicate collapses them back into one.
 
-  getByRecipient: async (recipient_user_id, limit, offset) => {
+  // Dismissed rows are excluded everywhere the inbox is read or counted — a
+  // dismissed notification that still drove the badge would be indistinguishable
+  // from a bug.
+  getByRecipient: async (recipient_user_id, limit, offset, { category = null, unreadOnly = false } = {}) => {
     return db.any(
       `SELECT id, sender_user_id, recipient_user_id, type, title, message,
               additional_data, category, action_url, is_read, created_at,
               delivered_at
          FROM tbl_notifications
         WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+          ${category ? 'AND LOWER(category) = LOWER($4)' : ''}
+          ${unreadOnly ? 'AND (is_read = 0 OR is_read IS NULL)' : ''}
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3`,
-      [recipient_user_id, limit, offset]
+      category
+        ? [recipient_user_id, limit, offset, category]
+        : [recipient_user_id, limit, offset]
     );
   },
 
@@ -231,12 +239,62 @@ const notificationModel = {
   getCounts: async (recipient_user_id) => {
     const row = await db.oneOrNone(
       `SELECT COUNT(*) FILTER (WHERE delivered_at IS NULL)::int        AS undelivered,
-              COUNT(*) FILTER (WHERE is_read = 0 OR is_read IS NULL)::int AS unread
+              COUNT(*) FILTER (WHERE is_read = 0 OR is_read IS NULL)::int AS unread,
+              COUNT(*)::int                                              AS total
          FROM tbl_notifications
-        WHERE COALESCE(recipient_user_id, sender_user_id) = $1`,
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL`,
       [recipient_user_id]
     );
-    return { undelivered: row ? row.undelivered : 0, unread: row ? row.unread : 0 };
+    return {
+      undelivered: row ? row.undelivered : 0,
+      unread: row ? row.unread : 0,
+      total: row ? row.total : 0
+    };
+  },
+
+  // Per-category unread tallies, so the inbox can offer a filter that states
+  // what is actually in it rather than a fixed list of tabs.
+  getCategoryCounts: async (recipient_user_id) => {
+    const rows = await db.any(
+      `SELECT COALESCE(LOWER(category), 'other') AS category,
+              COUNT(*)::int                                              AS total,
+              COUNT(*) FILTER (WHERE is_read = 0 OR is_read IS NULL)::int AS unread
+         FROM tbl_notifications
+        WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
+        GROUP BY 1
+        ORDER BY 1`,
+      [recipient_user_id]
+    );
+    return rows;
+  },
+
+  // Soft delete. These rows are the only record that a given approver was asked
+  // to act, so tidying the list must not destroy the audit trail.
+  dismiss: async (notification_id, recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET dismissed_at = NOW(),
+              delivered_at = COALESCE(delivered_at, NOW())
+        WHERE id = $1
+          AND COALESCE(recipient_user_id, sender_user_id) = $2
+          AND dismissed_at IS NULL`,
+      [notification_id, recipient_user_id]
+    );
+  },
+
+  // Undo for a misclick. Delivery is deliberately NOT reset: the user has
+  // demonstrably seen the row, so resurrecting the badge would be a lie.
+  markUnread: async (notification_id, recipient_user_id) => {
+    return db.result(
+      `UPDATE tbl_notifications
+          SET is_read = 0, is_read_at = NULL
+        WHERE id = $1
+          AND COALESCE(recipient_user_id, sender_user_id) = $2
+          AND dismissed_at IS NULL`,
+      [notification_id, recipient_user_id]
+    );
   },
 
   getUnreadCount: async (recipient_user_id) => {
@@ -244,6 +302,7 @@ const notificationModel = {
       `SELECT COUNT(*)::int AS count
          FROM tbl_notifications
         WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
           AND (is_read = 0 OR is_read IS NULL)`,
       [recipient_user_id]
     );
@@ -265,6 +324,7 @@ const notificationModel = {
       `UPDATE tbl_notifications
           SET delivered_at = NOW()
         WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
           AND delivered_at IS NULL
           ${ids ? 'AND id IN ($2:csv)' : ''}`,
       ids ? [recipient_user_id, ids] : [recipient_user_id]
@@ -294,6 +354,7 @@ const notificationModel = {
               is_read_at = NOW(),
               delivered_at = COALESCE(delivered_at, NOW())
         WHERE COALESCE(recipient_user_id, sender_user_id) = $1
+          AND dismissed_at IS NULL
           AND (is_read = 0 OR is_read IS NULL)`,
       [recipient_user_id]
     );

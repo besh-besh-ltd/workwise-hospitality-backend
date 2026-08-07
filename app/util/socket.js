@@ -1,9 +1,42 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import Cryptr from 'cryptr';
 import Config from '../config/app.config.js';
 import { logger } from './logger.js';
 
 let ioInstance = null;
+const cryptr = new Cryptr(Config.cryptR.secret);
+
+/**
+ * Pull the user id out of a login JWT, the same way passport's `jwtUsr`
+ * strategy does.
+ *
+ * This is subtle and was wrong: the app's tokens carry `user: true` as a
+ * *boolean flag* and keep the real id encrypted in `sub`. Reading
+ * `payload.user` therefore yielded `true` for every genuine token, so every
+ * socket joined the room literally named `user:true` while `emitToUser(80011)`
+ * published to `user:80011`. Nothing ever matched — which is why the real-time
+ * channel appeared to work (sockets connected, events emitted) while never
+ * delivering anything, and why the unauthenticated `addNewUser` join was the
+ * only thing that had ever put a client in the right room.
+ *
+ * The numeric fallbacks are kept for any non-login token shape.
+ */
+const resolveUserIdFromPayload = (payload) => {
+  if (payload?.sub) {
+    try {
+      const decrypted = Number(cryptr.decrypt(payload.sub));
+      if (Number.isInteger(decrypted) && decrypted > 0) return decrypted;
+    } catch (_) {
+      // Not an encrypted id — fall through to the numeric shapes below.
+    }
+  }
+  for (const candidate of [payload?.id, payload?.userId, payload?.user]) {
+    const n = Number(candidate);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return null;
+};
 
 export const getIo = () => ioInstance;
 
@@ -43,7 +76,7 @@ export const SocketConfig = (SERVER) => {
 
     jwt.verify(token, Config.jwt.secret, (err, payload) => {
       if (err || !payload) return next();
-      const uid = payload.user || payload.id || payload.userId;
+      const uid = resolveUserIdFromPayload(payload);
       if (uid) {
         socket.userId = uid;
         socket.join(`user:${uid}`);

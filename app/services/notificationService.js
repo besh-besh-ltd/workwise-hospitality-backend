@@ -95,6 +95,14 @@ export const dispatch = async ({
 
   if (recipients.length === 0 || !title) return [];
 
+  // Categories arrived in three casings — 'po' and 'PO' for the same module,
+  // plus 'ARC' and 'CALL_OFF'. Nothing read the column so it never showed, but
+  // the inbox filter groups by it, and a filter that lists "po" and "PO" as
+  // separate things is worse than no filter. Normalised on the way in; the
+  // read side lowercases too, so existing rows group correctly without a
+  // backfill.
+  const normalizedCategory = category ? String(category).toLowerCase() : null;
+
   const created = [];
 
   for (const recipientId of recipients) {
@@ -102,7 +110,7 @@ export const dispatch = async ({
       const row = await notificationModel.createForRecipient({
         sender_user_id: senderUserId,
         recipient_user_id: recipientId,
-        category,
+        category: normalizedCategory,
         type,
         title,
         message: body,
@@ -115,7 +123,7 @@ export const dispatch = async ({
         id: row.id,
         title,
         body,
-        category,
+        category: normalizedCategory,
         type,
         action_url: actionUrl,
         created_at: row.created_at,
@@ -143,7 +151,7 @@ export const dispatch = async ({
         data: {
           id: idByUser.get(Number(userId)) || null,
           url: actionUrl || '/',
-          category,
+          category: normalizedCategory,
           type
         }
       });
