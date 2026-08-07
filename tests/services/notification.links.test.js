@@ -274,13 +274,36 @@ describe("missing identifiers", () => {
 });
 
 // ─── The guard that actually catches route rot ───────────────────────────────
+//
+// This one reads the FRONTEND repo's route tree, so it can only run where that
+// tree is on disk. Backend CI checks out this repo alone, so there it is
+// skipped rather than failed — a cross-repo invariant cannot be a single-repo
+// gate, and asserting against a checked-in copy of the route list would only
+// re-state what the per-route assertions above already pin.
+//
+// It resolves the frontend as a sibling of the backend, which holds for a normal
+// two-repo checkout and for matched git worktrees. Set NOTIFICATION_LINKS_FRONTEND_DIR
+// to point it anywhere else — e.g. a combined CI job that checks out both.
 
-describe("every emitted link resolves to a real frontend page", () => {
-  const FRONTEND = path.resolve(
-    process.cwd(), "..", "..", "..", ".worktrees", "notifications", "frontend"
-  );
-  const PAGES = path.join(FRONTEND, "pages");
+const resolveFrontendPages = () => {
+  // An explicit setting wins outright, so a caller can point this at a specific
+  // checkout — or at nothing, to exercise the skip path.
+  const dir =
+    process.env.NOTIFICATION_LINKS_FRONTEND_DIR ||
+    path.resolve(process.cwd(), "..", "frontend");
 
+  const pages = path.join(dir, "pages");
+  try {
+    return fs.statSync(pages).isDirectory() ? pages : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const PAGES = resolveFrontendPages();
+const describeIfFrontend = PAGES ? describe : describe.skip;
+
+describeIfFrontend("every emitted link resolves to a real frontend page", () => {
   const routeExists = (urlPath) => {
     const clean = urlPath.split("?")[0].split("#")[0].replace(/^\/+|\/+$/g, "");
     const segs = clean ? clean.split("/") : [];
@@ -340,9 +363,18 @@ describe("every emitted link resolves to a real frontend page", () => {
     approvalActionUrl("ARC_NEGOTIATION", 1, { arc_id: 1, round_id: 2 }),
   ];
 
-  it("resolves the frontend pages directory", () => {
-    // If this fails the guard below is vacuous, so assert it explicitly.
-    expect(fs.existsSync(PAGES)).toBe(true);
+  it("is reading a real route tree, not an empty directory", () => {
+    // Without this the walk below would return false for everything and the
+    // suite would look like it had caught 29 dead links.
+    expect(fs.existsSync(path.join(PAGES, "dashboard"))).toBe(true);
+  });
+
+  it("reports a route that genuinely does not exist", () => {
+    // Proves the walk can still fail — otherwise a bug that made routeExists
+    // always return true would leave this whole guard silently useless.
+    expect(routeExists("/dashboard/buyer/rfq-details")).toBe(false);
+    expect(routeExists("/dashboard/buyer/arc-committee")).toBe(false);
+    expect(routeExists("/dashboard/vendor/rate-contracts/requests/1")).toBe(false);
   });
 
   it.each(EVERY_LINK)("%s", (url) => {
