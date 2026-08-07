@@ -66,7 +66,7 @@ import { evaluateVendorTechnicalQualification } from '../../services/technicalQu
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
-import { vendorRfqDetail, vendorRfqList, queryThread, buyerRfqDetail, buyerQuoteComparison } from '../../services/notificationLinks.js';
+import { vendorRfqDetail, vendorRfqList, queryThread, buyerRfqDetail, buyerQuoteComparison, buyerClarifications } from '../../services/notificationLinks.js';
 import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification, sendRfqClosedHeadsUpNotification, sendApprovalCancelledNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 import {
   buildQuoteVisibilityMeta,
@@ -17531,6 +17531,24 @@ getClauses: async (req, res) => {
         ]
       };
 
+      // Raising a clarification freezes quoting for EVERY vendor on this RFQ
+      // until the buyer closes it, and the buyer had no way of finding out that
+      // had happened — this whole module emitted nothing, by any channel.
+      try {
+        await dispatchNotification({
+          userIds: [Number(rfq.created_by)],
+          senderUserId: user.id,
+          category: 'clarification',
+          type: 'clarification_raised',
+          title: `Clarification raised on RFQ #${rfq.rfq_no}`,
+          body: `${vendorName?.name || 'A vendor'} asked: "${subject}". Quoting is paused for all vendors until you close it.`,
+          data: { rfq_id: rfq.id, clarification_id: clarification.id },
+          actionUrl: buyerClarifications(rfq.id) || buyerRfqDetail(rfq.id)
+        });
+      } catch (notifyErr) {
+        logError('dispatch clarification_raised failed', notifyErr);
+      }
+
       return res.status(200).json({
         status: 1,
         message: 'Clarification raised successfully',
@@ -17639,6 +17657,26 @@ getClauses: async (req, res) => {
         closed_by: resolved.closed_by,
         messages: messages
       };
+
+      // Closing it unblocks quoting again. The vendor who asked has been unable
+      // to quote the whole time and was never told when that changed — they had
+      // to keep re-checking the RFQ.
+      try {
+        await dispatchNotification({
+          userIds: [Number(resolved.raised_by)],
+          senderUserId: user.id,
+          category: 'clarification',
+          type: 'clarification_resolved',
+          title: `Your clarification was answered`,
+          body: response
+            ? `"${String(response).slice(0, 160)}" — you can now submit your quote.`
+            : 'The buyer closed your clarification. You can now submit your quote.',
+          data: { rfq_id: resolved.rfq_id, clarification_id: resolved.id },
+          actionUrl: vendorRfqDetail(resolved.rfq_id) || vendorRfqList()
+        });
+      } catch (notifyErr) {
+        logError('dispatch clarification_resolved failed', notifyErr);
+      }
 
       return res.status(200).json({
         status: 1,
