@@ -7,6 +7,14 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+// The single definition of "this product has a usable quantity and unit".
+// checkRFQCompletion builds its SQL from these rather than restating the rule,
+// so the create gate, the update gate and the client cannot drift apart.
+import {
+  QUANTITY_PATTERN_SQL,
+  MIN_QUANTITY,
+  UNIT_PLACEHOLDERS_SQL,
+} from '../util/productCompleteness.js';
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
@@ -291,8 +299,8 @@ WHERE NOT EXISTS (
                -- "invalid input syntax for type double precision". CASE is
                -- the construct that does guarantee the ordering.
                AND CASE
-                     WHEN btrim(s.value) ~ '^\\+?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)$'
-                       THEN btrim(s.value)::float8 > 0
+                     WHEN btrim(s.value) ~ ${QUANTITY_PATTERN_SQL}
+                       THEN btrim(s.value)::float8 >= ${MIN_QUANTITY}
                      ELSE FALSE
                    END
              LIMIT 1
@@ -306,7 +314,7 @@ WHERE NOT EXISTS (
                AND s.variant IS NOT DISTINCT FROM rp.variant
                AND lower(btrim(s.title)) = 'unit'
                AND btrim(s.value) <> ''
-               AND upper(btrim(s.value)) NOT IN ('NA', 'N/A', 'NIL', 'NONE', 'NULL', '-', '--')
+               AND upper(btrim(s.value)) NOT IN (${UNIT_PLACEHOLDERS_SQL})
              LIMIT 1
           ) u ON TRUE
           -- ANY value that was written, usable or not. Only used to tell

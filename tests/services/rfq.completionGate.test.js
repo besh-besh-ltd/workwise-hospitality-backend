@@ -52,6 +52,10 @@ const { default: rfqController } = await import(
   "../../app/controllers/rfq/rfqController.js"
 );
 const { default: rfqModel } = await import("../../app/models/rfqModel.js");
+const { isQuantityValid, isUnitValid } = await import("../../app/util/productCompleteness.js");
+const { assertProductQuantityAndUnit } = await import(
+  "../../app/controllers/rfq/rfqUpdateHelpers.js"
+);
 
 afterAll(async () => {
   await closeDb();
@@ -318,6 +322,30 @@ describe("a draft with a genuinely incomplete product is still rejected", () => 
     expect(isQtyUnitRejection(calls)).toBe(true);
   });
 
+  it("rejects a quantity below the 0.1 minimum", async () => {
+    // The edit path (assertProductQuantityAndUnit) has enforced this floor for
+    // a long time while the create path allowed anything above zero, so the
+    // same draft could save and then refuse to edit. One rule now.
+    for (const qty of ["0.05", "0.09999"]) {
+      const rfq_id = await makeDraftRfq();
+      await addProduct(rfq_id, 1);
+      await addQtyUnit(rfq_id, 1, qty, "KG");
+      await addVendor(rfq_id, 1);
+
+      expect({ qty, rejected: isQtyUnitRejection(await submit(rfq_id)) })
+        .toEqual({ qty, rejected: true });
+    }
+  });
+
+  it("accepts exactly the 0.1 minimum", async () => {
+    const rfq_id = await makeDraftRfq();
+    await addProduct(rfq_id, 1);
+    await addQtyUnit(rfq_id, 1, "0.1", "KG");
+    await addVendor(rfq_id, 1);
+
+    await expectAccepted(rfq_id, await submit(rfq_id));
+  });
+
   it("rejects a quantity of zero", async () => {
     const rfq_id = await makeDraftRfq();
     await addProduct(rfq_id, 1);
@@ -523,5 +551,140 @@ describe("the journey that produced the ticket", () => {
     expect(calls.body.details).toHaveLength(1);
     expect(calls.body.details[0].productVariantId).toBe(2);
     expect(calls.body.details[0].missing).toEqual(["Unit"]);
+  });
+});
+
+// ===========================================================================
+//  Group 6 — the three layers must not drift apart again
+// ===========================================================================
+
+describe("the SQL gate and the JS predicate answer identically", () => {
+  /**
+   * The ticket existed because five places each had their own idea of a valid
+   * quantity and unit. Three of them are now derived from one module: the SQL
+   * in checkRFQCompletion is built from its constants, assertProductQuantityAndUnit
+   * calls its predicates, and the client mirrors it.
+   *
+   * This pins the two server layers together on real data: one RFQ, one product
+   * per candidate value, and the set the SQL rejects must equal the set the JS
+   * predicate rejects. Change one rule without the other and this fails.
+   */
+  const QUANTITIES = [
+    "10", "0.1", ".1", "0.5", "12.750", "+7", "  25  ", "1.",
+    "0", "0.05", "0.09999", "-5", "ten", "", "   ", "NA", "1,000", "10abc", "1e3",
+  ];
+  const UNITS = ["g", "m", "L", "KG", "NOS", "sq ft", "", "   ", "NA", "n/a", "NIL", "-", "--"];
+
+  it("agrees on every quantity form", async () => {
+    const rfq_id = await makeDraftRfq();
+    // One product per candidate, product_variant_id doubles as the index.
+    for (let i = 0; i < QUANTITIES.length; i++) {
+      await addProduct(rfq_id, 100 + i);
+      await addQtyUnit(rfq_id, 100 + i, QUANTITIES[i], "KG");
+    }
+
+    const { incomplete } = await rfqModel.checkRFQCompletion(rfq_id, null);
+    const sqlRejected = new Set(incomplete.map((p) => p.productVariantId));
+
+    const disagreements = QUANTITIES.map((qty, i) => ({
+      qty,
+      sql: sqlRejected.has(100 + i) ? "reject" : "accept",
+      js: isQuantityValid(qty) ? "accept" : "reject",
+    })).filter((row) => row.sql !== row.js);
+
+    expect(disagreements).toEqual([]);
+  });
+
+  it("agrees on every unit form", async () => {
+    const rfq_id = await makeDraftRfq();
+    for (let i = 0; i < UNITS.length; i++) {
+      await addProduct(rfq_id, 200 + i);
+      await addQtyUnit(rfq_id, 200 + i, "10", UNITS[i]);
+    }
+
+    const { incomplete } = await rfqModel.checkRFQCompletion(rfq_id, null);
+    const sqlRejected = new Set(incomplete.map((p) => p.productVariantId));
+
+    const disagreements = UNITS.map((unit, i) => ({
+      unit,
+      sql: sqlRejected.has(200 + i) ? "reject" : "accept",
+      js: isUnitValid(unit) ? "accept" : "reject",
+    })).filter((row) => row.sql !== row.js);
+
+    expect(disagreements).toEqual([]);
+  });
+
+  it("the update gate applies the same rule as the create gate", async () => {
+    // assertProductQuantityAndUnit guards PUT /rfq/update. It used Number(),
+    // which accepts '1e3', and treated 'NA' as a unit.
+    const check = (specs) => {
+      try {
+        assertProductQuantityAndUnit({ products: [{ product_name: "P", specs }] });
+        return "accept";
+      } catch {
+        return "reject";
+      }
+    };
+
+    expect(check({ Quantity: "1e3", Unit: "KG" })).toBe("reject");
+    expect(check({ Quantity: "10", Unit: "NA" })).toBe("reject");
+    expect(check({ Quantity: "0.05", Unit: "KG" })).toBe("reject");
+    expect(check({ Quantity: "0.1", Unit: "g" })).toBe("accept");
+    expect(check({ Quantity: "10", Unit: "m" })).toBe("accept");
+  });
+});
+
+// ===========================================================================
+//  Group 7 — orphan spec rows can no longer be created
+// ===========================================================================
+
+describe("specs are never written for a product that is not on the RFQ", () => {
+  it("drops the spec instead of creating an invisible orphan group", async () => {
+    // How RFQ 610 became unsubmittable on production: spec rows were written
+    // for (rfq, product_variant, variant) with no product row behind them.
+    // Nothing renders them, so nobody could find or delete them, and the old
+    // gate counted them forever.
+    const rfq_id = await makeDraftRfq();
+    await addProduct(rfq_id, 1);
+    await addVendor(rfq_id, 1);
+
+    const calls = await submit(rfq_id, {
+      updatableData: {
+        products: {
+          updatable: {
+            specs: {
+              "new:1:0": { product_id: 1, variant: 0, Quantity: "10", Unit: "NOS" },
+              // product_variant 99 is not on this RFQ at all
+              "new:99:0": { product_id: 99, variant: 0, Quantity: "40", Unit: "RMT" },
+            },
+          },
+          deletable: [],
+          insertable: [],
+        },
+        vendors: {},
+      },
+    });
+
+    await expectAccepted(rfq_id, calls);
+
+    const orphans = await db.any(
+      `SELECT s.product_variant_id, s.variant
+         FROM tbl_rfq_products_specs s
+        WHERE s.rfq_id = $1
+          AND NOT EXISTS (SELECT 1 FROM tbl_rfq_products p
+                          WHERE p.rfq_id = s.rfq_id
+                            AND p.product_variant_id = s.product_variant_id
+                            AND p.variant IS NOT DISTINCT FROM s.variant)`,
+      [rfq_id]
+    );
+    expect(orphans).toEqual([]);
+
+    // The real product still got its specs — the guard is targeted, not blanket.
+    const kept = await db.one(
+      `SELECT count(*)::int AS n FROM tbl_rfq_products_specs
+        WHERE rfq_id = $1 AND product_variant_id = 1`,
+      [rfq_id]
+    );
+    expect(kept.n).toBe(2);
   });
 });

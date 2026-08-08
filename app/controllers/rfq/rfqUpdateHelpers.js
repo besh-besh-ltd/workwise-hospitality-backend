@@ -10,6 +10,7 @@
  */
 
 import { decode } from 'html-entities';
+import { isQuantityValid, isUnitValid, MIN_QUANTITY } from '../../util/productCompleteness.js';
 import {
   RFQ_EDITABLE_FIELDS,
   isFieldEditable,
@@ -204,20 +205,20 @@ export function assertProductQuantityAndUnit(snapshot) {
       else if (k === 'unit') unitRaw = value;
     }
 
-    if (qtyRaw == null || String(qtyRaw).trim() === '') {
-      throw httpError(400, `Quantity is required for "${label}".`, 'products');
-    }
-    const qtyNum = Number(qtyRaw);
-    if (!Number.isFinite(qtyNum) || qtyNum < 0.1) {
+    // Same rule as the create gate. This used Number(), which reads '1e3' as
+    // 1000 where the create gate rejects it, and treated 'NA' as a unit
+    // because it only checked for a blank string. Two submit paths applying
+    // two different rules is the defect the client reported, one layer up.
+    if (!isQuantityValid(qtyRaw)) {
       throw httpError(
         400,
-        `Quantity for "${label}" must be a positive number (minimum 0.1).`,
+        `Quantity for "${label}" must be a number of at least ${MIN_QUANTITY}.`,
         'products'
       );
     }
 
-    if (unitRaw == null || String(unitRaw).trim() === '') {
-      throw httpError(400, `Unit is required for "${label}".`, 'products');
+    if (!isUnitValid(unitRaw)) {
+      throw httpError(400, `A valid unit is required for "${label}".`, 'products');
     }
   }
 }

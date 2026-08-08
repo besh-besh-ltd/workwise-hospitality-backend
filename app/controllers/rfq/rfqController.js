@@ -2675,6 +2675,34 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
           delete products.updatable.specs[rfqProductId].variant;
           delete products.updatable.specs[rfqProductId].product_id;
 
+          // Specs are written against (rfq_id, product_variant_id, variant),
+          // and nothing here checked that a product actually stands behind
+          // that key. When it did not, the rows became invisible orphans:
+          // they belong to no product, so no screen renders them and nobody
+          // can edit or delete them, yet the old completion gate counted them
+          // and the RFQ could never be submitted again. RFQ 610 on production
+          // was locked this way by a single ghost "LED STRIP" group.
+          //
+          // No product row is ever created in this function — products come
+          // from /rfq/add-product-to-draft and /rfq/add-products-to-draft,
+          // which run first — so "no product row" here always means the spec
+          // has nowhere to live. Skip it and say so rather than writing data
+          // that can only cause harm later.
+          const productExists = await t.oneOrNone(
+            `SELECT 1 FROM tbl_rfq_products
+              WHERE rfq_id = $1 AND product_variant_id = $2
+                AND variant IS NOT DISTINCT FROM $3
+              LIMIT 1`,
+            [rfq_id, productId, variant ?? 0]
+          );
+          if (!productExists) {
+            logger.warn(
+              { rfq_id, productId, variant, specKey: rfqProductId },
+              'saveRfqDraft: dropped specs for a product with no row on this RFQ'
+            );
+            continue;
+          }
+
           let whereClause = {
             where: `rfq_id = $1::INT AND product_variant_id = $2::INT AND variant = $3::INT`,
             values: [rfq_id, productId, variant ?? '0']
