@@ -5594,14 +5594,23 @@ const rfqController = {
       }
       await saveRfqDraft(user_id, req.body);
 
-      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
+      // Name the products that are actually incomplete. "Some products are
+      // missing quantity or unit" gave the buyer nothing to act on — and when
+      // the old count-comparison gate fired on an RFQ where every product was
+      // in fact complete, it was not even true. Mirrors the shape
+      // checkProductVendors already returns.
+      const completion = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
-      if (!isRFQComplete) {
+      if (!completion.complete) {
+        const names = completion.incomplete.map((p) => p.productName).join(', ');
         return res
           .status(400)
           .json({
             status: 2,
-            message: 'Some products are missing quantity or unit. Please fill them before proceeding.'
+            message:
+              `Quantity and unit are required for every product. ` +
+              `Please check: ${names}.`,
+            details: completion.incomplete,
           })
           .end();
       }

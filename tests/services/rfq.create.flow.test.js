@@ -319,7 +319,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
     expect(m.calls.body.status).toBe(2);
-    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/quantity and unit are required/i);
   });
 
   it("rejects when Quantity spec is empty/whitespace", async () => {
@@ -337,7 +337,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     });
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/quantity and unit are required/i);
   });
 
   it("rejects when Quantity spec is non-numeric", async () => {
@@ -354,7 +354,7 @@ describe("rfqController.create — checkRFQCompletion gate (every product needs 
     });
     await rfqController.create(m.req, m.res, () => {});
     expect(m.calls.status).toBe(400);
-    expect(m.calls.body.message).toMatch(/missing quantity or unit/i);
+    expect(m.calls.body.message).toMatch(/quantity and unit are required/i);
   });
 });
 
