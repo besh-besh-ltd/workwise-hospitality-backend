@@ -2354,6 +2354,10 @@ export async function createApprovalInstance({
     // metadata; the auto-approve BEHAVIOUR is unchanged (that has live blast
     // radius and needs its own decision) — only its legibility is.
     const skippedSteps = [];
+    // USER-source approvers resolved despite holding no read+approve on the
+    // entity's resource. Observed, not enforced — see the block in the step
+    // loop below for why, and what flipping it to enforcement would cost.
+    const unqualifiedUserApprovers = [];
     const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
     const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
 
@@ -2430,6 +2434,62 @@ export async function createApprovalInstance({
       // scope is honored when picking who qualifies).
       const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
 
+      // ── USER-source steps: OBSERVE the permission gap, do not act on it ────
+      //
+      // ROLE-source steps are gated above: a role without read+approve on the
+      // entity's resource has its step dropped. USER-source steps have never
+      // been gated anywhere — not at policy save, not at resolution, not
+      // mid-flight (the reconciler's discovery SQL filters to ROLE/DEPARTMENT),
+      // and not at act time (submitApprovalAction re-checks nothing). So naming
+      // a user directly grants binding approval authority to someone who may
+      // hold no permission on the entity at all, and nothing anywhere says so.
+      //
+      // That is what produced the RFQ 791 incident: EMP003 was resolved through
+      // a scope row carrying no rfq.read, so they blocked a workflow they could
+      // not see.
+      //
+      // DELIBERATELY NOT ENFORCED YET. Enforcing it today would strip authority
+      // from 9 of 10 live USER-source RFQ approver slots and leave 7 active
+      // policies resolving to nobody — which, with the fail-closed guard below,
+      // blocks entity creation in those scopes. USER-source approval is used
+      // precisely to name someone a role does not already cover, so the gap is
+      // the feature's normal shape rather than a handful of mistakes. It gets
+      // recorded here so the data can be cleaned first; flipping this to a
+      // `continue` is then a one-line change with no blast radius.
+      //
+      // scripts/audit_approval_rbac_coherence.sql section E reports the same
+      // condition across all live policies.
+      if (policyStep.approver_source_type === 'USER' && approverUserIds.length > 0) {
+        for (const approverId of approverUserIds) {
+          const qualified = await t.oneOrNone(`
+            SELECT 1
+              FROM tbl_user_role_scopes urs
+              JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+              JOIN tbl_permissions p ON p.id = rp.permission_id
+             WHERE urs.user_id = $1
+               AND p.resource::text = $2
+               AND p.action IN ('read', 'approve')
+               AND urs.company_id = $3
+               AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+               AND ($5::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $5)
+               AND (urs.process_id IS NULL OR urs.process_id = $6)
+             GROUP BY urs.user_id
+            HAVING COUNT(DISTINCT p.action) = 2
+          `, [approverId, roleResource, hospitality_company_id, hotel_id, resolveDeptId, process_id]);
+
+          if (!qualified) {
+            unqualifiedUserApprovers.push({
+              policy_step_id: policyStep.id,
+              step_order: policyStep.step_order,
+              approver_user_id: approverId,
+              resource: roleResource,
+              reason: 'USER_LACKS_READ_AND_APPROVE',
+              enforced: false
+            });
+          }
+        }
+      }
+
       // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {
         skippedSteps.push({
@@ -2461,11 +2521,25 @@ export async function createApprovalInstance({
       policy_step_count: policySteps.length,
       resolved_step_count: resolvedSteps.length,
       skipped_steps: skippedSteps,
+      ...(unqualifiedUserApprovers.length > 0
+        ? { unqualified_user_approvers: unqualifiedUserApprovers }
+        : {}),
       recorded_at: new Date().toISOString()
     };
     const instanceMetadata = { ...(metadata || {}) };
-    if (skippedSteps.length > 0) {
+    // Written whenever there is anything to report — a step was dropped, OR a
+    // USER-source approver was resolved without the permission to act on what
+    // they are approving. The second is invisible everywhere else.
+    if (skippedSteps.length > 0 || unqualifiedUserApprovers.length > 0) {
       instanceMetadata.approval_diagnostics = diagnostics;
+    }
+    if (unqualifiedUserApprovers.length > 0) {
+      logger.warn(
+        `[ApprovalEngine] ${entity_type}/${entity_id} (policy ${policy.id}): ` +
+        `${unqualifiedUserApprovers.length} USER-source approver(s) hold no ` +
+        `${roleResource}.read+approve in this scope but were resolved anyway ` +
+        `(not enforced): ${JSON.stringify(unqualifiedUserApprovers)}`
+      );
     }
 
     // EVERY step was dropped. Refuse — do not create the instance.

@@ -174,3 +174,61 @@ SELECT 'D. BORN APPROVED, NO STEPS' AS finding,
    AND NOT EXISTS (SELECT 1 FROM tbl_approval_instance_steps s WHERE s.approval_instance_id = i.id)
  GROUP BY 1,2,3
  ORDER BY instances DESC;
+
+
+-- ---------------------------------------------------------------------------
+--  SECTION E — USER-source approvers who hold no permission on what they approve.
+--
+--  ROLE-source steps are gated at instance creation: a role without
+--  read+approve on the entity's resource has its step dropped. USER-source
+--  steps are gated NOWHERE — not at policy save, not at resolution, not
+--  mid-flight, and not at act time. Naming a user directly therefore grants
+--  binding approval authority to someone who may hold no permission on the
+--  entity at all, and until now nothing anywhere said so.
+--
+--  This is the condition createApprovalInstance now records on the instance as
+--  `approval_diagnostics.unqualified_user_approvers`. It is deliberately NOT
+--  enforced yet: enforcing it today would leave several active policies
+--  resolving to nobody, which blocks entity creation in those scopes. Clean
+--  the rows this returns, re-run until it is empty, and enforcement becomes a
+--  one-line change with no blast radius.
+--
+--  Rows here are NOT currently breaking anything. They are the list of
+--  approver assignments that would stop working the day the gate is turned on.
+-- ---------------------------------------------------------------------------
+
+WITH map AS (
+  SELECT * FROM (VALUES
+    ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
+    ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
+    ('PO','awarding'), ('MR','awarding'),
+    ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
+    ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
+    ('ARC_AMENDMENT','arc')
+  ) AS v(entity_type, resource)
+)
+SELECT 'E. USER APPROVER WITHOUT PERMISSION' AS finding,
+       p.id AS policy_id, p.entity_type, s.step_order,
+       p.hospitality_company_id AS co, p.hotel_id, p.process_id,
+       u.id AS user_id, u.employee_code, u.name,
+       m.resource AS needs
+  FROM tbl_approval_policies p
+  JOIN tbl_approval_policy_steps s ON s.approval_policy_id = p.id
+  JOIN map m ON m.entity_type = p.entity_type
+  JOIN tbl_users u ON u.id = s.approver_source_id
+ WHERE p.is_active
+   AND s.approver_source_type = 'USER'
+   AND NOT EXISTS (
+     SELECT 1 FROM tbl_user_role_scopes urs
+       JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+       JOIN tbl_permissions pm ON pm.id = rp.permission_id
+      WHERE urs.user_id = u.id
+        AND pm.resource::text = m.resource
+        AND pm.action IN ('read','approve')
+        AND urs.company_id = p.hospitality_company_id
+        AND (urs.hotel_id IS NULL OR urs.hotel_id = p.hotel_id)
+        AND (urs.process_id IS NULL OR urs.process_id = p.process_id)
+      GROUP BY urs.user_id
+     HAVING count(DISTINCT pm.action) = 2
+   )
+ ORDER BY p.entity_type, p.id, s.step_order;
