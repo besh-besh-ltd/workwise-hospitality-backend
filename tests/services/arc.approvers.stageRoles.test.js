@@ -108,6 +108,17 @@ const ALL_USERS = [
 ];
 
 const NOPERM_ROLE = 89100; // custom role, deliberately granted nothing
+// A role that exists ONLY to make U_INITIATOR eligible for the case-(a) USER
+// step. USER-source steps are now permission-gated like ROLE-source ones, so an
+// initiator named as their own approver must actually hold arc-tech
+// read+approve — otherwise the step is dropped and the by-design
+// INITIATOR_ONLY short-circuit can never be reached.
+//
+// It is a DEDICATED role rather than the shared 'ARC Technical Approver'
+// because no policy in this suite names it: granting U_INITIATOR the shared
+// role would make them resolve on every ROLE-source arc-tech step too, quietly
+// changing the approver sets the other tests assert on.
+const INITIATOR_ROLE = 89101;
 
 // Policies. uq_approval_policy_scope_process is UNIQUE on
 // (entity_type, company, COALESCE(hotel,0), COALESCE(dept,0), COALESCE(process,0))
@@ -296,6 +307,21 @@ beforeAll(async () => {
     [NOPERM_ROLE]
   );
 
+  await db.none(
+    `INSERT INTO tbl_roles (id, title, description, created_by)
+     VALUES ($1, 'ARC Stage Initiator Fixture', 'arc-tech read+approve, named by no policy', NULL)
+     ON CONFLICT (id) DO NOTHING`,
+    [INITIATOR_ROLE]
+  );
+  await db.none(
+    `INSERT INTO tbl_role_permissions (role_id, permission_id)
+     SELECT $1, p.id FROM tbl_permissions p
+      WHERE p.resource::text = 'arc-tech' AND p.action IN ('read','approve')
+        AND NOT EXISTS (SELECT 1 FROM tbl_role_permissions rp
+                        WHERE rp.role_id = $1 AND rp.permission_id = p.id)`,
+    [INITIATOR_ROLE]
+  );
+
   // Role grants: company-wide (hotel NULL, dept NULL) so a single row covers
   // every policy scope in this suite.
   await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [ALL_USERS]);
@@ -308,6 +334,7 @@ beforeAll(async () => {
     [U_NOPERM, NOPERM_ROLE],
     [U_TENDER_APP, ROLE_TENDER_APPROVER],
     [U_AMEND_APP, ROLE_ARC_APPROVER_LEGACY],
+    [U_INITIATOR, INITIATOR_ROLE],
   ];
   for (const [userId, roleId] of grants) {
     await db.none(

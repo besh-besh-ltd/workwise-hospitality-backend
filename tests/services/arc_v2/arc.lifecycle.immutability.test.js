@@ -17,6 +17,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -63,6 +64,9 @@ describe("ARC lifecycle — stage immutability + send-back unlock", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [POLICY_ID, COMMITTEE_APPROVER]
     );
+    // COMMITTEE_APPROVER is named via ('USER', COMMITTEE_APPROVER) — permission-gated
+    // at instance creation (finalize spawns the ARC_COMMITTEE instance below).
+    await ensureArcApprovable(db, [COMMITTEE_APPROVER], HC);
 
     // Window closed, NO clauses (technical skipped) — straight to commercial.
     const arc = await db.one(

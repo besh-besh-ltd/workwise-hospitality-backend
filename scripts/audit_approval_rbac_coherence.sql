@@ -14,7 +14,7 @@
 --  every screen an admin could open said the configuration was fine.
 --
 --  Each section answers one question. A healthy platform returns ZERO rows
---  from sections A, B and C. Section D is historical and may be non-zero.
+--  from sections A, B, C and E. Section D is historical and may be non-zero.
 -- ===========================================================================
 
 
@@ -186,15 +186,20 @@ SELECT 'D. BORN APPROVED, NO STEPS' AS finding,
 --  binding approval authority to someone who may hold no permission on the
 --  entity at all, and until now nothing anywhere said so.
 --
---  This is the condition createApprovalInstance now records on the instance as
---  `approval_diagnostics.unqualified_user_approvers`. It is deliberately NOT
---  enforced yet: enforcing it today would leave several active policies
---  resolving to nobody, which blocks entity creation in those scopes. Clean
---  the rows this returns, re-run until it is empty, and enforcement becomes a
---  one-line change with no blast radius.
+--  ⚠️  THIS IS NOW ENFORCED. A row here is a step that WILL be dropped at
+--  instance creation, recorded in `approval_diagnostics.skipped_steps` with
+--  reason USER_LACKS_READ_AND_APPROVE — and if it is a policy's only step, the
+--  submission is REFUSED outright (see section C).
 --
---  Rows here are NOT currently breaking anything. They are the list of
---  approver assignments that would stop working the day the gate is turned on.
+--  It shipped observe-only first because enforcing against the data as it stood
+--  would have left 7 active policies resolving to nobody. Those 19 assignments
+--  were repaired by prod_04_clear_unqualified_user_approvers.sql and this
+--  section went to zero; the gate was turned on only after that.
+--
+--  MUST return zero rows. Anything here is an approver who has silently lost
+--  their step. The usual cause is a policy naming someone who holds no
+--  read+approve for that entity in that company — grant the matching role
+--  scoped to the policy's company, or repoint the step.
 -- ---------------------------------------------------------------------------
 
 WITH map AS (

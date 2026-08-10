@@ -13,6 +13,8 @@
 // fixed id + shared scope safe (only one policy per scope alive at a time).
 
 import { db } from "../setup/db.js";
+import { ensureArcApprovable } from "./arcApproverPerms.js";
+
 
 export async function seedAutoApproveArcPolicy({
   policyId,
@@ -38,6 +40,8 @@ export async function seedAutoApproveArcPolicy({
      VALUES ($1, 1, 'ALL', 'USER', $2)`,
     [policyId, approver]
   );
+  // USER-source steps are permission-gated; the named approver must qualify.
+  await ensureArcApprovable(db, approver, hospitalityCompanyId);
 }
 
 // Tear down the policy + any ARC_PUBLISH approval instances it spawned for the

@@ -504,20 +504,21 @@ describe("getRfqById applies the same axes as the RFQ list", () => {
 //  Group 6 — USER-source approvers without permission are RECORDED, not dropped
 // ===========================================================================
 
-describe("a USER-source approver who cannot act on the entity is flagged", () => {
+describe("a USER-source approver who cannot act on the entity is not resolved", () => {
   /**
-   * ROLE-source steps are gated: a role without read+approve has its step
-   * dropped. USER-source steps are gated NOWHERE — not at policy save, not at
-   * resolution, not mid-flight, not at act time. Naming a user directly grants
-   * binding approval authority to someone who may hold no permission on the
-   * entity at all, which is exactly how RFQ 791 ended up blocked on someone who
-   * could not see it.
+   * ROLE-source steps have always been dropped when the role lacks read+approve
+   * on the entity's resource. USER-source steps were gated NOWHERE — not at
+   * policy save, not at resolution, not mid-flight, not at act time. Naming a
+   * user directly handed binding approval authority to someone who might hold
+   * no permission on the entity at all, and nothing anywhere said so. That is
+   * how RFQ 791 came to be blocked on an approver who could not see it.
    *
-   * Enforcing that today would strip authority from 9 of 10 live USER-source
-   * RFQ approver slots and leave 7 active policies resolving to nobody — so it
-   * is RECORDED first, the data gets cleaned, and enforcement becomes a
-   * one-line change. These tests pin both halves: the flag appears, and the
-   * approver is still resolved.
+   * This shipped observe-only first: enforcing against the data as it stood
+   * would have stripped authority from 9 of 10 live USER-source RFQ approver
+   * slots and left 7 active policies resolving to nobody. Those 19 assignments
+   * were repaired (prod_04) — audit section E went 19 -> 0 — and the gate is
+   * now enforced. The two halves have to stay in step: if section E is ever
+   * non-empty again, those policies lose steps.
    */
   async function policyWithUserStep(userId) {
     const pol = await db.one(
@@ -527,44 +528,88 @@ describe("a USER-source approver who cannot act on the entity is flagged", () =>
        VALUES ('RFQ',$1,NULL,NULL,NULL,true,true,$2) RETURNING id`,
       [IDS.hospitality.A, IDS.users.a1_proc_buyer]
     );
+    created.policyIds.push(pol.id);
     await db.none(
       `INSERT INTO tbl_approval_policy_steps
          (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
        VALUES ($1,1,'STANDARD','ANY','USER',$2)`,
       [pol.id, userId]
     );
-    created.policyIds.push(pol.id);
     return pol.id;
   }
 
-  it("records the approver in approval_diagnostics instead of silently trusting them", async () => {
-    const rfqId = await makeSubmittedRfq();
-    const polId = await policyWithUserStep(BLIND);   // holds no rfq.read for dept proc
-
-    const res = await createApprovalInstance({
-      entity_type: 'RFQ', entity_id: rfqId, approval_policy_id: polId,
-      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1,
-      department_id: IDS.departments.proc, process_id: IDS.processes.A_P1,
-      initiated_by: IDS.users.a1_proc_buyer,
-    });
-    if (res?.instance?.id) created.instanceIds.push(res.instance.id);
-
-    const row = await db.one(
-      `SELECT metadata FROM tbl_approval_instances WHERE id=$1`, [res.instance.id]
-    );
-    const flagged = row.metadata?.approval_diagnostics?.unqualified_user_approvers || [];
-    expect(flagged.map(f => f.approver_user_id)).toContain(BLIND);
-    expect(flagged[0]).toMatchObject({ reason: 'USER_LACKS_READ_AND_APPROVE', enforced: false });
-
-  });
-
-  it("still resolves them, so no live approval loses its approver", async () => {
-    // The whole point of recording rather than enforcing: nothing breaks today.
+  it("drops the step and says why, rather than granting authority it cannot back", async () => {
+    // BLIND holds no rfq.read+approve covering this RFQ's department. Their step
+    // is the only one, so the whole creation is refused — the fail-closed path,
+    // not a silent auto-approval.
     const rfqId = await makeSubmittedRfq();
     const polId = await policyWithUserStep(BLIND);
 
+    let thrown;
+    try {
+      await createApprovalInstance({
+        entity_type: 'RFQ', entity_id: rfqId, approval_policy_id: polId,
+        hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1,
+        department_id: IDS.departments.proc, process_id: IDS.processes.A_P1,
+        initiated_by: IDS.users.a1_proc_buyer,
+      });
+    } catch (err) { thrown = err; }
+
+    expect(thrown).toBeDefined();
+    expect(thrown.message).toMatch(/resolved to zero usable approval steps/i);
+    // The diagnostics must name the user and the reason — the whole point is
+    // that this is traceable rather than silent.
+    expect(thrown.diagnostics.skipped_steps[0]).toMatchObject({
+      approver_source_type: 'USER',
+      approver_source_id: BLIND,
+      reason: 'USER_LACKS_READ_AND_APPROVE',
+    });
+
+    // And nothing was written.
+    const orphan = await db.oneOrNone(
+      `SELECT id FROM tbl_approval_instances WHERE entity_type='RFQ' AND entity_id=$1`, [rfqId]
+    );
+    expect(orphan).toBeNull();
+  });
+
+  it("keeps the workflow when a qualified approver stands behind another step", async () => {
+    // A policy with one unqualified USER step and one qualified one must lose
+    // only the bad step — not the whole submission.
+    const QUALIFIED = 80095;
+    await db.none(
+      `INSERT INTO tbl_users (id,name,email,user_type,status,company_id)
+       VALUES ($1,'Qualified','qualified@test.local',2,1,$2) ON CONFLICT (id) DO NOTHING`,
+      [QUALIFIED, IDS.companies?.A ?? 90001]
+    );
+    await db.none(
+      `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
+       VALUES ($1,$2,NULL,0) ON CONFLICT DO NOTHING`,
+      [QUALIFIED, IDS.hospitality.A]
+    );
+    await db.none(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
+       VALUES ($1,$2,$3,NULL,NULL,NULL)`,
+      [QUALIFIED, roleReadDeptBound, IDS.hospitality.A]   // rfq.read + rfq.approve
+    );
+
+    const rfqId = await makeSubmittedRfq();
+    const pol = await db.one(
+      `INSERT INTO tbl_approval_policies
+         (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+          is_active, is_master, created_by)
+       VALUES ('RFQ',$1,NULL,NULL,NULL,true,true,$2) RETURNING id`,
+      [IDS.hospitality.A, IDS.users.a1_proc_buyer]
+    );
+    created.policyIds.push(pol.id);
+    await db.none(
+      `INSERT INTO tbl_approval_policy_steps
+         (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
+       VALUES ($1,1,'STANDARD','ANY','USER',$2), ($1,2,'STANDARD','ANY','USER',$3)`,
+      [pol.id, BLIND, QUALIFIED]
+    );
+
     const res = await createApprovalInstance({
-      entity_type: 'RFQ', entity_id: rfqId, approval_policy_id: polId,
+      entity_type: 'RFQ', entity_id: rfqId, approval_policy_id: pol.id,
       hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1,
       department_id: IDS.departments.proc, process_id: IDS.processes.A_P1,
       initiated_by: IDS.users.a1_proc_buyer,
@@ -576,12 +621,21 @@ describe("a USER-source approver who cannot act on the entity is flagged", () =>
          JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
         WHERE ais.approval_instance_id = $1`, [res.instance.id]
     );
-    expect(approvers.map(a => a.approver_user_id)).toContain(BLIND);
-    expect(res.instance.status).toBe('PENDING');
+    expect(approvers.map(a => a.approver_user_id)).toEqual([QUALIFIED]);
+    expect(approvers.map(a => a.approver_user_id)).not.toContain(BLIND);
 
+    // The drop is recorded, not silent.
+    const row = await db.one(`SELECT metadata FROM tbl_approval_instances WHERE id=$1`, [res.instance.id]);
+    expect(row.metadata?.approval_diagnostics?.skipped_steps?.[0]).toMatchObject({
+      approver_source_id: BLIND, reason: 'USER_LACKS_READ_AND_APPROVE',
+    });
+
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id=$1`, [QUALIFIED]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id=$1`, [QUALIFIED]);
+    await db.none(`DELETE FROM tbl_users WHERE id=$1`, [QUALIFIED]);
   });
 
-  it("does not flag a USER approver who does hold read+approve in scope", async () => {
+  it("does not flag or drop a USER approver who does hold read+approve in scope", async () => {
     // SIGHTED holds rfq.read but not rfq.approve, so use the dept-bound
     // read+approve role scoped to the RFQ's own department instead.
     const QUALIFIED = 80095;
@@ -613,7 +667,13 @@ describe("a USER-source approver who cannot act on the entity is flagged", () =>
     if (res?.instance?.id) created.instanceIds.push(res.instance.id);
 
     const row = await db.one(`SELECT metadata FROM tbl_approval_instances WHERE id=$1`, [res.instance.id]);
-    expect(row.metadata?.approval_diagnostics?.unqualified_user_approvers).toBeUndefined();
+    expect(row.metadata?.approval_diagnostics).toBeUndefined();
+    const kept = await db.any(
+      `SELECT asa.approver_user_id FROM tbl_approval_instance_steps ais
+         JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+        WHERE ais.approval_instance_id = $1`, [res.instance.id]
+    );
+    expect(kept.map(a => a.approver_user_id)).toContain(QUALIFIED);
 
     await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id=$1`, [QUALIFIED]);
     await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id=$1`, [QUALIFIED]);

@@ -29,6 +29,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { createApprovalInstance, getApprovalInstanceDetails } from "../../../app/models/generalModel.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC    = IDS.hospitality.A;
 const HOTEL = IDS.hotels.A1;
@@ -151,6 +152,14 @@ describe("ARC — REMOVED approvers never render as live approvers", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [TECH_POLICY_ID, GHOST]
     );
+    // GHOST is the policy-resolved USER-source approver — permission-gated at
+    // instance creation (seedTechArc below, before it gets tombstoned in
+    // setup). SURVIVOR is deliberately NOT granted here: SURVIVOR is never
+    // named on a policy step, it's added directly to
+    // tbl_approval_step_approvers below to simulate a mid-flight addition —
+    // granting it would be an unrelated over-grant, not something this fixture
+    // gap requires.
+    await ensureArcApprovable(db, [GHOST], HC);
 
     // (a) mixed step: GHOST tombstoned, SURVIVOR added alongside and left PENDING.
     ({ arcId: mixedArcId, instanceId: mixedInstanceId } =
@@ -209,6 +218,11 @@ describe("ARC — REMOVED approvers never render as live approvers", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2), ($1, 2, 'ALL', 'USER', $3)`,
       [AMD_POLICY_ID, AMD_STEP1, AMD_GHOST]
     );
+    // AMD_STEP1/AMD_GHOST are named via ('USER', ...) on the two amendment
+    // steps — permission-gated at instance creation (the amendment request
+    // test below spawns the instance through the engine, before AMD_GHOST
+    // gets tombstoned mid-suite).
+    await ensureArcApprovable(db, [AMD_STEP1, AMD_GHOST], HC);
   });
 
   afterAll(async () => {

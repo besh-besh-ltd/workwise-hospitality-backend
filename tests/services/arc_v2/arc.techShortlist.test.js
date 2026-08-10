@@ -20,6 +20,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC      = IDS.hospitality.A;
 const HOTEL   = IDS.hotels.A1;
@@ -167,6 +168,9 @@ describe("ARC v2 — Sr54 commercial-ranked technical-evaluation shortlist", () 
        VALUES ($1, 1, 'ANY', 'USER', $2) ON CONFLICT DO NOTHING`,
       [TECH_POLICY_ID, BUYER]
     );
+    // BUYER is the sole USER-source approver on this ARC_TECH step — grant
+    // read+approve on 'arc-tech' at the ARC's own hotel+department.
+    await ensureApprovable(db, BUYER, "arc-tech", HC, HOTEL, DEPT);
 
     // ───────── Main ARC: 8 technical respondents, 7 with commercial quotes ─────────
     mainArcId = await insertArc(`ARC-SHORTLIST-MAIN-${Date.now()}`, "Shortlist main");

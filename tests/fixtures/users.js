@@ -115,6 +115,32 @@ const ROLE_SCOPES = [
   { user: IDS.users.a1_proc_commApp,  role: ROLE_IDS.COMM_APPROVER,     hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.proc },
   { user: IDS.users.a1_proc_poApp,    role: ROLE_IDS.FINAL_AWARDING_P1, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.proc },
   { user: IDS.users.a1_proc_finance,  role: ROLE_IDS.TENDER_APPROVER,   hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.proc },
+  // ── Named-approver grants ────────────────────────────────────────────────
+  // USER-source policy steps are now permission-gated exactly like ROLE-source
+  // ones: a user named on a step whose resource they hold no read+approve for
+  // has that step DROPPED at instance creation. These three users are named as
+  // approvers by fixture policies but were only ever given the role for their
+  // *other* duty, so their steps silently vanished under the gate.
+  //
+  // Granting the role their assignment implies is the same repair applied to
+  // production (prod_04_clear_unqualified_user_approvers.sql). It does not
+  // change WHO resolves for any policy — only whether they survive the gate.
+  //
+  // Deliberately NOT granted: a1_proc_finance at hotel A3. A3_P1_RFQ is the
+  // "business unit whose policy can approve nobody" fixture, and
+  // F-DUPLICATE-001 depends on it resolving to nobody.
+  { user: IDS.users.a1_proc_commApp,  role: ROLE_IDS.TENDER_APPROVER,    hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.proc },  // A1_P2_RFQ step 1 → rfq.read+approve
+  { user: IDS.users.a1_proc_techEval, role: ROLE_IDS.TECH_APPROVER,      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.proc },  // A1_P2_TECHNICAL step 1 → te.read+approve
+  //
+  // NOT granted: awarding.* to a1_proc_finance, even though A1_P1_PO step 3
+  // names them. They are modelled as a pure Tender Approver — rfq.read/approve
+  // and boq.read, nothing downstream — and rfq.publishLapse.test.js depends on
+  // exactly that to prove a reader is redirected away from a stage they cannot
+  // see. Giving them awarding.read would make the PO stage visible and destroy
+  // that premise. So A1_P1_PO step 3 legitimately fails the gate and is
+  // dropped; steps 1 (a1_proc_poApp, FINAL_AWARDING_P1) and the rest carry the
+  // policy, which is the shape the gate is supposed to produce for a step
+  // naming someone who cannot act.
 
   // A-1 engineering buyer
   { user: IDS.users.a1_eng_buyer, role: ROLE_IDS.TENDER_CREATOR, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, dept: IDS.departments.eng },

@@ -35,6 +35,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -130,6 +131,7 @@ describe("ARC v2 — blind technical evaluation (anti-favoritism)", () => {
          (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [TECH_POLICY_ID, APPROVER]);
+    await ensureArcApprovable(db, [APPROVER], HC);
 
     // ARC — submission closed, ready to score.
     const arc = await db.one(
