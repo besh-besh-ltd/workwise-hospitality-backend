@@ -8,6 +8,7 @@ import arcManualEntryModel from '../../models/arc_v2/arcManualEntryModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import { arcVendorContractAccept } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
@@ -1023,18 +1024,24 @@ function persistedStatusFor(stage, endedStatus, arc = {}) {
 // S3 only — emit the real awaiting-acceptance notification to the contracted
 // vendors so they receive the genuine pending sign request (the one live case).
 async function notifyAwaitingVendors(arc, contracts, actorId) {
-  const vendorIds = [...new Set(contracts.map((c) => Number(c.vendor_id)).filter(Boolean))];
+  const signable = contracts.filter((c) => Number(c.vendor_id) && Number(c.id));
+  const vendorIds = [...new Set(signable.map((c) => Number(c.vendor_id)))];
   if (vendorIds.length === 0) return;
-  await dispatchNotification({
-    userIds: vendorIds,
-    senderUserId: actorId,
-    category: 'ARC',
-    type: 'ARC_CONTRACT_AWAITING_ACCEPTANCE',
-    title: 'Rate contract awaiting your signature',
-    body: `${arc.title} (${arc.arc_number}) is ready for you to review and e-sign.`,
-    data: { arc_id: arc.id, arc_number: arc.arc_number },
-    actionUrl: '/dashboard/vendor/rate-contracts/pending-acceptance',
-  });
+  // One dispatch per contract, not one for the whole panel: the signing screen
+  // is keyed on the arc_contract id and the API rejects any row the recipient
+  // does not own, so the vendors cannot be handed a shared link.
+  for (const contract of signable) {
+    await dispatchNotification({
+      userIds: [Number(contract.vendor_id)],
+      senderUserId: actorId,
+      category: 'ARC',
+      type: 'ARC_CONTRACT_AWAITING_ACCEPTANCE',
+      title: 'Rate contract awaiting your signature',
+      body: `${arc.title} (${arc.arc_number}) is ready for you to review and e-sign.`,
+      data: { arc_id: arc.id, arc_number: arc.arc_number, arc_contract_id: Number(contract.id) },
+      actionUrl: arcVendorContractAccept(contract.id),
+    });
+  }
   // Email is best-effort.
   const rows = await db.any(`SELECT id, name, email FROM tbl_users WHERE id = ANY($1::int[])`, [vendorIds]);
   for (const v of rows) {

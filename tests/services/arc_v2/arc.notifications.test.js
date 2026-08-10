@@ -297,7 +297,10 @@ describe("1 — Recipient scoping: VENDOR_TECH_SUBMITTED → tech evaluators ONL
 
     expect(recipientIds).toContain(Number(TECH_EVAL));
     for (const row of rows) {
-      expect(row.category).toBe("ARC");
+      // Lowercase since the inbox filter groups by category: emitters wrote
+      // 'ARC', 'po', 'PO' and 'CALL_OFF', and a filter listing the same module
+      // twice under different casings is worse than no filter at all.
+      expect(row.category).toBe("arc");
       expect(row.type).toBe("VENDOR_TECH_SUBMITTED");
     }
   });

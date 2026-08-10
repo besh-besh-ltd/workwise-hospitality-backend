@@ -7,6 +7,14 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+// The single definition of "this product has a usable quantity and unit".
+// checkRFQCompletion builds its SQL from these rather than restating the rule,
+// so the create gate, the update gate and the client cannot drift apart.
+import {
+  QUANTITY_PATTERN_SQL,
+  MIN_QUANTITY,
+  UNIT_PLACEHOLDERS_SQL,
+} from '../util/productCompleteness.js';
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
@@ -206,38 +214,177 @@ WHERE NOT EXISTS (
     }
   },
 
+  /**
+   * Which products on this RFQ still lack a usable Quantity or Unit.
+   *
+   * This used to compare two counts — DISTINCT (product_variant_id, variant)
+   * in tbl_rfq_products against the number of spec groups holding both a
+   * Quantity and a Unit — and call the RFQ complete when the two numbers were
+   * equal. Counting is not matching. Spec rows outlive the product row they
+   * describe (removing a product deletes tbl_rfq_products but leaves specs
+   * behind whenever the delete keys on a variant that does not line up), so
+   * the qualified count drifts away from the product count in both directions:
+   *
+   *   qualified > products  ->  every product is complete, submit still blocked.
+   *                             Measured on production: 49 of 81 open drafts.
+   *   qualified = products  ->  a leftover group substitutes for a product
+   *     but different sets     that has no quantity at all, and the RFQ is
+   *                             published with a hole in it.
+   *
+   * So this matches each product row to ITS OWN specs by identity and reports
+   * the products that fail, which also lets the caller name them instead of
+   * saying "some products".
+   *
+   * Returns { complete: boolean, incomplete: [{ id, productVariantId, variant,
+   * productName, missing: ['Quantity'|'Unit'], reason }] }.
+   */
   checkRFQCompletion: async (rfq_id, selectedSheets) => {
     try {
-      let totalQ = `
-      SELECT DISTINCT product_variant_id, variant
-      FROM tbl_rfq_products rp
-          WHERE rp.rfq_id = $1
-          ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
-      `;
+      // The sheet list arrives from the request body. It used to be pasted
+      // into the SQL with .join(','), which is an injection hole as well as a
+      // crash waiting on any non-numeric entry. Reject anything that is not a
+      // number rather than silently dropping it — a caller sending garbage
+      // here is a bug, and quietly widening the gate would hide it.
+      let sheetIds = null;
+      if (Array.isArray(selectedSheets) && selectedSheets.length > 0) {
+        sheetIds = selectedSheets.map((s) => {
+          const n = Number(s);
+          if (!Number.isInteger(n)) {
+            throw new Error(`checkRFQCompletion: selectedSheets must be integers, got ${JSON.stringify(s)}`);
+          }
+          return n;
+        });
+      }
 
-      let qualifiedQ = `
-        SELECT s.product_variant_id, s.variant
-          FROM tbl_rfq_products_specs s
-          WHERE s.rfq_id = $1
-            ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
-            AND s.title IN ('Quantity', 'Unit')
-            AND TRIM(s.value) != ''
-            AND TRIM(s.value) != 'NA'
-            AND (
-              (s.title = 'Quantity' AND
-              TRIM(s.value) ~ '^[0-9]+(\.[0-9]+)?$' AND  -- Regex to check it's all digits
-              CAST(TRIM(s.value) AS FLOAT) > 0)
-                  OR
-              (s.title = 'Unit' AND LENGTH(TRIM(s.value)) >= 2)
-              )
-          GROUP BY s.product_variant_id, s.variant
-          HAVING COUNT(DISTINCT s.title) = 2;
-      `;
+      // A spec row counts only when it belongs to THIS product. `variant` is
+      // nullable on both tables, so the join uses IS NOT DISTINCT FROM — plain
+      // `=` drops every NULL-variant pairing and reads as "no specs".
+      //
+      // Titles are compared case-insensitively: production carries rows
+      // written as 'quantity'/'unit' by one path and 'Quantity'/'Unit' by
+      // another, and the exact-match IN (...) could not see the former.
+      //
+      // Quantity accepts an optional sign and the usual decimal shapes
+      // ('10', '0.5', '.5', '12.750') and must be > 0. Thousands separators
+      // are deliberately NOT accepted: parseFloat('1,000') is 1 everywhere
+      // downstream, so letting it through the gate would turn a typo into a
+      // 1000x error on a purchase order. Better to stop it here and say so.
+      //
+      // Unit accepts any single character — 'g', 'm' and 'L' are units, and
+      // the old LENGTH >= 2 rule rejected them — but not a placeholder.
+      const rows = await db.any(
+        `
+        SELECT rp.id,
+               rp.product_variant_id,
+               rp.variant,
+               COALESCE(pv.name, 'Product ' || rp.id) AS product_name,
+               q.value AS quantity_value,
+               u.value AS unit_value,
+               qa.value AS quantity_any,
+               ua.value AS unit_any
+          FROM tbl_rfq_products rp
+          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          -- the usable Quantity, if there is one
+          LEFT JOIN LATERAL (
+            SELECT btrim(s.value) AS value
+              FROM tbl_rfq_products_specs s
+             WHERE s.rfq_id = rp.rfq_id
+               AND s.product_variant_id = rp.product_variant_id
+               AND s.variant IS NOT DISTINCT FROM rp.variant
+               AND lower(btrim(s.title)) = 'quantity'
+               -- The regex and the cast are ONE expression on purpose.
+               -- Postgres does not promise to evaluate AND'd conditions left
+               -- to right, so writing them as two conditions lets the planner
+               -- attempt btrim('ten')::float8 and fail the whole query with
+               -- "invalid input syntax for type double precision". CASE is
+               -- the construct that does guarantee the ordering.
+               AND CASE
+                     WHEN btrim(s.value) ~ ${QUANTITY_PATTERN_SQL}
+                       THEN btrim(s.value)::float8 >= ${MIN_QUANTITY}
+                     ELSE FALSE
+                   END
+             LIMIT 1
+          ) q ON TRUE
+          -- the usable Unit, if there is one
+          LEFT JOIN LATERAL (
+            SELECT btrim(s.value) AS value
+              FROM tbl_rfq_products_specs s
+             WHERE s.rfq_id = rp.rfq_id
+               AND s.product_variant_id = rp.product_variant_id
+               AND s.variant IS NOT DISTINCT FROM rp.variant
+               AND lower(btrim(s.title)) = 'unit'
+               AND btrim(s.value) <> ''
+               AND upper(btrim(s.value)) NOT IN (${UNIT_PLACEHOLDERS_SQL})
+             LIMIT 1
+          ) u ON TRUE
+          -- ANY value that was written, usable or not. Only used to tell
+          -- "you never filled this in" apart from "what you typed is not a
+          -- quantity", which are different things to the person fixing it.
+          LEFT JOIN LATERAL (
+            SELECT btrim(s.value) AS value
+              FROM tbl_rfq_products_specs s
+             WHERE s.rfq_id = rp.rfq_id
+               AND s.product_variant_id = rp.product_variant_id
+               AND s.variant IS NOT DISTINCT FROM rp.variant
+               AND lower(btrim(s.title)) = 'quantity'
+               AND btrim(s.value) <> ''
+             LIMIT 1
+          ) qa ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT btrim(s.value) AS value
+              FROM tbl_rfq_products_specs s
+             WHERE s.rfq_id = rp.rfq_id
+               AND s.product_variant_id = rp.product_variant_id
+               AND s.variant IS NOT DISTINCT FROM rp.variant
+               AND lower(btrim(s.title)) = 'unit'
+               AND btrim(s.value) <> ''
+             LIMIT 1
+          ) ua ON TRUE
+         WHERE rp.rfq_id = $1
+           -- No sheet list means "check everything". With a list, a product
+           -- whose sheet_id is NULL is still checked: on production every
+           -- product and spec row has sheet_id NULL, so a strict IN (...)
+           -- matched nothing, both counts collapsed to zero, and the gate
+           -- passed an RFQ that had no quantities anywhere.
+           AND ($2::bigint[] IS NULL OR rp.sheet_id IS NULL OR rp.sheet_id = ANY($2::bigint[]))
+         ORDER BY rp.id
+        `,
+        [rfq_id, sheetIds]
+      );
 
-      const totalRes = await db.any(totalQ, [rfq_id]);
-      const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
+      const incomplete = [];
+      for (const r of rows) {
+        const missing = [];
+        if (r.quantity_value === null) missing.push('Quantity');
+        if (r.unit_value === null) missing.push('Unit');
+        if (missing.length === 0) continue;
 
-      return (totalRes ?? []).length === (qualifiedRes ?? []).length;
+        const reasons = [];
+        if (r.quantity_value === null) {
+          reasons.push(
+            r.quantity_any
+              ? `quantity "${r.quantity_any}" is not a number greater than zero`
+              : 'quantity is not set'
+          );
+        }
+        if (r.unit_value === null) {
+          reasons.push(r.unit_any ? `unit "${r.unit_any}" is not a valid unit` : 'unit is not set');
+        }
+
+        incomplete.push({
+          // `rfqProductId` deliberately matches the key checkProductVendors
+          // already emits, so the client's existing "highlight these rows and
+          // jump back to the product step" handler picks this up unchanged.
+          rfqProductId: r.id,
+          productVariantId: r.product_variant_id,
+          variant: r.variant,
+          productName: r.product_name,
+          missing,
+          reason: reasons.join('; '),
+        });
+      }
+
+      return { complete: incomplete.length === 0, incomplete };
     } catch (error) {
       throw error;
     }

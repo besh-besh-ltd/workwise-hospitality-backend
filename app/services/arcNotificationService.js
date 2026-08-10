@@ -12,6 +12,9 @@
  *  - In-app always; email only when the event's config marks email:true.
  *  - Self-notification suppressed: actorId is filtered out of recipients.
  *  - Dedup by numeric user id (in-app) and lowercased email (email).
+ *  - One destination per audience, not per event: the buyer and vendor rate-
+ *    contract pages are distinct routes on distinct ids, and most events reach
+ *    both sides, so recipients are grouped by their resolved URL.
  */
 
 import db from '../config/dbConn.js';
@@ -24,9 +27,16 @@ import { logger } from '../util/logger.js';
 import { ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { getApprovalWorkflowUsers } from '../models/generalModel.js';
 import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
-
-const BUYER_BASE  = '/dashboard/buyer/rate-contracts';
-const VENDOR_BASE = '/dashboard/vendor/rate-contracts';
+import {
+  buyerArcDetail,
+  arcVendorContract,
+  arcVendorContractAccept,
+  arcVendorQuote,
+  arcVendorRequests,
+  arcVendorAmendments,
+  home,
+  toAbsoluteUrl,
+} from './notificationLinks.js';
 
 // Audience tokens resolved per event config.
 const AUDIENCE = Object.freeze({
@@ -43,16 +53,44 @@ const AUDIENCE = Object.freeze({
   EVENT_VENDOR:     'event_vendor',
 });
 
+// Audiences whose members are vendors; every other audience is buyer-side.
+// This — not the event-level vendorFacing flag — is what decides which URL a
+// recipient gets, because an event may address both sides at once and the two
+// sides are different routes keyed on different ids.
+const VENDOR_AUDIENCES = new Set([
+  AUDIENCE.AWARDED_VENDORS,
+  AUDIENCE.INVITED_VENDORS,
+  AUDIENCE.EVENT_VENDOR,
+]);
+
+// ─── Per-recipient destinations ──────────────────────────────────────────────
+//
+// notifyArcEvent builds `ctx` per recipient: { role, contractId }, where
+// contractId is THAT vendor's own tbl_arc_contract row for this ARC (null when
+// none exists yet). `/dashboard/vendor/rate-contracts/:id` is keyed on the
+// contract id and the API re-checks contract.vendor_id === req.user.id, so any
+// other id — the ARC id included — is a guaranteed 403 for the recipient.
+
+const buyerArc = (arc) => buyerArcDetail(arc.id);
+
+// The awarded vendor's own contract. A vendor who holds no contract row has
+// nothing to open there, so their open-requests list is the only honest landing.
+const vendorArc = (ctx) => arcVendorContract(ctx.contractId) || arcVendorRequests();
+
+// The signing screen for the vendor's own contract.
+const vendorArcSign = (ctx) =>
+  arcVendorContractAccept(ctx.contractId) || arcVendorRequests({ tab: 'awaiting-sign' });
+
 // ─── Event configuration ─────────────────────────────────────────────────────
 //
 // Each entry: {
 //   audiences: [...AUDIENCE values],   // which groups to notify in-app
 //   emailAudiences: [...] | null,       // if set, only these get email; else all if email:true
 //   email: bool,                        // send email at all?
-//   vendorFacing: bool,                 // true → actionUrl uses VENDOR_BASE
+//   vendorFacing: bool,                 // side assumed for recipientsOverride, which carries no audience tag
 //   title: string,
 //   body: (arc, payload) => string,
-//   url: (arc, role) => string,         // role = 'vendor' | 'buyer'
+//   url: (arc, ctx) => string,          // ctx = { role: 'vendor'|'buyer', contractId }
 // }
 //
 // For events with mixed channels per audience we call notifyArcEvent twice with
@@ -67,7 +105,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Rate contract approved & live',
     body:         (arc) => `${arc.title} (${arc.arc_number}) was approved and is now open to vendors.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // Sr 47 (Cap 2, Path A) — the mechanics are still the publish-reject path
@@ -79,7 +117,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Changes requested on your rate contract',
     body:         (arc, payload) => `The approver requested changes before publishing ${arc.title} (${arc.arc_number}).${payload.reason ? ' Note: ' + payload.reason : ''} Revise and re-publish to send it back for approval.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // floated — creator only IN-APP (vendor email handled by existing notifyVendorsOfFloat)
@@ -89,7 +127,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Your rate contract is live',
     body:         (arc) => `${arc.title} (${arc.arc_number}) is now open for vendor quotes.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.EXTENDED]: {
@@ -98,7 +136,8 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Submission deadline extended',
     body:         (arc, payload) => `The deadline for ${arc.title} (${arc.arc_number}) was extended${payload.newDeadline ? ' to ' + payload.newDeadline : ''}.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    // Pre-award: the extension only matters on the quote wizard, keyed on the ARC id.
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorQuote(arc.id) : buyerArc(arc),
   },
 
   // Buyer-facing close: creator (in-app) + the NEXT-STAGE evaluators (in-app +
@@ -116,7 +155,7 @@ const EVENT_CONFIG = {
         ? payload.nextStage : null;
       return `Quote submission for ${arc.title} (${arc.arc_number}) has closed${stage ? ` — begin ${stage} evaluation` : ''}.`;
     },
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.WITHDRAWN]: {
@@ -125,7 +164,8 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Rate contract withdrawn',
     body:         (arc) => `${arc.title} (${arc.arc_number}) has been withdrawn.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    // Nothing left to open per-record — the withdrawn ARC drops off the list.
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorRequests() : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.TERMINATED]: {
@@ -135,7 +175,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Rate contract terminated',
     body:         (arc) => `${arc.title} (${arc.arc_number}) has been terminated.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CLOSED_NO_AWARD]: {
@@ -144,7 +184,8 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Rate contract closed without award',
     body:         (arc) => `${arc.title} (${arc.arc_number}) was closed without an award.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    // No contract was ever generated, so no vendor here has a record to open.
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorRequests() : buyerArc(arc),
   },
 
   // ── Vendor invitation & response ─────────────────────────────────────────
@@ -155,7 +196,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'New rate contract opportunity',
     body:         (arc) => `You've been invited to quote on ${arc.title} (${arc.arc_number}).`,
-    url:          () => `${VENDOR_BASE}/requests`,
+    url:          () => arcVendorRequests(),
   },
 
   [ARC_EVENT_TYPES.VENDOR_SUBMITTED]: {
@@ -164,7 +205,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor submitted a quote',
     body:         (arc) => `A vendor submitted a quote for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.VENDOR_TECH_SUBMITTED]: {
@@ -173,7 +214,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical response ready for evaluation',
     body:         (arc) => `A technical response was submitted for ${arc.title} (${arc.arc_number}) and is ready for evaluation.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.VENDOR_WITHDREW]: {
@@ -182,7 +223,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor withdrew from a rate contract',
     body:         (arc) => `A vendor withdrew from ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.VENDOR_DECLINED]: {
@@ -191,7 +232,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor declined to participate',
     body:         (arc) => `A vendor declined participation in ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // ── Technical evaluation ─────────────────────────────────────────────────
@@ -202,7 +243,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical evaluation open',
     body:         (arc) => `Technical evaluation is open for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.TECH_EVAL_SUBMITTED]: {
@@ -211,7 +252,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical evaluation submitted',
     body:         (arc) => `Technical evaluation for ${arc.title} (${arc.arc_number}) was submitted and is pending approval.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.TECH_EVAL_APPROVED]: {
@@ -221,7 +262,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical evaluation approved',
     body:         (arc) => `Technical evaluation for ${arc.title} (${arc.arc_number}) was approved. Commercial evaluation can proceed.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.TECH_EVAL_REJECTED]: {
@@ -230,7 +271,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Technical evaluation rejected',
     body:         (arc) => `Technical evaluation for ${arc.title} (${arc.arc_number}) was rejected and needs rework.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // Sr 54 — a held vendor was auto-promoted into evaluation because one of
@@ -242,7 +283,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'A held vendor was moved into technical evaluation',
     body:         (arc) => `A shortlisted vendor did not qualify on ${arc.title} (${arc.arc_number}) — the next vendor in commercial rank was automatically moved into evaluation.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // ── Commercial evaluation & committee ────────────────────────────────────
@@ -253,7 +294,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Commercial evaluation open',
     body:         (arc) => `Commercial evaluation is open for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.COMM_EVAL_FINALIZED]: {
@@ -262,7 +303,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Commercial evaluation finalized',
     body:         (arc) => `Commercial evaluation for ${arc.title} (${arc.arc_number}) was finalized and sent to committee.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK]: {
@@ -271,7 +312,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Commercial evaluation sent back',
     body:         (arc, payload) => `Commercial evaluation for ${arc.title} (${arc.arc_number}) was sent back for revision.${payload.reason ? ' Reason: ' + payload.reason : ''}`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.COMM_EVAL_SENT_BACK_TO_TECH]: {
@@ -280,7 +321,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Sent back to technical evaluation',
     body:         (arc, payload) => `Commercial evaluation for ${arc.title} (${arc.arc_number}) was sent back to technical evaluation for re-assessment.${payload.reason ? ' Reason: ' + payload.reason : ''}`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.COMMITTEE_DECISION]: {
@@ -289,7 +330,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Committee decision recorded',
     body:         (arc, payload) => `The committee ${payload.decision === 'rejected' ? 'sent back' : 'approved'} ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // ── Contract (award → sign → active) ─────────────────────────────────────
@@ -300,7 +341,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Contracts generated',
     body:         (arc) => `Contracts were generated for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE]: {
@@ -309,7 +350,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        "You've been awarded a rate contract",
     body:         (arc) => `You've been awarded ${arc.title} (${arc.arc_number}). Please review and sign.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArcSign(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED]: {
@@ -318,7 +359,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Signing OTP requested',
     body:         (arc) => `A one-time passcode was requested to sign ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArcSign(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_SIGNED]: {
@@ -328,7 +369,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor signed the rate contract',
     body:         (arc) => `A vendor signed the contract for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_ACTIVE]: {
@@ -337,7 +378,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Rate contract active',
     body:         (arc) => `The rate contract ${arc.title} (${arc.arc_number}) is now active.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_DECLINED]: {
@@ -346,7 +387,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor declined the contract',
     body:         (arc) => `A vendor declined the contract for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // ── Contract clarification loop ───────────────────────────────────────────
@@ -357,7 +398,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor raised a clarification',
     body:         (arc) => `A vendor raised a clarification on the contract for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CLARIFICATION_REVISED]: {
@@ -366,7 +407,8 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Your clarification was addressed',
     body:         (arc) => `Your clarification on ${arc.title} (${arc.arc_number}) was addressed and a revised contract issued.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    // Resolving a clarification returns the contract to awaiting_acceptance.
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArcSign(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CLARIFICATION_UPHELD]: {
@@ -375,7 +417,8 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Clarification reviewed',
     body:         (arc) => `Your clarification on ${arc.title} (${arc.arc_number}) was reviewed and the original terms upheld.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    // Upholding also reopens signing — the vendor still has to accept or decline.
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArcSign(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CONTRACT_REISSUED]: {
@@ -384,7 +427,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Revised contract ready to sign',
     body:         (arc) => `A revised contract for ${arc.title} (${arc.arc_number}) is ready for your signature.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArcSign(ctx) : buyerArc(arc),
   },
 
   // ── Amendments & addendum re-signing ─────────────────────────────────────
@@ -395,7 +438,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Amendment requested',
     body:         (arc) => `A vendor requested an amendment on ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_APPROVED]: {
@@ -404,7 +447,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Amendment approved',
     body:         (arc) => `Your amendment on ${arc.title} (${arc.arc_number}) was approved. Please sign the addendum.`,
-    url:          () => `${VENDOR_BASE}/amendments`,
+    url:          () => arcVendorAmendments(),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_REJECTED]: {
@@ -413,7 +456,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Amendment rejected',
     body:         (arc) => `Your amendment request on ${arc.title} (${arc.arc_number}) was rejected.`,
-    url:          () => `${VENDOR_BASE}/amendments`,
+    url:          () => arcVendorAmendments(),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_AWAITING_SIGNATURE]: {
@@ -422,7 +465,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Addendum awaiting signature',
     body:         (arc) => `An addendum for ${arc.title} (${arc.arc_number}) is awaiting your signature.`,
-    url:          () => `${VENDOR_BASE}/amendments`,
+    url:          () => arcVendorAmendments(),
   },
 
   [ARC_EVENT_TYPES.ADDENDUM_SIGNED]: {
@@ -432,7 +475,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Addendum signed',
     body:         (arc) => `A vendor signed the addendum for ${arc.title} (${arc.arc_number}); the amendment now binds.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/amendments` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorAmendments() : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_SIGN_DECLINED]: {
@@ -441,7 +484,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Addendum signing declined',
     body:         (arc) => `A vendor declined to sign the addendum for ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_VOIDED]: {
@@ -450,7 +493,7 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Amendment voided',
     body:         (arc) => `An amendment on ${arc.title} (${arc.arc_number}) was voided.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/amendments` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorAmendments() : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_LIVE]: {
@@ -459,7 +502,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Amendment now in effect',
     body:         (arc) => `An amendment to ${arc.title} (${arc.arc_number}) is now in effect.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/amendments` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorAmendments() : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.AMENDMENT_ENDED]: {
@@ -468,7 +511,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Amendment ended',
     body:         (arc) => `An amendment period on ${arc.title} (${arc.arc_number}) has ended.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/amendments` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? arcVendorAmendments() : buyerArc(arc),
   },
 
   // ── Expiry / renewal (cron-driven — wired only if cron exists) ────────────
@@ -481,7 +524,7 @@ const EVENT_CONFIG = {
     body:         (arc, payload) => payload && payload.daysLeft
       ? `${arc.title} (${arc.arc_number}) expires in ${payload.daysLeft} day${payload.daysLeft === 1 ? '' : 's'}.`
       : `${arc.title} (${arc.arc_number}) is expiring soon.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.EXPIRED]: {
@@ -490,7 +533,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Rate contract expired',
     body:         (arc) => `${arc.title} (${arc.arc_number}) has expired.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.RENEWED]: {
@@ -499,7 +542,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Rate contract renewed',
     body:         (arc) => `${arc.title} (${arc.arc_number}) has been renewed.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   // ── ARC Negotiation rounds ────────────────────────────────────────────────
@@ -512,7 +555,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Negotiation round pending approval',
     body:         (arc, payload) => `A negotiation round (#${payload?.round_number ?? ''}) for ${arc.title} (${arc.arc_number}) is pending your approval.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED]: {
@@ -522,7 +565,9 @@ const EVENT_CONFIG = {
     vendorFacing: true,
     title:        'Negotiation round active — submit your revised rate',
     body:         (arc, payload) => `A negotiation round is now active on ${arc.title} (${arc.arc_number}). Please submit a revised rate before the deadline.`,
-    url:          (arc) => `${VENDOR_BASE}/requests/${arc.id}`,
+    // The revised-rate control is the negotiation banner on the quote wizard —
+    // keyed on the ARC id, since a negotiation round precedes any contract.
+    url:          (arc) => arcVendorQuote(arc.id),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_QUOTE_RECEIVED]: {
@@ -531,7 +576,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Vendor submitted a revised rate',
     body:         (arc, payload) => `A vendor submitted a revised rate for ${arc.title} (${arc.arc_number})${payload?.arc_item_id ? ` (item ${payload.arc_item_id})` : ''}.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_ROUND_ENDED]: {
@@ -540,7 +585,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Negotiation round ended',
     body:         (arc, payload) => `A negotiation round has ended for ${arc.title} (${arc.arc_number}). Review the revised rates.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_ROUND_EXPIRED]: {
@@ -549,7 +594,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Negotiation round expired without approval',
     body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) expired before it could be approved.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_ROUND_REJECTED]: {
@@ -558,7 +603,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Negotiation round rejected',
     body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) was rejected.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.NEGOTIATION_ROUND_CLOSED]: {
@@ -567,7 +612,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Negotiation round closed',
     body:         (arc) => `A negotiation round for ${arc.title} (${arc.arc_number}) was closed by the evaluator.`,
-    url:          (arc) => `${BUYER_BASE}/${arc.id}`,
+    url:          (arc) => buyerArc(arc),
   },
 
   // ── Call-off ──────────────────────────────────────────────────────────────
@@ -578,7 +623,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Call-off order released',
     body:         (arc) => `A call-off order was released against ${arc.title} (${arc.arc_number}).`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
   [ARC_EVENT_TYPES.CALL_OFF_REJECTED]: {
@@ -587,7 +632,7 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Call-off order rejected',
     body:         (arc) => `A call-off order against ${arc.title} (${arc.arc_number}) was rejected.`,
-    url:          (arc, role) => role === 'vendor' ? `${VENDOR_BASE}/${arc.id}` : `${BUYER_BASE}/${arc.id}`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 };
 
@@ -712,6 +757,9 @@ async function resolveOneAudience(audience, arc, payload) {
 
 // ─── Deduplication helpers ────────────────────────────────────────────────────
 
+// Filters rather than rebuilds, so the `_audience` tag survives — it decides
+// each survivor's destination downstream. A user matching two audiences keeps
+// the first one listed in the event config.
 function dedupeUsers(list) {
   const seen = new Set();
   return list.filter((u) => {
@@ -739,12 +787,46 @@ async function normalizeOverride(list) {
     .filter((r) => r && r.id);
 }
 
+// ─── URL resolution ───────────────────────────────────────────────────────────
+
+/**
+ * Which side of the app a recipient lives on. Audience membership decides it,
+ * because a single event routinely addresses both sides at once (CONTRACT_ACTIVE
+ * notifies the creator AND the awarded vendors). Recipients supplied through
+ * recipientsOverride carry no audience tag, so they fall back to the event's
+ * declared side.
+ */
+function roleFor(user, cfg) {
+  if (user._audience == null) return cfg.vendorFacing ? 'vendor' : 'buyer';
+  return VENDOR_AUDIENCES.has(user._audience) ? 'vendor' : 'buyer';
+}
+
+/**
+ * Map vendor user id → that vendor's own tbl_arc_contract id for this ARC.
+ * One query for the whole recipient set; the (arc_id, vendor_id) unique key
+ * means at most one row per vendor. Vendors with no row are simply absent —
+ * their destination must then be one that needs no contract id.
+ */
+async function loadVendorContractIds(arcId, vendorIds) {
+  const byVendor = new Map();
+  if (vendorIds.length === 0) return byVendor;
+  try {
+    const rows = await db.any(
+      `SELECT id, vendor_id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = ANY($2::int[])`,
+      [arcId, vendorIds]
+    );
+    rows.forEach((r) => byVendor.set(Number(r.vendor_id), Number(r.id)));
+  } catch (err) {
+    logger.warn({ err, arcId }, '[arcNotify] vendor contract lookup failed');
+  }
+  return byVendor;
+}
+
 // ─── Email renderer ───────────────────────────────────────────────────────────
 
 function renderArcEmail({ arc, title, body, url, recipientName }) {
   const greeting = recipientName ? `Hello ${recipientName},` : 'Hello,';
-  const frontendBase = process.env.FRONT_END_WEBSITE || '';
-  const fullUrl = url ? (url.startsWith('http') ? url : `${frontendBase}${url}`) : null;
+  const fullUrl = toAbsoluteUrl(url);
 
   const headerContent = `<h2 style="margin: 0 0 8px; font-size: 20px; color: #1A5C7E;">${title}</h2>`;
   const containerContent = `
@@ -793,40 +875,59 @@ export async function notifyArcEvent({ arcId, eventType, actorId = null, payload
 
     const title = cfg.title;
     const body  = cfg.body(arc, payload);
-    const role  = cfg.vendorFacing ? 'vendor' : 'buyer';
-    const actionUrl = cfg.url(arc, role);
 
-    // 2. In-app (always)
-    await dispatchNotification({
-      userIds:      targets.map((u) => Number(u.id)).filter(Boolean),
-      senderUserId: actorId,
-      category:     'ARC',
-      type:         eventType.toUpperCase().replace(/-/g, '_'),
-      title,
-      body,
-      data: {
-        arc_id:     arc.id,
-        arc_number: arc.arc_number,
-        event_type: eventType,
-        ...(payload?.notifyData || {}),
-      },
-      actionUrl,
-    }).catch((e) => logError('[arcNotify] in-app dispatch failed', e));
+    // 2. Resolve one destination PER RECIPIENT. The buyer and vendor rate-contract
+    //    pages are different routes keyed on different ids (ARC id vs the
+    //    recipient's own arc_contract id), so a mixed-audience event cannot be
+    //    served by a single URL — anyone handed the other side's link gets a 403.
+    const contractByVendor = await loadVendorContractIds(
+      arc.id,
+      targets.filter((u) => roleFor(u, cfg) === 'vendor').map((u) => Number(u.id))
+    );
 
-    // 3. Email (only when cfg.email)
+    const urlByUser = new Map();
+    for (const u of targets) {
+      const role = roleFor(u, cfg);
+      const ctx  = { role, contractId: role === 'vendor' ? contractByVendor.get(Number(u.id)) || null : null };
+      urlByUser.set(Number(u.id), cfg.url(arc, ctx) || home(role));
+    }
+
+    // 3. In-app (always) — one dispatch per distinct destination.
+    const byUrl = new Map();
+    for (const [userId, url] of urlByUser) {
+      if (!byUrl.has(url)) byUrl.set(url, []);
+      byUrl.get(url).push(userId);
+    }
+
+    for (const [actionUrl, userIds] of byUrl) {
+      await dispatchNotification({
+        userIds,
+        senderUserId: actorId,
+        category:     'ARC',
+        type:         eventType.toUpperCase().replace(/-/g, '_'),
+        title,
+        body,
+        data: {
+          arc_id:     arc.id,
+          arc_number: arc.arc_number,
+          event_type: eventType,
+          ...(payload?.notifyData || {}),
+        },
+        actionUrl,
+      }).catch((e) => logError('[arcNotify] in-app dispatch failed', e));
+    }
+
+    // 4. Email (only when cfg.email)
     if (cfg.email) {
-      // When emailAudiences is specified, only those audience members get email
+      // When emailAudiences is specified, only those audience members get email.
+      // Eligibility is read off rawRecipients, not targets: dedupe keeps only the
+      // first audience a user matched, and a user can sit in a silent audience
+      // and an email-eligible one at once.
       let emailTargets = targets;
       if (cfg.emailAudiences) {
         const emailAudienceSet = new Set(cfg.emailAudiences);
-        // rawRecipients carry _audience tag; but dedupeUsers strips it — re-tag
-        const taggedRaw = recipientsOverride
-          ? rawRecipients
-          : await resolveAudiences(cfg.audiences, arc, payload);
-
-        // Build the set of ids that belong to email-eligible audiences
         const emailEligibleIds = new Set(
-          taggedRaw
+          rawRecipients
             .filter((u) => emailAudienceSet.has(u._audience))
             .map((u) => Number(u.id))
         );
@@ -841,7 +942,7 @@ export async function notifyArcEvent({ arcId, eventType, actorId = null, payload
         sendMail({
           to:      u.email,
           subject: title,
-          html:    renderArcEmail({ arc, title, body, url: actionUrl, recipientName: u.name }),
+          html:    renderArcEmail({ arc, title, body, url: urlByUser.get(Number(u.id)), recipientName: u.name }),
         }).catch((e) => logError('[arcNotify] email failed', e));
       }
     }

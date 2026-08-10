@@ -2351,7 +2351,9 @@ CREATE TABLE public.tbl_notifications (
     token text,
     recipient_user_id integer,
     action_url text,
-    category character varying(32)
+    category character varying(32),
+    delivered_at timestamp with time zone,
+    dismissed_at timestamp with time zone
 );
 
 -- Browser push subscriptions + per-recipient notification columns mirror
@@ -2369,6 +2371,11 @@ CREATE TABLE IF NOT EXISTS public.tbl_push_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_push_sub_user ON public.tbl_push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_notif_recipient_unread ON public.tbl_notifications(recipient_user_id, is_read);
+-- Mirrors migrations/20260807100000_notification_delivered_at.sql — the bell
+-- badge counts undelivered rows, so it needs its own partial index.
+CREATE INDEX IF NOT EXISTS idx_notif_recipient_undelivered ON public.tbl_notifications(recipient_user_id) WHERE delivered_at IS NULL;
+-- Mirrors migrations/20260807140000_notification_inbox_controls.sql.
+CREATE INDEX IF NOT EXISTS idx_notif_recipient_active ON public.tbl_notifications(recipient_user_id, created_at DESC) WHERE dismissed_at IS NULL;
 
 
 --

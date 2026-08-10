@@ -16,8 +16,10 @@ import { describe, it, expect, beforeEach, jest } from "@jest/globals";
 
 // Captured outbound mail — one entry per recipient.
 const sentMails = [];
-// Captured in-app notifications — they carry the same actionUrl as the mail,
-// so a divergence between the two surfaces would show up here.
+// Captured in-app notifications. The mail href and the in-app actionUrl are
+// deliberately NOT identical: mail is read outside the app so it needs an
+// absolute URL, while the stored row stays relative so one notification works
+// on local, staging and production alike. They must still name the same path.
 const dispatched = [];
 
 jest.unstable_mockModule("../../app/helper/common.js", () => ({
@@ -83,7 +85,7 @@ describe("NEGOTIATION_QUOTE approval email — per-product deep link", () => {
     expect(sentMails).toHaveLength(1);
     const href = ctaHref(sentMails[0]);
 
-    expect(href).toContain("/dashboard/buyer/quote-compare");
+    expect(href).toContain("/dashboard/buyer/quote-comparison");
     expect(href).toContain(`rfq=${RFQ_ID}`);
     expect(href).toContain(`rfq_product_id=${PRODUCT_A}`);
     expect(href).toContain("focus=approval");
@@ -107,7 +109,10 @@ describe("NEGOTIATION_QUOTE approval email — per-product deep link", () => {
     await sendApprovalStepNotification(stepArgs(PRODUCT_A));
 
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0].actionUrl).toBe(ctaHref(sentMails[0]));
+    // Same destination, different form: relative in-app, absolute in the mail.
+    const stored = dispatched[0].actionUrl;
+    expect(stored.startsWith("/")).toBe(true);
+    expect(ctaHref(sentMails[0])).toBe(`http://localhost:3000${stored}`);
   });
 
   describe("when metadata.rfq_id is missing", () => {
@@ -144,7 +149,7 @@ describe("link builder — neighbouring entity types are unaffected", () => {
     });
 
     const href = ctaHref(sentMails[0]);
-    expect(href).toContain(`/dashboard/buyer/quote-compare?rfq=${RFQ_ID}`);
+    expect(href).toContain(`/dashboard/buyer/quote-comparison?rfq=${RFQ_ID}`);
     expect(href).not.toContain("rfq_product_id");
   });
 
@@ -161,7 +166,7 @@ describe("link builder — neighbouring entity types are unaffected", () => {
     });
 
     const href = ctaHref(sentMails[0]);
-    expect(href).toContain(`/dashboard/buyer/quote-compare?rfq=${RFQ_ID}`);
+    expect(href).toContain(`/dashboard/buyer/quote-comparison?rfq=${RFQ_ID}`);
     expect(href).not.toContain("rfq_product_id");
   });
 });

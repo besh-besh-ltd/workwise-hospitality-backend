@@ -6,9 +6,10 @@ import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
-import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
+import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
 import pricingEngine from "../services/pricingEngine.js";
 import { dispatch as dispatchNotification } from "../services/notificationService.js";
+import { buyerPoList } from "../services/notificationLinks.js";
 import {
   assertUserHasScope,
   AuthorizationError,
@@ -1483,12 +1484,12 @@ export const autoInitiateRFQPOs = async (rfq_id, triggering_user_id = null) => {
         if (summary.failed.length) parts.push(`${summary.failed.length} failed`);
         await dispatchNotification({
           userIds: [Number(triggering_user_id)],
-          category: 'PO',
+          category: 'po',
           type: 'PO_AUTO_INITIATED',
           title: `${rfqLabel}: purchase orders auto-initiated`,
           body: `${rfqLabel} is fully awarded · ${parts.join(' · ')}.`,
           data: { rfq_id, ...summary },
-          actionUrl: '/dashboard/buyer/purchase-orders',
+          actionUrl: buyerPoList(),
         });
       } catch (notifyErr) {
         logError('[autoInitiateRFQPOs] notification dispatch failed', notifyErr);
@@ -2832,6 +2833,43 @@ export const updateHSNCode = async (po_id, hsn_codes, mapped_by) => {
   }
 };
 
+// Buyer-side recipients for the post-approval PO lifecycle events (dispatched,
+// GRN, invoice).
+//
+// These were resolved solely by tbl_approval_hierarchy.hierarchy_id =
+// po.selected_hierarchy, a column belonging to the pre-approval-engine
+// hierarchy that no hospitality PO populates. ARRAY_AGG over zero matching rows
+// still returns one row whose users_list is an explicit NULL, and the mailers
+// iterated it — the TypeError rejected inside db.tx and took the recorded GRN
+// or invoice down with it. Resolve from the approval engine instead and keep
+// the legacy hierarchy only as an extra source for a PO that still carries one.
+const resolvePoNotificationRecipients = async (po, t = db) => {
+  const ids = new Set();
+
+  if (po?.initiated_by != null) ids.add(Number(po.initiated_by));
+
+  const workflowUsers = await getApprovalWorkflowUsers('PO', po?.id, t);
+  for (const user of workflowUsers || []) {
+    if (user?.user_id != null) ids.add(Number(user.user_id));
+  }
+
+  if (po?.selected_hierarchy) {
+    const legacy = await t.oneOrNone(
+      `SELECT ARRAY_AGG(user_id) AS users_list
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      AND hierarchy_type = 'po'
+      AND hierarchy_id = $2`,
+      [po.company_id, po.selected_hierarchy]
+    );
+    for (const id of legacy?.users_list || []) {
+      if (id != null) ids.add(Number(id));
+    }
+  }
+
+  return [...ids];
+};
+
 export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
   return await db.tx(async t => {
     const po = await t.oneOrNone(
@@ -2881,14 +2919,7 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
       [po_id]
     );
 
-    const reminderUsers = await t.oneOrNone(
-      `SELECT ARRAY_AGG(user_id) AS users_list
-      FROM tbl_approval_hierarchy
-      WHERE company_id = $1
-      AND hierarchy_type = 'po'
-      AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
-    );
+    const reminderUsers = await resolvePoNotificationRecipients(po, t);
 
     const txn = await t.oneOrNone(
       `SELECT id FROM tbl_approval_hierarchy_transactions
@@ -2906,7 +2937,12 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
       );
     }
 
-    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers?.users_list);
+    // An undeliverable mail must not undo an invoice the vendor already filed.
+    try {
+      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
+    } catch (err) {
+      logError(`[po ${po_id}] invoice notification failed`, err);
+    }
 
     return result;
   })
@@ -2963,14 +2999,13 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
       [po_id]
     );
 
-    const reminderUsers = await t.oneOrNone(
-      `SELECT ARRAY_AGG(user_id) AS users_list
-      FROM tbl_approval_hierarchy
-      WHERE company_id = $1
-      AND hierarchy_type = 'po'
-      AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
-    );
+    const reminderUsers = await resolvePoNotificationRecipients(po, t);
+
+    // The GRN is the vendor's trigger to raise their invoice, so they join the
+    // recipients here; sendGRNUpdationEmail points them at the vendor PO page.
+    const grnRecipients = [...new Set(
+      [...reminderUsers, po.finalized_vendor_id].filter((id) => id != null).map(Number)
+    )];
 
     const txn = await t.oneOrNone(
       `SELECT id FROM tbl_approval_hierarchy_transactions
@@ -2988,7 +3023,12 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
       );
     }
 
-    await sendGRNUpdationEmail(formattedPOData, grn_document_url, reminderUsers?.users_list);
+    // A notification failure must never roll back a GRN that was recorded.
+    try {
+      await sendGRNUpdationEmail(formattedPOData, grn_document_url, grnRecipients);
+    } catch (err) {
+      logError(`[po ${po_id}] GRN notification failed`, err);
+    }
 
     return result;
   });
@@ -3033,14 +3073,7 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       [po_id]
     );
 
-    const reminderUsers = await t.oneOrNone(
-      `SELECT ARRAY_AGG(user_id) AS users_list
-      FROM tbl_approval_hierarchy
-      WHERE company_id = $1
-      AND hierarchy_type = 'po'
-      AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
-    );
+    const reminderUsers = await resolvePoNotificationRecipients(po, t);
 
     const grnRepData = await t.oneOrNone(
       `SELECT id, name, email, phone
@@ -3049,9 +3082,14 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       AND entity_id = $1`,
       [po_id]
     );
-    
-    await scheduleGRNReminders(formattedPOData, reminderUsers?.users_list, grnRepData);
-    await sendDispatchedEmail(formattedPOData, reminderUsers?.users_list);
+
+    // The dispatch itself is already recorded; reminders and mail are advisory.
+    try {
+      await scheduleGRNReminders(formattedPOData, reminderUsers, grnRepData);
+      await sendDispatchedEmail(formattedPOData, reminderUsers);
+    } catch (err) {
+      logError(`[po ${po_id}] dispatch notification failed`, err);
+    }
 
     return true;
   })

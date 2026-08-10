@@ -81,10 +81,27 @@ export const dispatch = async ({
   data = {},
   actionUrl = null
 }) => {
-  const recipients = (Array.isArray(userIds) ? userIds : [userIds])
-    .filter((id) => id != null);
+  // Coerce to positive integers and drop anything else. Callers have passed
+  // `''` (an empty-string "recipient list"), `NaN` and objects here; each
+  // produced an INSERT that failed against the integer column and was swallowed
+  // by the per-recipient catch below, so the notification simply never arrived
+  // and nothing surfaced. Filtering up front makes a bad recipient a no-op
+  // instead of an invisible failure.
+  const recipients = [...new Set(
+    (Array.isArray(userIds) ? userIds : [userIds])
+      .map(Number)
+      .filter((id) => Number.isInteger(id) && id > 0)
+  )];
 
   if (recipients.length === 0 || !title) return [];
+
+  // Categories arrived in three casings — 'po' and 'PO' for the same module,
+  // plus 'ARC' and 'CALL_OFF'. Nothing read the column so it never showed, but
+  // the inbox filter groups by it, and a filter that lists "po" and "PO" as
+  // separate things is worse than no filter. Normalised on the way in; the
+  // read side lowercases too, so existing rows group correctly without a
+  // backfill.
+  const normalizedCategory = category ? String(category).toLowerCase() : null;
 
   const created = [];
 
@@ -93,7 +110,7 @@ export const dispatch = async ({
       const row = await notificationModel.createForRecipient({
         sender_user_id: senderUserId,
         recipient_user_id: recipientId,
-        category,
+        category: normalizedCategory,
         type,
         title,
         message: body,
@@ -106,7 +123,7 @@ export const dispatch = async ({
         id: row.id,
         title,
         body,
-        category,
+        category: normalizedCategory,
         type,
         action_url: actionUrl,
         created_at: row.created_at,
@@ -119,11 +136,25 @@ export const dispatch = async ({
 
   try {
     const subs = await pushSubscriptionModel.listByUserIds(recipients);
-    const payload = JSON.stringify({
-      title,
-      body,
-      data: { url: actionUrl || '/', category, type }
-    });
+    // Each recipient owns a different notification row, so the payload cannot be
+    // shared. Carrying the row id lets the service worker mark that exact
+    // notification read when the OS toast is clicked — without it, acting on a
+    // push left the row unread and the badge lit.
+    const idByUser = new Map(
+      created.map((row) => [Number(row.recipient_user_id), row.id])
+    );
+    const payloadFor = (userId) =>
+      JSON.stringify({
+        id: idByUser.get(Number(userId)) || null,
+        title,
+        body,
+        data: {
+          id: idByUser.get(Number(userId)) || null,
+          url: actionUrl || '/',
+          category: normalizedCategory,
+          type
+        }
+      });
 
     await Promise.all(
       subs.map((sub) =>
@@ -133,7 +164,7 @@ export const dispatch = async ({
               endpoint: sub.endpoint,
               keys: { p256dh: sub.p256dh, auth: sub.auth }
             },
-            payload
+            payloadFor(sub.user_id)
           )
           .catch(async (err) => {
             const status = err && err.statusCode;

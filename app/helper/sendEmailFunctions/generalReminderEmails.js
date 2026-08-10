@@ -4,13 +4,21 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import { buyerPoDetail, buyerPoList, toAbsoluteUrl, vendorPoDetail, vendorPoList } from "../../services/notificationLinks.js";
 
-const buildPoActionUrl = (rfq_id, po_id) =>
-  `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}`;
+// Root-relative for the in-app row; the email bodies wrap it with toAbsoluteUrl().
+const buildPoActionUrl = (po_id) => buyerPoDetail(po_id) || buyerPoList();
+const buildVendorPoActionUrl = (po_id) => vendorPoDetail(po_id) || vendorPoList();
+
+// Callers resolve recipients with ARRAY_AGG, which returns one row holding an
+// explicit NULL when no rows match — a `= []` parameter default never fires on
+// that, so every entry point normalises before it iterates.
+const toRecipientList = (userList) => (Array.isArray(userList) ? userList.filter(Boolean) : []);
 
 export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0) => {
   return new Promise(async (resolve, reject) => {
     try {
+      const list = toRecipientList(userList);
       const {
         id: po_id,
         rfq_id,
@@ -73,6 +81,9 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
       const vendorName = finalized_vendor_name || "N/A";
 
+      const linkPath = buildPoActionUrl(po_id);
+      const emailUrl = toAbsoluteUrl(linkPath);
+
       const headerContent = `<h2>Goods Received Note (GRN) Reminder</h2>`;
 
       const containerContent = `
@@ -97,7 +108,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+          <a href="${emailUrl}"
             style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600;">
             View PO in Dashboard
           </a>
@@ -119,7 +130,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
       const emails = [];
 
-      for (let user of userList) {
+      for (let user of list) {
         let u = await userModel.getUserById(user);
         u = u?.[0];
 
@@ -139,7 +150,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
       sendMail(recipients);
 
       try {
-        const userIds = await resolveRecipientUserIds(userList);
+        const userIds = await resolveRecipientUserIds(list);
         await dispatchNotification({
           userIds,
           category: 'po',
@@ -147,7 +158,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
           title: `GRN reminder — PO #${po_number} (${subjectSuffix})`,
           body: reminderTagLine,
           data: { po_id, rfq_id, day },
-          actionUrl: buildPoActionUrl(rfq_id, po_id)
+          actionUrl: linkPath
         });
       } catch (notifyErr) {
         logError(`dispatch grn_reminder_${day} failed`, notifyErr);
@@ -164,6 +175,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = []) => {
   return new Promise(async (resolve, reject) => {
     try {
+      const list = toRecipientList(userList);
       const {
         id: po_id,
         rfq_id,
@@ -173,6 +185,9 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
       } = purchase_order || {};
 
       const vendorName = finalized_vendor_name || "Vendor";
+
+      const linkPath = buildPoActionUrl(po_id);
+      const emailUrl = toAbsoluteUrl(linkPath);
 
       const headerContent = `<h2>Invoice Raised for Purchase Order</h2>`;
 
@@ -206,7 +221,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
                   </a>`
               : ""
           }
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+          <a href="${emailUrl}"
              style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             View PO in Dashboard
           </a>
@@ -228,7 +243,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
 
       const emails = [];
 
-      for (let user of userList) {
+      for (let user of list) {
         let u = await userModel.getUserById(user);
         u = u?.[0];
         if (u && u.email) emails.push(u.email);
@@ -244,7 +259,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
       sendMail(recipients);
 
       try {
-        const userIds = await resolveRecipientUserIds(userList);
+        const userIds = await resolveRecipientUserIds(list);
         await dispatchNotification({
           userIds,
           category: 'po',
@@ -252,7 +267,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
           title: `Invoice raised for PO #${po_number}`,
           body: `${vendorName} has submitted an invoice for your review.`,
           data: { po_id, rfq_id, invoice_url: invoice_url || null },
-          actionUrl: buildPoActionUrl(rfq_id, po_id)
+          actionUrl: linkPath
         });
       } catch (notifyErr) {
         logError('dispatch invoice_raised failed', notifyErr);
@@ -268,19 +283,31 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
 export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, userList) => {
   return new Promise(async (resolve, reject) => {
     try {
+      const list = toRecipientList(userList);
       const {
         id: po_id,
         rfq_id,
         po_number,
+        finalized_vendor_id,
         finalized_vendor_name,
         finalized_vendor_email,
       } = purchase_order || {};
 
       const vendorName = finalized_vendor_name || "Vendor";
 
+      // The GRN is the vendor's cue to raise an invoice, so they are notified
+      // too — but sent to their own PO page: a vendor account cannot open the
+      // buyer dashboard, so one shared link would strand half the audience.
+      const isVendor = (id) => finalized_vendor_id != null && String(id) === String(finalized_vendor_id);
+      const buyerIds = list.filter((id) => !isVendor(id));
+      const vendorIds = list.filter(isVendor);
+
+      const buyerLinkPath = buildPoActionUrl(po_id);
+      const vendorLinkPath = buildVendorPoActionUrl(po_id);
+
       const headerContent = `<h2>GRN Marked for Purchase Order</h2>`;
 
-      const containerContent = `
+      const buildContainerContent = (dashboardUrl) => `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
         <p>
           This is to inform you that <strong>GRN ( Goods Received Note )</strong> has raised and uploaded 
@@ -310,7 +337,7 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
                   </a>`
               : ""
           }
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+          <a href="${dashboardUrl}"
              style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             View PO in Dashboard
           </a>
@@ -322,33 +349,41 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
         </p>
       </div>`;
 
-      const htmlContent = generateEmailTemplate(headerContent, containerContent);
-
-      let recipients = {
-        from: config.webmasterMail,
-        subject: `GRN marked for PO #${po_number}`,
-        html: htmlContent,
-      };
-
       const emails = [];
 
-      for (let user of userList) {
+      for (let user of buyerIds) {
         let u = await userModel.getUserById(user);
         u = u?.[0];
         if (u && u.email) emails.push(u.email);
       }
 
-      if (emails && emails.length > 0) {
-        recipients.to = emails;
-      } else {
+      const vendorNotified = vendorIds.length > 0 && !!finalized_vendor_email;
+
+      if (emails.length === 0 && !vendorNotified) {
         // fallback, no emails to send
         return resolve(false);
       }
 
-      sendMail(recipients);
+      if (emails.length > 0) {
+        sendMail({
+          from: config.webmasterMail,
+          subject: `GRN marked for PO #${po_number}`,
+          html: generateEmailTemplate(headerContent, buildContainerContent(toAbsoluteUrl(buyerLinkPath))),
+          to: emails,
+        });
+      }
+
+      if (vendorNotified) {
+        sendMail({
+          from: config.webmasterMail,
+          subject: `GRN marked for PO #${po_number}`,
+          html: generateEmailTemplate(headerContent, buildContainerContent(toAbsoluteUrl(vendorLinkPath))),
+          to: finalized_vendor_email,
+        });
+      }
 
       try {
-        const userIds = await resolveRecipientUserIds(userList);
+        const userIds = await resolveRecipientUserIds(buyerIds);
         await dispatchNotification({
           userIds,
           category: 'po',
@@ -356,8 +391,20 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
           title: `GRN marked for PO #${po_number}`,
           body: `Goods Received Note has been uploaded for this Purchase Order.`,
           data: { po_id, rfq_id, grn_document_url: grn_document_url || null },
-          actionUrl: buildPoActionUrl(rfq_id, po_id)
+          actionUrl: buyerLinkPath
         });
+
+        if (vendorIds.length > 0) {
+          await dispatchNotification({
+            userIds: await resolveRecipientUserIds(vendorIds),
+            category: 'po',
+            type: 'grn_marked',
+            title: `GRN marked for PO #${po_number}`,
+            body: `Goods have been received at site. You can now raise your invoice.`,
+            data: { po_id, rfq_id, grn_document_url: grn_document_url || null },
+            actionUrl: vendorLinkPath
+          });
+        }
       } catch (notifyErr) {
         logError('dispatch grn_marked failed', notifyErr);
       }
@@ -373,6 +420,7 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
 export const sendDispatchedEmail = async (purchase_order, userList) => {
   return new Promise(async (resolve, reject) => {
     try {
+      const list = toRecipientList(userList);
       const {
         id: po_id,
         rfq_id,
@@ -400,6 +448,9 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
           }
         }
       }
+
+      const linkPath = buildPoActionUrl(po_id);
+      const emailUrl = toAbsoluteUrl(linkPath);
 
       const headerContent = `<h2>Dispatch Update for Purchase Order</h2>`;
 
@@ -442,7 +493,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+          <a href="${emailUrl}"
              style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             View PO in Dashboard
           </a>
@@ -464,7 +515,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
 
       const emails = [];
 
-      for (let user of userList) {
+      for (let user of list) {
         let u = await userModel.getUserById(user);
         u = u?.[0];
 
@@ -481,7 +532,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
       sendMail(recipients);
 
       try {
-        const userIds = await resolveRecipientUserIds(userList);
+        const userIds = await resolveRecipientUserIds(list);
         await dispatchNotification({
           userIds,
           category: 'po',
@@ -489,7 +540,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
           title: `PO #${po_number} marked as Dispatched`,
           body: `${vendorName} has dispatched the goods. Expected delivery: ${deliveryDateLabel}.`,
           data: { po_id, rfq_id, delivery_date: deliveryDate ? deliveryDate.toISOString() : null },
-          actionUrl: buildPoActionUrl(rfq_id, po_id)
+          actionUrl: linkPath
         });
       } catch (notifyErr) {
         logError('dispatch po_dispatched failed', notifyErr);
@@ -572,7 +623,7 @@ export const sendGRNRepresentativeEmail = async (purchase_order, siteRepEmail, t
 
             <div style="text-align:center; margin-top:24px;">
                 <a
-                    href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${token}"
+                    href="${toAbsoluteUrl(`/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${token}`)}"
                     style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-bottom:12px;"
                 >
                     Open GRN Page

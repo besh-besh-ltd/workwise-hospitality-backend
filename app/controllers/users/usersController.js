@@ -50,6 +50,7 @@ import {
   handleAutoCompletedInstances,
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
+import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -241,7 +242,7 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
               title: 'Welcome to Phileein Hospitality',
               body: 'Your account has been created. Use the credentials emailed to you to log in.',
               data: { company_id },
-              actionUrl: 'https://hospitality.letsworkwise.com'
+              actionUrl: buyerHome()
             });
           }
         } catch (notifyErr) {
@@ -292,7 +293,7 @@ const continueVendorCompanyRegistration = async (inputData, company_id)=>{
               title: 'Registration received',
               body: 'Your account is under review. We will notify you once it is approved.',
               data: { company_id },
-              actionUrl: 'https://hospitality.letsworkwise.com'
+              actionUrl: vendorHome()
             });
           }
         } catch (notifyErr) {
@@ -1991,7 +1992,13 @@ get_company_users: async (req, res, next) => {
           title: 'Password reset code sent',
           body: 'Check your email for the verification code to reset your password.',
           data: {},
-          actionUrl: verificationLink
+          // Deliberately NOT `verificationLink` — that carries the OTP in its
+          // query string, and an action_url is persisted to tbl_notifications
+          // and fanned out over web-push. Storing it there would hand a live
+          // password-reset code to anyone who can read the row or intercept the
+          // push payload, defeating the point of mailing it. The bare page is
+          // enough; the code comes from the email.
+          actionUrl: '/validate-otp'
         }).catch((err) => logError('dispatch forgot_password_otp_sent failed', err));
 
         let updateOtp = {

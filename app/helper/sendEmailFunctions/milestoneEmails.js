@@ -4,6 +4,7 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import { buyerPoDetail, buyerPoList, toAbsoluteUrl } from "../../services/notificationLinks.js";
 
 export const sendReminderMail = async (milestone, userList) => {
   logger.info("SENDING MILESTONE MAIL");
@@ -16,6 +17,11 @@ export const sendReminderMail = async (milestone, userList) => {
         po_id,
         rfq_id,
       } = milestone;
+
+      // Milestones live on the PO detail page; the in-app row keeps the
+      // relative path while the mail body needs the absolute one.
+      const linkPath = buyerPoDetail(po_id) || buyerPoList();
+      const emailUrl = toAbsoluteUrl(linkPath);
 
       const headerContent = `<h2>Upcoming Payment Milestone Reminder</h2>`;
 
@@ -38,7 +44,7 @@ export const sendReminderMail = async (milestone, userList) => {
           Please ensure the necessary actions are taken on or before the due date.
         </p>
 
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}" 
+        <a href="${emailUrl}"
            style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600; margin: 20px auto;">
           View Milestone in Dashboard
         </a>
@@ -84,7 +90,7 @@ export const sendReminderMail = async (milestone, userList) => {
           title: `Milestone "${milestone_name}" due soon`,
           body: `Due on ${new Date(due_date).toDateString()}.`,
           data: { po_id, rfq_id, milestone_name, due_date },
-          actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}`
+          actionUrl: linkPath
         });
       } catch (notifyErr) {
         logError('dispatch milestone_reminder failed', notifyErr);

@@ -4,6 +4,7 @@ import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
 import { dispatch as dispatchNotification } from "../../services/notificationService.js";
+import { buyerRfqDetail, buyerRfqList, toAbsoluteUrl } from "../../services/notificationLinks.js";
 
 const escapeHtml = (s) =>
   String(s ?? '')
@@ -49,7 +50,10 @@ export const sendRfqPublishFailureToCreator = async ({ rfq, failureReason }) => 
         })
       : 'an earlier scheduled time';
 
-    const detailsUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management/${rfq.id}`;
+    // `rfq-management` is a leaf listing page, so the old `/rfq-management/<id>`
+    // form matched no route at all — Force Publish lives on the workspace.
+    const linkPath = buyerRfqDetail(rfq.id) || buyerRfqList();
+    const detailsUrl = toAbsoluteUrl(linkPath);
     const subject = `Action required: ${entityLabel} #${rfq.rfq_no} failed to auto-publish`;
 
     const reasonBlock = failureReason
@@ -117,7 +121,7 @@ export const sendRfqPublishFailureToCreator = async ({ rfq, failureReason }) => 
         title: `Action required: ${entityLabel} #${rfq.rfq_no} failed to auto-publish`,
         body: `Auto-publish failed after retries. Use Force Publish to publish manually.`,
         data: { rfq_id: rfq.id, is_tender: rfq.is_tender, reason: failureReason || null },
-        actionUrl: detailsUrl
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('[Publish Failure] dispatch failed', notifyErr);

@@ -3,6 +3,7 @@ import { logger } from '../util/logger.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { notifyArcEvent } from './arcNotificationService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
+import { arcVendorRequests } from './notificationLinks.js';
 import arcModel from '../models/arc_v2/arcModel.js';
 import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
 import { arcMomentIst, nowIst } from '../helper/arcTime.js';
@@ -27,8 +28,6 @@ import { arcMomentIst, nowIst } from '../helper/arcTime.js';
  * one ARC's failure never aborts the sweep, and notifications never run inside
  * the tx. `now` is injectable for deterministic tests.
  */
-
-const VENDOR_BASE = '/dashboard/vendor/rate-contracts';
 
 /**
  * @param {{ now?: Date|null }} [opts]
@@ -122,7 +121,7 @@ async function notifyVendorsOfSubmissionClose(arcId) {
       title:        'Submissions closed',
       body:         `Quote submission for ${arc.title} (${arc.arc_number}) has closed. Thank you for participating.`,
       data:         { arc_id: arc.id, arc_number: arc.arc_number, event_type: 'submission_closed' },
-      actionUrl:    `${VENDOR_BASE}/${arc.id}`,
+      actionUrl:    arcVendorRequests({ tab: 'submitted' }),
     });
   } catch (err) {
     logger.error({ err, arcId }, '[arcSubmissionClose] vendor submission-closed notice failed');

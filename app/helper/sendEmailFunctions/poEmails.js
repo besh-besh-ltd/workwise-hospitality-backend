@@ -3,6 +3,7 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import { buyerRfqDetail, buyerRfqList, toAbsoluteUrl } from "../../services/notificationLinks.js";
 
 /**
  * Send notification to all company members when PO is fully approved
@@ -62,6 +63,9 @@ export const sendPOApprovalCompletionNotification = async ({
         }).join('')
       : '<tr><td colspan="4" style="padding:8px; text-align:center;">No approval history available</td></tr>';
 
+    const linkPath = buyerRfqDetail(rfqDetails?.id) || buyerRfqList();
+    const emailUrl = toAbsoluteUrl(linkPath);
+
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
 
@@ -116,7 +120,7 @@ export const sendPOApprovalCompletionNotification = async ({
           </table>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-details?id=${rfqDetails?.id}"
+            <a href="${emailUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
               View RFQ Details
             </a>
@@ -155,7 +159,7 @@ export const sendPOApprovalCompletionNotification = async ({
         title: `PO #${po_number} approved — awaiting vendor acceptance`,
         body: `PO sent to ${vendorName}. Vendor must accept or reject before it can proceed.`,
         data: { po_id: poDetails?.id, rfq_id: rfqDetails?.id, vendor_id: vendorDetails?.id },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/rfq-details?id=${rfqDetails?.id}`
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch po_approval_completed failed', notifyErr);

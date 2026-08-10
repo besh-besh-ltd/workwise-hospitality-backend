@@ -3,6 +3,14 @@ import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
+import {
+  buyerQuoteComparison,
+  buyerRfqDetail,
+  buyerRfqList,
+  toAbsoluteUrl,
+  vendorRfqDetail,
+  vendorRfqList
+} from "../../services/notificationLinks.js";
 
 /**
  * Send notification emails when technical evaluation completes
@@ -19,6 +27,12 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
 
     const { id: rfq_id, rfq_no, title: rfq_title } = rfqDetails || {};
     const { total_passed_verified, required_passed_vendors } = techEvalDetails || {};
+
+    // The comparison surface is where the reader acts next, so it carries the
+    // in-app row; the RFQ workspace stays a secondary button in the mail.
+    const linkPath = buyerQuoteComparison(rfq_id) || buyerRfqList();
+    const compareUrl = toAbsoluteUrl(linkPath);
+    const rfqUrl = toAbsoluteUrl(buyerRfqDetail(rfq_id) || buyerRfqList());
 
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
@@ -48,11 +62,11 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-details?id=${rfq_id}"
+            <a href="${rfqUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
               View RFQ Details
             </a>
-            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
+            <a href="${compareUrl}"
                style="background-color:#10B981; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
               Compare Quotes
             </a>
@@ -85,7 +99,7 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
         title: `Technical Evaluation complete — RFQ #${rfq_no}`,
         body: `${total_passed_verified}/${required_passed_vendors} vendors qualified. Ready for quote comparison.`,
         data: { rfq_id, tech_eval_id: techEvalDetails?.id },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/buyer/quote-compare?rfq=${rfq_id}`
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch tech_eval_completed failed', notifyErr);
@@ -111,8 +125,11 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
     const { id: rfq_id, rfq_no, is_tender, product_name, company_name } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
 
+    const linkPath = vendorRfqDetail(rfq_id) || vendorRfqList();
+
     for (const vendor of vendors) {
-      const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}`;
+      // The single-use token only rides along on the emailed link.
+      const viewUrl = `${toAbsoluteUrl(linkPath)}&token=${vendor.token}`;
 
       const headerContent = `<h2>Hello ${vendor.vendor_name || 'Vendor'},</h2>`;
 
@@ -167,7 +184,7 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
         title: `Technical Evaluation passed — ${entityLabel} #${rfq_no}`,
         body: `Your submission for ${product_name || 'the product'} has been technically accepted.`,
         data: { rfq_id, is_tender },
-        actionUrl: `${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor/inquiries-details?id=${rfq_id}`
+        actionUrl: linkPath
       });
     } catch (notifyErr) {
       logError('dispatch vendor_tech_accepted failed', notifyErr);
