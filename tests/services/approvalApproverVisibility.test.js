@@ -50,6 +50,9 @@ const { default: rfqModel } = await import("../../app/models/rfqModel.js");
 const { createApprovalInstance, ENTITY_APPROVE_RESOURCE_MAP } = await import(
   "../../app/models/generalModel.js"
 );
+const { default: rfqController } = await import(
+  "../../app/controllers/rfq/rfqController.js"
+);
 
 afterAll(async () => { await closeDb(); });
 
@@ -408,5 +411,86 @@ describe("createApprovalInstance refuses a policy that resolves to nobody", () =
     if (res?.instance?.id) created.instanceIds.push(res.instance.id);
     expect(res?.instance?.id).toBeTruthy();
     expect(res?.totalSteps ?? 0).toBeGreaterThan(0);
+  });
+});
+
+// ===========================================================================
+//  Group 5 — the detail gate must agree with the list it mirrors
+// ===========================================================================
+
+describe("getRfqById applies the same axes as the RFQ list", () => {
+  function mockRes() {
+    const calls = { status: 200, body: null };
+    return {
+      calls,
+      res: {
+        status(c) { calls.status = c; return this; },
+        json(b) { calls.body = b; return this; },
+        end() { return this; },
+      },
+    };
+  }
+
+  const openRfq = async (rfqId, user) => {
+    const m = mockRes();
+    await rfqController.getRfqById(
+      { params: { id: String(rfqId) }, query: {}, user },
+      m.res,
+      () => {}
+    );
+    return m.calls;
+  };
+
+  it("lets a super admin open an RFQ instead of 403ing them", async () => {
+    // The guard was `user_type != 3` (vendors), so user_type 8 ran the scope
+    // check — and super admins hold NO tbl_user_role_scopes rows at all, which
+    // is why purchaseOrderModel and arcScope both special-case them. This one
+    // endpoint refused the only user type that is supposed to see everything.
+    const rfqId = await makeSubmittedRfq();
+
+    const calls = await openRfq(rfqId, { id: IDS.users.superAdmin, user_type: 8 });
+    expect(calls.status).not.toBe(403);
+  });
+
+  it("honours the process axis, so detail is not wider than list", async () => {
+    // The list filters `(urs.process_id IS NULL OR urs.process_id = RFQ.process_id)`;
+    // this gate did not. A user bound to process A could be filtered out of
+    // every list and still open a process-B RFQ by URL — a defence-in-depth
+    // gate that was strictly weaker than the surface it defends.
+    const rfqId = await makeSubmittedRfq();   // process A_P1
+
+    // A user whose ONLY rfq.read is bound to a different process.
+    const PROC_BOUND = 80094;
+    await db.none(
+      `INSERT INTO tbl_users (id, name, email, user_type, status, company_id)
+       VALUES ($1,'ProcBound','procbound@test.local',2,1,$2) ON CONFLICT (id) DO NOTHING`,
+      [PROC_BOUND, IDS.companies?.A ?? 90001]
+    );
+    await db.none(
+      `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
+       VALUES ($1,$2,NULL,0) ON CONFLICT DO NOTHING`,
+      [PROC_BOUND, IDS.hospitality.A]
+    );
+    await db.none(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
+       VALUES ($1,$2,$3,NULL,NULL,$4)`,
+      [PROC_BOUND, roleReadUnrestricted, IDS.hospitality.A, IDS.processes.A_P2]
+    );
+
+    const calls = await openRfq(rfqId, { id: PROC_BOUND, user_type: 2 });
+    expect(calls.status).toBe(403);
+
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id=$1`, [PROC_BOUND]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id=$1`, [PROC_BOUND]);
+    await db.none(`DELETE FROM tbl_users WHERE id=$1`, [PROC_BOUND]);
+  });
+
+  it("still lets a blind approver open the RFQ they must approve", async () => {
+    // The list fix alone would be useless if the row appeared and then 403'd.
+    const rfqId = await makeSubmittedRfq();
+    await assignApprover(rfqId, BLIND);
+
+    const calls = await openRfq(rfqId, { id: BLIND, user_type: 2 });
+    expect(calls.status).not.toBe(403);
   });
 });
