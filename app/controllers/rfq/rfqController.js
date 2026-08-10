@@ -8208,7 +8208,30 @@ const rfqController = {
           LIMIT 1
         `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id, rfqData.department_id || null]);
 
+        // A live approver may open the RFQ they have been asked to approve even
+        // when no single scope row carries rfq/boq.read for its
+        // (hotel x department x process) tuple. Without this the list fix alone
+        // is useless: the row would appear in "pending my approval" and then
+        // 403 on click. Same predicate as the list — see
+        // authorizationService.buildApproverReadExemption for the reasoning.
+        let isAssignedApprover = false;
         if (!hasAccess) {
+          isAssignedApprover = !!(await db.oneOrNone(`
+            SELECT 1
+              FROM tbl_approval_instances ai
+              JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+              JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+             WHERE ai.status = 'PENDING'
+               AND ai.entity_type IN ('RFQ', 'TENDER')
+               AND ai.entity_id = $2
+               AND asa.approver_user_id = $1
+               AND asa.status = 'PENDING'
+               AND asa.removed_at IS NULL
+             LIMIT 1
+          `, [user_id, rfqData.id]));
+        }
+
+        if (!hasAccess && !isAssignedApprover) {
           return res.status(403).json({ status: 0, message: 'You do not have permission to view this RFQ' });
         }
       }

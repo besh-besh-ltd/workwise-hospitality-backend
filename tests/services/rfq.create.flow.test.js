@@ -510,13 +510,29 @@ describe("rfqController.create — happy path", () => {
 // ===========================================================================
 
 describe("rfqController.create — multi-hotel duplication", () => {
-  it("F-DUPLICATE-001 — multi-hotel RFQ commits all dupes; each carries the parent's process_id + department_id", async () => {
-    // Use hotels A1 + A3. Both have valid 1+ step RFQ policies under P1
-    // (A1_P1_RFQ has 2 ALL steps, A3_P1_RFQ has 1 ANY step). A2/P1 is
-    // intentionally a zero-step "auto-skip" fixture for a separate engine
-    // test — including it here would unnecessarily entangle the two
-    // contracts. The F-DUPLICATE-001 principle (process_id + department_id
-    // propagation) is fully exercised with one dupe.
+  it("F-DUPLICATE-001 — a multi-hotel RFQ is refused ENTIRELY when one BU's policy can approve nothing", async () => {
+    // Hotels A1 + A3. A3_P1_RFQ names a1_proc_finance at all three levels, and
+    // that user is mapped and scoped to hotel A1 ONLY (tests/fixtures/users.js
+    // :74, :117). So every step of A3's policy resolves to nobody.
+    //
+    // WHAT THIS USED TO ASSERT, AND WHY IT CHANGED. It expected 200 and both
+    // rows committed. That outcome depended on createApprovalInstance
+    // inserting the A3 duplicate's instance and immediately stamping it
+    // APPROVED / current_step = 0 because every step had been dropped — i.e.
+    // the duplicate went live having been approved by nobody, and the test
+    // recorded that as success.
+    //
+    // createApprovalInstance now refuses that instance instead. This is the
+    // SAME contract the engine has always applied to a MISSING policy — a hard
+    // 400 that rolls the whole create back (see "Missing-policy is a HARD FAIL"
+    // in startApprovalForRfq) — and "a policy that can approve nothing" is that
+    // condition wearing a different mask. Making the two behave identically is
+    // the point.
+    //
+    // The propagation this test is named for (process_id + department_id on the
+    // duplicate) is still covered: duplicateRfqForHotels runs inside the same
+    // transaction, so the assertions below prove the rollback left NOTHING
+    // half-created, which is the stronger property.
     const rfq_id = await makeDraftRfq();
     await addProduct(rfq_id, 1);
     await addQuantityAndUnitSpecs(rfq_id, 1);
@@ -546,21 +562,27 @@ describe("rfqController.create — multi-hotel duplication", () => {
       ...allRfqs.map((r) => r.id).filter((id) => id !== rfq_id && !inserted.rfqIds.includes(id))
     );
 
-    // POST-FIX: duplicateRfqForHotels' INSERT copies process_id + department_id
-    // from the parent, so each duplicate RFQ resolves its approval policy
-    // correctly. Both rows commit and the controller responds 200.
-    expect(m.calls.status).toBe(200);
+    // Refused, and refused as a whole.
+    expect(m.calls.status).toBe(400);
+    expect(JSON.stringify(m.calls.body)).toMatch(/approv/i);
+
+    // NOTHING half-created: no duplicate row survives the rollback...
     const dupes = allRfqs.filter((r) => r.id !== rfq_id);
-    expect(dupes.length).toBe(1);
-    expect(dupes[0].hotel_id).toBe(IDS.hotels.A3);
-    // Duplicate carries the parent's process_id (not NULL) — and the parent's
-    // department_id (which makeDraftRfq leaves NULL by default in this test
-    // file, so we assert it matches the parent rather than asserting NOT NULL).
-    const parent = await db.one(`SELECT process_id, department_id FROM tbl_rfq WHERE id=$1`, [rfq_id]);
-    const dupe = await db.one(`SELECT process_id, department_id FROM tbl_rfq WHERE id=$1`, [dupes[0].id]);
-    expect(dupe.process_id).toBe(parent.process_id);
-    expect(dupe.process_id).toBe(IDS.processes.A_P1);
-    expect(dupe.department_id).toBe(parent.department_id);
+    expect(dupes).toEqual([]);
+
+    // ...and the parent is still an unsubmitted draft rather than a published
+    // RFQ with an approval nobody granted.
+    const parent = await db.one(
+      `SELECT status, is_published FROM tbl_rfq WHERE id=$1`, [rfq_id]
+    );
+    expect(Number(parent.status)).toBe(0);
+    expect(Number(parent.is_published)).toBe(0);
+
+    // And no approval instance was left behind for either hotel.
+    const instances = await db.any(
+      `SELECT id FROM tbl_approval_instances WHERE entity_type='RFQ' AND entity_id=$1`, [rfq_id]
+    );
+    expect(instances).toEqual([]);
   });
 });
 
