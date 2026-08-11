@@ -1087,10 +1087,26 @@ export async function getPODetailFull(po_id, scope) {
     ? await db.oneOrNone(`SELECT name FROM tbl_users WHERE id = $1`, [po.rfq_created_by])
     : null;
 
-  // --- RFQ buyer docs + vendor quote docs ---
-  // Only available for RFQ-sourced POs (call-off POs have no rfq_id).
-  let rfq_docs = null;
-  let vendor_docs = null;
+  // --- Every document on this PO, grouped by where it came from -------------
+  //
+  // An approver deciding approve-vs-reject needs all the paperwork in ONE
+  // place. The detail page used to scatter it: the PO pdf / GRN / invoice sat
+  // in a prominent card mid-page, while the RFQ, quote and tech-eval files sat
+  // in a pair of cards at the very bottom of the right-hand aside — below the
+  // fold on most screens. Reviewers were missing that aside entirely and
+  // rejecting POs for paperwork that was on the page all along.
+  //
+  // These are four genuinely DIFFERENT document classes, not one class shown
+  // twice, so consolidating means grouping rather than dropping either surface.
+  // The group is recorded here, at the point each row is read, because only
+  // this layer knows the provenance — every group below comes from a different
+  // table, and a filename on the client cannot tell you which.
+  //
+  // RFQ/quote/tech groups are only available for RFQ-sourced POs; a call-off PO
+  // is awarded from an ARC and has no rfq_id, so it carries PO documents alone.
+  let rfqGroupFiles = [];
+  let vendorQuoteGroupFiles = [];
+  let technicalGroupFiles = [];
 
   if (po.rfq_id) {
     const FILE_LABEL = {
@@ -1177,38 +1193,57 @@ export async function getPODetailFull(po_id, scope) {
         )
       : [];
 
-    // Merge buyer per-product files (TDS/QAP/SPEC) + clause files
-    const buyerProductMap = new Map();
-    for (const row of rfqProductRows) {
-      if (!buyerProductMap.has(row.product_name)) buyerProductMap.set(row.product_name, []);
-      buyerProductMap.get(row.product_name).push({ url: row.url, label: toLabel(row.file_type) });
-    }
-    for (const row of buyerClauseFileRows) {
-      if (!buyerProductMap.has(row.product_name)) buyerProductMap.set(row.product_name, []);
-      buyerProductMap.get(row.product_name).push({ url: row.url, label: "Clause doc" });
-    }
+    // A file entry is flat on purpose: `product` is a plain attribute rather
+    // than a nesting level, so the client renders one uniform row everywhere
+    // and RFQ-level and per-product files can sit in a single scannable list.
+    const toFile = (row, label) => ({
+      url: row.url,
+      name: fileNameFromUrl(row.url),
+      label,
+      product: row.product_name || null,
+    });
 
-    rfq_docs = {
-      rfq_level: rfqLevelRows.map((r) => ({ url: r.url, label: toLabel(r.file_type) })),
-      products: Array.from(buyerProductMap.entries()).map(([name, files]) => ({ name, files })),
-    };
+    // What the buyer issued with the RFQ: header T&Cs, then per-product
+    // TDS / QAP / spec sheets.
+    rfqGroupFiles = [
+      ...rfqLevelRows.map((r) => toFile(r, toLabel(r.file_type))),
+      ...rfqProductRows.map((r) => toFile(r, toLabel(r.file_type))),
+    ];
 
-    // Merge vendor per-product docs + eval response files
-    const vendorProdMap = new Map();
-    for (const row of vendorProductDocRows) {
-      if (!vendorProdMap.has(row.product_name)) vendorProdMap.set(row.product_name, []);
-      vendorProdMap.get(row.product_name).push({ url: row.url, label: toLabel(row.file_type) });
-    }
-    for (const row of vendorEvalRows) {
-      if (!vendorProdMap.has(row.product_name)) vendorProdMap.set(row.product_name, []);
-      vendorProdMap.get(row.product_name).push({ url: row.url, label: "Eval response" });
-    }
+    // What THIS PO's vendor attached to the quote it was awarded on.
+    vendorQuoteGroupFiles = [
+      ...vendorQuoteLevelRows.map((r) => toFile(r, toLabel(r.file_type))),
+      ...vendorProductDocRows.map((r) => toFile(r, toLabel(r.file_type))),
+    ];
 
-    vendor_docs = {
-      quote_level: vendorQuoteLevelRows.map((r) => ({ url: r.url, label: toLabel(r.file_type) })),
-      products: Array.from(vendorProdMap.entries()).map(([name, files]) => ({ name, files })),
-    };
+    // The only mixed-provenance group, so the labels — not the group title —
+    // carry who supplied each file.
+    technicalGroupFiles = [
+      ...buyerClauseFileRows.map((r) => toFile(r, "Buyer clause")),
+      ...vendorEvalRows.map((r) => toFile(r, "Vendor response")),
+    ];
   }
+
+  // Ordered for a decision, not for a filesystem: the artefact being approved
+  // first, then what was asked for, then what was offered, then the evidence
+  // it was judged on. Empty groups are omitted so the card never shows a
+  // heading with nothing under it.
+  const PO_DOC_LABEL = { po: "PO", grn: "GRN", invoice: "Invoice" };
+  const document_groups = [
+    {
+      key: "po",
+      title: "PO documents",
+      files: docs.map((d) => ({
+        url: d.url,
+        name: d.name,
+        label: PO_DOC_LABEL[d.type] || "Document",
+        product: null,
+      })),
+    },
+    { key: "rfq", title: "RFQ documents (buyer-issued)", files: rfqGroupFiles },
+    { key: "vendor_quote", title: "Vendor quote documents", files: vendorQuoteGroupFiles },
+    { key: "technical", title: "Technical evaluation documents", files: technicalGroupFiles },
+  ].filter((g) => g.files.length > 0);
 
   // ── Does this PO cover every product on its RFQ? ────────────────────────
   //
@@ -1324,9 +1359,28 @@ export async function getPODetailFull(po_id, scope) {
     awaiting_me,
     current_step_label,
     current_approvers,
-    rfq_docs,
-    vendor_docs,
+    // `docs` stays the raw PO-document list (the hero's "Download PO" control
+    // still reads the po-typed entry out of it); document_groups is the
+    // grouped, decision-ordered view the detail page renders.
+    document_groups,
   };
+}
+
+// Display name for an attachment. Storage rows carry only a URL — sometimes an
+// absolute S3 url, sometimes a bare key — so the name is the last path segment,
+// percent-decoded, with query/fragment stripped.
+function fileNameFromUrl(url) {
+  if (!url) return "File";
+  const path = String(url).split("?")[0].split("#")[0];
+  const seg = path.split("/").filter(Boolean).pop();
+  if (!seg) return "File";
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    // A stray "%" in the key makes decodeURIComponent throw; the raw segment is
+    // still a better name than a generic placeholder.
+    return seg;
+  }
 }
 
 function humanizeStatus(status) {
