@@ -1099,6 +1099,42 @@ export async function getPODetailFull(po_id, scope) {
     };
   }
 
+  // ── Does this PO cover every product on its RFQ? ────────────────────────
+  //
+  // A purchase order is per-vendor and is built from the quote finalizations
+  // made so far, so a draft can be initiated while products on the same RFQ
+  // are still unfinalized. Initiating then FREEZES this PO: anything finalized
+  // afterwards is clubbed into a SEPARATE purchase order. The buyer has to be
+  // told that before they commit, which is what the "Force Initiate" warning
+  // on the detail page exists to say.
+  //
+  // Derived here, on the server, rather than inferred by the client from the
+  // items array: the client sees only the rows it was sent, so it cannot know
+  // what is missing. Call-off POs are sourced from an ARC/MR, not from RFQ
+  // finalization, so the question does not apply and coverage is reported as
+  // complete.
+  let productCoverage = { rfq_product_count: 0, po_product_count: 0, covers_all_products: true };
+  if (!po.is_call_off && po.rfq_id) {
+    const cov = await db.one(
+      `SELECT
+         (SELECT count(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = $2) AS rfq_product_count,
+         (SELECT count(DISTINCT pop.rfq_product_id)::int
+            FROM tbl_purchase_order_product pop
+           WHERE pop.purchase_order_id = $1) AS po_product_count`,
+      [poId, po.rfq_id]
+    );
+    productCoverage = {
+      rfq_product_count: cov.rfq_product_count,
+      po_product_count: cov.po_product_count,
+      // Only a PO carrying every product of its RFQ is "complete". Equality is
+      // deliberate over >=: a PO can never hold more RFQ products than the RFQ
+      // has, and if that ever became true it is a data fault we should not
+      // paper over by calling the PO complete.
+      covers_all_products:
+        cov.rfq_product_count > 0 && cov.po_product_count === cov.rfq_product_count,
+    };
+  }
+
   return {
     id: po.id,
     po_number: po.po_number,
@@ -1116,6 +1152,9 @@ export async function getPODetailFull(po_id, scope) {
     // different answer (see PODetail's Force Initiate gate).
     hotel_id: po.hotel_id != null ? Number(po.hotel_id) : null,
     department_id: po.department_id != null ? Number(po.department_id) : null,
+    // Product coverage — drives Initiate (covers everything) vs Force
+    // Initiate (does not, so later finalizations land in another PO).
+    ...productCoverage,
     // Call-off provenance (null for regular RFQ-sourced POs) — lets the detail
     // page link back to the originating ARC and material requisition.
     call_off: po.is_call_off
