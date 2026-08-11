@@ -43,6 +43,10 @@ function mockExpress(opts = {}) {
 // concrete-id tracking per CONVENTIONS.md §6.
 const inserted = { rfqIds: [] };
 
+// Catalogue variants used by the draft-product tests below.
+const VARIANT_ID = 1;
+const OTHER_VARIANT_ID = 2;
+
 beforeEach(() => { inserted.rfqIds = []; });
 
 afterEach(async () => {
@@ -51,6 +55,11 @@ afterEach(async () => {
   await db.none(`DELETE FROM tbl_rfq_terms_map WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(
+    `DELETE FROM tbl_rfq_product_files WHERE rfq_product_id IN
+       (SELECT id FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[]))`,
+    [inserted.rfqIds]
+  );
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted.rfqIds]);
 });
@@ -264,14 +273,17 @@ describe("createOrUpdateRfqDraftWithProductVendors — happy paths", () => {
 // ===========================================================================
 
 describe("saveDraft — updates draft metadata before submission", () => {
+  // rfq_no is UNIQUE, so it has to vary per call — a test that makes two
+  // drafts (e.g. the cross-RFQ delete case) would otherwise collide.
+  let bareDraftSeq = 0;
   async function makeBareDraft() {
     const r = await db.one(
       `INSERT INTO tbl_rfq
          (rfq_no, comment, company_name, response_email, contact_name, contact_number,
           bid_end_date, location, is_published, status, created_by, updated_by, "timestamp")
-       VALUES (8201001, '', '', '', '', '', '', '', 0, 0, $1, $1, NOW())
+       VALUES ($2, '', '', '', '', '', '', '', 0, 0, $1, $1, NOW())
        RETURNING id`,
-      [IDS.users.a1_proc_buyer]
+      [IDS.users.a1_proc_buyer, 8201001 + bareDraftSeq++]
     );
     inserted.rfqIds.push(r.id);
     return r.id;
@@ -339,5 +351,293 @@ describe("saveDraft — updates draft metadata before submission", () => {
     // structured `httpError` like the update controller does.
     expect([400, 403]).toContain(m.calls.status);
     expect(m.calls.body.errors.rfq).toMatch(/do not have access/i);
+  });
+
+  // =========================================================================
+  //  Adding a product to an existing draft, then saving.
+  //
+  //  The edit buffer is an object keyed by `tbl_rfq_products.id`. A product
+  //  added in THIS editing session has no server id yet, so the client files
+  //  its edits under the literal string "undefined". The files branch used to
+  //  pass that key straight into `rfq_product_id = $1::INT`, so Postgres threw
+  //  `invalid input syntax for type integer: "undefined"`, the whole save
+  //  rolled back, and the buyer could not save a draft at all after adding a
+  //  product. Reported from production 2026-08-11.
+  //
+  //  Every bucket must resolve the product by the identity carried INSIDE the
+  //  value (product_id + variant), never by the key.
+  // =========================================================================
+  describe("adding a product to a draft — the bucket key is not a primary key", () => {
+    async function draftWithProduct(variant = 0) {
+      const rfq_id = await makeBareDraft();
+      const p = await db.one(
+        `INSERT INTO tbl_rfq_products
+           (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, qap, variant)
+         VALUES ($1, '', '0', '', '', $2, '0', $3)
+         RETURNING id`,
+        [rfq_id, VARIANT_ID, variant]
+      );
+      return { rfq_id, rfqProductId: p.id };
+    }
+
+    function saveBody(rfq_id, updatableProducts) {
+      return {
+        rfq_id,
+        hospitality_company_id: IDS.hospitality.A,
+        hotel_id: IDS.hotels.A1,
+        process_id: IDS.processes.A_P1,
+        is_tender: 0,
+        filters: { global: null, local: null },
+        updatableData: { products: updatableProducts },
+      };
+    }
+
+    it('does not 500 when a just-added product files its edits under the "undefined" key', async () => {
+      const { rfq_id, rfqProductId } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            // Exactly what the client sends for a product added in-session.
+            files: {
+              undefined: {
+                product_id: VARIANT_ID,
+                variant: 0,
+                spec_file: ["https://files.test/spec-1.pdf"],
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      // and the file landed on the real product row, not nowhere
+      const files = await db.any(
+        `SELECT rfq_product_id, file_type, file_url
+           FROM tbl_rfq_product_files WHERE rfq_product_id = $1`,
+        [rfqProductId]
+      );
+      expect(files).toHaveLength(1);
+      expect(files[0].file_type).toBe("SPEC");
+      expect(files[0].file_url).toBe("https://files.test/spec-1.pdf");
+      await db.none(`DELETE FROM tbl_rfq_product_files WHERE rfq_product_id = $1`, [rfqProductId]);
+    });
+
+    it('accepts the "new:<variantId>:<variant>" key the client mints for unsaved products', async () => {
+      const { rfq_id, rfqProductId } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            files: {
+              [`new:${VARIANT_ID}:0`]: {
+                product_id: VARIANT_ID,
+                variant: 0,
+                qap_file: ["https://files.test/qap-1.pdf"],
+              },
+            },
+            comment: {
+              [`new:${VARIANT_ID}:0`]: {
+                product_id: VARIANT_ID,
+                variant: 0,
+                comment: "added in this session",
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const files = await db.any(
+        `SELECT file_type FROM tbl_rfq_product_files WHERE rfq_product_id = $1`,
+        [rfqProductId]
+      );
+      expect(files.map((f) => f.file_type)).toEqual(["QAP"]);
+      const row = await db.one(`SELECT comment FROM tbl_rfq_products WHERE id = $1`, [rfqProductId]);
+      expect(row.comment).toBe("added in this session");
+      await db.none(`DELETE FROM tbl_rfq_product_files WHERE rfq_product_id = $1`, [rfqProductId]);
+    });
+
+    it("a comment for a product with no row on this RFQ is dropped, not written onto another product", async () => {
+      const { rfq_id, rfqProductId } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            comment: {
+              undefined: {
+                product_id: OTHER_VARIANT_ID, // never added to this RFQ
+                variant: 0,
+                comment: "should not land anywhere",
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const row = await db.one(`SELECT comment FROM tbl_rfq_products WHERE id = $1`, [rfqProductId]);
+      expect(row.comment).toBe("");
+    });
+
+    it("files for a product with no row on this RFQ are dropped without failing the save", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            files: {
+              undefined: {
+                product_id: OTHER_VARIANT_ID, // never added to this RFQ
+                variant: 0,
+                spec_file: ["https://files.test/orphan.pdf"],
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const orphans = await db.any(
+        `SELECT f.id FROM tbl_rfq_product_files f
+           JOIN tbl_rfq_products p ON p.id = f.rfq_product_id
+          WHERE p.rfq_id = $1`,
+        [rfq_id]
+      );
+      expect(orphans).toHaveLength(0);
+    });
+
+    // `products.deletable` is a client-supplied list of PRIMARY KEYS. The
+    // delete used to run `WHERE id = $1` with no rfq_id predicate, so a buyer
+    // editing their own draft could name any tbl_rfq_products.id in the system
+    // — including another tenant's — and it would be deleted along with its
+    // files and technical evaluations.
+    it("cannot delete a product belonging to a different RFQ by naming its id", async () => {
+      const victim = await draftWithProduct();
+      const attacker = await draftWithProduct();
+
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(attacker.rfq_id, { deletable: [victim.rfqProductId] }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const stillThere = await db.oneOrNone(
+        `SELECT id, rfq_id FROM tbl_rfq_products WHERE id = $1`,
+        [victim.rfqProductId]
+      );
+      expect(stillThere).not.toBeNull();
+      expect(stillThere.rfq_id).toBe(victim.rfq_id);
+    });
+
+    it("still deletes a product that does belong to the RFQ being saved", async () => {
+      const { rfq_id, rfqProductId } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, { deletable: [rfqProductId] }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const gone = await db.oneOrNone(`SELECT id FROM tbl_rfq_products WHERE id = $1`, [rfqProductId]);
+      expect(gone).toBeNull();
+    });
+
+    it("a non-numeric id in deletable is ignored instead of aborting the save", async () => {
+      const { rfq_id, rfqProductId } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          deletable: ["undefined", `new:${VARIANT_ID}:0`],
+          updatable: {
+            comment: {
+              undefined: { product_id: VARIANT_ID, variant: 0, comment: "saved anyway" },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const row = await db.one(`SELECT comment FROM tbl_rfq_products WHERE id = $1`, [rfqProductId]);
+      expect(row.comment).toBe("saved anyway");
+    });
+
+    // tbl_rfq_product_vendors.variant is nullable, so an undefined variant
+    // writes NULL against a product row holding 0 — and every later lookup
+    // matches on the (product_variant_id, variant) pair, so the vendor is
+    // mapped in name only and never actually sees the RFQ.
+    it("maps a vendor at variant 0 when the client sends no variant", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: {
+          ...saveBody(rfq_id, {}),
+          updatableData: {
+            vendors: {
+              undefined: {
+                product_id: VARIANT_ID,
+                addable: [IDS.users.vendor_alpha],
+              },
+            },
+          },
+        },
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const mapped = await db.any(
+        `SELECT variant FROM tbl_rfq_product_vendors WHERE rfq_id = $1 AND user_id = $2`,
+        [rfq_id, IDS.users.vendor_alpha]
+      );
+      expect(mapped).toHaveLength(1);
+      expect(mapped[0].variant).toBe(0);
+    });
+
+    it("a variant-bearing product resolves to its own row, not the variant-0 sibling", async () => {
+      const rfq_id = await makeBareDraft();
+      const base = await db.one(
+        `INSERT INTO tbl_rfq_products
+           (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, qap, variant)
+         VALUES ($1, '', '0', '', '', $2, '0', 0) RETURNING id`,
+        [rfq_id, VARIANT_ID]
+      );
+      const withVariant = await db.one(
+        `INSERT INTO tbl_rfq_products
+           (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, qap, variant)
+         VALUES ($1, '', '0', '', '', $2, '0', 1) RETURNING id`,
+        [rfq_id, VARIANT_ID]
+      );
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            files: {
+              undefined: {
+                product_id: VARIANT_ID,
+                variant: 1,
+                spec_file: ["https://files.test/variant-1.pdf"],
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const onVariant = await db.any(
+        `SELECT id FROM tbl_rfq_product_files WHERE rfq_product_id = $1`, [withVariant.id]);
+      const onBase = await db.any(
+        `SELECT id FROM tbl_rfq_product_files WHERE rfq_product_id = $1`, [base.id]);
+      expect(onVariant).toHaveLength(1);
+      expect(onBase).toHaveLength(0);
+      await db.none(`DELETE FROM tbl_rfq_product_files WHERE rfq_product_id = ANY($1::int[])`,
+        [[base.id, withVariant.id]]);
+    });
   });
 });

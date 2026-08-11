@@ -2752,12 +2752,47 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       if (products.updatable?.files)
         for (const rfqProductId of Object.keys(products.updatable.files)) {
           if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
+
+          // The bucket KEY is not a primary key. It is whatever the client
+          // filed the edit under, and for a product added in this editing
+          // session there is no server id yet, so the key arrives as the
+          // literal string "undefined". Feeding that straight into an integer
+          // column is what produced `invalid input syntax for type integer:
+          // "undefined"` on save — the whole draft save then rolled back, so a
+          // buyer who added a product simply could not save.
+          //
+          // Resolve the real tbl_rfq_products.id from the identity carried
+          // INSIDE the value instead, the same way the specs block above does.
+          // For an already-saved product this finds exactly the row the key
+          // named, so behaviour is unchanged; for a new one it finds the row
+          // /rfq/add-product-to-draft created moments earlier.
+          const fileProductId = products.updatable.files[rfqProductId].product_id;
+          const fileVariant = products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
+          const fileProductRow = await t.oneOrNone(
+            `SELECT id FROM tbl_rfq_products
+              WHERE rfq_id = $1 AND product_variant_id = $2
+                AND variant IS NOT DISTINCT FROM $3
+              LIMIT 1`,
+            [rfq_id, fileProductId, fileVariant ?? 0]
+          );
+
+          // No product row means the files have nowhere to live. Skip and say
+          // so, rather than failing the entire save for one orphaned bucket.
+          if (!fileProductRow) {
+            logger.warn(
+              { rfq_id, productId: fileProductId, variant: fileVariant, fileKey: rfqProductId },
+              'saveRfqDraft: dropped files for a product with no row on this RFQ'
+            );
+            continue;
+          }
+          const resolvedRfqProductId = fileProductRow.id;
+
           let whereClause = {
             where: `rfq_product_id = $1::INT`,
-            values: [rfqProductId]
+            values: [resolvedRfqProductId]
           };
 
           for (const fileType of Object.keys(
@@ -2784,13 +2819,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
 
             if (doesExist && doesExist.length > 0) {
               const conditions = {
-                rfq_product_id: rfqProductId,
+                rfq_product_id: resolvedRfqProductId,
                 file_type: transformedFileType
               };
               await rfqModel.delete('tbl_rfq_product_files', conditions, t);
               if (!isRemovable) {
                 const insertableData = data.map((file_url) => ({
-                  rfq_product_id: rfqProductId,
+                  rfq_product_id: resolvedRfqProductId,
                   file_type: transformedFileType,
                   file_url
                 }));
@@ -2803,7 +2838,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               }
             } else if (!isRemovable) {
               const insertableData = data.map((file_url) => ({
-                rfq_product_id: rfqProductId,
+                rfq_product_id: resolvedRfqProductId,
                 file_type: transformedFileType,
                 file_url
               }));
@@ -2825,30 +2860,60 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             const variant = products.updatable.comment[rfqProductId].variant;
             const comment = products.updatable.comment[rfqProductId].comment;
 
+            // `variant ?? 0` for the same reason the specs block does it: a
+            // product added in this session carries no variant, and an
+            // undefined here becomes `variant = NULL`, which matches no row —
+            // so the comment was silently dropped with no error to show for it.
             let whereClause = {
               where: `rfq_id = $1::INT AND product_variant_id = $2::INT AND variant = $3::INT`,
-              values: [rfq_id, productId, variant]
+              values: [rfq_id, productId, variant ?? 0]
             };
 
             const data = {
               comment
             };
-            await rfqModel.updateWhere(
+            const commentUpdate = await rfqModel.updateWhere(
               'tbl_rfq_products',
               data,
               whereClause,
               t
             );
+            if (!commentUpdate || commentUpdate.length === 0) {
+              logger.warn(
+                { rfq_id, productId, variant, commentKey: rfqProductId },
+                'saveRfqDraft: dropped comment for a product with no row on this RFQ'
+              );
+            }
           }
     }
 
     if (products && products?.deletable && products.deletable.length > 0) {
       for (const rfqProductId of products.deletable) {
-        // Delete records from tbl_rfq_products
+        // A product added in this editing session has no server id, so the
+        // client can send a non-numeric placeholder here. There is nothing to
+        // delete in that case, and passing it through would abort the save on
+        // an integer cast.
+        if (!Number.isInteger(Number(rfqProductId))) {
+          logger.warn(
+            { rfq_id, deletableKey: rfqProductId },
+            'saveRfqDraft: ignoring a non-numeric id in products.deletable'
+          );
+          continue;
+        }
+
+        // Scoped by rfq_id, NOT by id alone. `deletable` is a client-supplied
+        // list of primary keys: without the rfq_id predicate, a buyer editing
+        // their own draft could name any tbl_rfq_products.id in the system —
+        // including another tenant's — and this would delete it, along with its
+        // files and technical evaluations below. Scoping here makes the id
+        // meaningful only within the RFQ the caller has already been authorised
+        // for, and the `continue` on an empty result means a foreign id is a
+        // no-op instead of a deletion.
         let deletedRecord = await rfqModel.delete(
           'tbl_rfq_products',
           {
-            id: rfqProductId
+            id: rfqProductId,
+            rfq_id
           },
           t
         );
@@ -3154,7 +3219,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
         if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
         
         const productId = updatableVendors[rfqProductId].product_id;
-        const variant = updatableVendors[rfqProductId].variant;
+        // `?? 0` for the same reason the specs and comment branches do it: a
+        // product added in this editing session carries no variant, and
+        // tbl_rfq_product_vendors.variant is nullable — so the mapping row
+        // would be written with variant NULL against a product row with
+        // variant 0, and every later lookup (which matches on the pair) would
+        // miss it. The vendor silently never sees the RFQ.
+        const variant = updatableVendors[rfqProductId].variant ?? 0;
 
         const addable = updatableVendors[rfqProductId]?.addable ?? [];
         const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
