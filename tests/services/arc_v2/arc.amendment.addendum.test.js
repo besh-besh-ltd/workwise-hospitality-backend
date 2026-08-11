@@ -19,6 +19,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { resolveCurrentPrice } from "../../../app/services/arcPricingResolver.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC        = IDS.hospitality.A;
 const HOTEL     = IDS.hotels.A1;
@@ -118,6 +119,10 @@ describe("ARC amendment addendum re-signing", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [POLICY_ID, APPROVER]
     );
+    // USER-source steps are permission-gated at instance creation: APPROVER is
+    // the only user named on this policy's step, so only APPROVER needs
+    // read+approve on 'arc' — BUYER deliberately is not on the policy.
+    await ensureArcApprovable(db, APPROVER, HC);
   });
 
   afterAll(async () => {

@@ -6,7 +6,13 @@
  * `<resource>.read` and `<resource>.approve` for the policy's entity type. The
  * drop is silent, and it happens at INSTANCE time — hours or weeks after the
  * policy was saved, inside somebody else's transaction. Drop every step and the
- * instance is born `APPROVED, current_step = 0`: an approval nobody granted.
+ * instance used to be born `APPROVED, current_step = 0`: an approval nobody
+ * granted. `createApprovalInstance` now REFUSES that case outright
+ * (`APPROVAL_POLICY_RESOLVES_TO_NOBODY`, no instance row written), so the
+ * runtime consequence is a blocked submission instead of a silent bypass — but
+ * that is a stall in someone else's transaction, discovered by whoever tried to
+ * submit. Catching it at SAVE time, where the admin who caused it is standing,
+ * is still the point of this suite.
  *
  * Nothing warned the admin at save time, and the wizard makes the mistake easy:
  * it lists every role in the tenant unfiltered and defaults each level to
@@ -298,74 +304,106 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     expect(res.status).toBe(201);
   });
 
-  it("fails OPEN when the catalogue CANNOT SATISFY the gate — the TENDER landmine", async () => {
-    // ── THE BLOCKER THIS TEST EXISTS FOR ──────────────────────────────────
-    // Production's `tender` resource holds ONLY `approve`. There is no
-    // `tender.read` row anywhere, so roleHasReadAndApprovePermission(<any role>,
-    // 'tender') can never return true for any role that will ever exist.
+  it("judges a TENDER ROLE step on its merits now that TENDER maps to a satisfiable resource", async () => {
+    // ── WHAT THIS TEST USED TO ASSERT, AND WHY IT NO LONGER CAN ───────────
+    // TENDER used to map to the `tender` resource, which holds ONLY `approve`.
+    // There is no `tender.read` row anywhere, so
+    // roleHasReadAndApprovePermission(<any role>, 'tender') could never return
+    // true for any role that will ever exist. TENDER is stage 1 of the
+    // Tender-process route in the admin Approval Wizard and its role dropdown is
+    // unfiltered, so an admin picking ANY role at Level 1 got a 400 they could
+    // not resolve through any UI — `tender.read` cannot be granted because it
+    // does not exist. This test therefore pinned a FAIL-OPEN: the guard waved
+    // the step through with a loud warning, and the runtime consequence (every
+    // ROLE step dropped, instance born APPROVED) was accepted as the price.
     //
-    // The first version of this guard failed open only when the resource was
-    // ENTIRELY absent from the catalogue. `tender` is present — it has
-    // `approve` — so it did not fail open, and every ROLE-source step of a
-    // TENDER policy was rejected with a hard 400.
-    //
-    // TENDER is stage 1 of the Tender-process route in the admin Approval
-    // Wizard, and its role dropdown is unfiltered. So an admin creating a new
-    // tender workflow and picking ANY role at Level 1 got a 400 they could not
-    // resolve through any UI: `tender.read` does not exist, so it cannot be
-    // granted to anything. The only escapes were switching to USER source or a
-    // DBA INSERT. The fault is a modelling gap; blocking the admin for it is
-    // wrong, so the guard now fails open when EITHER row is missing.
-    const catalogue = await db.any(
+    // ── WHAT CHANGED ─────────────────────────────────────────────────────
+    // ENTITY_APPROVE_RESOURCE_MAP now maps 'TENDER' → 'boq', the resource the
+    // tender surfaces actually read on (`CASE WHEN is_tender = 1 THEN 'boq'`),
+    // and `boq` carries the full read/approve pair. The landmine is defused at
+    // the source rather than routed around: there is nothing to fail open ABOUT,
+    // so the guard discriminates on TENDER exactly as it does on every other
+    // entity type. Both halves of that are asserted below, because "it stopped
+    // failing open" is only good news if the gate is now real.
+    const tenderCatalogue = await db.any(
       `SELECT DISTINCT action::text AS action FROM tbl_permissions
         WHERE resource::text = 'tender' AND action IN ('read','approve')`
     );
-    // The premise, pinned: if someone ever seeds tender.read this test stops
-    // testing what it claims to, and should say so by failing here.
-    expect(catalogue.map((r) => r.action).sort()).toEqual(["approve"]);
+    // Still pinned: `tender` remains unsatisfiable. That is the fact that made
+    // pointing TENDER at it wrong, and if someone ever seeds `tender.read` the
+    // rationale above changes and this test should say so by failing here.
+    expect(tenderCatalogue.map((r) => r.action).sort()).toEqual(["approve"]);
 
+    // ...and the resource TENDER points at instead can satisfy the gate.
+    const boqCatalogue = await db.any(
+      `SELECT DISTINCT action::text AS action FROM tbl_permissions
+        WHERE resource::text = 'boq' AND action IN ('read','approve')`
+    );
+    expect(boqCatalogue.map((r) => r.action).sort()).toEqual(["approve", "read"]);
+
+    // 'Tender Approver' holds boq.read + boq.approve, so it is permitted ON ITS
+    // MERITS — reason OK, not the RESOURCE_CANNOT_SATISFY_GATE pass it used to
+    // be waved through with.
     const verdict = await roleStepPermissionVerdict(ROLE_IDS.TENDER_APPROVER, "TENDER", db);
-    expect(verdict).toEqual({
-      permitted: true,
-      resource: "tender",
-      reason: "RESOURCE_CANNOT_SATISFY_GATE",
-      missing_actions: ["read"],
+    expect(verdict).toEqual({ permitted: true, resource: "boq", reason: "OK" });
+
+    // The other half, and the reason this is a strengthening rather than a
+    // relaxation: a role that does NOT hold the pair is now REJECTED. Under the
+    // old fail-open EVERY role passed this save, including this one, and the
+    // policy then silently dropped its only step at instance time.
+    const client = await httpClient(ADMIN);
+    const rejected = await savePolicy(client, {
+      entity_type: "TENDER",
+      hotel_id: IDS.hotels.A2,
+      department_id: IDS.departments.fb,
+      steps: [roleStep(1, ROLE_IDS.TENDER_CREATOR)], // boq.read + boq.create, no boq.approve
     });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
+    expect(rejected.body.data.steps[0]).toMatchObject({
+      role_id: ROLE_IDS.TENDER_CREATOR,
+      role_title: "Tender Creator",
+      resource: "boq",
+      missing_permissions: ["boq.approve"],
+    });
+    expect(
+      await db.any(
+        `SELECT id FROM tbl_approval_policies
+          WHERE entity_type = 'TENDER' AND hotel_id = $1 AND department_id = $2`,
+        [IDS.hotels.A2, IDS.departments.fb]
+      )
+    ).toHaveLength(0);
 
     const warn = jest.spyOn(logger, "warn");
     try {
-      const client = await httpClient(ADMIN);
-      const res = await savePolicy(client, {
+      const accepted = await savePolicy(client, {
         entity_type: "TENDER",
         hotel_id: IDS.hotels.A2,
         department_id: IDS.departments.fb,
         steps: [roleStep(1, ROLE_IDS.TENDER_APPROVER)],
       });
 
-      expect(res.status).toBe(201);
-      expect(await stepsOf(res.body.data.id)).toEqual([
+      expect(accepted.status).toBe(201);
+      expect(await stepsOf(accepted.body.data.id)).toEqual([
         { step_order: 1, decision_rule: "ANY", approver_source_type: "ROLE", approver_source_id: ROLE_IDS.TENDER_APPROVER },
       ]);
 
-      // Failing open silently would trade a visible 400 for the invisible
-      // under-approval this whole branch exists to eliminate, so the warning is
-      // part of the contract, not decoration. Asserted on CONTENT (does an
-      // operator learn the resource, the missing row and the consequence?), not
-      // on a call count.
+      // The 201 must come from passing the gate, not from being waved past it.
+      // The fail-open path is the one that names the missing row, so its absence
+      // is the observable difference between "permitted" and "unjudgeable".
       const messages = warn.mock.calls.map((c) => String(c[0]));
-      const relevant = messages.filter((m) => m.includes("tender.read"));
-      expect(relevant.length).toBeGreaterThan(0);
-      expect(relevant.join("\n")).toMatch(/dropped/i);
-      expect(relevant.join("\n")).toMatch(/APPROVED/);
+      expect(messages.filter((m) => m.includes("tender.read"))).toEqual([]);
+      expect(messages.filter((m) => m.includes("RolePermGate"))).toEqual([]);
     } finally {
       warn.mockRestore();
     }
   });
 
   it("still rejects when the catalogue CAN express the requirement and the role just lacks it", async () => {
-    // The distinction the fix turns on. `arc-tech.approve` exists, so naming a
-    // role that does not hold it is an admin error and stays a 400 — unlike
-    // `tender.read`, which no admin can grant because it does not exist.
+    // The distinction the fail-open turns on. `arc-tech.approve` exists, so
+    // naming a role that does not hold it is an admin error and stays a 400 —
+    // unlike a resource with no rows at all (see the INDENT case below), where
+    // the missing permission cannot be granted by any admin.
     const client = await httpClient(ADMIN);
     const res = await savePolicy(client, {
       entity_type: "ARC_TECH",

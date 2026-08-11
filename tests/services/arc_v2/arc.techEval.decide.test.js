@@ -15,6 +15,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -52,6 +53,11 @@ describe("ARC tech-eval — approver approve/reject/amend", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [POLICY_ID, APPROVER]
     );
+    // USER-source steps are permission-gated at instance creation: only
+    // APPROVER is named on this policy's step, so only APPROVER gets
+    // read+approve on 'arc-tech' — BUYER stays unqualified (asserted as a
+    // non-approver below).
+    await ensureArcApprovable(db, APPROVER, HC);
 
     const arc = await db.one(
       `INSERT INTO tbl_arc

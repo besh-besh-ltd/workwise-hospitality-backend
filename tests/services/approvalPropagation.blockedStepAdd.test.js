@@ -25,6 +25,7 @@
 import { describe, it, expect, beforeAll, afterEach } from "@jest/globals";
 import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { ensureApprovable } from "../helpers/arcApproverPerms.js";
 import {
   applyDiffToInstance,
   reEvaluateInstanceStep,
@@ -134,6 +135,89 @@ afterEach(async () => {
     await db.none(`DELETE FROM tbl_approval_policies WHERE id = ANY($1::int[])`, [made.policyIds]);
   }
   made.instanceIds = []; made.stepIds = []; made.policyStepIds = []; made.policyIds = [];
+});
+
+// ===========================================================================
+//  Creation and policy-edit propagation must agree on WHO may hold authority.
+//
+//  Creation gates every approver source on read+approve for the entity's
+//  resource. Propagation gated NEITHER source type — it called resolveApprovers
+//  directly — so editing a live policy could install an approver that creating
+//  the same instance one second later would have dropped. Two instances of the
+//  same policy, opposite approver sets, and the mid-flight one is BINDING:
+//  submitApprovalAction re-checks nothing, the snapshot IS the authorization.
+//
+//  Both paths now ask policyStepApproverEligibility. What they do with a "no"
+//  still differs on purpose — creation drops the step (no instance exists yet),
+//  propagation stalls it (an instance exists, and silently removing an
+//  authority level from a live approval is worse than blocking on it).
+// ===========================================================================
+describe("policy-edit propagation applies the same eligibility gate as creation", () => {
+  /** A USER-source step naming someone with no permission on this entity. */
+  async function makeUserPolicyStep(stepOrder, userId) {
+    const policyId = await makeOwnPolicy();
+    const ps = await db.one(
+      `INSERT INTO tbl_approval_policy_steps
+         (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
+       VALUES ($1, $2, 'STANDARD', 'ANY', 'USER', $3) RETURNING *`,
+      [policyId, stepOrder, userId]
+    );
+    made.policyStepIds.push(ps.id);
+    const policy = await db.one(`SELECT * FROM tbl_approval_policies WHERE id = $1`, [policyId]);
+    return { step: ps, policy };
+  }
+
+  it("does NOT install a USER approver that creation would have dropped", async () => {
+    const { inst } = await seedLiveInstance();
+    // A vendor holds no buyer-side read+approve on this entity's resource.
+    const { step: newPolicyStep, policy } = await makeUserPolicyStep(2, IDS.users.vendor_alpha);
+
+    await db.tx((t) =>
+      applyDiffToInstance(inst, [{ type: "STEP_ADDED", step_order: 2, newStep: newPolicyStep }], policy, BUYER, t)
+    );
+
+    const steps = await stepsOf(inst.id);
+    const added = steps.find((s) => s.step_order === 2);
+    expect(added).toBeTruthy();
+    // Stalls rather than granting authority: PENDING, nobody on it.
+    expect(added.status).toBe("PENDING");
+    expect(added.approver_count).toBe(0);
+
+    // And specifically NOT the ineligible user.
+    const rows = await db.any(
+      `SELECT approver_user_id FROM tbl_approval_step_approvers
+        WHERE approval_instance_step_id = $1`,
+      [added.id]
+    );
+    expect(rows.map((r) => r.approver_user_id)).not.toContain(IDS.users.vendor_alpha);
+  });
+
+  it("still installs a USER approver who IS eligible", async () => {
+    const { inst } = await seedLiveInstance();
+    // These instances are entity_type PO, which resolves against `awarding`.
+    // APPROVER is seeded onto step 1 by raw INSERT, which bypasses every gate,
+    // so holding a step does NOT imply holding the permission — grant it
+    // explicitly, exactly as production would, or this asserts nothing.
+    await ensureApprovable(
+      db, [APPROVER], "awarding", IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc
+    );
+    const { step: newPolicyStep, policy } = await makeUserPolicyStep(2, APPROVER);
+
+    await db.tx((t) =>
+      applyDiffToInstance(inst, [{ type: "STEP_ADDED", step_order: 2, newStep: newPolicyStep }], policy, BUYER, t)
+    );
+
+    const steps = await stepsOf(inst.id);
+    const added = steps.find((s) => s.step_order === 2);
+    expect(added.status).toBe("PENDING");
+    expect(added.approver_count).toBe(1);
+    const rows = await db.any(
+      `SELECT approver_user_id FROM tbl_approval_step_approvers
+        WHERE approval_instance_step_id = $1`,
+      [added.id]
+    );
+    expect(rows.map((r) => r.approver_user_id)).toContain(APPROVER);
+  });
 });
 
 describe("a policy step added to a live instance that resolves to nobody", () => {

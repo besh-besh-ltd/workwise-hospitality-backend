@@ -24,6 +24,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -108,6 +109,11 @@ describe("ARC amendment flow — request → review → terminal state", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2), ($1, 2, 'ALL', 'USER', $3)`,
       [POLICY_ID, APPROVER1, APPROVER2]
     );
+    // BUYER is deliberately NOT granted here — the top-of-file comment marks
+    // BUYER as "NOT on the amendment policy", and a later test asserts an
+    // outsider buyer is stopped by the engine even though the route lets them
+    // through. Only the two named USER-source approvers qualify.
+    await ensureArcApprovable(db, [APPROVER1, APPROVER2], HC);
   });
 
   afterAll(async () => {

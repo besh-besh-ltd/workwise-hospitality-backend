@@ -18,6 +18,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -66,6 +67,10 @@ describe("ARC Negotiation — approver-display (can_user_approve)", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [POLICY_ID, APPROVER]
     );
+    // APPROVER is the USER-source approver on this ARC_NEGOTIATION step — grant
+    // read+approve on 'arc-comm' (the entity_type's mapped resource) at the
+    // ARC's own hotel+department, or createApprovalInstance drops the step.
+    await ensureApprovable(db, APPROVER, "arc-comm", HC, HOTEL, DEPT);
 
     // ARC at comm_eval_in_progress + 1 item + 2 invited vendors with submitted quotes.
     const arc = await db.one(

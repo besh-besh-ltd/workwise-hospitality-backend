@@ -7,7 +7,25 @@ import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificat
 // Maps entity_type to the permission resource used in tbl_permissions
 export const ENTITY_APPROVE_RESOURCE_MAP = {
   'RFQ': 'rfq',
-  'TENDER': 'tender',
+  // TENDER resolves against 'boq', NOT 'tender'.
+  //
+  // The 'tender' resource carries exactly one action — `approve`. There is no
+  // `tender.read` row and never has been, so `roleHasReadAndApprovePermission`
+  // (which requires BOTH) could not be satisfied by any role that has ever
+  // existed. Every ROLE-source step of every TENDER policy was therefore
+  // dropped at creation, and a policy whose steps are all ROLE produced an
+  // instance born APPROVED with nobody having approved it.
+  //
+  // 'boq' is the resource the tender surfaces actually read on — the RFQ
+  // visibility predicate keys on `CASE WHEN is_tender = 1 THEN 'boq' ELSE
+  // 'rfq' END` — and it carries the full read/create/update/delete/approve
+  // set. Pointing the approval gate at the same resource the UI reads on is
+  // what makes "resolved as approver" and "can see it" agree for tenders.
+  //
+  // Verified read-only against production 2026-08-10: both live TENDER
+  // policies (8, 190) score 0-1 against 'tender' and 2 against 'boq' on their
+  // Tender Approver steps, i.e. they go from every-step-dropped to working.
+  'TENDER': 'boq',
   'TECHNICAL': 'te',
   'NEGOTIATION': 'negotiation',
   'NEGOTIATION_QUOTE': 'quote-compare',
@@ -17,9 +35,24 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // authored as plain 'ARC', so ROLE-source approver steps resolve against the
   // same 'arc' permission resource (USER-source steps bypass this map).
   'ARC_PUBLISH': 'arc',
-  // MR is the call-off/demand path — role approvers resolve against the same
-  // 'awarding' permission as POs (USER-source steps bypass this map).
-  'MR': 'awarding',
+  // MR resolves against its OWN 'mr' resource, not 'awarding'.
+  //
+  // It was mapped to 'awarding' (the PO resource) while a dedicated 'mr'
+  // resource carrying read/create/approve has existed since the permissions
+  // seed. The seeded 'MR Approver' system role holds exactly `mr.read` +
+  // `mr.approve` and no `awarding` at all, so under the read+approve gate the
+  // obvious policy — one ROLE step naming 'MR Approver' — had its only step
+  // dropped. Before the all-steps-dropped refusal that produced an MR born
+  // APPROVED with nobody approving it; after it, a hard 400.
+  //
+  // Mapping to 'awarding' also made the remedy wrong: it told an admin to grant
+  // MR approvers the PO AWARDING permission, escalating them into a different
+  // and much broader authority to work around a mapping mistake.
+  //
+  // Verified before changing: production holds 0 MR policies, 0 MR approval
+  // instances and 0 material requisitions, so this repoints a latent trap and
+  // moves no live approval.
+  'MR': 'mr',
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
@@ -49,6 +82,18 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // migrations/20260608100800_permissions_seed.sql:56-57) — the only ARC v2
   // stage resource that was modelled correctly from the start. Mapped 2026-08-03.
   'ARC_COMMITTEE': 'arc-committee',
+  // ARC_AMENDMENT: post-award amendment sign-off. There is no `arc-amendment`
+  // resource, so this resolves against 'arc' — the same resource the ARC base
+  // and publish gates use, and the one an amendment approver must already hold
+  // to see the contract they are amending.
+  //
+  // Before this entry the lookup fell through to entity_type.toLowerCase() =
+  // 'arc_amendment', which is not a resource_type label and matches no
+  // permission row, so EVERY ROLE-source amendment step was dropped at
+  // creation and an all-ROLE policy produced an instance born APPROVED. An
+  // amendment changes agreed commercial terms after award; auto-approving one
+  // is the worst instance of this class, not the mildest.
+  'ARC_AMENDMENT': 'arc',
 
   // ── THE FULL ARC-STAGE PERMISSION PICTURE (as of 20260803110000) ───────────
   //   arc            read/create/admin (20260608100800) + approve (legacy)
@@ -2024,6 +2069,69 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  *   wildcard) qualify as approvers.
  * @returns {Array<number>} Array of user IDs
  */
+/**
+ * Is this policy step's approver source ALLOWED to hold approval authority for
+ * this entity, in this scope?
+ *
+ * ── WHY THIS IS A SHARED FUNCTION ──
+ * Three code paths install approvers on an instance: creation
+ * (createApprovalInstance), policy-edit propagation (applyDiffToInstance's
+ * STEP_ADDED / STEP_MODIFIED) and membership revalidation. Creation gated ROLE
+ * sources, and now gates USER sources too. Propagation gated NEITHER — it
+ * called resolveApprovers directly — so editing a live policy could install an
+ * approver that creating the same instance one second later would have
+ * dropped. Two instances of the same policy, opposite approver sets, and the
+ * mid-flight one is binding: submitApprovalAction re-checks nothing, the
+ * snapshot IS the authorization.
+ *
+ * The eligibility RULE therefore lives here, in one place, and every path that
+ * grants authority asks this question. What the paths do with a "no" still
+ * differs, legitimately: creation DROPS the step (no instance exists yet),
+ * while propagation STALLS it (an instance exists, and silently dropping an
+ * authority level from a live approval is worse than blocking on it).
+ *
+ * DEPARTMENT sources are deliberately answered `true`: they have never been
+ * gated anywhere, and quietly starting to gate them here would silently
+ * change live approver sets. That remains an open hole, tracked separately.
+ *
+ * @returns {Promise<{eligible: boolean, reason: string|null, resource: string}>}
+ */
+export async function policyStepApproverEligibility(
+  step, entity_type, { hospitality_company_id, hotel_id = null, department_id = null, process_id = null } = {}, t = db
+) {
+  const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
+
+  if (step.approver_source_type === 'ROLE') {
+    const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resource, t);
+    return hasBoth
+      ? { eligible: true, reason: null, resource }
+      : { eligible: false, reason: 'ROLE_LACKS_READ_AND_APPROVE', resource };
+  }
+
+  if (step.approver_source_type === 'USER') {
+    const qualified = await t.oneOrNone(`
+      SELECT 1
+        FROM tbl_user_role_scopes urs
+        JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+       WHERE urs.user_id = $1
+         AND p.resource::text = $2
+         AND p.action IN ('read', 'approve')
+         AND urs.company_id = $3
+         AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+         AND ($5::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $5)
+         AND (urs.process_id IS NULL OR urs.process_id = $6)
+       GROUP BY urs.user_id
+      HAVING COUNT(DISTINCT p.action) = 2
+    `, [step.approver_source_id, resource, hospitality_company_id, hotel_id, department_id, process_id]);
+    return qualified
+      ? { eligible: true, reason: null, resource }
+      : { eligible: false, reason: 'USER_LACKS_READ_AND_APPROVE', resource };
+  }
+
+  return { eligible: true, reason: null, resource };
+}
+
 export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
   const userIds = [];
 
@@ -2223,6 +2331,30 @@ export async function createApprovalInstance({
     throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
   }
 
+  // An unmapped entity_type can never produce a working approval — reject it
+  // here, before any policy lookup or row is written.
+  //
+  // The ROLE gate resolves its resource via ENTITY_APPROVE_RESOURCE_MAP and
+  // falls back to entity_type.toLowerCase(). For anything not in the map that
+  // fallback is not a resource_type label, so it matches no permission row, so
+  // NO role can qualify, so every ROLE step is dropped. Historically the
+  // instance was then born APPROVED — meaning a typo'd or newly-added entity
+  // type silently disabled approval for that entity class rather than failing.
+  //
+  // This is also the whitelist `generalController.submitApproval` never had:
+  // it takes entity_type straight from the request body, so without this an
+  // arbitrary string could mint a self-approving instance.
+  if (!Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type)) {
+    const err = new Error(
+      `Approval misconfiguration: entity_type '${entity_type}' has no entry in ` +
+      `ENTITY_APPROVE_RESOURCE_MAP, so no role could ever qualify as its approver. ` +
+      `Add a mapping before creating approvals for this entity type.`
+    );
+    err.code = 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP';
+    err.httpStatus = 400;
+    throw err;
+  }
+
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
     // 1. Check for existing pending/approved instance for this entity
@@ -2303,6 +2435,11 @@ export async function createApprovalInstance({
     const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
     const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
 
+    // (entity_type is validated against ENTITY_APPROVE_RESOURCE_MAP at the top
+    //  of createApprovalInstance, before any policy lookup, so resourceIsMapped
+    //  is always true here. It is still threaded into the skip diagnostics
+    //  because roleStepPermissionVerdict reports on policies from other paths.)
+
     // Probed lazily (only when a ROLE gate actually fails) and at most once, so
     // the common path pays nothing. It answers a question the bare `hasBoth`
     // false cannot: was this role NOT GRANTED something, or does the permission
@@ -2367,6 +2504,53 @@ export async function createApprovalInstance({
         }
       }
 
+      // ── USER-source steps are gated exactly like ROLE-source ones ─────────
+      //
+      // ROLE-source steps have always been dropped when the role lacks
+      // read+approve on the entity's resource. USER-source steps were gated
+      // NOWHERE — not at policy save, not here, not mid-flight (the
+      // reconciler's discovery SQL filters to ROLE/DEPARTMENT), and not at act
+      // time (submitApprovalAction re-checks nothing). Naming a user directly
+      // therefore handed binding approval authority to someone who might hold
+      // no permission on the entity at all, and nothing anywhere said so. That
+      // is what produced the RFQ 791 incident: EMP003 blocked a workflow they
+      // could not see.
+      //
+      // This shipped as observe-only first, deliberately. Enforcing it against
+      // the data as it stood would have stripped authority from 9 of 10 live
+      // USER-source RFQ approver slots and left 7 active policies resolving to
+      // nobody. Those 19 assignments were repaired by
+      // scripts/prod_04_clear_unqualified_user_approvers.sql — audit section E
+      // went 19 -> 0, and "active policies resolving to nobody" stayed at 0 —
+      // so enforcement now costs nothing. Re-run that audit before assuming it
+      // still does.
+      //
+      // A dropped step is recorded in skippedSteps like any other, and a policy
+      // whose every step drops is REFUSED rather than auto-approved.
+      if (policyStep.approver_source_type === 'USER') {
+        // Shared with policy-edit propagation via policyStepApproverEligibility
+        // so the two paths cannot drift apart on WHO may hold authority.
+        const { eligible } = await policyStepApproverEligibility(
+          policyStep, entity_type,
+          { hospitality_company_id, hotel_id, department_id: resolveDeptId, process_id },
+          t
+        );
+        const qualified = eligible;
+
+        if (!qualified) {
+          skippedSteps.push({
+            policy_step_id: policyStep.id,
+            step_order: policyStep.step_order,
+            approver_source_type: 'USER',
+            approver_source_id: policyStep.approver_source_id,
+            resource: roleResource,
+            resource_mapped: resourceIsMapped,
+            reason: 'USER_LACKS_READ_AND_APPROVE'
+          });
+          continue;
+        }
+      }
+
       // Resolve approvers for this step (pass process_id so the user's process
       // scope is honored when picking who qualifies).
       const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
@@ -2409,6 +2593,44 @@ export async function createApprovalInstance({
       instanceMetadata.approval_diagnostics = diagnostics;
     }
 
+    // EVERY step was dropped. Refuse — do not create the instance.
+    //
+    // This used to insert the instance and immediately mark it
+    // APPROVED / current_step = 0 with `legitimate: false` in its metadata and
+    // an error-level log. That is an authorization bypass wearing a diagnostic:
+    // the entity proceeds as approved, the audit trail says APPROVED, and the
+    // only trace is a log line nobody reads. Production already holds 50 rows
+    // in exactly that shape (39 TECHNICAL, 9 RFQ, 2 PO), all predating the
+    // diagnostics, so none of them can even be attributed after the fact.
+    //
+    // Failing closed is the same call already made for mid-flight steps that
+    // resolve to nobody: they are written PENDING so the workflow STALLS
+    // rather than silently completing. A stalled workflow is a support ticket;
+    // a bypassed one is an unapproved PO.
+    //
+    // Blast radius measured read-only against production 2026-08-10, with the
+    // TENDER→boq and ARC_AMENDMENT→arc map repairs above applied: ZERO active
+    // policies across all 11 entity types would hit this. The only two that
+    // would have (TENDER 8 and 190) are repaired by the map change, because
+    // their steps were being dropped for exactly the reason this guards.
+    if (resolvedSteps.length === 0) {
+      logger.error(
+        `[ApprovalEngine] REFUSED to create ${entity_type}/${entity_id} approval instance — ` +
+        `all ${policySteps.length} step(s) of policy ${policy.id} were dropped. ` +
+        `Skipped: ${JSON.stringify(skippedSteps)}`
+      );
+      const err = new Error(
+        `Approval policy ${policy.id} for ${entity_type} resolved to zero usable approval steps, ` +
+        `so nobody would be asked to approve this. ` +
+        `Fix the policy (Settings → Approvals) — each step needs an approver who holds ` +
+        `both read and approve on this entity — then try again.`
+      );
+      err.code = 'APPROVAL_POLICY_RESOLVES_TO_NOBODY';
+      err.httpStatus = 400;
+      err.diagnostics = diagnostics;
+      throw err;
+    }
+
     // 5. Create the approval instance only after all approvers are known
     const instance = await t.one(`
       INSERT INTO tbl_approval_instances
@@ -2416,45 +2638,9 @@ export async function createApprovalInstance({
       VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
     `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(instanceMetadata)]);
 
-    // 6. Every step was dropped — CASE (b). Nobody was ever asked to approve
-    // this. The instance is still auto-approved (unchanged behaviour), but it is
-    // now labelled as such and logged at error level, because "approved" here
-    // means "no approver could be found", not "the approver was the initiator".
-    if (resolvedSteps.length === 0) {
-      const autoApproval = {
-        case: 'NO_APPROVER_RESOLVED',
-        legitimate: false,
-        detail: 'Every policy step was dropped at creation — no role qualified and/or no user resolved. Nobody approved this instance.',
-        ...diagnostics
-      };
-      await t.none(`
-        UPDATE tbl_approval_instances
-        SET status = 'APPROVED', current_step = 0, completed_at = NOW(),
-            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
-        WHERE id = $1
-      `, [instance.id, JSON.stringify({ auto_approval: autoApproval, approval_diagnostics: diagnostics })]);
-
-      logger.error(
-        `[ApprovalAutoApprove] MISCONFIGURATION — instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) ` +
-        `was born APPROVED because ALL ${policySteps.length} policy step(s) were dropped at creation. Nobody approved it. ` +
-        `Skipped: ${JSON.stringify(skippedSteps)}`
-      );
-
-      return {
-        instance: {
-          ...instance,
-          status: 'APPROVED',
-          current_step: 0,
-          metadata: { ...instanceMetadata, auto_approval: autoApproval, approval_diagnostics: diagnostics }
-        },
-        policy: { id: policy.id, entity_type: policy.entity_type },
-        steps: [],
-        totalSteps: 0,
-        autoApproved: true,
-        autoApprovalCase: 'NO_APPROVER_RESOLVED',
-        skippedSteps
-      };
-    }
+    // 6. (The all-steps-dropped case is refused before the INSERT above — see
+    //     APPROVAL_POLICY_RESOLVES_TO_NOBODY. It can no longer reach here, and
+    //     an instance is never created for a policy nobody can approve.)
 
     // 7. Create instance steps and approvers, auto-approving initiator where present
     const instanceSteps = [];

@@ -2752,12 +2752,47 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
       if (products.updatable?.files)
         for (const rfqProductId of Object.keys(products.updatable.files)) {
           if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
+
+          // The bucket KEY is not a primary key. It is whatever the client
+          // filed the edit under, and for a product added in this editing
+          // session there is no server id yet, so the key arrives as the
+          // literal string "undefined". Feeding that straight into an integer
+          // column is what produced `invalid input syntax for type integer:
+          // "undefined"` on save — the whole draft save then rolled back, so a
+          // buyer who added a product simply could not save.
+          //
+          // Resolve the real tbl_rfq_products.id from the identity carried
+          // INSIDE the value instead, the same way the specs block above does.
+          // For an already-saved product this finds exactly the row the key
+          // named, so behaviour is unchanged; for a new one it finds the row
+          // /rfq/add-product-to-draft created moments earlier.
+          const fileProductId = products.updatable.files[rfqProductId].product_id;
+          const fileVariant = products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
+          const fileProductRow = await t.oneOrNone(
+            `SELECT id FROM tbl_rfq_products
+              WHERE rfq_id = $1 AND product_variant_id = $2
+                AND variant IS NOT DISTINCT FROM $3
+              LIMIT 1`,
+            [rfq_id, fileProductId, fileVariant ?? 0]
+          );
+
+          // No product row means the files have nowhere to live. Skip and say
+          // so, rather than failing the entire save for one orphaned bucket.
+          if (!fileProductRow) {
+            logger.warn(
+              { rfq_id, productId: fileProductId, variant: fileVariant, fileKey: rfqProductId },
+              'saveRfqDraft: dropped files for a product with no row on this RFQ'
+            );
+            continue;
+          }
+          const resolvedRfqProductId = fileProductRow.id;
+
           let whereClause = {
             where: `rfq_product_id = $1::INT`,
-            values: [rfqProductId]
+            values: [resolvedRfqProductId]
           };
 
           for (const fileType of Object.keys(
@@ -2784,13 +2819,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
 
             if (doesExist && doesExist.length > 0) {
               const conditions = {
-                rfq_product_id: rfqProductId,
+                rfq_product_id: resolvedRfqProductId,
                 file_type: transformedFileType
               };
               await rfqModel.delete('tbl_rfq_product_files', conditions, t);
               if (!isRemovable) {
                 const insertableData = data.map((file_url) => ({
-                  rfq_product_id: rfqProductId,
+                  rfq_product_id: resolvedRfqProductId,
                   file_type: transformedFileType,
                   file_url
                 }));
@@ -2803,7 +2838,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               }
             } else if (!isRemovable) {
               const insertableData = data.map((file_url) => ({
-                rfq_product_id: rfqProductId,
+                rfq_product_id: resolvedRfqProductId,
                 file_type: transformedFileType,
                 file_url
               }));
@@ -2825,30 +2860,60 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             const variant = products.updatable.comment[rfqProductId].variant;
             const comment = products.updatable.comment[rfqProductId].comment;
 
+            // `variant ?? 0` for the same reason the specs block does it: a
+            // product added in this session carries no variant, and an
+            // undefined here becomes `variant = NULL`, which matches no row —
+            // so the comment was silently dropped with no error to show for it.
             let whereClause = {
               where: `rfq_id = $1::INT AND product_variant_id = $2::INT AND variant = $3::INT`,
-              values: [rfq_id, productId, variant]
+              values: [rfq_id, productId, variant ?? 0]
             };
 
             const data = {
               comment
             };
-            await rfqModel.updateWhere(
+            const commentUpdate = await rfqModel.updateWhere(
               'tbl_rfq_products',
               data,
               whereClause,
               t
             );
+            if (!commentUpdate || commentUpdate.length === 0) {
+              logger.warn(
+                { rfq_id, productId, variant, commentKey: rfqProductId },
+                'saveRfqDraft: dropped comment for a product with no row on this RFQ'
+              );
+            }
           }
     }
 
     if (products && products?.deletable && products.deletable.length > 0) {
       for (const rfqProductId of products.deletable) {
-        // Delete records from tbl_rfq_products
+        // A product added in this editing session has no server id, so the
+        // client can send a non-numeric placeholder here. There is nothing to
+        // delete in that case, and passing it through would abort the save on
+        // an integer cast.
+        if (!Number.isInteger(Number(rfqProductId))) {
+          logger.warn(
+            { rfq_id, deletableKey: rfqProductId },
+            'saveRfqDraft: ignoring a non-numeric id in products.deletable'
+          );
+          continue;
+        }
+
+        // Scoped by rfq_id, NOT by id alone. `deletable` is a client-supplied
+        // list of primary keys: without the rfq_id predicate, a buyer editing
+        // their own draft could name any tbl_rfq_products.id in the system —
+        // including another tenant's — and this would delete it, along with its
+        // files and technical evaluations below. Scoping here makes the id
+        // meaningful only within the RFQ the caller has already been authorised
+        // for, and the `continue` on an empty result means a foreign id is a
+        // no-op instead of a deletion.
         let deletedRecord = await rfqModel.delete(
           'tbl_rfq_products',
           {
-            id: rfqProductId
+            id: rfqProductId,
+            rfq_id
           },
           t
         );
@@ -3154,7 +3219,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
         if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
         
         const productId = updatableVendors[rfqProductId].product_id;
-        const variant = updatableVendors[rfqProductId].variant;
+        // `?? 0` for the same reason the specs and comment branches do it: a
+        // product added in this editing session carries no variant, and
+        // tbl_rfq_product_vendors.variant is nullable — so the mapping row
+        // would be written with variant NULL against a product row with
+        // variant 0, and every later lookup (which matches on the pair) would
+        // miss it. The vendor silently never sees the RFQ.
+        const variant = updatableVendors[rfqProductId].variant ?? 0;
 
         const addable = updatableVendors[rfqProductId]?.addable ?? [];
         const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
@@ -8193,7 +8264,24 @@ const rfqController = {
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
       // RBAC check for non-vendor users: must have rfq.read/boq.read for this RFQ's business unit
-      if (rfqData?.id && user_type != 3) {
+      //
+      // Two ways this gate disagreed with the LIST predicate it is supposed to
+      // mirror (rfqModel.getAllBuyerRfq), both fixed below:
+      //
+      //   1. NO PROCESS AXIS. The list filters
+      //      `(urs.process_id IS NULL OR urs.process_id = RFQ.process_id)`;
+      //      this did not. A user whose grant is bound to process A could not
+      //      see a process-B RFQ in any list, but could open it by URL. Detail
+      //      was strictly WIDER than list on that axis — the wrong direction
+      //      for a "defence in depth" gate.
+      //   2. SUPER ADMINS WERE 403'd. The guard is `user_type != 3` (vendors),
+      //      so user_type 8 ran the check — and super admins hold no
+      //      tbl_user_role_scopes rows at all (the same reason
+      //      purchaseOrderModel and arcScope both special-case them), so this
+      //      endpoint refused them while every other RFQ surface let them
+      //      through.
+      const SUPER_ADMIN_USER_TYPE = 8;
+      if (rfqData?.id && user_type != 3 && Number(user_type) !== SUPER_ADMIN_USER_TYPE) {
         const resource = rfqData.is_tender == 1 ? 'boq' : 'rfq';
         const hasAccess = await db.oneOrNone(`
           SELECT 1 FROM tbl_user_role_scopes urs
@@ -8204,11 +8292,36 @@ const rfqController = {
             AND p.action = 'read'
             AND urs.company_id = $3
             AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+            AND ($6::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $6)
             AND ($5::int IS NULL OR urs.department_id = $5 OR urs.department_id IS NULL)
           LIMIT 1
-        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id, rfqData.department_id || null]);
+        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id,
+            rfqData.department_id || null, rfqData.process_id || null]);
 
+        // A live approver may open the RFQ they have been asked to approve even
+        // when no single scope row carries rfq/boq.read for its
+        // (hotel x department x process) tuple. Without this the list fix alone
+        // is useless: the row would appear in "pending my approval" and then
+        // 403 on click. Same predicate as the list — see
+        // authorizationService.buildApproverReadExemption for the reasoning.
+        let isAssignedApprover = false;
         if (!hasAccess) {
+          isAssignedApprover = !!(await db.oneOrNone(`
+            SELECT 1
+              FROM tbl_approval_instances ai
+              JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+              JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+             WHERE ai.status = 'PENDING'
+               AND ai.entity_type IN ('RFQ', 'TENDER')
+               AND ai.entity_id = $2
+               AND asa.approver_user_id = $1
+               AND asa.status = 'PENDING'
+               AND asa.removed_at IS NULL
+             LIMIT 1
+          `, [user_id, rfqData.id]));
+        }
+
+        if (!hasAccess && !isAssignedApprover) {
           return res.status(403).json({ status: 0, message: 'You do not have permission to view this RFQ' });
         }
       }
@@ -16975,6 +17088,22 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: error.message
+        });
+      }
+
+      // The approval engine raises structured, actionable errors — most
+      // importantly APPROVAL_POLICY_RESOLVES_TO_NOBODY, which carries
+      // httpStatus 400 and the per-step diagnostics explaining WHICH step was
+      // dropped and why. This handler matched on message text alone, so that
+      // error matched nothing and fell through to the 500 below: the evaluator
+      // lost their submission and were told only "Error submitting technical
+      // evaluation". Honour the status the engine set, and pass the reason on.
+      if (error?.httpStatus) {
+        return res.status(error.httpStatus).json({
+          status: 0,
+          message: error.message,
+          ...(error.code ? { code: error.code } : {}),
+          ...(error.diagnostics ? { diagnostics: error.diagnostics } : {})
         });
       }
 

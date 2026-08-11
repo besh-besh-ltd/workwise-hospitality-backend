@@ -91,7 +91,14 @@ describe("fixtures", () => {
           IDS.users.a1_proc_finance,
         ]
       );
-      expect(scopes.length).toBe(7);
+      // 9, not 7: two users carry a SECOND role because a fixture policy names
+      // them as an approver for an entity their primary role grants nothing on.
+      // USER-source policy steps are permission-gated now, so a1_proc_commApp
+      // (named on A1_P2_RFQ) also holds TENDER_APPROVER for rfq.read+approve,
+      // and a1_proc_techEval (named on A1_P2_TECHNICAL) also holds
+      // TECH_APPROVER for te.read+approve. Without them those steps are dropped
+      // and the policies resolve to nobody. See tests/fixtures/users.js.
+      expect(scopes.length).toBe(9);
       // Every scope should be Hotel A1 / Procurement dept.
       for (const s of scopes) {
         expect(s.hotel_id).toBe(IDS.hotels.A1);
