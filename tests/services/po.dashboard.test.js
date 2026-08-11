@@ -56,6 +56,17 @@ const inserted = {
   approverIds: [],
   techEvalIds: [],
   techClauseIds: [],
+  quoteItemIds: [],
+  // Attachment rows, one array per storage table — these carry no FKs, so they
+  // are purged by id rather than cascading off their parents.
+  rfqFileIds: [],
+  rfqProductFileIds: [],
+  quotesFileIds: [],
+  quoteItemFileIds: [],
+  clauseFileIds: [],
+  evalResponseIds: [],
+  evalResponseFileIds: [],
+  poDocIds: [],
 };
 
 beforeEach(() => {
@@ -63,7 +74,22 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Tech-eval first: cleared_vendors references approval_instances, and the
+  // Attachment rows first — they hang off rfq / quote / tech-eval / PO rows
+  // that the purges below remove.
+  const purgeById = async (table, ids) => {
+    if (ids.length) await db.none(`DELETE FROM ${table} WHERE id = ANY($1::int[])`, [ids]);
+  };
+  await purgeById("tbl_rfq_product_tech_evaluation_vendors_response_files", inserted.evalResponseFileIds);
+  await purgeById("tbl_rfq_product_tech_evaluation_vendors_response", inserted.evalResponseIds);
+  await purgeById("tbl_rfq_product_tech_evaluation_clauses_files", inserted.clauseFileIds);
+  await purgeById("tbl_quote_item_files", inserted.quoteItemFileIds);
+  await purgeById("tbl_quotes_files", inserted.quotesFileIds);
+  await purgeById("tbl_rfq_product_files", inserted.rfqProductFileIds);
+  await purgeById("tbl_rfq_files", inserted.rfqFileIds);
+  await purgeById("tbl_purchase_order_document", inserted.poDocIds);
+  await purgeById("tbl_quote_items", inserted.quoteItemIds);
+
+  // Tech-eval next: cleared_vendors references approval_instances, and the
   // tech_evaluation row references rfq + rfq_product — so purge these before
   // the approval-instance and rfq/product deletes below to avoid FK errors.
   if (inserted.techClauseIds.length) {
@@ -625,6 +651,219 @@ describe("GET /po/detail/:po_id", () => {
     // the scope predicate uses, so a call-off PO reports its ARC's hotel.
     expect(res.body.data.hotel_id).toBe(IDS.hotels.A1);
     expect(res.body.data.department_id).toBe(IDS.departments.proc);
+  });
+});
+
+// ===========================================================================
+// 5b) GET /po/detail/:po_id — document_groups
+// ===========================================================================
+//
+// Client report: approvers were rejecting POs for missing paperwork that was
+// on the page all along. The detail page showed the PO pdf / GRN / invoice in a
+// prominent card and put the RFQ, quote and tech-eval files in two cards at the
+// very bottom of the right-hand aside, below the fold. The two surfaces were
+// NOT duplicates — four different document classes, one of them invisible.
+//
+// The endpoint now groups all of them, because provenance is only knowable
+// here: each class comes from a different table and a filename cannot tell them
+// apart. These tests pin that every class lands in the right group, and that a
+// group with nothing in it is omitted rather than rendered empty.
+
+// Seed one attachment into each storage table that feeds document_groups.
+async function seedEveryDocumentClass({ rfq_id, rfq_no, rfq_product_id, product_variant_id, quote_id, po_id, vendorId = IDS.users.vendor_alpha }) {
+  // tbl_purchase_order_product.quote_id points at a quote ITEM (not a quote),
+  // and the vendor's per-product files hang off that item — so the row has to
+  // exist for the join to resolve.
+  const qi = await db.one(
+    `INSERT INTO tbl_quote_items
+       (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, comment, delivery_period, quantity)
+     VALUES ($1, $2, $3, $4, 50, 100, '', '7 days', '2') RETURNING id`,
+    [rfq_id, rfq_no, quote_id, product_variant_id]
+  );
+  inserted.quoteItemIds.push(qi.id);
+  const pop = await db.one(
+    `INSERT INTO tbl_purchase_order_product
+       (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, total_price)
+     VALUES ($1, $2, $3, 2, 'NOS', 50, 100) RETURNING id`,
+    [po_id, rfq_product_id, qi.id]
+  );
+  inserted.poProductIds.push(pop.id);
+
+  // The generated PO pdf + a vendor invoice: the "PO documents" group.
+  await db.none(`UPDATE tbl_rfq_purchase_order SET po_pdf_url = $2 WHERE id = $1`, [po_id, "https://s3.test/po/order.pdf"]);
+  const invoice = await db.one(
+    `INSERT INTO tbl_purchase_order_document (purchase_order_id, document_type, document_url, uploaded_by)
+     VALUES ($1, 'invoice', $2, $3) RETURNING id`,
+    [po_id, "https://s3.test/po/invoice-771.pdf", IDS.users.a1_proc_buyer]
+  );
+  inserted.poDocIds.push(invoice.id);
+
+  // Buyer, RFQ side: header T&C + a per-product datasheet. The %20 is
+  // deliberate — the display name has to arrive decoded.
+  const rfqFile = await db.one(
+    `INSERT INTO tbl_rfq_files (rfq_id, file_type, file_url) VALUES ($1, 'term_and_condition', $2) RETURNING id`,
+    [rfq_id, "https://s3.test/rfq/general-terms.pdf"]
+  );
+  inserted.rfqFileIds.push(rfqFile.id);
+  const rfqProductFile = await db.one(
+    `INSERT INTO tbl_rfq_product_files (rfq_product_id, file_type, file_url) VALUES ($1, 'TDS', $2) RETURNING id`,
+    [rfq_product_id, "https://s3.test/rfq/tech%20data%20sheet.pdf"]
+  );
+  inserted.rfqProductFileIds.push(rfqProductFile.id);
+
+  // Vendor, quote side: quote-level T&C + a per-item catalogue.
+  const quoteFile = await db.one(
+    `INSERT INTO tbl_quotes_files (quote_id, file_type, file_url) VALUES ($1, 'term_and_condition', $2) RETURNING id`,
+    [quote_id, "https://s3.test/quote/vendor-terms.pdf"]
+  );
+  inserted.quotesFileIds.push(quoteFile.id);
+  const quoteItemFile = await db.one(
+    `INSERT INTO tbl_quote_item_files (quote_item_id, file_type, file_url) VALUES ($1, 'DOC', $2) RETURNING id`,
+    [qi.id, "https://s3.test/quote/catalogue.pdf"]
+  );
+  inserted.quoteItemFileIds.push(quoteItemFile.id);
+
+  // Technical evaluation: the only group with two sources — a buyer-issued
+  // clause attachment and the vendor's response to it.
+  const te = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation
+       (rfq_id, tbl_rfq_product_id, minimum_passing_score, is_complete, current_round)
+     VALUES ($1, $2, 60, true, 1) RETURNING id`,
+    [rfq_id, rfq_product_id]
+  );
+  inserted.techEvalIds.push(te.id);
+  const clause = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation_clauses
+       (tbl_rfq_product_tech_evaluation_id, clause_text, weightage, clause_type)
+     VALUES ($1, 'Fire rating certificate', 10, 'clause') RETURNING id`,
+    [te.id]
+  );
+  inserted.techClauseIds.push(clause.id);
+  const clauseFile = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files
+       (tbl_rfq_product_tech_evaluation_clauses_id, file_url) VALUES ($1, $2) RETURNING id`,
+    [clause.id, "https://s3.test/tech/clause-brief.pdf"]
+  );
+  inserted.clauseFileIds.push(clauseFile.id);
+  const response = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+       (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response, buyer_id, buyer_marks, "timestamp", score_timestamp)
+     VALUES ($1, $2, 'Certificate attached', $3, 9, NOW() - INTERVAL '2 hours', NOW()) RETURNING id`,
+    [clause.id, vendorId, IDS.users.a1_proc_buyer]
+  );
+  inserted.evalResponseIds.push(response.id);
+  const responseFile = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response_files
+       (tbl_rfq_product_tech_evaluation_vendors_response_id, file_url) VALUES ($1, $2) RETURNING id`,
+    [response.id, "https://s3.test/tech/vendor-fire-cert.pdf"]
+  );
+  inserted.evalResponseFileIds.push(responseFile.id);
+}
+
+describe("GET /po/detail/:po_id — document_groups", () => {
+  const groupNamed = (groups, key) => groups.find((g) => g.key === key);
+  const urlsIn = (groups, key) => (groupNamed(groups, key)?.files || []).map((f) => f.url);
+
+  it("puts every document class in its own group, so nothing is only reachable from the aside", async () => {
+    const seed = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({
+      rfq_id: seed.rfq_id, status: "pending_approval",
+      rfq_product_ids: [seed.rfq_product_id], quote_ids: [seed.quote_id],
+    });
+    await seedEveryDocumentClass({ ...seed, po_id });
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    expect(res.status).toBe(200);
+    const groups = res.body.data.document_groups;
+
+    // Ordered for a decision: the artefact being approved, then what was asked
+    // for, then what was offered, then the evidence it was judged on.
+    expect(groups.map((g) => g.key)).toEqual(["po", "rfq", "vendor_quote", "technical"]);
+    expect(groups.map((g) => g.title)).toEqual([
+      "PO documents",
+      "RFQ documents (buyer-issued)",
+      "Vendor quote documents",
+      "Technical evaluation documents",
+    ]);
+
+    // Each file lands in the group its SOURCE TABLE implies — a vendor's
+    // catalogue must never be filed under the buyer's RFQ documents.
+    expect(urlsIn(groups, "po")).toEqual([
+      "https://s3.test/po/order.pdf",
+      "https://s3.test/po/invoice-771.pdf",
+    ]);
+    expect(urlsIn(groups, "rfq")).toEqual([
+      "https://s3.test/rfq/general-terms.pdf",
+      "https://s3.test/rfq/tech%20data%20sheet.pdf",
+    ]);
+    expect(urlsIn(groups, "vendor_quote")).toEqual([
+      "https://s3.test/quote/vendor-terms.pdf",
+      "https://s3.test/quote/catalogue.pdf",
+    ]);
+    expect(urlsIn(groups, "technical")).toEqual([
+      "https://s3.test/tech/clause-brief.pdf",
+      "https://s3.test/tech/vendor-fire-cert.pdf",
+    ]);
+  });
+
+  it("labels each file with its kind, and names the source inside the one mixed group", async () => {
+    const seed = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({
+      rfq_id: seed.rfq_id, status: "pending_approval",
+      rfq_product_ids: [seed.rfq_product_id], quote_ids: [seed.quote_id],
+    });
+    await seedEveryDocumentClass({ ...seed, po_id });
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    const groups = res.body.data.document_groups;
+
+    expect(groupNamed(groups, "po").files.map((f) => f.label)).toEqual(["PO", "Invoice"]);
+    expect(groupNamed(groups, "rfq").files.map((f) => f.label)).toEqual(["T&C", "TDS"]);
+    // Technical evaluation holds files from BOTH sides, so the label has to say
+    // which side each came from — the group heading cannot.
+    expect(groupNamed(groups, "technical").files.map((f) => f.label)).toEqual([
+      "Buyer clause",
+      "Vendor response",
+    ]);
+
+    // A per-product file names its product; an RFQ-level one has none.
+    const rfqFiles = groupNamed(groups, "rfq").files;
+    expect(rfqFiles[0].product).toBeNull();
+    expect(typeof rfqFiles[1].product).toBe("string");
+    expect(rfqFiles[1].product.length).toBeGreaterThan(0);
+
+    // Display names come from the server, percent-decoded — the client must not
+    // have to parse a url to render a row.
+    expect(rfqFiles[1].name).toBe("tech data sheet.pdf");
+    expect(groupNamed(groups, "technical").files[1].name).toBe("vendor-fire-cert.pdf");
+  });
+
+  it("omits a group the PO has no files for, rather than shipping an empty heading", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    await db.none(`UPDATE tbl_rfq_purchase_order SET po_pdf_url = $2 WHERE id = $1`, [po_id, "https://s3.test/po/only.pdf"]);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    const groups = res.body.data.document_groups;
+
+    expect(groups.map((g) => g.key)).toEqual(["po"]);
+    expect(groups.every((g) => g.files.length > 0)).toBe(true);
+  });
+
+  it("is an empty list — not null — for a PO carrying no documents at all", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    expect(res.body.data.document_groups).toEqual([]);
   });
 });
 

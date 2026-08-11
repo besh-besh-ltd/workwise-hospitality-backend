@@ -1616,6 +1616,61 @@ describe("GET /rfq/quote-comparison-view/:id — approval trail decision rule + 
     expect(node.by).not.toBe(removedName);
   });
 
+  it("stamps each approver with the INSTANT they acted, so two approvals on one date do not collapse into the same value", async () => {
+    // The drawer prints this beside each approver ("11 Aug 2026 · 03:50 PM"),
+    // in the same format as the trail's own "Sent for approval" milestone. The
+    // question it is opened to answer is not WHETHER someone approved but WHEN
+    // — against a bid deadline, or against the other approvals on the same
+    // level — and a level cleared by two people four hours apart is unreadable
+    // if the payload only carries the day.
+    //
+    // Asserted as a DIFFERENCE between two stamps rather than an absolute
+    // clock time: that holds under any Postgres session / Node process
+    // timezone, while still going to zero the moment the value is truncated to
+    // a date anywhere on the way out.
+    const { instId, rfq_id, rfq_product_id } = await l1NodeFor({
+      status: "APPROVED", decisionRule: "ALL", stampActedAt: false,
+    });
+    const stepId = (await db.one(
+      `SELECT id FROM tbl_approval_instance_steps
+        WHERE approval_instance_id = $1 AND step_order = 1`,
+      [instId]
+    )).id;
+
+    // Literal wall-clock instants, not NOW(): the gap has to be exact, and a
+    // relative pair could straddle midnight on an unlucky run.
+    await db.none(
+      `UPDATE tbl_approval_step_approvers
+          SET status = 'APPROVED', acted_at = TIMESTAMP '2026-06-11 09:15:00'
+        WHERE approval_instance_step_id = $1 AND approver_user_id = $2`,
+      [stepId, IDS.users.a1_proc_commApp]
+    );
+    const later = await db.one(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, acted_at)
+       VALUES ($1, $2, 'APPROVED', TIMESTAMP '2026-06-11 10:15:00') RETURNING id`,
+      [stepId, IDS.users.a1_proc_finance]
+    );
+    inserted.approverIds.push(later.id);
+
+    const client = await scopedClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(VIEW(rfq_id));
+    expect(res.status).toBe(200);
+    const product = res.body.products.find((p) => p.id === rfq_product_id);
+    const node = product.approval.trail.find((n) => n.title === "L1 approval");
+
+    const nine = node.approvers.find((a) => a.user_id === IDS.users.a1_proc_commApp);
+    const ten = node.approvers.find((a) => a.user_id === IDS.users.a1_proc_finance);
+    expect(nine).toBeDefined();
+    expect(ten).toBeDefined();
+
+    // An ISO instant carrying a time of day — not "2026-06-11".
+    expect(nine.acted_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(ten.acted_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    // And the hour between them survives to the client.
+    expect(Date.parse(ten.acted_at) - Date.parse(nine.acted_at)).toBe(3600_000);
+  });
+
   it("does not leak the trail before the bid deadline — the pre-deadline lock blanks approval wholesale, new fields included", async () => {
     // Approver identities, their user ids and act times sit BEHIND the same
     // gate as quotes and tech scores: while quotes are locked the shaper

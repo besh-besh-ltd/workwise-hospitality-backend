@@ -3066,6 +3066,23 @@ const NegotiationController = {
         return res.status(400).json({ status: 2, message: 'Invalid RFQ ID' });
       }
 
+      // The rfq_id arrives straight off the URL and nothing downstream scoped
+      // it: the model's query is `WHERE nr.rfq_id = $1` with no tenant
+      // predicate, and `userId` was passed only to compute can_user_approve.
+      // Any authenticated buyer could therefore read ANY RFQ's negotiation
+      // rounds — vendor identities, target prices, approver names and emails —
+      // by editing the id in the URL.
+      //
+      // Gated BEFORE any state read, so an out-of-scope caller cannot even
+      // learn whether the RFQ exists. Same matrix, same 403 shape, as the
+      // sibling round-detail endpoints.
+      if (!(await negotiationModel.userCanReadRfqNegotiations(readScopeUserId(req), rfqId))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You do not have access to this negotiation'
+        });
+      }
+
       const bundle = await negotiationModel.getApprovalBundleForRfq(rfqId, userId);
 
       return res.status(200).json({
