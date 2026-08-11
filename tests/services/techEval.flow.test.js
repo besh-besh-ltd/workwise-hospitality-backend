@@ -399,6 +399,79 @@ describe("submitTechEvalForApproval — gates", () => {
 //  Full happy path with scored vendor (Tasks 26 + 27 — uses tests/factories/techEval.js)
 // ===========================================================================
 
+// ===========================================================================
+//  A policy that resolves to nobody must surface as an ACTIONABLE 400.
+//
+//  The approval engine refuses to create an instance when every step of the
+//  policy drops (APPROVAL_POLICY_RESOLVES_TO_NOBODY), attaching httpStatus 400
+//  and per-step diagnostics naming WHICH step was dropped and why. This
+//  handler matched on error message text alone, so that error matched nothing
+//  and fell through to a blanket 500 — the evaluator lost their submission and
+//  was told only "Error submitting technical evaluation for approval".
+//
+//  TECHNICAL is the highest-volume path into this refusal, so a 500 here is
+//  the difference between an admin fixing a policy and an engineer reading
+//  logs.
+// ===========================================================================
+describe("submitTechEvalForApproval — a policy resolving to nobody", () => {
+  const POLICY_ID = 64990;
+
+  afterEach(async () => {
+    await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id=$1`, [POLICY_ID]);
+    await db.none(`DELETE FROM tbl_approval_policies WHERE id=$1`, [POLICY_ID]);
+  });
+
+  it("returns 400 with the engine's reason and diagnostics, not a blanket 500", async () => {
+    const { rfq_id, rfq_product_id } = await makeRfqWithProduct({
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A3,
+      process: IDS.processes.A_P1,
+    });
+    await setupScoredVendor({
+      rfq_id, rfq_product_id, product_variant_id: 1, variant: 0,
+      vendor_id: IDS.users.vendor_alpha, buyer_id: IDS.users.a1_proc_buyer,
+      weightages: [50, 50], marksPerClause: 30, minimum_passing_score: 50,
+    });
+
+    // A TECHNICAL policy for THIS scope whose only step names a user holding
+    // no te.read+te.approve — so the step drops and nothing survives.
+    await db.none(
+      `INSERT INTO tbl_approval_policies
+         (id, entity_type, hospitality_company_id, hotel_id, department_id,
+          is_active, created_by, process_id, is_master, is_department_scoped, version)
+       VALUES ($1,'TECHNICAL',$2,$3,NULL,true,$4,$5,false,false,1)
+       ON CONFLICT (id) DO NOTHING`,
+      [POLICY_ID, IDS.hospitality.A, IDS.hotels.A3, IDS.users.a1_proc_buyer, IDS.processes.A_P1]
+    );
+    await db.none(
+      `INSERT INTO tbl_approval_policy_steps
+         (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
+       VALUES ($1, 1, 'ALL', 'USER', $2)`,
+      [POLICY_ID, IDS.users.vendor_alpha]  // a vendor: holds no te permissions
+    );
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, rfq_product_id },
+    });
+    await rfqController.submitTechEvalForApproval(m.req, m.res);
+
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/resolved to zero usable approval steps/i);
+    expect(m.calls.body.code).toBe("APPROVAL_POLICY_RESOLVES_TO_NOBODY");
+    // The diagnostics are the point: they name the dropped step and the reason.
+    expect(m.calls.body.diagnostics?.skipped_steps?.[0]?.reason)
+      .toBe("USER_LACKS_READ_AND_APPROVE");
+
+    // And nothing was written — no half-created instance.
+    const insts = await db.any(
+      `SELECT id FROM tbl_approval_instances WHERE entity_type='TECHNICAL' AND entity_id=$1`,
+      [rfq_product_id]
+    );
+    expect(insts.length).toBe(0);
+  });
+});
+
 describe("submitTechEvalForApproval — happy path with a fully-scored vendor", () => {
   it("creates a TECHNICAL approval instance against the A1/P1 TECHNICAL policy (NOT cross-process)", async () => {
     const { rfq_id, rfq_product_id } = await makeRfqWithProduct({

@@ -17091,6 +17091,22 @@ getClauses: async (req, res) => {
         });
       }
 
+      // The approval engine raises structured, actionable errors — most
+      // importantly APPROVAL_POLICY_RESOLVES_TO_NOBODY, which carries
+      // httpStatus 400 and the per-step diagnostics explaining WHICH step was
+      // dropped and why. This handler matched on message text alone, so that
+      // error matched nothing and fell through to the 500 below: the evaluator
+      // lost their submission and were told only "Error submitting technical
+      // evaluation". Honour the status the engine set, and pass the reason on.
+      if (error?.httpStatus) {
+        return res.status(error.httpStatus).json({
+          status: 0,
+          message: error.message,
+          ...(error.code ? { code: error.code } : {}),
+          ...(error.diagnostics ? { diagnostics: error.diagnostics } : {})
+        });
+      }
+
       return res.status(500).json({
         status: 0,
         message: 'Error submitting technical evaluation for approval',
