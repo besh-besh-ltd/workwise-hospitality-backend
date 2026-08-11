@@ -193,3 +193,44 @@ describe("negotiation approval bundle — who opened the round", () => {
     expect(round.created_by_name).not.toBe(names.rfq_creator);
   });
 });
+
+// ===========================================================================
+//  Cross-tenant read gate.
+//
+//  The endpoint is keyed by rfq_id straight off the URL, and nothing scoped
+//  it: the model query is `WHERE nr.rfq_id = $1` with no tenant predicate, and
+//  the userId was passed only to compute can_user_approve. Any authenticated
+//  buyer could read ANY RFQ's negotiation rounds — vendor identities, target
+//  prices, approver names and emails — by editing the id.
+//
+//  The sibling round-detail endpoints have always gated on the same read
+//  matrix; this one was the gap.
+// ===========================================================================
+describe("GET /negotiation/rounds/:rfq_id/approval-bundle — tenant scope", () => {
+  it("refuses a buyer from another hospitality company, and leaks nothing", async () => {
+    const rfqId = await makeBidEndedRfq();
+    await addProduct(rfqId, 1);
+
+    // companyB_admin is mapped only to Hospitality B; the RFQ is Hospitality A.
+    // user_type must be 2 or the route's acl([2,8]) refuses first and this
+    // asserts nothing about tenant scope — real buyers in production ARE
+    // user_type 2, so without this the test cannot reach the code it guards.
+    await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`,
+      [IDS.users.companyB_admin]);
+    const outsider = await httpClient(IDS.users.companyB_admin);
+    const res = await outsider.get(`/api/v1/negotiation/rounds/${rfqId}/approval-bundle`);
+
+    expect(res.status).toBe(403);
+    // Refused before any state read — the body must not reveal that the RFQ
+    // exists, nor carry any round, vendor or approver data.
+    expect(JSON.stringify(res.body)).not.toMatch(/rounds_history|created_by_name|target/i);
+  });
+
+  it("still serves the in-scope approver", async () => {
+    const rfqId = await makeBidEndedRfq();
+    await addProduct(rfqId, 1);
+    const insider = await httpClient(APPROVER);
+    const res = await insider.get(`/api/v1/negotiation/rounds/${rfqId}/approval-bundle`);
+    expect(res.status).toBe(200);
+  });
+});

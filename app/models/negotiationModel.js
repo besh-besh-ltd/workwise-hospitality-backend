@@ -1049,6 +1049,30 @@ const negotiationModel = {
    *
    * `userId` null = super admin (user_type 8) → allowed.
    */
+  /**
+   * Can this user read the negotiation data belonging to an RFQ?
+   *
+   * The RFQ-level twin of `userCanReadRound`, applying the identical read
+   * matrix to the parent rather than to one round. The approval-bundle
+   * endpoint is keyed by rfq_id, so the round-level gate cannot express the
+   * question it needs to ask.
+   *
+   * `userId == null` means super-admin (see readScopeUserId) and bypasses,
+   * matching every other gate in this model.
+   */
+  userCanReadRfqNegotiations: async (userId, rfqId) => {
+    if (userId == null) return true;
+    if (!rfqId) return false;
+    const row = await db.oneOrNone(
+      `SELECT 1 AS ok
+         FROM tbl_rfq rfq
+        WHERE rfq.id = $2::int
+          AND ${negotiationReadScopeSql('rfq', '$1')}`,
+      [Number(userId), Number(rfqId)]
+    );
+    return !!row;
+  },
+
   userCanReadRound: async (userId, roundId) => {
     if (userId == null) return true;
     if (!roundId) return false;
