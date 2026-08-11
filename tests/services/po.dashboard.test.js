@@ -496,6 +496,81 @@ describe("GET /po/awaiting", () => {
 // ===========================================================================
 // 5) GET /po/detail/:po_id
 // ===========================================================================
+describe("GET /po/detail/:po_id — product coverage", () => {
+  // A purchase order is per-vendor and is built from the finalizations made so
+  // far, so a draft can be initiated while other products on the same RFQ are
+  // still unfinalized. Initiating FREEZES it — anything finalized afterwards is
+  // clubbed into a separate PO. The detail page turns this into Initiate
+  // (green, covers everything) vs Force Initiate (yellow, with a warning), so
+  // the flag has to be derived on the server: the client sees only the items it
+  // was sent and cannot know what is missing.
+  //
+  // Production example this mirrors: PO 472 on RFQ 809 — 3 products on the RFQ,
+  // 1 finalized, 1 PO. Incomplete.
+
+  /** Add another product to an existing RFQ, without putting it on any PO. */
+  async function addRfqProduct(rfq_id, product_variant_id) {
+    const p = await db.one(
+      `INSERT INTO tbl_rfq_products
+         (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, qap, variant)
+       VALUES ($1, '', '0', '', '', $2, '0', 0) RETURNING id`,
+      [rfq_id, product_variant_id]
+    );
+    inserted.rfqProductIds = inserted.rfqProductIds || [];
+    inserted.rfqProductIds.push(p.id);
+    return p.id;
+  }
+
+  it("covers_all_products = true when the PO carries every product on the RFQ", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.rfq_product_count).toBe(1);
+    expect(res.body.data.po_product_count).toBe(1);
+    expect(res.body.data.covers_all_products).toBe(true);
+  });
+
+  it("covers_all_products = false when a product on the RFQ is not on the PO", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    // Two more products on the RFQ, neither finalized onto this PO — the
+    // production shape of PO 472.
+    await addRfqProduct(rfq_id, 2);
+    await addRfqProduct(rfq_id, 3);
+    const po_id = await makePo({ rfq_id, rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.rfq_product_count).toBe(3);
+    expect(res.body.data.po_product_count).toBe(1);
+    expect(res.body.data.covers_all_products).toBe(false);
+  });
+
+  it("counts a product once even if it appears on several PO lines", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    await addRfqProduct(rfq_id, 2);
+    const po_id = await makePo({ rfq_id, rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    await attachProductToPo(po_id, rfq_product_id, quote_id); // same product, second line
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+
+    // Two lines, but still only ONE of the RFQ's two products is covered —
+    // counting rows instead of distinct products would call this complete.
+    expect(res.body.data.po_product_count).toBe(1);
+    expect(res.body.data.rfq_product_count).toBe(2);
+    expect(res.body.data.covers_all_products).toBe(false);
+  });
+});
+
 describe("GET /po/detail/:po_id", () => {
   it("returns the contract-shaped detail object for an in-scope PO", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
