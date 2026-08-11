@@ -1,0 +1,490 @@
+// ============================================================================
+// poExcelExport.js
+// ----------------------------------------------------------------------------
+// Excel workbooks for the Purchase Order surfaces (buyer dashboard list, buyer
+// tracking, buyer analytics, vendor order book).
+//
+// The rows handed in here are ALREADY scoped and filtered by the model layer
+// (poDashboardModel / poVendorModel) — this file only formats. It must never
+// query, because a second query is a second chance to disagree with the screen.
+//
+// ── Conventions, and why ────────────────────────────────────────────────────
+// Same rulebook as the quote-comparison workbooks
+// (frontend/components/dashboard/buyer/quoteComparison/quoteComparisonExcel.js),
+// so a user who has opened one of ours already knows how to read this one:
+//
+//   • REAL NUMBERS AND REAL DATES, never pre-formatted strings. The legacy
+//     exports in this codebase write "₹1,200" and "12 Jun 2026" as text, so
+//     nothing in the sheet sums, sorts, filters or pivots. Every money cell is
+//     a number with a currency-less "#,##0.00" format and a "(₹)" header;
+//     every date cell is a real date with a display format.
+//   • NO MERGED CELLS in the data grid — merges break sort and filter, which is
+//     the single most common reason an export gets thrown away. The run's
+//     metadata therefore lives on its own "Report info" sheet rather than in a
+//     banner above the table.
+//   • Frozen header row + autofilter on every grid, so a 5,000-row export is
+//     usable the moment it opens.
+//   • Explicit column widths. Excel's default 8.43 characters turns every
+//     vendor name into "####".
+//   • IST. Timestamps come out of Postgres as absolute instants (created_at is
+//     timestamptz); the product renders them as Indian wall-clock everywhere
+//     else, so the workbook does too — see istDate() for the mechanics.
+// ============================================================================
+
+import excelJS from "exceljs";
+
+const MONEY = "#,##0.00";
+const INT = "0";
+const DATE_TIME = "dd-mmm-yyyy hh:mm";
+const HEAD_BG = "FFF1F5F9";
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/**
+ * A Date whose UTC components equal the IST wall-clock of `value`.
+ *
+ * ExcelJS converts a JS Date to an Excel serial straight from its epoch
+ * milliseconds (`25569 + t / 86400000`), i.e. it writes the UTC wall-clock and
+ * offers no timezone option. Shifting by +05:30 first is therefore the only way
+ * to make the cell READ as IST while staying a real date that sorts and
+ * filters. The column header says "(IST)" so nobody has to infer it.
+ */
+function istDate(value) {
+  if (!value) return null;
+  const t = new Date(value);
+  return Number.isNaN(t.getTime()) ? null : new Date(t.getTime() + IST_OFFSET_MS);
+}
+
+function nowIstLabel() {
+  return new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/**
+ * Write one tabular sheet from a column spec.
+ *
+ * columns: [{ header, key, width, numFmt?, align? }]
+ * rows:    plain objects keyed by `key`. A null/undefined cell is left EMPTY
+ *          rather than zero-filled — a 0 in a money column sorts as the
+ *          cheapest and quietly poisons any min()/average built on the sheet.
+ */
+function writeGrid(ws, columns, rows) {
+  ws.columns = columns.map((c) => ({ header: c.header, key: c.key, width: c.width || 16 }));
+
+  for (const r of rows) ws.addRow(r);
+
+  const header = ws.getRow(1);
+  header.font = { bold: true, size: 10 };
+  header.alignment = { vertical: "middle", wrapText: true };
+  header.height = 26;
+  header.eachCell((cell) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEAD_BG } };
+    cell.border = { bottom: { style: "thin", color: { argb: "FFCBD5E1" } } };
+  });
+
+  columns.forEach((c, i) => {
+    const col = ws.getColumn(i + 1);
+    if (c.numFmt) col.numFmt = c.numFmt;
+    if (c.align) col.alignment = { horizontal: c.align };
+  });
+
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+  if (rows.length > 0) {
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
+  }
+  return ws;
+}
+
+/**
+ * The provenance sheet: what was exported, by whom, under which filters, at
+ * what time. Without it an exported file forwarded to a third party is an
+ * unlabelled pile of rows, and "why does your number differ from mine?" has no
+ * answer. Two columns, no merges.
+ */
+function writeReportInfo(wb, { title, generatedBy, filters = [], rowCount, truncated, rowCap }) {
+  const ws = wb.addWorksheet("Report info");
+  ws.columns = [{ width: 26 }, { width: 62 }];
+  const put = (k, v) => {
+    const row = ws.addRow([k, v]);
+    row.getCell(1).font = { bold: true, size: 10 };
+  };
+  put("Report", title);
+  put("Generated at (IST)", nowIstLabel());
+  if (generatedBy) put("Generated by", generatedBy);
+  put("Rows", rowCount);
+  if (truncated) {
+    put(
+      "NOTE",
+      `Only the first ${rowCap} rows are included. Narrow the filters and export again for the rest.`
+    );
+  }
+  if (filters.length > 0) {
+    ws.addRow([]);
+    const head = ws.addRow(["Filters applied", ""]);
+    head.getCell(1).font = { bold: true, size: 10 };
+    for (const [k, v] of filters) put(k, v);
+  }
+  return ws;
+}
+
+const workbook = (creator) => {
+  const wb = new excelJS.Workbook();
+  wb.creator = creator || "Workwise";
+  wb.created = new Date();
+  return wb;
+};
+
+// ---------------------------------------------------------------------------
+// Buyer — "All purchase orders" (PO dashboard)
+// ---------------------------------------------------------------------------
+const LIST_COLUMNS = [
+  { header: "PO #", key: "po_number", width: 20 },
+  { header: "Status", key: "status", width: 20 },
+  { header: "Pending with", key: "pending_with", width: 28 },
+  { header: "RFQ #", key: "rfq_no", width: 12 },
+  { header: "RFQ title", key: "rfq_title", width: 34 },
+  { header: "Vendor", key: "vendor", width: 30 },
+  { header: "Items", key: "items_label", width: 34 },
+  { header: "Item count", key: "items_count", width: 12, numFmt: INT, align: "right" },
+  { header: "Quantity", key: "quantity", width: 12, numFmt: MONEY, align: "right" },
+  { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
+  { header: "Initiated by", key: "initiator", width: 24 },
+  { header: "Created (IST)", key: "created_at", width: 20, numFmt: DATE_TIME },
+];
+
+// Human status copy must match the screen (frontend .../purchase-orders/shared.js
+// STATUS_LABELS) — an export that renames what the user just read is a support
+// ticket waiting to happen.
+const STATUS_LABELS = {
+  draft: "Draft",
+  pending: "Pending approval",
+  pending_approval: "Pending approval",
+  acceptance_pending: "Awaiting vendor",
+  approved: "Approved",
+  sent: "Sent to vendor",
+  invoice_raised: "Invoice raised",
+  dispatched: "Dispatched",
+  GRN: "Goods received",
+  delivered: "Delivered",
+  completed: "Completed",
+  rejected: "Rejected",
+  rejected_by_vendor: "Rejected by vendor",
+  cancelled: "Cancelled",
+};
+const statusLabel = (s) => STATUS_LABELS[s] || (s ? String(s) : "");
+
+export function buildPoListWorkbook({ rows, filters = [], generatedBy, truncated = false, rowCap }) {
+  const wb = workbook(generatedBy);
+  const ws = wb.addWorksheet("Purchase orders");
+  writeGrid(
+    ws,
+    LIST_COLUMNS,
+    rows.map((p) => ({
+      po_number: p.po_number || `#${p.id}`,
+      status: statusLabel(p.status),
+      pending_with: (p.current_approvers || []).map((a) => a.name).filter(Boolean).join(", "),
+      rfq_no: p.rfq_no || "",
+      rfq_title: p.rfq_title || "",
+      vendor: p.vendor?.name || "",
+      items_label: p.items_label === "—" ? "" : p.items_label || "",
+      items_count: p.items_count ?? null,
+      quantity: p.quantity ?? null,
+      total_value: p.total_value ?? null,
+      initiator: p.initiator?.name || "",
+      created_at: istDate(p.created_at),
+    }))
+  );
+  writeReportInfo(wb, {
+    title: "Purchase orders",
+    generatedBy,
+    filters,
+    rowCount: rows.length,
+    truncated,
+    rowCap,
+  });
+  return wb;
+}
+
+// ---------------------------------------------------------------------------
+// Buyer — PO tracking
+// ---------------------------------------------------------------------------
+const TRACKING_COLUMNS = [
+  { header: "PO #", key: "po_number", width: 20 },
+  { header: "RFQ #", key: "rfq_no", width: 12 },
+  { header: "Vendor", key: "vendor", width: 30 },
+  { header: "Items", key: "items_label", width: 34 },
+  { header: "Current stage", key: "stage", width: 20 },
+  { header: "Progress (%)", key: "progress", width: 13, numFmt: INT, align: "right" },
+  { header: "GRN", key: "grn_status", width: 12 },
+  { header: "Invoice", key: "invoice_status", width: 12 },
+  { header: "Payment", key: "payment_status", width: 12 },
+  { header: "Next milestone due (IST)", key: "eta", width: 24, numFmt: DATE_TIME },
+  { header: "Overdue", key: "overdue", width: 10 },
+  { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
+];
+
+const STAGE_LABELS = {
+  approved: "Approved",
+  sent: "PO sent",
+  ack: "Acknowledged",
+  dispatched: "Dispatched",
+  delivered: "Delivered",
+  grn: "GRN received",
+  invoiced: "Invoiced",
+  paid: "Paid",
+};
+
+const titleCase = (s) => (s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : "");
+
+export function buildTrackingWorkbook({ rows, filters = [], generatedBy, truncated = false, rowCap }) {
+  const wb = workbook(generatedBy);
+  const ws = wb.addWorksheet("PO tracking");
+  writeGrid(
+    ws,
+    TRACKING_COLUMNS,
+    rows.map((p) => ({
+      po_number: p.po_number || `#${p.id}`,
+      rfq_no: p.rfq_no || "",
+      vendor: p.vendor?.name || "",
+      items_label: p.items_label === "—" ? "" : p.items_label || "",
+      stage: STAGE_LABELS[p.current_stage] || p.current_stage || "",
+      progress: p.progress ?? null,
+      grn_status: titleCase(p.grn_status),
+      invoice_status: titleCase(p.invoice_status),
+      payment_status: titleCase(p.payment_status),
+      eta: istDate(p.eta_delivery),
+      overdue: p.overdue ? "Yes" : "No",
+      total_value: p.total_value ?? null,
+    }))
+  );
+  writeReportInfo(wb, {
+    title: "PO tracking",
+    generatedBy,
+    filters,
+    rowCount: rows.length,
+    truncated,
+    rowCap,
+  });
+  return wb;
+}
+
+// ---------------------------------------------------------------------------
+// Buyer — PO analytics
+// ---------------------------------------------------------------------------
+// The analytics screen is charts, so its export is one sheet per chart rather
+// than one flat grid: each chart's underlying series, tidy and re-pivotable.
+export function buildAnalyticsWorkbook({ analytics, period, filters = [], generatedBy }) {
+  const wb = workbook(generatedBy);
+  const a = analytics || {};
+  const k = a.kpis || {};
+
+  const kpiSheet = wb.addWorksheet("KPIs");
+  writeGrid(
+    kpiSheet,
+    [
+      { header: "Metric", key: "metric", width: 34 },
+      { header: "Value", key: "value", width: 18, numFmt: MONEY, align: "right" },
+      { header: "Unit", key: "unit", width: 16 },
+    ],
+    [
+      { metric: "Total spend", value: k.total_spend ?? null, unit: "₹" },
+      { metric: "Spend change vs previous period", value: k.spend_delta_pct ?? null, unit: "%" },
+      { metric: "Average approval cycle", value: k.avg_approval_cycle_days ?? null, unit: "days" },
+      { metric: "Approval cycle change", value: k.approval_cycle_delta ?? null, unit: "days" },
+      { metric: "On-time delivery", value: k.on_time_delivery_pct ?? null, unit: "%" },
+      { metric: "Cost savings", value: k.cost_savings ?? null, unit: "₹" },
+      { metric: "Savings", value: k.savings_pct ?? null, unit: "%" },
+      { metric: "Active vendors", value: k.active_vendors ?? null, unit: "count" },
+      { metric: "Vendor categories", value: k.vendor_categories ?? null, unit: "count" },
+    ]
+  );
+
+  writeGrid(
+    wb.addWorksheet("Spend trend"),
+    [
+      { header: "Month", key: "month", width: 16 },
+      { header: "PO value (₹)", key: "value", width: 18, numFmt: MONEY, align: "right" },
+      { header: "Current period", key: "current", width: 16 },
+    ],
+    (a.spend_trend || []).map((s) => ({
+      month: s.month || "",
+      value: s.value ?? null,
+      current: s.current ? "Yes" : "No",
+    }))
+  );
+
+  writeGrid(
+    wb.addWorksheet("Status mix"),
+    [
+      { header: "Status", key: "label", width: 24 },
+      { header: "POs", key: "count", width: 12, numFmt: INT, align: "right" },
+      { header: "Share (%)", key: "pct", width: 12, numFmt: MONEY, align: "right" },
+      { header: "Value (₹)", key: "value", width: 18, numFmt: MONEY, align: "right" },
+    ],
+    (a.status_dist || []).map((s) => ({
+      label: s.label || s.key || "",
+      count: s.count ?? null,
+      pct: s.pct ?? null,
+      value: s.value ?? null,
+    }))
+  );
+
+  writeGrid(
+    wb.addWorksheet("Top vendors"),
+    [
+      { header: "Rank", key: "rank", width: 8, numFmt: INT, align: "right" },
+      { header: "Vendor", key: "name", width: 34 },
+      { header: "Orders", key: "orders", width: 12, numFmt: INT, align: "right" },
+      { header: "Spend (₹)", key: "value", width: 18, numFmt: MONEY, align: "right" },
+      { header: "On-time delivery (%)", key: "otd", width: 20, numFmt: MONEY, align: "right" },
+    ],
+    (a.top_vendors || []).map((v, i) => ({
+      rank: i + 1,
+      name: v.name || "",
+      orders: v.orders ?? null,
+      value: v.value ?? null,
+      otd: v.otd ?? null,
+    }))
+  );
+
+  writeGrid(
+    wb.addWorksheet("Approval bottlenecks"),
+    [
+      { header: "Stage", key: "stage", width: 26 },
+      { header: "Average time at stage", key: "time", width: 22 },
+      { header: "Assessment", key: "status", width: 16 },
+    ],
+    (a.bottlenecks || []).map((b) => ({
+      stage: b.stage || "",
+      time: b.time || "",
+      status: titleCase(b.status),
+    }))
+  );
+
+  writeGrid(
+    wb.addWorksheet("Spend by department"),
+    [
+      { header: "Department", key: "name", width: 30 },
+      { header: "Spend (₹)", key: "value", width: 18, numFmt: MONEY, align: "right" },
+    ],
+    (a.spend_by_dept || []).map((d) => ({ name: d.name || "", value: d.value ?? null }))
+  );
+
+  const q = a.queue_health || {};
+  writeGrid(
+    wb.addWorksheet("Approval queue"),
+    [
+      { header: "Waiting time", key: "bucket", width: 22 },
+      { header: "Pending POs", key: "count", width: 14, numFmt: INT, align: "right" },
+    ],
+    [
+      { bucket: "Under 24 hours", count: q.under_24h ?? 0 },
+      { bucket: "1–3 days", count: q.d1_to_3 ?? 0 },
+      { bucket: "Over 3 days", count: q.over_3d ?? 0 },
+    ]
+  );
+
+  writeReportInfo(wb, {
+    title: `PO analytics · ${period}`,
+    generatedBy,
+    filters,
+    rowCount: (a.spend_trend || []).length + (a.top_vendors || []).length,
+  });
+  return wb;
+}
+
+// ---------------------------------------------------------------------------
+// Vendor — order book
+// ---------------------------------------------------------------------------
+// Vendor-facing status copy, matching VendorPoOrders.js (a vendor reads
+// "Awaiting you", not the buyer's "Awaiting vendor").
+const VENDOR_STATUS_LABELS = {
+  acceptance_pending: "Awaiting you",
+  sent: "Awaiting you",
+  approved: "Accepted",
+  dispatched: "Dispatched",
+  invoice_raised: "Invoice raised",
+  GRN: "Received",
+  delivered: "Received",
+  completed: "Completed",
+  rejected_by_vendor: "Rejected",
+  rejected: "Rejected",
+  cancelled: "Cancelled",
+  draft: "Draft",
+  pending: "Pending",
+  pending_approval: "Pending",
+};
+
+const VENDOR_COLUMNS = [
+  { header: "PO #", key: "po_number", width: 20 },
+  { header: "Status", key: "status", width: 18 },
+  { header: "Order type", key: "type", width: 16 },
+  { header: "Buyer", key: "buyer_name", width: 32 },
+  { header: "Hotel", key: "hotel_name", width: 28 },
+  { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
+  { header: "Created (IST)", key: "created_at", width: 20, numFmt: DATE_TIME },
+];
+
+export function buildVendorOrdersWorkbook({ rows, filters = [], generatedBy, truncated = false, rowCap }) {
+  const wb = workbook(generatedBy);
+  const ws = wb.addWorksheet("My orders");
+  writeGrid(
+    ws,
+    VENDOR_COLUMNS,
+    rows.map((p) => ({
+      po_number: p.po_number || `#${p.id}`,
+      status: VENDOR_STATUS_LABELS[p.status] || (p.status ? String(p.status) : ""),
+      type: p.is_call_off ? "Released Order" : "RFQ",
+      buyer_name: p.buyer_name || "",
+      hotel_name: p.hotel_name || "",
+      total_value: p.total_value ?? null,
+      created_at: istDate(p.created_at),
+    }))
+  );
+  writeReportInfo(wb, {
+    title: "My purchase orders",
+    generatedBy,
+    filters,
+    rowCount: rows.length,
+    truncated,
+    rowCap,
+  });
+  return wb;
+}
+
+/**
+ * Stream a workbook to the HTTP response as a downloadable .xlsx.
+ * Content-Disposition carries the filename so the browser does not save it as
+ * the endpoint path ("export" with no extension, which Excel refuses to open).
+ */
+export async function sendWorkbook(res, wb, filename) {
+  const safe = String(filename).replace(/[^\w.\-]+/g, "_");
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  res.setHeader("Content-Disposition", `attachment; filename="${safe}"`);
+  // The browser fetch reads the filename off the response; without this the
+  // header is invisible to cross-origin XHR and every download is named
+  // "export.xlsx" regardless of the filters.
+  res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+  await wb.xlsx.write(res);
+  res.end();
+}
+
+/** "purchase-orders_2026-08-11.xlsx" — dated so repeat exports do not collide. */
+export function datedFilename(base) {
+  const stamp = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  return `${base}_${stamp}.xlsx`;
+}
+
+export default {
+  buildPoListWorkbook,
+  buildTrackingWorkbook,
+  buildAnalyticsWorkbook,
+  buildVendorOrdersWorkbook,
+  sendWorkbook,
+  datedFilename,
+};
