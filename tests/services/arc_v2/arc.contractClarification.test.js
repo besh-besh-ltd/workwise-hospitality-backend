@@ -24,6 +24,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -64,6 +65,11 @@ describe("ARC — vendor contract clarification loop (surgical)", () => {
         [pid, BUYER]
       );
     }
+    // BUYER is the sole USER-source approver on both ARC_TECH and ARC_COMMITTEE
+    // steps above — grant read+approve on their mapped resources at the ARC's
+    // own hotel+department.
+    await ensureApprovable(db, BUYER, "arc-tech", HC, HOTEL, DEPT);
+    await ensureApprovable(db, BUYER, "arc-committee", HC, HOTEL, DEPT);
 
     const arc = await db.one(
       `INSERT INTO tbl_arc
@@ -306,6 +312,11 @@ describe("ARC — clarification on a split award preserves a signed sibling", ()
         [pid, BUYER]
       );
     }
+    // Same USER-source approver grant as the first describe block above — this
+    // is a separate suite-level fixture role/scope keyed by (user, role,
+    // company, hotel, dept), so re-granting here is idempotent (ON CONFLICT).
+    await ensureApprovable(db, BUYER, "arc-tech", HC, HOTEL, DEPT);
+    await ensureApprovable(db, BUYER, "arc-committee", HC, HOTEL, DEPT);
 
     const arc = await db.one(
       `INSERT INTO tbl_arc

@@ -17,6 +17,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { createApprovalInstance } from "../../../app/models/generalModel.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -105,6 +106,9 @@ describe("ARC committee — chain visibility, approver gating, decide endpoint",
        VALUES ($1, 1, 'ALL', 'USER', $2), ($1, 2, 'ALL', 'USER', $3)`,
       [POLICY_ID, APPROVER1, APPROVER2]
     );
+    // APPROVER1/APPROVER2 are named via ('USER', ...) on the two steps —
+    // permission-gated at instance creation (seedCommitteeArc below).
+    await ensureArcApprovable(db, [APPROVER1, APPROVER2], HC);
 
     await seedCommitteeArc("approve", "ARC-TEST-CMTE-1", 1);
     await seedCommitteeArc("sendback", "ARC-TEST-CMTE-2", 2);

@@ -136,11 +136,22 @@ describe("createApprovalInstance — process-scoped resolution", () => {
     });
   });
 
-  it("RFQ in process A_P2 + hotel A2/proc resolves to A2_P2 policy distinctly", async () => {
-    // Multi-axis isolation: A2/P1 (auto-skip; zero steps) and A2/P2 (different
-    // approver). Make sure P2 picks the P2 policy.
+  it("RFQ in process A_P2 + hotel A2/proc resolves to the A2_P2 policy distinctly — named in the refusal", async () => {
+    // Multi-axis isolation: A2/P1 (no steps at all) and A2/P2 (a ROLE step whose
+    // role cannot pass the read+approve gate for 'rfq'). Make sure P2 picks the
+    // P2 policy and not P1's, or A1's.
+    //
+    // The observable proof of "which policy was picked" changed, the property
+    // did not. This used to read the policy id off the created instance. The
+    // A2_P2 fixture's single ROLE step resolves to zero approvers, and
+    // createApprovalInstance now REFUSES a policy that resolves to nobody rather
+    // than creating an instance born APPROVED with nobody asked — so there is no
+    // instance row to read the id from. The refusal names the policy it
+    // resolved, which is the same fact from the same lookup; asserting on it
+    // keeps the cross-process isolation pinned. This mirrors the sibling test
+    // "A2/P1 RFQ has zero steps and either auto-completes or throws clearly".
     await withTx(async (t) => {
-      const result = await createApprovalInstance({
+      const attempt = createApprovalInstance({
         entity_type: "RFQ",
         entity_id: nextEntityId(),
         hospitality_company_id: IDS.hospitality.A,
@@ -150,7 +161,15 @@ describe("createApprovalInstance — process-scoped resolution", () => {
         initiated_by: IDS.users.a1_proc_buyer,
         txContext: t,
       });
-      expect(result.instance.approval_policy_id).toBe(IDS.policies.A2_P2_RFQ);
+
+      // The resolved policy is A2_P2 (60051) — NOT A2_P1 (60021), NOT A1_P2.
+      await expect(attempt).rejects.toThrow(
+        new RegExp(`policy ${IDS.policies.A2_P2_RFQ}\\b`, "i")
+      );
+      await expect(attempt).rejects.toMatchObject({
+        code: "APPROVAL_POLICY_RESOLVES_TO_NOBODY",
+        httpStatus: 400,
+      });
     });
   });
 

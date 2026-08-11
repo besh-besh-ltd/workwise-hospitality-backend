@@ -17,6 +17,7 @@ import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { resolveCurrentPrice } from "../../../app/services/arcPricingResolver.js";
 import { submitApprovalAction } from "../../../app/models/generalModel.js";
 import { handleArcAmendmentApproval } from "../../../app/controllers/arc_v2/arcAmendmentController.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC = IDS.hospitality.A, HOTEL = IDS.hotels.A1, DEPT = IDS.departments.proc, PROC = IDS.processes.A_P1;
 const BUYER = IDS.users.a1_proc_buyer, APPROVER = IDS.users.a1_proc_techApp, VENDOR = IDS.users.vendor_alpha;
@@ -65,6 +66,9 @@ describe("ARC amendment addendum — coverage (types, edges, hook)", () => {
     await db.none(`INSERT INTO tbl_approval_policies (id, entity_type, hospitality_company_id, hotel_id, department_id, is_active, created_by, process_id, is_master, is_department_scoped, version)
        VALUES ($1, 'ARC_AMENDMENT', $2, $3, NULL, true, $4, $5, false, false, 1) ON CONFLICT (id) DO NOTHING`, [POLICY_ID, HC, HOTEL, BUYER, PROC]);
     await db.none(`INSERT INTO tbl_approval_policy_steps (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id) VALUES ($1, 1, 'ALL', 'USER', $2)`, [POLICY_ID, APPROVER]);
+    // USER-source steps are permission-gated at instance creation: APPROVER is
+    // the only user named on this policy's step.
+    await ensureArcApprovable(db, APPROVER, HC);
   });
 
   afterAll(async () => {

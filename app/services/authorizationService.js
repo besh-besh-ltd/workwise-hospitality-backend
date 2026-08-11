@@ -283,6 +283,101 @@ export function buildScopeExistsClause(userId, requiredPermission, entityAlias, 
 }
 
 /**
+ * "I am being asked to approve this, therefore I may read it."
+ *
+ * ── THE DEFECT THIS CLOSES ────────────────────────────────────────────────
+ * Approver resolution and entity visibility are two independent answers to
+ * "may this user act on this entity", and they disagree:
+ *
+ *   resolveApprovers (USER-source)  — does the user hold ANY tbl_user_role_scopes
+ *                                     row covering company/hotel/dept/process?
+ *   the read predicate              — does the user hold such a row that ALSO
+ *                                     carries <resource>.read?
+ *
+ * Nothing requires those to be the same row, so a user can be resolved as a
+ * mandatory approver through a role that grants no read at all. Production
+ * incident 2026-08-10, RFQ 791: EMP003 was resolved through 'Commercial
+ * Approver' (department-unrestricted, no rfq.read) while their only rfq.read
+ * came from 'CEO', which is granted per-department and not for that RFQ's
+ * department. They were step 1 of 2 and could not see the RFQ anywhere.
+ *
+ * It is worse than invisible: getPendingApprovalRfqs ANDs approver-hood with
+ * the read predicate, so the "pending my approval" list — the one surface
+ * built to show exactly this — returns empty for the person blocking the
+ * workflow. Measured across production: 6 such approver slots, EVERY one of
+ * them step 1, i.e. deadlocked at the first gate.
+ *
+ * ── WHY WIDENING READ IS THE RIGHT DIRECTION ─────────────────────────────
+ * The alternative is to make resolution stricter so these users are never
+ * resolved. That converts an invisible-work bug into a nobody-resolved bug,
+ * and a step that resolves to nobody stalls the workflow forever (or, before
+ * the createApprovalInstance change shipped alongside this, auto-approved it).
+ * Strictness at resolution time is the more dangerous failure.
+ *
+ * It is also already the system's own position elsewhere:
+ *   · THE SNAPSHOT IS THE AUTHORIZATION — submitApprovalAction validates only
+ *     that the caller has a PENDING row on the current step. It re-checks no
+ *     role, no permission, no scope. Being a resolved approver already confers
+ *     the power to APPROVE; this only lets you SEE what you are approving.
+ *   · purchaseOrderModel.isAssignedPoApprover does exactly this for the PO
+ *     approve endpoint, with the same reasoning, and is explicitly scoped
+ *     "never for reads" — which is precisely the gap that left approvers able
+ *     to approve a PO they cannot open.
+ *   · arcScope.js drops the permission join wholesale because "approval-policy
+ *     approvers legitimately hold no ARC module role at all, yet they must see
+ *     the ARC they are approving".
+ *
+ * ── HOW NARROW THIS IS ───────────────────────────────────────────────────
+ * It grants read on ONE entity — the specific row you have a live, non-removed,
+ * PENDING approver assignment against. It is not scope, not a permission, not
+ * inheritable, and it evaporates when the instance completes or the approver
+ * row is removed/retired. An admin naming you as approver IS the authorization
+ * decision; this makes the read side honour the decision the engine already
+ * acted on.
+ *
+ * @param {string} entityIdExpr  SQL expression for the entity's id, e.g. 'RFQ.id'
+ * @param {string[]} entityTypes approval entity_type values that point at it,
+ *                               e.g. ['RFQ','TENDER']
+ * @param {number|string} userParam bound user id or a $n placeholder
+ * @returns {string} an EXISTS(...) fragment safe to OR into a WHERE clause
+ */
+export function buildApproverReadExemption(entityIdExpr, entityTypes, userParam) {
+  if (!entityIdExpr || /[^a-zA-Z0-9_.]/.test(entityIdExpr)) {
+    throw new Error(`buildApproverReadExemption: invalid entityIdExpr '${entityIdExpr}'`);
+  }
+  if (!Array.isArray(entityTypes) || entityTypes.length === 0) {
+    throw new Error('buildApproverReadExemption: entityTypes must be a non-empty array');
+  }
+  // entity_type values are developer-supplied constants, never user input, but
+  // they are interpolated into SQL so they are whitelisted by shape anyway.
+  for (const t of entityTypes) {
+    if (!/^[A-Z_]+$/.test(t)) {
+      throw new Error(`buildApproverReadExemption: invalid entity_type '${t}'`);
+    }
+  }
+  const typeList = entityTypes.map(t => `'${t}'`).join(', ');
+
+  // Deliberately NOT restricted to `ais.step_order = ai.current_step`: a
+  // later-step approver must be able to read the entity before their turn
+  // arrives, which is exactly what Ash II could do (by luck of scope) and
+  // Ash I could not. Restricted to instances still PENDING and approver rows
+  // still PENDING and not removed, so completed and retired assignments grant
+  // nothing.
+  return `EXISTS (
+    SELECT 1
+      FROM tbl_approval_instances ai
+      JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+      JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+     WHERE ai.status = 'PENDING'
+       AND ai.entity_type IN (${typeList})
+       AND ai.entity_id = ${entityIdExpr}
+       AND asa.approver_user_id = ${userParam}
+       AND asa.status = 'PENDING'
+       AND asa.removed_at IS NULL
+  )`;
+}
+
+/**
  * Defense-in-depth gate for per-entity GET endpoints (TE detail, quote
  * compare, PO detail, RFQ details). Reads the RFQ row at `rfqId` and asserts
  * the user has `rfq.read` (or `boq.read` for tenders) scope including

@@ -8193,7 +8193,24 @@ const rfqController = {
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
       // RBAC check for non-vendor users: must have rfq.read/boq.read for this RFQ's business unit
-      if (rfqData?.id && user_type != 3) {
+      //
+      // Two ways this gate disagreed with the LIST predicate it is supposed to
+      // mirror (rfqModel.getAllBuyerRfq), both fixed below:
+      //
+      //   1. NO PROCESS AXIS. The list filters
+      //      `(urs.process_id IS NULL OR urs.process_id = RFQ.process_id)`;
+      //      this did not. A user whose grant is bound to process A could not
+      //      see a process-B RFQ in any list, but could open it by URL. Detail
+      //      was strictly WIDER than list on that axis — the wrong direction
+      //      for a "defence in depth" gate.
+      //   2. SUPER ADMINS WERE 403'd. The guard is `user_type != 3` (vendors),
+      //      so user_type 8 ran the check — and super admins hold no
+      //      tbl_user_role_scopes rows at all (the same reason
+      //      purchaseOrderModel and arcScope both special-case them), so this
+      //      endpoint refused them while every other RFQ surface let them
+      //      through.
+      const SUPER_ADMIN_USER_TYPE = 8;
+      if (rfqData?.id && user_type != 3 && Number(user_type) !== SUPER_ADMIN_USER_TYPE) {
         const resource = rfqData.is_tender == 1 ? 'boq' : 'rfq';
         const hasAccess = await db.oneOrNone(`
           SELECT 1 FROM tbl_user_role_scopes urs
@@ -8204,11 +8221,36 @@ const rfqController = {
             AND p.action = 'read'
             AND urs.company_id = $3
             AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+            AND ($6::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $6)
             AND ($5::int IS NULL OR urs.department_id = $5 OR urs.department_id IS NULL)
           LIMIT 1
-        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id, rfqData.department_id || null]);
+        `, [user_id, resource, rfqData.hospitality_company_id, rfqData.hotel_id,
+            rfqData.department_id || null, rfqData.process_id || null]);
 
+        // A live approver may open the RFQ they have been asked to approve even
+        // when no single scope row carries rfq/boq.read for its
+        // (hotel x department x process) tuple. Without this the list fix alone
+        // is useless: the row would appear in "pending my approval" and then
+        // 403 on click. Same predicate as the list — see
+        // authorizationService.buildApproverReadExemption for the reasoning.
+        let isAssignedApprover = false;
         if (!hasAccess) {
+          isAssignedApprover = !!(await db.oneOrNone(`
+            SELECT 1
+              FROM tbl_approval_instances ai
+              JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+              JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+             WHERE ai.status = 'PENDING'
+               AND ai.entity_type IN ('RFQ', 'TENDER')
+               AND ai.entity_id = $2
+               AND asa.approver_user_id = $1
+               AND asa.status = 'PENDING'
+               AND asa.removed_at IS NULL
+             LIMIT 1
+          `, [user_id, rfqData.id]));
+        }
+
+        if (!hasAccess && !isAssignedApprover) {
           return res.status(403).json({ status: 0, message: 'You do not have permission to view this RFQ' });
         }
       }

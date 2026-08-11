@@ -16,6 +16,7 @@ import { db, closeDb } from "../../setup/db.js";
 import { httpClient } from "../../helpers/http.js";
 import { IDS } from "../../fixtures/ids.js";
 import { createApprovalInstance, findBestMatchingPolicyTx } from "../../../app/models/generalModel.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC = IDS.hospitality.A;
 const HOTEL = IDS.hotels.A1;
@@ -62,6 +63,9 @@ describe("ARC approval policy — admin flow (process-free)", () => {
     const policy = res.body?.data;
     expect(policy?.id).toBeTruthy();
     createdPolicyIds.push(policy.id);
+    // The step names APPROVER via ('USER', APPROVER) — permission-gated at
+    // instance creation (test 3 below resolves this exact policy).
+    await ensureArcApprovable(db, [APPROVER], HC);
     expect(policy.process_id == null).toBe(true);
     const row = await db.one(`SELECT process_id FROM tbl_approval_policies WHERE id = $1`, [policy.id]);
     expect(row.process_id == null).toBe(true);

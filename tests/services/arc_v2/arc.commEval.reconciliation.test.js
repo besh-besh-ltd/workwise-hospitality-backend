@@ -9,6 +9,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 describe("ARC v2 — commercial eval split-award reconciliation", () => {
   const BUYER  = IDS.users.a1_proc_buyer;
@@ -51,6 +52,9 @@ describe("ARC v2 — commercial eval split-award reconciliation", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [POLICY_ID, IDS.users.a1_proc_finance]
     );
+    // USER-source steps are permission-gated at instance creation: only the
+    // named committee approver (a1_proc_finance) needs read+approve on 'arc-committee'.
+    await ensureArcApprovable(db, IDS.users.a1_proc_finance, HC);
 
     // Seed an ARC + item + two submitted vendor quotes so we can run comm-eval.
     const arc = await db.one(

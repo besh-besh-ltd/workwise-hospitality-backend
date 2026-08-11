@@ -32,6 +32,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -109,6 +110,11 @@ async function pointPolicyAt(approverUserId) {
        (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
      VALUES ($1, 1, 'ALL', 'USER', $2)`,
     [POLICY_ID, approverUserId]);
+  // USER-source steps are permission-gated at instance creation: the named
+  // approver must hold read+approve on 'arc' or the step (and thus the whole
+  // policy, which has only this one step) gets dropped. Only the user actually
+  // named here is granted — never the other suite actors.
+  await ensureArcApprovable(db, approverUserId, HC);
 }
 
 // Toggle the shared policy active/inactive (no-policy scenario uses false). The

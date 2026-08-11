@@ -24,6 +24,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -67,9 +68,13 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     await seedArcEvalPerms(db, [BUYER]);
 
     // Policies: 1-step ARC_TECH (tech approver), 1-step ARC_COMMITTEE (finance).
-    for (const [pid, entity, approver] of [
-      [TECH_POLICY_ID, 'ARC_TECH', TECH_APPROVER],
-      [COMMITTEE_POLICY_ID, 'ARC_COMMITTEE', COMMITTEE_APPROVER],
+    // The 4th element is the resource the entity_type maps to. USER-source
+    // steps are permission-gated, so each named approver must hold read+approve
+    // on exactly that resource — and only that one, so test 11 can still assert
+    // an exact permissions payload rather than a blanket ARC grant.
+    for (const [pid, entity, approver, resource] of [
+      [TECH_POLICY_ID, 'ARC_TECH', TECH_APPROVER, 'arc-tech'],
+      [COMMITTEE_POLICY_ID, 'ARC_COMMITTEE', COMMITTEE_APPROVER, 'arc-committee'],
     ]) {
       await db.none(
         `INSERT INTO tbl_approval_policies
@@ -85,6 +90,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
          VALUES ($1, 1, 'ALL', 'USER', $2)`,
         [pid, approver]
       );
+      await ensureArcApprovable(db, [approver], HC, null, [resource]);
     }
 
     // Journey ARC: floated, window still open, 2 items, both vendors quoted,
@@ -529,11 +535,23 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect([...bp['arc-tech']].sort()).toEqual(['evaluate', 'read']);
     expect([...bp['arc-comm']].sort()).toEqual(['evaluate', 'read']);
     expect(bp['arc-committee']).toEqual([]);
-    // Tech approver has NO ARC module roles → all empty (decide stays
-    // engine-gated, so approvers don't need any).
+    // Tech approver holds arc-tech read+approve and NOTHING else.
+    //
+    // This used to assert all-empty, on the premise that "decide stays
+    // engine-gated, so approvers don't need any permissions". That premise is
+    // no longer true: USER-source approval steps are permission-gated at
+    // resolution, so a named approver who holds no read+approve on the step's
+    // resource is dropped and never becomes an approver at all. Holding
+    // arc-tech read+approve is now a PRECONDITION of being the ARC_TECH
+    // approver in tests 4-8 above, not an incidental extra grant.
+    //
+    // The assertion stays exact — it just encodes the new invariant: an
+    // approver holds precisely the resource they approve on, and no other.
     const asTechApprover = await techApproverClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
-    expect(asTechApprover.body.data.permissions).toEqual({
-      'arc': [], 'arc-tech': [], 'arc-comm': [], 'arc-committee': [],
+    const tp = asTechApprover.body.data.permissions;
+    expect([...tp['arc-tech']].sort()).toEqual(['approve', 'read']);
+    expect({ ...tp, 'arc-tech': undefined }).toEqual({
+      'arc': [], 'arc-tech': undefined, 'arc-comm': [], 'arc-committee': [],
     });
     // Reader holds arc-tech.read at this hotel.
     const asReader = await readerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
@@ -552,9 +570,17 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     // No arc-comm key at all → even the comm-eval read is denied.
     const commDenied = await readerClient.get(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval`);
     expect(commDenied.status).toBe(403);
-    // Tech approver has no module roles whatsoever → tech read denied too.
-    const approverDenied = await techApproverClient.get(`/api/v1/arc-v2/evaluation/items/${itemIds[0]}/tech-eval`);
-    expect(approverDenied.status).toBe(403);
+    // Tech approver now necessarily holds arc-tech.read (see test 11), so the
+    // tech matrix READ is allowed — they have to be able to see what they are
+    // approving. What they still must NOT have is `evaluate`: reading the
+    // matrix and scoring it are different permissions, and the approver was
+    // never granted the latter.
+    const approverRead = await techApproverClient.get(`/api/v1/arc-v2/evaluation/items/${itemIds[0]}/tech-eval`);
+    expect(approverRead.status).toBe(200);
+    const approverScoreDenied = await techApproverClient
+      .post(`/api/v1/arc-v2/evaluation/tech-eval/score`)
+      .send({ response_id: responseIdsA[0], buyer_marks: 7 });
+    expect(approverScoreDenied.status).toBe(403);
   });
 
   test("13. cross-tenant caller receives 403 on GET lifecycle (P0 tenant guard)", async () => {

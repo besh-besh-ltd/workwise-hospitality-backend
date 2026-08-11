@@ -18,6 +18,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC = IDS.hospitality.A;
 const HOTEL = IDS.hotels.A1;
@@ -68,6 +69,10 @@ describe("ARC v2 — commercial send-back to technical", () => {
         [pid, approver]
       );
     }
+    // USER-source steps are permission-gated at instance creation: only the
+    // named approvers (TECH_APPROVER on ARC_TECH, COMMITTEE_APPROVER on
+    // ARC_COMMITTEE) need read+approve, not BUYER or anyone else.
+    await ensureArcApprovable(db, [TECH_APPROVER, COMMITTEE_APPROVER], HC);
 
     // Main ARC — window closed, 1 item, 1 clause, both vendors quoted + responded.
     const arc = await db.one(

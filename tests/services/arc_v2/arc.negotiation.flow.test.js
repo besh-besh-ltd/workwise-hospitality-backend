@@ -24,6 +24,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -94,6 +95,9 @@ describe("ARC Negotiation — flow + guards", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2)`,
       [ARC_NEG_POLICY_ID, BUYER]
     );
+    // BUYER is the sole USER-source approver on this ARC_NEGOTIATION step —
+    // grant read+approve on 'arc-comm' at the ARC's own hotel+department.
+    await ensureApprovable(db, BUYER, "arc-comm", HC, HOTEL, DEPT);
 
     // ── Seed main ARC at comm_eval_in_progress ──
     const arc = await db.one(

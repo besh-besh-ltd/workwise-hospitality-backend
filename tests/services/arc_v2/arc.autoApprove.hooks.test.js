@@ -17,6 +17,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -53,6 +54,11 @@ describe("ARC — auto-approved instances still fire post-approval hooks", () =>
         [pid, BUYER]
       );
     }
+    // BUYER is the sole USER-source approver on both ARC_TECH and ARC_COMMITTEE
+    // steps above — grant read+approve on their mapped resources at the ARC's
+    // own hotel+department.
+    await ensureApprovable(db, BUYER, "arc-tech", HC, HOTEL, DEPT);
+    await ensureApprovable(db, BUYER, "arc-committee", HC, HOTEL, DEPT);
 
     const arc = await db.one(
       `INSERT INTO tbl_arc

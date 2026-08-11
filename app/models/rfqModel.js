@@ -7,6 +7,25 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+import { buildApproverReadExemption } from '../services/authorizationService.js';
+
+/**
+ * "You are an approver on this RFQ, so you may read it."
+ *
+ * OR'd into every RFQ read predicate below. Without it, approver resolution and
+ * read visibility answer "can this user act on this RFQ" differently and a
+ * mandatory approver can be unable to see what they must approve — production
+ * incident 2026-08-10 (RFQ 791). The full reasoning lives on
+ * buildApproverReadExemption; do not re-derive it here.
+ *
+ * NOT applied to the getAllDraftRfqs predicates: that query is scoped to
+ * `is_published = 0 AND status NOT IN (2,3,4)`, i.e. rows that have not been
+ * submitted, and an approval instance does not exist until submission. There is
+ * no approver to exempt.
+ */
+const RFQ_APPROVER_READ_EXEMPTION = (user_id) =>
+  buildApproverReadExemption('RFQ.id', ['RFQ', 'TENDER'], user_id);
+
 // The single definition of "this product has a usable quantity and unit".
 // checkRFQCompletion builds its SQL from these rather than restating the rule,
 // so the create gate, the update gate and the client cannot drift apart.
@@ -4233,7 +4252,13 @@ LIMIT 2;
         )
       )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4)${include_drafts ? ` OR (RFQ.is_published = 0 AND RFQ.created_by = ${user_id})` : ''})
       -- Permission filter: only RFQs the user has read access for
-      AND EXISTS (
+      AND (
+        -- Approver-read exemption: a live PENDING approver on this RFQ can
+        -- read it even when no single scope row carries rfq/boq.read for its
+        -- (hotel x department x process) tuple. See
+        -- authorizationService.buildApproverReadExemption for why.
+        ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+        OR EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
         JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
@@ -4248,6 +4273,7 @@ LIMIT 2;
             OR _urs2.department_id IS NULL
           )
           AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
+      )
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -6047,7 +6073,13 @@ LIMIT 2;
           )
         )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
         -- Permission filter: only RFQs the user has read access for
-        AND EXISTS (
+        AND (
+          -- Approver-read exemption: a live PENDING approver on this RFQ can
+          -- read it even when no single scope row carries rfq/boq.read for its
+          -- (hotel x department x process) tuple. See
+          -- authorizationService.buildApproverReadExemption for why.
+          ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+          OR EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
           JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
           JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
@@ -6062,6 +6094,7 @@ LIMIT 2;
               OR _urs2.department_id IS NULL
             )
             AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
+        )
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -6292,7 +6325,13 @@ LIMIT 2;
           )
       )
       -- Permission filter: only RFQs the user has read access for
-      AND EXISTS (
+      AND (
+        -- Approver-read exemption: a live PENDING approver on this RFQ can
+        -- read it even when no single scope row carries rfq/boq.read for its
+        -- (hotel x department x process) tuple. See
+        -- authorizationService.buildApproverReadExemption for why.
+        ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+        OR EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
         JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
@@ -6307,6 +6346,7 @@ LIMIT 2;
             OR _urs2.department_id IS NULL
           )
           AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
+      )
       )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
@@ -6363,7 +6403,13 @@ LIMIT 2;
             )
         )
         -- Permission filter: only RFQs the user has read access for
-        AND EXISTS (
+        AND (
+          -- Approver-read exemption: a live PENDING approver on this RFQ can
+          -- read it even when no single scope row carries rfq/boq.read for its
+          -- (hotel x department x process) tuple. See
+          -- authorizationService.buildApproverReadExemption for why.
+          ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+          OR EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
           JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
           JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
@@ -6378,6 +6424,7 @@ LIMIT 2;
               OR _urs2.department_id IS NULL
             )
             AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
+        )
         )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)

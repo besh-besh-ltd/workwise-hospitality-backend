@@ -33,6 +33,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC      = IDS.hospitality.A;
 const HOTEL   = IDS.hotels.A1;
@@ -251,6 +252,7 @@ describe("ARC v2 — universal (ARC-wide) technical-evaluation clauses", () => {
        VALUES ($1, 1, 'ANY', 'USER', $2) ON CONFLICT DO NOTHING`,
       [TECH_POLICY_ID, BUYER]
     );
+    await ensureArcApprovable(db, [BUYER], HC);
     // ARC_COMMITTEE — finalize spawns this instance (one finance approver).
     await db.none(
       `INSERT INTO tbl_approval_policies
@@ -266,6 +268,7 @@ describe("ARC v2 — universal (ARC-wide) technical-evaluation clauses", () => {
        VALUES ($1, 1, 'ALL', 'USER', $2) ON CONFLICT DO NOTHING`,
       [COMMITTEE_POLICY_ID, FINANCE]
     );
+    await ensureArcApprovable(db, [FINANCE], HC);
     // ARC_NEGOTIATION — buyer is the sole approver → createRound auto-approves.
     await db.none(
       `INSERT INTO tbl_approval_policies
@@ -281,6 +284,7 @@ describe("ARC v2 — universal (ARC-wide) technical-evaluation clauses", () => {
        VALUES ($1, 1, 'ANY', 'USER', $2) ON CONFLICT DO NOTHING`,
       [NEGOTIATION_POLICY_ID, BUYER]
     );
+    await ensureArcApprovable(db, [BUYER], HC);
 
     // ── ARC_REG — item-only, no universal. submission_closed, real flow. ──
     regArc = await insertArc(`UNIV-REG-${Date.now()}`, "submission_closed");

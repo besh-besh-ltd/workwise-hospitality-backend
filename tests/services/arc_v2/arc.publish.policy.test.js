@@ -41,6 +41,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
 
 const HC        = IDS.hospitality.A;          // 10001
 const HOTEL     = IDS.hotels.A1;              // 10101
@@ -99,6 +100,9 @@ async function seedArcPolicy({ policyId, processId, approver }) {
      VALUES ($1, 1, 'STANDARD', 'ANY', 'USER', $2)`,
     [policyId, approver]
   );
+  // The step names `approver` via ('USER', approver) — permission-gated at
+  // instance creation (publish resolves this policy through the engine).
+  await ensureArcApprovable(db, [approver], HC);
 }
 
 async function deactivatePolicy(policyId) {
