@@ -190,22 +190,22 @@ const TABS = {
   rejected: ["rejected_by_vendor"],
 };
 
-export async function vendorListView(
-  vendorId,
-  { tab = "all", search = "", filters = {}, page = 1, limit = 20 } = {}
-) {
-  // --- normalise inputs --------------------------------------------------
+// Cap on an unpaginated export. A memory guard, never a scope decision.
+export const VENDOR_EXPORT_ROW_CAP = 5000;
+
+// The WHERE fragment + joins shared by the paged list view and its Excel
+// export, so "export what I'm looking at" holds by construction. Returns
+// { whereSql, fromSql, params } with params already bound to the caller's own
+// vendor id ($1) — the vendor scope is inside this builder and cannot be
+// bypassed by any caller.
+function buildVendorListQuery(vendorId, { tab = "all", search = "", filters = {} } = {}) {
   const tabStatuses = TABS[tab] || VENDOR_VISIBLE_STATUSES;
-  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
-  const safePage = Math.max(1, Number(page) || 1);
-  const offset = (safePage - 1) * safeLimit;
 
   // Effective status set = tab bucket intersected (implicitly) with the
   // vendor's visible set. The WHERE clause asserts both, so a malformed tab
   // can never widen visibility.
   const visible = VENDOR_VISIBLE_STATUSES;
 
-  // --- build the filtered WHERE clause -----------------------------------
   // $1 vendorId, $2 visible statuses, $3 tab statuses; type/search appended.
   const where = [
     "po.finalized_vendor_id = $1",
@@ -226,8 +226,6 @@ export async function vendorListView(
     where.push(`po.po_number ILIKE $${params.length}`);
   }
 
-  const whereSql = where.join("\n        AND ");
-
   // Joins resolve buyer/hotel names for BOTH PO flavours (RFQ vs ARC call-off);
   // COALESCE picks whichever parent supplies the hotel.
   const fromSql = `
@@ -238,12 +236,10 @@ export async function vendorListView(
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = COALESCE(rfq.hotel_id, a.hotel_id)
        LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id`;
 
-  // --- page of rows ------------------------------------------------------
-  const limIdx = params.length + 1;
-  const offIdx = params.length + 2;
-  const rowParams = [...params, safeLimit, offset];
-  const rows = await db.any(
-    `SELECT po.id,
+  return { whereSql: where.join("\n        AND "), fromSql, params };
+}
+
+const VENDOR_ROW_COLUMNS = `po.id,
             po.po_number,
             po.status,
             po.total_value::float8 AS total_value,
@@ -253,7 +249,41 @@ export async function vendorListView(
             po.rfq_id,
             po.arc_contract_id,
             hc.name AS buyer_name,
-            h.name  AS hotel_name
+            h.name  AS hotel_name`;
+
+// Every order the calling vendor can currently see under the active tab /
+// type / search — unpaginated, for the Excel export.
+export async function vendorListViewForExport(vendorId, { tab = "all", search = "", filters = {} } = {}) {
+  const { whereSql, fromSql, params } = buildVendorListQuery(vendorId, { tab, search, filters });
+  const rows = await db.any(
+    `SELECT ${VENDOR_ROW_COLUMNS}
+       ${fromSql}
+      WHERE ${whereSql}
+      ORDER BY po.created_at DESC
+      LIMIT $${params.length + 1}`,
+    [...params, VENDOR_EXPORT_ROW_CAP + 1]
+  );
+  return { rows: rows.slice(0, VENDOR_EXPORT_ROW_CAP), truncated: rows.length > VENDOR_EXPORT_ROW_CAP };
+}
+
+export async function vendorListView(
+  vendorId,
+  { tab = "all", search = "", filters = {}, page = 1, limit = 20 } = {}
+) {
+  // --- normalise inputs --------------------------------------------------
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
+  const safePage = Math.max(1, Number(page) || 1);
+  const offset = (safePage - 1) * safeLimit;
+  const visible = VENDOR_VISIBLE_STATUSES;
+
+  const { whereSql, fromSql, params } = buildVendorListQuery(vendorId, { tab, search, filters });
+
+  // --- page of rows ------------------------------------------------------
+  const limIdx = params.length + 1;
+  const offIdx = params.length + 2;
+  const rowParams = [...params, safeLimit, offset];
+  const rows = await db.any(
+    `SELECT ${VENDOR_ROW_COLUMNS}
        ${fromSql}
       WHERE ${whereSql}
       ORDER BY po.created_at DESC
@@ -300,4 +330,4 @@ export async function vendorListView(
   };
 }
 
-export default { vendorDashboard, vendorListView, VENDOR_VISIBLE_STATUSES };
+export default { vendorDashboard, vendorListView, vendorListViewForExport, VENDOR_VISIBLE_STATUSES };

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getPoInitiators, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
-import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics } from "../../controllers/po/poDashboardController.js";
-import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf } from "../../controllers/po/poVendorController.js";
+import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics, exportPOList, exportTracking, exportAnalytics } from "../../controllers/po/poDashboardController.js";
+import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf, vendorExport } from "../../controllers/po/poVendorController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
@@ -25,6 +25,13 @@ PORoutes.get('/awaiting', passportSignIn, noAcl([3]), awaitingPOs);
 PORoutes.get('/tracking', passportSignIn, noAcl([3]), tracking);
 PORoutes.get('/analytics', passportSignIn, noAcl([3]), analytics);
 PORoutes.get('/detail/:po_id', passportSignIn, noAcl([3]), poDetailFull);
+// Excel exports. Same middleware and the same deriveScope()-driven queries as
+// the read endpoints above — an export is a read, so it must not be reachable
+// by anyone the corresponding page is not. Registered before '/:po_id' for the
+// same reason as the rest of this block.
+PORoutes.get('/export', passportSignIn, noAcl([3]), exportPOList);
+PORoutes.get('/tracking/export', passportSignIn, noAcl([3]), exportTracking);
+PORoutes.get('/analytics/export', passportSignIn, noAcl([3]), exportAnalytics);
 
 // ---------------------------------------------------------------------------
 // Vendor-facing PO endpoints (vendors only — acl([3])). Registered BEFORE the
@@ -34,6 +41,9 @@ PORoutes.get('/detail/:po_id', passportSignIn, noAcl([3]), poDetailFull);
 // ---------------------------------------------------------------------------
 PORoutes.get('/vendor/dashboard', passportSignIn, acl([3]), vendorDashboard);
 PORoutes.post('/vendor/list-view', passportSignIn, acl([3]), vendorListView);
+// Excel export of the vendor's own order book — same acl([3]) + same
+// req.user-derived scope as the list view it mirrors.
+PORoutes.post('/vendor/export', passportSignIn, acl([3]), vendorExport);
 PORoutes.get('/vendor/detail/:po_id', passportSignIn, acl([3]), vendorPoDetail);
 PORoutes.get('/vendor/detail/:po_id/pdf', passportSignIn, acl([3]), vendorPoPdf);
 

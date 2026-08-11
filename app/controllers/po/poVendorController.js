@@ -15,6 +15,11 @@ import { logError } from "../../helper/common.js";
 import * as poVendorModel from "../../models/poVendorModel.js";
 import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { generateCallOffPoPdf } from "../../helper/arc_v2/callOffPoRenderer.js";
+import {
+  buildVendorOrdersWorkbook,
+  sendWorkbook,
+  datedFilename,
+} from "../../services/poExcelExport.js";
 
 function ok(res, data, message = "success") {
   return res.status(200).json({ status: 1, message, data });
@@ -46,6 +51,35 @@ export const vendorListView = async (req, res) => {
   } catch (error) {
     logError("vendorListView failed", error);
     return res.status(500).json({ status: 0, message: error.message || "Failed to load vendor orders." });
+  }
+};
+
+// ===========================================================================
+// POST /po/vendor/export — the vendor order book, as .xlsx
+// ---------------------------------------------------------------------------
+// POST, not GET, purely so it can share the list view's body contract (tab /
+// search / filters) verbatim — one shape, one filter builder, no chance of the
+// download and the table disagreeing. Scope is req.user.id inside the model, so
+// a vendor can only ever export their own orders.
+// ===========================================================================
+export const vendorExport = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { rows, truncated } = await poVendorModel.vendorListViewForExport(req.user.id, body);
+    const filters = [["Tab", body.tab || "all"]];
+    if (body.search) filters.push(["Search", String(body.search)]);
+    if (body.filters?.type) filters.push(["Order type", String(body.filters.type)]);
+    const wb = buildVendorOrdersWorkbook({
+      rows,
+      generatedBy: req.user?.name || undefined,
+      filters,
+      truncated,
+      rowCap: poVendorModel.VENDOR_EXPORT_ROW_CAP,
+    });
+    return await sendWorkbook(res, wb, datedFilename("my-purchase-orders"));
+  } catch (error) {
+    logError("vendorExport failed", error);
+    return res.status(500).json({ status: 0, message: error.message || "Failed to export orders." });
   }
 };
 

@@ -176,6 +176,68 @@ function buildScopeClause(scope, values, startIndex) {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-cutting list facets: vendor + PO creation-date window.
+//
+// Neither is a tenant identifier, so accepting them from the request is safe:
+// they are ANDed on top of the scope clause built above and can therefore only
+// ever REMOVE rows from an already-authorized set. A caller asking for a vendor
+// they cannot see simply gets nothing back.
+//
+// Date semantics match the RFQ/ARC/MR listings' FY filter (rfqController
+// .getRfqListView): `dateFrom`/`dateTo` are ISO calendar days "YYYY-MM-DD" and
+// BOTH ends are inclusive, which is why the upper bound is expressed as
+// "< dateTo + 1 day" rather than "<= dateTo" (created_at is a timestamptz, so
+// "<= dateTo" would silently drop everything created after midnight on the
+// last day of the window).
+// ---------------------------------------------------------------------------
+function applyPoFacetFilters({ vendorId, dateFrom, dateTo } = {}, conditions, values, startIndex) {
+  let i = startIndex;
+  if (vendorId) {
+    conditions.push(`po.finalized_vendor_id = $${i++}`);
+    values.push(vendorId);
+  }
+  if (dateFrom) {
+    conditions.push(`po.created_at >= $${i++}::date`);
+    values.push(dateFrom);
+  }
+  if (dateTo) {
+    conditions.push(`po.created_at < ($${i++}::date + INTERVAL '1 day')`);
+    values.push(dateTo);
+  }
+  return i;
+}
+
+// Vendors that appear on the caller's scoped POs, for the "Vendor" filter
+// dropdown. Deliberately scope-only (it ignores the status tab, the search box
+// and the date window) so the option list does not shrink out from under the
+// user as they filter — the same facet-invariance the FY filter uses on the
+// RFQ/ARC/MR listings.
+export async function getVendorFacets(scope) {
+  // No $1 placeholder here: buildScopeClause pushes every parameter it needs,
+  // and Postgres rejects a bind that supplies more parameters than the
+  // statement references — so the userId slot the paged queries reserve for
+  // poCoreSelect() must NOT be reserved on this one.
+  const values = [];
+  const scoped = buildScopeClause(scope, values, 1);
+  const rows = await db.any(
+    `SELECT po.finalized_vendor_id AS id,
+            COALESCE(VC.company_name, VENDOR.organization_name, VENDOR.name) AS name,
+            COUNT(*)::int AS count
+     ${poCoreJoins()}
+     WHERE ${scoped.clause}
+     GROUP BY po.finalized_vendor_id, COALESCE(VC.company_name, VENDOR.organization_name, VENDOR.name)
+     ORDER BY COUNT(*) DESC, 2 ASC`,
+    values
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    key: String(r.id),
+    label: r.name || "Unknown Vendor",
+    count: r.count,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 function initialsOf(name) {
@@ -397,11 +459,10 @@ function mapPoCoreRow(r) {
 // ===========================================================================
 // 1) GET /po/list
 // ===========================================================================
-export async function getPOList(scope, { status = "all", search = "", page = 1, limit = 20, sort = "newest" } = {}) {
-  const pg = Math.max(1, parseInt(page, 10) || 1);
-  const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-  const offset = (pg - 1) * lim;
-
+// Builds the WHERE fragment shared by the paged list AND the Excel export, so
+// the two can never disagree about which rows the user is looking at. Returns
+// { whereClause, values, hasCreate } — `values` already holds $1 = userId.
+async function buildPoListWhere(scope, { status = "all", search = "", vendorId, dateFrom, dateTo } = {}) {
   const conditions = [];
   const values = [];
   // $1 reserved for the logged-in user id (used inside poCoreSelect + the
@@ -446,7 +507,18 @@ export async function getPOList(scope, { status = "all", search = "", page = 1, 
     idx++;
   }
 
-  const whereClause = `WHERE ${conditions.join(" AND ")}`;
+  idx = applyPoFacetFilters({ vendorId, dateFrom, dateTo }, conditions, values, idx);
+
+  return { whereClause: `WHERE ${conditions.join(" AND ")}`, values, nextIndex: idx, hasCreate };
+}
+
+export async function getPOList(scope, { status = "all", search = "", page = 1, limit = 20, sort = "newest", vendorId, dateFrom, dateTo } = {}) {
+  const pg = Math.max(1, parseInt(page, 10) || 1);
+  const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (pg - 1) * lim;
+
+  const { whereClause, values, nextIndex: idx, hasCreate } =
+    await buildPoListWhere(scope, { status, search, vendorId, dateFrom, dateTo });
   const orderClause = sort === "oldest" ? "po.created_at ASC" : "po.created_at DESC";
 
   const dataQuery = `
@@ -466,6 +538,7 @@ export async function getPOList(scope, { status = "all", search = "", page = 1, 
   );
 
   const statusCounts = await getStatusCounts(scope, hasCreate);
+  const vendors = await getVendorFacets(scope);
 
   // Attach current pending-step approver info (step label + approver names) so
   // the list can show "on L2 — <names>" under pending rows.
@@ -486,7 +559,45 @@ export async function getPOList(scope, { status = "all", search = "", page = 1, 
     page: pg,
     limit: lim,
     status_counts: statusCounts,
+    vendors,
   };
+}
+
+// Every row the caller can currently see, unpaginated — the Excel export.
+// It runs the SAME buildPoListWhere() the screen runs, so "export what I'm
+// looking at" is true by construction rather than by two copies of the filter
+// logic agreeing. EXPORT_ROW_CAP is a memory guard, not a scope decision; the
+// caller is told when it bites so the UI can say so.
+export const EXPORT_ROW_CAP = 5000;
+
+export async function getPOListForExport(scope, { status = "all", search = "", sort = "newest", vendorId, dateFrom, dateTo } = {}) {
+  const { whereClause, values, nextIndex: idx } =
+    await buildPoListWhere(scope, { status, search, vendorId, dateFrom, dateTo });
+  const orderClause = sort === "oldest" ? "po.created_at ASC" : "po.created_at DESC";
+
+  const rows = await db.any(
+    `SELECT ${poCoreSelect(1)}
+     ${poCoreJoins()}
+     ${whereClause}
+     ORDER BY ${orderClause}
+     LIMIT $${idx}`,
+    [...values, EXPORT_ROW_CAP + 1]
+  );
+
+  const truncated = rows.length > EXPORT_ROW_CAP;
+  const page = rows.slice(0, EXPORT_ROW_CAP);
+  const data = page.map(mapPoCoreRow);
+
+  const approverInfo = await fetchCurrentApproverInfo(
+    page.filter((r) => r.approval_instance_id).map((r) => r.approval_instance_id)
+  );
+  for (let i = 0; i < data.length; i++) {
+    const info = approverInfo.get(page[i].approval_instance_id);
+    data[i].current_step_label = info ? info.step_label : null;
+    data[i].current_approvers = info ? info.approvers : [];
+  }
+
+  return { data, truncated };
 }
 
 // Per-bucket counts for the list page tabs (scope only, ignores status/search).
@@ -1936,11 +2047,9 @@ function deriveStageIndex(po, hasGrnDoc, hasInvoiceDoc, paymentDone) {
   return idx;
 }
 
-export async function getTracking(scope, { tab = "active", search = "", page = 1, limit = 20 } = {}) {
-  const pg = Math.max(1, parseInt(page, 10) || 1);
-  const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-  const offset = (pg - 1) * lim;
-
+// All trackable rows the caller can see, already mapped — shared by the paged
+// tracking endpoint and its Excel export so both apply one filter definition.
+async function fetchTrackingRows(scope, { search = "", vendorId, dateFrom, dateTo } = {}) {
   const values = [scope.userId];
   const scoped = buildScopeClause(scope, values, 2);
   let idx = scoped.nextIndex;
@@ -1964,6 +2073,8 @@ export async function getTracking(scope, { tab = "active", search = "", page = 1
     idx++;
   }
 
+  idx = applyPoFacetFilters({ vendorId, dateFrom, dateTo }, conditions, values, idx);
+
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
   const rows = await db.any(
@@ -1984,10 +2095,14 @@ export async function getTracking(scope, { tab = "active", search = "", page = 1
     values
   );
 
-  // Build full mapped list, then apply tab filter in JS (stage is derived).
-  const mapped = rows.map((r) => buildTrackingRow(r));
+  // Build full mapped list; the tab filter is applied by the caller because the
+  // stage a row lands in is derived in JS, not in SQL.
+  return rows.map((r) => buildTrackingRow(r));
+}
 
-  const tabFilter = (row) => {
+// Tab predicate, shared by the paged view, the tab counts and the export.
+function trackingTabFilter(tab) {
+  return (row) => {
     switch (tab) {
       case "active":
         return !row.completed;
@@ -2002,8 +2117,16 @@ export async function getTracking(scope, { tab = "active", search = "", page = 1
         return true;
     }
   };
+}
 
-  const filtered = mapped.filter(tabFilter);
+export async function getTracking(scope, { tab = "active", search = "", page = 1, limit = 20, vendorId, dateFrom, dateTo } = {}) {
+  const pg = Math.max(1, parseInt(page, 10) || 1);
+  const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (pg - 1) * lim;
+
+  const mapped = await fetchTrackingRows(scope, { search, vendorId, dateFrom, dateTo });
+
+  const filtered = mapped.filter(trackingTabFilter(tab));
   const paged = filtered.slice(offset, offset + lim);
 
   const tabCounts = {
@@ -2018,7 +2141,16 @@ export async function getTracking(scope, { tab = "active", search = "", page = 1
     data: paged,
     total_items: filtered.length,
     tab_counts: tabCounts,
+    vendors: await getVendorFacets(scope),
   };
+}
+
+// Unpaginated tracking rows for the Excel export — same filters, same tab, no
+// page window.
+export async function getTrackingForExport(scope, { tab = "active", search = "", vendorId, dateFrom, dateTo } = {}) {
+  const mapped = await fetchTrackingRows(scope, { search, vendorId, dateFrom, dateTo });
+  const filtered = mapped.filter(trackingTabFilter(tab));
+  return { data: filtered.slice(0, EXPORT_ROW_CAP), truncated: filtered.length > EXPORT_ROW_CAP };
 }
 
 function buildTrackingRow(r) {
@@ -2331,9 +2463,12 @@ export async function getAnalytics(scope, { period = "this-month" } = {}) {
 
 export default {
   getPOList,
+  getPOListForExport,
   getDashboardKpis,
   getAwaitingPOs,
   getPODetailFull,
   getTracking,
+  getTrackingForExport,
+  getVendorFacets,
   getAnalytics,
 };
