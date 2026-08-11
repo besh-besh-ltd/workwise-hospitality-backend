@@ -1250,6 +1250,16 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         }
       } catch (approvalError) {
         logError("APPROVAL ERROR", approvalError);
+        // Preserve structured engine errors. Rewriting every failure as "no
+        // policy found" was wrong twice over: it discarded the engine's
+        // httpStatus/code/diagnostics, and it told the operator the policy was
+        // MISSING when in fact it existed and resolved to nobody — which sends
+        // them to create a duplicate policy instead of fixing the broken one.
+        // (autoInitiateRFQPOs matches on this message to bucket POs as
+        // skipped_no_policy, so the distinction has to survive.)
+        if (approvalError?.code || approvalError?.httpStatus) {
+          throw approvalError;
+        }
         // No policy found - throw error, do not auto-approve
         throw new Error('No approval policy found for Purchase Order. Please configure an approval policy for PO entity type in the hospitality scope.');
       }
