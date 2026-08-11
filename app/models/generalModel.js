@@ -35,9 +35,24 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // authored as plain 'ARC', so ROLE-source approver steps resolve against the
   // same 'arc' permission resource (USER-source steps bypass this map).
   'ARC_PUBLISH': 'arc',
-  // MR is the call-off/demand path — role approvers resolve against the same
-  // 'awarding' permission as POs (USER-source steps bypass this map).
-  'MR': 'awarding',
+  // MR resolves against its OWN 'mr' resource, not 'awarding'.
+  //
+  // It was mapped to 'awarding' (the PO resource) while a dedicated 'mr'
+  // resource carrying read/create/approve has existed since the permissions
+  // seed. The seeded 'MR Approver' system role holds exactly `mr.read` +
+  // `mr.approve` and no `awarding` at all, so under the read+approve gate the
+  // obvious policy — one ROLE step naming 'MR Approver' — had its only step
+  // dropped. Before the all-steps-dropped refusal that produced an MR born
+  // APPROVED with nobody approving it; after it, a hard 400.
+  //
+  // Mapping to 'awarding' also made the remedy wrong: it told an admin to grant
+  // MR approvers the PO AWARDING permission, escalating them into a different
+  // and much broader authority to work around a mapping mistake.
+  //
+  // Verified before changing: production holds 0 MR policies, 0 MR approval
+  // instances and 0 material requisitions, so this repoints a latent trap and
+  // moves no live approval.
+  'MR': 'mr',
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
@@ -2054,6 +2069,69 @@ export async function roleHasReadAndApprovePermission(roleId, resource, t = db) 
  *   wildcard) qualify as approvers.
  * @returns {Array<number>} Array of user IDs
  */
+/**
+ * Is this policy step's approver source ALLOWED to hold approval authority for
+ * this entity, in this scope?
+ *
+ * ── WHY THIS IS A SHARED FUNCTION ──
+ * Three code paths install approvers on an instance: creation
+ * (createApprovalInstance), policy-edit propagation (applyDiffToInstance's
+ * STEP_ADDED / STEP_MODIFIED) and membership revalidation. Creation gated ROLE
+ * sources, and now gates USER sources too. Propagation gated NEITHER — it
+ * called resolveApprovers directly — so editing a live policy could install an
+ * approver that creating the same instance one second later would have
+ * dropped. Two instances of the same policy, opposite approver sets, and the
+ * mid-flight one is binding: submitApprovalAction re-checks nothing, the
+ * snapshot IS the authorization.
+ *
+ * The eligibility RULE therefore lives here, in one place, and every path that
+ * grants authority asks this question. What the paths do with a "no" still
+ * differs, legitimately: creation DROPS the step (no instance exists yet),
+ * while propagation STALLS it (an instance exists, and silently dropping an
+ * authority level from a live approval is worse than blocking on it).
+ *
+ * DEPARTMENT sources are deliberately answered `true`: they have never been
+ * gated anywhere, and quietly starting to gate them here would silently
+ * change live approver sets. That remains an open hole, tracked separately.
+ *
+ * @returns {Promise<{eligible: boolean, reason: string|null, resource: string}>}
+ */
+export async function policyStepApproverEligibility(
+  step, entity_type, { hospitality_company_id, hotel_id = null, department_id = null, process_id = null } = {}, t = db
+) {
+  const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
+
+  if (step.approver_source_type === 'ROLE') {
+    const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resource, t);
+    return hasBoth
+      ? { eligible: true, reason: null, resource }
+      : { eligible: false, reason: 'ROLE_LACKS_READ_AND_APPROVE', resource };
+  }
+
+  if (step.approver_source_type === 'USER') {
+    const qualified = await t.oneOrNone(`
+      SELECT 1
+        FROM tbl_user_role_scopes urs
+        JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p ON p.id = rp.permission_id
+       WHERE urs.user_id = $1
+         AND p.resource::text = $2
+         AND p.action IN ('read', 'approve')
+         AND urs.company_id = $3
+         AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
+         AND ($5::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $5)
+         AND (urs.process_id IS NULL OR urs.process_id = $6)
+       GROUP BY urs.user_id
+      HAVING COUNT(DISTINCT p.action) = 2
+    `, [step.approver_source_id, resource, hospitality_company_id, hotel_id, department_id, process_id]);
+    return qualified
+      ? { eligible: true, reason: null, resource }
+      : { eligible: false, reason: 'USER_LACKS_READ_AND_APPROVE', resource };
+  }
+
+  return { eligible: true, reason: null, resource };
+}
+
 export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
   const userIds = [];
 
@@ -2450,22 +2528,14 @@ export async function createApprovalInstance({
       // A dropped step is recorded in skippedSteps like any other, and a policy
       // whose every step drops is REFUSED rather than auto-approved.
       if (policyStep.approver_source_type === 'USER') {
-        const qualified = await t.oneOrNone(`
-          SELECT 1
-            FROM tbl_user_role_scopes urs
-            JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-            JOIN tbl_permissions p ON p.id = rp.permission_id
-           WHERE urs.user_id = $1
-             AND p.resource::text = $2
-             AND p.action IN ('read', 'approve')
-             AND urs.company_id = $3
-             AND (urs.hotel_id IS NULL OR urs.hotel_id = $4)
-             AND ($5::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $5)
-             AND (urs.process_id IS NULL OR urs.process_id = $6)
-           GROUP BY urs.user_id
-          HAVING COUNT(DISTINCT p.action) = 2
-        `, [policyStep.approver_source_id, roleResource, hospitality_company_id,
-            hotel_id, resolveDeptId, process_id]);
+        // Shared with policy-edit propagation via policyStepApproverEligibility
+        // so the two paths cannot drift apart on WHO may hold authority.
+        const { eligible } = await policyStepApproverEligibility(
+          policyStep, entity_type,
+          { hospitality_company_id, hotel_id, department_id: resolveDeptId, process_id },
+          t
+        );
+        const qualified = eligible;
 
         if (!qualified) {
           skippedSteps.push({

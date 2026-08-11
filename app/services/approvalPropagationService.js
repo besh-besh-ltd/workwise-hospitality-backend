@@ -18,6 +18,7 @@ import {
   resolveApprovers,
   ENTITY_APPROVE_RESOURCE_MAP,
   roleHasReadAndApprovePermission,
+  policyStepApproverEligibility,
   getApprovalInstanceById,
   recordLifecycleEvent
 } from '../models/generalModel.js';
@@ -929,11 +930,38 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       );
       const currentApproverIds = currentApproverRows.map(r => r.approver_user_id);
 
-      // Resolve NEW approvers (from new policy step definition)
-      const newResolvedIds = await resolveApprovers(
-        d.newStep, instance.hospitality_company_id, instance.hotel_id,
-        resolveDeptId, t, null, instance.process_id || null
+      // Same eligibility rule creation uses — see
+      // policyStepApproverEligibility. Without this, editing a live policy
+      // could install an approver that creating the same instance would have
+      // dropped, and that approver is binding (submitApprovalAction re-checks
+      // nothing). An ineligible source resolves to NOBODY here, so the step
+      // below takes the existing "resolves to nobody" branch: it stalls rather
+      // than silently granting authority.
+      const modEligibility = await policyStepApproverEligibility(
+        d.newStep, instance.entity_type,
+        {
+          hospitality_company_id: instance.hospitality_company_id,
+          hotel_id: instance.hotel_id,
+          department_id: resolveDeptId,
+          process_id: instance.process_id || null,
+        }, t
       );
+      if (!modEligibility.eligible) {
+        logger.warn(
+          `[PropagateGate] STEP_MODIFIED: policy step ${d.newStep.id} source ` +
+          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
+          `for ${instance.entity_type} (${modEligibility.reason}, resource '${modEligibility.resource}') — ` +
+          `resolving to nobody on instance ${instance.id} instead of installing them.`
+        );
+      }
+
+      // Resolve NEW approvers (from new policy step definition)
+      const newResolvedIds = modEligibility.eligible
+        ? await resolveApprovers(
+            d.newStep, instance.hospitality_company_id, instance.hotel_id,
+            resolveDeptId, t, null, instance.process_id || null
+          )
+        : [];
 
       logger.info(`[PropagateModify] Current DB approvers (non-REMOVED): [${currentApproverIds.join(',')}], New resolved: [${newResolvedIds.join(',')}]`);
 
@@ -1113,10 +1141,37 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       result.stepsAdded.push({ step_order: insertPosition, status: 'SKIPPED' });
     } else {
       // Future step — insert as PENDING with resolved approvers
-      const newResolvedIds = await resolveApprovers(
-        d.newStep, instance.hospitality_company_id, instance.hotel_id,
-        resolveDeptId, t, null, instance.process_id || null
+      // Same eligibility rule creation uses — see
+      // policyStepApproverEligibility. Without this, editing a live policy
+      // could install an approver that creating the same instance would have
+      // dropped, and that approver is binding (submitApprovalAction re-checks
+      // nothing). An ineligible source resolves to NOBODY here, so the step
+      // below takes the existing "resolves to nobody" branch: it stalls rather
+      // than silently granting authority.
+      const addEligibility = await policyStepApproverEligibility(
+        d.newStep, instance.entity_type,
+        {
+          hospitality_company_id: instance.hospitality_company_id,
+          hotel_id: instance.hotel_id,
+          department_id: resolveDeptId,
+          process_id: instance.process_id || null,
+        }, t
       );
+      if (!addEligibility.eligible) {
+        logger.warn(
+          `[PropagateGate] STEP_ADDED: policy step ${d.newStep.id} source ` +
+          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
+          `for ${instance.entity_type} (${addEligibility.reason}, resource '${addEligibility.resource}') — ` +
+          `resolving to nobody on instance ${instance.id} instead of installing them.`
+        );
+      }
+
+      const newResolvedIds = addEligibility.eligible
+        ? await resolveApprovers(
+            d.newStep, instance.hospitality_company_id, instance.hotel_id,
+            resolveDeptId, t, null, instance.process_id || null
+          )
+        : [];
 
       if (newResolvedIds.length === 0) {
         // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
