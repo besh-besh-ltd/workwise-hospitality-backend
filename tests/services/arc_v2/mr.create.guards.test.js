@@ -73,11 +73,11 @@ describe("MR create guards (CO1 scope · CO2 linkage · CO4 over-consumption)", 
       `INSERT INTO tbl_approval_policy_steps
          (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
        VALUES ($1,1,'ANY','USER',$2)`, [mrPolicyId, BUYER]);
-    // MR entity types resolve against the `awarding` resource, and USER-source
+    // MR entity types resolve against the `mr` resource, and USER-source
     // steps are permission-gated — the named approver must hold read+approve
     // on it or the step drops and submit 400s. Scoped to the buyer's OWN
     // hotel+department so it cannot widen the scope these suites assert on.
-    await ensureApprovable(db, [BUYER], 'awarding', HC, HOTEL, DEPT_PROC);
+    await ensureApprovable(db, [BUYER], 'mr', HC, HOTEL, DEPT_PROC);
   });
 
   afterAll(async () => {

@@ -29,10 +29,11 @@ const ROLE_ID_BY_RESOURCE = {
   "arc-comm": 89303,
   "arc-committee": 89304,
   // Not ARC resources, but reached through the same gate by suites in this
-  // area: MR and PO entity types map to `awarding`, RFQ maps to `rfq`.
+  // area: PO maps to `awarding`, MR maps to `mr`, RFQ maps to `rfq`.
   // See ENTITY_APPROVE_RESOURCE_MAP in app/models/generalModel.js.
   "awarding": 89305,
   "rfq": 89306,
+  "mr": 89307,
 };
 const ARC_RESOURCES = ["arc", "arc-tech", "arc-comm", "arc-committee"];
 

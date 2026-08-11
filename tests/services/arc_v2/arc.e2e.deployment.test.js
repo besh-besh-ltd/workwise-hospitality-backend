@@ -77,10 +77,10 @@ describe("ARC v2 — DEPLOYMENT E2E: create → contract_active → MR → call-
          (approval_policy_id, step_order, decision_rule, approver_source_type, approver_source_id)
        VALUES ($1, 1, 'ALL', 'USER', $2)`, [MR_POLICY_ID, BUYER]);
     // BUYER is the named USER-source approver on the MR policy step above; the
-    // gate requires read+approve on 'awarding' (MR's mapped resource). Scoped to
+    // gate requires read+approve on 'mr' (MR's mapped resource). Scoped to
     // this hotel + department rather than company-wide, so the grant cannot
     // widen any scope check downstream.
-    await ensureApprovable(db, [BUYER], 'awarding', HC, HOTEL, DEPT);
+    await ensureApprovable(db, [BUYER], 'mr', HC, HOTEL, DEPT);
 
     buyerClient   = await httpClient(BUYER);
     vendorAClient = await httpClient(VENDOR_A);
