@@ -5208,15 +5208,63 @@ const negSameNum = (a, b) => {
 };
 const negSameText = (a, b) => negText(a) === negText(b);
 
+// ---------------------------------------------------------------------------
+// Normalisation: an UNSET field is a data gap, not a commercial term.
+//
+// The vendor's client re-posts the FULL quote on every save — there is no
+// field-level delta — so this diff sees every field whether or not the vendor
+// touched it. Any lossy coercion between "what is stored" and "what the client
+// re-serialises" therefore manufactures a phantom change to a field the round
+// never opened, and the whole submission is refused.
+//
+// Two such coercions deadlocked real vendors (RFQ 560, 604, 734):
+//
+//   delivery_period  stored ''  ->  client sends 0   (`parseInt('') || 0`)
+//   tax_mode         stored NULL ->  client sends 'percentage'
+//
+// The second is the worse one: it resolves to `gst`, which is in
+// ALWAYS_FROZEN_FIELDS and can never be opened by any round, so those 330
+// production line items were permanently un-revisable.
+//
+// Both are normalised away below. This is deliberately NOT applied to
+// unit_price, tax or quantity: a zero price is a commercial statement, and
+// treating it as "unset" would let a vendor move a price the buyer never
+// opened for negotiation.
+// ---------------------------------------------------------------------------
+
+/** Mode columns default to 'percentage'; NULL and '' mean the same thing. */
+const NEG_MODE_DEFAULT = 'percentage';
+const negMode = (v) => negText(v) || NEG_MODE_DEFAULT;
+
+/**
+ * True when a delivery period was never actually stated.
+ *
+ * `tbl_quote_items.delivery_period` is `text NOT NULL`, so "never stated" is
+ * stored as '' rather than NULL. The wizard re-posts it through
+ * `parseInt(x) || 0` (SendQuoteWizard.js:1543), so an unstated period comes
+ * back as the number 0. '' and 0 are the same fact spelled two ways, and a
+ * delivery period of zero days is not a value this product accepts anywhere.
+ */
+const negDeliveryUnset = (v) => {
+  const t = negText(v);
+  if (t === '') return true;
+  const n = Number(t);
+  return Number.isFinite(n) && n === 0;
+};
+
 // A charge reduced to the shape a comparison cares about. `name` is excluded
 // on purpose: two charges with the same slug are the same charge, and buyers
 // rename them ("Freight" vs "FREIGHT CHARGES AS PER ACTUAL") without that
 // being a commercial change.
+// Modes go through negMode, not negText: a charge stored before the mode
+// columns were populated holds NULL, and the client re-serialises the same
+// charge as 'percentage'. Compared as raw text those differ, and the vendor is
+// told they changed a charge they never touched.
 const negChargeShape = (c) => ({
   amount: negNum(c?.amount),
-  amount_mode: negText(c?.amount_mode),
+  amount_mode: negMode(c?.amount_mode),
   tax: negNum(c?.tax),
-  tax_mode: negText(c?.tax_mode),
+  tax_mode: negMode(c?.tax_mode),
   comment: negText(c?.comment)
 });
 const negSameCharge = (a, b) => {
@@ -5374,7 +5422,9 @@ const negChangedProductFields = (product, storedItem) => {
   if (!storedItem) {
     if (negNum(product.unit_price)) changed.add(NEGOTIABLE_BASE_PRICE);
     if (negText(product.comment)) changed.add('comment');
-    if (negText(product.delivery_period)) changed.add('delivery_period');
+    // `parseInt('') || 0` again: a blank delivery period on a brand-new line
+    // arrives as 0, which is not the vendor stating anything.
+    if (!negDeliveryUnset(product.delivery_period)) changed.add('delivery_period');
     if (Array.isArray(product.document_files) && product.document_files.length > 0) {
       changed.add('documents');
     }
@@ -5401,7 +5451,7 @@ const negChangedProductFields = (product, storedItem) => {
 
   if (
     !negSameNum(product.tax, stored.tax) ||
-    !negSameText(product.tax_mode, stored.tax_mode)
+    negMode(product.tax_mode) !== negMode(stored.tax_mode)
   ) {
     changed.add(ALWAYS_FROZEN_FIELDS.tax);
   }
@@ -5409,8 +5459,13 @@ const negChangedProductFields = (product, storedItem) => {
     changed.add(ALWAYS_FROZEN_FIELDS.quantity);
   }
   if (!negSameText(product.comment, stored.comment)) changed.add('comment');
-  if (!negSameText(product.delivery_period, stored.delivery_period)) {
-    changed.add('delivery_period');
+  // Filling a delivery period that was never stated is not a renegotiation of
+  // it — there was nothing to negotiate. Only moving a period the vendor
+  // actually quoted counts as a change the buyer has to have opened.
+  if (!negDeliveryUnset(stored.delivery_period)) {
+    if (!negSameText(product.delivery_period, stored.delivery_period)) {
+      changed.add('delivery_period');
+    }
   }
   // The endpoint only ever APPENDS per-product files (it never diffs them), so
   // any non-empty list is an attempt to change the documents on this line.
