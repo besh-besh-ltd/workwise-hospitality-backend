@@ -258,32 +258,47 @@ describe("negotiation round conflict guard", () => {
     expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
   });
 
-  it("the deadline test does not depend on the Postgres session timezone", async () => {
-    // end_date is naive UTC. Bare NOW() makes Postgres reinterpret it in the
-    // session zone, so under Asia/Kolkata a round with 3 hours left reads as
-    // 2.5 hours EXPIRED and silently stops blocking. Run the guard's own model
-    // function under a shifted session to prove it no longer cares.
+  it("a LIVE round with 2 hours left still blocks, whatever the session timezone", async () => {
+    // The real regression test for the bare-NOW() defect, exercising the real
+    // model function rather than a hand-written copy of its SQL.
     //
-    // A transaction-local SET keeps this from leaking into sibling suites.
+    // end_date is naive UTC. Bare `NOW()` is a timestamptz, and comparing the
+    // two makes Postgres reinterpret the naive side in the SESSION timezone.
+    // Under Asia/Kolkata — which is what local Postgres runs, per CLAUDE.md —
+    // the right-hand side lands 5h30m ahead, so a round with 2 hours genuinely
+    // left reads as 3.5 hours EXPIRED and silently stops blocking.
+    //
+    // This has to be an ACTIVE round: the old predicate was
+    // `(status != 'ACTIVE' OR end_date > NOW())`, so a PENDING round
+    // short-circuited past the date entirely and would not show the skew.
+    //
+    // Under a UTC session (CI, production) both old and new code agree, so
+    // this case only bites locally — which is the right way round: the machine
+    // a human runs tests on is the one that catches it.
     const rfq_id = await makeBidEndedRfq();
     const product_id = await attachProduct(rfq_id, 1);
     await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
 
     expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
     const round = await onlyRound(rfq_id);
-    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') + interval '3 hours'`);
+    const approve = mockExpress({
+      user: { id: IDS.users.a1_proc_commApp }, params: { id: String(round.id) }, body: {},
+    });
+    await negotiationController.approveRound(approve.req, approve.res);
+    expect(approve.calls.status).toBe(200);
 
-    for (const tz of ["UTC", "Asia/Kolkata", "America/New_York"]) {
-      const visible = await db.tx(async (t) => {
-        await t.none(`SET LOCAL TIME ZONE '${tz}'`);
-        return t.any(
-          `SELECT id FROM tbl_negotiation_rounds
-            WHERE rfq_id = $1
-              AND status IN ('PENDING_APPROVAL','ACTIVE')
-              AND end_date > (now() AT TIME ZONE 'UTC')`,
-          [rfq_id]);
-      });
-      expect({ tz, blocking: visible.length }).toEqual({ tz, blocking: 1 });
-    }
+    // Genuinely 2 hours of life left, stated in the column's own frame (UTC).
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') + interval '2 hours'`);
+
+    const { default: negotiationModel } = await import("../../app/models/negotiationModel.js");
+    const blocking = await negotiationModel.getActiveRoundsByRfqId(rfq_id, false);
+
+    const sessionTz = (await db.one(`SHOW timezone`)).TimeZone;
+    expect({ sessionTz, blocking: blocking.length }).toEqual({ sessionTz, blocking: 1 });
+
+    // And the guard built on it must still refuse the overlapping round.
+    const second = await createRound(rfq_id, product_id, [{ name: "base_price", target: 60000 }]);
+    expect(second.status).toBe(400);
+    expect(second.body.code).toBe("ROUND_ACTIVE");
   });
 });
