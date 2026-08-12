@@ -1124,6 +1124,63 @@ export const removeNegotiationRoundExpiration = (roundId) => {
  * On server startup: reschedule expiration jobs for all future rounds
  * and immediately process any rounds that expired during downtime.
  */
+/**
+ * Periodic backstop for negotiation round closure.
+ *
+ * WHY THIS EXISTS. `scheduleNegotiationRoundExpiration` registers a ONE-SHOT,
+ * IN-MEMORY `node-cron` job at create time, and the only other thing that ever
+ * closes a round is the startup sweep. So a round is closed on time only if
+ * the process that created it is still alive at its deadline. Anything that
+ * ends the process in between — a deploy, a crash, a restart — drops the job,
+ * and nothing notices until the next boot.
+ *
+ * That is not theoretical. Measured across 806 closed production rounds:
+ *   768 closed on time (<2 min)
+ *     9 closed 1-12 hours late
+ *    29 closed only when the server next restarted (>12 h; worst was 45 h)
+ *
+ * A stale round is not cosmetic: while it sits in a blocking status it stops
+ * the buyer opening a replacement round on the same fields (see the conflict
+ * guard in negotiationController.createRound).
+ *
+ * The one-shot jobs stay — they close rounds within seconds, which this sweep
+ * cannot. This only catches what they drop. `handleNegotiationRoundExpiration`
+ * re-reads the row and branches on its current status, so running it twice is
+ * harmless: the second call finds a non-blocking status and no-ops.
+ */
+export const startNegotiationRoundClosureSweeper = () => {
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      // `now() AT TIME ZONE 'UTC'`, not bare NOW(): end_date is a naive column
+      // holding UTC, and comparing it to a timestamptz makes Postgres
+      // reinterpret it in the SESSION timezone — 5h30m out under Asia/Kolkata.
+      const overdue = await db.any(
+        `SELECT id, status FROM tbl_negotiation_rounds
+          WHERE status IN ('PENDING_APPROVAL', 'ACTIVE')
+            AND end_date <= (now() AT TIME ZONE 'UTC')
+          ORDER BY end_date
+          LIMIT 200`
+      );
+      if (overdue.length === 0) return;
+
+      logger.warn(
+        `[Negotiation Sweeper] ${overdue.length} round(s) past their deadline still open — ` +
+        `their scheduled job did not fire. Closing now.`
+      );
+      for (const round of overdue) {
+        try {
+          await handleNegotiationRoundExpiration(round.id);
+        } catch (err) {
+          logError(`[Negotiation Sweeper] Failed to close round ${round.id}`, err);
+        }
+      }
+    } catch (err) {
+      logError('[Negotiation Sweeper] Sweep failed', err);
+    }
+  });
+  logger.info('[Negotiation Sweeper] Cron scheduled: every 5 minutes');
+};
+
 export const rescheduleAllNegotiationRoundExpirations = async () => {
   try {
     // 1. Reschedule future rounds

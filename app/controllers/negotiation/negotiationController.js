@@ -26,6 +26,21 @@ const parseAsUTC = (d) => {
   if (s.includes('+') || s.includes('Z')) return new Date(s);
   return new Date(s.replace(' ', 'T') + 'Z');
 };
+
+// A round deadline written the way an Indian buyer reads it. end_date is a
+// naive UTC column, so the stored digits are 5h30m behind the wall clock the
+// buyer picked — "10:30" is 4 PM, not half past ten in the morning. Any
+// message quoting a deadline must convert, or it reads as a different day-part
+// entirely.
+const formatRoundDeadlineIst = (endDate) => {
+  const d = parseAsUTC(endDate);
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return `${d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true
+  })} IST`;
+};
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
@@ -912,6 +927,16 @@ const NegotiationController = {
           message: 'End date must be in the future'
         });
       }
+      // Normalise to a naive UTC string before it is persisted. `end_date` is
+      // `timestamp without time zone`, and Postgres casts an incoming string by
+      // DISCARDING any offset and keeping the literal digits — so a client
+      // sending "2026-08-12T18:00:00+05:30" would store 18:00 and be read back
+      // by the whole app as 18:00 UTC, i.e. 23:30 IST: a deadline 5h30m later
+      // than the buyer chose. The browser happens to send a `Z` string today
+      // (NegotiationModal.js sends moment(...).utc()), which is why production
+      // data is correct — but that is the client being careful, not the server.
+      // Validation already parsed it as UTC above; persist exactly that.
+      const endDateUtc = endDate.format('YYYY-MM-DD HH:mm:ss');
 
       // Check if RFQ exists and get hospitality context
       const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
@@ -1019,9 +1044,28 @@ const NegotiationController = {
             const activeFields = getVendorFieldsForProduct(round, vid, pid).map(f => f?.name).filter(Boolean);
             const overlappingFields = newFields.filter(f => activeFields.includes(f));
             if (overlappingFields.length > 0) {
+              // Say which of the two situations this actually is. Calling a
+              // PENDING_APPROVAL round "active" and telling the buyer to wait
+              // for it to "complete" was actively misleading: such a round has
+              // never reached the vendor, and it cannot complete — it can only
+              // be approved or expire. A buyer sat blocked for 24.5 hours on
+              // RFQ #536326 following that advice.
+              const isPending = round.status === 'PENDING_APPROVAL';
+              const fields = overlappingFields.join(', ');
+              const closesAt = formatRoundDeadlineIst(round.end_date);
               return res.status(400).json({
                 status: 2,
-                message: `${vendorNameOf(vid)} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
+                code: isPending ? 'ROUND_AWAITING_APPROVAL' : 'ROUND_ACTIVE',
+                message: isPending
+                  ? `Round ${round.round_number} for ${vendorNameOf(vid)} on ${fields} is still awaiting internal approval, so it has not reached the vendor yet. Approve or reject that round before opening a new one on the same field(s).`
+                  : `${vendorNameOf(vid)} has a live negotiation round on ${fields}${closesAt ? `, closing ${closesAt}` : ''}. Select different fields, or wait for that round to close.`,
+                data: {
+                  round_id: round.id,
+                  round_number: round.round_number,
+                  round_status: round.status,
+                  fields: overlappingFields,
+                  end_date: round.end_date
+                }
               });
             }
           }
@@ -1097,7 +1141,7 @@ const NegotiationController = {
           rfq_product_id: legacyProductId,
           round_number,
           target_price: target_price || null,
-          end_date,
+          end_date: endDateUtc,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
           vendor_ids: parsedVendorIds,
@@ -1523,6 +1567,21 @@ const NegotiationController = {
         return res.status(400).json({
           status: 2,
           message: `Round is not pending approval. Current status: ${round.status}`
+        });
+      }
+
+      // A round whose deadline has already passed must not be activated. The
+      // closer is a one-shot in-memory job and demonstrably misses its window
+      // (38 of 806 production rounds closed late), so a stale PENDING_APPROVAL
+      // row can outlive its own deadline. Approving it here would publish a
+      // round the vendor has no time to answer — and, now that the conflict
+      // guard ignores past-deadline rounds, could put two live rounds on the
+      // same field at once.
+      const roundEndsAt = parseAsUTC(round.end_date);
+      if (roundEndsAt && roundEndsAt.getTime() <= Date.now()) {
+        return res.status(400).json({
+          status: 2,
+          message: 'This round\'s deadline has already passed, so it can no longer be approved. Create a new round instead.'
         });
       }
 

@@ -323,7 +323,11 @@ describe("createRound — field-overlap protection on the same product", () => {
     });
     await negotiationController.createRound(create2.req, create2.res);
     expect(create2.calls.status).toBe(400);
-    expect(create2.calls.body.message).toMatch(/already has an active negotiation round for field/i);
+    // Wording changed deliberately: the old copy called every blocking round
+    // "active" even when it was only awaiting approval. This round really IS
+    // live (approveRound above), so it gets the live-round message.
+    expect(create2.calls.body.code).toBe("ROUND_ACTIVE");
+    expect(create2.calls.body.message).toMatch(/has a live negotiation round on Freight/i);
   });
 
   it("a second round targeting a DIFFERENT field on the same product+vendor IS allowed", async () => {
