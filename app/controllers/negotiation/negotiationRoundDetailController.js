@@ -113,7 +113,10 @@ const pick = (obj, keys) => {
  * the round's own scope, so the page never has to guess (and never renders a
  * button the API would refuse).
  */
-export const deriveActions = ({ state, permissions, locked, vendorApprovalSummary, hasResponses }) => {
+export const deriveActions = ({
+  state, permissions, locked, vendorApprovalSummary, hasResponses,
+  viewerUserId = null, createdByUserId = null,
+}) => {
   const p = permissions || {};
   const s = String(state || '');
 
@@ -137,9 +140,23 @@ export const deriveActions = ({ state, permissions, locked, vendorApprovalSummar
   const anyPending = Number(summary.pending || 0) > 0;
   const anyRejected = Number(summary.rejected || 0) > 0;
 
+  // The author's own escape hatch, and the ONLY action here that is not gated
+  // on a permission. `can_reject` requires negotiation.approve, which the buyer
+  // who opened the round frequently does not hold — creating a round needs only
+  // acl([2, 8]). That asymmetry is what left buyers with no way to clear a
+  // round nobody approved: 179 production rounds died waiting, 107 of them
+  // blocking their own replacement for over 12 hours.
+  //
+  // Authorship is checked, not permission — POST /rounds/:id/withdraw enforces
+  // exactly the same rule, so this can never render a button the API refuses.
+  const isCreator =
+    viewerUserId != null && createdByUserId != null &&
+    Number(viewerUserId) === Number(createdByUserId);
+
   return {
     can_approve: !!p.approve && preApproval,
     can_reject: !!p.approve && preApproval,
+    can_withdraw: preApproval && isCreator,
     can_approve_vendor: !!p.approve && preApproval && anyPending,
     can_reject_vendor: !!p.approve && preApproval && anyPending,
     can_resubmit_vendor: !!p.approve && preApproval && anyRejected,
@@ -245,6 +262,13 @@ const negotiationRoundDetailController = {
           locked: quoteVisibility.locked,
           vendorApprovalSummary: payload.approval?.vendor_approvals ?? null,
           hasResponses: payload.totals?.lines_responded > 0,
+          viewerUserId: req.user?.id ?? null,
+          // `created_by` is an object {user_id, name, …}; the flat column is
+          // the fallback shape.
+          createdByUserId:
+            payload.round?.created_by?.user_id ??
+            payload.round?.created_by ??
+            null,
         }),
       };
 
