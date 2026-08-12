@@ -258,6 +258,95 @@ describe("negotiation round conflict guard", () => {
     expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
   });
 
+  // ---- withdraw: the creator's way out of a stuck round -------------------
+
+  async function withdraw(round_id, userId, remarks = "approver is on leave") {
+    const m = mockExpress({
+      user: { id: userId }, params: { id: String(round_id) }, body: { remarks },
+    });
+    await negotiationController.withdrawRound(m.req, m.res);
+    return m.calls;
+  }
+
+  it("the creator can withdraw their own stuck round, and then open a new one", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+
+    // Blocked before withdrawing — this is the reported state.
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 60000 }])).status).toBe(400);
+
+    const res = await withdraw(round.id, IDS.users.a1_proc_buyer);
+    expect(res.status).toBe(200);
+    expect(res.body.data.withdrawn).toBe(true);
+
+    const after = await db.one(`SELECT status, closed_at FROM tbl_negotiation_rounds WHERE id=$1`, [round.id]);
+    expect(after.status).toBe("CANCELLED");
+    expect(after.closed_at).not.toBeNull();
+
+    // The approval request must die with it, or the approver keeps an
+    // actionable card for a round that no longer exists.
+    const instance = await db.oneOrNone(
+      `SELECT status FROM tbl_approval_instances WHERE entity_type='NEGOTIATION' AND entity_id=$1`,
+      [round.id]);
+    if (instance) expect(instance.status).toBe("CANCELLED");
+
+    // The whole point: the buyer is unblocked.
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 60000 }])).status).toBe(200);
+  });
+
+  it("a buyer who did NOT create the round cannot withdraw it", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+
+    // Same hotel, same RFQ, genuine round access — and still refused. Round
+    // access is not authorship; withdrawing is.
+    const res = await withdraw(round.id, IDS.users.a1_proc_commApp);
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/only the buyer who created this round/i);
+    expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
+  });
+
+  it("a live round cannot be withdrawn — the vendor can already see it", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+    const approve = mockExpress({
+      user: { id: IDS.users.a1_proc_commApp }, params: { id: String(round.id) }, body: {},
+    });
+    await negotiationController.approveRound(approve.req, approve.res);
+    expect(approve.calls.status).toBe(200);
+
+    const res = await withdraw(round.id, IDS.users.a1_proc_buyer);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already live with the vendor/i);
+    expect((await onlyRound(rfq_id)).status).toBe("ACTIVE");
+  });
+
+  it("withdrawing requires a reason", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+
+    const res = await withdraw(round.id, IDS.users.a1_proc_buyer, "   ");
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/why you are withdrawing/i);
+    expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
+  });
+
   // ---- the sweeper: backstop for the one-shot in-memory closer -----------
 
   it("the sweeper closes an overdue PENDING round as EXPIRED, not ENDED", async () => {

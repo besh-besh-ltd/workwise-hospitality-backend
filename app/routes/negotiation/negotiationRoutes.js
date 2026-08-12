@@ -87,6 +87,18 @@ NegotiationRoutes.post(
   negotiationController.approveRound
 );
 
+// Withdraw a round you created that is still awaiting approval.
+// Same acl as reject — the creator-only rule is enforced in the controller
+// against tbl_negotiation_rounds.created_by, which is the only place that
+// knows who authored this particular round.
+NegotiationRoutes.post(
+  '/rounds/:id/withdraw',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.withdrawRound
+);
+
 // Reject a round
 NegotiationRoutes.post(
   '/rounds/:id/reject',

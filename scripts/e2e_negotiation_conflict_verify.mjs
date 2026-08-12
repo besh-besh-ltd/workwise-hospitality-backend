@@ -55,6 +55,8 @@ async function api(method, path, { userId, body } = {}) {
   return { status: res.status, body: json };
 }
 
+const expect200 = (res, label) => record(label, res.status === 200, `HTTP ${res.status}`);
+
 const naive = (ms) => new Date(Date.now() + ms).toISOString().replace("T", " ").slice(0, 19);
 
 /**
@@ -196,6 +198,45 @@ async function main() {
     const drift = Math.abs(stored - target.getTime()) / 60000;
     record("stored value equals the intended instant (no 5h30m drift)", drift < 2,
       `stored=${r.end_date}Z intended=${istString} drift=${drift.toFixed(1)} min`);
+  }
+
+  // ── 6. WITHDRAW: the creator's way out ──────────────────────────────────
+  console.log("\n6. Creator withdraws a stuck round");
+  {
+    const { rfq: rfq4, rp: rp4 } = await seedRfq();
+    expect200(await createRound(rfq4, rp4, 9000), "round 1 created");
+    const [r] = await roundsOf(rfq4.id);
+
+    const blocked = await createRound(rfq4, rp4, 8000);
+    record("blocked while it waits for approval", blocked.status === 400, `HTTP ${blocked.status}`);
+
+    const byOther = await api("POST", `/api/v1/negotiation/rounds/${r.id}/withdraw`, {
+      userId: IDS.users.a1_proc_commApp, body: { remarks: "not mine to withdraw" },
+    });
+    record("a non-creator cannot withdraw it",
+      byOther.status === 403 && /only the buyer who created/i.test(byOther.body?.message || ""),
+      `HTTP ${byOther.status} — ${byOther.body?.message}`);
+
+    const noReason = await api("POST", `/api/v1/negotiation/rounds/${r.id}/withdraw`, {
+      userId: BUYER, body: { remarks: "  " },
+    });
+    record("a reason is required", noReason.status === 400, `HTTP ${noReason.status}`);
+
+    const ok = await api("POST", `/api/v1/negotiation/rounds/${r.id}/withdraw`, {
+      userId: BUYER, body: { remarks: "approver on leave" },
+    });
+    record("the creator can withdraw it", ok.status === 200, `HTTP ${ok.status} — ${ok.body?.message}`);
+
+    const after = await db.one(`SELECT status FROM tbl_negotiation_rounds WHERE id=$1`, [r.id]);
+    record("the round is CANCELLED", after.status === "CANCELLED", `status = ${after.status}`);
+
+    const instance = await db.oneOrNone(
+      `SELECT status FROM tbl_approval_instances WHERE entity_type='NEGOTIATION' AND entity_id=$1`, [r.id]);
+    record("its approval request is cancelled too",
+      !instance || instance.status === "CANCELLED", `instance = ${instance?.status ?? "none"}`);
+
+    const unblocked = await createRound(rfq4, rp4, 8000);
+    record("the buyer is unblocked", unblocked.status === 200, `HTTP ${unblocked.status}`);
   }
 
   const passed = results.filter((r) => r.pass).length;
