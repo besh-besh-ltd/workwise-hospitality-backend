@@ -420,6 +420,63 @@ describe("negotiation round conflict guard", () => {
     expect(second.status).toBe("EXPIRED");
   });
 
+  it("overlapping sweeps are skipped rather than stacked", async () => {
+    // A sweep can outlast its own 5-minute interval — up to 200 rounds, each a
+    // transaction plus an email — and cron fires regardless.
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') - interval '1 minute'`);
+
+    const { runNegotiationRoundClosureSweep } = await import("../../app/helper/cronManager.js");
+    const [a, b, c] = await Promise.all([
+      runNegotiationRoundClosureSweep(),
+      runNegotiationRoundClosureSweep(),
+      runNegotiationRoundClosureSweep(),
+    ]);
+
+    expect((await onlyRound(rfq_id)).status).toBe("EXPIRED");
+    // One did the work; the others bowed out instead of piling on.
+    expect([a, b, c].filter((r) => r?.skipped === true)).toHaveLength(2);
+
+    // Exactly one closure recorded, not three.
+    const events = await db.any(
+      `SELECT id FROM tbl_lifecycle_history
+        WHERE entity_id = $1 AND action = 'NEGOTIATION_ROUND_EXPIRED'`,
+      [rfq_id]);
+    expect(events).toHaveLength(1);
+  });
+
+  it("the status-guarded claim lets exactly one closer win a genuine race", async () => {
+    // The in-flight flag only covers sweeps inside ONE process. The one-shot
+    // in-memory job, the boot sweep and the sweeper are all separate callers —
+    // and across several app instances there is no shared flag at all. What
+    // actually makes double-closing impossible is that the transition is
+    // CLAIMED: the UPDATE carries the expected status, so the loser writes no
+    // rows and returns before emailing or logging.
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+
+    const claim = () =>
+      db.result(
+        `UPDATE tbl_negotiation_rounds
+            SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND status = 'PENDING_APPROVAL'`,
+        [round.id]);
+
+    const results = await Promise.all([claim(), claim(), claim()]);
+    const winners = results.filter((r) => r.rowCount === 1);
+    expect(winners).toHaveLength(1);
+    expect((await onlyRound(rfq_id)).status).toBe("EXPIRED");
+  });
+
   it("a LIVE round with 2 hours left still blocks, whatever the session timezone", async () => {
     // The real regression test for the bare-NOW() defect, exercising the real
     // model function rather than a hand-written copy of its SQL.

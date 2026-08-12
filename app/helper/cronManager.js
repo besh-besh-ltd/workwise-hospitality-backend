@@ -936,12 +936,20 @@ const handleNegotiationRoundExpiration = async (roundId) => {
       // --- EXPIRE the round ---
       logger.info(`[Negotiation Expiry] Expiring PENDING_APPROVAL round ${roundId} for RFQ #${round.rfq_no}`);
 
-      await db.tx(async (t) => {
-        // Update round status to EXPIRED
-        await t.none(
-          `UPDATE tbl_negotiation_rounds SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      const claimed = await db.tx(async (t) => {
+        // CLAIM the transition, don't just perform it. The status was read
+        // above, outside this transaction, and three things can now race for
+        // the same round: the one-shot in-memory job, the boot sweep, and the
+        // periodic sweeper (which exists precisely to overlap the first two).
+        // Without the status predicate all three pass the earlier check and
+        // all three send the expiry email and write a lifecycle event.
+        const res = await t.result(
+          `UPDATE tbl_negotiation_rounds
+              SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND status = 'PENDING_APPROVAL'`,
           [roundId]
         );
+        if (res.rowCount === 0) return false;   // someone else got there first
 
         // Cancel pending approval instances (entity_id = round_id)
         await t.none(
@@ -965,7 +973,15 @@ const handleNegotiationRoundExpiration = async (roundId) => {
         // are already CANCELLED, and the ApprovalTimeline component uses
         // instanceStatus to render PENDING approvers as "Expired" when the
         // instance is CANCELLED.
+        return true;
       });
+
+      // Lost the race — another runner already expired this round and has
+      // already emailed and logged it. Stop here rather than doing it twice.
+      if (!claimed) {
+        logger.info(`[Negotiation Expiry] Round ${roundId} was already closed by another runner; skipping.`);
+        return;
+      }
 
       // Record lifecycle event (fire-and-forget)
       recordLifecycleEvent({
@@ -1017,10 +1033,19 @@ const handleNegotiationRoundExpiration = async (roundId) => {
       // --- END the round ---
       logger.info(`[Negotiation Expiry] Ending ACTIVE round ${roundId} for RFQ #${round.rfq_no}`);
 
-      await db.none(
-        `UPDATE tbl_negotiation_rounds SET status = 'ENDED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      // Status-guarded claim, same reasoning as the EXPIRED branch above: the
+      // one-shot job, the boot sweep and the periodic sweeper can all reach
+      // this round, and only one of them should email the evaluators.
+      const endedClaim = await db.result(
+        `UPDATE tbl_negotiation_rounds
+            SET status = 'ENDED', closed_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND status = 'ACTIVE'`,
         [roundId]
       );
+      if (endedClaim.rowCount === 0) {
+        logger.info(`[Negotiation Expiry] Round ${roundId} was already closed by another runner; skipping.`);
+        return;
+      }
 
       const quoteCount = await negotiationModel.getQuoteCountForRound(roundId);
 
@@ -1148,7 +1173,17 @@ export const removeNegotiationRoundExpiration = (roundId) => {
  * re-reads the row and branches on its current status, so running it twice is
  * harmless: the second call finds a non-blocking status and no-ops.
  */
+// A sweep can outlast its own 5-minute interval: up to 200 rounds, each one a
+// transaction plus an email. `cron.schedule` fires regardless, so without this
+// the ticks pile up on top of each other.
+let negotiationSweepInFlight = false;
+
 export const runNegotiationRoundClosureSweep = async () => {
+  if (negotiationSweepInFlight) {
+    logger.warn('[Negotiation Sweeper] Previous sweep still running; skipping this tick.');
+    return { swept: 0, failed: 0, skipped: true };
+  }
+  negotiationSweepInFlight = true;
   try {
     // `now() AT TIME ZONE 'UTC'`, not bare NOW(): end_date is a naive column
     // holding UTC, and comparing it to a timestamptz makes Postgres
@@ -1182,6 +1217,10 @@ export const runNegotiationRoundClosureSweep = async () => {
   } catch (err) {
     logError('[Negotiation Sweeper] Sweep failed', err);
     return { swept: 0, failed: 0, error: true };
+  } finally {
+    // Must release on every path, including the error one, or a single failed
+    // sweep silently disables the backstop for the life of the process.
+    negotiationSweepInFlight = false;
   }
 };
 
