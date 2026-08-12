@@ -2618,7 +2618,19 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   }
 
   let rfqDetail = null;
-  
+
+  // Edits filed against a product that has no row on this RFQ cannot be
+  // written anywhere, so each branch inside the transaction skips them.
+  // Skipping quietly is how a whole class of bugs stayed invisible: the client
+  // believed it had added a product, the save answered 200, and the only trace
+  // was a log line nobody reads. Collect what we drop and hand it back, so the
+  // caller can tell the user something went missing instead of claiming
+  // success. Declared out here because the response is built after the tx.
+  const droppedWrites = [];
+  const noteDropped = (kind, key, productId, variant) => {
+    droppedWrites.push({ kind, key, product_variant_id: productId ?? null, variant: variant ?? null });
+  };
+
   await db.tx(async (t) => {
     rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
     if(rfqDetail)
@@ -2700,6 +2712,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               { rfq_id, productId, variant, specKey: rfqProductId },
               'saveRfqDraft: dropped specs for a product with no row on this RFQ'
             );
+            noteDropped('specs', rfqProductId, productId, variant);
             continue;
           }
 
@@ -2786,6 +2799,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               { rfq_id, productId: fileProductId, variant: fileVariant, fileKey: rfqProductId },
               'saveRfqDraft: dropped files for a product with no row on this RFQ'
             );
+            noteDropped('files', rfqProductId, fileProductId, fileVariant);
             continue;
           }
           const resolvedRfqProductId = fileProductRow.id;
@@ -2883,6 +2897,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
                 { rfq_id, productId, variant, commentKey: rfqProductId },
                 'saveRfqDraft: dropped comment for a product with no row on this RFQ'
               );
+              noteDropped('comment', rfqProductId, productId, variant);
             }
           }
     }
@@ -3277,7 +3292,15 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     }
   });
 
-  return { status: 1, message: 'Draft has been saved successfully', rfq: {...rfqDetail} };
+  return {
+    status: 1,
+    message: 'Draft has been saved successfully',
+    rfq: {...rfqDetail},
+    // Empty on a clean save. Anything in here means the client sent edits for
+    // a product this RFQ does not have, which is a client-side bug — the UI
+    // must say so rather than report unqualified success.
+    dropped_writes: droppedWrites,
+  };
 };
 
 
