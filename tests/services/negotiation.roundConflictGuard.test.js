@@ -347,6 +347,53 @@ describe("negotiation round conflict guard", () => {
     expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
   });
 
+  // ---- the round-detail action gate that surfaces Withdraw ----------------
+
+  it("offers Withdraw to the author, and to nobody else", async () => {
+    // The endpoint alone is not the feature — the button has to appear on a
+    // page that exists. My first attempt put it on NegotiationBanner.js, which
+    // is imported by nothing; a browser sweep caught that it never rendered.
+    // This pins the server-side gate the LIVE round-detail page reads.
+    const { deriveActions } = await import(
+      "../../app/controllers/negotiation/negotiationRoundDetailController.js");
+
+    const base = {
+      state: "awaiting_approval",
+      permissions: { read: true, create: true, update: true, approve: false },
+      locked: false,
+      vendorApprovalSummary: { pending: 1 },
+      hasResponses: false,
+    };
+
+    const author = deriveActions({ ...base, viewerUserId: 42, createdByUserId: 42 });
+    const colleague = deriveActions({ ...base, viewerUserId: 99, createdByUserId: 42 });
+
+    expect(author.can_withdraw).toBe(true);
+    expect(colleague.can_withdraw).toBe(false);
+
+    // Withdraw is the author's escape hatch precisely BECAUSE reject is not
+    // available to them: `can_reject` needs negotiation.approve, which this
+    // author does not hold. 2 of 26 production round-creators are in exactly
+    // this position.
+    expect(author.can_reject).toBe(false);
+    expect(author.can_approve).toBe(false);
+  });
+
+  it("does not offer Withdraw once the round is live or already closed", async () => {
+    const { deriveActions } = await import(
+      "../../app/controllers/negotiation/negotiationRoundDetailController.js");
+    const base = {
+      permissions: { read: true, approve: true },
+      locked: false, vendorApprovalSummary: {}, hasResponses: false,
+      viewerUserId: 42, createdByUserId: 42,
+    };
+    // Live with vendors: pulling it back is a louder action, and the server
+    // route refuses it too.
+    expect(deriveActions({ ...base, state: "open_with_vendors" }).can_withdraw).toBe(false);
+    expect(deriveActions({ ...base, state: "cancelled" }).can_withdraw).toBe(false);
+    expect(deriveActions({ ...base, state: "concluded" }).can_withdraw).toBe(false);
+  });
+
   // ---- the sweeper: backstop for the one-shot in-memory closer -----------
 
   it("the sweeper closes an overdue PENDING round as EXPIRED, not ENDED", async () => {
