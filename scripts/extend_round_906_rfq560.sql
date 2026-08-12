@@ -90,6 +90,12 @@ UPDATE tbl_negotiation_rounds
        updated_at = NOW()
  WHERE id = 906
    AND status = 'ENDED'                                -- only ever re-opens an ENDED round
+   -- Refuse a deadline already in the past. The date above is hardcoded but
+   -- this script waits for approval, so it may well be run on a later day —
+   -- and a past end_date would reopen the round either to close instantly on
+   -- the next restart, or to hang ACTIVE with no scheduled close at all.
+   -- If this matches 0 rows, update the timestamp rather than removing this.
+   AND TIMESTAMP '2026-08-12 12:30:00' > (now() AT TIME ZONE 'UTC')
    AND NOT EXISTS (SELECT 1 FROM tbl_negotiation_round_quotes
                     WHERE negotiation_round_id = 906); -- never overwrite a real response
 
