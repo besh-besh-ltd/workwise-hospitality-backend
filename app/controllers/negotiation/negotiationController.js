@@ -26,6 +26,21 @@ const parseAsUTC = (d) => {
   if (s.includes('+') || s.includes('Z')) return new Date(s);
   return new Date(s.replace(' ', 'T') + 'Z');
 };
+
+// A round deadline written the way an Indian buyer reads it. end_date is a
+// naive UTC column, so the stored digits are 5h30m behind the wall clock the
+// buyer picked — "10:30" is 4 PM, not half past ten in the morning. Any
+// message quoting a deadline must convert, or it reads as a different day-part
+// entirely.
+const formatRoundDeadlineIst = (endDate) => {
+  const d = parseAsUTC(endDate);
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return `${d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true
+  })} IST`;
+};
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
@@ -912,6 +927,16 @@ const NegotiationController = {
           message: 'End date must be in the future'
         });
       }
+      // Normalise to a naive UTC string before it is persisted. `end_date` is
+      // `timestamp without time zone`, and Postgres casts an incoming string by
+      // DISCARDING any offset and keeping the literal digits — so a client
+      // sending "2026-08-12T18:00:00+05:30" would store 18:00 and be read back
+      // by the whole app as 18:00 UTC, i.e. 23:30 IST: a deadline 5h30m later
+      // than the buyer chose. The browser happens to send a `Z` string today
+      // (NegotiationModal.js sends moment(...).utc()), which is why production
+      // data is correct — but that is the client being careful, not the server.
+      // Validation already parsed it as UTC above; persist exactly that.
+      const endDateUtc = endDate.format('YYYY-MM-DD HH:mm:ss');
 
       // Check if RFQ exists and get hospitality context
       const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
@@ -1019,9 +1044,31 @@ const NegotiationController = {
             const activeFields = getVendorFieldsForProduct(round, vid, pid).map(f => f?.name).filter(Boolean);
             const overlappingFields = newFields.filter(f => activeFields.includes(f));
             if (overlappingFields.length > 0) {
+              // Say which of the two situations this actually is. Calling a
+              // PENDING_APPROVAL round "active" and telling the buyer to wait
+              // for it to "complete" was actively misleading: such a round has
+              // never reached the vendor, and it cannot complete — it can only
+              // be approved or expire. A buyer sat blocked for 24.5 hours on
+              // RFQ #536326 following that advice.
+              const isPending = round.status === 'PENDING_APPROVAL';
+              const fields = overlappingFields.join(', ');
+              const closesAt = formatRoundDeadlineIst(round.end_date);
               return res.status(400).json({
                 status: 2,
-                message: `${vendorNameOf(vid)} already has an active negotiation round for field(s): ${overlappingFields.join(', ')}. Please select different fields or wait for the existing round to complete.`
+                code: isPending ? 'ROUND_AWAITING_APPROVAL' : 'ROUND_ACTIVE',
+                message: isPending
+                  ? `Round ${round.round_number} for ${vendorNameOf(vid)} on ${fields} is still awaiting internal approval, so it has not reached the vendor yet. Wait for it to be approved, or withdraw it to open a new round on the same field(s).`
+                  : `${vendorNameOf(vid)} has a live negotiation round on ${fields}${closesAt ? `, closing ${closesAt}` : ''}. Select different fields, or wait for that round to close.`,
+                data: {
+                  round_id: round.id,
+                  round_number: round.round_number,
+                  round_status: round.status,
+                  fields: overlappingFields,
+                  end_date: round.end_date,
+                  // Lets the client offer the way out directly instead of
+                  // leaving the buyer to find it. Only the author may withdraw.
+                  can_withdraw: isPending && Number(round.created_by) === Number(user_id)
+                }
               });
             }
           }
@@ -1097,7 +1144,7 @@ const NegotiationController = {
           rfq_product_id: legacyProductId,
           round_number,
           target_price: target_price || null,
-          end_date,
+          end_date: endDateUtc,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
           vendor_ids: parsedVendorIds,
@@ -1526,6 +1573,21 @@ const NegotiationController = {
         });
       }
 
+      // A round whose deadline has already passed must not be activated. The
+      // closer is a one-shot in-memory job and demonstrably misses its window
+      // (38 of 806 production rounds closed late), so a stale PENDING_APPROVAL
+      // row can outlive its own deadline. Approving it here would publish a
+      // round the vendor has no time to answer — and, now that the conflict
+      // guard ignores past-deadline rounds, could put two live rounds on the
+      // same field at once.
+      const roundEndsAt = parseAsUTC(round.end_date);
+      if (roundEndsAt && roundEndsAt.getTime() <= Date.now()) {
+        return res.status(400).json({
+          status: 2,
+          message: 'This round\'s deadline has already passed, so it can no longer be approved. Create a new round instead.'
+        });
+      }
+
       // Get approval instance and submit APPROVE action
       const instances = await getApprovalInstancesByEntity('NEGOTIATION', round_id);
       const pendingInstance = instances.find(i => i.status === 'PENDING');
@@ -1787,6 +1849,140 @@ const NegotiationController = {
           rejected: true
         },
         message: 'Round rejected successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Withdraw a round you created that is still waiting on approval.
+   * POST /negotiation/rounds/:id/withdraw
+   *
+   * WHY THIS EXISTS. A round needing approval blocks any new round on the same
+   * field(s) for the same vendor (see the conflict guard in createRound). If an
+   * approver simply never acts — one absent approver on an ALL-rule step is
+   * enough — the buyer is blocked until the deadline passes. On RFQ #536326
+   * that was 24.5 hours, and production holds 179 such rounds, 107 of which
+   * blocked for over 12 hours and one for a week. Until now the buyer had no
+   * way out: `reject` is the APPROVER's verdict, and the UI only ever offered
+   * it to a current approver, so the creator was shown nothing at all.
+   *
+   * Deliberately NOT the same thing as `rejectRound`:
+   *   - reject   = an approver refuses the round. Any buyer with round access.
+   *   - withdraw = the author takes their own request back. Creator only.
+   * They land in the same terminal state (CANCELLED) but mean different things,
+   * and the lifecycle trail records which one happened.
+   *
+   * PENDING_APPROVAL only. Once a round is ACTIVE the vendor can see it and may
+   * already be preparing a revised quote — pulling it out from under them is a
+   * different, louder action than calling back something nobody has seen.
+   */
+  withdrawRound: async (req, res) => {
+    try {
+      const round_id = parseInt(req.params.id);
+      const user_id = req.user.id;
+      const { remarks } = req.body;
+
+      if (!round_id) {
+        return res.status(400).json({ status: 2, message: 'Round ID is required' });
+      }
+      if (!remarks || String(remarks).trim().length === 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Please say why you are withdrawing this round'
+        });
+      }
+
+      const round = await negotiationModel.getRoundById(round_id);
+      if (!round) {
+        return res.status(404).json({ status: 2, message: 'Round not found' });
+      }
+
+      // Authorship IS the authorization here, and it is STRICTER than the
+      // `userCanReadRound` scope gate the sibling endpoints use — you may only
+      // withdraw a round you personally created, which no amount of id-guessing
+      // can satisfy. `created_by` is server-side data, never client input.
+      //
+      // Deliberately NOT layered on top of userCanReadRound: creating a round
+      // requires only acl([2, 8]), while that gate demands `negotiation.read`
+      // in scope. Those are different questions, and a buyer can satisfy the
+      // first without the second — our own TENDER_CREATOR fixture does exactly
+      // that. Requiring both would lock the author out of withdrawing their own
+      // stuck round, which is the entire point of this endpoint. (Same
+      // resolver-vs-visibility mismatch that produced the RFQ 791 defect.)
+      if (Number(round.created_by) !== Number(user_id)) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only the buyer who created this round can withdraw it.'
+        });
+      }
+
+      if (round.status !== 'PENDING_APPROVAL') {
+        return res.status(400).json({
+          status: 2,
+          message: round.status === 'ACTIVE'
+            ? 'This round is already live with the vendor and can no longer be withdrawn.'
+            : `This round is no longer awaiting approval. Current status: ${round.status}`
+        });
+      }
+
+      await db.tx(async (t) => {
+        await t.none(
+          `UPDATE tbl_negotiation_rounds
+              SET status = 'CANCELLED', remarks = COALESCE($2, remarks),
+                  closed_at = NOW(), updated_at = NOW()
+            WHERE id = $1`,
+          [round_id, remarks]
+        );
+        // Cancel — not reject. The creator is typically not an approver on this
+        // instance, so routing through submitApprovalAction would be recording
+        // a verdict from someone with no standing to give one. This mirrors
+        // what the expiry cron does when a round runs out of time.
+        await t.none(
+          `UPDATE tbl_approval_instances
+              SET status = 'CANCELLED', completed_at = NOW()
+            WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
+          [round_id]
+        );
+        await t.none(
+          `UPDATE tbl_approval_instance_steps
+              SET status = 'CANCELLED', completed_at = NOW()
+            WHERE approval_instance_id IN (
+                    SELECT id FROM tbl_approval_instances
+                     WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'CANCELLED')
+              AND status = 'PENDING'`,
+          [round_id]
+        );
+      });
+
+      // The round is terminal now; its scheduled closer has nothing to do.
+      removeNegotiationRoundExpiration(round_id);
+
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfqData = rfq?.[0];
+      if (rfqData) {
+        await recordLifecycleEvent({
+          entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+          entity_id: round.rfq_id,
+          stage: `NEGOTIATION_ROUND_${round.round_number}`,
+          action: 'ROUND_WITHDRAWN',
+          performed_by: user_id,
+          metadata: {
+            round_id,
+            round_number: round.round_number,
+            rfq_product_id: round.rfq_product_id,
+            rfq_product_ids: getCoveredProductIds(round),
+            remarks
+          }
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: { withdrawn: true, round_id },
+        message: 'Round withdrawn. You can now create a new round on the same fields.'
       });
     } catch (error) {
       logError(error);

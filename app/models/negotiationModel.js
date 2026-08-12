@@ -2958,9 +2958,26 @@ const negotiationModel = {
       ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
       : `('PENDING_APPROVAL', 'ACTIVE')`;
 
-    // When not including ended rounds, also exclude rounds whose end_date has passed
-    // (cron may not have updated the status to ENDED yet)
-    const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
+    // When not including ended rounds, also exclude rounds whose end_date has
+    // passed — the closer is a one-shot in-memory job and does miss its window
+    // (measured in production: 38 of 806 rounds closed late, 29 of them only
+    // when the server next restarted, one 45 hours after its deadline).
+    //
+    // This deliberately covers PENDING_APPROVAL as well as ACTIVE. It used to
+    // read `(nr.status != 'ACTIVE' OR nr.end_date > NOW())`, which short-
+    // circuits for a pending round and never looks at its deadline — so a
+    // round nobody approved kept blocking its fields with no time-based
+    // escape at all. A pending round past its deadline cannot become live;
+    // it can only expire, so it must not block a replacement.
+    //
+    // `now() AT TIME ZONE 'UTC'`, not bare `NOW()`: end_date is a naive column
+    // holding UTC, and comparing it against a timestamptz makes Postgres
+    // reinterpret the naive side in the SESSION timezone. That is exact under
+    // production's UTC session and 5h30m wrong under a local Asia/Kolkata one
+    // — in the releasing direction, so a stuck block is invisible in dev.
+    const endDateFilter = includeEnded
+      ? ''
+      : `AND nr.end_date > (now() AT TIME ZONE 'UTC')`;
 
     const rows = await db.any(
       `SELECT

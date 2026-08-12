@@ -936,12 +936,20 @@ const handleNegotiationRoundExpiration = async (roundId) => {
       // --- EXPIRE the round ---
       logger.info(`[Negotiation Expiry] Expiring PENDING_APPROVAL round ${roundId} for RFQ #${round.rfq_no}`);
 
-      await db.tx(async (t) => {
-        // Update round status to EXPIRED
-        await t.none(
-          `UPDATE tbl_negotiation_rounds SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      const claimed = await db.tx(async (t) => {
+        // CLAIM the transition, don't just perform it. The status was read
+        // above, outside this transaction, and three things can now race for
+        // the same round: the one-shot in-memory job, the boot sweep, and the
+        // periodic sweeper (which exists precisely to overlap the first two).
+        // Without the status predicate all three pass the earlier check and
+        // all three send the expiry email and write a lifecycle event.
+        const res = await t.result(
+          `UPDATE tbl_negotiation_rounds
+              SET status = 'EXPIRED', closed_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND status = 'PENDING_APPROVAL'`,
           [roundId]
         );
+        if (res.rowCount === 0) return false;   // someone else got there first
 
         // Cancel pending approval instances (entity_id = round_id)
         await t.none(
@@ -965,7 +973,15 @@ const handleNegotiationRoundExpiration = async (roundId) => {
         // are already CANCELLED, and the ApprovalTimeline component uses
         // instanceStatus to render PENDING approvers as "Expired" when the
         // instance is CANCELLED.
+        return true;
       });
+
+      // Lost the race — another runner already expired this round and has
+      // already emailed and logged it. Stop here rather than doing it twice.
+      if (!claimed) {
+        logger.info(`[Negotiation Expiry] Round ${roundId} was already closed by another runner; skipping.`);
+        return;
+      }
 
       // Record lifecycle event (fire-and-forget)
       recordLifecycleEvent({
@@ -1017,10 +1033,19 @@ const handleNegotiationRoundExpiration = async (roundId) => {
       // --- END the round ---
       logger.info(`[Negotiation Expiry] Ending ACTIVE round ${roundId} for RFQ #${round.rfq_no}`);
 
-      await db.none(
-        `UPDATE tbl_negotiation_rounds SET status = 'ENDED', closed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      // Status-guarded claim, same reasoning as the EXPIRED branch above: the
+      // one-shot job, the boot sweep and the periodic sweeper can all reach
+      // this round, and only one of them should email the evaluators.
+      const endedClaim = await db.result(
+        `UPDATE tbl_negotiation_rounds
+            SET status = 'ENDED', closed_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND status = 'ACTIVE'`,
         [roundId]
       );
+      if (endedClaim.rowCount === 0) {
+        logger.info(`[Negotiation Expiry] Round ${roundId} was already closed by another runner; skipping.`);
+        return;
+      }
 
       const quoteCount = await negotiationModel.getQuoteCountForRound(roundId);
 
@@ -1124,6 +1149,86 @@ export const removeNegotiationRoundExpiration = (roundId) => {
  * On server startup: reschedule expiration jobs for all future rounds
  * and immediately process any rounds that expired during downtime.
  */
+/**
+ * Periodic backstop for negotiation round closure.
+ *
+ * WHY THIS EXISTS. `scheduleNegotiationRoundExpiration` registers a ONE-SHOT,
+ * IN-MEMORY `node-cron` job at create time, and the only other thing that ever
+ * closes a round is the startup sweep. So a round is closed on time only if
+ * the process that created it is still alive at its deadline. Anything that
+ * ends the process in between — a deploy, a crash, a restart — drops the job,
+ * and nothing notices until the next boot.
+ *
+ * That is not theoretical. Measured across 806 closed production rounds:
+ *   768 closed on time (<2 min)
+ *     9 closed 1-12 hours late
+ *    29 closed only when the server next restarted (>12 h; worst was 45 h)
+ *
+ * A stale round is not cosmetic: while it sits in a blocking status it stops
+ * the buyer opening a replacement round on the same fields (see the conflict
+ * guard in negotiationController.createRound).
+ *
+ * The one-shot jobs stay — they close rounds within seconds, which this sweep
+ * cannot. This only catches what they drop. `handleNegotiationRoundExpiration`
+ * re-reads the row and branches on its current status, so running it twice is
+ * harmless: the second call finds a non-blocking status and no-ops.
+ */
+// A sweep can outlast its own 5-minute interval: up to 200 rounds, each one a
+// transaction plus an email. `cron.schedule` fires regardless, so without this
+// the ticks pile up on top of each other.
+let negotiationSweepInFlight = false;
+
+export const runNegotiationRoundClosureSweep = async () => {
+  if (negotiationSweepInFlight) {
+    logger.warn('[Negotiation Sweeper] Previous sweep still running; skipping this tick.');
+    return { swept: 0, failed: 0, skipped: true };
+  }
+  negotiationSweepInFlight = true;
+  try {
+    // `now() AT TIME ZONE 'UTC'`, not bare NOW(): end_date is a naive column
+    // holding UTC, and comparing it to a timestamptz makes Postgres
+    // reinterpret it in the SESSION timezone — 5h30m out under Asia/Kolkata.
+    const overdue = await db.any(
+      `SELECT id, status FROM tbl_negotiation_rounds
+        WHERE status IN ('PENDING_APPROVAL', 'ACTIVE')
+          AND end_date <= (now() AT TIME ZONE 'UTC')
+        ORDER BY end_date
+        LIMIT 200`
+    );
+    if (overdue.length === 0) return { swept: 0, failed: 0 };
+
+    logger.warn(
+      `[Negotiation Sweeper] ${overdue.length} round(s) past their deadline still open — ` +
+      `their scheduled job did not fire. Closing now.`
+    );
+    let swept = 0;
+    let failed = 0;
+    for (const round of overdue) {
+      try {
+        await handleNegotiationRoundExpiration(round.id);
+        swept += 1;
+      } catch (err) {
+        failed += 1;
+        // One bad round must not abandon the rest of the sweep.
+        logError(`[Negotiation Sweeper] Failed to close round ${round.id}`, err);
+      }
+    }
+    return { swept, failed };
+  } catch (err) {
+    logError('[Negotiation Sweeper] Sweep failed', err);
+    return { swept: 0, failed: 0, error: true };
+  } finally {
+    // Must release on every path, including the error one, or a single failed
+    // sweep silently disables the backstop for the life of the process.
+    negotiationSweepInFlight = false;
+  }
+};
+
+export const startNegotiationRoundClosureSweeper = () => {
+  cron.schedule('*/5 * * * *', () => { runNegotiationRoundClosureSweep(); });
+  logger.info('[Negotiation Sweeper] Cron scheduled: every 5 minutes');
+};
+
 export const rescheduleAllNegotiationRoundExpirations = async () => {
   try {
     // 1. Reschedule future rounds
