@@ -1148,36 +1148,45 @@ export const removeNegotiationRoundExpiration = (roundId) => {
  * re-reads the row and branches on its current status, so running it twice is
  * harmless: the second call finds a non-blocking status and no-ops.
  */
-export const startNegotiationRoundClosureSweeper = () => {
-  cron.schedule('*/5 * * * *', async () => {
-    try {
-      // `now() AT TIME ZONE 'UTC'`, not bare NOW(): end_date is a naive column
-      // holding UTC, and comparing it to a timestamptz makes Postgres
-      // reinterpret it in the SESSION timezone — 5h30m out under Asia/Kolkata.
-      const overdue = await db.any(
-        `SELECT id, status FROM tbl_negotiation_rounds
-          WHERE status IN ('PENDING_APPROVAL', 'ACTIVE')
-            AND end_date <= (now() AT TIME ZONE 'UTC')
-          ORDER BY end_date
-          LIMIT 200`
-      );
-      if (overdue.length === 0) return;
+export const runNegotiationRoundClosureSweep = async () => {
+  try {
+    // `now() AT TIME ZONE 'UTC'`, not bare NOW(): end_date is a naive column
+    // holding UTC, and comparing it to a timestamptz makes Postgres
+    // reinterpret it in the SESSION timezone — 5h30m out under Asia/Kolkata.
+    const overdue = await db.any(
+      `SELECT id, status FROM tbl_negotiation_rounds
+        WHERE status IN ('PENDING_APPROVAL', 'ACTIVE')
+          AND end_date <= (now() AT TIME ZONE 'UTC')
+        ORDER BY end_date
+        LIMIT 200`
+    );
+    if (overdue.length === 0) return { swept: 0, failed: 0 };
 
-      logger.warn(
-        `[Negotiation Sweeper] ${overdue.length} round(s) past their deadline still open — ` +
-        `their scheduled job did not fire. Closing now.`
-      );
-      for (const round of overdue) {
-        try {
-          await handleNegotiationRoundExpiration(round.id);
-        } catch (err) {
-          logError(`[Negotiation Sweeper] Failed to close round ${round.id}`, err);
-        }
+    logger.warn(
+      `[Negotiation Sweeper] ${overdue.length} round(s) past their deadline still open — ` +
+      `their scheduled job did not fire. Closing now.`
+    );
+    let swept = 0;
+    let failed = 0;
+    for (const round of overdue) {
+      try {
+        await handleNegotiationRoundExpiration(round.id);
+        swept += 1;
+      } catch (err) {
+        failed += 1;
+        // One bad round must not abandon the rest of the sweep.
+        logError(`[Negotiation Sweeper] Failed to close round ${round.id}`, err);
       }
-    } catch (err) {
-      logError('[Negotiation Sweeper] Sweep failed', err);
     }
-  });
+    return { swept, failed };
+  } catch (err) {
+    logError('[Negotiation Sweeper] Sweep failed', err);
+    return { swept: 0, failed: 0, error: true };
+  }
+};
+
+export const startNegotiationRoundClosureSweeper = () => {
+  cron.schedule('*/5 * * * *', () => { runNegotiationRoundClosureSweep(); });
   logger.info('[Negotiation Sweeper] Cron scheduled: every 5 minutes');
 };
 

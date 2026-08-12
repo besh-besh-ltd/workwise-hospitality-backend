@@ -258,6 +258,79 @@ describe("negotiation round conflict guard", () => {
     expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
   });
 
+  // ---- the sweeper: backstop for the one-shot in-memory closer -----------
+
+  it("the sweeper closes an overdue PENDING round as EXPIRED, not ENDED", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+    // The one-shot job was lost to a deploy; the deadline came and went.
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') - interval '2 hours'`);
+
+    const { runNegotiationRoundClosureSweep } = await import("../../app/helper/cronManager.js");
+    await runNegotiationRoundClosureSweep();
+
+    // EXPIRED, because nobody approved it in time — distinct from ENDED, which
+    // means a live round ran its course. The two are not interchangeable: only
+    // EXPIRED tells the buyer the round never reached the vendor.
+    const after = await onlyRound(rfq_id);
+    expect(after.status).toBe("EXPIRED");
+
+    // …and the pending approval instance must be cancelled with it, or the
+    // approver keeps an actionable card for a round that no longer exists.
+    const instance = await db.oneOrNone(
+      `SELECT status FROM tbl_approval_instances
+        WHERE entity_type='NEGOTIATION' AND entity_id=$1`, [round.id]);
+    if (instance) expect(instance.status).toBe("CANCELLED");
+  });
+
+  it("the sweeper closes an overdue ACTIVE round as ENDED", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+    const approve = mockExpress({
+      user: { id: IDS.users.a1_proc_commApp }, params: { id: String(round.id) }, body: {},
+    });
+    await negotiationController.approveRound(approve.req, approve.res);
+    expect(approve.calls.status).toBe(200);
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') - interval '2 hours'`);
+
+    const { runNegotiationRoundClosureSweep } = await import("../../app/helper/cronManager.js");
+    await runNegotiationRoundClosureSweep();
+
+    expect((await onlyRound(rfq_id)).status).toBe("ENDED");
+  });
+
+  it("the sweeper leaves a round that still has time alone, and is safe to run twice", async () => {
+    const rfq_id = await makeBidEndedRfq();
+    const product_id = await attachProduct(rfq_id, 1);
+    await attachVendor(rfq_id, IDS.users.vendor_alpha, 1);
+
+    expect((await createRound(rfq_id, product_id, [{ name: "base_price", target: 64000 }])).status).toBe(200);
+    const round = await onlyRound(rfq_id);
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') + interval '6 hours'`);
+
+    const { runNegotiationRoundClosureSweep } = await import("../../app/helper/cronManager.js");
+    await runNegotiationRoundClosureSweep();
+    expect((await onlyRound(rfq_id)).status).toBe("PENDING_APPROVAL");
+
+    // Overdue now — and sweeping twice must not double-close or throw, since
+    // the real cron overlaps with the one-shot job it is backing up.
+    await setRoundDeadline(round.id, `(now() AT TIME ZONE 'UTC') - interval '1 minute'`);
+    await runNegotiationRoundClosureSweep();
+    const first = await onlyRound(rfq_id);
+    await runNegotiationRoundClosureSweep();
+    const second = await onlyRound(rfq_id);
+    expect(first.status).toBe("EXPIRED");
+    expect(second.status).toBe("EXPIRED");
+  });
+
   it("a LIVE round with 2 hours left still blocks, whatever the session timezone", async () => {
     // The real regression test for the bare-NOW() defect, exercising the real
     // model function rather than a hand-written copy of its SQL.
