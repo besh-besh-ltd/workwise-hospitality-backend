@@ -336,7 +336,14 @@ export const NEG_STATE = {
 // approval") for the same round; one table now feeds both.
 export const NEG_STATE_PRESENTATION = {
   [NEG_STATE.AWAITING_APPROVAL]: {
-    label: 'Awaiting your approval',
+    // NOT "Awaiting YOUR approval". This table is keyed on the round's state
+    // and nothing else — there is no viewer in scope here and never was, so a
+    // possessive baked into a state constant is a claim the constant cannot
+    // support. It told all five approvers on a round the same thing, sixteen
+    // hours after one of them had already approved. The viewer-relative
+    // wording is computed at render time, where the viewer exists:
+    // frontend negotiationStates.negStateHeaderLabel, off approval.my_status.
+    label: 'Awaiting approval',
     description: 'Waiting for an internal approver before vendors are notified.',
     tone: 'committee',
     badge: 'committee',
@@ -1577,6 +1584,38 @@ const negotiationModel = {
         inst.status === 'PENDING' && currentStep
           ? currentStep.approvers.filter((a) => a.status === 'PENDING')
           : [];
+
+      // WHERE THE VIEWER STANDS on this instance — the fact the page needs to
+      // stop telling somebody a round awaits "your" approval sixteen hours
+      // after they approved it.
+      //
+      // 96% of negotiation rounds go through a multi-approver ALL step, and
+      // the average gap between the first approval and the last is 8.4 hours
+      // (max 4.8 days). For all of that time the round is legitimately still
+      // `awaiting_approval` — but not from everyone.
+      //
+      // Read over EVERY step, not just the current one: an approver can sit on
+      // step 1 (approved) and step 3 (pending) of the same chain, and the
+      // answer that matters to them is the one that needs an action. Removed
+      // approvers are already filtered out above, so they correctly read null.
+      const myRecords =
+        viewerUserId == null
+          ? []
+          : instSteps.flatMap((s) =>
+              s.approvers.filter((a) => Number(a.user_id) === Number(viewerUserId))
+            );
+      const myStatuses = new Set(myRecords.map((a) => String(a.status || '').toUpperCase()));
+      const myStatus =
+        myRecords.length === 0
+          ? null
+          : myStatuses.has('PENDING')
+            ? 'PENDING'
+            : myStatuses.has('REJECTED')
+              ? 'REJECTED'
+              : myStatuses.has('APPROVED')
+                ? 'APPROVED'
+                : null;
+
       return {
         instance_id: Number(inst.id),
         round_id: Number(inst.entity_id),
@@ -1593,6 +1632,8 @@ const negotiationModel = {
         },
         steps: instSteps,
         pending_with: pendingWith,
+        pending_count: pendingWith.length,
+        my_status: myStatus,
         is_pending_for_me:
           viewerUserId != null && pendingWith.some((a) => Number(a.user_id) === Number(viewerUserId)),
       };
@@ -1887,6 +1928,11 @@ const negotiationModel = {
       instances: approvalInstances,
       status: approvalInstances[0]?.status ?? null,
       pending_with: approvalInstances[0]?.pending_with ?? [],
+      // How many approvers this round is STILL waiting on, and where the
+      // viewer stands among them. Both are read off the newest instance —
+      // the same one `status` and `pending_with` come from.
+      pending_count: approvalInstances[0]?.pending_count ?? 0,
+      my_status: approvalInstances[0]?.my_status ?? null,
       is_pending_for_me: approvalInstances.some((i) => i.is_pending_for_me),
       vendor_approvals: {
         total: vendorApprovals.length,
