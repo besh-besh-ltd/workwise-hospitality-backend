@@ -5,6 +5,7 @@ import {
   parseAsUTC,
   withIsoTimestamps,
 } from '../helper/dbTime.js';
+import { getBidEndMomentIst } from '../helper/quoteVisibility.js';
 
 // These two used to be defined here, one copy per module that needed them.
 // They now live in app/helper/dbTime.js with the reasoning attached, and are
@@ -2005,7 +2006,14 @@ const negotiationModel = {
         title: primary.parent_rfq_title ?? primary.parent_arc_title ?? null,
         status: primary.parent_rfq_status ?? primary.parent_arc_status ?? null,
         is_tender: primary.parent_is_tender == null ? null : Number(primary.parent_is_tender),
-        bid_end_date: primary.parent_bid_end_date ?? null,
+        // The one IST column on this payload. Everything else here is naive
+        // UTC and goes through isoOrNull; bid_end_date is naive IST text and
+        // would come out 5h30m early if it did. getBidEndMomentIst is the
+        // parser that knows the difference (helper/quoteVisibility.js).
+        bid_end_date: (() => {
+          const m = getBidEndMomentIst(primary.parent_bid_end_date);
+          return m ? m.toDate().toISOString() : null;
+        })(),
         vendor_clarification_date: isoOrNull(primary.parent_vendor_clarification_date),
         submission_end_at: isoOrNull(primary.parent_arc_submission_end_at),
         hospitality_company_id: primary.parent_company_id == null ? null : Number(primary.parent_company_id),
