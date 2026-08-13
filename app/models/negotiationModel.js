@@ -1,15 +1,26 @@
 import db, { pgp } from '../config/dbConn.js';
+import {
+  NEGOTIATION_TIMESTAMP_KEYS,
+  isoOrNull,
+  parseAsUTC,
+  withIsoTimestamps,
+} from '../helper/dbTime.js';
 
-// Helper: parse date strings as UTC when no timezone suffix is present
-// PostgreSQL returns timestamp without time zone as bare strings (e.g. "2026-03-27 18:54:00")
-// which new Date() would incorrectly interpret as local time
-const parseAsUTC = (dateValue) => {
-  if (!dateValue) return null;
-  if (dateValue instanceof Date) return dateValue;
-  const str = String(dateValue);
-  if (str.includes('+') || str.includes('Z')) return new Date(str);
-  return new Date(str.replace(' ', 'T') + 'Z');
-};
+// These two used to be defined here, one copy per module that needed them.
+// They now live in app/helper/dbTime.js with the reasoning attached, and are
+// re-exported so existing importers of this module keep working.
+export { parseAsUTC, isoOrNull };
+
+// The listing queries alias their timestamp columns — same naive-UTC contract,
+// different names — so they cannot reuse NEGOTIATION_TIMESTAMP_KEYS verbatim.
+const ROUND_LIST_TIMESTAMP_KEYS = [
+  'round_created_at',
+  'end_date',
+  'approved_at',
+  'published_at',
+  'closed_at',
+];
+const PARENT_LIST_TIMESTAMP_KEYS = ['first_round_at', 'last_activity_at', 'next_deadline'];
 
 // ============= READ-SCOPE (RBAC MATRIX) =============
 // P0 FIX: the negotiation listings used to scope rows to the caller's
@@ -193,10 +204,6 @@ const num = (v) => {
 };
 const round2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
 const round4 = (v) => (v == null ? null : Math.round(v * 10000) / 10000);
-const isoOrNull = (v) => {
-  const d = parseAsUTC(v);
-  return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
-};
 
 // The (product | arc item | rfq-level) slots a round negotiates over.
 export const getRoundItemSlots = (round) => {
@@ -2058,6 +2065,9 @@ const negotiationModel = {
 
     const rows = await db.any(query, values);
     rows.forEach(normalizeProductNames);
+    // `SELECT nr.*` puts every naive UTC column on the wire unlabelled. Give
+    // each one an explicit offset before it leaves — see helper/dbTime.js.
+    rows.forEach(r => withIsoTimestamps(r, NEGOTIATION_TIMESTAMP_KEYS));
     // Vendor reads must not leak other vendors' targets.
     if (vendorId) rows.forEach(r => stripProductsForVendor(r, vendorId));
     return rows;
@@ -2283,7 +2293,7 @@ const negotiationModel = {
   // null ONLY for super admins (user_type 8). The companyIds clause is kept as
   // defence in depth — both must hold.
   getNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
-    return db.any(
+    const rows = await db.any(
       `SELECT nr.id                 AS round_id,
               -- The DISPLAYED round number: this round's position in the whole
               -- RFQ, computed at read time. The stored column restarts at 1 per
@@ -2354,6 +2364,7 @@ const negotiationModel = {
         ORDER BY nr.created_at DESC`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, ROUND_LIST_TIMESTAMP_KEYS));
   },
 
   // ARC negotiation round list: one row per ARC negotiation round, shaped to the
@@ -2361,7 +2372,7 @@ const negotiationModel = {
   // bucket/facet/sort/paginate logic works over the concatenated array unchanged.
   // Scoped to a.hospitality_company_id = ANY(companyIds) — same guard as the RFQ branch.
   getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
-    return db.any(
+    const rows = await db.any(
       `SELECT nr.id                 AS round_id,
               -- Same read-time position as the RFQ branch. ARC allocation is
               -- already contract-wide, so this agrees with the stored value.
@@ -2431,6 +2442,7 @@ const negotiationModel = {
         ORDER BY nr.created_at DESC`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, ROUND_LIST_TIMESTAMP_KEYS));
   },
 
   // ==========================================================================
@@ -2460,7 +2472,7 @@ const negotiationModel = {
   // defence in depth — both must hold.
   getNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     const stateExpr = 'r.neg_status';
-    return db.any(
+    const rows = await db.any(
       `SELECT 'RFQ:' || r.rfq_id            AS parent_key,
               'RFQ'::text                   AS source_type,
               r.rfq_id,
@@ -2557,6 +2569,7 @@ const negotiationModel = {
         ORDER BY last_activity_at DESC NULLS LAST`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, PARENT_LIST_TIMESTAMP_KEYS));
   },
 
   // ARC counterpart, shaped to the EXACT same column contract so the
@@ -2565,7 +2578,7 @@ const negotiationModel = {
   // precisely why filters.parentKey exists alongside filters.rfqId.
   getArcNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     const stateExpr = 'r.neg_status';
-    return db.any(
+    const rows = await db.any(
       `SELECT 'ARC:' || r.arc_id            AS parent_key,
               'ARC'::text                   AS source_type,
               NULL::int                     AS rfq_id,
@@ -2652,6 +2665,7 @@ const negotiationModel = {
         ORDER BY last_activity_at DESC NULLS LAST`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, PARENT_LIST_TIMESTAMP_KEYS));
   },
 
   // ==========================================================================
@@ -3818,6 +3832,12 @@ const negotiationModel = {
     // Try round.id first, then fall back to matching via metadata.round_id from the product bucket.
     const enrichedRounds = roundsHistory.map(round => {
       normalizeProductNames(round);
+      // `SELECT nr.*` again — label the naive UTC columns before the approval
+      // page reads them. This is the row behind ticket 1: ApproveRoundPage
+      // hands round.end_date straight to StepReview, which parsed the bare
+      // string as local wall clock and rendered 07:00 AM for a 12:30 PM
+      // deadline. See helper/dbTime.js.
+      withIsoTimestamps(round, NEGOTIATION_TIMESTAMP_KEYS);
       let roundApprovals = negotiationInstances[String(round.id)] || [];
       if (roundApprovals.length === 0) {
         // Backward compat: old instances keyed by rfq_product_id
