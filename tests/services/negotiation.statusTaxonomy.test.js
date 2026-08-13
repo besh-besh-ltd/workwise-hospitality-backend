@@ -201,7 +201,7 @@ describe("Negotiation status taxonomy", () => {
     await addProduct("lapsed", 1);
     await addProduct("cancelled", 2);
 
-    // DRAFT / PENDING_APPROVAL → "Awaiting your approval"
+    // DRAFT / PENDING_APPROVAL → "Awaiting approval"
     await addRound("awaiting", { productKey: "awaiting", roundNumber: 1, status: "PENDING_APPROVAL", endDate: stamp(4) });
 
     // ACTIVE with the window still open → "Open with vendors"
@@ -502,6 +502,11 @@ describe("Negotiation status taxonomy", () => {
     it("is closed while the round is still awaiting internal approval", async () => {
       const detail = await detailFor("awaiting");
       expect(detail.actions.can_create_next_round).toBe(false);
+      // can_approve is true here BECAUSE the caller is this instance's pending
+      // approver, not merely because they hold negotiation.approve — the gate
+      // is now viewer-relative. Anchored on is_pending_for_me so this passes
+      // for the right reason.
+      expect(detail.approval.is_pending_for_me).toBe(true);
       expect(detail.actions.can_approve).toBe(true);
     });
   });

@@ -1,4 +1,5 @@
 import db from '../../config/dbConn.js';
+import { NEGOTIATION_TIMESTAMP_KEYS, parseAsUTC, withIsoTimestamps } from '../../helper/dbTime.js';
 
 /**
  * ARC Negotiation Model
@@ -83,7 +84,7 @@ const arcNegotiationModel = {
 
   /** All rounds for an ARC with item-name decoration (item-level and arc-level). */
   getRoundsForArc: async (arcId, userId = null, txContext = null) => {
-    return (txContext || db).any(
+    const rows = await (txContext || db).any(
       `SELECT nr.*,
               pv.name AS arc_item_name,
               -- The approve/reject action belongs to the round's ARC_NEGOTIATION
@@ -117,6 +118,10 @@ const arcNegotiationModel = {
         ORDER BY nr.round_number DESC`,
       [arcId, userId]
     );
+    // `SELECT nr.*` — the naive UTC columns get an explicit offset before they
+    // reach ArcRoundsList / ArcApproveRoundPanel, both of which parsed the bare
+    // string as local wall clock. See helper/dbTime.js.
+    return rows.map((r) => withIsoTimestamps(r, NEGOTIATION_TIMESTAMP_KEYS));
   },
 
   /**
@@ -338,7 +343,10 @@ const arcNegotiationModel = {
       [roundId]
     );
     if (!row) return false;
-    return row.status === 'ACTIVE' && new Date(row.end_date) <= new Date();
+    // parseAsUTC is what the RFQ original this claims to mirror actually uses
+    // (negotiationModel.isRoundExpired). new Date() on the bare column resolves
+    // through the process timezone and expires the round 5h30m early on IST.
+    return row.status === 'ACTIVE' && parseAsUTC(row.end_date) <= new Date();
   },
 
   // ──────────────────────────────────────────────────────────────────────────

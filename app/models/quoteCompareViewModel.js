@@ -33,7 +33,7 @@ import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
 import rfqModel from "./rfqModel.js";
 import { enrichQuoteCompareData } from "../services/quoteCompareService.js";
-import { buildQuoteVisibilityMeta } from "../helper/quoteVisibility.js";
+import { buildQuoteVisibilityMeta, getBidEndMomentIst } from "../helper/quoteVisibility.js";
 import { shapeStageActors } from "./rfq/rfqLifecycleShaper.js";
 import {
   getCoveredProductIds,
@@ -2146,12 +2146,21 @@ function mapRfqStatus(status) {
   return RFQ_STATUS_LABELS[Number(status)] || String(status);
 }
 
-// bid_end_date is stored as free text ("YYYY-MM-DD HH:mm:ss"); coerce to ISO
-// when parseable, else null.
+// bid_end_date is stored as free text ("YYYY-MM-DD HH:mm:ss") holding a naive
+// IST wall clock — the deadline the buyer typed, in the zone the buyer typed it.
+//
+// This used to be `new Date(String(raw).replace(" ", "T")).toISOString()`,
+// which resolves the naive string through the NODE PROCESS timezone. In
+// production that is UTC, so a 12:00 IST deadline was published to the API as
+// "2026-08-01T12:00:00.000Z" and every browser rendered it as 05:30 pm — the
+// same 5h30m error as the negotiation timestamps, in the opposite direction.
+//
+// getBidEndMomentIst is the one parser that knows the column is IST; it also
+// backs the quote-visibility lock, so the deadline shown and the deadline
+// enforced now come off the same reading.
 function parseDeadline(raw) {
-  if (!raw) return null;
-  const d = new Date(String(raw).replace(" ", "T"));
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  const m = getBidEndMomentIst(raw);
+  return m ? m.toDate().toISOString() : null;
 }
 
 export default { getQuoteComparisonView };
