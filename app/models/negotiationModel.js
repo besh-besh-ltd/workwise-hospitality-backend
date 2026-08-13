@@ -7,6 +7,19 @@ import {
 } from '../helper/dbTime.js';
 import { getBidEndMomentIst } from '../helper/quoteVisibility.js';
 
+/**
+ * A naive-IST text column -> a real ISO instant.
+ *
+ * `bid_end_date`, `vendor_clarification_date` and the ARC `submission_end_at`
+ * store IST wall clock with no offset. Feeding one to isoOrNull/parseAsUTC
+ * reads it as UTC and lands the instant 5h30m early — the same defect as the
+ * negotiation timestamps, in the opposite direction. dbTime.js names all three.
+ */
+const istTextToIso = (raw) => {
+  const m = getBidEndMomentIst(raw);
+  return m ? m.toDate().toISOString() : null;
+};
+
 // These two used to be defined here, one copy per module that needed them.
 // They now live in app/helper/dbTime.js with the reasoning attached, and are
 // re-exported so existing importers of this module keep working.
@@ -2052,16 +2065,23 @@ const negotiationModel = {
         title: primary.parent_rfq_title ?? primary.parent_arc_title ?? null,
         status: primary.parent_rfq_status ?? primary.parent_arc_status ?? null,
         is_tender: primary.parent_is_tender == null ? null : Number(primary.parent_is_tender),
-        // The one IST column on this payload. Everything else here is naive
-        // UTC and goes through isoOrNull; bid_end_date is naive IST text and
-        // would come out 5h30m early if it did. getBidEndMomentIst is the
-        // parser that knows the difference (helper/quoteVisibility.js).
-        bid_end_date: (() => {
-          const m = getBidEndMomentIst(primary.parent_bid_end_date);
-          return m ? m.toDate().toISOString() : null;
-        })(),
-        vendor_clarification_date: isoOrNull(primary.parent_vendor_clarification_date),
-        submission_end_at: isoOrNull(primary.parent_arc_submission_end_at),
+        // THREE IST columns on this payload, not one. Everything else here is
+        // naive UTC and goes through isoOrNull; these hold naive IST wall clock
+        // and would come out 5h30m early if they did — see the warning in
+        // helper/dbTime.js, which names all three.
+        //
+        // The rest of the codebase already agrees they are IST:
+        // rfqController.js:17702 parses vendor_clarification_date with
+        // getBidEndMomentIst, and arcController.js:77,813 parse
+        // submission_end_at with arcMomentIst. This payload was the odd one out.
+        //
+        // Caught in review: the first pass fixed bid_end_date and left its two
+        // immediate neighbours wrong, under a comment claiming there was only
+        // one. Dormant today (no frontend consumer reads either field), which
+        // is exactly how the original tickets started.
+        bid_end_date: istTextToIso(primary.parent_bid_end_date),
+        vendor_clarification_date: istTextToIso(primary.parent_vendor_clarification_date),
+        submission_end_at: istTextToIso(primary.parent_arc_submission_end_at),
         hospitality_company_id: primary.parent_company_id == null ? null : Number(primary.parent_company_id),
         company_name: primary.parent_company_name ?? null,
         hotel_id: primary.parent_hotel_id == null ? null : Number(primary.parent_hotel_id),
