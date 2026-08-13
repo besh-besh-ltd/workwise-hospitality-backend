@@ -1,5 +1,5 @@
 import db from '../../config/dbConn.js';
-import { NEGOTIATION_TIMESTAMP_KEYS, withIsoTimestamps } from '../../helper/dbTime.js';
+import { NEGOTIATION_TIMESTAMP_KEYS, parseAsUTC, withIsoTimestamps } from '../../helper/dbTime.js';
 
 /**
  * ARC Negotiation Model
@@ -343,7 +343,10 @@ const arcNegotiationModel = {
       [roundId]
     );
     if (!row) return false;
-    return row.status === 'ACTIVE' && new Date(row.end_date) <= new Date();
+    // parseAsUTC is what the RFQ original this claims to mirror actually uses
+    // (negotiationModel.isRoundExpired). new Date() on the bare column resolves
+    // through the process timezone and expires the round 5h30m early on IST.
+    return row.status === 'ACTIVE' && parseAsUTC(row.end_date) <= new Date();
   },
 
   // ──────────────────────────────────────────────────────────────────────────
