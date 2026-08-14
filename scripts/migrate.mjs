@@ -19,6 +19,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import pg from "pg";
 import dotenv from "dotenv";
 import { runner } from "node-pg-migrate";
@@ -35,13 +36,83 @@ if (!process.env.HOST && existsSync(join(ROOT, ".env"))) {
   dotenv.config({ path: join(ROOT, ".env") });
 }
 
+// Any positional argument that survives to here is almost certainly a value the
+// caller meant to attach to a flag (`down 2` meaning `down --count 2`) rather
+// than something this CLI accepts bare. Silently ignoring it is how `down 2`
+// used to revert 1 migration and exit 0.
+function positionalHint(command, token) {
+  if (command === "down") return ` (did you mean --count ${token}?)`;
+  if (command === "baseline") return ` (did you mean --confirm ${token}?)`;
+  return "";
+}
+
 function parseArgs(argv) {
   const [command = "status", ...rest] = argv;
   const flags = {};
   for (let i = 0; i < rest.length; i += 1) {
-    if (rest[i].startsWith("--")) flags[rest[i].slice(2)] = rest[i + 1]?.startsWith("--") ? true : rest[++i];
+    const token = rest[i];
+    if (!token.startsWith("--")) {
+      throw new Error(
+        `unexpected argument '${token}' — flags must be passed as --name value or ` +
+          `--name=value${positionalHint(command, token)}`
+      );
+    }
+    const eq = token.indexOf("=");
+    if (eq !== -1) {
+      // --flag=value: whatever follows '=' is the value, verbatim (including "").
+      flags[token.slice(2, eq)] = token.slice(eq + 1);
+      continue;
+    }
+    const name = token.slice(2);
+    const next = rest[i + 1];
+    if (next === undefined || next.startsWith("--")) {
+      // Nothing follows, or the next token is itself a flag: this is a bare
+      // boolean-style flag (e.g. --yes). Recorded as `true`, NOT as `undefined` —
+      // a command that requires a value (e.g. --count) must be able to tell
+      // "flag given with no value" (true) apart from "flag never given"
+      // (absent from `flags` entirely), and reject the former explicitly rather
+      // than silently defaulting, which is exactly how a dangling `--count` at
+      // the end of argv used to revert 1 migration and exit 0.
+      flags[name] = true;
+    } else {
+      flags[name] = next;
+      i += 1;
+    }
   }
   return { command, flags };
+}
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+// backend/.env resolves to hospitality_stage on a shared RDS host by default, so
+// an `up`/`down` run from a bare terminal — no flags, no thought given to which
+// database is active — writes to that shared environment unless something stops
+// it first. `baseline` already has --confirm; `up`/`down` had nothing. This
+// mirrors the gate migrations/run_pending_migrations.sh already uses (its
+// ASSUME_YES / `-t 0` check) rather than inventing a new shape.
+async function guardRemoteTarget(conn, flags) {
+  if (LOCAL_HOSTS.has(conn.host)) return; // dev/CI scratch db: no shared blast radius
+  // --yes must be a bare flag (see parseArgs above) — CD passes it explicitly to
+  // state its intent, which is the point: `--yes false` would be parsed as
+  // giving --yes the *value* "false", a truthy string, not a way to say no.
+  if (flags.yes === true) return;
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      `refusing to run against a REMOTE database non-interactively: ${describeTarget(conn)}. ` +
+        "Pass --yes to confirm this is intentional."
+    );
+  }
+  console.log(`\nTarget is REMOTE: ${describeTarget(conn)}`);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let typed;
+  try {
+    typed = await rl.question(`Type the database name (${conn.database}) to continue: `);
+  } finally {
+    rl.close();
+  }
+  if (typed !== conn.database) {
+    throw new Error(`refusing: confirmation did not match '${conn.database}'`);
+  }
 }
 
 function runnerOptions(client, overrides) {
@@ -130,8 +201,18 @@ const commands = {
   },
 
   async down(client, conn, flags) {
-    const count = Number(flags.count ?? 1);
-    if (!Number.isInteger(count) || count < 1) throw new Error("--count must be a positive integer");
+    // flags.count === undefined means --count was never passed at all: default
+    // to 1. flags.count === true means it WAS passed but with no usable value
+    // (dangling `--count` at the end of argv, or immediately followed by another
+    // --flag) — that must error, not silently coerce to 1: Number(true) === 1,
+    // which would make this exact bug invisible again.
+    if (flags.count === true) {
+      throw new Error("--count requires a value, e.g. --count 1 (got a bare flag with nothing after it)");
+    }
+    const count = flags.count === undefined ? 1 : Number(flags.count);
+    if (!Number.isInteger(count) || count < 1) {
+      throw new Error(`--count must be a positive integer (got ${JSON.stringify(flags.count)})`);
+    }
     console.log(`Target : ${describeTarget(conn)}`);
     console.log(`Reverting ${count} migration(s)...`);
     await runner(runnerOptions(client, { direction: "down", count }));
@@ -172,6 +253,15 @@ const commands = {
   },
 };
 
+// up/down are the only commands with no confirmation gate of their own
+// (baseline has --confirm; status/verify/manifest never write). Gated here.
+const REMOTE_GUARDED = new Set(["up", "down"]);
+
+// Set once buildConnection() resolves, purely so a later fatal error (including
+// a failed client.connect()) can still say which database it was reaching for —
+// see describeError below.
+let lastConn = null;
+
 async function main() {
   const { command, flags } = parseArgs(process.argv.slice(2));
   const run = commands[command];
@@ -186,6 +276,18 @@ async function main() {
   }
 
   const conn = buildConnection();
+  lastConn = conn;
+
+  // Checked before client.connect(), not inside the command: buildConnection()
+  // is pure env-var parsing with no I/O, so the remote/local decision — and, for
+  // a remote target, the whole prompt-or-refuse flow — can complete before a
+  // single packet reaches the network. An operator (or CI) pointed at a remote
+  // host by an untouched .env is stopped before a connection even opens, not
+  // after node-pg-migrate has already started applying DDL against it.
+  if (REMOTE_GUARDED.has(command)) {
+    await guardRemoteTarget(conn, flags);
+  }
+
   const client = new pg.Client(conn);
   await client.connect();
   try {
@@ -195,7 +297,26 @@ async function main() {
   }
 }
 
+// Node's connection stack can throw an AggregateError whose top-level .message
+// is "" (e.g. every address a hostname resolved to refused the connection) —
+// `ABORT: ` with nothing after it leaves no diagnostic for an on-call engineer
+// to grep out of a CD log. Falls back through sub-errors, then error code, then
+// the constructor name, so the line is never empty; always names the target
+// (via describeTarget, which never includes the password) so the log says WHICH
+// database could not be reached.
+function describeError(err) {
+  const parts = [];
+  if (err.message) parts.push(err.message);
+  if (Array.isArray(err.errors) && err.errors.length > 0) {
+    parts.push(err.errors.map((e) => e?.message || String(e)).join("; "));
+  }
+  if (err.code) parts.push(`code=${err.code}`);
+  if (parts.length === 0) parts.push(err.constructor?.name ?? String(err));
+  return parts.join(" | ");
+}
+
 main().catch((err) => {
-  console.error(`\nABORT: ${err.message}`);
+  const target = lastConn ? ` (target: ${describeTarget(lastConn)})` : "";
+  console.error(`\nABORT: ${describeError(err)}${target}`);
   process.exit(1);
 });
