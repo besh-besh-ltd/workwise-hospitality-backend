@@ -304,6 +304,7 @@ jobs:
   # ---------------------------------------------------------------------------
   migrations:
     name: Migration replay (production baseline)
+    needs: shards
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -414,7 +415,11 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.migrations.result }}" != "success" ]; then
-            echo "::error::The migration replay failed — this PR's migrations do not apply cleanly to a database shaped like production. Reproduce locally: npm run migrate:replay && npm run migrate:up"
+            echo "::error::The migration replay failed — this PR's migrations do not apply cleanly to a database shaped like production."
+            echo "Reproduce locally (swap DATABASE_USERNAME/DATABASE_PASSWORD for your own Postgres superuser if you're not on a trust-auth Homebrew install). Use export, not a prefix before '&&' — an env prefix only applies to the first command in the chain, so migrate:up would silently fall through to .env and hit the REMOTE-target guard instead of touching migration_replay:"
+            echo "  export HOST=localhost DATABASE_PORT=5432 DATABASE_USERNAME=\"\$USER\" DATABASE_PASSWORD= \\"
+            echo "         DATABASE_NAME=migration_replay TEST_DB_NO_SSL=1 REPLAY_MAINTENANCE_DB=postgres PGOPTIONS='-c timezone=UTC'"
+            echo "  npm run migrate:replay && npm run migrate:up && npm run migrate:verify"
             exit 1
           fi
           echo "All shards green."
