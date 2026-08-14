@@ -62,6 +62,20 @@ function runnerOptions(client, overrides) {
     advisoryLockMode: "wait",
     // Pairs NAME.up.sql with NAME.down.sql; ledger id normalises to NAME.sql.
     migrationLoaderStrategies: [{ extensions: [".sql"], loader: "sql" }],
+    // Consider ONLY .sql files. Without this, node-pg-migrate scans every entry in
+    // the directory and throws `Cannot determine numeric prefix for "<name>"` on the
+    // first one that is not a migration — a stray shell script is enough to break
+    // every deploy. Its default ignore is `^\..*` (dotfiles only), which covers
+    // .DS_Store but not `run_notification_catchup.sh`.
+    //
+    // The deeper reason is agreement: `status` counts pending work through our own
+    // listMigrations(), which already looks at .sql alone. If the runner's scan saw a
+    // different set, `status` would report "0 pending" while `up` threw — the two
+    // halves of one CLI disagreeing about what exists.
+    //
+    // The library anchors this itself as `^<pattern>$` (dist/legacy/migration.js), so
+    // it reads: any name that does not end in .sql.
+    ignorePattern: "(?!.*\\.sql$).*",
     verbose: true,
     ...overrides,
   };
