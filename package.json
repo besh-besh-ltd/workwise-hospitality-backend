@@ -22,7 +22,13 @@
     "test:shards": "node scripts/check-shard-coverage.mjs",
     "test:tooling": "node --test scripts/__tests__/*.test.mjs",
     "check:tx-response": "node scripts/check-response-in-tx.mjs",
-    "test:snapshot-staging": "node tests/setup/snapshotStaging.js"
+    "test:snapshot-staging": "node tests/setup/snapshotStaging.js",
+    "migrate:status": "node scripts/migrate.mjs status",
+    "migrate:up": "node scripts/migrate.mjs up",
+    "migrate:down": "node scripts/migrate.mjs down",
+    "migrate:verify": "node scripts/migrate.mjs verify",
+    "migrate:baseline": "node scripts/migrate.mjs baseline",
+    "migrate:manifest": "node scripts/migrate.mjs manifest"
   },
   "repository": {
     "type": "git",
