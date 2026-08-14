@@ -71,8 +71,19 @@ the first migration file and exist in no migration. `baseline/production_baselin
 is a schema-only dump of production, and `baseline/MANIFEST.txt` lists the migrations
 already applied in it. Together they are the floor that CI replays onto.
 
-Re-baseline when the replay gets slow — roughly annually. Dump production again,
-regenerate the manifest with `npm run migrate:manifest`, and commit both.
+Re-baseline when the replay gets slow — roughly annually.
+
+```bash
+npm run migrate:dump-baseline -- --database hospitality_main
+```
+
+This dumps production's schema (read-only `pg_dump`), regenerates
+`MANIFEST.txt` to match, and refuses to write either file if the dump looks
+like it came from staging instead — `--database` has no default, because
+staging and production live on the same RDS host. Review the diff and commit
+both files; `scripts/dump-baseline.mjs` carries the exclusion list and the
+staging/production check, so nothing about doing this correctly depends on
+anyone remembering a hand-typed command.
 
 ## Rolling back production
 
