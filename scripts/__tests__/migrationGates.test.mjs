@@ -107,6 +107,29 @@ test("gate 4 rejects a rename that also changed the content", () => {
   assert.deepEqual(gates(r), ["immutability"]);
 });
 
+test("gate 4 coerces similarity string '100' to pass (regression: cross-file type discipline)", () => {
+  // similarity arrives as a string from git-status parsing. A genuine 100%-similarity
+  // rename must not fail due to string vs. number comparison, which would incorrectly
+  // report "content-changing rename" for a pure rename.
+  const r = run({
+    headFiles: ["20260101000000_old.up.sql", "20260101000000_old.down.sql"],
+    baseFiles: ["20260101000000_old.sql", "20260101000000_old.down.sql"],
+    changes: [
+      { status: "R", similarity: "100", from: "20260101000000_old.sql", file: "20260101000000_old.up.sql" },
+    ],
+  });
+  assert.deepEqual(r.failures, []);
+});
+
+test("gate 4 coerces similarity string '87' to fail (regression: cross-file type discipline)", () => {
+  const r = run({
+    changes: [
+      { status: "R", similarity: "87", from: "20260101000000_old.sql", file: "20260101000000_old.up.sql" },
+    ],
+  });
+  assert.deepEqual(gates(r), ["immutability"]);
+});
+
 test("gate 5 rejects statement-level BEGIN/COMMIT in a new migration", () => {
   const r = run({
     headFiles: [...BASE, "20260202000000_new.up.sql", "20260202000000_new.down.sql"],

@@ -14,6 +14,14 @@ import { parseMigrationFilename } from "./migrationFiles.mjs";
  * A statement-level transaction control keyword: start of line, then the
  * keyword, then a semicolon. PL/pgSQL's block BEGIN has no semicolon after it,
  * so a DO $$ ... BEGIN ... END $$ block does not match.
+ *
+ * Known limitations (both acceptable):
+ * - A statement-level keyword not alone on its line is NOT caught (e.g.,
+ *   "SELECT 1; BEGIN;"). Acceptable because this repo's migrations always put
+ *   BEGIN/COMMIT on their own lines.
+ * - A BEGIN inside a multi-line string literal WOULD false-positive. Acceptable
+ *   because the worst case is a blocked PR and a reworded migration, not an
+ *   unsafe one — the gate has no string/dollar-quote awareness.
  */
 const TX_KEYWORD_RE = /^[ \t]*(BEGIN|COMMIT|ROLLBACK)[ \t]*;/gim;
 const IRREVERSIBLE_RE = /^\s*--\s*irreversible:/im;
@@ -55,12 +63,18 @@ export function evaluate({ headFiles, baseFiles, changes, contents }) {
         );
       }
     }
-    if (change.status === "R" && change.similarity !== 100) {
+    if (change.status === "R" && Number(change.similarity) !== 100) {
+      // Coerce similarity to a number: it comes from git-status parsing in Task 9's CLI
+      // and must not depend on type discipline across the boundary. If this ever regresses
+      // to string comparison, a genuine "100" rename fails review as a content-changing
+      // rename — the opposite of what happened — affecting all 55 renames in the adoption.
+      const similarityPct = Number(change.similarity);
+      const similarityStr = Number.isNaN(similarityPct) ? "unknown" : `${similarityPct}%`;
       fail(
         "immutability",
         change.file,
         `'${change.from}' -> '${change.file}' is a rename that also changed the content ` +
-          `(${change.similarity}% similar). Rename or edit, not both.`
+          `(${similarityStr} similar). Rename or edit, not both.`
       );
     }
   }
