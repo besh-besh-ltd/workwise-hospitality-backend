@@ -24,7 +24,14 @@ function git(...args) {
 
 function resolveBase() {
   const flagIndex = process.argv.indexOf("--base");
-  if (flagIndex !== -1 && process.argv[flagIndex + 1]) return process.argv[flagIndex + 1];
+  if (flagIndex !== -1) {
+    const value = process.argv[flagIndex + 1];
+    if (!value) {
+      console.error("FAIL: --base requires a value, e.g. --base origin/qa.");
+      process.exit(1);
+    }
+    return value;
+  }
   if (process.env.GITHUB_BASE_REF) return `origin/${process.env.GITHUB_BASE_REF}`;
   return "origin/main";
 }
@@ -59,21 +66,69 @@ function filesAtHead() {
     .filter(isTopLevelSql);
 }
 
+// migrationGates.mjs#evaluate only understands these four statuses. Anything
+// else — typechange 'T' (e.g. a merged .up.sql swapped for a symlink of the
+// same name), copy 'C', unmerged 'U', or a status a future git version adds —
+// must not be quietly dropped or quietly passed through: an unrecognised
+// change to what might be a merged migration is by definition unreviewed.
+const HANDLED_STATUSES = new Set(["A", "M", "D", "R"]);
+
 function changesSince(base) {
   const raw = git("diff", "--name-status", "--find-renames", `${base}...HEAD`, "--", `${DIR}/`);
   const strip = (p) => p.slice(`${DIR}/`.length);
-  return raw
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => {
-      const [code, ...paths] = line.split("\t");
-      const status = code[0];
-      if (status === "R") {
-        return { status, similarity: Number(code.slice(1)), from: strip(paths[0]), file: strip(paths[1]) };
+
+  const changes = [];
+  const unrecognized = [];
+
+  for (const line of raw.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const [code, ...paths] = line.split("\t");
+    const status = code[0];
+
+    if (!HANDLED_STATUSES.has(status)) {
+      unrecognized.push({ code, file: strip(paths[paths.length - 1]) });
+      continue;
+    }
+
+    if (status === "R") {
+      const similarity = Number(code.slice(1));
+      const from = strip(paths[0]);
+      const file = strip(paths[1]);
+      if (isTopLevelSql(file)) {
+        changes.push({ status, similarity, from, file });
+        continue;
       }
-      return { status, file: strip(paths[0]) };
-    })
-    .filter((c) => isTopLevelSql(c.file));
+      // The rename's destination is not a top-level migrations/*.sql file (e.g.
+      // it moved into migrations/baseline/), so filesAtHead() no longer lists
+      // it and it would otherwise vanish from this diff entirely — a merged
+      // migration relocated out of the runner's non-recursive readdirSync,
+      // with the gate printing "OK". If the source WAS a top-level file (i.e.
+      // a file the runner, and gate 4, could see), report the move as the
+      // deletion it effectively is; gate 4 already rejects deleting a merged
+      // migration, so this reuses that check instead of adding a new one.
+      if (isTopLevelSql(from)) {
+        changes.push({ status: "D", file: from });
+      }
+      continue;
+    }
+
+    const file = strip(paths[0]);
+    if (isTopLevelSql(file)) changes.push({ status, file });
+  }
+
+  if (unrecognized.length > 0) {
+    console.error(
+      "FAIL: unrecognised git status code(s) under migrations/ — evaluate() only handles A, M, D and R:"
+    );
+    for (const { code, file } of unrecognized) console.error(`  - '${file}': status '${code}'`);
+    console.error(
+      "      An unrecognised change to a possibly-merged migration cannot be evaluated safely. " +
+        "Resolve it manually (e.g. undo a type change) rather than merging it unreviewed."
+    );
+    process.exit(1);
+  }
+
+  return changes;
 }
 
 const base = resolveBase();
@@ -93,6 +148,12 @@ const contents = {};
 for (const change of changes) {
   if (change.status !== "A") continue;
   const path = join(ROOT, DIR, change.file);
+  // If an added file is in the diff but missing from disk, contents[file] stays
+  // unset and evaluate() reads it as "" — that fails safe for gate 3 (missing
+  // down-file still gets flagged) but would silently hide a gate 5 (transaction)
+  // violation in content the CLI never actually read. Deliberately unhandled:
+  // unreachable in normal CI, since the working tree matches HEAD right after
+  // checkout.
   if (existsSync(path)) contents[change.file] = readFileSync(path, "utf8");
 }
 

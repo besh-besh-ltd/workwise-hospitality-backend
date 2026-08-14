@@ -26,6 +26,8 @@ import { parseMigrationFilename } from "./migrationFiles.mjs";
 const TX_KEYWORD_RE = /^[ \t]*(BEGIN|COMMIT|ROLLBACK)[ \t]*;/gim;
 const IRREVERSIBLE_RE = /^\s*--\s*irreversible:/im;
 
+const KNOWN_CHANGE_STATUSES = new Set(["A", "M", "D", "R"]);
+
 export function evaluate({ headFiles, baseFiles, changes, contents }) {
   const failures = [];
   const fail = (gate, file, message) => failures.push({ gate, file, message });
@@ -50,6 +52,26 @@ export function evaluate({ headFiles, baseFiles, changes, contents }) {
 
   // Gate 4 — immutability of merged migrations.
   for (const change of changes) {
+    // Defensive: check-migrations.mjs is expected to reject anything other than
+    // A/M/D/R before it ever reaches evaluate(), but this function is the actual
+    // authority the CLI is a thin shell around, and it may not be the only
+    // caller. A status this loop does not recognise (git typechange 'T', copy
+    // 'C', unmerged 'U', or something a future git adds) touching a file that is
+    // already on the base branch is, by definition, an unreviewed change to a
+    // merged migration — fail it instead of silently matching none of the
+    // branches below and passing through as if nothing happened.
+    if (!KNOWN_CHANGE_STATUSES.has(change.status)) {
+      if (baseSet.has(change.file)) {
+        fail(
+          "immutability",
+          change.file,
+          `'${change.file}' is already merged and has an unrecognised git status ` +
+            `('${change.status}'). This gate only understands add/modify/delete/rename; ` +
+            "refusing to silently allow an unreviewed change to a merged migration."
+        );
+      }
+      continue;
+    }
     if (change.status === "M" || change.status === "D") {
       if (baseSet.has(change.file)) {
         fail(
