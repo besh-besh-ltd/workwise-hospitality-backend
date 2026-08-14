@@ -76,21 +76,9 @@ concurrency:
 jobs:
   # ---------------------------------------------------------------------------
   # Gate + fan-out. Proves the shard patterns are an exact partition of the
-  # suite, then emits the job matrix from the same file. The shard-coverage and
-  # response-in-tx checks below need no dependencies and no database, so they
-  # run first and fail fast: a broken partition means no shard runs at all,
-  # rather than a green build with untested code.
-  #
-  # This job also gates on the migration tooling suite and the migration
-  # naming/ordering/reversibility/immutability checks (test:tooling,
-  # check:migrations) — see those steps below for why they live here rather
-  # than in `test`. Neither imports an npm package as of this writing
-  # (verified: both still exit 0 with node_modules removed entirely), but
-  # `npm ci` runs before them anyway as a hedge against that becoming false
-  # later and failing in a confusing way instead of a loud one. That means
-  # this job is no longer dependency-free end to end — only its first two
-  # steps still are; budget for an `npm ci` (cached, typically well under a
-  # minute) before the migration steps run.
+  # suite, then emits the job matrix from the same file. Needs no dependencies
+  # and no database, so it costs ~10s and fails fast: a broken partition means
+  # no shard runs at all, rather than a green build with untested code.
   # ---------------------------------------------------------------------------
   shards:
     name: Static gates + shard coverage
@@ -110,7 +98,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Verify every suite is covered exactly once
         run: node scripts/check-shard-coverage.mjs
@@ -128,16 +115,23 @@ jobs:
       - name: Verify no HTTP response is emitted inside a transaction
         run: node scripts/check-response-in-tx.mjs
 
-      # Only the two static checks above run before this. See the job comment
-      # at the top: test:tooling and check:migrations don't import npm
-      # packages today, but this install is the hedge for when they do.
-      - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
-
       # Migration tooling is plain node:test — no app boot, no database, ~1s. It
       # deliberately lives outside tests/ so that check-shard-coverage.mjs, which
       # requires every tests/**/*.test.js to match exactly one shard, does not
       # have to carry a suite that needs neither a shard nor a database.
+      #
+      # This step and the one below are why this file has no `npm ci` anywhere
+      # above "Build job matrix": scripts/check-migrations.mjs,
+      # scripts/lib/migrationGates.mjs, scripts/lib/migrationFiles.mjs,
+      # scripts/lib/migrationConfig.mjs, and every scripts/__tests__/*.test.mjs
+      # import ONLY node: builtins — never an npm package. That is load-bearing,
+      # not incidental: it is the only reason these checks can live in this
+      # dependency-free ~10s job instead of costing every PR an npm ci. If you
+      # add an `import` of an npm package to any of those files, this job will
+      # fail with "Cannot find module" — there is no node_modules here. That is
+      # not a CI bug; it is this constraint working as designed. Move the
+      # dependent code into the `test` or `migrations` job instead of adding
+      # `npm ci` here.
       - name: Verify migration tooling
         run: npm run test:tooling
 
