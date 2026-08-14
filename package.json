@@ -29,7 +29,8 @@
     "migrate:verify": "node scripts/migrate.mjs verify",
     "migrate:baseline": "node scripts/migrate.mjs baseline",
     "migrate:manifest": "node scripts/migrate.mjs manifest",
-    "migrate:dump-baseline": "node scripts/dump-baseline.mjs"
+    "migrate:dump-baseline": "node scripts/dump-baseline.mjs",
+    "migrate:replay": "node scripts/migrate-replay.mjs"
   },
   "repository": {
     "type": "git",
