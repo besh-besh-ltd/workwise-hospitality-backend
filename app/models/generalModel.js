@@ -79,7 +79,7 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   'ARC_TECH': 'arc-tech',
   // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
   // BOTH `read` and `approve` (seeded together in
-  // migrations/20260608100800_permissions_seed.sql:56-57) — the only ARC v2
+  // migrations/20260608100800_permissions_seed.up.sql:56-57) — the only ARC v2
   // stage resource that was modelled correctly from the start. Mapped 2026-08-03.
   'ARC_COMMITTEE': 'arc-committee',
   // ARC_AMENDMENT: post-award amendment sign-off. There is no `arc-amendment`
@@ -105,7 +105,7 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   //
   // The evaluate/approve split is the point: `evaluate` is doing the scoring,
   // `approve` is signing it off, and no system role holds both verbs on the same
-  // resource. See migrations/20260803110000_arc_stage_approver_permissions.sql.
+  // resource. See migrations/20260803110000_arc_stage_approver_permissions.up.sql.
   //
   // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
   // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES
