@@ -18,15 +18,17 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import pg from "pg";
 import dotenv from "dotenv";
 import { buildConnection, describeTarget } from "./lib/migrationConfig.mjs";
-import { listMigrations } from "./lib/migrationFiles.mjs";
+import { listMigrations, ledgerName } from "./lib/migrationFiles.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS_DIR = join(ROOT, "migrations");
 const BASELINE_DIR = join(MIGRATIONS_DIR, "baseline");
 const OUT_FILE = join(BASELINE_DIR, "production_baseline.sql");
 const MANIFEST_FILE = join(BASELINE_DIR, "MANIFEST.txt");
+const LEDGER_TABLE = "pgmigrations";
 
 // Same rule as scripts/migrate.mjs: on a deploy host the environment arrives via
 // `docker run --env-file`, so there is no .env to read and dotenv must not
@@ -66,6 +68,16 @@ const EXCLUDED_TABLES = [
   // not application schema — nothing in the codebase queries them.
   "public.stg_products",
   "public.product_search_record",
+  // The migration ledger itself. Excluded because of WHEN it appeared: the
+  // ORIGINAL baseline was dumped from a production database that predated
+  // `pgmigrations`, so scripts/migrate-replay.mjs owns the table's DDL (its
+  // CREATE_LEDGER) and creates it before seeding MANIFEST.txt. Production now
+  // HAS the table, so the next re-baseline would bake node-pg-migrate's own
+  // CREATE TABLE into the dump — silently turning CREATE_LEDGER's
+  // `IF NOT EXISTS` into a no-op and moving authority for that table's shape
+  // from a script in git to a generated artefact nobody reads. Keep the
+  // ledger's definition in exactly one place.
+  `public.${LEDGER_TABLE}`,
 ];
 
 /**
@@ -90,6 +102,21 @@ const RESTRICT_LINE_RE = /^\\(?:restrict|unrestrict)[^\n]*\n?/gm;
  * and this table exist on staging in NO migration file — hand-applied residue
  * from unmerged WIP branches — and therefore must NEVER appear in a baseline
  * meant to describe what production's migrations already cover.
+ *
+ * TIME-LIMITED — REVISIT WHEN THE STAGING DRIFT REPAIR SHIPS. This list, and
+ * tblQuoteItemsHasRealMoney() below, detect staging by the very residue the
+ * spec's deferred "Repairing the staging drift" ticket exists to REMOVE — and
+ * that ticket names the `real` -> `numeric(15,2)` conversion these two checks
+ * split between them as its headline. The day the repair lands, both halves stop
+ * matching anything and this guard passes a staging dump silently, with nothing
+ * to announce that it stopped working.
+ *
+ * The durable guard is the pgmigrations cross-check in ledgerIds() /
+ * assertLedgerMatchesTree(): a database whose ledger does not match the working
+ * tree is refused whatever its columns look like, and staging's ledger will
+ * diverge from production's the moment the two are not deployed in lockstep.
+ * Treat these markers as a fast, legible second opinion — not the load-bearing
+ * check — and delete or replace them when the drift repair merges.
  */
 const STAGING_MARKERS = [
   "bypass_arc",
@@ -179,11 +206,13 @@ function runPgDump(conn) {
 }
 
 /**
- * Same list + same id normalisation scripts/migrate.mjs's `manifest` command
- * uses (via scripts/lib/migrationFiles.mjs), so a re-baseline's manifest and
- * `npm run migrate:manifest`'s output can never silently diverge.
+ * What the WORKING TREE says the migration set is. Same list + same id
+ * normalisation scripts/migrate.mjs's `manifest` command uses (via
+ * scripts/lib/migrationFiles.mjs).
+ *
+ * NOT the manifest's source any more — only one half of the cross-check below.
  */
-function manifestIds() {
+function treeIds() {
   const { migrations, invalid } = listMigrations(MIGRATIONS_DIR);
   if (invalid.length > 0) {
     throw new Error(`invalid migration file(s) in migrations/: ${invalid.join(", ")}`);
@@ -191,20 +220,127 @@ function manifestIds() {
   return migrations.map((m) => m.id);
 }
 
-// Header text is intentionally byte-for-byte what migrations/baseline/MANIFEST.txt
-// already carries — changing it here would make every future re-baseline diff
-// noisily even when nothing about the migration set changed.
-function manifestContent(conn) {
+/**
+ * What the DUMPED DATABASE says it has actually applied.
+ *
+ * MANIFEST.txt's own header claims its entries are "Migrations already applied
+ * in the database that production_baseline.sql was dumped from", and until this
+ * function existed that claim was unverified: the manifest was built from
+ * listMigrations(), i.e. from whatever happened to be checked out.
+ *
+ * That is not an exotic failure — it is the NORMAL case. Production applies
+ * migrations behind a manual approval, so `main` is routinely AHEAD of
+ * production. Re-baseline on such a day and MANIFEST claims migrations the dump
+ * does not contain; migrate-replay.mjs then seeds them as already applied, the CI
+ * dry-run never replays them, and every later PR replays onto a floor missing
+ * that schema. Nothing downstream notices: the replay asserts row COUNT against
+ * array length (equal either way), and migrate:verify passes because the
+ * over-claimed rows genuinely are in the ledger.
+ *
+ * Returns BARE ids (no extension) — what node-pg-migrate stores in `name`.
+ */
+async function ledgerIds(conn) {
+  const client = new pg.Client(conn);
+  await client.connect();
+  try {
+    const { rows } = await client.query("SELECT to_regclass($1) IS NOT NULL AS present", [
+      `public.${LEDGER_TABLE}`,
+    ]);
+    if (!rows[0].present) {
+      throw new Error(
+        `refusing: '${conn.database}' has no '${LEDGER_TABLE}' table, so it cannot say which ` +
+          "migrations it has applied — and a database with no ledger cannot be baselined FROM. " +
+          "Baseline it first (npm run migrate:baseline -- --confirm " +
+          `${conn.database}), or point --database at a database that has been.`
+      );
+    }
+    const applied = await client.query(`SELECT name FROM ${LEDGER_TABLE} ORDER BY id`);
+    return applied.rows.map((r) => r.name);
+  } finally {
+    await client.end();
+  }
+}
+
+function formatSet(label, ids) {
+  return ids.length === 0 ? `  ${label}: (none)` : `  ${label}:\n${ids.map((i) => `    ${i}`).join("\n")}`;
+}
+
+/**
+ * The database is the authority for MANIFEST.txt, but a disagreement with the
+ * working tree is never something to resolve silently in either direction:
+ * "tree ahead of database" means the checkout carries migrations production has
+ * not applied, and "database ahead of tree" means production ran something this
+ * checkout does not contain. Both are real conditions with different remedies,
+ * and picking a winner automatically would bake one of them into the artefact
+ * CI replays onto. Print both sides and stop.
+ */
+function assertLedgerMatchesTree(applied, tree) {
+  const treeBare = tree.map(ledgerName);
+  const appliedSet = new Set(applied);
+  const treeSet = new Set(treeBare);
+  const onlyInDb = applied.filter((n) => !treeSet.has(n));
+  const onlyInTree = treeBare.filter((n) => !appliedSet.has(n));
+  if (onlyInDb.length === 0 && onlyInTree.length === 0) return;
+  throw new Error(
+    "refusing: the database's ledger and the working tree disagree about which migrations exist.\n" +
+      formatSet(`applied in the database but not in migrations/ (${onlyInDb.length})`, onlyInDb) +
+      "\n" +
+      formatSet(`in migrations/ but not applied in the database (${onlyInTree.length})`, onlyInTree) +
+      "\n  A baseline must describe a database exactly. If migrations/ is ahead, this checkout " +
+      "carries work the target has not applied yet — check out the commit it IS on, or apply them. " +
+      "If the database is ahead, it ran something this checkout does not have. Neither is safe to " +
+      "guess at, so nothing was written."
+  );
+}
+
+function assertNoDuplicates(label, ids) {
+  if (new Set(ids).size === ids.length) return;
+  const seen = new Set();
+  const dupes = [...new Set(ids.filter((id) => (seen.has(id) ? true : (seen.add(id), false))))];
+  throw new Error(
+    `refusing: ${label} contains duplicate migration id(s): ${dupes.join(", ")}. ` +
+      "migrate-replay.mjs seeds one ledger row per line, so a duplicate would make the replay's " +
+      "row-count assertion pass against a ledger that misrepresents what ran."
+  );
+}
+
+/**
+ * Header text stays close to what migrations/baseline/MANIFEST.txt already
+ * carries so a re-baseline diffs only where the migration set actually changed.
+ * The last line is corrected: `migrate:manifest` prints the WORKING TREE's ids,
+ * which is precisely the thing this file must not be generated from.
+ *
+ * Ids are written WITH the `.sql` suffix, which is the format
+ * scripts/migrate-replay.mjs expects and maps back through ledgerName().
+ * The ledger stores them bare; do not "simplify" by writing bare ids here
+ * without changing that reader too.
+ */
+function manifestContent(conn, applied) {
   const date = new Date().toISOString().slice(0, 10);
   const header = [
     "# Migrations already applied in the database that production_baseline.sql was dumped from.",
     `# Source: ${conn.database}, ${date}.`,
     "#",
+    "# Read from that database's pgmigrations ledger, NOT from the migrations/",
+    "# directory — main is routinely ahead of production, and a manifest built from",
+    "# the checkout would claim migrations the dump does not contain.",
+    "#",
     "# CI seeds these into pgmigrations before replaying a PR's migrations, so the",
     "# replay applies exactly what production is missing — no more, no less.",
-    "# Regenerate with 'npm run migrate:manifest' only when re-baselining.",
+    "# Regenerate with 'npm run migrate:dump-baseline -- --database <name>'.",
   ];
-  return [...header, ...manifestIds()].join("\n") + "\n";
+  return [...header, ...applied.map((name) => `${name}.sql`)].join("\n") + "\n";
+}
+
+/**
+ * Temp-file + rename, matching production_baseline.sql's write above. The two
+ * files are one artefact: a half-written MANIFEST beside a complete dump would
+ * make CI replay onto a floor that never existed.
+ */
+function writeAtomic(path, content) {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
 }
 
 async function main() {
@@ -227,6 +363,16 @@ async function main() {
 
   const conn = buildConnection();
   conn.database = flags.database;
+
+  // Asked BEFORE pg_dump runs: both of these can refuse, and refusing after a
+  // multi-second dump of a production database is wasted work on a shared
+  // instance. Neither writes anything.
+  const applied = await ledgerIds(conn);
+  assertNoDuplicates(`${conn.database}'s ${LEDGER_TABLE} ledger`, applied);
+  const tree = treeIds();
+  assertNoDuplicates("the migrations/ directory", tree);
+  assertLedgerMatchesTree(applied, tree);
+  console.log(`Ledger  : ${applied.length} migration(s) applied in ${conn.database}, matching migrations/.`);
 
   console.log(`Dumping schema-only from ${describeTarget(conn)} (read-only pg_dump)...`);
   const rawDump = await runPgDump(conn);
@@ -260,12 +406,11 @@ async function main() {
 
   renameSync(tmpFile, OUT_FILE);
 
-  const manifest = manifestContent(conn);
-  writeFileSync(MANIFEST_FILE, manifest);
+  writeAtomic(MANIFEST_FILE, manifestContent(conn, applied));
   const manifestIdCount = readFileSync(MANIFEST_FILE, "utf8")
     .split("\n")
     .filter((l) => l && !l.startsWith("#")).length;
-  console.log(`MANIFEST.txt: ${manifestIdCount} migration id(s).`);
+  console.log(`MANIFEST.txt: ${manifestIdCount} migration id(s), from ${conn.database}'s ledger.`);
 
   console.log(`\nWrote ${OUT_FILE}\nWrote ${MANIFEST_FILE}`);
 }

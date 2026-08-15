@@ -101,13 +101,28 @@ Re-baseline when the replay gets slow — roughly annually.
 npm run migrate:dump-baseline -- --database hospitality_main
 ```
 
-This dumps production's schema (read-only `pg_dump`), regenerates
-`MANIFEST.txt` to match, and refuses to write either file if the dump looks
-like it came from staging instead — `--database` has no default, because
-staging and production live on the same RDS host. Review the diff and commit
-both files; `scripts/dump-baseline.mjs` carries the exclusion list and the
-staging/production check, so nothing about doing this correctly depends on
-anyone remembering a hand-typed command.
+This dumps production's schema (read-only `pg_dump`) and regenerates
+`MANIFEST.txt` **from that database's own `pgmigrations` ledger** — not from your
+checkout. Production applies migrations behind a manual approval, so `main` is
+routinely ahead of it; a manifest built from the working tree would claim
+migrations the dump does not contain, CI would seed them as already applied, and
+every later PR would replay onto a floor missing that schema. Nothing downstream
+would notice, so the check has to be here.
+
+It therefore refuses, writing nothing, when:
+
+- the target has no `pgmigrations` table (a database with no ledger cannot be
+  baselined *from*);
+- the ledger and `migrations/` disagree — it prints both sides rather than
+  picking a winner. Usually this means your checkout is ahead of production;
+  check out the commit production is actually on;
+- the dump looks like it came from staging. `--database` has no default, because
+  staging and production live on the same RDS host.
+
+Review the diff and commit both files. `scripts/dump-baseline.mjs` carries the
+exclusion list, the ledger cross-check and the staging/production check, so
+nothing about doing this correctly depends on anyone remembering a hand-typed
+command.
 
 ## Rolling back production
 
