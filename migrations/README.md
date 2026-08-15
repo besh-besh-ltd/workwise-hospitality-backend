@@ -39,9 +39,10 @@ wrapper, so the label and its first use must be two separate migrations.
 ## Commands
 
 ```bash
-npm run migrate:status     # what is applied, what is pending
-npm run migrate:up         # apply pending
-npm run migrate:verify     # exit non-zero if anything is pending
+npm run migrate:status            # what is applied, what is pending
+npm run migrate:up                # apply pending
+npm run migrate:down -- --count 1 # revert the last migration (see "Rolling back")
+npm run migrate:verify            # exit non-zero if anything is pending
 ```
 
 **`up` and `down` refuse a remote database unless you say so.** `backend/.env` points at
@@ -50,6 +51,11 @@ npm run migrate:verify     # exit non-zero if anything is pending
 anything other than `localhost`/`127.0.0.1`/`::1` these two commands make you type the
 database name at a prompt, or pass `--yes` when there is no terminal. The deploy workflows
 pass `--yes` deliberately. `status`, `verify` and `manifest` are read-only and ungated.
+
+**`down` asks for more.** On a remote target it also requires `--confirm <database>`
+naming the resolved target, because it executes `.down.sql` files and some of those
+drop tables. `--yes` alone is not enough — it is a flag you could copy out of a
+workflow file without meaning to.
 
 To point at a local database, override the whole target rather than relying on `.env`:
 
@@ -128,8 +134,54 @@ command.
 
 Do not. Roll *forward* with a new migration.
 
-If the schema genuinely has to be reverted, run the `.down.sql` by hand against a
-database you have backed up first, and note that the ledger row must be removed
-too. Reverting a deploy's *code* needs no database change, which is what the
+Reverting a deploy's *code* needs no database change at all, which is what the
 expand-then-contract rule buys you: `workflow_dispatch` the deploy workflow with an
 older `commit_sha` and leave the schema alone.
+
+If the schema genuinely has to be reverted, **`migrate:down` is the supported path**.
+It runs the `.down.sql` files and removes the ledger rows in one step, in the runner's
+own transaction, so the database and the ledger cannot end up disagreeing:
+
+```bash
+# Back the database up first. On a remote target both flags are required.
+npm run migrate:down -- --count 1 --yes --confirm hospitality_main
+npm run migrate:status
+```
+
+`--count` defaults to 1 and reverts the *most recently applied* migrations, newest
+first. There is no upper bound on it, so pick the number deliberately.
+
+Running the `.down.sql` by hand is the break-glass option, for when the down file
+itself is broken and needs editing before it will execute. If you do that, you own
+what the runner would otherwise have handled: back the database up first, and delete
+the matching `pgmigrations` row yourself — leave it behind and `migrate:status`
+reports the migration as still applied, so the next deploy will not re-apply it.
+
+## Troubleshooting
+
+### `Not run migration X is preceding already run migration Y`
+
+Every `migrate:up` fails, on staging or production, and nothing you can revert in git
+fixes it. `checkOrder` compares the migration filenames on disk against the ledger
+positionally, and something has made those two orders disagree. There are two causes.
+
+**Two PRs merged out of timestamp order.** Gate 2 compares each PR against the base
+branch *at PR time*, so two PRs opened from the same base both pass individually and
+only conflict once both are merged. Fix: re-stamp the newer migration's filename —
+rename both halves to a timestamp above everything already merged, in a new PR. It has
+not run anywhere yet, so renaming it is free.
+
+Enabling **"Require branches to be up to date before merging"** on `main` and `qa`
+prevents this class entirely: the second PR must rebase onto the first, and gate 2
+then sees the timestamp it is actually competing with.
+
+**A merged migration was renamed.** The ledger keeps the old name while `migrations/`
+now offers the new one. Gate 4 rejects this now, but a branch cut before that gate
+landed can still carry one. Fix: rename it back to exactly the name in `pgmigrations`
+(`npm run migrate:status` prints what the ledger holds). If the name really is wrong,
+leave it and write a *new* migration — a merged filename is as immutable as its
+contents.
+
+Hand-editing `pgmigrations` to match the new name also works and is a last resort:
+it silently makes the two databases disagree about their own history if you only
+remember to do it on one of them.
