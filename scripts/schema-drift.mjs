@@ -3,10 +3,19 @@
  * Compares two live databases column by column.
  *
  * Written because the two we have do not match: 20 columns and one whole table
- * exist only on staging, none of them owned by any migration file, and nine more
+ * exist only on staging, none of them owned by any migration file, and 11 more
  * columns differ in type or nullability — including tbl_quote_items' money
  * columns, which are float4 on staging and numeric(15,2) on production. Quote
  * totals therefore round differently in the two environments.
+ *
+ * That figure was 9 in the first draft of the audit, and THIS SCRIPT is what
+ * corrected it. The hand-written query behind the draft rendered a column's type
+ * as `data_type || coalesce('(' || character_maximum_length || ')', '')`, which
+ * never reads numeric_precision — so unconstrained `numeric` and `numeric(15,2)`
+ * both rendered as the bare string `numeric` and compared equal, hiding
+ * tbl_purchase_order_product.unit_price and .total_price. COLUMNS_SQL below
+ * renders precision and scale for numeric/decimal, which is the whole argument
+ * for this existing as a script rather than as a query someone retypes each time.
  *
  * Not part of CI: this needs RDS credentials, and CI deliberately has none.
  * Run it before and after a re-baseline, and whenever staging behaves oddly.

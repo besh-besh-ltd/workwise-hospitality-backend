@@ -220,8 +220,14 @@ const commands = {
       return;
     }
     console.log(`Applying ${pending.length} migration(s)...`);
-    await runner(runnerOptions(client, { direction: "up", count: Infinity }));
-    console.log(`\nApplied ${pending.length} migration(s).`);
+    // Reported from the runner's OWN result, not from `pending`. `pending` is
+    // what computeStatus() predicted before anything ran; printing it as
+    // "Applied N" claims a measurement that was never taken, and the two can
+    // legitimately differ (a concurrent run holding the advisory lock applies
+    // some of them first). runner() returns one RunMigration per migration it
+    // actually executed.
+    const run = await runner(runnerOptions(client, { direction: "up", count: Infinity }));
+    console.log(`\nApplied ${run.length} migration(s): ${run.map((m) => m.name).join(", ") || "none"}`);
   },
 
   async down(client, conn, flags) {
@@ -239,7 +245,8 @@ const commands = {
     }
     console.log(`Target : ${describeTarget(conn)}`);
     console.log(`Reverting ${count} migration(s)...`);
-    await runner(runnerOptions(client, { direction: "down", count }));
+    const run = await runner(runnerOptions(client, { direction: "down", count }));
+    console.log(`\nReverted ${run.length} migration(s): ${run.map((m) => m.name).join(", ") || "none"}`);
   },
 
   async verify(client, conn) {
