@@ -11,7 +11,7 @@
  *
  *   npm run migrate:status
  *   npm run migrate:up
- *   npm run migrate:down -- --count 1
+ *   npm run migrate:down -- --count 1            (remote: also --yes --confirm <db>)
  *   npm run migrate:verify
  *   npm run migrate:baseline -- --confirm hospitality_main
  *   npm run migrate:manifest
@@ -90,8 +90,32 @@ const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 // it first. `baseline` already has --confirm; `up`/`down` had nothing. This
 // mirrors the gate migrations/run_pending_migrations.sh already uses (its
 // ASSUME_YES / `-t 0` check) rather than inventing a new shape.
-async function guardRemoteTarget(conn, flags) {
+async function guardRemoteTarget(conn, flags, command) {
   if (LOCAL_HOSTS.has(conn.host)) return; // dev/CI scratch db: no shared blast radius
+
+  // `down` needs MORE than --yes, because the guards were the wrong way round.
+  // `baseline` — which writes ledger rows and no DDL at all — already demands
+  // --confirm <database>. `down` runs .down.sql files, several of which genuinely
+  // DROP TABLE, and asked only for a bare --yes; and that exact flag is sitting in
+  // .github/workflows/deploy-prod.yml ready to be copy-pasted. Nothing bounds
+  // --count either, so `npm run migrate:down -- --count 20 --yes` from any
+  // non-interactive shell holding production credentials reverts twenty
+  // migrations. Requiring the database name to be typed out makes "wrong
+  // terminal" a typo rather than an incident, exactly as it does for baseline.
+  //
+  // This is IN ADDITION to the --yes/prompt gate below, not instead of it, and it
+  // applies only to remote targets: CI's replay job runs migrate:down against
+  // localhost and must keep working ungated.
+  if (command === "down" && flags.confirm !== conn.database) {
+    throw new Error(
+      `refusing to revert migrations on a REMOTE database: ${describeTarget(conn)}. ` +
+        `Pass --confirm ${conn.database} as well as --yes. ` +
+        "down executes .down.sql files, some of which drop tables — unlike baseline, which " +
+        "only writes ledger rows and has required --confirm from the start. " +
+        `(got ${flags.confirm === undefined ? "nothing" : `'${flags.confirm}'`})`
+    );
+  }
+
   // --yes must be a bare flag (see parseArgs above) — CD passes it explicitly to
   // state its intent, which is the point: `--yes false` would be parsed as
   // giving --yes the *value* "false", a truthy string, not a way to say no.
@@ -285,7 +309,7 @@ async function main() {
   // host by an untouched .env is stopped before a connection even opens, not
   // after node-pg-migrate has already started applying DDL against it.
   if (REMOTE_GUARDED.has(command)) {
-    await guardRemoteTarget(conn, flags);
+    await guardRemoteTarget(conn, flags, command);
   }
 
   const client = new pg.Client(conn);
