@@ -42,7 +42,6 @@ wrapper, so the label and its first use must be two separate migrations.
 npm run migrate:status     # what is applied, what is pending
 npm run migrate:up         # apply pending
 npm run migrate:verify     # exit non-zero if anything is pending
-npm run migrate:replay     # rebuild a local scratch DB from the baseline and replay
 ```
 
 **`up` and `down` refuse a remote database unless you say so.** `backend/.env` points at
@@ -58,6 +57,31 @@ To point at a local database, override the whole target rather than relying on `
 HOST=localhost DATABASE_USERNAME="$USER" DATABASE_PASSWORD= \
   DATABASE_NAME=my_scratch_db TEST_DB_NO_SSL=1 npm run migrate:status
 ```
+
+## Reproducing the CI replay locally
+
+`npm run migrate:replay` **does not replay.** It rebuilds the scratch database —
+drops and recreates it, restores `baseline/production_baseline.sql`, then seeds
+`baseline/MANIFEST.txt` into `pgmigrations` — and stops there. `migrate:up` is what
+performs the replay, onto that floor.
+
+It also refuses any database not named `migration_replay[_suffix]`, because it drops
+its target. `backend/.env` names `hospitality_stage`, so a bare `npm run migrate:replay`
+aborts at that guard. Export the whole target first — this is the same invocation CI
+runs, and the one the `CI gate` job prints when the replay fails:
+
+```bash
+export HOST=localhost DATABASE_PORT=5432 DATABASE_USERNAME="$USER" DATABASE_PASSWORD= \
+       DATABASE_NAME=migration_replay TEST_DB_NO_SSL=1 REPLAY_MAINTENANCE_DB=postgres PGOPTIONS='-c timezone=UTC'
+npm run migrate:replay && npm run migrate:up && npm run migrate:verify
+```
+
+Use `export`, not an env prefix before `&&` — a prefix applies only to the first
+command in the chain, so `migrate:up` would fall through to `.env`, find staging, and
+hit the REMOTE-target guard instead of touching `migration_replay`. Swap
+`DATABASE_USERNAME`/`DATABASE_PASSWORD` for your own Postgres superuser if you are not
+on a trust-auth Homebrew install. Drop the scratch database when you are done:
+`dropdb migration_replay`.
 
 `npm run migrate:baseline` marks migrations applied *without running them*. It
 exists for adopting a database that already has the schema, it requires the target
