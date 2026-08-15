@@ -14,6 +14,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluate } from "./lib/migrationGates.mjs";
+import { isTopLevelSql } from "./lib/migrationFiles.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIR = "migrations";
@@ -34,19 +35,6 @@ function resolveBase() {
   }
   if (process.env.GITHUB_BASE_REF) return `origin/${process.env.GITHUB_BASE_REF}`;
   return "origin/main";
-}
-
-/**
- * True for a directory-relative path that names a .sql file directly inside
- * migrations/, not nested in a subdirectory. migrationFiles.mjs#listMigrations
- * reads the runner's view of that same directory with a non-recursive
- * readdirSync(dir), so anything git finds one level deeper — e.g. the
- * migrations/baseline/ snapshot dump — is invisible to the runner. The CLI's
- * file-listing must agree byte-for-byte with that view (see the docstring atop
- * migrationFiles.mjs), or gates fire on files node-pg-migrate never touches.
- */
-function isTopLevelSql(strippedPath) {
-  return strippedPath.endsWith(".sql") && !strippedPath.includes("/");
 }
 
 /** Migration-directory-relative .sql filenames at a git ref. */

@@ -17,6 +17,43 @@ import { readdirSync } from "node:fs";
 /** YYYYMMDDHHMMSS_lower_snake_slug.(up|down).sql — nothing else is a migration. */
 export const FILENAME_RE = /^(\d{14})_([a-z0-9]+(?:_[a-z0-9]+)*)\.(up|down)\.sql$/;
 
+/**
+ * "Is this name in scope for the migration gates at all?" — deliberately CASE-
+ * INSENSITIVE, and deliberately the one expression everything routes through.
+ *
+ * Case matters because macOS and Windows filesystems are case-insensitive: a
+ * `git mv` typo, or an editor that helpfully upper-cases an extension, produces
+ * `migrations/Foo.SQL`. With a case-SENSITIVE `.endsWith(".sql")` that file is
+ * invisible to every gate here AND to `migrate:status` (which reports 0 pending,
+ * green) AND to node-pg-migrate — whose `ignorePattern` in scripts/migrate.mjs is
+ * likewise case-sensitive, so it ignores the file too. Measured, not assumed: a
+ * `migrations/Foo.SQL` placed in the tree produced a clean `status` and a clean
+ * `up` against a scratch database.
+ *
+ * A silently-ignored file in migrations/ is precisely the drift that
+ * run_pending_migrations.sh died of — a migration nobody runs and nothing
+ * notices. Matching case-insensitively makes such a file *visible*: it fails
+ * gate 1 with a naming error at review time, and listMigrations() reports it as
+ * invalid so migrate.mjs refuses to guess. Loud beats silent.
+ */
+const SQL_EXT_RE = /\.sql$/i;
+
+/**
+ * True for a directory-relative path naming a .sql file directly inside
+ * migrations/, not nested in a subdirectory.
+ *
+ * Lives here, beside listMigrations(), because the two must describe the same
+ * set of files. listMigrations() reads the runner's view with a NON-recursive
+ * readdirSync(dir), so anything git reports one level deeper — e.g. the
+ * migrations/baseline/ snapshot dump — is invisible to the runner and must be
+ * invisible to the gates too, or gates fire on files node-pg-migrate never
+ * touches. scripts/check-migrations.mjs imports this rather than restating it:
+ * a second copy is a second thing to forget to update.
+ */
+export function isTopLevelSql(strippedPath) {
+  return SQL_EXT_RE.test(strippedPath) && !strippedPath.includes("/");
+}
+
 export function parseMigrationFilename(filename) {
   const match = FILENAME_RE.exec(filename);
   if (!match) return null;
@@ -28,7 +65,10 @@ export function listMigrations(dir) {
   const invalid = [];
   const byId = new Map();
 
-  for (const filename of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+  // Case-insensitive on purpose — see SQL_EXT_RE. `Foo.SQL` must land in
+  // `invalid` (where migrate.mjs turns it into a hard error naming the file)
+  // rather than being dropped on the floor by this filter.
+  for (const filename of readdirSync(dir).filter((f) => SQL_EXT_RE.test(f)).sort()) {
     const parsed = parseMigrationFilename(filename);
     if (!parsed) {
       invalid.push(filename);

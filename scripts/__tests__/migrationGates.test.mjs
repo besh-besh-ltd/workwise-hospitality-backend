@@ -87,12 +87,75 @@ test("gate 4 rejects deleting a migration that is already on the base branch", (
   ]);
 });
 
-test("gate 4 accepts a 100%-similarity rename (the adoption commit)", () => {
+// Regression: a 100%-similarity `git mv` of an ALREADY-MERGED migration that was
+// already in the .up.sql convention used to pass every gate. The ledger then keeps
+// the old name while migrations/ yields the new one, and checkOrder compares them
+// positionally — freezing every subsequent migrate:up on staging and production.
+// CI cannot catch it once the migration is merged past the baseline: the replay
+// applies it fresh under the new name and goes green.
+test("gate 4 rejects renaming a merged .up.sql/.down.sql pair (deploy-freezing checkOrder conflict)", () => {
+  const r = run({
+    // Renamed as a pair, which is how it would really happen — renaming only one
+    // half would additionally orphan the other, and that is a different gate.
+    headFiles: ["20260101000000_renamed.up.sql", "20260101000000_renamed.down.sql"],
+    baseFiles: BASE,
+    changes: [
+      {
+        status: "R",
+        similarity: 100,
+        from: "20260101000000_old.up.sql",
+        file: "20260101000000_renamed.up.sql",
+      },
+      {
+        status: "R",
+        similarity: 100,
+        from: "20260101000000_old.down.sql",
+        file: "20260101000000_renamed.down.sql",
+      },
+    ],
+  });
+  // Both halves flagged: the .down.sql source is in the new convention too.
+  assert.deepEqual(gates(r), ["immutability", "immutability"]);
+  assert.deepEqual(
+    r.failures.map((f) => f.file),
+    ["20260101000000_renamed.up.sql", "20260101000000_renamed.down.sql"]
+  );
+  const message = r.failures[0].message;
+  assert.match(message, /already merged/i);
+  // The message must name the consequence AND the remedy, not just the rule.
+  assert.match(message, /Not run migration .* is preceding already run migration/);
+  assert.match(message, /Rename it back/i);
+  assert.match(message, /write a NEW migration/i);
+});
+
+// The other half of the same rule, and the one that must NOT regress: the
+// adoption commit renamed 55 files, and every one of those SOURCES was a legacy
+// bare NAME.sql — none was already .up.sql. That is exactly the discriminator
+// gate 4 uses, so this shape has to keep passing.
+test("gate 4 still accepts the adoption shape: legacy NAME.sql -> NAME.up.sql", () => {
   const r = run({
     headFiles: ["20260101000000_old.up.sql", "20260101000000_old.down.sql"],
     baseFiles: ["20260101000000_old.sql", "20260101000000_old.down.sql"],
     changes: [
       { status: "R", similarity: 100, from: "20260101000000_old.sql", file: "20260101000000_old.up.sql" },
+    ],
+  });
+  assert.deepEqual(r.failures, []);
+});
+
+// A rename whose source is in the new convention but is NOT on the base branch is
+// this branch's own work being tidied before review — nothing has recorded it in
+// any ledger, so there is nothing to conflict with.
+test("gate 4 allows renaming an unmerged .up.sql this branch itself added", () => {
+  const r = run({
+    headFiles: [...BASE, "20260202000000_final.up.sql", "20260202000000_final.down.sql"],
+    changes: [
+      {
+        status: "R",
+        similarity: 100,
+        from: "20260202000000_draft.up.sql",
+        file: "20260202000000_final.up.sql",
+      },
     ],
   });
   assert.deepEqual(r.failures, []);
@@ -128,6 +191,42 @@ test("gate 4 coerces similarity string '87' to fail (regression: cross-file type
     ],
   });
   assert.deepEqual(gates(r), ["immutability"]);
+});
+
+// Regression: an orphan .down.sql used to pass all five gates and then take out
+// every migrate:up/down with node-pg-migrate's own
+// "Found .down.sql without matching .up.sql" — a deploy failure for something a
+// static gate can see at review time.
+test("gate 3 rejects a .down.sql with no matching .up.sql", () => {
+  const r = run({
+    headFiles: [...BASE, "20260202000000_orphan.down.sql"],
+    changes: [{ status: "A", file: "20260202000000_orphan.down.sql" }],
+    contents: { "20260202000000_orphan.down.sql": "DROP TABLE t;" },
+  });
+  assert.deepEqual(gates(r), ["reversibility"]);
+  assert.match(r.failures[0].message, /20260202000000_orphan\.up\.sql/);
+  assert.match(r.failures[0].message, /Found \.down\.sql without matching \.up\.sql/);
+});
+
+// The orphan check looks at the whole HEAD tree, not just the diff — the runner
+// does not care which commit unpaired the directory.
+test("gate 3 rejects an orphan .down.sql even when this branch did not add it", () => {
+  const r = run({
+    headFiles: [...BASE, "20260202000000_orphan.down.sql"],
+    baseFiles: [...BASE, "20260202000000_orphan.down.sql"],
+  });
+  assert.deepEqual(gates(r), ["reversibility"]);
+});
+
+// An up with no down is a DIFFERENT rule (gate 3b: allowed with an
+// `-- irreversible:` marker). The orphan check must not fire on it.
+test("gate 3's orphan check does not fire on an up migration with no down", () => {
+  const r = run({
+    headFiles: [...BASE, "20260202000000_backfill.up.sql"],
+    changes: [{ status: "A", file: "20260202000000_backfill.up.sql" }],
+    contents: { "20260202000000_backfill.up.sql": "-- irreversible: one-way backfill\nUPDATE t SET c = 1;" },
+  });
+  assert.deepEqual(r.failures, []);
 });
 
 test("gate 5 rejects statement-level BEGIN/COMMIT in a new migration", () => {

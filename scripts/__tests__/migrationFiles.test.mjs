@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseMigrationFilename, listMigrations, ledgerName } from "../lib/migrationFiles.mjs";
+import {
+  parseMigrationFilename,
+  listMigrations,
+  ledgerName,
+  isTopLevelSql,
+} from "../lib/migrationFiles.mjs";
 
 test("parses an up filename and normalises the ledger id", () => {
   const r = parseMigrationFilename("20260803110000_arc_stage_approver_permissions.up.sql");
@@ -83,6 +88,32 @@ test("reports unparseable .sql files as invalid and ignores non-sql files", () =
   );
   assert.deepEqual(migrations.map((m) => m.id), ["20260101000000_ok.sql"]);
   assert.deepEqual(invalid, ["2026_05_26_legacy.sql"]);
+});
+
+// Regression: `.sql` matching used to be case-sensitive, so migrations/Foo.SQL was
+// invisible to listMigrations() AND to node-pg-migrate's ignorePattern — measured
+// against a scratch database, `migrate:status` reported 0 pending and `migrate:up`
+// exited 0 with the file never applied. A silently-skipped file in migrations/ is
+// exactly the drift run_pending_migrations.sh died of. It must now surface as
+// invalid, which is what makes migrate.mjs and gate 1 refuse it by name.
+test("an uppercase .SQL extension is reported as invalid, not silently skipped", () => {
+  const { migrations, invalid } = withDir(
+    ["20260101000000_ok.up.sql", "Foo.SQL", "20260102000000_shouty.UP.SQL"],
+    listMigrations
+  );
+  assert.deepEqual(migrations.map((m) => m.id), ["20260101000000_ok.sql"]);
+  assert.deepEqual(invalid.sort(), ["20260102000000_shouty.UP.SQL", "Foo.SQL"]);
+});
+
+test("isTopLevelSql matches .sql case-insensitively and rejects nested paths", () => {
+  assert.equal(isTopLevelSql("20260101000000_ok.up.sql"), true);
+  assert.equal(isTopLevelSql("Foo.SQL"), true);
+  assert.equal(isTopLevelSql("Foo.Sql"), true);
+  // Nested — migrations/baseline/production_baseline.sql is not the runner's business.
+  assert.equal(isTopLevelSql("baseline/production_baseline.sql"), false);
+  assert.equal(isTopLevelSql("baseline/PRODUCTION_BASELINE.SQL"), false);
+  assert.equal(isTopLevelSql("README.md"), false);
+  assert.equal(isTopLevelSql("run_pending_migrations.sh"), false);
 });
 
 test("ledgerName strips .sql, matching what Task 1's spike observed in pgmigrations", () => {

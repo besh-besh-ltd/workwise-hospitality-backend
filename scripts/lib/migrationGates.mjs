@@ -8,7 +8,7 @@
  * against the base branch is that missing checksum, moved earlier: a modified
  * migration fails review instead of failing a deploy.
  */
-import { parseMigrationFilename } from "./migrationFiles.mjs";
+import { parseMigrationFilename, ledgerName } from "./migrationFiles.mjs";
 
 /**
  * A statement-level transaction control keyword: start of line, then the
@@ -28,6 +28,18 @@ const IRREVERSIBLE_RE = /^\s*--\s*irreversible:/im;
 
 const KNOWN_CHANGE_STATUSES = new Set(["A", "M", "D", "R"]);
 
+/**
+ * A filename already written in the runner's own convention. The discriminator
+ * for gate 4's rename rule — see the comment at its use site.
+ */
+const NEW_CONVENTION_RE = /\.(up|down)\.sql$/i;
+
+/** The bare id node-pg-migrate stores in pgmigrations.name, for error messages. */
+function ledgerIdOf(file) {
+  const parsed = parseMigrationFilename(file);
+  return parsed ? ledgerName(parsed.id) : file;
+}
+
 export function evaluate({ headFiles, baseFiles, changes, contents }) {
   const failures = [];
   const fail = (gate, file, message) => failures.push({ gate, file, message });
@@ -44,6 +56,40 @@ export function evaluate({ headFiles, baseFiles, changes, contents }) {
           "Expected YYYYMMDDHHMMSS_lower_snake_slug.up.sql or .down.sql."
       );
     }
+  }
+
+  // Gate 3a — an orphan .down.sql. node-pg-migrate's 'sql' loader groups
+  // NAME.up.sql with NAME.down.sql by id and throws
+  //   Found .down.sql without matching .up.sql for <id>
+  // (dist/legacy/migrationLoader.js:236) the moment it scans the directory —
+  // i.e. on every `migrate:up` and `migrate:down`, in every environment. Nothing
+  // else here catches it: gate 1 accepts the filename (it IS well-formed), and
+  // gate 3b only looks at *added up* files, so a down file added alone, or an up
+  // file dropped from an unmerged pair, sails through all five gates and lands
+  // as a deploy failure instead of a review failure.
+  //
+  // Checked across the whole HEAD tree rather than only the diff: the directory
+  // either pairs up or it does not, and the runner does not care which commit
+  // broke it.
+  const upIds = new Set();
+  const downOnHead = [];
+  for (const file of headFiles) {
+    const parsed = parseMigrationFilename(file);
+    if (!parsed) continue;
+    if (parsed.direction === "up") upIds.add(parsed.id);
+    else downOnHead.push(parsed);
+  }
+  for (const parsed of downOnHead) {
+    if (upIds.has(parsed.id)) continue;
+    const upFile = `${parsed.timestamp}_${parsed.slug}.up.sql`;
+    fail(
+      "reversibility",
+      parsed.filename,
+      `'${parsed.filename}' has no matching '${upFile}'. node-pg-migrate pairs the two by id and ` +
+        `throws "Found .down.sql without matching .up.sql for ${parsed.id}" as soon as it scans ` +
+        "migrations/, so every migrate:up and migrate:down fails — on staging and production, not " +
+        "just here. Add the up file, or delete the orphan down file."
+    );
   }
 
   const baseSet = new Set(baseFiles);
@@ -84,6 +130,42 @@ export function evaluate({ headFiles, baseFiles, changes, contents }) {
             "disagree with what those databases actually executed. Write a new migration instead."
         );
       }
+    }
+    // A rename of an already-merged migration that is ALREADY in the runner's
+    // convention. The similarity check below does not catch this: a pure `git mv`
+    // is 100% similar and used to pass every gate.
+    //
+    // What it costs. pgmigrations still holds the OLD id while migrations/ now
+    // yields the NEW one, and node-pg-migrate's checkOrder compares the two
+    // positionally — so the very next `migrate:up` throws
+    //   Not run migration <new> is preceding already run migration <old>
+    // on staging AND production, and keeps throwing until somebody renames the
+    // file back or hand-edits the ledger. A deploy freeze, reachable through
+    // green CI: the replay job only notices when the migration is BASELINED
+    // (MANIFEST still carries the old id). Rename one merged after the baseline
+    // and the replay simply applies it fresh under its new name, no conflict
+    // arises, CI is green, and the first symptom is the staging deploy.
+    //
+    // Why `from` and not `file`. This branch's adoption commit renamed 55 files,
+    // and every one of those rename SOURCES is a legacy bare NAME.sql — zero were
+    // already .up.sql/.down.sql. That is the discriminator, and it is exact:
+    // "was the source already in the new convention?" separates the one-time
+    // adoption (legal, and must stay legal) from renaming a migration the runner
+    // has already recorded (never legal). It also closes the reverse case — a
+    // file moved from a subdirectory back to top level — since that source is
+    // top-level-invisible and reported as a delete before it reaches here.
+    if (change.status === "R" && baseSet.has(change.from) && NEW_CONVENTION_RE.test(change.from)) {
+      fail(
+        "immutability",
+        change.file,
+        `'${change.from}' -> '${change.file}' renames a migration that is already merged. ` +
+          `The ledger keeps recording it as '${ledgerIdOf(change.from)}' while migrations/ now offers ` +
+          `'${ledgerIdOf(change.file)}', and node-pg-migrate compares them positionally — so every ` +
+          `subsequent 'migrate:up' fails with "Not run migration ${ledgerIdOf(change.file)} is ` +
+          `preceding already run migration ${ledgerIdOf(change.from)}", on staging AND production, ` +
+          "until the file is renamed back or pgmigrations is hand-edited. Rename it back; if the " +
+          "name is wrong, write a NEW migration instead."
+      );
     }
     if (change.status === "R" && Number(change.similarity) !== 100) {
       // Coerce similarity to a number: it comes from git-status parsing in Task 9's CLI

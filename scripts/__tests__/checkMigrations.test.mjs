@@ -12,8 +12,15 @@ function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-/** A throwaway repo with one committed migration on 'base', then a feature branch. */
-function withRepo(fn) {
+/**
+ * A throwaway repo with one committed migration on 'base', then a feature branch.
+ *
+ * `extraBaseFiles` seeds additional files onto 'base' only — used by the adoption
+ * test, which needs a legacy bare NAME.sql on the base branch to rename. It is
+ * opt-in because such a file left un-renamed on HEAD would fail gate 1 for every
+ * other test in this file.
+ */
+function withRepo(fn, extraBaseFiles = {}) {
   const dir = mkdtempSync(join(tmpdir(), "checkmig-"));
   try {
     git(dir, "init", "-q", "-b", "base");
@@ -25,6 +32,9 @@ function withRepo(fn) {
     cpSync(join(SCRIPTS, "lib"), join(dir, "scripts", "lib"), { recursive: true });
     writeFileSync(join(dir, "migrations", "20260101000000_old.up.sql"), "SELECT 1;\n");
     writeFileSync(join(dir, "migrations", "20260101000000_old.down.sql"), "SELECT 1;\n");
+    for (const [name, body] of Object.entries(extraBaseFiles)) {
+      writeFileSync(join(dir, "migrations", name), body);
+    }
     git(dir, "add", "-A");
     git(dir, "commit", "-qm", "base");
     git(dir, "checkout", "-q", "-b", "feature");
@@ -70,13 +80,66 @@ test("fails when a merged migration is modified", () => {
   });
 });
 
-test("passes a pure rename of a merged migration", () => {
+// A 100%-similarity `git mv` of a merged migration used to pass end-to-end. It is
+// the worst kind of green: the ledger keeps the old name, migrations/ yields the
+// new one, and checkOrder freezes every later migrate:up on staging and
+// production. See the gate-4 rename comment in lib/migrationGates.mjs.
+test("fails a pure rename of a merged migration already in the .up.sql convention", () => {
   withRepo((dir) => {
     git(dir, "mv", "migrations/20260101000000_old.up.sql", "migrations/20260101000000_renamed.up.sql");
     git(dir, "mv", "migrations/20260101000000_old.down.sql", "migrations/20260101000000_renamed.down.sql");
     git(dir, "commit", "-qm", "rename");
     const { code, out } = check(dir);
-    assert.equal(code, 0, out);
+    assert.equal(code, 1, out);
+    assert.match(out, /immutability/);
+    assert.match(out, /Not run migration .* is preceding already run migration/);
+  });
+});
+
+// The half that must NOT regress: this is the adoption commit's shape — 55 legacy
+// bare NAME.sql files renamed to NAME.up.sql, sources that no ledger has ever
+// recorded. Exercised through real git rename detection, not a hand-built change
+// record, because the discriminator reads change.from.
+test("passes the adoption rename: a legacy bare NAME.sql becomes NAME.up.sql", () => {
+  withRepo(
+    (dir) => {
+      git(dir, "mv", "migrations/20260103000000_legacy.sql", "migrations/20260103000000_legacy.up.sql");
+      git(dir, "commit", "-qm", "adopt the up/down convention");
+      const { code, out } = check(dir);
+      assert.equal(code, 0, out);
+      assert.match(out, /OK/);
+    },
+    { "20260103000000_legacy.sql": "SELECT 1;\n" }
+  );
+});
+
+// C2: `.sql` matching is case-insensitive so a stray Foo.SQL surfaces as a naming
+// failure here instead of being silently ignored by both this gate and the
+// runner — a file in migrations/ that never runs and nothing reports.
+test("fails on a .SQL file whose extension is not lowercase", () => {
+  withRepo((dir) => {
+    writeFileSync(join(dir, "migrations", "20260202000000_new.UP.SQL"), "SELECT 1;\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "shouty extension");
+    const { code, out } = check(dir);
+    assert.equal(code, 1, out);
+    assert.match(out, /naming/);
+    assert.match(out, /20260202000000_new\.UP\.SQL/);
+  });
+});
+
+// C3: an orphan .down.sql is well-formed by gate 1 and invisible to gate 3's
+// up-side check, but node-pg-migrate throws on it the moment it scans the
+// directory.
+test("fails on a .down.sql added with no matching .up.sql", () => {
+  withRepo((dir) => {
+    writeFileSync(join(dir, "migrations", "20260202000000_orphan.down.sql"), "DROP TABLE t;\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "orphan down");
+    const { code, out } = check(dir);
+    assert.equal(code, 1, out);
+    assert.match(out, /reversibility/);
+    assert.match(out, /without matching \.up\.sql/);
   });
 });
 
