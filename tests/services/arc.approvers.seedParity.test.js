@@ -50,10 +50,13 @@ import { getTestDbConfig } from "../setup/envguard.js";
 // The migrations that own ARC/MR RBAC, in dependency order. 20260611100000
 // grants arc-tech.read to roles created by 20260608100800; 20260803110000 grants
 // arc-tech.approve alongside it.
+// These are FILENAMES on disk, not ledger ids: the node-pg-migrate adoption
+// renamed every up-migration NAME.sql -> NAME.up.sql, so reading them by the old
+// name here fails with ENOENT before a single assertion runs.
 const RBAC_MIGRATIONS = [
-  "20260608100800_permissions_seed.sql",
-  "20260611100000_arc_eval_read_permissions.sql",
-  "20260803110000_arc_stage_approver_permissions.sql",
+  "20260608100800_permissions_seed.up.sql",
+  "20260611100000_arc_eval_read_permissions.up.sql",
+  "20260803110000_arc_stage_approver_permissions.up.sql",
 ];
 
 // Resource families these migrations own. Anything outside is out of scope.
