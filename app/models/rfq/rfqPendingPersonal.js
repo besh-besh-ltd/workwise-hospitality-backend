@@ -121,10 +121,21 @@ export async function getPersonalPendingForRFQs(rfqList, userId, lifecycleMap = 
       });
     }
 
-    // 4. A negotiation round still ACTIVE past its end date — nothing moves
-    //    until the creator closes it. A round whose window is still OPEN is
-    //    the same situation as AWAITING_QUOTES (vendors are still responding),
-    //    so it is deliberately excluded.
+    // 4. A negotiation round still ACTIVE past its end date. A round whose
+    //    window is still OPEN is the same situation as AWAITING_QUOTES
+    //    (vendors are still responding), so it is deliberately excluded.
+    //
+    //    The label does NOT ask the creator to close the round: nothing in the
+    //    UI can. handleNegotiationRoundExpiration flips ACTIVE -> ENDED on its
+    //    own, driven by a one-shot job at create time, a boot sweep and a
+    //    5-minute cron backstop (cronManager.js). What the creator actually
+    //    owes here is the review of what came back, which is the same action
+    //    the round-ended email and the ARC notification both ask for
+    //    ("Review the revised rates", arcNotificationService.js).
+    //
+    //    Note this row can therefore be transient — it should clear itself
+    //    within ~5 minutes of the deadline. If it persists, the round is stuck
+    //    ACTIVE and the sweeper is the thing to look at, not the buyer.
     if (mine.length > 0) {
       const rounds = await db.any(
         `SELECT rfq_id, COUNT(*)::int AS n
@@ -132,14 +143,21 @@ export async function getPersonalPendingForRFQs(rfqList, userId, lifecycleMap = 
           WHERE rfq_id = ANY($1::int[])
             AND status = 'ACTIVE'
             AND end_date IS NOT NULL
-            AND end_date <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+            -- now() AT TIME ZONE 'UTC', not Asia/Kolkata: end_date is a naive
+            -- column holding UTC, so converting the clock to IST compared it
+            -- against wall time 5h30m ahead and called every round expired
+            -- 5.5 hours early. Must stay identical to the sweeper's predicate
+            -- in cronManager.js (runNegotiationRoundClosureSweep) — when the
+            -- two disagree this flag fires on rounds the sweeper is correctly
+            -- refusing to close, so the row cannot clear.
+            AND end_date <= (now() AT TIME ZONE 'UTC')
           GROUP BY rfq_id`,
         [mine]
       );
       for (const r of rounds) {
         add(r.rfq_id, {
           code: 'NEGOTIATION_ROUND_EXPIRED',
-          label: 'Negotiation round ended — close it',
+          label: 'Negotiation round ended — review the revised rates',
           count: r.n,
         });
       }
