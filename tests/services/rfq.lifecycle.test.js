@@ -3,7 +3,10 @@ import { shapeRfqLifecycle, STAGE_ORDER } from "../../app/models/rfq/rfqLifecycl
 import { db } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
-import { makeRfqVisibleToDashboard, addProductToRfq, cleanupRfqs } from "../helpers/dashboardSeed.js";
+import {
+  makeRfqVisibleToDashboard, addProductToRfq, cleanupRfqs, makePO, cleanupPurchaseOrders,
+} from "../helpers/dashboardSeed.js";
+import rfqModel from "../../app/models/rfqModel.js";
 import { makeRFQ } from "../factories/rfq.js";
 
 // Minimal getLifecycleSummary-shaped fixture.
@@ -387,5 +390,78 @@ describe("GET /rfq/:rfqId/lifecycle — REMOVED approver pass-through", () => {
     const pendingApprover = approvers.find((a) => a.status === "PENDING");
     expect(pendingApprover).toBeDefined();
     expect(pendingApprover.added_mid_flight).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeLifecycleStages — a PO awaiting vendor acceptance is still an
+// approved PO.
+//
+// `acceptance_pending` is the state a PO enters the moment internal approval
+// COMPLETES, and it stays there until the vendor accepts (acceptPO flips it to
+// 'approved'). It was missing from the "products covered by an approved PO"
+// whitelist, so a fully-approved PO counted for nothing: the CASE fell past
+// APPROVED_COMPLETED and PO_APPROVAL down to AWAITING_PO. That put the RFQ in
+// the Ongoing tab under "Quotes finalized — purchase orders can now be raised"
+// and named its PO initiators as the people who must act — on an order that
+// already existed and was already approved.
+//
+// Every PO passes through this state, so it was never an edge case: 20 RFQs
+// were mislabelled when it was found (e.g. RFQ 536374 / PO 138756, approved
+// at both levels and awaiting vendor acceptance).
+// ---------------------------------------------------------------------------
+describe("computeLifecycleStages — PO awaiting vendor acceptance", () => {
+  const BUYER = IDS.users.a1_proc_buyer;
+  const VENDOR = IDS.users.vendor_alpha;
+  const rfqIds = [];
+  const poIds = [];
+
+  afterAll(async () => {
+    await cleanupPurchaseOrders(db, poIds);
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1)`, [rfqIds]);
+    await cleanupRfqs(db, rfqIds);
+  });
+
+  /** One RFQ, one product, one PO in `status` covering that product. */
+  async function rfqWithPoInStatus(status) {
+    const seeded = await db.tx(async (t) => {
+      const { rfq_id } = await makeRfqVisibleToDashboard(t, {
+        createdBy: BUYER, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+        status: 1, is_published: 1, title: `Lifecycle PO ${status}`,
+      });
+      const { rfq_product_id } = await addProductToRfq(t, rfq_id);
+      const { po_id } = await makePO(t, {
+        rfq_id, rfq_product_id, status,
+        company_id: IDS.hospitality.A,
+        vendor_user_id: VENDOR,
+        initiated_by: BUYER,
+      });
+      return { rfq_id, po_id };
+    });
+    rfqIds.push(seeded.rfq_id);
+    poIds.push(seeded.po_id);
+    return seeded.rfq_id;
+  }
+
+  it("reads as APPROVED_COMPLETED, not AWAITING_PO", async () => {
+    const rfq_id = await rfqWithPoInStatus("acceptance_pending");
+    const stages = await rfqModel.computeLifecycleStages([rfq_id]);
+
+    // The defect: this was AWAITING_PO, so the listing asked the PO initiators
+    // to raise a purchase order that was already raised and approved.
+    expect(stages[rfq_id]).not.toBe("AWAITING_PO");
+    expect(stages[rfq_id]).toBe("APPROVED_COMPLETED");
+  });
+
+  it("an accepted PO still reads as APPROVED_COMPLETED (control)", async () => {
+    const rfq_id = await rfqWithPoInStatus("approved");
+    const stages = await rfqModel.computeLifecycleStages([rfq_id]);
+    expect(stages[rfq_id]).toBe("APPROVED_COMPLETED");
+  });
+
+  it("a PO still awaiting internal approval is PO_APPROVAL, not complete", async () => {
+    const rfq_id = await rfqWithPoInStatus("pending_approval");
+    const stages = await rfqModel.computeLifecycleStages([rfq_id]);
+    expect(stages[rfq_id]).toBe("PO_APPROVAL");
   });
 });

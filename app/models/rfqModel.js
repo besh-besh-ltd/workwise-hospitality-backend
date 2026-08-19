@@ -3385,7 +3385,7 @@ LIMIT 1;`;
             SELECT 1 FROM tbl_rfq_purchase_order _po
             JOIN tbl_purchase_order_product _pop ON _pop.purchase_order_id = _po.id
             WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
-              AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+              AND _po.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
         ) AS has_approved_po
         -- is_dead_end: this product has all eligible vendors' POs rejected with no replacement
         ,(
@@ -4009,7 +4009,7 @@ LIMIT 2;
                     SELECT 1 FROM tbl_rfq_purchase_order _po2
                     JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
                     WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                      AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                      AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
                   FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
                 ) _chk
@@ -4028,7 +4028,7 @@ LIMIT 2;
                     SELECT 1 FROM tbl_rfq_purchase_order _po3
                     JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
                     WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                      AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                      AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
                   FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
                 ) _chk2
@@ -4288,7 +4288,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po2
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
         END) = true
         OR (SELECT CASE
@@ -4298,7 +4298,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po3
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END) = true
       )` : ''}
@@ -4311,7 +4311,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po2
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
         END) = true
         AND NOT (SELECT CASE
@@ -4321,7 +4321,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po3
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END)
       )` : ''}
@@ -4459,18 +4459,29 @@ LIMIT 2;
           rfq_id,
           COUNT(*)::int AS total_pos,
           COUNT(*) FILTER (WHERE status = 'pending_approval')::int AS pending_approval_pos,
-          COUNT(*) FILTER (WHERE status IN ('approved','sent','dispatched','GRN','completed','invoice_raised'))::int AS approved_pos
+          COUNT(*) FILTER (WHERE status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised'))::int AS approved_pos
         FROM tbl_rfq_purchase_order
         WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
       ),
-      -- Distinct products covered by approved POs
+      -- Distinct products covered by approved POs.
+      --
+      -- acceptance_pending belongs in this list: it is the state a PO enters
+      -- once internal approval COMPLETES and before the vendor accepts
+      -- (acceptPO flips acceptance_pending -> approved; see poDashboardModel.js
+      -- :1782, which uses the same set). Omitting it meant a fully-approved PO
+      -- counted for nothing here, so the CASE below fell past both
+      -- APPROVED_COMPLETED and PO_APPROVAL down to AWAITING_PO -- telling the
+      -- PO initiators to raise an order that already existed and was approved,
+      -- and holding the RFQ in the Ongoing tab. Every PO passes through this
+      -- state, so it affected every RFQ awaiting vendor acceptance (20 live
+      -- when this was found, e.g. RFQ 536374 / PO 138756).
       po_products_approved AS (
         SELECT po.rfq_id, COUNT(DISTINCT pop.rfq_product_id)::int AS products_with_approved_po
         FROM tbl_rfq_purchase_order po
         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
         WHERE po.rfq_id = ANY($1::int[])
-          AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+          AND po.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
         GROUP BY po.rfq_id
       ),
       -- Whether tech eval is configured for this RFQ (+ count of TE products)
@@ -6106,14 +6117,14 @@ LIMIT 2;
           ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
           OR (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
           ELSE (SELECT COUNT(*) FILTER (WHERE _ha) > 0 AND COUNT(*) FILTER (WHERE NOT _ha) > 0
             FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po3
             JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
             WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-            AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2) END) = true
         )` : ''}
         ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
@@ -6122,7 +6133,7 @@ LIMIT 2;
           ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
         )` : ''}
         ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
@@ -14289,7 +14300,7 @@ ORDER BY tq.timestamp DESC;
                   JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
                   WHERE _po2.rfq_id = RFQ.id
                     AND _pop2.rfq_product_id = _rp3.id
-                    AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                    AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                 ) AS has_approved
                 FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
               ) _chk
