@@ -15089,6 +15089,24 @@ sendFollowUpEmails: async (req, res) => {
             [quoteExists[0].rfq_id]
           );
 
+          // Does an ACTIVE round raise `documents` at RFQ level? Such a round
+          // names no product, but its ask is answerable from any line's
+          // uploader as well as the quote-wide one, so those lines must be
+          // allowed through the per-product check below.
+          const rfqLevelDocumentsAsk = await db.oneOrNone(
+            `SELECT 1 AS ok
+               FROM tbl_negotiation_rounds nr
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(p_->'vendor_targets','[]'::jsonb)) vt_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vt_->'fields','[]'::jsonb)) f_
+              WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()
+                AND (p_->>'is_rfq_level')::boolean IS TRUE
+                AND lower(f_->>'name') = 'documents'
+              LIMIT 1`,
+            [quoteExists[0].rfq_id]
+          );
+          const hasRfqLevelDocumentsAsk = !!rfqLevelDocumentsAsk;
+
           // Only block if there are NO active negotiation rounds
           if (!activeNegotiationRounds || activeNegotiationRounds.length === 0) {
             // Different messages based on reverse auction status
@@ -15128,10 +15146,29 @@ sendFollowUpEmails: async (req, res) => {
               );
 
               if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
-                return res.status(400).json({
-                  status: 3,
-                  message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
-                });
+                // Exemption: an RFQ-level `documents` round opens every line's
+                // uploader in the vendor wizard. A line carrying attachments is
+                // a legitimate answer to that ask even though the round names
+                // no product, so it must not be rejected here — otherwise the
+                // vendor uploads a file, sees it listed, and loses the whole
+                // submission to a 400.
+                //
+                // Scoped as narrowly as the request allows: only when such a
+                // round is live, and only for lines that actually carry files.
+                // NOTE: the line still arrives with its previously quoted
+                // values (the wizard disables those inputs but re-sends them),
+                // so this does not verify they are unchanged.
+                const answersDocumentsAsk =
+                  hasRfqLevelDocumentsAsk &&
+                  Array.isArray(product.document_files) &&
+                  product.document_files.length > 0;
+
+                if (!answersDocumentsAsk) {
+                  return res.status(400).json({
+                    status: 3,
+                    message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
+                  });
+                }
               }
             }
           }
