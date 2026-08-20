@@ -33,6 +33,29 @@ process.env.NODE_ENV = "test";
 // Load .env.test FIRST (override=true) — wins over any leftover env vars.
 dotenv.config({ path: path.join(BACKEND_DIR, ".env.test"), override: true });
 
+// Pin the POSTGRES SESSION timezone to UTC, matching CI (ci-tests.yml) and
+// production.
+//
+// Several columns are `timestamp without time zone` holding UTC —
+// tbl_negotiation_rounds.end_date among them (see app/helper/dbTime.js). Any
+// comparison between one of those and a timestamptz, in either SQL (`end_date >
+// NOW()`) or a seed (`NOW() + interval`), resolves the naive side through the
+// session timezone. A Homebrew Postgres inherits the machine's zone, so on an
+// IST box those land 5h30m off and tests fail for reasons that have nothing to
+// do with the code under test. arc.negotiation.expiry did exactly that for
+// seven weeks while CI stayed green.
+//
+// node-postgres forwards PGOPTIONS to the server (verified: unset -> the
+// server default, `-c timezone=UTC` -> UTC). TZ= does NOT work; that is a Node
+// setting and never reaches Postgres.
+//
+// An explicitly-exported PGOPTIONS still wins, so reproducing a timezone bug
+// stays a one-liner:
+//   PGOPTIONS="-c timezone=Asia/Kolkata" npm test -- --testPathPatterns "..."
+if (!process.env.PGOPTIONS) {
+  process.env.PGOPTIONS = "-c timezone=UTC";
+}
+
 function sanitize(s) {
   return String(s).replace(/[^a-zA-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
 }
