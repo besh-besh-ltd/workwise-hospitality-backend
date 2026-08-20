@@ -128,7 +128,14 @@ export async function executeApprovalAction(args) {
   // 1. Run the underlying transactional model action (status updates only).
   const result = await submitApprovalActionModel(args);
 
-  // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
+  // 2. Refresh the PO document. Must come BEFORE the post-action, which emails
+  //    that PDF, and runs on EVERY approve rather than only the terminal one —
+  //    the approver table inside the PDF lists each step.
+  if (args.action === 'APPROVE') {
+    await regeneratePoDocumentIfPo(args.approval_instance_id);
+  }
+
+  // 3. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
     await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
       status: result.instance_status,
@@ -141,6 +148,55 @@ export async function executeApprovalAction(args) {
   }
 
   return result;
+}
+
+/**
+ * Rewrite the stored PO PDF after an approval, if this instance belongs to a PO.
+ *
+ * A PO PDF is a stored artefact — `po_pdf_url` points at a file uploaded to S3,
+ * and downloading serves that file rather than rendering on demand. So the
+ * approver table printed inside it only changes when something rewrites the
+ * file. Nothing here did.
+ *
+ * Regeneration used to live solely in the dedicated PO approval endpoint
+ * (purchaseOrderController), on the stated assumption that it was "the
+ * canonical PO approval surface". It is not the only one: the RFQ Lifecycle
+ * Journey and the generic action endpoint both approve POs through this
+ * service. An approval taken from either recorded correctly in the database and
+ * transitioned the PO, but left the PDF frozen at whatever the previous write
+ * captured.
+ *
+ * Observed on PO 483 (RFQ 536375): step 1 was approved through the dedicated
+ * endpoint and the PDF was rewritten; step 2 was approved elsewhere a day
+ * later, and the downloaded PO still printed that approver as "Invited" — a
+ * document contradicting its own approval record, in front of a client.
+ *
+ * Attaching this to the action rather than to one endpoint means every surface
+ * that can approve a PO now leaves a truthful document behind.
+ *
+ * Never throws: the approval has already committed, and a stale PDF must not be
+ * reported to the caller as a failed approval. Same policy as the post-action
+ * dispatcher below.
+ */
+async function regeneratePoDocumentIfPo(approvalInstanceId) {
+  try {
+    const instance = await getApprovalInstanceById(approvalInstanceId);
+    if (!instance || instance.entity_type !== 'PO' || !instance.entity_id) return;
+
+    // Dynamic import for the same reason the post-action handlers use one:
+    // purchaseOrderModel pulls in controllers that import this service.
+    const { regeneratePODocument } = await import('../models/purchaseOrderModel.js');
+    // No txContext on purpose — submitApprovalActionModel has already committed,
+    // so this must read the approval rows outside that transaction to see the
+    // decision it is meant to be printing.
+    await regeneratePODocument(instance.entity_id);
+    logger.info(
+      { approvalInstanceId, poId: instance.entity_id },
+      'Regenerated PO document after approval action'
+    );
+  } catch (err) {
+    logError('executeApprovalAction: failed to regenerate PO document', err);
+  }
 }
 
 /**
