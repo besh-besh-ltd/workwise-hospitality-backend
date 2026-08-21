@@ -63,6 +63,7 @@ import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
 import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
+import { findUnansweredTechEvalLines, unansweredTechEvalMessage } from '../../services/techEvalQuoteGate.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
@@ -9468,6 +9469,29 @@ const rfqController = {
           }
         }
 
+        // Technical evaluation must be ANSWERED before a line can be quoted —
+        // on EVERY RFQ. The acceptance check below is scoped to reverse
+        // auctions, which left 623 of 675 RFQs with no server-side technical
+        // gate at all; enforcement was effectively browser-only, and both
+        // vendor clients fail open when tech_evaluation_status is absent.
+        // See app/services/techEvalQuoteGate.js for the full account.
+        //
+        // Deliberately a different question from the acceptance check: a vendor
+        // quoting has not been evaluated yet, so `status === 1` cannot be
+        // required here. This asks only whether they answered the clauses.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
+          }
+        }
+
         // Check if technical evaluation is required for any products and if vendor is accepted
         if (isReverseAuction && products && products.length > 0) {
           let rejectedProducts = [];
@@ -15063,6 +15087,23 @@ sendFollowUpEmails: async (req, res) => {
             status: 3,
             message: 'All Products are Finalized'
           });
+        }
+
+        // Same technical-evaluation gate as createQuote. updateQuoteItems is the
+        // other way a quote reaches the database, and it had NO technical check
+        // of any kind — not even the reverse-auction one — so a vendor could add
+        // or re-price a line on a product whose clauses they never answered.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id: quoteExists[0].rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
+          }
         }
 
         // Check if past bid end date - but allow if there are active negotiation rounds
