@@ -2858,6 +2858,78 @@ WHERE NOT EXISTS (
             AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
         )
       ) AS has_tech_stuck_product,
+      -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+      -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+      -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+      -- never open for anybody.
+      --
+      -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+      -- means evaluation RAN and every vendor failed, and it is also read further down
+      -- this file to mark products terminally dead and drop them from downstream stages.
+      -- Here evaluation never STARTED and the products are perfectly alive, so the two
+      -- must not share a predicate.
+      --
+      -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+      -- clause-bearing lines without answering a single clause, the window then closed,
+      -- and assertEditAllowed refused every edit because neither existing unlock branch
+      -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+          WHERE _te_unstart.rfq_id = RFQ.id
+            -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+            -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+            -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+            -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+            -- whole listing query for every user, not just this subselect.
+            AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+            -- a vendor has real commercial interest riding on this product: a
+            -- non-regret quote line exists for it. Without this the flag also fires on
+            -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+            -- those are already unlocked by the zero-participation branch anyway, since
+            -- they carry no tbl_quotes row at all.
+            AND EXISTS (
+              SELECT 1
+              FROM tbl_quote_items _qi
+              JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+              JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+              WHERE _q.rfq_id = _te_unstart.rfq_id
+                AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                AND _qi.product_variant_id = _rp_u.product_variant_id
+                AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+            )
+            -- the product actually carries clauses a vendor is expected to answer
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+              WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+            )
+            -- nobody already holds a technical pass here
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+              WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND _cv.status = 1
+            )
+            -- and no vendor has answered the FULL non-sampling clause set, which is what
+            -- getVendorScoresForTechEval needs before it can score anyone at all
+            AND NOT EXISTS (
+              SELECT 1
+              FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+              JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+              WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+              GROUP BY _vr.vendor_id
+              HAVING COUNT(DISTINCT _c2.id) = (
+                SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+              )
+            )
+        )
+      ) AS has_tech_unstartable_product,
 
       ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
@@ -4128,6 +4200,78 @@ LIMIT 2;
                 AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
             )
           ) AS has_tech_stuck_product,
+          -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+          -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+          -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+          -- never open for anybody.
+          --
+          -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+          -- means evaluation RAN and every vendor failed, and it is also read further down
+          -- this file to mark products terminally dead and drop them from downstream stages.
+          -- Here evaluation never STARTED and the products are perfectly alive, so the two
+          -- must not share a predicate.
+          --
+          -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+          -- clause-bearing lines without answering a single clause, the window then closed,
+          -- and assertEditAllowed refused every edit because neither existing unlock branch
+          -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+              WHERE _te_unstart.rfq_id = RFQ.id
+                -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+                -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+                -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+                -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+                -- whole listing query for every user, not just this subselect.
+                AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                    <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                -- a vendor has real commercial interest riding on this product: a
+                -- non-regret quote line exists for it. Without this the flag also fires on
+                -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+                -- those are already unlocked by the zero-participation branch anyway, since
+                -- they carry no tbl_quotes row at all.
+                AND EXISTS (
+                  SELECT 1
+                  FROM tbl_quote_items _qi
+                  JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+                  JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+                  WHERE _q.rfq_id = _te_unstart.rfq_id
+                    AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                    AND _qi.product_variant_id = _rp_u.product_variant_id
+                    AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+                )
+                -- the product actually carries clauses a vendor is expected to answer
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+                  WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+                )
+                -- nobody already holds a technical pass here
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                  WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND _cv.status = 1
+                )
+                -- and no vendor has answered the FULL non-sampling clause set, which is what
+                -- getVendorScoresForTechEval needs before it can score anyone at all
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+                  JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                    ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+                  WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                    AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+                  GROUP BY _vr.vendor_id
+                  HAVING COUNT(DISTINCT _c2.id) = (
+                    SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                    WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                      AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+                  )
+                )
+            )
+          ) AS has_tech_unstartable_product,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -14429,6 +14573,78 @@ ORDER BY tq.timestamp DESC;
               AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
           )
         ) AS has_tech_stuck_product
+      , -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+        -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+        -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+        -- never open for anybody.
+        --
+        -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+        -- means evaluation RAN and every vendor failed, and it is also read further down
+        -- this file to mark products terminally dead and drop them from downstream stages.
+        -- Here evaluation never STARTED and the products are perfectly alive, so the two
+        -- must not share a predicate.
+        --
+        -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+        -- clause-bearing lines without answering a single clause, the window then closed,
+        -- and assertEditAllowed refused every edit because neither existing unlock branch
+        -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+            WHERE _te_unstart.rfq_id = RFQ.id
+              -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+              -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+              -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+              -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+              -- whole listing query for every user, not just this subselect.
+              AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                  <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+              -- a vendor has real commercial interest riding on this product: a
+              -- non-regret quote line exists for it. Without this the flag also fires on
+              -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+              -- those are already unlocked by the zero-participation branch anyway, since
+              -- they carry no tbl_quotes row at all.
+              AND EXISTS (
+                SELECT 1
+                FROM tbl_quote_items _qi
+                JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+                JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+                WHERE _q.rfq_id = _te_unstart.rfq_id
+                  AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                  AND _qi.product_variant_id = _rp_u.product_variant_id
+                  AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+              )
+              -- the product actually carries clauses a vendor is expected to answer
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+                WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+              )
+              -- nobody already holds a technical pass here
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND _cv.status = 1
+              )
+              -- and no vendor has answered the FULL non-sampling clause set, which is what
+              -- getVendorScoresForTechEval needs before it can score anyone at all
+              AND NOT EXISTS (
+                SELECT 1
+                FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+                JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                  ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                  AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+                GROUP BY _vr.vendor_id
+                HAVING COUNT(DISTINCT _c2.id) = (
+                  SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                  WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+                )
+              )
+          )
+        ) AS has_tech_unstartable_product
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ

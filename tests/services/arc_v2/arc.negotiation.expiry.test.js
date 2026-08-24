@@ -53,10 +53,19 @@ describe("ARC Negotiation — expiry (lazy-flip + cron handler + regression guar
        SELECT 'ARC', $1, NULL, NULL,
               $2, NULL,
               COALESCE(MAX(round_number), 0) + 1,
-              NOW() + ($3 || ' seconds')::interval,
+              -- (NOW() AT TIME ZONE 'UTC'), not bare NOW(). These are naive
+              -- columns holding UTC (see app/helper/dbTime.js), and the code
+              -- under test reads end_date with parseAsUTC. Casting a
+              -- timestamptz NOW() into a naive column renders it in the
+              -- POSTGRES SESSION timezone, so on an Asia/Kolkata dev box this
+              -- seeded IST wall-clock digits that parseAsUTC then read as UTC —
+              -- putting a round seeded 60s in the past 5h29m in the FUTURE, so
+              -- it never flipped to ENDED. Exact under CI/production's UTC
+              -- session, which is why only local runs failed.
+              (NOW() AT TIME ZONE 'UTC') + ($3 || ' seconds')::interval,
               NULL, NULL,
               $4, $5, $6::int[], $7::jsonb,
-              NOW(), NOW()
+              (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC')
          FROM tbl_negotiation_rounds
         WHERE source_type = 'ARC' AND source_id = $1
        RETURNING *`,
