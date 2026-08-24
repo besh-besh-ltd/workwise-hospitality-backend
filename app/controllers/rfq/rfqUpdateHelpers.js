@@ -36,8 +36,17 @@ import {
  * does NOT block edit at this layer — it's accepted so the controller can pass
  * the same option bag in and compute `isRestrictedEdit` from it. Mirrors
  * the FE permission helper canEditRfq().
+ *
+ * Three flags unlock step 4 once the window has closed, and they answer three
+ * different questions — do not collapse them:
+ *   hasDeadEndProduct         all eligible vendors' POs were rejected
+ *   hasTechStuckProduct       technical evaluation RAN and every vendor failed
+ *   hasTechUnstartableProduct technical evaluation never STARTED — clauses exist
+ *                             and a quote line exists, but nobody answered, so
+ *                             no vendor can be scored and no quote can ever
+ *                             surface commercially
  */
-export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false, hasTechStuckProduct = false, hasReceivedQuotes = false } = {}) {
+export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndProduct = false, hasTechStuckProduct = false, hasTechUnstartableProduct = false, hasReceivedQuotes = false } = {}) {
   if (!rfq) {
     throw httpError(404, 'RFQ not found.');
   }
@@ -54,7 +63,12 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndPr
     // POs were rejected) so the creator can add new vendors or modify specs.
     // Also allow restricted editing when a product is tech-stuck (all vendors
     // failed tech eval) so the creator can extend bid_end_date and refresh vendors.
-    if (hasQuotes && !hasDeadEndProduct && !hasTechStuckProduct) {
+    // Also allow restricted editing when a product is tech-UNSTARTABLE: it carries
+    // technical clauses and a real quote line, but no vendor ever answered the
+    // clauses, so evaluation cannot even begin and the commercial gate can never
+    // open. Without this branch such an RFQ is unrecoverable — nobody can re-open
+    // the window to let the vendor answer. See RFQ 536289 (Orchid Panchgani).
+    if (hasQuotes && !hasDeadEndProduct && !hasTechStuckProduct && !hasTechUnstartableProduct) {
       throw httpError(
         400,
         'The bid window has closed; this RFQ can no longer be edited.'

@@ -45,7 +45,7 @@ const ROLE_COMM_NEGO_N1 = 8;
 const EVALUATOR = IDS.users.a1_proc_buyer;   // rfq.read via TENDER_CREATOR
 const OUTSIDER = IDS.users.a1_eng_buyer;     // rfq.read, but no quote-compare
 
-const inserted = { rfqIds: [], scopeIds: [], quoteIds: [], clarIds: [], msgIds: [] };
+const inserted = { rfqIds: [], scopeIds: [], quoteIds: [], clarIds: [], msgIds: [], roundIds: [] };
 
 beforeEach(() => {
   for (const k of Object.keys(inserted)) inserted[k] = [];
@@ -62,6 +62,9 @@ afterEach(async () => {
   }
   if (inserted.quoteIds.length) {
     await db.none(`DELETE FROM tbl_quotes WHERE id = ANY($1::int[])`, [inserted.quoteIds]);
+  }
+  if (inserted.roundIds.length) {
+    await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1::int[])`, [inserted.roundIds]);
   }
   if (inserted.rfqIds.length) {
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
@@ -456,5 +459,81 @@ describe("POST /rfq/list-view — pending grouping contract", () => {
     const order = { approval: 0, response: 1, evaluation: 2 };
     const seen = data.rows.map((r) => order[r.pending_kind]);
     expect(seen).toEqual([...seen].sort((a, b) => a - b));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source 4: a negotiation round still ACTIVE past its end date.
+//
+// tbl_negotiation_rounds.end_date is a NAIVE column holding UTC — the opposite
+// convention to tbl_rfq.bid_end_date, which holds naive IST. Comparing it
+// against `CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'` measures it against a
+// wall clock 5h30m ahead, so the flag fired on rounds up to 5.5 hours BEFORE
+// they ended. Confirmed in production on RFQ 536312 / round 950: end_date
+// 11:30 UTC, flag firing since 06:00 UTC, sweeper correctly refusing to close.
+//
+// The predicate must stay identical to the sweeper's in cronManager.js
+// (runNegotiationRoundClosureSweep). When the two disagree this flag fires on
+// rounds the sweeper will not close, so the row cannot clear itself.
+// ---------------------------------------------------------------------------
+
+/** Naive-UTC 'YYYY-MM-DD HH:MM:SS', offset from now — the column's own format. */
+const utcNaive = (hoursFromNow) =>
+  new Date(Date.now() + hoursFromNow * 3600 * 1000)
+    .toISOString().slice(0, 19).replace("T", " ");
+
+async function addRound(rfq_id, { status, endDate }) {
+  const row = await db.one(
+    `INSERT INTO tbl_negotiation_rounds
+       (rfq_id, source_type, source_id, round_number, status, end_date, created_by)
+     VALUES ($1, 'RFQ', $1, 1, $2, $3, $4)
+     RETURNING id`,
+    [rfq_id, status, endDate, EVALUATOR]
+  );
+  inserted.roundIds.push(Number(row.id));
+  return Number(row.id);
+}
+
+describe("POST /rfq/list-view — an ACTIVE negotiation round past its end date", () => {
+  it("a round still 2 hours from its deadline is NOT pending", async () => {
+    // Inside the old 5h30m false-positive window: the IST predicate called
+    // this ended, the sweeper (correctly) did not.
+    const rfq_id = await makeAwaitingQuotesRfq();
+    await addRound(rfq_id, { status: "ACTIVE", endDate: utcNaive(2) });
+
+    const row = rowFor(await listView(EVALUATOR), rfq_id);
+    if (row) {
+      expect(row.pending_reasons.map((r) => r.code)).not.toContain("NEGOTIATION_ROUND_EXPIRED");
+    }
+  });
+
+  it("a round past its deadline and still ACTIVE IS pending for the creator", async () => {
+    const rfq_id = await makeAwaitingQuotesRfq();
+    await addRound(rfq_id, { status: "ACTIVE", endDate: utcNaive(-2) });
+
+    const row = rowFor(await listView(EVALUATOR), rfq_id);
+    expect(row.is_pending_for_me).toBe(true);
+    expect(row.pending_kind).toBe("response");
+    expect(row.pending_reasons.map((r) => r.code)).toContain("NEGOTIATION_ROUND_EXPIRED");
+  });
+
+  it("a round the sweeper already closed is not pending", async () => {
+    const rfq_id = await makeAwaitingQuotesRfq();
+    await addRound(rfq_id, { status: "ENDED", endDate: utcNaive(-2) });
+
+    const row = rowFor(await listView(EVALUATOR), rfq_id);
+    if (row) {
+      expect(row.pending_reasons.map((r) => r.code)).not.toContain("NEGOTIATION_ROUND_EXPIRED");
+    }
+  });
+
+  it("an expired round on someone else's RFQ is not pending for a non-creator", async () => {
+    const rfq_id = await makeAwaitingQuotesRfq({ createdBy: OUTSIDER });
+    await addRound(rfq_id, { status: "ACTIVE", endDate: utcNaive(-2) });
+
+    const row = rowFor(await listView(EVALUATOR), rfq_id);
+    if (row) {
+      expect(row.pending_reasons.map((r) => r.code)).not.toContain("NEGOTIATION_ROUND_EXPIRED");
+    }
   });
 });

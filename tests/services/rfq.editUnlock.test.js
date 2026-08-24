@@ -76,6 +76,7 @@ afterEach(async () => {
   if (!inserted.rfqIds.length) return;
   await db.none(`DELETE FROM tbl_rfq_change_history WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response WHERE tbl_rfq_product_tech_evaluation_clauses_id IN (SELECT c.id FROM tbl_rfq_product_tech_evaluation_clauses c JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id WHERE te.rfq_id = ANY($1::int[]))`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE tbl_rfq_product_tech_evaluation_id IN (SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[]))`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_quote_items WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
@@ -375,4 +376,305 @@ describe("rfqController.update — Step 9: tech-eval-all-failed unlock (restrict
   it.todo(
     "F-NOTIFY-001 (P2): refreshVendors MUST send a vendor-RFQ notification email to each newly-added vendor — today no email fires for the delta-set. Needs jest.unstable_mockModule on approvalEmails.sendVendorRfqNotification (or similar) to capture recipients."
   );
+});
+
+// ===========================================================================
+//  Step 10 — tech-eval-UNSTARTABLE edit-unlock (restricted)
+//
+//  CONFIRMED PRODUCTION DEADLOCK, reproduced from RFQ 536289 (Orchid Hotel
+//  Panchgani, Aug 2026). Six products each carried one technical clause. One of
+//  31 invited vendors submitted a regret, came back and converted it into a
+//  fully-priced 14-line quote via updateQuoteItems — which had no technical
+//  check at all — and answered none of the clauses. Then the bid window closed.
+//
+//  Every downstream gate then held, correctly, and together they welded the RFQ
+//  shut:
+//    * addVendorResponse refuses a technical answer after bid_end_date, so the
+//      vendor could not answer.
+//    * getVendorScoresForTechEval derives its list from response rows, so the
+//      buyer had nobody to score and the Technical Evaluation screen was blank.
+//    * the commercial gate (vendorCondition) drops a vendor from EVERY product
+//      unless they hold a pass somewhere on the RFQ, so all 14 priced lines
+//      read as "awaiting quote".
+//    * assertEditAllowed refused every edit, because "evaluation never started"
+//      matched neither the dead-end nor the tech-stuck unlock branch — so
+//      nobody could re-open the window to let the vendor answer.
+//
+//  The rule these tests pin: when the window has closed and a clause-bearing
+//  product carries a real (non-regret) quote line that no vendor has fully
+//  answered, the creator gets a RESTRICTED edit so they can extend the deadline.
+//  And — the part that matters most — the unlock must NOT fire once a vendor has
+//  actually answered, or it becomes a permanent hole in the bid window.
+// ===========================================================================
+
+describe("rfqController.update — Step 10: tech-eval-unstartable unlock (restricted)", () => {
+  // A technical evaluation that HAS clauses but has NOT been run: no
+  // blocked_insufficient_vendors, no cleared_vendors. This is the shape a
+  // freshly-configured evaluation has, and the shape 536289 was stuck in.
+  async function plantTechEvalWithClauses(rfq_id, productId, { clauseType = "clause", count = 1 } = {}) {
+    const { id: evalId } = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, blocked_insufficient_vendors,
+          total_passed_verified, required_passed_vendors, minimum_passing_score)
+       VALUES ($1, $2, FALSE, 0, 5, 50) RETURNING id`,
+      [rfq_id, productId]
+    );
+    const clauseIds = [];
+    for (let i = 0; i < count; i++) {
+      const { id } = await db.one(
+        `INSERT INTO tbl_rfq_product_tech_evaluation_clauses
+           (tbl_rfq_product_tech_evaluation_id, clause_text, weightage, clause_type)
+         VALUES ($1, $2, 20, $3) RETURNING id`,
+        [evalId, `Ocean Brand clause ${i + 1}`, clauseType]
+      );
+      clauseIds.push(id);
+    }
+    return { evalId, clauseIds };
+  }
+
+  // A quote WITH a line for the given product — the "real commercial interest"
+  // half of the predicate. is_regret=1 carries no interest and must not unlock.
+  async function plantQuoteWithLine(rfq_id, vendorId, productVariantId, { isRegret = 0 } = {}) {
+    const { id: quoteId } = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, is_regret, "timestamp")
+       SELECT $1, rfq_no, $2, $2, 1, $3, NOW() FROM tbl_rfq WHERE id=$1 RETURNING id`,
+      [rfq_id, vendorId, isRegret]
+    );
+    await db.none(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, variant, unit_price,
+          total_price, comment, delivery_period, quantity)
+       SELECT $1, rfq_no, $2, $3, 0, 100, 1000, '', '7', '10'
+         FROM tbl_rfq WHERE id=$1`,
+      [rfq_id, quoteId, productVariantId]
+    );
+    return quoteId;
+  }
+
+  // A quote row with NO line for the clause-bearing product. hasQuotes is true
+  // (so the zero-participation branch does not apply) but there is no
+  // commercial interest in the gated product.
+  async function plantQuoteWithoutLine(rfq_id, vendorId) {
+    return db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
+       SELECT $1, rfq_no, $2, $2, 1, NOW() FROM tbl_rfq WHERE id=$1 RETURNING id`,
+      [rfq_id, vendorId]
+    ).then((r) => r.id);
+  }
+
+  async function answerClauses(clauseIds, vendorId, response = "I Agree") {
+    for (const clauseId of clauseIds) {
+      await db.none(
+        `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+           (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response, "timestamp")
+         VALUES ($1, $2, $3, NOW())`,
+        [clauseId, vendorId, response]
+      );
+    }
+  }
+
+  it("bid past + priced clause-bearing line + NOBODY answered → ALLOWS extending bid_end_date", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const newBid = istString(7 * 86400_000);
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: newBid } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+
+    const after = await db.one(`SELECT bid_end_date FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    expect(after.bid_end_date).toBe(newBid);
+  });
+
+  // THE REGRESSION GUARD. If this ever goes green the unlock has become a
+  // permanent hole in the bid window: any RFQ with a technical evaluation would
+  // stay editable forever, whatever the vendors did.
+  it("bid past + a vendor answered EVERY clause → still refuses the edit", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    const { clauseIds } = await plantTechEvalWithClauses(rfq_id, productId, { count: 2 });
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    await answerClauses(clauseIds, IDS.users.vendor_alpha);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/bid window has closed/i);
+  });
+
+  // Partial answers are not answers: getVendorScoresForTechEval needs the FULL
+  // clause set before is_passed stops being NULL, so one-of-two leaves the
+  // evaluation just as unstartable.
+  it("bid past + a vendor answered only SOME clauses → still unlocks", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    const { clauseIds } = await plantTechEvalWithClauses(rfq_id, productId, { count: 2 });
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    await answerClauses([clauseIds[0]], IDS.users.vendor_alpha);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+  });
+
+  // An empty string / 'N/A' is what a placeholder row carries (see
+  // createEmptyVendorResponses); it is not an answer and must not re-lock.
+  it("bid past + placeholder responses only ('' / 'N/A') → still unlocks", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    const { clauseIds } = await plantTechEvalWithClauses(rfq_id, productId, { count: 2 });
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    await answerClauses([clauseIds[0]], IDS.users.vendor_alpha, "");
+    await answerClauses([clauseIds[1]], IDS.users.vendor_alpha, "N/A");
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(200);
+  });
+
+  // No commercial interest in the gated product → not a deadlock. Without this
+  // condition the flag fired on 37 production RFQs instead of the 1 that was
+  // actually stuck.
+  it("bid past + quote exists but NO line on the clause-bearing product → refuses", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithoutLine(rfq_id, IDS.users.vendor_alpha);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/bid window has closed/i);
+  });
+
+  it("bid past + only a REGRET quote on the product → refuses", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1, { isRegret: 1 });
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/bid window has closed/i);
+  });
+
+  // Sampling clauses are excluded from every other technical count in the
+  // codebase (techEvalQuoteGate, rfqModel's tech_evaluation_status CTEs, both
+  // vendor clients). A sampling-only evaluation asks nothing of the vendor, so
+  // there is nothing for them to be stuck on.
+  it("bid past + SAMPLING-only clauses → refuses (nothing for a vendor to answer)", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId, { clauseType: "sampling" });
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/bid window has closed/i);
+  });
+
+  it("bid past + a vendor already holds a technical PASS → refuses", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    const { evalId } = await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
+         (tbl_rfq_product_tech_evaluation_id, vendor_id, status, is_verified, evaluation_round)
+       VALUES ($1, $2, 1, TRUE, 1)`,
+      [evalId, IDS.users.vendor_beta]
+    );
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: { rfq_id, snapshot: { ...snap, bid_end_date: istString(7 * 86400_000) } },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/bid window has closed/i);
+  });
+
+  // The unlock is RESTRICTED, exactly like the tech-stuck one: extend the
+  // deadline and refresh vendors, nothing else. A creator must not be able to
+  // rewrite the RFQ's terms after bids are in.
+  it("bid past + unstartable → REJECTS modifying any other RFQ field", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: {
+          ...snap,
+          bid_end_date: istString(7 * 86400_000),
+          comment: "rewriting the brief after bids are in",
+        },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit/i);
+
+    const after = await db.one(`SELECT comment FROM tbl_rfq WHERE id=$1`, [rfq_id]);
+    expect(after.comment).toBe("post-bid RFQ");
+  });
+
+  it("bid past + unstartable → REJECTS modifying technical evaluation clauses", async () => {
+    const rfq_id = await makeBidPastRfq();
+    const productId = await attachProduct(rfq_id, 1);
+    await plantTechEvalWithClauses(rfq_id, productId);
+    await plantQuoteWithLine(rfq_id, IDS.users.vendor_alpha, 1);
+    const snap = await fetchSnapshot(rfq_id);
+
+    // Drop the clause the vendor is meant to answer — that would "resolve" the
+    // deadlock by deleting the buyer's own requirement, and is not allowed.
+    const products = (snap.products || []).map((p) => ({ ...p, tech_eval_clauses: [] }));
+    const m = mockExpress({
+      user: { id: IDS.users.a1_proc_buyer },
+      body: {
+        rfq_id,
+        snapshot: { ...snap, bid_end_date: istString(7 * 86400_000), products },
+      },
+    });
+    await rfqController.update(m.req, m.res);
+    expect(m.calls.status).toBe(400);
+    expect(m.calls.body.message).toMatch(/Restricted edit/i);
+  });
 });

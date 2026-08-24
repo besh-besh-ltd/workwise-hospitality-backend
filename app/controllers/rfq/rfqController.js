@@ -63,6 +63,7 @@ import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
 import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
+import { findUnansweredTechEvalLines, unansweredTechEvalMessage } from '../../services/techEvalQuoteGate.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
@@ -6468,11 +6469,82 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck OR dead-end OR a real (non-regret) quote has
-        // already been received. Only bid_end_date + vendor refresh are allowed.
-        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct || hasReceivedQuotes;
+        // 1e. Check for tech-eval-UNSTARTABLE products — the bid window has closed
+        //     and a product carrying technical clauses has a real (non-regret) quote
+        //     line against it, yet not one vendor answered the full clause set. No
+        //     vendor can be scored, so the RFQ-wide commercial gate can never open
+        //     for anybody and the RFQ is stuck permanently.
+        //
+        //     Deliberately a different question from hasTechStuckProduct above,
+        //     which means evaluation RAN and everyone failed. That predicate is also
+        //     read elsewhere to mark products terminally dead; these products are
+        //     alive and simply need the window re-opened so the vendor can answer.
+        //
+        //     Reported on RFQ 536289 (Orchid Panchgani): one vendor priced six
+        //     clause-bearing lines, answered none, and the window then shut. Neither
+        //     existing unlock branch described that state, so the creator could not
+        //     edit the RFQ at all and it could never be recovered. Kept in sync with
+        //     the has_tech_unstartable_product column in rfqModel.js, which drives
+        //     the client-side Edit button through canEditRfq().
+        const hasTechUnstartableProduct = !!(await t.oneOrNone(`
+          SELECT 1
+            FROM tbl_rfq_product_tech_evaluation te_un
+            JOIN tbl_rfq r_un ON r_un.id = te_un.rfq_id
+           WHERE te_un.rfq_id = $1
+             -- bid_end_date is naive-IST text; compare through Asia/Kolkata, never
+             -- bare CURRENT_TIMESTAMP (production's session zone is UTC).
+             AND CAST(NULLIF(TRIM(r_un.bid_end_date), '') AS TIMESTAMP)
+                 <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+             AND EXISTS (
+               SELECT 1
+                 FROM tbl_quote_items qi_un
+                 JOIN tbl_quotes q_un ON q_un.id = qi_un.quote_id
+                 JOIN tbl_rfq_products rp_un ON rp_un.id = te_un.tbl_rfq_product_id
+                WHERE q_un.rfq_id = te_un.rfq_id
+                  AND (q_un.is_regret IS NULL OR q_un.is_regret <> 1)
+                  AND qi_un.product_variant_id = rp_un.product_variant_id
+                  AND COALESCE(qi_un.variant, 0) = COALESCE(rp_un.variant, 0)
+             )
+             AND EXISTS (
+               SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses c_un
+                WHERE c_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND (c_un.clause_type <> 'sampling' OR c_un.clause_type IS NULL)
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv_un
+                WHERE cv_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND cv_un.status = 1
+             )
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM tbl_rfq_product_tech_evaluation_vendors_response vr_un
+                 JOIN tbl_rfq_product_tech_evaluation_clauses c2_un
+                   ON c2_un.id = vr_un.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE c2_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND (c2_un.clause_type <> 'sampling' OR c2_un.clause_type IS NULL)
+                  AND COALESCE(TRIM(vr_un.vendor_response), '') NOT IN ('', 'N/A')
+                GROUP BY vr_un.vendor_id
+               HAVING COUNT(DISTINCT c2_un.id) = (
+                      SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses c3_un
+                       WHERE c3_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                         AND (c3_un.clause_type <> 'sampling' OR c3_un.clause_type IS NULL))
+             )
+           LIMIT 1
+        `, [rfq_id]));
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct, hasReceivedQuotes });
+        // Restricted edit = tech-stuck OR tech-unstartable OR dead-end OR a real
+        // (non-regret) quote has already been received. Only bid_end_date + vendor
+        // refresh are allowed.
+        const isRestrictedEdit =
+          hasTechStuckProduct || hasTechUnstartableProduct || hasDeadEndProduct || hasReceivedQuotes;
+
+        assertEditAllowed(current, userId, {
+          hasQuotes,
+          hasDeadEndProduct,
+          hasTechStuckProduct,
+          hasTechUnstartableProduct,
+          hasReceivedQuotes
+        });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -9077,6 +9149,7 @@ const rfqController = {
         // Fields canEditRfq() needs so the client can gate the Edit button.
         is_quotes_present: r.is_quotes_present, has_dead_end_product: r.has_dead_end_product,
         has_tech_stuck_product: r.has_tech_stuck_product,
+        has_tech_unstartable_product: r.has_tech_unstartable_product,
         action_holders: actionMap[parseInt(r.id)] || null,
         // Approval affordances — let the card render Approve/Review and deep
         // link to the pending instance instead of falling back to Edit/Delete.
@@ -9465,6 +9538,29 @@ const rfqController = {
                 }
               }
             }
+          }
+        }
+
+        // Technical evaluation must be ANSWERED before a line can be quoted —
+        // on EVERY RFQ. The acceptance check below is scoped to reverse
+        // auctions, which left 623 of 675 RFQs with no server-side technical
+        // gate at all; enforcement was effectively browser-only, and both
+        // vendor clients fail open when tech_evaluation_status is absent.
+        // See app/services/techEvalQuoteGate.js for the full account.
+        //
+        // Deliberately a different question from the acceptance check: a vendor
+        // quoting has not been evaluated yet, so `status === 1` cannot be
+        // required here. This asks only whether they answered the clauses.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
           }
         }
 
@@ -15065,6 +15161,23 @@ sendFollowUpEmails: async (req, res) => {
           });
         }
 
+        // Same technical-evaluation gate as createQuote. updateQuoteItems is the
+        // other way a quote reaches the database, and it had NO technical check
+        // of any kind — not even the reverse-auction one — so a vendor could add
+        // or re-price a line on a product whose clauses they never answered.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id: quoteExists[0].rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
+          }
+        }
+
         // Check if past bid end date - but allow if there are active negotiation rounds
         if (bidEndDateTime && now > bidEndDateTime) {
           // Check if any active negotiation round exists for this RFQ
@@ -15088,6 +15201,24 @@ sendFollowUpEmails: async (req, res) => {
              WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
             [quoteExists[0].rfq_id]
           );
+
+          // Does an ACTIVE round raise `documents` at RFQ level? Such a round
+          // names no product, but its ask is answerable from any line's
+          // uploader as well as the quote-wide one, so those lines must be
+          // allowed through the per-product check below.
+          const rfqLevelDocumentsAsk = await db.oneOrNone(
+            `SELECT 1 AS ok
+               FROM tbl_negotiation_rounds nr
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(p_->'vendor_targets','[]'::jsonb)) vt_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vt_->'fields','[]'::jsonb)) f_
+              WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()
+                AND (p_->>'is_rfq_level')::boolean IS TRUE
+                AND lower(f_->>'name') = 'documents'
+              LIMIT 1`,
+            [quoteExists[0].rfq_id]
+          );
+          const hasRfqLevelDocumentsAsk = !!rfqLevelDocumentsAsk;
 
           // Only block if there are NO active negotiation rounds
           if (!activeNegotiationRounds || activeNegotiationRounds.length === 0) {
@@ -15128,10 +15259,29 @@ sendFollowUpEmails: async (req, res) => {
               );
 
               if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
-                return res.status(400).json({
-                  status: 3,
-                  message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
-                });
+                // Exemption: an RFQ-level `documents` round opens every line's
+                // uploader in the vendor wizard. A line carrying attachments is
+                // a legitimate answer to that ask even though the round names
+                // no product, so it must not be rejected here — otherwise the
+                // vendor uploads a file, sees it listed, and loses the whole
+                // submission to a 400.
+                //
+                // Scoped as narrowly as the request allows: only when such a
+                // round is live, and only for lines that actually carry files.
+                // NOTE: the line still arrives with its previously quoted
+                // values (the wizard disables those inputs but re-sends them),
+                // so this does not verify they are unchanged.
+                const answersDocumentsAsk =
+                  hasRfqLevelDocumentsAsk &&
+                  Array.isArray(product.document_files) &&
+                  product.document_files.length > 0;
+
+                if (!answersDocumentsAsk) {
+                  return res.status(400).json({
+                    status: 3,
+                    message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
+                  });
+                }
               }
             }
           }
