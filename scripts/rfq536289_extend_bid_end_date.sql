@@ -3,13 +3,15 @@
 --  Re-open the quote submission window so the vendor can answer the six
 --  technical clauses they never answered.
 --
---  CLIENT-CONFIRMED DEADLINE: 2026-08-26 17:19 IST.
---  Kamat Hotels asked for 26 Aug at the same time of day the window originally
---  closed (11 Aug 17:19), so the new value keeps 17:19 and moves only the date.
+--  APPLIED TO PRODUCTION 2026-08-24 09:41 UTC (15:11 IST).
+--  bid_end_date "2026-08-11 17:19" -> "2026-08-26 17:00", edit_session_id
+--  88ad52ca-1854-4e21-a6d4-609f42d2113c, change_history #2075, lifecycle #13882.
+--  Kamat Hotels asked for 26 Aug 5:00 PM IST.
 --
---  The deadline is still a REQUIRED parameter with no default — it is not baked
---  in, so a re-run after the date has lapsed cannot silently reuse a stale value.
---  Pass it explicitly:  -v new_bid_end_date='2026-08-26 17:19'
+--  Re-running is safe but will REFUSE once the vendor has answered a clause
+--  (Guard 2), which is the expected outcome from here. The deadline stays a
+--  REQUIRED parameter with no default, so a later re-run cannot silently reuse a
+--  stale value:  -v new_bid_end_date='YYYY-MM-DD HH:MM'
 -- ===========================================================================
 --
 --  WHY THIS EXISTS
@@ -57,12 +59,12 @@
 --  ----------
 --    # 1. dry run — guards + before/after, then ROLLBACK. Safe.
 --    psql -h <host> -U postgres -d hospitality_main \
---         -v new_bid_end_date='2026-08-26 17:19' \
+--         -v new_bid_end_date='2026-08-26 17:00' \
 --         -f scripts/rfq536289_extend_bid_end_date.sql
 --
 --    # 2. for real — same command plus -v commit=yes
 --    psql -h <host> -U postgres -d hospitality_main \
---         -v new_bid_end_date='2026-08-26 17:19' -v commit=yes \
+--         -v new_bid_end_date='2026-08-26 17:00' -v commit=yes \
 --         -f scripts/rfq536289_extend_bid_end_date.sql
 --
 --  Without -v commit=yes the transaction rolls back, so the dry run is the
