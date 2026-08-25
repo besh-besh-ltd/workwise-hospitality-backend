@@ -84,6 +84,25 @@ const MAX_AGE_DAYS = valueOf('--max-age-days') ? Number(valueOf('--max-age-days'
 const INCLUDE_DEAD = has('--include-dead');
 const VERIFY = has('--verify');
 
+// Non-interactive confirmation.
+//
+// The prompts below are for a human at a terminal. They cannot be answered by
+// piping: Node's readline promise API never settles a SECOND question once
+// stdin has hit EOF, so `printf 'name\nyes\n' | ...` hangs at the second gate
+// and the run winds down having written nothing. (Safely — but silently.)
+//
+// So a non-interactive run states its intent on the command line instead, where
+// it is explicit, lands in shell history, and can be read back afterwards:
+//
+//   --confirm-db hospitality_main --yes
+//
+// Both are required together, and --confirm-db still has to match the database
+// actually connected — the whole point of the gate is that the target is named
+// deliberately rather than inherited from an environment variable.
+const CONFIRM_DB = valueOf('--confirm-db');
+const ASSUME_YES = has('--yes');
+const NON_INTERACTIVE = Boolean(CONFIRM_DB) || ASSUME_YES;
+
 // When the document was last written.
 //
 // `po_document_generated_at` is authoritative but only exists after migration
@@ -237,11 +256,21 @@ async function showConnection() {
   return { ...row, isProd };
 }
 
+// ONE readline interface for the whole run, closed at the end.
+//
+// This used to open and close a fresh interface per question. Interactively
+// that works; on piped stdin it does not — closing the first interface ends the
+// stream, so the second question reads EOF, returns '', and the run aborts.
+// Safely, as it happens: the abort lands before any write and before the revert
+// journal. But a two-gate confirmation that cannot be answered non-interactively
+// is a gate that just fails shut, and this script has to be runnable from a
+// deploy shell as well as by hand.
+let sharedRl = null;
+const rl = () => (sharedRl ??= readline.createInterface({ input: process.stdin, output: process.stdout }));
+const closeRl = () => { sharedRl?.close(); sharedRl = null; };
+
 async function ask(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await rl.question(question);
-  rl.close();
-  return answer.trim();
+  return (await rl().question(question)).trim();
 }
 
 const confirm = async (question) => (await ask(question)).toLowerCase() === 'yes';
@@ -297,6 +326,21 @@ async function doRepair(rows, conn) {
   report(rows);
   warnAbout(rows);
 
+  // Non-interactive: both flags, and the named database must be the one we are
+  // actually connected to.
+  if (NON_INTERACTIVE) {
+    if (!CONFIRM_DB || !ASSUME_YES) {
+      console.log('\nNon-interactive runs need BOTH --confirm-db <name> and --yes. Nothing was written.');
+      return;
+    }
+    if (CONFIRM_DB !== conn.db) {
+      console.log(`\n--confirm-db said "${CONFIRM_DB}" but this connection is to "${conn.db}". Nothing was written.`);
+      return;
+    }
+    console.log(`\nNon-interactive: --confirm-db ${CONFIRM_DB} --yes. Proceeding on ${rows.length} PO(s).`);
+    return runRebuild(rows);
+  }
+
   // Two gates on production, one everywhere else. Typing the database name is
   // the difference between "yes" muscle-memory and actually reading which
   // system you are about to rewrite.
@@ -317,6 +361,10 @@ async function doRepair(rows, conn) {
     return;
   }
 
+  return runRebuild(rows);
+}
+
+async function runRebuild(rows) {
   // Journal BEFORE the first write, so an interrupted run is still revertible.
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const journalPath = path.resolve(process.cwd(), `po-doc-revert-${stamp}.json`);
@@ -428,4 +476,12 @@ main()
     console.error(err);
     process.exitCode = 1;
   })
-  .finally(() => process.exit(process.exitCode || 0));
+  .finally(async () => {
+    // Release the readline handle and the pg pool, then let Node exit on its
+    // own. This used to call process.exit(), which does not flush pending
+    // stdout writes to a pipe — so the tail of the run (the per-PO results and
+    // the revert-journal path, i.e. exactly the record you need afterwards)
+    // was silently truncated whenever the output was piped.
+    closeRl();
+    await db.$pool.end().catch(() => {});
+  });
