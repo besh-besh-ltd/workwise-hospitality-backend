@@ -107,3 +107,28 @@ nodemailer.createTransport = function stubCreateTransport() {
     close() {},
   };
 };
+
+// Stub the S3 client and the PDF renderer, for the same reason nodemailer is
+// stubbed above: they are external services, and the test env has neither real
+// credentials nor a reason to launch Chromium a few hundred times.
+//
+// This became necessary when PO document generation stopped swallowing its own
+// failures. Before that, `regeneratePODocument` caught everything and returned
+// null, so every test that approved a PO was silently generating no document
+// at all and passing anyway — the same silence that put sixteen stale
+// documents in front of clients was hiding the gap in the test suite too.
+//
+// Everything except the two external calls still runs for real: the template
+// data build, the Handlebars render, the URL validation, the database write.
+import s3Client from "../../app/config/s3config.js";
+s3Client.send = async function stubbedS3Send() {
+  return { ETag: '"test-stub-etag"', $metadata: { httpStatusCode: 200 } };
+};
+
+import fs from "fs";
+import { pdfRenderer } from "../../app/util/pdfRenderer.js";
+pdfRenderer.renderToFile = async function stubbedRenderToFile(html, outputPath) {
+  // A real file, because uploadToS3 reads it back off disk.
+  fs.writeFileSync(outputPath, `%PDF-1.4 test stub (${Buffer.byteLength(html)} bytes of HTML)\n`);
+  return outputPath;
+};

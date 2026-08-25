@@ -29,11 +29,13 @@ afterAll(async () => {
 const INITIATOR = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_poApp;
 
-const created = { instanceIds: [], stepIds: [] };
+const created = { instanceIds: [], stepIds: [], poIds: [], rfqIds: [] };
 
 beforeEach(async () => {
   created.instanceIds = [];
   created.stepIds = [];
+  created.poIds = [];
+  created.rfqIds = [];
   await db.none(
     `DELETE FROM tbl_notifications
       WHERE COALESCE(recipient_user_id, sender_user_id) = ANY($1::int[])`,
@@ -53,7 +55,54 @@ afterEach(async () => {
       WHERE COALESCE(recipient_user_id, sender_user_id) = ANY($1::int[])`,
     [[INITIATOR, APPROVER]]
   );
+  if (created.poIds.length) {
+    await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [created.poIds]);
+  }
+  if (created.rfqIds.length) {
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [created.rfqIds]);
+    await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [created.rfqIds]);
+  }
 });
+
+let PO_SEQ = 9_600_000;
+
+/**
+ * A real purchase order row.
+ *
+ * Most tests here get away with a synthetic entity_id because a REJECT only
+ * logs "PO not found" and moves on. An APPROVE no longer can: a PO approval now
+ * generates its document inside the approval transaction, and a PO that does
+ * not exist cannot produce one, so the approval correctly fails. The instance
+ * has to point at something real.
+ */
+async function makeRealPo() {
+  const rfqNo = ++PO_SEQ;
+  const rfq = await db.one(
+    `INSERT INTO tbl_rfq (rfq_no, comment, company_name, response_email, contact_name,
+                          contact_number, bid_end_date, location, is_published, status,
+                          created_by, updated_by, "timestamp", hospitality_company_id,
+                          hotel_id, process_id, is_tender, title)
+     VALUES ($1,'','','b@t','b','0', NOW() + INTERVAL '7 days','Mumbai',1,1,$2,$2,NOW(),$3,$4,$5,0,$6)
+     RETURNING id`,
+    [rfqNo, INITIATOR, IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1, `Notif RFQ ${rfqNo}`]
+  );
+  created.rfqIds.push(rfq.id);
+
+  const product = await db.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1,'','','','','',1,0) RETURNING id`,
+    [rfq.id]
+  );
+
+  const po = await db.one(
+    `INSERT INTO tbl_rfq_purchase_order (rfq_id, rfq_product_id, po_number, company_id, status,
+                                         quantity, unit_price, finalized_vendor_id, total_value, created_at)
+     VALUES ($1,ARRAY[$2::int],$3,$4,'pending_approval',5,100,$5,500,NOW()) RETURNING id, po_number`,
+    [rfq.id, product.id, `NOTIF-${++PO_SEQ}`, IDS.companies.A, IDS.users.vendor_alpha]
+  );
+  created.poIds.push(po.id);
+  return po;
+}
 
 // A minimal PENDING instance with one step and one approver — enough for the
 // engine to accept a decision on it.
@@ -199,10 +248,11 @@ describe("rejection tells the initiator", () => {
 
 describe("approval tells the initiator too", () => {
   it("notifies when the instance clears every step", async () => {
+    const po = await makeRealPo();
     const { instanceId, stepId } = await makePendingApproval({
       entityType: "PO",
-      entityId: 999004,
-      metadata: { po_number: "PO-9", po_id: 61, rfq_id: 359 },
+      entityId: po.id,
+      metadata: { po_number: "PO-9", po_id: po.id, rfq_id: 359 },
     });
 
     const { executeApprovalAction } = await import(

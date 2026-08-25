@@ -16,8 +16,19 @@
 // through the dispatcher a day later and did not.
 //
 // The rule these tests pin: executeApprovalAction regenerates the PO document on
-// every APPROVE, before the post-action that emails it, and never lets a
-// regeneration failure surface as a failed approval.
+// every APPROVE, before the post-action that emails it.
+//
+// UPDATED 2026-08-25. These tests originally also pinned "a regeneration
+// failure never fails the committed approval". That rule was wrong, and the
+// production data says why: sixteen POs in hospitality_main carry a document
+// written before their own final approval, and on 2026-08-24 one approver
+// clicked Approve four times on PO 501 because each attempt reported success
+// and changed nothing. Carrying on past a failed document is what produced
+// every one of those.
+//
+// A PO approval is now all-or-nothing — see
+// tests/services/po.approvalDocumentAtomicity.test.js — so the last test in
+// this file asserts the opposite of what it used to.
 
 import { jest } from "@jest/globals";
 
@@ -30,16 +41,27 @@ let regenImpl = async (poId) => { regenCalls.push(poId); return "https://s3/po.p
 jest.unstable_mockModule("../../app/models/generalModel.js", () => ({
   submitApprovalAction: async () => actionResult,
   getApprovalInstanceById: async () => instanceRow,
+  notifyNextApprovalStep: async () => {},
 }));
 
-jest.unstable_mockModule("../../app/models/purchaseOrderModel.js", () => ({
-  regeneratePODocument: (...a) => regenImpl(...a),
+// The PO path runs inside a transaction it owns. `conn.tx(fn)` here just runs
+// the body — the real rollback semantics are covered against Postgres in
+// po.approvalDocumentAtomicity.test.js; this suite is about ordering.
+jest.unstable_mockModule("../../app/config/dbConn.js", () => ({
+  default: { tx: async (fn) => fn({ __tx: true }) },
+  pgp: {},
+}));
+
+jest.unstable_mockModule("../../app/services/poDocumentService.js", () => ({
+  writePoDocument: (...a) => regenImpl(...a),
 }));
 
 // The post-action must observe a PDF that already includes this approver.
 jest.unstable_mockModule("../../app/controllers/po/purchaseOrderController.js", () => ({
-  handlePOPostApproval: async () => { dispatchCalls.push({ after: regenCalls.length }); },
-  handlePORejectionByInstance: async () => { dispatchCalls.push({ after: regenCalls.length }); },
+  handlePOPostApproval: async (_id, _user, ctx = {}) =>
+    { dispatchCalls.push({ after: regenCalls.length, txContext: ctx.txContext }); },
+  handlePORejectionByInstance: async (_id, _user, ctx = {}) =>
+    { dispatchCalls.push({ after: regenCalls.length, txContext: ctx.txContext }); },
 }));
 
 jest.unstable_mockModule("../../app/services/notificationService.js", () => ({
@@ -102,8 +124,39 @@ describe("PO document regeneration on approval", () => {
     expect(regenCalls).toEqual([]);
   });
 
-  it("a regeneration failure never fails the committed approval", async () => {
+  it("dispatches a REJECT post-commit, not inside a transaction", async () => {
+    // A rejection produces no document, so there is nothing for it to be
+    // atomic with — and handlePORejectionByInstance opens its OWN transaction
+    // and re-reads the instance to confirm it is REJECTED. Called from inside
+    // an uncommitted transaction, that read still sees PENDING on its separate
+    // connection, so it returns early and the vendor de-finalization never
+    // happens. REJECT therefore stays on the post-commit path, where it worked.
+    actionResult = { status: "REJECTED", instance_status: "REJECTED" };
+    await executeApprovalAction({
+      approval_instance_id: 4218, approver_user_id: 42, action: "REJECT", comment: "no",
+    });
+    expect(dispatchCalls).toHaveLength(1);
+    expect(dispatchCalls[0].txContext).toBeUndefined();
+  });
+
+  it("dispatches a terminal APPROVE inside the approval transaction", async () => {
+    // The other half of the same rule: the status transition must commit with
+    // the decision and the document, so it needs the transaction.
+    await approve();
+    expect(dispatchCalls[0].txContext).toBeDefined();
+  });
+
+  it("fails the approval when the document cannot be generated", async () => {
+    // Reversed deliberately. An approval that cannot produce its document must
+    // not be reported as done — that is how PO 501 got approved four times
+    // against a document from two days earlier.
     regenImpl = async () => { throw new Error("S3 unreachable"); };
-    await expect(approve()).resolves.toMatchObject({ instance_status: "APPROVED" });
+    await expect(approve()).rejects.toThrow(/S3 unreachable/);
+  });
+
+  it("does not run the post-action when the document fails", async () => {
+    regenImpl = async () => { throw new Error("S3 unreachable"); };
+    await expect(approve()).rejects.toThrow();
+    expect(dispatchCalls).toEqual([]);
   });
 });

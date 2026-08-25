@@ -78,15 +78,28 @@ if (EMIT_MATRIX && unmatched.length === 0 && duplicated.length === 0) {
   // One matrix entry per job. A shard with `split: n` becomes n jobs that carve
   // the same pattern up with Jest's own --shard, which is exhaustive by
   // construction, so the guard above only has to reason about the pattern layer.
+  // `needsChromium` is carried through so the workflow can install a browser
+  // only where one is actually used (see tests/shards.json). GitHub drops
+  // matrix keys that are absent, so it is emitted as a string on every entry
+  // rather than conditionally — `if: matrix.needsChromium == 'true'` then reads
+  // the same on all shards instead of being undefined on most of them.
+  const entry = (s, extra) => ({
+    name: s.name,
+    pattern: s.pattern,
+    needsChromium: s.needsChromium ? "true" : "false",
+    ...extra,
+  });
+
   const include = compiled.flatMap((s) =>
     s.split
-      ? Array.from({ length: s.split }, (_, i) => ({
-          name: `${s.name}-${i + 1}`,
-          pattern: s.pattern,
-          jestShard: `${i + 1}/${s.split}`,
-          suites: `~${Math.ceil(s.matches.length / s.split)}`,
-        }))
-      : [{ name: s.name, pattern: s.pattern, jestShard: "", suites: String(s.matches.length) }]
+      ? Array.from({ length: s.split }, (_, i) =>
+          entry(s, {
+            name: `${s.name}-${i + 1}`,
+            jestShard: `${i + 1}/${s.split}`,
+            suites: `~${Math.ceil(s.matches.length / s.split)}`,
+          })
+        )
+      : [entry(s, { jestShard: "", suites: String(s.matches.length) })]
   );
   process.stdout.write(JSON.stringify({ include }));
   process.exit(0);

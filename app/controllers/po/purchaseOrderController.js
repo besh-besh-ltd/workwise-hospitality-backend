@@ -2,7 +2,9 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
-import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
+import { executePoApprovalAtomically } from "../../services/poApprovalService.js";
+import { writePoDocument, PoDocumentError } from "../../services/poDocumentService.js";
+import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, notifyNextApprovalStep } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
@@ -583,88 +585,116 @@ export const approvePO = async (req, res) => {
       if (!(await isAssignedPoApprover(userId, po_id))) return sendPoAccessError(res, err);
     }
 
+    // The PO header is read before any transaction opens: the two workflows
+    // below own their commits differently, and neither needs this lookup inside
+    // one.
+    const po = await db.oneOrNone(`
+      SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
+      FROM tbl_rfq_purchase_order WHERE id = $1
+    `, [po_id]);
+
+    if (!po) {
+      return res.status(404).json({ status: 2, message: 'Purchase order not found.' });
+    }
+
+    // ── NEW APPROVAL WORKFLOW ───────────────────────────────────────────────
+    //
+    // All-or-nothing: the decision and the PO document commit together, or
+    // neither does.
+    //
+    // This used to sit inside a `db.tx` that only LOOKED atomic.
+    // `submitApprovalAction` opened its own transaction on a second connection
+    // and committed independently, so by the time the document was attempted
+    // the approval was already durable — and the document write was wrapped in
+    // a catch that logged and carried on regardless. Sixteen production POs
+    // ended up with a document that predates their own final approval, and the
+    // approvers were told the approval had succeeded.
+    //
+    // executePoApprovalAtomically runs both on one transaction. A document that
+    // cannot be produced now rolls the approval back and the approver is asked
+    // to try again, which is the guarantee the client asked for.
+    if (po.approval_instance_id) {
+      let actionResult;
+      try {
+        actionResult = await executePoApprovalAtomically(
+          {
+            po_id: Number(po_id),
+            approval_instance_id: po.approval_instance_id,
+            approver_user_id: userId,
+            action: decision === 'approved' ? 'APPROVE' : 'REJECT',
+            comment: remarks || '',
+          },
+          {
+            writeDocument: writePoDocument,
+
+            // Inside the transaction, so a failure here rolls the decision back
+            // too — the reverse split-brain the old code could produce, where
+            // the post-action threw and the outer transaction discarded the PO
+            // status transition while the approval stayed APPROVED.
+            postAction: async (tx, result) => {
+              if (result.instance_status === 'APPROVED') {
+                await handlePOPostApproval(po.approval_instance_id, userId, { txContext: tx });
+              } else if (result.instance_status === 'REJECTED') {
+                await tx.none(`
+                  UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
+                `, [po_id]);
+                await handlePORejection(po, userId, tx);
+              }
+            },
+
+            afterCommit: async (result) => {
+              await notifyNextApprovalStep(po.approval_instance_id, result);
+            },
+          }
+        );
+      } catch (err) {
+        // The approval did not happen. Say so plainly enough that the approver
+        // knows to retry rather than assuming it went through — the silence
+        // here is what had people clicking Approve four times.
+        //
+        // Only a document failure gets the retry wording. An authorization
+        // problem or a dead connection also lands here, and telling someone to
+        // approve again when the real problem is that they cannot would just be
+        // a different kind of misleading.
+        logError(`PO ${po_id} approval rolled back`, err);
+
+        if (err instanceof PoDocumentError) {
+          return res.status(503).json({
+            status: 0,
+            message:
+              'The purchase order document could not be generated, so the approval was not recorded. ' +
+              'Nothing has changed. Please try approving again.',
+            error_code: 'PO_DOCUMENT_GENERATION_FAILED',
+          });
+        }
+
+        throw err;
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message:
+          actionResult.instance_status === 'APPROVED'
+            ? 'Purchase order approved and finalized.'
+            : actionResult.instance_status === 'REJECTED'
+            ? 'Purchase order rejected successfully.'
+            : 'Approval action recorded, waiting for more approvers.',
+        data: {
+          instance_status: actionResult.instance_status,
+          step_status: actionResult.status,
+          next_step: actionResult.next_step,
+          approval_type: 'new',
+        },
+      });
+    }
+
     // Respond-AFTER-commit. Every exit below returns a deferred-response marker
     // instead of writing to `res` inside the transaction: emitting the response
     // mid-tx flushes it before pg-promise issues COMMIT, so the approver's next
     // read can still see the pre-approval PO, and a COMMIT failure could never
-    // be reported (headers already sent → the 500 below is unreachable). The
+    // be reported (headers already sent -> the 500 below is unreachable). The
     // markers resolve the callback normally, so the same work commits as before.
     const txOutcome = await db.tx(async t => {
-        // Check if PO uses new approval workflow (has approval_instance_id)
-        const po = await t.oneOrNone(`
-          SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
-          FROM tbl_rfq_purchase_order WHERE id = $1
-        `, [po_id]);
-
-        if (!po) {
-          return deferJson(404, {
-            status: 2,
-            message: 'Purchase order not found.'
-          });
-        }
-
-        // NEW APPROVAL WORKFLOW
-        if (po.approval_instance_id) {
-          // NOTE: this dedicated endpoint uses the raw submitApprovalAction
-          // model function (NOT executeApprovalAction) because the post-action
-          // handlers must run AFTER regeneratePODocument so that the PDF
-          // emailed by handlePOPostApproval includes the latest approver. The
-          // dispatcher in approvalActionService cannot inject the PDF
-          // regeneration step between submitApprovalAction and the post-action,
-          // so we keep the explicit ordering here.
-          //
-          // Other approval surfaces (RFQ Lifecycle Journey, generic action
-          // endpoint) go through executeApprovalAction and the dispatcher,
-          // which correctly handles the PO status transition — they just
-          // don't regenerate the PDF, which is acceptable because the
-          // dedicated endpoint is the canonical PO approval surface.
-          const actionResult = await submitApprovalAction({
-            approval_instance_id: po.approval_instance_id,
-            approver_user_id: userId,
-            action: decision === 'approved' ? 'APPROVE' : 'REJECT',
-            comment: remarks || ''
-          });
-
-          // Regenerate PO document on every approval step to update approver statuses
-          // Must happen BEFORE post-approval so the emailed PDF includes the latest approver
-          if (decision === 'approved') {
-            try {
-              await regeneratePODocument(po_id, t);
-            } catch (err) {
-              logError('Failed to regenerate PO document', err);
-            }
-          }
-
-          // Handle post-approval actions
-          if (actionResult.instance_status === 'APPROVED') {
-            await handlePOPostApproval(po.approval_instance_id, userId, { txContext: t });
-          } else if (actionResult.instance_status === 'REJECTED') {
-            // Update PO status to rejected
-            await t.none(`
-              UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
-            `, [po_id]);
-
-            // Handle rejection cleanup (move finalization to history)
-            await handlePORejection(po, userId, t);
-          }
-
-          return deferJson(200, {
-            status: 1,
-            message:
-              actionResult.instance_status === 'APPROVED'
-                ? 'Purchase order approved and finalized.'
-                : actionResult.instance_status === 'REJECTED'
-                ? 'Purchase order rejected successfully.'
-                : 'Approval action recorded, waiting for more approvers.',
-            data: {
-              instance_status: actionResult.instance_status,
-              step_status: actionResult.status,
-              next_step: actionResult.next_step,
-              approval_type: 'new'
-            }
-          });
-        }
-
         // OLD APPROVAL WORKFLOW (backward compatibility for non-hospitality POs)
         // 1. Get the matching approval transaction by looking into the meta
         const trx = await t.oneOrNone(
@@ -696,14 +726,15 @@ export const approvePO = async (req, res) => {
           t,
         });
 
-        // Regenerate PO document to update approval section (on each successful approval)
-        // Must happen BEFORE fetching purchaseOrder so notification gets the latest po_pdf_url
+        // Regenerate the PO document to update the approval section.
+        // Must happen BEFORE fetching purchaseOrder so the notification carries
+        // the latest po_pdf_url.
+        //
+        // Uncaught on purpose. Unlike the new workflow, `approveRequest` above
+        // runs on THIS transaction, so a throw here genuinely rolls the legacy
+        // approval back — same all-or-nothing rule, no extra machinery needed.
         if (decision === 'approved') {
-          try {
-            await regeneratePODocument(po_id, t);
-          } catch (err) {
-            logError('Failed to regenerate PO document', err);
-          }
+          await regeneratePODocument(po_id, t);
         }
 
         const purchaseOrder = await t.oneOrNone(`

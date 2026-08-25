@@ -23,8 +23,46 @@ const nextEntityId = () => ++ENTITY_ID;
 // up via afterEach.
 
 const insertedInstanceIds = [];
+const insertedPoIds = [];
+const insertedRfqIds = [];
+
+// A PO approval instance needs a PO behind it.
+//
+// This used to point at a synthetic entity_id with no row behind it, which
+// passed only because document regeneration silently skipped a PO it could not
+// find. It no longer does — a PO approval that cannot produce its document
+// rolls back — so the fixture now has to be as real as the path it drives.
+async function createPoCommitted() {
+  const rfqNo = nextEntityId();
+  const rfq = await db.one(
+    `INSERT INTO tbl_rfq (rfq_no, comment, company_name, response_email, contact_name,
+                          contact_number, bid_end_date, location, is_published, status,
+                          created_by, updated_by, "timestamp", hospitality_company_id,
+                          hotel_id, process_id, is_tender, title)
+     VALUES ($1,'','','b@t','b','0', NOW() + INTERVAL '7 days','Mumbai',1,1,$2,$2,NOW(),$3,$4,$5,0,$6)
+     RETURNING id`,
+    [rfqNo, IDS.users.a1_proc_buyer, IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1, `Smoke RFQ ${rfqNo}`]
+  );
+  insertedRfqIds.push(rfq.id);
+
+  const product = await db.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1,'','','','','',1,0) RETURNING id`,
+    [rfq.id]
+  );
+
+  const po = await db.one(
+    `INSERT INTO tbl_rfq_purchase_order (rfq_id, rfq_product_id, po_number, company_id, status,
+                                         quantity, unit_price, finalized_vendor_id, total_value, created_at)
+     VALUES ($1,ARRAY[$2::int],$3,$4,'pending_approval',10,100,$5,1000,NOW()) RETURNING id`,
+    [rfq.id, product.id, `SMOKE-${rfqNo}`, IDS.companies.A, IDS.users.vendor_alpha]
+  );
+  insertedPoIds.push(po.id);
+  return po.id;
+}
+
 async function createInstanceCommitted({ entity_type = "RFQ", policy_id }) {
-  const entity_id = nextEntityId();
+  const entity_id = entity_type === "PO" ? await createPoCommitted() : nextEntityId();
   const result = await createApprovalInstance({
     entity_type,
     entity_id,
@@ -60,6 +98,13 @@ afterAll(async () => {
       `DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`,
       [insertedInstanceIds]
     );
+  }
+  if (insertedPoIds.length) {
+    await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [insertedPoIds]);
+  }
+  if (insertedRfqIds.length) {
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [insertedRfqIds]);
+    await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [insertedRfqIds]);
   }
   // closeDb LAST so cleanup queries above can still use the pool.
   await closeDb();

@@ -55,7 +55,16 @@
     {
       "name": "po-pricing",
       "pattern": "tests/services/(po\\.|poTemplate|pricing|quote)",
-      "description": "Purchase orders, PO templates, the pricing engine, and quote submission/compare"
+      "description": "Purchase orders, PO templates, the pricing engine, and quote submission/compare",
+      "needsChromium": true,
+      "$chromium": [
+        "po.documentEndToEnd.test.js renders a real PO through the real Handlebars",
+        "template and a real Chromium, so this shard installs the browser that the",
+        "other eight deliberately skip. That test exists because PO document",
+        "generation is now STRICT — a template that throws no longer means a stale",
+        "PDF, it means the approval fails — and a stubbed renderer cannot catch a",
+        "broken template."
+      ]
     },
     {
       "name": "security-approval",

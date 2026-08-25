@@ -745,6 +745,28 @@ export const startRfqStuckPublishWatchdog = () => {
   logger.info('[RFQ Watchdog] Cron scheduled: every 5 minutes (grace=2m, max-attempts-before-email=3)');
 };
 
+// ============= PO DOCUMENT WATCHDOG =============
+
+/**
+ * Repairs POs whose stored document is older than their own latest approval.
+ *
+ * The approval transaction stops new ones appearing; this catches what that
+ * rule cannot reach — the POs already damaged, and documents written outside
+ * an approval where a failure has nothing to roll back. Same shape as the RFQ
+ * publish watchdog above: find, retry, escalate.
+ */
+export const startPoDocumentWatchdog = () => {
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { runPoDocumentWatchdogTick } = await import('../services/poDocumentWatchdog.js');
+      await runPoDocumentWatchdogTick();
+    } catch (err) {
+      logError('[PO Document Watchdog] Cron tick failed', err);
+    }
+  });
+  logger.info('[PO Document Watchdog] Cron scheduled: every 5 minutes (grace=5m, max-attempts-before-escalation=5)');
+};
+
 // ============= VENDOR PO ACCEPTANCE REMINDERS =============
 
 /**

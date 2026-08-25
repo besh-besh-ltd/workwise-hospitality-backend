@@ -148,9 +148,10 @@ jobs:
           --health-retries=20
 
     env:
-      # Skip Chromium download — no test exercises the puppeteer code paths
-      # (ARC PDF generation, etc. are not covered by the integration suite).
-      # Both var names set to cover puppeteer pre-22 / 22+.
+      # Skip Chromium on `npm ci` for every shard. One shard needs a browser and
+      # installs it explicitly below (matrix.needsChromium in tests/shards.json);
+      # the other eight never render anything and should not pay for the
+      # download. Both var names cover puppeteer pre-22 / 22+.
       PUPPETEER_SKIP_DOWNLOAD: 'true'
       PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
       # Belt-and-suspenders. jestEnv.js / envguard.js also force this.
@@ -217,6 +218,28 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
+
+      # PO document generation is STRICT: a template that throws no longer
+      # leaves a stale PDF, it fails the approver's approval. A stubbed renderer
+      # cannot catch a broken template, so po.documentEndToEnd.test.js drives a
+      # real Chromium — and this is the only shard that does.
+      - name: Cache Chromium
+        if: matrix.needsChromium == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium
+        if: matrix.needsChromium == 'true'
+        env:
+          # The job-level skip flags exist to keep Chromium out of `npm ci`.
+          # Clear them here or they would suppress this deliberate install too,
+          # and the shard would fail with "Could not find Chrome" exactly as if
+          # the step were missing.
+          PUPPETEER_SKIP_DOWNLOAD: 'false'
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'false'
+        run: npx puppeteer browsers install chrome
 
       - name: Wait for Postgres
         # Actions already blocks the first step until the service container's
