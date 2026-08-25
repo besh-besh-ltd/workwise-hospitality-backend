@@ -285,6 +285,61 @@ describe("PO document watchdog", () => {
     });
   });
 
+  it("ignores a PO whose approval was rejected", async () => {
+    // Found by running the report against production. Staleness is measured
+    // against the last APPROVED action, so a PO that collected two approvals
+    // and was then REJECTED looks stale forever: the reject never rewrites the
+    // document, by design, and never will.
+    //
+    // Four of the sixteen damaged production POs are exactly this. They are
+    // dead purchase orders, and without this the watchdog would rebuild their
+    // documents every five minutes for the rest of time.
+    await withTx(async (t) => {
+      const poId = await makeApprovedPo(t, {
+        pdfAtMs: now - 3 * HOUR,
+        approvedAtMs: now - 2 * HOUR,
+        status: "rejected",
+      });
+      await t.none(
+        `UPDATE tbl_approval_instances SET status = 'REJECTED'
+          WHERE id = (SELECT approval_instance_id FROM tbl_rfq_purchase_order WHERE id = $1)`,
+        [poId]
+      );
+
+      const result = await tick(t);
+
+      expect(result.examined).not.toContain(poId);
+    });
+  });
+
+  it("ignores a cancelled PO", async () => {
+    await withTx(async (t) => {
+      const poId = await makeApprovedPo(t, {
+        pdfAtMs: now - 3 * HOUR,
+        approvedAtMs: now - 2 * HOUR,
+        status: "cancelled",
+      });
+
+      const result = await tick(t);
+
+      expect(result.examined).not.toContain(poId);
+    });
+  });
+
+  it("ignores a PO the vendor rejected", async () => {
+    await withTx(async (t) => {
+      const poId = await makeApprovedPo(t, {
+        pdfAtMs: now - 3 * HOUR,
+        approvedAtMs: now - 2 * HOUR,
+        status: "rejected_by_vendor",
+      });
+
+      const result = await tick(t);
+
+      expect(result.examined).not.toContain(poId);
+    });
+  });
+
   it("stands down quietly when its columns have not been migrated yet", async () => {
     // Same deploy-order reality as poDocumentService: deploy-prod.yml has no
     // migration step, so the container can run ahead of the schema. The

@@ -46,6 +46,15 @@ const BATCH_LIMIT = 25;           // bounded work per tick
 // scripts/repair_stale_po_documents.mjs.
 const MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
+// Purchase orders nothing will act on again.
+//
+// Staleness is measured against the last APPROVED action, so a PO that
+// collected two approvals and was then REJECTED reads as permanently stale: a
+// reject never rewrites the document, by design, and never will. Four of the
+// sixteen damaged production POs are exactly that shape — dead orders whose
+// documents would otherwise be rebuilt every five minutes forever.
+const DEAD_PO_STATUSES = ['draft', 'rejected', 'rejected_by_vendor', 'cancelled'];
+
 // Reads the write time of the stored document: the stamped column if present,
 // else the millisecond timestamp in the S3 key.
 const PDF_WRITTEN_AT_SQL = `
@@ -131,9 +140,12 @@ export async function runPoDocumentWatchdogTick({
              po.po_document_attempts, po.po_document_failure_notified_at,
              la.acted_at AS last_approval_at
         FROM tbl_rfq_purchase_order po
+        JOIN tbl_approval_instances ai ON ai.id = po.approval_instance_id
         JOIN last_approval la ON la.approval_instance_id = po.approval_instance_id
        WHERE po.approval_instance_id IS NOT NULL
-         AND po.status <> 'draft'
+         AND po.status::text <> ALL ($4::text[])
+         -- A rejected or cancelled approval will never rewrite its document.
+         AND ai.status <> ALL (ARRAY['REJECTED', 'CANCELLED'])
          -- past the grace window: not a live approval still finishing
          AND la.acted_at < to_timestamp($1::bigint / 1000.0) AT TIME ZONE 'UTC' - ($2::text || ' milliseconds')::interval
          AND (
@@ -145,7 +157,7 @@ export async function runPoDocumentWatchdogTick({
        ORDER BY la.acted_at DESC
        LIMIT $3
       `,
-      [String(clock()), String(graceMs), limit]
+      [String(clock()), String(graceMs), limit, DEAD_PO_STATUSES]
     );
   } catch (err) {
     logError('[PO Document Watchdog] Could not scan for stale documents', err);

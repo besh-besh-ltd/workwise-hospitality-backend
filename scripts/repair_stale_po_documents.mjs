@@ -18,11 +18,15 @@
  *      the change, so `--revert` puts them all back exactly.
  *
  * Modes:
- *   --stale   (default) only POs whose document predates their latest approval
- *   --all               every non-draft PO with an approval instance
+ *   --stale         (default) only POs whose document predates their latest approval
+ *   --all           every live PO with an approval instance
+ *   --include-dead  also consider rejected / cancelled POs (normally skipped:
+ *                   a reject never rewrites its document, so they read as
+ *                   permanently stale and rebuilding them is churn)
  *
  * Usage:
  *   node scripts/repair_stale_po_documents.mjs                      # report, stale only
+ *   node scripts/repair_stale_po_documents.mjs --verify             # render each locally, write nothing
  *   node scripts/repair_stale_po_documents.mjs --all                # report, everything
  *   node scripts/repair_stale_po_documents.mjs --repair             # rebuild the stale ones
  *   node scripts/repair_stale_po_documents.mjs --repair --po 507,510
@@ -41,6 +45,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import db from '../app/config/dbConn.js';
 import { writePoDocument } from '../app/services/poDocumentService.js';
+import seoController from '../app/controllers/seo/seoController.js';
 
 // Which database is this actually pointed at?
 //
@@ -51,6 +56,18 @@ import { writePoDocument } from '../app/services/poDocumentService.js';
 // purchase orders. Every run prints where it is connected before it does
 // anything, and a production repair has to be confirmed by name.
 const PRODUCTION_DB = 'hospitality_main';
+
+// Purchase orders nothing will act on again.
+//
+// Staleness is measured against the last APPROVED action, so a PO that
+// collected two approvals and was then REJECTED reads as permanently stale — a
+// reject never rewrites the document, by design. Four of the sixteen damaged
+// production POs are that shape. They were genuinely hit by the bug at the
+// time, but they are dead orders now and rebuilding their documents would be
+// churn on something nobody will ever open.
+//
+// --include-dead brings them back if you specifically want them.
+const DEAD_PO_STATUSES = ['draft', 'rejected', 'rejected_by_vendor', 'cancelled'];
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -64,6 +81,8 @@ const ALL = has('--all');
 const REVERT_FILE = valueOf('--revert');
 const ONLY = (valueOf('--po') || '').split(',').map((s) => s.trim()).filter(Boolean).map(Number);
 const MAX_AGE_DAYS = valueOf('--max-age-days') ? Number(valueOf('--max-age-days')) : null;
+const INCLUDE_DEAD = has('--include-dead');
+const VERIFY = has('--verify');
 
 // When the document was last written.
 //
@@ -120,6 +139,7 @@ async function findCandidates() {
            la.acted_at       AS last_approval_at,
            u.name            AS last_approver
       FROM tbl_rfq_purchase_order po
+      JOIN tbl_approval_instances ai ON ai.id = po.approval_instance_id
       JOIN last_approval la ON la.approval_instance_id = po.approval_instance_id
       LEFT JOIN LATERAL (
         SELECT sa2.approver_user_id
@@ -130,13 +150,19 @@ async function findCandidates() {
       ) last_actor ON true
       LEFT JOIN tbl_users u ON u.id = last_actor.approver_user_id
      WHERE po.approval_instance_id IS NOT NULL
-       AND po.status <> 'draft'
+       AND (po.status::text <> ALL ($3::text[]))
+       AND ($4::bool OR ai.status <> ALL (ARRAY['REJECTED', 'CANCELLED']))
        AND ${staleClause}
        AND ($1::int IS NULL OR la.acted_at > NOW() - ($1::text || ' days')::interval)
        AND ($2::int[] IS NULL OR po.id = ANY($2::int[]))
      ORDER BY la.acted_at DESC
     `,
-    [MAX_AGE_DAYS, ONLY.length ? ONLY : null]
+    [
+      MAX_AGE_DAYS,
+      ONLY.length ? ONLY : null,
+      INCLUDE_DEAD ? ['draft'] : DEAD_PO_STATUSES,
+      INCLUDE_DEAD,
+    ]
   );
 }
 
@@ -223,6 +249,49 @@ const confirm = async (question) => (await ask(question)).toLowerCase() === 'yes
 // Production asks for the database name rather than "yes", so the answer cannot
 // come from muscle memory.
 const confirmExact = async (question, expected) => (await ask(question)) === expected;
+
+/**
+ * Render every candidate locally and report whether it works.
+ *
+ * Writes nothing: no S3 upload, no database update, just a PDF in the local
+ * scratch directory. The point is to find out BEFORE committing to a repair
+ * whether these documents can still be produced at all — a PO from March is
+ * being rendered by a template and a pricing path that have both moved since,
+ * and the honest way to find out what that does is to do it and look.
+ */
+async function doVerify(rows) {
+  console.log(`\nRendering ${rows.length} PO document(s) locally. Nothing is uploaded or written.\n`);
+
+  const failures = [];
+  for (const po of rows) {
+    const row = await db.one(
+      `SELECT PO.id, PO.company_id, RFQ.hospitality_company_id, RFQ.hotel_id
+         FROM tbl_rfq_purchase_order PO JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
+        WHERE PO.id = $1`,
+      [po.id]
+    );
+    try {
+      const out = await seoController.poPDF({
+        po_id: row.id,
+        company_id: row.company_id,
+        hospitality_company_id: row.hospitality_company_id,
+        hotel_id: row.hotel_id,
+      });
+      const size = fs.statSync(out.absolutePath).size;
+      console.log(`  ${String(po.po_number).padEnd(8)} ${String(ageInDays(po.last_approval_at) + 'd').padStart(5)}  renders OK   ${(size / 1024).toFixed(0)} KB   ${out.absolutePath}`);
+    } catch (err) {
+      failures.push({ po, error: err.message });
+      console.error(`  ${String(po.po_number).padEnd(8)} ${String(ageInDays(po.last_approval_at) + 'd').padStart(5)}  FAILS        ${err.message}`);
+    }
+  }
+
+  console.log(`\n${rows.length - failures.length}/${rows.length} render cleanly.`);
+  if (failures.length) {
+    console.log('A --repair run would fail on these, leaving their documents as they are:');
+    for (const f of failures) console.log(`  ${f.po.po_number}: ${f.error}`);
+  }
+  console.log('\nNothing was uploaded and nothing was written.\n');
+}
 
 async function doRepair(rows, conn) {
   report(rows);
@@ -335,6 +404,11 @@ async function main() {
   if (!rows.length) {
     console.log(ALL ? 'No POs matched.' : 'No POs found with a document older than their own approval.');
     return;
+  }
+
+  if (VERIFY) {
+    report(rows);
+    return doVerify(rows);
   }
 
   if (!REPAIR) {
