@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog } from './app/helper/cronManager.js';
 import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
 import { logger } from './app/util/logger.js';
 
@@ -53,6 +53,7 @@ rescheduleAllNegotiationRoundExpirations();
 startNegotiationRoundClosureSweeper();
 rescheduleAllArcNegotiationRoundExpirations();
 startRfqStuckPublishWatchdog();
+startPoDocumentWatchdog();
 startArcAmendmentLifecycleCron();
 
 

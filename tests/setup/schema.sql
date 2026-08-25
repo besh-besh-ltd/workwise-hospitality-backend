@@ -4669,7 +4669,11 @@ CREATE TABLE public.tbl_rfq_purchase_order (
     arc_contract_id bigint,
     source_mr_id bigint,
     is_call_off boolean DEFAULT false NOT NULL,
-    auto_initiated boolean DEFAULT false NOT NULL
+    auto_initiated boolean DEFAULT false NOT NULL,
+    po_document_attempts integer DEFAULT 0 NOT NULL,
+    po_document_failure_reason text,
+    po_document_failure_notified_at timestamp without time zone,
+    po_document_generated_at timestamp without time zone
 );
 
 

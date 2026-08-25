@@ -3193,13 +3193,33 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
  * Submit an approval action (APPROVE or REJECT)
  * Validates user permission and handles step progression
  */
+/**
+ * Record an approval decision.
+ *
+ * @param {Object} args
+ * @param {Object} [txContext] - An open transaction to record the decision in.
+ *   Pass one when the decision must commit together with other work, and the
+ *   caller then owns the commit. PO approvals do exactly this: the PO document
+ *   is rendered and stored on the same transaction, so an approval whose
+ *   document cannot be produced rolls back instead of leaving the client a PO
+ *   that contradicts its own approval record (see poApprovalService.js).
+ *
+ *   Without one, this opens its own transaction and commits on return — which
+ *   is why the old PO endpoint could not be made atomic by wrapping this call:
+ *   the decision committed on a second connection before the document was even
+ *   attempted, so rolling the outer transaction back could not undo it.
+ *
+ *   Note that the step-progression email below is post-commit work. When a
+ *   caller supplies a transaction, nothing has committed yet, so it is the
+ *   caller's job to send it after their commit.
+ */
 export async function submitApprovalAction({
   approval_instance_id,
   approval_instance_step_id,
   approver_user_id,
   action,
   comment = null
-}) {
+}, txContext = null) {
   if (!approval_instance_id || !approver_user_id || !action) {
     throw new Error('approval_instance_id, approver_user_id, and action are required');
   }
@@ -3210,7 +3230,10 @@ export async function submitApprovalAction({
 
   const normalizedAction = action.toUpperCase();
 
-  const result = await db.tx(async t => {
+  // Join the caller's transaction when given one; otherwise own the commit.
+  const runInTransaction = (work) => (txContext ? work(txContext) : db.tx(work));
+
+  const result = await runInTransaction(async t => {
     // 1. Get instance with FOR UPDATE lock to prevent race conditions
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
@@ -3469,47 +3492,66 @@ export async function submitApprovalAction({
     }
   });
 
-  // After transaction committed — send email for step progression
-  if (result.instance_status === 'PENDING' && result.next_step_id) {
-    try {
-      const instance = await db.oneOrNone(
-        'SELECT entity_type, entity_id, metadata, initiated_by FROM tbl_approval_instances WHERE id = $1',
-        [approval_instance_id]
-      );
-      if (instance) {
-        const approvers = await db.any(`
-          SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
-          FROM tbl_approval_step_approvers sa
-          JOIN tbl_users u ON sa.approver_user_id = u.id
-          WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
-        `, [result.next_step_id]);
-
-        const initiator = await db.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [instance.initiated_by]);
-
-        const totalSteps = await db.one(
-          'SELECT COUNT(*) as count FROM tbl_approval_instance_steps WHERE approval_instance_id = $1',
-          [approval_instance_id]
-        );
-
-        const metadata = typeof instance.metadata === 'string' ? JSON.parse(instance.metadata) : instance.metadata;
-
-        sendApprovalStepNotification({
-          entityType: instance.entity_type,
-          entityId: instance.entity_id,
-          entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${instance.entity_id}`,
-          stepOrder: result.next_step,
-          totalSteps: parseInt(totalSteps.count),
-          initiatorName: initiator?.name || 'Unknown',
-          approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' }
-        });
-      }
-    } catch (emailError) {
-      logError('Error sending next step approval notification', emailError);
-    }
-  }
+  // After transaction committed — send email for step progression.
+  // Skipped when the caller supplied a transaction: it has not committed yet,
+  // and mailing the next approver about a decision that may still roll back is
+  // exactly the kind of premature side effect this refactor exists to stop.
+  // Callers passing a txContext call notifyNextApprovalStep themselves once
+  // they commit.
+  if (!txContext) await notifyNextApprovalStep(approval_instance_id, result);
 
   return result;
+}
+
+/**
+ * Tell the next step's approvers that it is their turn.
+ *
+ * Post-commit work, extracted so the callers that own their own transaction
+ * (PO approvals, which commit the decision and the PO document together) can
+ * run it at the right moment — after their commit — rather than having it fire
+ * from inside a transaction that might still roll back.
+ *
+ * Never throws: the decision is durable by the time this runs.
+ */
+export async function notifyNextApprovalStep(approval_instance_id, result) {
+  if (!result || result.instance_status !== 'PENDING' || !result.next_step_id) return;
+
+  try {
+    const instance = await db.oneOrNone(
+      'SELECT entity_type, entity_id, metadata, initiated_by FROM tbl_approval_instances WHERE id = $1',
+      [approval_instance_id]
+    );
+    if (!instance) return;
+
+    const approvers = await db.any(`
+      SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
+      FROM tbl_approval_step_approvers sa
+      JOIN tbl_users u ON sa.approver_user_id = u.id
+      WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
+    `, [result.next_step_id]);
+
+    const initiator = await db.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [instance.initiated_by]);
+
+    const totalSteps = await db.one(
+      'SELECT COUNT(*) as count FROM tbl_approval_instance_steps WHERE approval_instance_id = $1',
+      [approval_instance_id]
+    );
+
+    const metadata = typeof instance.metadata === 'string' ? JSON.parse(instance.metadata) : instance.metadata;
+
+    sendApprovalStepNotification({
+      entityType: instance.entity_type,
+      entityId: instance.entity_id,
+      entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${instance.entity_id}`,
+      stepOrder: result.next_step,
+      totalSteps: parseInt(totalSteps.count),
+      initiatorName: initiator?.name || 'Unknown',
+      approvers,
+      extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' }
+    });
+  } catch (emailError) {
+    logError('Error sending next step approval notification', emailError);
+  }
 }
 
 /**
