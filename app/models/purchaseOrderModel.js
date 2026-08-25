@@ -1,12 +1,11 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
-import seoController from "../controllers/seo/seoController.js";
 import { consoleLogData, generateSignature, logError } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
-import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
+import generalModel, { markPOStatusChange, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
 import pricingEngine from "../services/pricingEngine.js";
 import { dispatch as dispatchNotification } from "../services/notificationService.js";
 import { buyerPoList } from "../services/notificationLinks.js";
@@ -17,6 +16,7 @@ import {
   listUsersWithAnyScope,
 } from "../services/authorizationService.js";
 import fs from 'fs';
+import { writePoDocument } from "../services/poDocumentService.js";
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -1302,28 +1302,19 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       }
     }
 
-    const items = await getPOItemDetails(purchaseOrder, t)
-
-    // Generate PO PDF with dynamic template selection
-    const pdfSaveResult = await seoController.poPDF({
-      po_id: purchaseOrder.id,
-      company_id: purchaseOrder.company_id,
-      hospitality_company_id: rfq?.hospitality_company_id,
-      hotel_id: rfq?.hotel_id,
-      // Legacy data for backward compatibility with default template
-      ...purchaseOrder,
-      ...items
-    }, t);
-
-    const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}-${Date.now().toString()}.pdf`)
-    // await fs.promises.unlink(pdfSaveResult.absolutePath);
-
-    await t.any(
-      `UPDATE tbl_rfq_purchase_order
-      SET po_pdf_url = $1
-      WHERE id = $2`,
-      [s3Url.url ?? `${process.env.APP_BASE_PATH}${pdfSaveResult.file}`, purchaseOrder.id]
-    );
+    // Generate and store the PO document on THIS transaction.
+    //
+    // Uncaught on purpose, same rule as approval: a PO whose document cannot be
+    // produced does not get initiated. This block used to read
+    //
+    //     [s3Url.url ?? `${process.env.APP_BASE_PATH}${pdfSaveResult.file}`, ...]
+    //
+    // which meant a failed S3 upload silently stored a container-local path in
+    // the column the buyer's download link and the vendor's email point at —
+    // and if the render itself had failed, `pdfSaveResult.absolutePath` was
+    // undefined, so `uploadToS3` threw on `fs.existsSync(undefined)`, was
+    // caught, and the fallback URL pointed at a file that was never written.
+    const poPdfUrl = await writePoDocument(purchaseOrder.id, t);
 
     return {
       po_id: purchaseOrder.id,
@@ -1331,7 +1322,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       current_approver_id: approvalResult.current_approver_id ?? null,
       approval_instance_id: approvalResult.instance?.id ?? null,
       approval_type: useNewWorkflow ? 'new' : 'legacy',
-      poPdf: pdfSaveResult
+      poPdf: { ok: true, url: poPdfUrl }
     };
   } catch (error) {
     throw error;
@@ -3172,58 +3163,23 @@ export const handleAddSiteRepresentative = async (po_id, added_by, name, email, 
 };
 
 /**
- * Regenerate PO PDF document with current approval state
- * Called after each approval action to update poApprovers section
+ * Regenerate a PO's stored document to reflect current approval state.
  *
- * @param {number} po_id - Purchase Order ID
- * @param {Object} txContext - Optional transaction context
- * @returns {string|null} - New PDF URL or null on failure
+ * Called on every PO approval — the approver table printed inside the PDF
+ * lists every step, so an intermediate approval leaves it wrong too.
+ *
+ * THROWS on failure. It used to log and return null, and both of its callers
+ * caught again on top of that, so an approval whose document never rendered
+ * committed anyway and the vendor was emailed a link to the previous version.
+ * When this runs inside an approval transaction, throwing is what rolls that
+ * approval back; see poApprovalService.js.
+ *
+ * @param {number} po_id
+ * @param {Object} [txContext] - the approval's transaction, when there is one.
+ *   Passing it matters: the document is built from the not-yet-committed
+ *   approver rows, which is how it can print this approver as "Approved".
+ * @returns {Promise<string>} the stored https URL
  */
 export const regeneratePODocument = async (po_id, txContext = null) => {
-  const t = txContext || db;
-
-  try {
-    // Get RFQ context for template selection
-    const poData = await t.oneOrNone(`
-      SELECT
-        PO.id, PO.po_number,
-        PO.company_id, RFQ.hospitality_company_id, RFQ.hotel_id
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
-      WHERE PO.id = $1
-    `, [po_id]);
-
-    if (!poData) {
-      logger.error(`Cannot regenerate PO document: PO ${po_id} not found`);
-      return null;
-    }
-
-    // Generate new PDF with dynamic template selection
-    const pdfResult = await seoController.poPDF({
-      po_id: poData.id,
-      company_id: poData.company_id,
-      hospitality_company_id: poData.hospitality_company_id,
-      hotel_id: poData.hotel_id
-    }, t);
-
-    if (pdfResult.ok) {
-      // Upload to S3 and update URL
-      const s3Key = `po-${poData.po_number}-${Date.now()}.pdf`;
-      const s3Url = await uploadToS3(pdfResult.absolutePath, s3Key);
-
-      await t.none(`
-        UPDATE tbl_rfq_purchase_order
-        SET po_pdf_url = $1, updated_at = NOW()
-        WHERE id = $2
-      `, [s3Url.url || pdfResult.file, po_id]);
-
-      logger.info(`Regenerated PO document for PO ${po_id}`);
-      return s3Url.url || pdfResult.file;
-    }
-
-    return null;
-  } catch (error) {
-    logError(`Error regenerating PO document for PO ${po_id}`, error);
-    return null;
-  }
+  return writePoDocument(po_id, txContext || db);
 };

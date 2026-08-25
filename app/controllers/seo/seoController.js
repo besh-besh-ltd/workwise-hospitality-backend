@@ -7,7 +7,7 @@ import seoModel from '../../models/seoModel.js';
 import fs from 'fs';
 import path from 'path';
 import Handlebars from 'handlebars';
-import puppeteer from 'puppeteer';
+import { pdfRenderer } from '../../util/pdfRenderer.js';
 import numberToWords from 'number-to-words';
 import { selectPOTemplate } from '../../helper/poTemplateSelector.js';
 import { buildPOTemplateData } from '../../helper/poTemplateDataBuilder.js';
@@ -16,12 +16,24 @@ const { toWords } = numberToWords;
 import { Readable } from 'stream';
 import httpClient from '../../util/httpClient.js';
 
+// Inlines a remote image as a data URI. Kept on a short leash: this runs
+// inside the approval transaction, and the shared 30s httpClient timeout would
+// hold a database connection open for half a minute over a company logo.
+// A logo is decoration — if it will not load promptly, the PO goes out without
+// it rather than the approval failing over it.
+const LOGO_FETCH_TIMEOUT_MS = 5000;
+
 async function getBase64FromUrl(url) {
-  const response = await httpClient.get(url, { responseType: 'arraybuffer' });
+  const response = await httpClient.get(url, {
+    responseType: 'arraybuffer',
+    timeout: LOGO_FETCH_TIMEOUT_MS,
+  });
   const buffer = Buffer.from(response.data);
-  const mimeType = response.headers['content-type'].toLowerCase();
+  // Used to be `headers['content-type'].toLowerCase()`, which threw a
+  // TypeError on any response without the header and took the whole PDF with it.
+  const mimeType = String(response.headers['content-type'] || 'image/png').toLowerCase();
   const base64 = buffer.toString('base64');
-  return `data:image/png;base64,${base64}`;
+  return `data:${mimeType};base64,${base64}`;
 }
 
 const seoController = {
@@ -118,7 +130,7 @@ const seoController = {
     }
 
     if (!fs.existsSync(templatePath)) {
-      return { ok: false, error: `Template not found at ${templatePath}` };
+      throw new Error(`Template not found at ${templatePath}`);
     }
 
     const templateSource = fs.readFileSync(templatePath, 'utf8');
@@ -127,16 +139,17 @@ const seoController = {
     // --- Build template data ---
     let data;
 
-    // If po_id is provided, use the enhanced data builder
+    // If po_id is provided, use the enhanced data builder.
+    //
+    // This used to catch and fall back to `{ ...poData }` — four keys, no line
+    // items, no approvers. Handlebars renders missing fields as empty rather
+    // than throwing, so that produced a near-blank PDF which was reported as a
+    // success and uploaded over the good document. Its filename came out
+    // `po-undefined.pdf`, a path shared by every concurrent failure across
+    // every tenant. A PO we cannot build is a PO we do not render.
     if (po_id) {
-      try {
-        data = await buildPOTemplateData(po_id, txContext);
-        logger.info(`Built PO template data for PO ${po_id}`);
-      } catch (buildError) {
-        logError(`Error building PO template data for PO ${po_id}`, buildError);
-        // Fall back to provided poData if build fails
-        data = { ...poData };
-      }
+      data = await buildPOTemplateData(po_id, txContext);
+      logger.info(`Built PO template data for PO ${po_id}`);
     } else {
       // Legacy mode: Use placeholder data merged with provided poData
       const now = new Date();
@@ -222,8 +235,12 @@ const seoController = {
       }
     }
 
-    if(data?.company?.logoUrl) {
-      data.company.logoUrlBase64 = await getBase64FromUrl(data.company.logoUrl)
+    if (data?.company?.logoUrl) {
+      try {
+        data.company.logoUrlBase64 = await getBase64FromUrl(data.company.logoUrl);
+      } catch (logoErr) {
+        logError(`PO logo fetch failed for ${data.company.logoUrl}; rendering without it`, logoErr);
+      }
     }
 
     if (data.created_at) {
@@ -256,26 +273,22 @@ const seoController = {
     const storageDir = path.join(process.cwd(), 'app', 'storage', 'invoices');
     if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });
 
-    const fileName = `po-${data.po_number}.pdf`;
+    if (!data.po_number) {
+      // Guards the `po-undefined.pdf` collision directly: without a PO number
+      // there is no filename that belongs to this PO alone.
+      throw new Error(`Refusing to render PO ${po_id ?? '(unknown)'} without a po_number`);
+    }
+
+    // A PID suffix keeps two app instances sharing a volume off each other's
+    // scratch file — the path used to be keyed on po_number alone, and
+    // uploadToS3 reads it back after the render.
+    const fileName = `po-${data.po_number}-${process.pid}.pdf`;
     const fullPath = path.join(storageDir, fileName);
 
-    // --- Launch puppeteer and create PDF ---
-    const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      headless: true
-    });
-
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    // ensure print background and A4
-    await page.pdf({
-      path: fullPath,
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' }
-    });
-
-    await browser.close();
+    // --- Render the PDF on the shared Chromium ---
+    // Every PO used to launch its own browser and leak it on failure. See
+    // app/util/pdfRenderer.js for what that cost in production.
+    await pdfRenderer.renderToFile(html, fullPath);
 
     // --- Return result ---
     return {
@@ -285,8 +298,12 @@ const seoController = {
       absolutePath: fullPath
     };
   } catch (err) {
+    // Rethrown, not swallowed. The caller writes this document inside the
+    // approval transaction and needs the failure to roll that approval back;
+    // returning `{ok:false}` here is how sixteen production POs ended up with
+    // a document that predates their own approval.
     logError('createPoPDF error', err);
-    return { ok: false, error: err.message || 'Failed to create PDF' };
+    throw err;
   }
 }
   ,
