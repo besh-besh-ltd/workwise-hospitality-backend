@@ -366,7 +366,14 @@ export const rfqSchemas = {
             vendors: Joi.array().items(Joi.number()).default([]),
             tech_eval_clauses: Joi.array().default([])
           })
-        ).default([])
+        ).default([]),
+
+        // Products the buyer removed in this edit, by tbl_rfq_products.id.
+        // Removal is explicit: the server deletes exactly these and refuses
+        // (409) any product that is simply absent from `products`, because a
+        // stale or racing snapshot is absent too. Inferring deletion from
+        // silence cost RFQ 536245 two products and 226 vendor mappings.
+        deleted_product_ids: Joi.array().items(Joi.number().integer()).default([])
       })
       .required()
       .unknown(true)
