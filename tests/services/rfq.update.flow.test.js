@@ -543,15 +543,20 @@ describe("rfqController.update — product changes (add / remove / update)", () 
     expect(created).not.toBeNull();
   });
 
-  it("removes a product (snapshot omits one) → tbl_rfq_products row deleted + PRODUCT DELETE history", async () => {
+  it("removes a product (snapshot omits one AND names it in deleted_product_ids) → tbl_rfq_products row deleted + PRODUCT DELETE history", async () => {
     const rfq_id = await makeEditableRfq();
     await attachOneProduct(rfq_id, 1);
     await attachOneProduct(rfq_id, 2);
     const snap = await fetchSnapshot(rfq_id);
 
-    // Drop product variant 2 from the snapshot.
+    // Drop product variant 2 from the snapshot. Omitting it is not enough on
+    // its own — since the RFQ 536245 data loss, removal must be explicit, so
+    // the id also has to be named in deleted_product_ids. Full coverage of the
+    // contract lives in rfq.update.productRemoval.test.js.
     const tampered = JSON.parse(JSON.stringify(snap));
+    const dropped = tampered.products.find((p) => p.product_variant_id === 2);
     tampered.products = tampered.products.filter((p) => p.product_variant_id !== 2);
+    tampered.deleted_product_ids = [dropped.id];
 
     const m = mockExpress({
       user: { id: IDS.users.a1_proc_buyer },

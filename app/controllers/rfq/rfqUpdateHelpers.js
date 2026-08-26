@@ -255,7 +255,11 @@ export function diffRfqSnapshot(current, snapshot) {
   }
 
   const rfqFields = diffRfqFields(current, snapshot);
-  const products  = diffProducts(current.products || [], snapshot.products || []);
+  const products  = diffProducts(
+    current.products || [],
+    snapshot.products || [],
+    snapshot.deleted_product_ids || []
+  );
   const terms     = diffTerms(current.terms || [], snapshot.terms || []);
   // T&C files diff — only produced when the snapshot explicitly carries
   // term_and_condition_files. Older clients that omit the key won't have
@@ -302,11 +306,45 @@ function diffRfqFields(current, snapshot) {
   return out;
 }
 
-function diffProducts(currentProducts, snapshotProducts) {
+/**
+ * Diff the RFQ's products against the snapshot.
+ *
+ * Removal is EXPLICIT. A product is deleted only when the snapshot names it in
+ * `deleted_product_ids`; a product that is merely missing means the client is
+ * working from a stale picture of the RFQ and the whole update is refused.
+ *
+ * That rule exists because the old one — "anything the snapshot does not
+ * mention is deleted" — destroyed real data. On 2026-08-26 four overlapping
+ * saves reached the server for RFQ 536245 within six seconds. `getFullRfqForEdit`
+ * takes no row lock, so the last transaction read a state that predated the
+ * other three and cascade-deleted the two products they had just created,
+ * along with 226 vendor mappings. Nothing in the request said "delete"; the
+ * server inferred it from silence.
+ */
+function diffProducts(currentProducts, snapshotProducts, deletedProductIds = []) {
   const currentById = new Map(currentProducts.map((p) => [p.id, p]));
   const snapshotIds = new Set(
     snapshotProducts.filter((p) => p.id != null).map((p) => p.id)
   );
+  const explicitDeletes = new Set(
+    (Array.isArray(deletedProductIds) ? deletedProductIds : [])
+      .map(Number)
+      .filter(Number.isFinite)
+  );
+
+  // Contradictory instruction: the same product is both kept and deleted.
+  // Resolving this silently is exactly the kind of guess that let the original
+  // defect hide for four months.
+  for (const id of explicitDeletes) {
+    if (snapshotIds.has(id)) {
+      const label = currentById.get(id)?.product_name || `product ${id}`;
+      throw httpError(
+        400,
+        `Product "${label}" is listed for removal and also present in the same update. Refresh and try again.`,
+        'products'
+      );
+    }
+  }
 
   const added = [];
   const updated = [];
@@ -334,9 +372,30 @@ function diffProducts(currentProducts, snapshotProducts) {
   }
 
   for (const cp of currentProducts) {
-    if (!snapshotIds.has(cp.id)) {
-      removed.push({ id: cp.id, current: cp });
+    if (snapshotIds.has(cp.id)) continue;
+    if (!explicitDeletes.has(Number(cp.id))) {
+      // Missing, but nobody asked for it to go. Refuse the whole update rather
+      // than delete on an inference — see the note on this function.
+      const label = cp.product_name || `product ${cp.id}`;
+      throw httpError(
+        409,
+        `Product "${label}" is missing from this update but was not marked for removal. ` +
+        `This RFQ changed since you opened it — refresh the page and try again.`,
+        'products'
+      );
     }
+    removed.push({ id: cp.id, current: cp });
+  }
+
+  // An RFQ with no products is not something the downstream flows (quoting,
+  // evaluation, PO) can represent. The wizard blocks it client-side; the
+  // server must not depend on that.
+  if (removed.length > 0 && currentProducts.length - removed.length + added.length === 0) {
+    throw httpError(
+      400,
+      'An RFQ must have at least one product. Add a replacement before removing the last one.',
+      'products'
+    );
   }
 
   return { added, removed, updated };
