@@ -11621,23 +11621,27 @@ ORDER BY m.created_at;
                     te.rfq_id,
                     te.tbl_rfq_product_id AS rfq_product_id,
                     vr.vendor_id,
-                    COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
+                    COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
                     COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    -- has_marks: true if ANY clause has been actually scored (score_timestamp differs from creation timestamp)
-                    BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
+                    -- has_marks: true if ANY clause carries a buyer's marks. buyer_id is
+                    -- written only by the buyer-scoring endpoint, so it is the record of a
+                    -- human assessment. Timestamps are not: a vendor re-submitting their
+                    -- answer moves "timestamp" and leaves score_timestamp behind, which is
+                    -- how RFQ 536405 recorded a 0% failure nobody had ever assessed.
+                    BOOL_OR(vr.buyer_id IS NOT NULL) AS has_marks,
                     CASE
-                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+                        WHEN NOT BOOL_OR(vr.buyer_id IS NOT NULL) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
-                        THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+                        THEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
                         ELSE 0
                     END AS calculated_score,
                     te.minimum_passing_score,
                     -- is_passed: only calculated when ALL clauses are scored
                     CASE
-                        WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+                        WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
                         THEN CASE
-                            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
+                            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
                             THEN true
                             ELSE false
                         END
@@ -16178,24 +16182,24 @@ ORDER BY tq.timestamp DESC;
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
         MAX(rpv.id) AS rfq_product_vendor_id,
-        COUNT(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN 1 END) AS evaluated_clauses_count,
+        COUNT(CASE WHEN vr.buyer_id IS NOT NULL THEN 1 END) AS evaluated_clauses_count,
         COUNT(c.id) AS total_clauses_count,
-        BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
-        BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS is_fully_evaluated,
-        COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
+        BOOL_OR(vr.buyer_id IS NOT NULL) AS has_marks,
+        BOOL_AND(vr.buyer_id IS NOT NULL) AS is_fully_evaluated,
+        COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
         COALESCE(SUM(c.weightage), 0) AS total_weightage,
         CASE
-          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+          WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
-          THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+          THEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
           ELSE 0
         END AS calculated_score,
         $2::NUMERIC AS minimum_passing_score,
         CASE
-          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+          WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN CASE
-            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
+            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
             THEN true
             ELSE false
           END
@@ -16432,6 +16436,15 @@ ORDER BY tq.timestamp DESC;
     // Find pending vendors (have tech eval responses, not yet scored) sorted by
     // rfq_product_vendor_id DESC so the highest-ranked (L6, L7, etc.) comes first.
     // This ensures when L1 fails, we pick L6 (next in line) not L3 (already in top 5).
+    //
+    // Only vendors who submitted a priced quote for THIS line are eligible. A
+    // vendor who answered the technical clauses but never bid cannot be scored
+    // by the buyer — the evaluation grid hides non-bidders by default — so
+    // promoting one leaves the evaluation permanently unfinishable. RFQ 536405
+    // froze exactly this way: a failed vendor was replaced by a non-bidder, and
+    // the RFQ could not leave the technical stage. This matches the quote test
+    // already used by getNextVendorsForProduct and by the grid's
+    // has_submitted_quote flag.
     let query = `
       SELECT DISTINCT ON (vr.vendor_id)
         vr.vendor_id,
@@ -16449,6 +16462,17 @@ ORDER BY tq.timestamp DESC;
         AND rpv.product_variant_id = rp.product_variant_id
         AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)
       WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          JOIN tbl_quote_items tqi ON tqi.quote_id = tq.id
+          WHERE tq.rfq_id = $3
+            AND tq.created_by = vr.vendor_id
+            AND tq.is_regret <> 1
+            AND tqi.product_variant_id = rp.product_variant_id
+            AND COALESCE(tqi.variant, 0) = COALESCE(rp.variant, 0)
+            AND tqi.total_price > 0
+        )
     `;
 
     const params = [tech_evaluation_id, rfq_product_id, rfq_id];

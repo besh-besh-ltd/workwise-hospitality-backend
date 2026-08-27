@@ -4255,6 +4255,24 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
 };
 
 /**
+ * A refusal the evaluator can act on: bad state, not a server fault.
+ *
+ * The submit-for-approval handler used to classify failures by substring-
+ * matching the thrown message, so every wording change silently reclassified an
+ * error. On RFQ 536405 the engine threw "No NEW vendors have been evaluated for
+ * this round" while the handler tested for "No vendors have been evaluated" —
+ * the extra word dropped a valid 400 into the blanket 500 branch, and the
+ * evaluator was told only "Error submitting technical evaluation for approval".
+ * Carry the status and a stable code on the error instead.
+ */
+const techEvalRefusal = (code, message) => {
+  const err = new Error(message);
+  err.httpStatus = 400;
+  err.code = code;
+  return err;
+};
+
+/**
  * startApprovalForTechEval
  *
  * Submits a Technical Evaluation for approval by creating an approval instance.
@@ -4303,7 +4321,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!product) {
-    throw new Error('RFQ product not found');
+    throw techEvalRefusal('RFQ_PRODUCT_NOT_FOUND', 'RFQ product not found for the given RFQ');
   }
 
   // Get tech evaluation record
@@ -4315,12 +4333,12 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!techEval) {
-    throw new Error('Technical evaluation not found for this product');
+    throw techEvalRefusal('TECH_EVAL_NOT_FOUND', 'Technical evaluation not found for this product');
   }
 
   // Check if already complete
   if (techEval.is_complete) {
-    throw new Error('Technical evaluation is already complete with required number of passed vendors');
+    throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
   }
 
   // Check if there's already a pending/submitted round for this evaluation
@@ -4332,7 +4350,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (existingPendingRound) {
-    throw new Error(`Round ${existingPendingRound.round_number} is already ${existingPendingRound.status.toLowerCase()}. Please wait for approval before submitting again.`);
+    throw techEvalRefusal('TECH_EVAL_ROUND_PENDING', `Round ${existingPendingRound.round_number} is already ${existingPendingRound.status.toLowerCase()}. Please wait for approval before submitting again.`);
   }
 
   // Get vendor scores with pass/fail status
@@ -4343,7 +4361,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!vendorScores || vendorScores.length === 0) {
-    throw new Error('No vendors have been evaluated for this technical evaluation');
+    throw techEvalRefusal('TECH_EVAL_NO_VENDORS_SCORED', 'No vendors have been evaluated. Please score at least one vendor before submitting for approval.');
   }
 
   // Defense-in-depth: exclude vendors already verified in previous approved rounds
@@ -4371,7 +4389,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Ensure at least one NEW vendor has been evaluated for this round
   if (evaluatedVendors.length === 0) {
-    throw new Error('No new vendors have been evaluated for this round. Please score at least one vendor before submitting.');
+    throw techEvalRefusal('TECH_EVAL_NO_NEW_VENDORS_SCORED', 'No new vendors have been evaluated for this round. Please score at least one vendor before submitting.');
   }
 
   // Create round record FIRST to get round_id
@@ -17269,69 +17287,27 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError(error);
 
-      // Handle specific error cases
-      if (error.message?.includes('No approval policy found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'No approval policy configured for TECHNICAL in this scope'
-        });
-      }
-
-      if (error.message?.includes('already exists') || error.message?.includes('already been approved')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message
-        });
-      }
-
-      if (error.message?.includes('RFQ product not found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'RFQ product not found for the given RFQ'
-        });
-      }
-
-      if (error.message?.includes('Technical evaluation not found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Technical evaluation not found for this product'
-        });
-      }
-
-      if (error.message?.includes('already complete')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Technical evaluation is already complete'
-        });
-      }
-
-      if (error.message?.includes('No vendors have been evaluated')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message || 'No vendors have been evaluated. Please score at least one vendor before submitting for approval.'
-        });
-      }
-
-      if (error.message?.includes('already submitted') || error.message?.includes('already pending')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message
-        });
-      }
-
-      // The approval engine raises structured, actionable errors — most
-      // importantly APPROVAL_POLICY_RESOLVES_TO_NOBODY, which carries
-      // httpStatus 400 and the per-step diagnostics explaining WHICH step was
-      // dropped and why. This handler matched on message text alone, so that
-      // error matched nothing and fell through to the 500 below: the evaluator
-      // lost their submission and were told only "Error submitting technical
-      // evaluation". Honour the status the engine set, and pass the reason on.
+      // Every refusal this endpoint can raise carries its own status and a
+      // stable code — startApprovalForTechEval via techEvalRefusal, and the
+      // approval engine via APPROVAL_POLICY_RESOLVES_TO_NOBODY and friends
+      // (which also attach per-step diagnostics naming the dropped step).
+      // Classifying by substring instead is what turned a valid 400 into a 500
+      // on RFQ 536405: the engine said "No NEW vendors have been evaluated"
+      // and the ladder tested for "No vendors have been evaluated".
       if (error?.httpStatus) {
         return res.status(error.httpStatus).json({
           status: 0,
           message: error.message,
           ...(error.code ? { code: error.code } : {}),
           ...(error.diagnostics ? { diagnostics: error.diagnostics } : {})
+        });
+      }
+
+      if (error.message?.includes('No approval policy found')) {
+        return res.status(400).json({
+          status: 0,
+          code: 'NO_TECHNICAL_APPROVAL_POLICY',
+          message: 'No approval policy configured for TECHNICAL in this scope'
         });
       }
 
