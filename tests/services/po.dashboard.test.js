@@ -1371,6 +1371,67 @@ describe("GET /po/detail/:po_id — technical evaluation", () => {
     }
   });
 
+  // A clause the buyer never marked must read as unscored, not as a zero.
+  //
+  // buyer_marks defaults to 0, and this panel used to decide "was it scored?" by
+  // comparing score_timestamp against the response timestamp. A vendor
+  // re-submitting their answer moves the response timestamp and leaves
+  // score_timestamp behind, so an unmarked clause started rendering a hard 0 —
+  // the same inference that recorded a 0% technical failure against a vendor
+  // nobody had assessed on RFQ 536405.
+  it("shows an unmarked clause as unscored, not as zero marks", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, status: "approved", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+
+    const te = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation
+         (rfq_id, tbl_rfq_product_id, minimum_passing_score, is_complete, current_round)
+       VALUES ($1, $2, 60, true, 1) RETURNING id`,
+      [rfq_id, rfq_product_id]
+    );
+    inserted.techEvalIds.push(te.id);
+    const scoredClause = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_clauses
+         (tbl_rfq_product_tech_evaluation_id, clause_text, weightage, clause_type)
+       VALUES ($1, 'Build quality', 10, 'clause') RETURNING id`,
+      [te.id]
+    );
+    const unmarkedClause = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_clauses
+         (tbl_rfq_product_tech_evaluation_id, clause_text, weightage, clause_type)
+       VALUES ($1, 'Warranty terms', 10, 'clause') RETURNING id`,
+      [te.id]
+    );
+    inserted.techClauseIds.push(scoredClause.id, unmarkedClause.id);
+
+    // Clause 1: genuinely marked by a buyer.
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+         (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response,
+          buyer_id, buyer_marks, "timestamp", score_timestamp)
+       VALUES ($1, $2, 'Meets spec', $3, 9, NOW() - INTERVAL '2 hours', NOW())`,
+      [scoredClause.id, IDS.users.vendor_alpha, IDS.users.a1_proc_poApp]
+    );
+    // Clause 2: the vendor answered, then re-submitted. No buyer ever marked it.
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+         (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response,
+          buyer_id, buyer_marks, "timestamp", score_timestamp)
+       VALUES ($1, $2, 'I Agree', NULL, 0, NOW(), NOW() - INTERVAL '8 seconds')`,
+      [unmarkedClause.id, IDS.users.vendor_alpha]
+    );
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+
+    const clauses = res.body.data.tech_eval[0].clauses;
+    const byText = Object.fromEntries(clauses.map((c) => [c.clause_text, c.obtained_marks]));
+    expect(byText["Build quality"]).toBe(9);
+    expect(byText["Warranty terms"]).toBeNull();
+  });
+
   it("tech_eval is [] when the PO's products have no technical evaluation configured", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
     const po_id = await makePo({ rfq_id, status: "approved", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });

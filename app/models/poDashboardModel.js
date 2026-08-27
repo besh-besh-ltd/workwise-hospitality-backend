@@ -1947,8 +1947,8 @@ async function buildComparison(po) {
 // evaluation. Sourced from the tech-eval tables:
 //   tbl_rfq_product_tech_evaluation (per rfq + product, minimum_passing_score)
 //   ..._clauses (clause_text, weightage = max marks)
-//   ..._vendors_response (buyer_marks = obtained; counted only once scored,
-//      i.e. score_timestamp differs from the response timestamp)
+//   ..._vendors_response (buyer_marks = obtained; counted only once a buyer has
+//      scored it, i.e. buyer_id is set)
 //   ..._cleared_vendors (calculated_score = final %, approval_instance_id)
 // Approver = the APPROVE action on that tech-eval approval instance.
 // Best-effort + read-only: any failure degrades to [] so the detail never breaks.
@@ -1984,7 +1984,7 @@ async function buildTechEval(po) {
     const clauseRows = await db.any(
       `SELECT c.tbl_rfq_product_tech_evaluation_id AS te_id, c.id AS clause_id,
               c.clause_text, c.weightage AS max_marks, c.clause_type,
-              vr.buyer_marks, vr.score_timestamp, vr."timestamp" AS resp_ts
+              vr.buyer_marks, vr.buyer_id
        FROM tbl_rfq_product_tech_evaluation_clauses c
        LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
          ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id AND vr.vendor_id = $1
@@ -2016,9 +2016,12 @@ async function buildTechEval(po) {
     const clausesByTe = new Map();
     for (const cr of clauseRows) {
       if (!clausesByTe.has(cr.te_id)) clausesByTe.set(cr.te_id, []);
-      const scored =
-        cr.score_timestamp != null &&
-        (cr.resp_ts == null || new Date(cr.score_timestamp).getTime() !== new Date(cr.resp_ts).getTime());
+      // buyer_id is written only by the buyer-scoring endpoint, so it is the
+      // record of a human assessment. Comparing score_timestamp against the
+      // response timestamp is not: a vendor re-submitting their answer moves
+      // the response timestamp and leaves score_timestamp behind, which made
+      // unmarked clauses render a hard 0 (RFQ 536405).
+      const scored = cr.buyer_id != null;
       clausesByTe.get(cr.te_id).push({
         clause_text: cr.clause_text,
         clause_type: cr.clause_type || null,
