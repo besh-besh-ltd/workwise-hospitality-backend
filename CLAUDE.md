@@ -30,7 +30,7 @@ A multi-tenant hospitality procurement platform enabling companies and hotels to
 | **Real-time** | Socket.io 4.8.1 |
 | **Push Notifications** | web-push 3.6.7 |
 | **Payments** | Razorpay 2.9.6 |
-| **Logging** | Winston 3.17.0 + daily rotation |
+| **Logging** | Pino 10 + pino-http, streamed to stdout and OpenTelemetry |
 | **Error Tracking** | Sentry (@sentry/node 10.11.0) |
 | **APM** | New Relic 12.22.0 |
 | **Scheduling** | node-cron 3.0.3 |
@@ -92,7 +92,7 @@ A multi-tenant hospitality procurement platform enabling companies and hotels to
 │   ├── storage/                 # File storage handling
 │   └── util/                    # Constants, logger, error handling
 │       ├── constants.js         # Status codes, enums
-│       ├── logger.js            # Winston logger setup
+│       ├── logger.js            # Pino logger -> stdout + OTel (never the DB)
 │       ├── error.js             # Error handler middleware
 │       └── socket.js            # Socket.io configuration
 ├── tests/                       # Jest test files
@@ -146,7 +146,13 @@ draft → pending_approval → approved → sent → GRN → completed
 - GST & HSN code management
 - Vendor email notifications
 
-**Key Tables:** `tbl_purchase_orders`, `tbl_po_items`, `tbl_po_milestones`, `tbl_po_tasks`, `tbl_grn`, `tbl_vendor_invoices`
+**Key Tables:** `tbl_rfq_purchase_order` (the PO itself — note there is no `tbl_purchase_orders`),
+`tbl_purchase_order_product` (lines), `tbl_payment_milestone`, `tbl_purchase_order_tasks`,
+`tbl_purchase_order_hsn_mapping`, `tbl_purchase_order_document`.
+
+There are **no GRN or invoice tables**. Both are rows in `tbl_purchase_order_document`
+discriminated by `document_type` (`'grn'`, etc.) plus a status flip on the PO — which is why
+GRN today records a document rather than line-level received quantities.
 
 ### 4. Award & Recognition (ARC)
 **Location:** `app/controllers/arc/`
@@ -212,7 +218,14 @@ Company + Hotel + Department > Company + Hotel > Company only
 - Project-to-company/hotel mapping
 - Hospitality vendor profiles (`is_hospitality` flag)
 
-**Key Tables:** `tbl_hospitality_companies`, `tbl_hospitality_company_hotels`, `tbl_hospitality_company_users`, `tbl_hospitality_company_projects`
+**Key Tables:** `tbl_hospitality_companies`, `tbl_hospitality_company_hotels`,
+`tbl_hospitality_user_mappings` (user↔company/hotel — note there is no
+`tbl_hospitality_company_users`), `tbl_hospitality_project_mappings`,
+`tbl_hospitality_company_documents`, `tbl_hospitality_hotel_documents`.
+
+`tbl_hospitality_user_mappings` carries `mapping_type` (0 = company-level, 1 = hotel-level) with a
+CHECK tying `hospitality_hotel_id` null-ness to it, and is UNIQUE on
+`(user_id, mapping_type, hospitality_company_id, hospitality_hotel_id)`.
 
 ---
 
@@ -510,7 +523,7 @@ same buggy code — test both directions.
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Express Server (Port 3200)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  Middleware: Helmet │ CORS │ Compression │ Winston │ Passport   │
+│  Middleware: Helmet │ CORS │ Compression │ Pino │ Passport      │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Routes (/api/v1/*)                         │
 │  /rfq │ /negotiation │ /po │ /arc │ /rbac │ /hospitality │ ... │

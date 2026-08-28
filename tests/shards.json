@@ -77,6 +77,10 @@
       "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, and harness self-checks"
     },
     {
+      "name": "activity",
+      "pattern": "tests/services/activity\\."
+    },
+    {
       "name": "arc-core",
       "pattern": "tests/services/arc_v2/arc\\.",
       "split": 2,

@@ -9,6 +9,7 @@ import origin from './origin.js';
 import error from './error.js';
 import otelMiddleware from '../middleware/otelMiddleware.js';
 import bodyCapture from '../middleware/bodyCapture.js';
+import requestContext from '../middleware/requestContext.js';
 import { httpLogger } from './logger.js';
 
 const util = (app) => {
@@ -22,6 +23,11 @@ const util = (app) => {
   app.use(express.json({ limit: '100mb' }));
   // bodyCapture must run AFTER body parsers so traces can include the parsed body.
   app.use(bodyCapture);
+  // Opens the ambient per-request context. Must wrap the router so it stays
+  // open for the whole request, including anything the handlers await. The
+  // acting user is read from `req` lazily, since authentication is per-route
+  // and has not run yet at this point.
+  app.use(requestContext);
   app.use('/api/v1', v1Router);
   error(app);
   app.use(errors());
