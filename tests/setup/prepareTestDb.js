@@ -157,6 +157,42 @@ function isTransientConnectError(err) {
   );
 }
 
+/**
+ * Applies migrations that have landed in migrations/ but are not yet in the
+ * schema snapshot.
+ *
+ * schema.sql is a pg_dump of staging, so until a migration is applied there
+ * and snapshotStaging.js is re-run, the test database is built from a schema
+ * the code no longer targets. The resulting failure reads as "relation does
+ * not exist", which sends you looking for a missing migration rather than a
+ * stale snapshot.
+ *
+ * tests/setup/pendingMigrations.json bridges that window. Migrations are
+ * applied in listed order and the list is emptied in whatever commit
+ * refreshes the snapshot.
+ */
+async function applyPendingMigrations(client, setupDir) {
+  const manifestFile = path.join(setupDir, "pendingMigrations.json");
+  if (!fs.existsSync(manifestFile)) return;
+
+  const { migrations = [] } = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+  if (migrations.length === 0) return;
+
+  const backendRoot = path.resolve(setupDir, "..", "..");
+  for (const rel of migrations) {
+    const file = path.join(backendRoot, rel);
+    if (!fs.existsSync(file)) {
+      throw new Error(
+        `pendingMigrations.json lists ${rel}, which does not exist. ` +
+          `Remove it from the list, or restore the file.`
+      );
+    }
+    await client.query(readSql(file));
+    await client.query("SET search_path = public, pg_catalog");
+    console.log(`[prepareTestDb] applied pending migration ${path.basename(rel)}`);
+  }
+}
+
 async function prepareTestDbOnce() {
   const cfg = getTestDbConfig();
   const adminConn = {
@@ -191,6 +227,8 @@ async function prepareTestDbOnce() {
     // schema.sql sets search_path = '' — reset so subsequent statements in this
     // session can resolve unqualified table names like 'tbl_approval_processes'.
     await client.query("SET search_path = public, pg_catalog");
+
+    await applyPendingMigrations(client, cfg.setupDir);
 
     await dropExternalFks(client);
     await applyFile(client, referenceFile, "seed_reference");

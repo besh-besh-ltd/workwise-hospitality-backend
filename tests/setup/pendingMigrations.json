@@ -1,0 +1,19 @@
+{
+  "$comment": [
+    "Migrations that have landed in migrations/ but are NOT yet in schema.sql.",
+    "",
+    "schema.sql is a pg_dump of staging, so a migration is invisible to every",
+    "test until someone applies it to staging and re-runs snapshotStaging.js.",
+    "Until that happens the suite tests a schema the code no longer targets,",
+    "and the failure looks like a missing table rather than a stale snapshot.",
+    "",
+    "List a migration here when you add it. prepareTestDb applies these in",
+    "array order, after schema.sql and before seed_reference.sql. Remove them",
+    "from the list in the same commit that refreshes the snapshot.",
+    "",
+    "Paths are relative to the backend root."
+  ],
+  "migrations": [
+    "migrations/20260829090000_audit_row_changes.sql"
+  ]
+}
