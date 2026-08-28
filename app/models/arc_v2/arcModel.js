@@ -1,6 +1,7 @@
 import db from '../../config/dbConn.js';
 import { logger } from '../../util/logger.js';
 import { buildArcScopeClause } from '../../helper/arc_v2/arcScope.js';
+import { notSupersededByCancellation } from '../subscriptionEligibility.js';
 
 /**
  * ARC v2 — Core model
@@ -715,6 +716,7 @@ const arcModel = {
         WHERE u.user_type = 3
           AND u.status = 1
           AND vhcs.status IN ('active','expired')
+          AND ${notSupersededByCancellation('vhcs')}
           AND (
             (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
             OR

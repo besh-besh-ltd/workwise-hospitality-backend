@@ -14,6 +14,7 @@ import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { logger } from '../../util/logger.js';
 import { financialYearOf, currentFinancialYearIst } from '../../helper/financialYear.js';
 import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { notSupersededByCancellation } from '../../models/subscriptionEligibility.js';
 
 /**
  * ARC v2 — Manual / backfill data-entry controller (spec §6).
@@ -162,6 +163,7 @@ async function vendorEligibleForScope(vendorId, hotelId, categoryId, runner = db
        SELECT 1 FROM tbl_vendor_hotel_category_subscription vhcs
         WHERE vhcs.vendor_id = $1
           AND vhcs.status IN ('active','expired')
+          AND ${notSupersededByCancellation('vhcs')}
           AND ((vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
             OR (vhcs.item_type = 'category' AND vhcs.item_id = $3))
      ) AS ok`,
@@ -199,6 +201,7 @@ export async function listAllVendors(req, res) {
                 SELECT 1 FROM tbl_vendor_hotel_category_subscription vhcs
                  WHERE vhcs.vendor_id = u.id
                    AND vhcs.status IN ('active','expired')
+                   AND ${notSupersededByCancellation('vhcs')}
                    AND ((vhcs.item_type = 'hotel'    AND vhcs.item_id = $1)
                      OR (vhcs.item_type = 'category' AND vhcs.item_id = $2))
               ) AS subscribed

@@ -37,6 +37,7 @@ import {
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
+import { notSupersededByCancellation } from './subscriptionEligibility.js';
 
 
 // A bare (optionally schema-qualified) SQL identifier. Table names reaching
@@ -8064,11 +8065,13 @@ LIMIT 2;
           AND vhcs_cat.item_type = 'category'
           AND vhcs_cat.item_id = pc.category_id
           AND vhcs_cat.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('vhcs_cat')}
         JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
           ON vhcs_hotel.vendor_id = pvvm.vendor_id
           AND vhcs_hotel.item_type = 'hotel'
           AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
           AND vhcs_hotel.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('vhcs_hotel')}
         WHERE pvvm.status = TRUE
           AND pvvm.is_approved = TRUE
         GROUP BY pvvm.product_variant_id, pc.category_id
@@ -8245,6 +8248,7 @@ LIMIT 2;
         WHERE s.item_type = 'hotel'
           AND s.item_id = ANY($2)
           AND s.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('s')}
       ),
 
       -- User's previous variants from their own RFQs (last 24 months window)
