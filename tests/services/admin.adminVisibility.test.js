@@ -75,6 +75,19 @@ describe("administrators are visible in People", () => {
     expect(Number(stats.total_count)).toBe(listed.n);
   });
 
+  it("says which listed users are administrators", async () => {
+    // The row needs to show it: administrators used to be filtered out, so
+    // nothing in the list ever had to distinguish them.
+    const { company_id } = await db.one("SELECT company_id FROM tbl_users WHERE id = $1", [ADMIN]);
+    const { users } = await userModel.getCompanyUsersDetailed(company_id, {});
+
+    const admin = users.find((u) => Number(u.id) === ADMIN);
+    expect(admin.is_company_admin).toBe(true);
+
+    const ordinary = users.find((u) => Number(u.id) === IDS.users.a1_eng_buyer);
+    expect(ordinary.is_company_admin).toBe(false);
+  });
+
   it("returns an administrator through the API the screen calls", async () => {
     const client = await httpClient(ADMIN);
     const res = await client.get("/api/v1/users/company-users-detailed");

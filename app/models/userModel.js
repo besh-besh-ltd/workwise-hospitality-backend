@@ -2271,6 +2271,25 @@ publishProfileReviews: async (reviewObj) => {
         tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status,
         tu.created_at, tu.employee_type, tu.employee_code, tu.designation,
         tu.payroll_company_id,
+        -- Administrators are listed here now, so the row has to be able to say
+        -- so. Computed from the capability rather than user_type, since an
+        -- administrator is an ordinary buyer holding company.admin; the legacy
+        -- user_type is accepted alongside it until those accounts migrate.
+        (
+          -- COALESCE, because user_type is nullable. NULL = 7 evaluates to
+          -- NULL, and NULL OR false is NULL, so without this the column comes
+          -- back null rather than false for anyone with no type set.
+          COALESCE(tu.user_type = 7, false)
+          OR EXISTS (
+            SELECT 1
+              FROM tbl_user_role_scopes urs_a
+              JOIN tbl_role_permissions rp_a ON rp_a.role_id = urs_a.role_id
+              JOIN tbl_permissions p_a ON p_a.id = rp_a.permission_id
+             WHERE urs_a.user_id = tu.id
+               AND p_a.resource = 'company'
+               AND p_a.action = 'admin'
+          )
+        ) AS is_company_admin,
         COALESCE(
           (SELECT json_agg(json_build_object('id', d.id, 'title', d.title) ORDER BY d.title)
            FROM tbl_user_department ud
