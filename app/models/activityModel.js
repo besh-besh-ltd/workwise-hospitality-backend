@@ -106,6 +106,17 @@ const ENTITY_SCOPE_SQL = {
     'SELECT hospitality_company_id, hotel_id, entity_type AS label FROM tbl_approval_instances WHERE id = $1',
   APPROVAL_POLICY:
     'SELECT hospitality_company_id, hotel_id, entity_type AS label FROM tbl_approval_policies WHERE id = $1',
+  // A person, as the subject of an event rather than its actor — which is what
+  // an internal-console route acts on. The join is what scopes it: a user with
+  // no hospitality mapping belongs to no company's trail, and an event nobody
+  // could ever be shown is not worth a row.
+  USER: `SELECT m.hospitality_company_id, m.hospitality_hotel_id AS hotel_id,
+                COALESCE(NULLIF(TRIM(u.name), ''), u.email) AS label
+           FROM tbl_users u
+           JOIN tbl_hospitality_user_mappings m ON m.user_id = u.id
+          WHERE u.id = $1
+          ORDER BY m.mapping_type ASC, m.id ASC
+          LIMIT 1`,
 };
 
 export async function resolveEntityScope(entityType, entityId) {

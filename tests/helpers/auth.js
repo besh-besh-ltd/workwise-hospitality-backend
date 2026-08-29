@@ -67,3 +67,46 @@ export async function authHeadersFor(userId) {
   const { headers } = await loginAs(userId);
   return headers;
 }
+
+/**
+ * Sign a JWT for Workwise's own internal console, which authenticates through
+ * `passport.use('jwtAdm', ...)` rather than 'jwtUsr'.
+ *
+ * The difference that matters is one claim: `admin: true` instead of
+ * `user: true`. That claim is the only thing separating "this person is
+ * working inside a customer's account as Workwise staff" from "this person is
+ * a customer's own administrator" — three production accounts can sign in to
+ * both consoles, so the account cannot tell them apart and the token must.
+ *
+ * Note jwtAdm checks `payload.ag` is present but, unlike jwtUsr, does not
+ * compare it to tbl_users.user_agent.
+ */
+export async function loginAsInternalStaff(userId) {
+  if (!Number.isInteger(userId)) {
+    throw new Error(`loginAsInternalStaff: userId must be an integer (got ${userId})`);
+  }
+  const user = await db.oneOrNone(
+    `SELECT id, name, status FROM tbl_users WHERE id = $1`,
+    [userId]
+  );
+  if (!user) throw new Error(`loginAsInternalStaff: user ${userId} not found`);
+  if (user.status !== 1) throw new Error(`loginAsInternalStaff: user ${userId} is inactive`);
+
+  const now = Math.round(Date.now() / 1000);
+  const token = JWT.sign(
+    {
+      iss: "Des Technico",
+      sub: cryptr.encrypt(String(user.id)),
+      name: user.name,
+      admin: true,
+      ag: cryptr.encrypt(TEST_USER_AGENT),
+      iat: now,
+      exp: now + 60 * 60,
+    },
+    Config.jwt.secret
+  );
+  return {
+    token,
+    headers: { Authorization: `Bearer ${token}`, "User-Agent": TEST_USER_AGENT },
+  };
+}

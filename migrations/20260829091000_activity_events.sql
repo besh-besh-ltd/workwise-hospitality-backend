@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_activity_events (
     -- Seven kinds of actor, not two. A vendor is a counterparty, the scheduler
     -- is not a person, and the site representative who signs for goods is a
     -- real human without an account. Collapsing them makes the feed lie.
-    actor_type              text         NOT NULL,   -- USER|VENDOR|GUEST_TOKEN|SYSTEM|PUBLIC|UNKNOWN
+    actor_type              text         NOT NULL,   -- USER|VENDOR|WORKWISE_STAFF|GUEST_TOKEN|SYSTEM|PUBLIC|UNKNOWN
     -- Deliberately no foreign key: an actor must outlive their account. If a
     -- user row is ever hard-deleted, the trail still has to say what they did.
     actor_user_id           integer,
@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS public.tbl_activity_events (
     CONSTRAINT chk_activity_source
         CHECK (source IN ('HTTP', 'CRON', 'WEBHOOK', 'BACKFILL')),
     CONSTRAINT chk_activity_actor_type
-        CHECK (actor_type IN ('USER', 'VENDOR', 'GUEST_TOKEN', 'SYSTEM', 'PUBLIC', 'UNKNOWN'))
+        CHECK (actor_type IN ('USER', 'VENDOR', 'WORKWISE_STAFF', 'GUEST_TOKEN',
+                              'SYSTEM', 'PUBLIC', 'UNKNOWN'))
 );
 
 -- The feed itself: one company, newest first. Every other query narrows this.

@@ -33,6 +33,7 @@ export const CATEGORIES = {
   APPROVALS: 'Approvals',
   VENDORS: 'Vendors',
   BILLING: 'Billing',
+  WORKWISE_ACCESS: 'Workwise Access',
   SYSTEM: 'System',
 };
 
@@ -370,6 +371,102 @@ export const EVENTS = [
     entity: { type: 'APPROVAL_INSTANCE', id: B('instance_id') },
     scope: SCOPE.entity('APPROVAL_INSTANCE'),
     summary: (c) => `${c.actor} cancelled an approval request`,
+  }),
+
+  // A GET that emails every vendor yet to quote. The verb says read; the
+  // effect is a mail to every counterparty on the RFQ, which is exactly the
+  // kind of event a buyer needs to see in the trail before they send a second
+  // one. Naming it here is what makes it captured at all.
+  e({
+    method: 'GET', path: '/rfq/send-reminder/:id', key: 'rfq_reminder_sent',
+    category: CATEGORIES.SOURCING, severity: 'notable',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `${c.actor} reminded every vendor yet to quote on RFQ ${c.entityLabel || c.entityId}`,
+  }),
+
+  // ── Workwise's own staff, in the internal console ───────────────────────
+  //
+  // The only entries here that are GETs. For a client's own people the trail
+  // records what changed; for the supplier's staff working inside a customer's
+  // account, looking is the thing worth recording, because "who at Workwise
+  // can see our data" is the first question a client's security review asks.
+  //
+  // Unnamed internal routes are still recorded — the middleware files anything
+  // by Workwise staff under this category — so this list makes the sentences
+  // read properly rather than deciding what is captured.
+  //
+  // Routes that name no single customer (a list of every buyer, the companies
+  // list) resolve to no company and so appear in nobody's feed. That is a
+  // property of a cross-tenant endpoint, not an omission: there is no one
+  // client whose trail it belongs in.
+  e({
+    method: 'GET', path: '/admin/buyer/buyer-details/:id', key: 'workwise_viewed_account',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) opened ${c.entityLabel || 'a user'}'s account`,
+  }),
+  e({
+    method: 'GET', path: '/admin/buyer/buyer-rfq-list/:id', key: 'workwise_viewed_user_rfqs',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) listed ${c.entityLabel || 'a user'}'s RFQs`,
+  }),
+  e({
+    method: 'PUT', path: '/admin/buyer/update-buyer/:id', key: 'workwise_edited_account',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'critical',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) edited ${c.entityLabel || 'a user'}'s account`,
+  }),
+  e({
+    method: 'PUT', path: '/admin/buyer/block-buyer/:id', key: 'workwise_blocked_account',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'critical',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) blocked ${c.entityLabel || 'a user'}'s account`,
+  }),
+  e({
+    method: 'PUT', path: '/admin/buyer/accept-buyer/:id', key: 'workwise_approved_account',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) approved ${c.entityLabel || 'a user'}'s account`,
+  }),
+  e({
+    method: 'DELETE', path: '/admin/buyer/delete-buyer/:id', key: 'workwise_deleted_account',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'critical',
+    entity: { type: 'USER', id: P('id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `Workwise staff (${c.actor}) deleted ${c.entityLabel || 'a user'}'s account`,
+  }),
+  e({
+    method: 'GET', path: '/admin/rfq/rfq-list/:id', key: 'workwise_viewed_rfq',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `Workwise staff (${c.actor}) opened RFQ ${c.entityLabel || c.entityId}`,
+  }),
+  e({
+    method: 'GET', path: '/admin/rfq/vendors-for-reminder/:id', key: 'workwise_viewed_rfq_vendors',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `Workwise staff (${c.actor}) listed the vendors yet to quote on RFQ ${c.entityLabel || c.entityId}`,
+  }),
+  // A GET that emails every vendor on the RFQ. Filtering capture on the verb
+  // would have missed it entirely, which is why the registry is the trigger.
+  e({
+    method: 'GET', path: '/admin/rfq/send-reminder/:id', key: 'workwise_sent_reminder',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'critical',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `Workwise staff (${c.actor}) emailed every vendor yet to quote on RFQ ${c.entityLabel || c.entityId}`,
+  }),
+  e({
+    method: 'POST', path: '/admin/rfq/send-selective-reminder/:id', key: 'workwise_sent_selective_reminder',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'critical',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `Workwise staff (${c.actor}) emailed selected vendors on RFQ ${c.entityLabel || c.entityId}`,
+  }),
+  e({
+    method: 'POST', path: '/admin/rfq/update-status', key: 'workwise_changed_rfq_service_status',
+    category: CATEGORIES.WORKWISE_ACCESS, severity: 'notable',
+    entity: { type: 'RFQ', id: B('rfq_id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) =>
+      `Workwise staff (${c.actor}) marked their work on RFQ ${c.entityLabel || c.entityId} as ${c.body?.status || 'updated'}`,
   }),
 ];
 

@@ -142,9 +142,13 @@ const captureEvent = async (req, res, responseBody) => {
   });
 
   // Without a company the row could never be shown to anybody, so writing it
-  // would only grow the table. Counted as a gap instead.
+  // would only grow the table. Counted as a gap instead — but only for the
+  // mutating routes the catalogue is about. Several internal-console reads are
+  // cross-company by nature (a list of every buyer), and those genuinely do
+  // not belong to one client's trail; counting them would report a permanent
+  // gap that no registry entry could ever close.
   if (!scope?.hospitalityCompanyId) {
-    noteUncatalogued(req, ' (unscoped)');
+    if (MUTATING.has(req.method)) noteUncatalogued(req, ' (unscoped)');
     return;
   }
 
@@ -170,12 +174,19 @@ const captureEvent = async (req, res, responseBody) => {
     summary = `${actor.actorLabel} performed ${req.method} ${pattern}`;
   }
 
+  // An unnamed route reached by Workwise's own staff is still a customer's
+  // data being looked at, so it is filed where they will look for it rather
+  // than under System, and it is never routine.
+  const isStaff = actor.actorType === ACTOR_TYPES.WORKWISE_STAFF;
+  const fallbackCategory = isStaff ? CATEGORIES.WORKWISE_ACCESS : CATEGORIES.SYSTEM;
+  const fallbackSeverity = isStaff ? 'notable' : 'routine';
+
   const eventId = await recordActivityEvent({
     requestId: ctx?.requestId || null,
     source: definition?.source || (actor.actorType === ACTOR_TYPES.SYSTEM ? 'CRON' : 'HTTP'),
     eventKey: definition?.key || null,
-    category: definition?.category || CATEGORIES.SYSTEM,
-    severity: definition?.severity || 'routine',
+    category: definition?.category || fallbackCategory,
+    severity: definition?.severity || fallbackSeverity,
     actorType: actor.actorType,
     actorUserId: actor.actorUserId,
     actorLabel: actor.actorLabel,
@@ -217,23 +228,42 @@ const captureEvent = async (req, res, responseBody) => {
  * that happened to the company; it is something that did not.
  */
 const activityCapture = (req, res, next) => {
-  if (!MUTATING.has(req.method)) return next();
+  const mutating = MUTATING.has(req.method);
 
   // The ~40 creations whose row does not exist until the insert returns can
   // only be identified from the response. The uniform { status, data: { id } }
   // envelope makes one generic extractor enough. Wrapping res.json is the
-  // pattern bodyCapture already established here.
+  // pattern bodyCapture already established here. Only mutations need it: a
+  // read is recorded for having happened, not for what it returned.
   let responseBody = null;
-  const originalJson = res.json.bind(res);
-  res.json = function (body) {
-    responseBody = body;
-    return originalJson(body);
-  };
+  if (mutating) {
+    const originalJson = res.json.bind(res);
+    res.json = function (body) {
+      responseBody = body;
+      return originalJson(body);
+    };
+  }
 
   res.on('finish', () => {
+    // Whether this is Workwise's own staff cannot be known here at mount time
+    // — this middleware runs before per-route authentication — but it is known
+    // by the time the response finishes, which is where the decision is made.
+    const isStaff = resolveActor(req).actorType === ACTOR_TYPES.WORKWISE_STAFF;
+
+    // For a client's own people, what happened is what changed. For Workwise
+    // staff working in a customer's account, reading the data *is* the event:
+    // "who at the vendor can see our data" is the first question a client's
+    // security review asks, and a trail of only their writes cannot answer it.
+    //
+    // The third case is a GET with a real side effect. `GET /rfq/send-reminder/
+    // :id` emails every vendor on an RFQ; gating on the verb would have missed
+    // it silently, which is the whole reason capture is registry-driven. A
+    // named GET is named precisely because somebody decided it matters.
+    if (!mutating && !isStaff && !lookupEvent(req.method, routePattern(req) || '')) return;
+
     // Registry coverage is tracked for every attempt; the event is recorded
     // only for the ones that actually happened.
-    if (!lookupEvent(req.method, routePattern(req) || '')) noteUncatalogued(req);
+    if (mutating && !lookupEvent(req.method, routePattern(req) || '')) noteUncatalogued(req);
     if (res.statusCode >= 400) return;
     captureEvent(req, res, responseBody).catch((err) =>
       logger.error({ err: err.message }, 'Activity capture failed')

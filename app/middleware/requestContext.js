@@ -8,6 +8,7 @@ import { runWithRequestContext } from '../util/requestContext.js';
 export const ACTOR_TYPES = {
   USER: 'USER',
   VENDOR: 'VENDOR',
+  WORKWISE_STAFF: 'WORKWISE_STAFF',
   GUEST_TOKEN: 'GUEST_TOKEN',
   SYSTEM: 'SYSTEM',
   PUBLIC: 'PUBLIC',
@@ -44,6 +45,19 @@ export const resolveActor = (req = {}) => {
       actorUserId: null,
       actorLabel: labelFor(user),
       actorDetail: user.tokenType || null,
+    };
+  }
+
+  // Workwise's own staff, working in the internal console against a
+  // customer's data. The question a client's IT review asks first is who at
+  // the vendor can see their data, and rendering a support engineer as an
+  // ordinary "User" answers it wrongly — it makes them look like the client's
+  // own employee.
+  if (user.is_internal_admin) {
+    return {
+      actorType: ACTOR_TYPES.WORKWISE_STAFF,
+      actorUserId: user.id > 0 ? user.id : null,
+      actorLabel: labelFor(user),
     };
   }
 
