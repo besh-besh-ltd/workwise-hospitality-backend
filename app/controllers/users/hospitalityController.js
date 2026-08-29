@@ -775,6 +775,21 @@ const HospitalityController = {
         });
       }
 
+      // One Head Office per company. Without this, calling the endpoint twice
+      // produced a second one — identical in every field, since it is copied
+      // from the company — and nothing downstream could tell them apart.
+      // The database enforces it too (uq_one_head_office_per_company); this is
+      // here so the answer is a sentence rather than a constraint violation.
+      const existingHO = await hospitalityModel.getHeadOffice(hospitalityCompanyId);
+      if (existingHO) {
+        return res.status(409).json({
+          status: 0,
+          code: 'HEAD_OFFICE_EXISTS',
+          message: `${existingHO.name} is already this company's Head Office`,
+          data: { id: existingHO.id, name: existingHO.name }
+        });
+      }
+
       const created = await hospitalityModel.createHOFromCompany(
         hospitalityCompanyId,
         req.user.id

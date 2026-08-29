@@ -159,16 +159,35 @@ const hospitalityModel = {
         (hospitality_company_id, name, full_address, state, gst, pan,
          bank_account_number, bank_name, ifsc_code, account_holder_name,
          msme, email, delivery_address, status, payment_status, keys,
-         fee_amount, created_by, updated_by)
+         fee_amount, created_by, updated_by, is_head_office)
        SELECT
          c.id, c.name, c.registered_office_address, NULL, c.gst, c.pan,
          c.bank_account_number, c.bank_name, c.ifsc_code, c.account_holder_name,
          c.msme, c.contact_email, c.corporate_office_address, 'Active', 'active', 0,
-         0, $2, $2
+         0, $2, $2, true
        FROM tbl_hospitality_companies c
        WHERE c.id = $1 AND c.is_deleted = 0
        RETURNING *`,
       [companyId, createdBy]
+    );
+  },
+
+  /**
+   * The company's live Head Office, if it has one.
+   *
+   * Read from the flag rather than the name: createHOFromCompany copies the
+   * company's name verbatim, so an HO and an ordinary unit named after the
+   * company were indistinguishable, and calling it twice silently produced a
+   * second Head Office.
+   */
+  getHeadOffice: async (companyId) => {
+    return db.oneOrNone(
+      `SELECT * FROM tbl_hospitality_company_hotels
+        WHERE hospitality_company_id = $1
+          AND is_head_office
+          AND COALESCE(is_deleted, 0) = 0
+        LIMIT 1`,
+      [companyId]
     );
   },
 

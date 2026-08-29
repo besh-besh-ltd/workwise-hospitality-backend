@@ -254,3 +254,51 @@ describe("removing a company", () => {
     expect(res.body.code).toBe("COMPANY_IN_USE");
   });
 });
+
+describe("the Head Office (HN-2 sibling)", () => {
+  it("marks a created Head Office as one", async () => {
+    // Nothing marked it before: createHOFromCompany copies the company's name,
+    // address, GST and bank details onto an otherwise ordinary hotel row, so
+    // "is this the HO?" could only be answered by reading the name.
+    const client = await httpClient(ADMIN);
+    // No fixture unit is named after its company, so the backfill leaves the
+    // company without one and this really does create it. Asserted rather than
+    // assumed, because a branch that skips the test when an HO already exists
+    // would pass silently the day a fixture changes.
+    const before = await db.one(
+      `SELECT count(*)::int AS n FROM tbl_hospitality_company_hotels
+        WHERE hospitality_company_id = $1 AND is_head_office AND COALESCE(is_deleted,0)=0`,
+      [COMPANY]
+    );
+    expect(before.n).toBe(0);
+
+    const res = await client.post(`${base}/create-ho`);
+    expect(res.status).toBe(200);
+    madeHotels.push(Number(res.body.data.id));
+    const row = await db.one(
+      "SELECT is_head_office FROM tbl_hospitality_company_hotels WHERE id = $1",
+      [Number(res.body.data.id)]
+    );
+    expect(row.is_head_office).toBe(true);
+  });
+
+  it("refuses to create a second one", async () => {
+    // Calling this twice used to produce two Head Offices, identical in every
+    // field because both are copied from the company, with nothing downstream
+    // able to tell them apart.
+    const client = await httpClient(ADMIN);
+    const first = await client.post(`${base}/create-ho`);
+    if (first.status === 200) madeHotels.push(Number(first.body.data.id));
+
+    const second = await client.post(`${base}/create-ho`);
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("HEAD_OFFICE_EXISTS");
+
+    const count = await db.one(
+      `SELECT count(*)::int AS n FROM tbl_hospitality_company_hotels
+        WHERE hospitality_company_id = $1 AND is_head_office AND COALESCE(is_deleted,0)=0`,
+      [COMPANY]
+    );
+    expect(count.n).toBe(1);
+  });
+});
