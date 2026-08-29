@@ -172,6 +172,28 @@ GeneralRoutes.get(
   passportSignIn,
   hospitalityApprovalController.willBeFinalApprover
 );
+// The oversight screens. requireCompanyAdmin rather than acl([7]), so an
+// administrator promoted the new way — a buyer holding company.admin — reaches
+// them; reassignment in particular is a company-administration action, not
+// something an approver does for themselves.
+GeneralRoutes.get(
+  '/hospitality/approval/stuck',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.getStuckApprovals
+);
+GeneralRoutes.get(
+  '/hospitality/approval/stuck/:id/candidates',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.getReassignmentCandidates
+);
+GeneralRoutes.post(
+  '/hospitality/approval/stuck/:id/reassign',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.reassignStuckApprover
+);
 GeneralRoutes.get(
   '/hospitality/approval/instance/:id/change-history',
   passportSignIn,

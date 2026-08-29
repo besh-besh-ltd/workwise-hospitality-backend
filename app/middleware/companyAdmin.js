@@ -68,10 +68,26 @@ export const isCompanyAdmin = async (user) => {
 };
 
 /**
+ * The same question, asked of a request, and asked at most once per request.
+ *
+ * Several handlers need it more than twice — a guard, then a branch that
+ * widens a query's scope — and each call is a round trip. Memoised on `req`
+ * for the same reason `resolveApprovalCompanyScope` is: within one request the
+ * answer cannot change, and the alternative is three identical queries.
+ */
+export const requestIsCompanyAdmin = async (req) => {
+  if (!req) return false;
+  if (req.__isCompanyAdmin === undefined) {
+    req.__isCompanyAdmin = await isCompanyAdmin(req.user);
+  }
+  return req.__isCompanyAdmin;
+};
+
+/**
  * Route guard. Replaces `acl([7])` on the company administration routes.
  */
 export const requireCompanyAdmin = async (req, res, next) => {
-  if (await isCompanyAdmin(req.user)) return next();
+  if (await requestIsCompanyAdmin(req)) return next();
   return res.status(403).json({ status: 0, message: 'Insufficient permissions' });
 };
 

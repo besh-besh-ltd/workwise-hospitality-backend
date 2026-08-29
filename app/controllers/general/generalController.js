@@ -44,6 +44,16 @@ import {
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
+import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
+import {
+  STUCK_CLASSES,
+  countStuckApprovals,
+  listStuckApprovals,
+  getStuckInstance,
+  getStepApprover,
+  listReassignmentCandidates,
+  reassignApprover
+} from '../../models/approvalOversightModel.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -411,19 +421,24 @@ async function computeApprovalCompanyScope(req) {
     [req.user?.id || null]
   )).map((r) => Number(r.company_id));
 
-  // Hospitality admins (user_type 7) own every business unit under their OWN
-  // parent buyer company and carry NEITHER a hospitality mapping NOR an RBAC
-  // role scope — verified in production: all three user_type-7 users have zero
-  // rows in both tables. Without this union the scope collapses to [] for the
-  // only role that may reach the Approval Wizard (POST /policies is acl([7])),
-  // so it could neither list nor save a single policy.
+  // Company admins own every business unit under their OWN parent buyer
+  // company and may carry NEITHER a hospitality mapping NOR an RBAC role scope
+  // — verified in production: all three legacy user_type-7 users have zero rows
+  // in both tables. Without this union the scope collapses to [] for the only
+  // role that may reach the Approval Wizard, so it could neither list nor save
+  // a single policy.
+  //
+  // Keyed on the capability rather than on user_type 7, or an administrator
+  // promoted the new way — an ordinary buyer holding company.admin — would fall
+  // through to whatever scope they happened to hold as a buyer, which is
+  // precisely the estate they were promoted to see beyond.
   //
   // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
   // is still derived entirely from req.user — never from a header or the body.
   // It is the same tenancy edge hospitalityController.js enforces everywhere as
   // `record.buyer_company_id !== company.id`.
   let administered = [];
-  if (Number(req.user?.user_type) === 7 && req.user?.company_id) {
+  if ((await requestIsCompanyAdmin(req)) && req.user?.company_id) {
     administered = (await db.any(
       `SELECT id
          FROM tbl_hospitality_companies
@@ -434,6 +449,23 @@ async function computeApprovalCompanyScope(req) {
   }
 
   return [...new Set([...(mapped || []), ...scoped, ...administered])];
+}
+
+/**
+ * The companies a stuck-approvals request may read.
+ *
+ * `resolveApprovalCompanyScope` returns null for the platform super admin,
+ * meaning "not bounded". The oversight queries take an explicit list rather
+ * than a null, because a query with no company predicate is one edit away from
+ * being a cross-tenant leak — so the unbounded case is expanded here, once,
+ * where it is visible.
+ */
+async function resolveStuckScope(req, scopeIds) {
+  if (scopeIds !== null) return scopeIds;
+  const rows = await db.any(
+    `SELECT id FROM tbl_hospitality_companies WHERE COALESCE(is_deleted, 0) = 0`
+  );
+  return rows.map((r) => Number(r.id));
 }
 
 /** True when `companyId` is inside the request's server-derived scope. */
@@ -1408,6 +1440,154 @@ const hospitalityApprovalController = {
   },
 
   /**
+   * What is stuck, for an administrator.
+   * GET /hospitality/approval/stuck
+   *
+   * Scoped from the request, never from a query parameter — a filter that
+   * widens scope is not a filter.
+   */
+  async getStuckApprovals(req, res) {
+    try {
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const companyIds = await resolveStuckScope(req, scopeIds);
+
+      const olderThanDays = Number(req.query.older_than_days) || 0;
+      const classes = String(req.query.classes || '')
+        .split(',')
+        .map((c) => c.trim())
+        .filter((c) => STUCK_CLASSES.includes(c));
+
+      const [counts, list] = await Promise.all([
+        // Counts ignore the class filter and the page on purpose: "3 blocked"
+        // has to mean three in the company, not three on this screen.
+        countStuckApprovals(companyIds, { olderThanDays }),
+        listStuckApprovals(companyIds, {
+          olderThanDays,
+          classes: classes.length ? classes : null,
+          entityType: req.query.entity_type || null,
+          hotelId: req.query.hotel_id ? parseInt(req.query.hotel_id, 10) : null,
+          limit: req.query.limit,
+          offset: req.query.offset,
+        }),
+      ]);
+
+      return res.json({
+        status: 1,
+        data: { counts, items: list.rows, total: list.total },
+      });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Who a stuck step could be handed to.
+   * GET /hospitality/approval/stuck/:id/candidates
+   */
+  async getReassignmentCandidates(req, res) {
+    try {
+      const instance = await getStuckInstance(parseInt(req.params.id, 10));
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      if (!instance || !inCompanyScope(scopeIds, instance.hospitality_company_id)) {
+        return res.status(404).json({ status: 2, message: 'Approval not found' });
+      }
+
+      const data = await listReassignmentCandidates(instance.hospitality_company_id, {
+        hotelId: instance.hotel_id || null,
+        search: req.query.search || null,
+      });
+      return res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Hand a stuck step to somebody else.
+   * POST /hospitality/approval/stuck/:id/reassign
+   *
+   * The reason is mandatory and stored on the tombstone. Changing who
+   * authorises spend on a live item is the most consequential thing on this
+   * screen, and an unexplained one is indistinguishable after the fact from
+   * somebody routing an approval to a friend.
+   */
+  async reassignStuckApprover(req, res) {
+    try {
+      const instanceId = parseInt(req.params.id, 10);
+      const fromUserId = parseInt(req.body?.from_user_id, 10);
+      const toUserId = parseInt(req.body?.to_user_id, 10);
+      const reason = String(req.body?.reason || '').trim();
+
+      if (!Number.isFinite(fromUserId) || !Number.isFinite(toUserId)) {
+        return res.status(400).json({ status: 3, message: 'from_user_id and to_user_id are required' });
+      }
+      if (reason.length < 10) {
+        return res.status(400).json({
+          status: 3,
+          code: 'REASON_REQUIRED',
+          message: 'Say why this approval is being reassigned (at least 10 characters)',
+        });
+      }
+      if (fromUserId === toUserId) {
+        return res.status(400).json({ status: 3, message: 'That is already the approver' });
+      }
+
+      const instance = await getStuckInstance(instanceId);
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      if (!instance || !inCompanyScope(scopeIds, instance.hospitality_company_id)) {
+        return res.status(404).json({ status: 2, message: 'Approval not found' });
+      }
+      if (instance.status !== 'PENDING' || instance.step_status !== 'PENDING') {
+        // Decided already. Rewriting the approver on a settled step would
+        // rewrite who authorised it, which is the one thing a trail exists to
+        // prevent.
+        return res.status(409).json({
+          status: 0,
+          code: 'APPROVAL_NOT_PENDING',
+          message: 'This approval has already been decided',
+        });
+      }
+
+      const existing = await getStepApprover(instance.step_id, fromUserId);
+      if (!existing || existing.status === 'REMOVED') {
+        return res.status(409).json({
+          status: 0,
+          code: 'NOT_AN_APPROVER',
+          message: 'That person is not currently an approver on this step',
+        });
+      }
+
+      // The incoming approver must be somebody the company could have put
+      // there in the first place — same tenant, active account. Otherwise
+      // reassignment becomes a way to grant authority the role model refuses.
+      const candidates = await listReassignmentCandidates(instance.hospitality_company_id, {
+        hotelId: instance.hotel_id || null,
+      });
+      if (!candidates.some((c) => Number(c.id) === toUserId)) {
+        return res.status(400).json({
+          status: 3,
+          code: 'NOT_ELIGIBLE',
+          message: 'That person cannot approve for this business unit',
+        });
+      }
+
+      await reassignApprover({
+        stepId: instance.step_id,
+        fromUserId,
+        toUserId,
+        reason,
+      });
+
+      return res.json({ status: 1, message: 'Reassigned' });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
    * Get pending instances that would be affected by a policy change.
    * GET /hospitality/approval/policies/:id/pending-impact
    */
@@ -1630,7 +1810,7 @@ const processController = {
       // another tenant's process catalog. Verify against the request's
       // server-derived scope first — 404 on a miss, as the policy/instance guards
       // above already do — then bridge to the buyer id.
-      if (queryCompanyId && Number(user_type) === 7) {
+      if (queryCompanyId && (await requestIsCompanyAdmin(req))) {
         const notFound = () =>
           res.status(404).json({ status: 2, message: 'Company not found' });
 

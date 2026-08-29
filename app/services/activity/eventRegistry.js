@@ -383,6 +383,18 @@ export const EVENTS = [
     entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
     summary: (c) => `${c.actor} reminded every vendor yet to quote on RFQ ${c.entityLabel || c.entityId}`,
   }),
+  // Changing who authorises spend on a live item, with a mandatory reason.
+  // Critical without qualification: an unexplained reassignment is
+  // indistinguishable after the fact from routing an approval to a friend.
+  e({
+    method: 'POST', path: '/general/hospitality/approval/stuck/:id/reassign',
+    key: 'approval_reassigned',
+    category: CATEGORIES.APPROVALS, severity: 'critical',
+    entity: { type: 'APPROVAL_INSTANCE', id: P('id') },
+    scope: SCOPE.entity('APPROVAL_INSTANCE'),
+    summary: (c) =>
+      `${c.actor} moved an approval on ${c.entityLabel || 'an item'} to a different approver — ${c.body?.reason || 'no reason given'}`,
+  }),
 
   // ── Workwise's own staff, in the internal console ───────────────────────
   //

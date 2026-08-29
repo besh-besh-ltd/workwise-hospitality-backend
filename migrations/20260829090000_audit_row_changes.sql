@@ -161,6 +161,16 @@ DECLARE
         'tbl_approval_policies',
         'tbl_approval_policy_steps',
         'tbl_approval_processes',
+        -- The live side of approval, not just the configured side. The policy
+        -- tables say who *should* approve; these say who actually was put on a
+        -- given item, and mid-flight changes to that -- a propagation, an
+        -- administrator reassigning a stuck step -- are what a dispute over an
+        -- authorisation turns on. Measured in production at roughly 200 rows a
+        -- day against a trail already taking 900, which is a fifth more for
+        -- the tables that record who authorises spend.
+        'tbl_approval_instances',
+        'tbl_approval_instance_steps',
+        'tbl_approval_step_approvers',
         'tbl_rfq_purchase_order',
         -- Retained from the original coverage
         'tbl_rfq',

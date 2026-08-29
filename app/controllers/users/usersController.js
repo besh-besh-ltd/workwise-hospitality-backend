@@ -42,7 +42,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
-import { isCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { isCompanyAdmin, requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
 import {
   simulateApproverImpact,
@@ -2232,7 +2232,11 @@ update_user_detail: async (req, res, next) => {
   try {
     const loggedInUser = req.user;
     const reqData = req.body;
-    const isAdmin = loggedInUser.user_type === 7;
+    // The capability, not the type. This route has no gate of its own — it
+    // also serves self-edit — so this line is the whole control over who may
+    // edit somebody else's account, and reading it off user_type would have
+    // left a capability-holding administrator unable to manage a single user.
+    const isAdmin = await requestIsCompanyAdmin(req);
 
     const targetUserId =
       reqData.user_id && isAdmin
