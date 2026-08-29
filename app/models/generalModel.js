@@ -3036,6 +3036,12 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
         u.name as user_name,
         u.email as user_email,
         u.designation as user_designation,
+        -- Whether this person could still act at all. A deactivated account
+        -- leaves its approver row PENDING forever — the engine deliberately
+        -- keeps the row rather than deleting it — so without this the panel
+        -- shows a name and the word "Waiting" about somebody who cannot log
+        -- in. Production carries 24 such rows across 19 live approvals.
+        (u.status = 1 AND COALESCE(u.is_deleted, 0) = 0) AS account_active,
         (
           SELECT d.title
           FROM tbl_user_department ud
@@ -3057,6 +3063,7 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       user_department: ap.user_department,
       employee_code: ap.employee_code,
       status: ap.status,
+      account_active: ap.account_active !== false,
       acted_at: ap.acted_at,
       comment: ap.comment,
       added_mid_flight: ap.added_mid_flight || false,

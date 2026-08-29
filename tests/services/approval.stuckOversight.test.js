@@ -164,6 +164,46 @@ describe("classifying what is stuck", () => {
   });
 });
 
+describe("an approver who can no longer sign in (UM-11)", () => {
+  it("says so in the approval panel's own payload", async () => {
+    // The engine keeps an approver row rather than deleting it, so a
+    // deactivated account leaves its row PENDING forever and every panel shows
+    // the name beside the word "Waiting". Production carries 24 such rows
+    // across 19 live approvals. The panel cannot distinguish them without
+    // being told, and it was never told.
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    await db.none("UPDATE tbl_users SET status = 0 WHERE id = $1", [APPROVER]);
+    try {
+      const client = await httpClient(ADMIN);
+      const res = await client.get(
+        `/api/v1/general/hospitality/approval/instance/${instanceId}`
+      );
+      expect(res.status).toBe(200);
+
+      const approvers = (res.body.data?.steps || []).flatMap((st) => st.approvers || []);
+      const row = approvers.find((a) => Number(a.user_id) === APPROVER);
+      expect(row).toBeDefined();
+      // Still pending — the row genuinely has not been acted on. What is new
+      // is the panel being able to tell that nobody can act on it.
+      expect(row.status).toBe("PENDING");
+      expect(row.account_active).toBe(false);
+    } finally {
+      await db.none("UPDATE tbl_users SET status = 1 WHERE id = $1", [APPROVER]);
+    }
+  });
+
+  it("does not mark a live approver as unreachable", async () => {
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+    const res = await client.get(
+      `/api/v1/general/hospitality/approval/instance/${instanceId}`
+    );
+
+    const approvers = (res.body.data?.steps || []).flatMap((st) => st.approvers || []);
+    expect(approvers.find((a) => Number(a.user_id) === APPROVER).account_active).toBe(true);
+  });
+});
+
 describe("handing a stuck approval to somebody else", () => {
   it("refuses without a reason", async () => {
     const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
