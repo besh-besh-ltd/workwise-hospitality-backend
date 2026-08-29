@@ -438,6 +438,71 @@ const UsersController = {
    * Answers strictly yes or no. Returning the matching account would turn a
    * form-validation helper into a directory-enumeration tool.
    */
+  /**
+   * An administrator restoring access for somebody who is locked out (T0).
+   *
+   * The password routes are otherwise strictly self-service, so an admin could
+   * not help at all and the request went to Workwise instead.
+   *
+   * The admin triggers the reset; they never see or choose the password. That
+   * reuses the existing OTP flow rather than opening a second credential path,
+   * and it keeps the property that matters: an administrator can restore
+   * access without gaining the ability to impersonate the person.
+   */
+  send_password_reset: async (req, res) => {
+    try {
+      const targetUserId = Number(req.params.user_id);
+      if (!Number.isFinite(targetUserId) || targetUserId <= 0) {
+        return res.status(400).json({ status: 0, message: 'Invalid user' });
+      }
+
+      const target = await db.oneOrNone(
+        `SELECT id, name, email, company_id
+           FROM tbl_users
+          WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+        [targetUserId]
+      );
+      if (!target) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      // Tenant boundary. An administrator restores access inside their own
+      // company and nowhere else; a user from another company is reported the
+      // same way as one that does not exist, so this cannot be used to probe
+      // for accounts.
+      if (Number(target.company_id) !== Number(req.user.company_id)) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      const otp = generateOTPRandomNo();
+      await userModel.update_user_otp_resend({ otp, email: target.email });
+
+      const link = `${process.env.FRONT_BASE_URL || 'https://hospitality.letsworkwise.com'}/validate-otp?otp=${otp}`;
+      let html = fs.readFileSync(`${Config.template_path}/otp_resend_template.txt`).toString();
+      for (const [key, value] of [['name', target.name], ['otp', otp], ['link', link]]) {
+        html = html.replaceAll(`[${key}]`, value);
+      }
+
+      sendMail({
+        to: target.email,
+        from: Config.webmasterMail,
+        subject: 'Work wise | Password reset',
+        html,
+        is_otp: true
+      });
+
+      // Deliberately no OTP in the response. Returning it would turn a
+      // recovery tool into an impersonation one.
+      return res.status(200).json({
+        status: 1,
+        message: `A password reset has been emailed to ${target.email}.`
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: 'Could not send the password reset' });
+    }
+  },
+
   check_identity: async (req, res) => {
     try {
       const { email, mobile, exclude_user_id: excludeUserId } = req.query;

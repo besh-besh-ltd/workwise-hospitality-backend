@@ -304,6 +304,12 @@ export const EVENTS = [
     summary: (c) => `${c.actor} updated a user account`,
   }),
   e({
+    method: 'POST', path: '/users/:user_id/send-password-reset', key: 'password_reset_sent',
+    category: CATEGORIES.PEOPLE, severity: 'critical',
+    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.actor(),
+    summary: (c) => `${c.actor} sent a password reset to a user`,
+  }),
+  e({
     method: 'POST', path: '/rbac/roles', key: 'role_created',
     category: CATEGORIES.ACCESS, severity: 'critical',
     entity: { type: 'ROLE', id: R() }, scope: SCOPE.actor(),

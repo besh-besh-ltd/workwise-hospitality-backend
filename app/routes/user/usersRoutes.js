@@ -153,6 +153,15 @@ UsersRoutes.get(
   UsersController.get_company_users_detailed
 );
 
+// An administrator restoring access for a locked-out employee. The admin
+// triggers the reset and never sees the code — see the controller.
+UsersRoutes.post(
+  '/:user_id/send-password-reset',
+  passportSignIn,
+  requireCompanyAdmin,
+  UsersController.send_password_reset
+);
+
 // Is this email or mobile already taken? (UM-1) Admin-only, because it answers
 // a question about accounts that exist.
 UsersRoutes.get(
