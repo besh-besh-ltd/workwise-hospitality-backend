@@ -951,7 +951,12 @@ create_buyer_company_users: async (req, res, next) => {
       name,
       email,
       mobile,
-      user_type,
+      // Defaulted here, not in the Joi schema: validateBody writes the
+      // validated result to `req.value.body` and leaves `req.body` untouched
+      // (userValidation.js:155), so a schema `.default()` never reaches a
+      // controller that reads req.body. The schema still constrains the value
+      // to 2 or 7; this only covers the omitted case.
+      user_type = 2,
       password,
       employee_code,
       employee_type,

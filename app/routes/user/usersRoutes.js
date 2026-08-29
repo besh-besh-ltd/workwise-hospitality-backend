@@ -117,6 +117,9 @@ UsersRoutes.post(
   '/create-buyer-company-user',
   passportSignIn,
   acl([7]),
+  // The body was previously unvalidated, so `user_type` reached the INSERT
+  // unchecked and a company admin could create a cross-tenant type-8 account.
+  validateBody(schemas.create_buyer_company_user),
   validateDbBody.user_exists,
   UsersController.create_buyer_company_users
 );
