@@ -20,6 +20,7 @@
     "migrations/20260829090000_audit_row_changes.sql",
     "migrations/20260829091000_activity_events.sql",
     "migrations/20260829092000_activity_backfill_identity.sql",
-    "migrations/20260829093000_rename_tender_creator_role.sql"
+    "migrations/20260829093000_rename_tender_creator_role.sql",
+    "migrations/20260829094000_company_admin_capability.sql"
   ]
 }

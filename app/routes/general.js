@@ -6,6 +6,7 @@ import { acl, noAcl } from '../helper/common.js';
 import { validateBody, validateParam } from '../validations/paramValidation/userValidation.js';
 import { hierarchySchema } from '../validations/hierarchyValidation.js';
 import { hospitalityApprovalController, processController } from '../controllers/general/generalController.js';
+import { requireCompanyAdmin } from '../middleware/companyAdmin.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -32,41 +33,41 @@ GeneralRoutes.get(
 GeneralRoutes.get(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateParam(hierarchySchema.getHeirarchies),
   generalController.getHierarchies
 );
 GeneralRoutes.post(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.createHeirarchy),
   generalController.createHierarchy
 );
 GeneralRoutes.put(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.updateHierarchy),
   generalController.updateHierarchy
 );
 GeneralRoutes.delete(
   '/hierarchy/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   generalController.deleteHierarchy
 );
 GeneralRoutes.post(
   '/mapHierarchyToProject',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.mapHierarchyToProject),
   generalController.mapHierarchyToProject
 );
 GeneralRoutes.post(
   '/setDefaultHierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.setDefaultHierarchy),
   generalController.setDefaultHierarchy
 );
@@ -89,7 +90,7 @@ GeneralRoutes.get(
 GeneralRoutes.post(
   '/hospitality/approval/processes',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.createProcess
 );
 GeneralRoutes.get(
@@ -101,13 +102,13 @@ GeneralRoutes.get(
 GeneralRoutes.put(
   '/hospitality/approval/processes/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.updateProcess
 );
 GeneralRoutes.delete(
   '/hospitality/approval/processes/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.deleteProcess
 );
 
@@ -115,7 +116,7 @@ GeneralRoutes.delete(
 GeneralRoutes.post(
   '/hospitality/approval/policies',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityApprovalController.upsertApprovalPolicy
 );
 // SECURITY: this route previously had NO acl() at all, so vendors (user_type 3)

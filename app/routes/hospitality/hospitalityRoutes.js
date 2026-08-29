@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { acl } from '../../helper/common.js';
 import hospitalityController from '../../controllers/users/hospitalityController.js';
 import UsersController from '../../controllers/users/usersController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
@@ -10,6 +9,7 @@ import {
   schemas,
   uploadHospitalityDocuments
 } from '../../validations/paramValidation/hospitalityValidation.js';
+import { requireCompanyAdmin } from '../../middleware/companyAdmin.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -18,7 +18,7 @@ const HospitalityRoutes = Router();
 HospitalityRoutes.get(
   '/companies',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.listCompanies
 );
@@ -26,7 +26,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/company',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   uploadHospitalityDocuments,
   validateBody(schemas.hospitalityCompany),
@@ -36,7 +36,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.put(
   '/company/:company_id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   uploadHospitalityDocuments,
@@ -47,7 +47,7 @@ HospitalityRoutes.put(
 HospitalityRoutes.get(
   '/company/:company_id/hotels',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   hospitalityController.listCompanyHotels
@@ -56,7 +56,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/company/:company_id/hotels',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   uploadHospitalityDocuments,
@@ -67,7 +67,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.post(
   '/company/:company_id/create-ho',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   hospitalityController.createHO
@@ -76,7 +76,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.put(
   '/company/:company_id/hotels/:hotel_id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.hotelIdParam),
   uploadHospitalityDocuments,
@@ -87,7 +87,7 @@ HospitalityRoutes.put(
 HospitalityRoutes.get(
   '/hotels/:hotel_id/documents',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.getHotelDocuments
 );
@@ -95,7 +95,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/company/:company_id/map-users',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   validateBody(schemas.hospitalityMapUsers),
@@ -105,7 +105,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.post(
   '/company/:company_id/map-projects',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   validateBody(schemas.hospitalityMapProjects),
@@ -115,7 +115,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.get(
   '/company/:company_id/mapped-user-ids',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   hospitalityController.getMappedUserIds
@@ -130,7 +130,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.get(
   '/company/:company_id/user-mappings',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   hospitalityController.listCompanyUserMappings
@@ -139,7 +139,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.get(
   '/company/:company_id/mapped-project-ids',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
   hospitalityController.getMappedProjectIds
@@ -148,7 +148,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.get(
   '/project/:project_id/mappings',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.checkHospitality(false),
   hospitalityController.getProjectMappings
 );
@@ -157,7 +157,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.delete(
   '/project/:project_id/mapping',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateBody(schemas.deleteMapping),
   hospitalityController.deleteProjectMapping
@@ -166,7 +166,7 @@ HospitalityRoutes.delete(
 HospitalityRoutes.get(
   '/user/:user_id/mappings',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.getUserMappingsById
 );
@@ -174,7 +174,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.delete(
   '/user/:user_id/mapping',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   validateBody(schemas.deleteMapping),
   hospitalityController.deleteUserMapping
@@ -202,13 +202,13 @@ HospitalityRoutes.post(
 
 
 
-HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
+HospitalityRoutes.get('/entities', passportSignIn, requireCompanyAdmin, UsersController.getListedEntities);
 
 // Send BU login credentials to mapped users
 HospitalityRoutes.post(
   '/company/:company_id/hotels/:hotel_id/send-credentials',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.sendBUCredentials
 );
@@ -217,7 +217,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.post(
   '/company/:company_id/hotels/:hotel_id/send-payment-link',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.sendPaymentLink
 );
@@ -226,7 +226,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.post(
   '/company/send-batch-payment-links',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityMiddleware.requireHospitality,
   hospitalityController.sendBatchPaymentLinks
 );

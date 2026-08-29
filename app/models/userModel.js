@@ -790,9 +790,23 @@ user_book_demo: async (mobile) => {
     });
   },
 
+  /**
+   * The per-request identity lookup behind `jwtUsr`.
+   *
+   * `is_deleted` is filtered here so a removed account stops working the
+   * moment it is removed, rather than surviving for the full 24-hour JWT life.
+   *
+   * `status` is deliberately NOT filtered, though it looks like it belongs.
+   * Nine production accounts carry `status = 0` and are in daily use — one
+   * with forty logins in ninety days — so adding the predicate would lock
+   * working people out mid-shift. Deactivation is therefore currently partial:
+   * `resolveApprovers` filters `status = 1`, so a deactivated user stops being
+   * offered as an approver, but nothing stops them signing in. Closing that is
+   * a decision with a data remediation attached, not a predicate.
+   */
   user_detail_check: async (id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_users where id = $1', [id])
+      db.any('select * from tbl_users where id = $1 and coalesce(is_deleted, 0) = 0', [id])
         .then(function (data) {
           resolve(data);
         })
