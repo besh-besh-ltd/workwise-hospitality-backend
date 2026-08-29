@@ -486,7 +486,38 @@ const hospitalityModel = {
         u.name,
         u.email,
         u.mobile,
-        COALESCE(hh.name, '') AS hotel_name
+        COALESCE(hh.name, '') AS hotel_name,
+        -- HN-3: which departments this person operates in, so an admin can
+        -- read it off the list instead of opening every user in turn.
+        --
+        -- Taken from their role scopes IN THIS COMPANY rather than from
+        -- tbl_user_department. Both exist and they disagree: 251 of 258 mapped
+        -- users have a tbl_user_department row and 227 have a scoped one, but
+        -- the scoped department is what actually routes approvals and gates
+        -- visibility, and it is what opening the user shows -- which is the
+        -- trip this column exists to save.
+        --
+        -- A scope with department_id NULL means all departments, which is a
+        -- real and different state from having none; it is reported as its own
+        -- flag rather than being flattened into an empty list.
+        COALESCE((
+          SELECT json_agg(DISTINCT d.title ORDER BY d.title)
+            FROM tbl_user_role_scopes urs
+            JOIN tbl_department d ON d.id = urs.department_id
+           WHERE urs.user_id = hum.user_id
+             AND urs.company_id = hum.hospitality_company_id
+        ), '[]'::json) AS departments,
+        EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes urs
+           WHERE urs.user_id = hum.user_id
+             AND urs.company_id = hum.hospitality_company_id
+             AND urs.department_id IS NULL
+        ) AS all_departments,
+        EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes urs
+           WHERE urs.user_id = hum.user_id
+             AND urs.company_id = hum.hospitality_company_id
+        ) AS has_roles_here
        FROM tbl_hospitality_user_mappings hum
        JOIN tbl_users u ON u.id = hum.user_id
        LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id

@@ -68,7 +68,7 @@
     },
     {
       "name": "security-approval",
-      "pattern": "tests/services/(security\\.|approval|authorizationService|rbac\\.|userRoleScope\\.|arc\\.approvers)",
+      "pattern": "tests/services/(security\\.|approval|authorizationService|rbac\\.|userRoleScope\\.|hospitality\\.|arc\\.approvers)",
       "description": "Tenant-scope/IDOR regressions, the approval engine, RBAC and process scoping"
     },
     {
