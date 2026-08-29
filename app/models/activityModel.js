@@ -145,3 +145,168 @@ export async function resolveUserScope(userId) {
 }
 
 export const ACTIVITY_ENTITY_TYPES = Object.keys(ENTITY_SCOPE_SQL);
+
+// ── Reading the trail ────────────────────────────────────────────────────
+
+/**
+ * The companies an admin may see activity for.
+ *
+ * Scoped exactly as the Organisation screen scopes itself — the hospitality
+ * companies under the caller's buyer company — so the trail shows the estate
+ * they actually administer and nothing else. Derived from the authenticated
+ * user, never from a query parameter, because a filter that widens scope is
+ * not a filter.
+ */
+export async function companiesVisibleTo(buyerCompanyId) {
+  if (!buyerCompanyId) return [];
+  return db.map(
+    `SELECT id FROM tbl_hospitality_companies
+      WHERE buyer_company_id = $1 AND is_deleted = 0`,
+    [buyerCompanyId],
+    (r) => r.id
+  );
+}
+
+const LIST_COLUMNS = `
+  id, occurred_at, request_id, source, event_key, category, severity,
+  actor_type, actor_user_id, actor_label,
+  hospitality_company_id, hotel_id, department_id,
+  entity_type, entity_id, entity_label,
+  summary, metadata, http_method, route_pattern, status_code, is_reconstructed`;
+
+/**
+ * One page of the feed.
+ *
+ * Every filter narrows; none can widen. `companyIds` is resolved from the
+ * session before this is called and is the only thing standing between one
+ * client's admin and another client's activity.
+ */
+export async function listActivity({
+  companyIds,
+  from = null,
+  to = null,
+  categories = null,
+  severities = null,
+  actorUserId = null,
+  actorType = null,
+  entityType = null,
+  entityId = null,
+  hotelId = null,
+  search = null,
+  limit = 50,
+  offset = 0,
+}) {
+  if (!companyIds?.length) return { rows: [], total: 0 };
+
+  const where = ['hospitality_company_id = ANY($1)'];
+  const params = [companyIds];
+  const add = (clause, value) => {
+    params.push(value);
+    where.push(clause.replace('$?', `$${params.length}`));
+  };
+
+  if (from) add('occurred_at >= $?', from);
+  if (to) add('occurred_at <= $?', to);
+  if (categories?.length) add('category = ANY($?)', categories);
+  if (severities?.length) add('severity = ANY($?)', severities);
+  if (actorUserId) add('actor_user_id = $?', actorUserId);
+  if (actorType) add('actor_type = $?', actorType);
+  if (entityType) add('entity_type = $?', entityType);
+  if (entityId) add('entity_id = $?', entityId);
+  if (hotelId) add('hotel_id = $?', hotelId);
+  // Trigram index on summary makes this usable without a tsvector column.
+  if (search) add('summary ILIKE $?', `%${search}%`);
+
+  const whereSql = where.join(' AND ');
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+
+  const [rows, count] = await Promise.all([
+    db.any(
+      `SELECT ${LIST_COLUMNS} FROM tbl_activity_events
+        WHERE ${whereSql}
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+      params
+    ),
+    db.one(
+      `SELECT count(*)::int AS total FROM tbl_activity_events WHERE ${whereSql}`,
+      params
+    ),
+  ]);
+
+  return { rows, total: count.total };
+}
+
+/**
+ * What the filter dropdowns should offer.
+ *
+ * Built from what this company actually has rather than from the full
+ * catalogue, so an admin is never offered a filter that returns nothing.
+ */
+export async function activityFacets(companyIds) {
+  if (!companyIds?.length) return { categories: [], actors: [], entityTypes: [], units: [] };
+
+  const [categories, actors, entityTypes, units] = await Promise.all([
+    db.any(
+      `SELECT category, count(*)::int AS count FROM tbl_activity_events
+        WHERE hospitality_company_id = ANY($1)
+        GROUP BY category ORDER BY count DESC`,
+      [companyIds]
+    ),
+    db.any(
+      `SELECT actor_user_id, actor_label, actor_type, count(*)::int AS count
+         FROM tbl_activity_events
+        WHERE hospitality_company_id = ANY($1) AND actor_user_id IS NOT NULL
+        GROUP BY actor_user_id, actor_label, actor_type
+        ORDER BY count DESC LIMIT 100`,
+      [companyIds]
+    ),
+    db.any(
+      `SELECT entity_type, count(*)::int AS count FROM tbl_activity_events
+        WHERE hospitality_company_id = ANY($1) AND entity_type IS NOT NULL
+        GROUP BY entity_type ORDER BY count DESC`,
+      [companyIds]
+    ),
+    db.any(
+      `SELECT e.hotel_id, h.name AS hotel_name, count(*)::int AS count
+         FROM tbl_activity_events e
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = e.hotel_id
+        WHERE e.hospitality_company_id = ANY($1) AND e.hotel_id IS NOT NULL
+        GROUP BY e.hotel_id, h.name ORDER BY count DESC`,
+      [companyIds]
+    ),
+  ]);
+
+  return { categories, actors, entityTypes, units };
+}
+
+/**
+ * The column-level changes one event produced.
+ *
+ * This is what turns "Priya renamed Company A" into something an admin can
+ * check. The event is re-read under the caller's company scope first, so an
+ * id from another company returns nothing rather than leaking its diff.
+ */
+export async function activityChanges(eventId, companyIds) {
+  if (!companyIds?.length) return null;
+
+  const event = await db.oneOrNone(
+    `SELECT ${LIST_COLUMNS} FROM tbl_activity_events
+      WHERE id = $1 AND hospitality_company_id = ANY($2)`,
+    [eventId, companyIds]
+  );
+  if (!event) return null;
+
+  const changes = event.request_id
+    ? await db.any(
+        `SELECT table_name, operation, record_id, old_data, new_data, changed_at
+           FROM tbl_audit_row_changes
+          WHERE request_id = $1
+          ORDER BY id`,
+        [event.request_id]
+      )
+    : [];
+
+  return { event, changes };
+}

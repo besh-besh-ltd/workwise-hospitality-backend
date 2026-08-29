@@ -7,6 +7,7 @@ import {
   resolveEntityScope,
   resolveUserScope,
 } from '../models/activityModel.js';
+import { emitToCompany } from '../util/socket.js';
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -169,7 +170,7 @@ const captureEvent = async (req, res, responseBody) => {
     summary = `${actor.actorLabel} performed ${req.method} ${pattern}`;
   }
 
-  await recordActivityEvent({
+  const eventId = await recordActivityEvent({
     requestId: ctx?.requestId || null,
     source: definition?.source || (actor.actorType === ACTOR_TYPES.SYSTEM ? 'CRON' : 'HTTP'),
     eventKey: definition?.key || null,
@@ -192,6 +193,16 @@ const captureEvent = async (req, res, responseBody) => {
     routePattern: pattern,
     statusCode: res.statusCode,
   });
+
+  // A signal, not a payload: watchers refetch rather than trusting the frame,
+  // so a duplicated or out-of-order delivery cannot corrupt the feed. Same
+  // contract as notification:new, which is what the client already knows.
+  if (eventId) {
+    emitToCompany(scope.hospitalityCompanyId, 'activity:new', {
+      id: eventId,
+      severity: definition?.severity || 'routine',
+    });
+  }
 };
 
 /**

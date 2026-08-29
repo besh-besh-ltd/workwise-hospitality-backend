@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import Cryptr from 'cryptr';
 import Config from '../config/app.config.js';
 import { logger } from './logger.js';
+import db from '../config/dbConn.js';
 
 let ioInstance = null;
 const cryptr = new Cryptr(Config.cryptR.secret);
@@ -39,6 +40,18 @@ const resolveUserIdFromPayload = (payload) => {
 };
 
 export const getIo = () => ioInstance;
+
+/**
+ * Pushes to everyone watching a company's activity feed.
+ *
+ * Used as a signal only: the client refetches rather than trusting the frame,
+ * which is the pattern useNotificationStream already established here and the
+ * reason an out-of-order or duplicated frame cannot corrupt what is on screen.
+ */
+export const emitToCompany = (companyId, event, payload) => {
+  if (!ioInstance || !companyId) return;
+  ioInstance.to(`company:${companyId}`).emit(event, payload);
+};
 
 export const emitToUser = (userId, event, payload) => {
   if (!ioInstance || userId == null) return;
@@ -111,6 +124,29 @@ export const SocketConfig = (SERVER) => {
     // from the payload. This used to `socket.join('user:' + userId)` with the
     // client-supplied id, so any connected socket could subscribe to any user's
     // `notification:new` stream simply by naming them.
+    // Subscribe to a company's activity feed.
+    //
+    // SECURITY: as with `addNewUser` above, the rooms come from the verified
+    // handshake identity and a fresh check of what that user administers —
+    // never from the payload. A client naming a company id would otherwise be
+    // subscribing to another client's entire audit trail.
+    socket.on('activity:subscribe', async () => {
+      const userId = socket.userId;
+      if (userId == null) return;
+      try {
+        const rows = await db.any(
+          `SELECT hc.id
+             FROM tbl_hospitality_companies hc
+             JOIN tbl_users u ON u.company_id = hc.buyer_company_id
+            WHERE u.id = $1 AND u.user_type = 7 AND hc.is_deleted = 0`,
+          [userId]
+        );
+        for (const row of rows) socket.join(`company:${row.id}`);
+      } catch (err) {
+        logger.warn({ err: err.message, userId }, 'Could not subscribe socket to company activity');
+      }
+    });
+
     socket.on('addNewUser', () => {
       const userId = socket.userId;
       if (userId == null) return;
