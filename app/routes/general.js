@@ -172,6 +172,29 @@ GeneralRoutes.get(
   passportSignIn,
   hospitalityApprovalController.willBeFinalApprover
 );
+// Cover. Reading and arranging it are NOT admin-only: somebody going on leave
+// arranges their own, and the controller is what refuses to let them arrange
+// anybody else's. Gating the route on administrator would make the common case
+// impossible.
+GeneralRoutes.get(
+  '/hospitality/approval/delegations',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.getDelegations
+);
+GeneralRoutes.post(
+  '/hospitality/approval/delegations',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.createDelegationEntry
+);
+GeneralRoutes.delete(
+  '/hospitality/approval/delegations/:id',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.revokeDelegationEntry
+);
+
 // The oversight screens. requireCompanyAdmin rather than acl([7]), so an
 // administrator promoted the new way — a buyer holding company.admin — reaches
 // them; reassignment in particular is a company-administration action, not

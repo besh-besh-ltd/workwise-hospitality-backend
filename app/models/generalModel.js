@@ -128,6 +128,7 @@ import fs from "fs";
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
+import { applyDelegations } from './approvalDelegationModel.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -2220,6 +2221,21 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
 
   // Remove duplicates
   let finalApprovers = [...new Set(userIds)];
+
+  // Cover, applied last so it sees exactly who would otherwise have been asked.
+  //
+  // This is the single point where delegation takes effect, which is what
+  // makes it forward-only: resolution happens as an approval instance is
+  // created, so an instance that already exists keeps the approvers it was
+  // created with. Moving one of those is reassignment, a different action with
+  // different guards.
+  //
+  // All eight callers get it, deliberately. The propagation service resolving
+  // a newly-added step is making a new assignment; simulateApproverImpact and
+  // willBeFinalApprover are asking who would be asked, and an answer that
+  // ignored cover would disagree with what actually happens.
+  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t);
+
   return finalApprovers;
 }
 

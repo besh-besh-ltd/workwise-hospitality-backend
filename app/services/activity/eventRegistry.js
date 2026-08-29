@@ -383,6 +383,25 @@ export const EVENTS = [
     entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
     summary: (c) => `${c.actor} reminded every vendor yet to quote on RFQ ${c.entityLabel || c.entityId}`,
   }),
+  // Cover. Notable rather than critical: it changes who is asked on approvals
+  // created from now on, but it cannot touch one that already exists and it
+  // cannot reach outside the company.
+  e({
+    method: 'POST', path: '/general/hospitality/approval/delegations',
+    key: 'approval_delegation_created',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.actor(),
+    summary: (c) =>
+      `${c.actor} arranged for someone to cover approvals until ${c.body?.ends_at || 'a set date'}`,
+  }),
+  e({
+    method: 'DELETE', path: '/general/hospitality/approval/delegations/:id',
+    key: 'approval_delegation_revoked',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'APPROVAL_DELEGATION', id: P('id') }, scope: SCOPE.actor(),
+    summary: (c) => `${c.actor} ended an approval cover arrangement early`,
+  }),
+
   // Changing who authorises spend on a live item, with a mandatory reason.
   // Critical without qualification: an unexplained reassignment is
   // indistinguishable after the fact from routing an approval to a friend.

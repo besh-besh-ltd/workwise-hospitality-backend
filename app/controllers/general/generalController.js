@@ -46,6 +46,13 @@ import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 import {
+  listDelegations,
+  findOverlappingDelegation,
+  createDelegation,
+  getDelegation,
+  revokeDelegation
+} from '../../models/approvalDelegationModel.js';
+import {
   STUCK_CLASSES,
   countStuckApprovals,
   listStuckApprovals,
@@ -1436,6 +1443,153 @@ const hospitalityApprovalController = {
         status: false,
         message: err.message
       });
+    }
+  },
+
+  /**
+   * Who is covering for whom.
+   * GET /hospitality/approval/delegations
+   */
+  async getDelegations(req, res) {
+    try {
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const companyIds = await resolveStuckScope(req, scopeIds);
+      const data = await listDelegations(companyIds, {
+        includeExpired: String(req.query.include_expired || '') === 'true',
+      });
+      return res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Arrange cover.
+   * POST /hospitality/approval/delegations
+   *
+   * An administrator arranges it for anybody in their company; anybody else
+   * arranges it only for themselves. Both are real needs — somebody going on
+   * leave sets their own, and an admin covers for a person who left suddenly.
+   */
+  async createDelegationEntry(req, res) {
+    try {
+      const delegatorUserId = Number(req.body?.delegator_user_id) || Number(req.user?.id);
+      const delegateUserId = Number(req.body?.delegate_user_id);
+      const startsAt = req.body?.starts_at;
+      const endsAt = req.body?.ends_at;
+
+      if (!Number.isFinite(delegateUserId) || !startsAt || !endsAt) {
+        return res.status(400).json({
+          status: 3,
+          message: 'delegate_user_id, starts_at and ends_at are required',
+        });
+      }
+      if (new Date(endsAt) <= new Date(startsAt)) {
+        return res.status(400).json({ status: 3, message: 'The cover must end after it starts' });
+      }
+      if (new Date(endsAt) <= new Date()) {
+        // Backdating cover would claim somebody approved things they did not:
+        // delegation is applied when an approval is created, so a window that
+        // has already passed can only ever be a fiction in the record.
+        return res.status(400).json({
+          status: 3,
+          code: 'WINDOW_IN_THE_PAST',
+          message: 'Cover cannot be arranged for a period that has already ended',
+        });
+      }
+      if (delegatorUserId === delegateUserId) {
+        return res.status(400).json({ status: 3, message: 'Someone cannot cover for themselves' });
+      }
+
+      const actingForSomeoneElse = delegatorUserId !== Number(req.user?.id);
+      if (actingForSomeoneElse && !(await requestIsCompanyAdmin(req))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only a company administrator can arrange cover for someone else',
+        });
+      }
+
+      // Both ends inside the caller's own tenant. Cover that reached outside it
+      // would be a way to hand another company's approvals to your own staff.
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const companyIds = await resolveStuckScope(req, scopeIds);
+      for (const userId of [delegatorUserId, delegateUserId]) {
+        const inScope = await db.oneOrNone(
+          `SELECT 1 FROM tbl_user_role_scopes
+            WHERE user_id = $1 AND company_id IN ($2:csv) LIMIT 1`,
+          [userId, companyIds]
+        );
+        if (!inScope) {
+          return res.status(400).json({
+            status: 3,
+            code: 'NOT_IN_COMPANY',
+            message: 'Both people must belong to your company',
+          });
+        }
+      }
+
+      const overlap = await findOverlappingDelegation({ delegatorUserId, startsAt, endsAt });
+      if (overlap) {
+        // Two overlapping windows would make "who is covering" ambiguous at
+        // the moment an approval is resolved, and the resolver must never have
+        // to pick.
+        return res.status(409).json({
+          status: 0,
+          code: 'OVERLAPPING_DELEGATION',
+          message: 'Cover is already arranged for part of that period',
+        });
+      }
+
+      const row = await createDelegation({
+        delegatorUserId,
+        delegateUserId,
+        startsAt,
+        endsAt,
+        reason: req.body?.reason || null,
+        createdBy: Number(req.user?.id),
+      });
+      return res.json({ status: 1, data: { id: row.id } });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * End cover early.
+   * DELETE /hospitality/approval/delegations/:id
+   */
+  async revokeDelegationEntry(req, res) {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const row = await getDelegation(id);
+      if (!row) return res.status(404).json({ status: 2, message: 'Cover not found' });
+
+      const isOwn = Number(row.delegator_user_id) === Number(req.user?.id);
+      if (!isOwn && !(await requestIsCompanyAdmin(req))) {
+        return res.status(403).json({ status: 0, message: 'Insufficient permissions' });
+      }
+
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const companyIds = await resolveStuckScope(req, scopeIds);
+      const inScope = await db.oneOrNone(
+        `SELECT 1 FROM tbl_user_role_scopes
+          WHERE user_id = $1 AND company_id IN ($2:csv) LIMIT 1`,
+        [row.delegator_user_id, companyIds]
+      );
+      if (!inScope) return res.status(404).json({ status: 2, message: 'Cover not found' });
+
+      // Ended, never deleted — "who was covering on the 14th" has to stay
+      // answerable after somebody comes back sooner than planned.
+      const result = await revokeDelegation(id, Number(req.user?.id));
+      if (result.rowCount === 0) {
+        return res.status(409).json({ status: 0, message: 'That cover has already ended' });
+      }
+      return res.json({ status: 1, message: 'Cover ended' });
+    } catch (e) {
+      logError(e);
+      return res.status(400).json({ status: 3, message: e.message });
     }
   },
 
