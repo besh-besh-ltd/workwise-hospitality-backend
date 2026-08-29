@@ -78,7 +78,7 @@
     },
     {
       "name": "activity",
-      "pattern": "tests/services/activity\\."
+      "pattern": "tests/services/(activity|admin)\\."
     },
     {
       "name": "arc-core",

@@ -277,6 +277,45 @@ user_book_demo: async (mobile) => {
     });
   },
 
+  /**
+   * Whether an email or mobile is already in use, ignoring one account.
+   *
+   * Case-insensitive on purpose. The submit-time check compares
+   * `email = $1` against a lowercased input, so a stored "Priya@example.com"
+   * never matches "priya@example.com" and both accounts get created —
+   * production already holds four duplicated emails and six duplicated
+   * mobiles, one of them across four accounts.
+   *
+   * `excludeUserId` keeps an account from flagging its own details while it is
+   * being edited; a warning that fires every time teaches people to ignore it.
+   */
+  identity_taken: async ({ email = null, mobile = null, excludeUserId = null }) => {
+    const [emailRow, mobileRow] = await Promise.all([
+      email
+        ? db.oneOrNone(
+            `SELECT 1 FROM tbl_users
+              WHERE lower(email) = lower($1)
+                AND COALESCE(is_deleted, 0) = 0
+                AND ($2::int IS NULL OR id <> $2)
+              LIMIT 1`,
+            [String(email).trim(), excludeUserId]
+          )
+        : null,
+      mobile
+        ? db.oneOrNone(
+            `SELECT 1 FROM tbl_users
+              WHERE regexp_replace(mobile, '[^0-9]', '', 'g')
+                    = regexp_replace($1, '[^0-9]', '', 'g')
+                AND COALESCE(is_deleted, 0) = 0
+                AND ($2::int IS NULL OR id <> $2)
+              LIMIT 1`,
+            [String(mobile).trim(), excludeUserId]
+          )
+        : null,
+    ]);
+    return { email: Boolean(emailRow), mobile: Boolean(mobileRow) };
+  },
+
   user_email_exist: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_users where email = $1', [email])

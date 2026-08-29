@@ -8,14 +8,18 @@
     "and the failure looks like a missing table rather than a stale snapshot.",
     "",
     "List a migration here when you add it. prepareTestDb applies these in",
-    "array order, after schema.sql and before seed_reference.sql. Remove them",
-    "from the list in the same commit that refreshes the snapshot.",
+    "array order, after schema.sql AND after seed_reference.sql, mirroring",
+    "production: a migration that transforms rows runs against data that",
+    "already exists. Applying one to an empty table and then re-inserting the",
+    "pre-migration values from the dump silently undoes it. Remove them from",
+    "the list in the same commit that refreshes the snapshot.",
     "",
     "Paths are relative to the backend root."
   ],
   "migrations": [
     "migrations/20260829090000_audit_row_changes.sql",
     "migrations/20260829091000_activity_events.sql",
-    "migrations/20260829092000_activity_backfill_identity.sql"
+    "migrations/20260829092000_activity_backfill_identity.sql",
+    "migrations/20260829093000_rename_tender_creator_role.sql"
   ]
 }

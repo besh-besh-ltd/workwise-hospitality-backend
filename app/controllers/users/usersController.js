@@ -427,6 +427,37 @@ const add_vendor_product = async (productDetails, vendorId) => {
 
 
 const UsersController = {
+  /**
+   * Is this email or mobile already taken? (UM-1)
+   *
+   * Duplicates were only caught on submit, after the whole form had been
+   * filled in, and came back as a generic error. This lets the form say so as
+   * the field is left.
+   *
+   * Answers strictly yes or no. Returning the matching account would turn a
+   * form-validation helper into a directory-enumeration tool.
+   */
+  check_identity: async (req, res) => {
+    try {
+      const { email, mobile, exclude_user_id: excludeUserId } = req.query;
+      const taken = await userModel.identity_taken({
+        email: email || null,
+        mobile: mobile || null,
+        excludeUserId: excludeUserId ? Number(excludeUserId) : null,
+      });
+      return res.status(200).json({
+        status: 1,
+        data: {
+          email: { taken: taken.email },
+          mobile: { taken: taken.mobile },
+        },
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: 'Could not check availability' });
+    }
+  },
+
   userBookDemo: async (req, res, next) => {
     try {
       const { mobile } = req.body;
@@ -1150,6 +1181,16 @@ create_buyer_company_users: async (req, res, next) => {
     });
 
   } catch (err) {
+    // A duplicate role assignment is the admin asking for something they
+    // already have, not a server failure. It used to surface as a bare 500
+    // (UM-7), which tells them nothing about what to do next.
+    if (err?.code === 'DUPLICATE_ROLE_SCOPE') {
+      return res.status(409).json({
+        status: 0,
+        code: 'DUPLICATE_ROLE_SCOPE',
+        message: err.message
+      });
+    }
     logError("create_buyer_company_users error", err);
     return res.status(500).json({
       status: false,
@@ -2519,6 +2560,13 @@ update_user_detail: async (req, res, next) => {
     });
 
   } catch (err) {
+    if (err?.code === 'DUPLICATE_ROLE_SCOPE') {
+      return res.status(409).json({
+        status: 0,
+        code: 'DUPLICATE_ROLE_SCOPE',
+        message: err.message
+      });
+    }
     logError(err);
     return res.status(400).json({
       status: false,

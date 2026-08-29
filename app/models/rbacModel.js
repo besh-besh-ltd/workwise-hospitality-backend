@@ -126,7 +126,22 @@ const rbacModel = {
       params
     );
 
-    return t ? run(t) : db.tx(run);
+    // uq_user_role_scope_tuple already refuses an exact duplicate. Without
+    // this, that refusal surfaced as a raw Postgres 23505 and the caller's
+    // generic catch turned it into a bare 500 — the admin was told the server
+    // had failed, when in fact they had asked for something they already had
+    // (UM-7). Rethrown as a named error the controller can report properly.
+    const withDuplicateContext = (err) => {
+      if (err?.code === '23505' && String(err?.constraint || '').includes('user_role_scope')) {
+        const duplicate = new Error('This role assignment already exists for this user.');
+        duplicate.code = 'DUPLICATE_ROLE_SCOPE';
+        duplicate.status = 409;
+        throw duplicate;
+      }
+      throw err;
+    };
+
+    return (t ? run(t) : db.tx(run)).catch(withDuplicateContext);
   },
   getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(

@@ -149,6 +149,15 @@ UsersRoutes.get(
   UsersController.get_company_users_detailed
 );
 
+// Is this email or mobile already taken? (UM-1) Admin-only, because it answers
+// a question about accounts that exist.
+UsersRoutes.get(
+  '/check-identity',
+  passportSignIn,
+  acl([7]),
+  UsersController.check_identity
+);
+
 UsersRoutes.post(
   '/user-registration',
   validateBody(schemas.user_register),

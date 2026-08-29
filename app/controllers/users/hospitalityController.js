@@ -2584,10 +2584,24 @@ const HospitalityController = {
         return res.status(404).json({ status: 2, message: 'Hotel not found in selected company' });
       }
 
-      const users = await hospitalityModel.getUsersForHotelWithPassword(hospitalityCompanyId, hotelId);
+      // UM-12: send to chosen people rather than to everybody at the unit.
+      // The list narrows the eligible set; it cannot extend it, so naming an
+      // id outside this unit selects nobody rather than mailing them.
+      const requestedIds = Array.isArray(req.body?.user_ids) ? req.body.user_ids : null;
+
+      const users = await hospitalityModel.getUsersForHotelWithPassword(
+        hospitalityCompanyId,
+        hotelId,
+        requestedIds
+      );
 
       if (!users || users.length === 0) {
-        return res.status(200).json({ status: 2, message: 'No users mapped to this business unit' });
+        return res.status(200).json({
+          status: 2,
+          message: requestedIds?.length
+            ? 'None of the selected people are mapped to this business unit'
+            : 'No users mapped to this business unit'
+        });
       }
 
       const DEFAULT_PASSWORD = 'Workwise@123';

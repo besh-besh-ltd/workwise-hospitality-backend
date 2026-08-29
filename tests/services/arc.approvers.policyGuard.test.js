@@ -362,7 +362,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     expect(rejected.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
     expect(rejected.body.data.steps[0]).toMatchObject({
       role_id: ROLE_IDS.TENDER_CREATOR,
-      role_title: "Tender Creator",
+      role_title: "RFQ Creator",
       resource: "boq",
       missing_permissions: ["boq.approve"],
     });

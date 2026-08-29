@@ -1574,7 +1574,19 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     );
   },
 
-  getUsersForHotelWithPassword: async (companyId, hotelId) => {
+  /**
+   * Users who can be sent credentials for a business unit.
+   *
+   * `userIds` narrows to a chosen few (UM-12). It intersects rather than
+   * replaces the mapping conditions, so a caller cannot mail credentials to
+   * somebody outside the unit by naming their id — the recipient list is a
+   * filter on who is already eligible, never a way to add to it.
+   */
+  getUsersForHotelWithPassword: async (companyId, hotelId, userIds = null) => {
+    const ids = Array.isArray(userIds) && userIds.length
+      ? userIds.map((id) => Number(id)).filter(Number.isFinite)
+      : null;
+
     return db.any(
       `SELECT DISTINCT ON (u.id)
         u.id AS user_id,
@@ -1590,8 +1602,9 @@ getVendorHotelCategoryMappings: async (vendorId) => {
            (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $2)
            OR hum.mapping_type = 0
          )
+         AND ($3::int[] IS NULL OR u.id = ANY($3::int[]))
        ORDER BY u.id, hum.mapping_type DESC`,
-      [companyId, hotelId]
+      [companyId, hotelId, ids]
     );
   },
 

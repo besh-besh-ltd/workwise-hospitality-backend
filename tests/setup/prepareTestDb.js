@@ -228,12 +228,18 @@ async function prepareTestDbOnce() {
     // session can resolve unqualified table names like 'tbl_approval_processes'.
     await client.query("SET search_path = public, pg_catalog");
 
-    await applyPendingMigrations(client, cfg.setupDir);
-
     await dropExternalFks(client);
     await applyFile(client, referenceFile, "seed_reference");
     // Reference seed dump also sets search_path = '' at its top.
     await client.query("SET search_path = public, pg_catalog");
+
+    // After the reference data, not before it. A migration that transforms
+    // rows — renaming a seeded role, backfilling a column — runs in production
+    // against data that already exists, and must do the same here. Applying it
+    // to an empty table and then re-inserting the pre-migration values from
+    // the dump silently undoes it, and the failure surfaces much later as a
+    // test asserting the old value.
+    await applyPendingMigrations(client, cfg.setupDir);
 
     // Fixtures are an orchestrated JS module (tests/fixtures/index.js) that
     // inserts the production-shaped test population (companies, hotels, users,
