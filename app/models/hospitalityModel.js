@@ -190,6 +190,16 @@ const hospitalityModel = {
     );
   },
 
+  // Archived units included. Every other reader wants them hidden, which is
+  // what makes archiving useful — but restoring one has to be able to find it
+  // first, and so does a tenancy check on a unit that is already archived.
+  getHotelByIdIncludingArchived: async (hotelId) => {
+    return db.oneOrNone(
+      `SELECT * FROM tbl_hospitality_company_hotels WHERE id = $1`,
+      [hotelId]
+    );
+  },
+
   updateHotel: async (hotelId, hotelObj, companyId) => {
     return db.one(
       `UPDATE tbl_hospitality_company_hotels

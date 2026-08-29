@@ -383,6 +383,34 @@ export const EVENTS = [
     entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
     summary: (c) => `${c.actor} reminded every vendor yet to quote on RFQ ${c.entityLabel || c.entityId}`,
   }),
+  // Removing a business unit or a company. Critical without qualification —
+  // an archive hides an estate's worth of work from every list, and a delete
+  // is the one action here with no undo.
+  e({
+    method: 'DELETE', path: '/hospitality/company/:company_id/hotels/:hotel_id',
+    key: 'business_unit_removed',
+    category: CATEGORIES.ORGANISATION, severity: 'critical',
+    entity: { type: 'HOTEL', id: P('hotel_id') },
+    scope: SCOPE.params('company_id', 'hotel_id'),
+    summary: (c) =>
+      `${c.actor} ${c.params?.archive === 'true' ? 'archived' : 'deleted'} a business unit`,
+  }),
+  e({
+    method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/restore',
+    key: 'business_unit_restored',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    entity: { type: 'HOTEL', id: P('hotel_id') }, scope: SCOPE.entity('HOTEL'),
+    summary: (c) => `${c.actor} restored ${c.entityLabel || 'a business unit'}`,
+  }),
+  e({
+    method: 'DELETE', path: '/hospitality/company/:company_id',
+    key: 'company_removed',
+    category: CATEGORIES.ORGANISATION, severity: 'critical',
+    entity: { type: 'COMPANY', id: P('company_id') },
+    scope: SCOPE.params('company_id'),
+    summary: (c) => `${c.actor} removed a hospitality company`,
+  }),
+
   // Cover. Notable rather than critical: it changes who is asked on approvals
   // created from now on, but it cannot touch one that already exists and it
   // cannot reach outside the company.

@@ -73,6 +73,59 @@ HospitalityRoutes.post(
   hospitalityController.createHO
 );
 
+// HN-2. There was no delete for a company or a business unit at any layer,
+// so an accidentally created one stayed forever.
+//
+// The pre-flight is not decoration: two tables reference a hotel with NO
+// foreign key — tbl_user_role_scopes and the 4,064-row vendor subscription
+// table — so Postgres would let the DELETE through and silently orphan both.
+// The second decides which vendors can be solicited for a unit, and orphaning
+// it fails quietly rather than loudly.
+HospitalityRoutes.get(
+  '/company/:company_id/hotels/:hotel_id/delete-preflight',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.hotelIdParam),
+  hospitalityController.previewHotelDelete
+);
+
+HospitalityRoutes.delete(
+  '/company/:company_id/hotels/:hotel_id',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.hotelIdParam),
+  hospitalityController.deleteHotel
+);
+
+HospitalityRoutes.post(
+  '/company/:company_id/hotels/:hotel_id/restore',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.hotelIdParam),
+  hospitalityController.restoreHotel
+);
+
+HospitalityRoutes.get(
+  '/company/:company_id/delete-preflight',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.previewCompanyDelete
+);
+
+HospitalityRoutes.delete(
+  '/company/:company_id',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.deleteCompany
+);
+
 HospitalityRoutes.put(
   '/company/:company_id/hotels/:hotel_id',
   passportSignIn,
