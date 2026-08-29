@@ -103,6 +103,25 @@ const rbacModel = {
 
   /* -------------------- ROLES & SCOPES -------------------- */
 
+  /**
+   * Role ids that carry the `company.admin` capability.
+   *
+   * Resolved from the permission rather than hardcoded to a title, so a
+   * company that builds its own administrator role — or renames the seeded one
+   * — is still recognised. Nothing should ever decide administration by
+   * matching a string.
+   */
+  rolesGrantingCompanyAdmin: async () => {
+    return db.map(
+      `SELECT DISTINCT rp.role_id
+         FROM tbl_role_permissions rp
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE p.resource = 'company' AND p.action = 'admin'`,
+      [],
+      (r) => Number(r.role_id)
+    );
+  },
+
   assignUserRoleScopes: (scopes = [], t = null) => {
     if (!scopes.length) return Promise.resolve();
 

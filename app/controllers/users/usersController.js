@@ -42,6 +42,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
+import { isCompanyAdmin } from '../../middleware/companyAdmin.js';
 import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
 import {
   simulateApproverImpact,
@@ -1300,7 +1301,6 @@ get_company_users: async (req, res, next) => {
     };
     
     const formattedUsers = users
-      .filter(user => user.user_type !== 7)
       .map(user => ({
         id: user.id,
         name: user.name,
@@ -2314,6 +2314,45 @@ update_user_detail: async (req, res, next) => {
       };
 
       logger.info(`[UpdateUser ${targetUserId}] role scopes: old=${oldRoleScopes.length}, new=${newRoleScopes?.length ?? 'n/a'}, removedScopes=${removedScopes.length}, addedScopes=${addedScopes.length}`);
+
+      /* ---- LAST ADMINISTRATOR ----
+         Deactivating an administrator, or taking away the role that carries
+         `company.admin`, must not leave the company with nobody who can
+         administer it. Nobody inside could restore one — creating and
+         promoting administrators is itself an administrator's power — so the
+         company would be locked out of its own configuration until Workwise
+         intervened with SQL.
+
+         Checked before the write, so the refusal costs nothing and leaves no
+         partial state. */
+      const targetUserRow = await db.oneOrNone(
+        'SELECT user_type, company_id FROM tbl_users WHERE id = $1',
+        [targetUserId]
+      );
+
+      if (targetUserRow && await isCompanyAdmin({ id: targetUserId, user_type: targetUserRow.user_type })) {
+        const adminRoleIds = await rbacModel.rolesGrantingCompanyAdmin();
+        const keepsCapability =
+          newRoleIds === null
+            ? true // roles untouched by this request
+            : newRoleIds.some((id) => adminRoleIds.includes(Number(id)));
+        const keepsLegacyType = Number(targetUserRow.user_type) === 7;
+
+        if (statusDeactivating || !(keepsCapability || keepsLegacyType)) {
+          try {
+            await userModel.assertNotLastCompanyAdmin(targetUserRow.company_id, targetUserId);
+          } catch (guardErr) {
+            if (guardErr?.code === 'LAST_COMPANY_ADMIN') {
+              return res.status(409).json({
+                status: 0,
+                code: 'LAST_COMPANY_ADMIN',
+                message: guardErr.message
+              });
+            }
+            throw guardErr;
+          }
+        }
+      }
 
       /* ---- FULL-WIPE BACKSTOP ----
          `roles: []` / `department_ids: []` mean "replace everything with

@@ -804,6 +804,58 @@ user_book_demo: async (mobile) => {
    * offered as an approver, but nothing stops them signing in. Closing that is
    * a decision with a data remediation attached, not a predicate.
    */
+  /**
+   * How many administrators a company has.
+   *
+   * Counts both kinds while the legacy user type still exists: an account with
+   * `user_type = 7`, and an account holding the `company.admin` capability
+   * through any granted role scope. Soft-deleted accounts do not count — an
+   * administrator who cannot sign in is not cover.
+   */
+  countCompanyAdmins: async (companyId, excludeUserId = null) => {
+    const row = await db.one(
+      `SELECT count(DISTINCT u.id)::int AS n
+         FROM tbl_users u
+        WHERE u.company_id = $1
+          AND COALESCE(u.is_deleted, 0) = 0
+          AND ($2::int IS NULL OR u.id <> $2)
+          AND (
+            u.user_type = 7
+            OR EXISTS (
+              SELECT 1
+                FROM tbl_user_role_scopes urs
+                JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+                JOIN tbl_permissions p ON p.id = rp.permission_id
+               WHERE urs.user_id = u.id
+                 AND p.resource = 'company'
+                 AND p.action = 'admin'
+            )
+          )`,
+      [companyId, excludeUserId]
+    );
+    return row.n;
+  },
+
+  /**
+   * Refuses to leave a company with no administrator.
+   *
+   * Nobody inside the company could restore one — creating and promoting
+   * administrators is itself an administrator's power — so the company would
+   * be locked out of its own configuration until Workwise intervened with SQL.
+   * That is the trapdoor this whole phase exists to close.
+   */
+  assertNotLastCompanyAdmin: async (companyId, userId) => {
+    const remaining = await userModel.countCompanyAdmins(companyId, userId);
+    if (remaining > 0) return;
+    const err = new Error(
+      'This is the only administrator left. Give someone else administrator access first, ' +
+      'or the company will have nobody who can manage users, units and approvals.'
+    );
+    err.code = 'LAST_COMPANY_ADMIN';
+    err.status = 409;
+    throw err;
+  },
+
   user_detail_check: async (id) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_users where id = $1 and coalesce(is_deleted, 0) = 0', [id])
@@ -2206,7 +2258,6 @@ publishProfileReviews: async (reviewObj) => {
     const whereClause = `
       WHERE tu.company_id = $1
         AND tu.is_deleted = 0
-        AND tu.user_type != 7
         ${statusClause}
         ${searchClause}
         ${companyClause}
@@ -2283,7 +2334,7 @@ publishProfileReviews: async (reviewObj) => {
         COUNT(DISTINCT hum.user_id) AS mapped_count
       FROM tbl_users tu
       LEFT JOIN tbl_hospitality_user_mappings hum ON hum.user_id = tu.id
-      WHERE tu.company_id = $1 AND tu.is_deleted = 0 AND tu.user_type != 7
+      WHERE tu.company_id = $1 AND tu.is_deleted = 0
     `;
     return db.one(query, [company_id]);
   },
