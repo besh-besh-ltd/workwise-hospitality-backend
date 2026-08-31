@@ -132,7 +132,10 @@ export async function listStuckApprovals(
     entityType,
     hotelId,
     classes,
-    limit: Math.min(Number(limit) || 50, 200),
+    // Clamped at both ends. Math.min alone let `?limit=-5` through as a
+    // negative LIMIT, which Postgres rejects and the caller saw as a bare 400
+    // — a hand-typed URL should not be able to produce an error page.
+    limit: Math.min(Math.max(Number(limit) || 50, 1), 200),
     offset: Math.max(Number(offset) || 0, 0),
   };
   if (entityType) where.push('ai.entity_type = $/entityType/');

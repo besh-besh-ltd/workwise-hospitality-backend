@@ -161,6 +161,17 @@ describe("classifying what is stuck", () => {
     }
   });
 
+  it("survives a hand-typed limit", async () => {
+    // `?limit=-5` reached Postgres as a negative LIMIT and came back a bare
+    // 400. A URL somebody edited by hand should not produce an error page.
+    const client = await httpClient(ADMIN);
+    for (const limit of ["-5", "0", "abc", "99999"]) {
+      const res = await client.get(`${STUCK_URL}?limit=${limit}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data.items)).toBe(true);
+    }
+  });
+
   it("keeps counting the whole company while the list is filtered", async () => {
     // "3 blocked" has to mean three in the company. A summary that moves with
     // the filter is a summary of the filter, which is not what anybody reads
