@@ -200,3 +200,49 @@ describe("activity detail", () => {
     expect(res.body.data.changes).toEqual([]);
   });
 });
+
+describe("the counts the screen leads with", () => {
+  it("reports how many of each severity the company has", async () => {
+    // The page opens with these three numbers because an admin's first
+    // question is "is anything wrong?", and a list makes them read to find
+    // out. Counted server-side over the whole company, deliberately not
+    // derived from the rows on screen — a count of the current page is a
+    // count of the page, which is not a question anybody asks.
+    // Seeded here rather than relying on another test having run: a count
+    // that depends on execution order is a count that passes for the wrong
+    // reason the first time somebody reorders the file.
+    await seedEvent({ severity: "critical", summary: "a critical thing" });
+    await seedEvent({ severity: "critical", summary: "another critical thing" });
+    await seedEvent({ severity: "routine", summary: "a routine thing" });
+
+    const client = await httpClient(ADMIN_A);
+    const res = await client.get("/api/v1/activity/facets");
+    expect(res.status).toBe(200);
+
+    const severities = res.body.data.severities;
+    const critical = severities.find((s) => s.severity === "critical");
+    expect(critical).toBeDefined();
+    expect(critical.count).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the unit facet distinct from the severity facet", async () => {
+    // Both were added to the same Promise.all and the destructure order was
+    // briefly wrong, which silently swapped them — units came back as
+    // severities and vice versa, and every count on the page was nonsense.
+    await seedEvent({ severity: "critical", hotelId: IDS.hotels.A1 });
+
+    const client = await httpClient(ADMIN_A);
+    const { data } = (await client.get("/api/v1/activity/facets")).body;
+    expect(data.severities.length).toBeGreaterThan(0);
+    expect(data.units.length).toBeGreaterThan(0);
+
+    for (const s of data.severities) {
+      expect(s).toHaveProperty("severity");
+      expect(s).not.toHaveProperty("hotel_id");
+    }
+    for (const u of data.units) {
+      expect(u).toHaveProperty("hotel_id");
+      expect(u).not.toHaveProperty("severity");
+    }
+  });
+});

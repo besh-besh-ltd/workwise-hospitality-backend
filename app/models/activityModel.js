@@ -275,9 +275,11 @@ export async function listActivity({
  * catalogue, so an admin is never offered a filter that returns nothing.
  */
 export async function activityFacets(companyIds) {
-  if (!companyIds?.length) return { categories: [], actors: [], entityTypes: [], units: [] };
+  if (!companyIds?.length) {
+    return { categories: [], actors: [], entityTypes: [], units: [], severities: [] };
+  }
 
-  const [categories, actors, entityTypes, units] = await Promise.all([
+  const [categories, actors, entityTypes, severities, units] = await Promise.all([
     db.any(
       `SELECT category, count(*)::int AS count FROM tbl_activity_events
         WHERE hospitality_company_id = ANY($1)
@@ -298,6 +300,22 @@ export async function activityFacets(companyIds) {
         GROUP BY entity_type ORDER BY count DESC`,
       [companyIds]
     ),
+    // Counted here rather than derived from the page, because the whole point
+    // of showing them is answering "is anything wrong?" for the WHOLE company
+    // — a number computed from the fifty rows currently on screen would be a
+    // count of the page, which is not a question anybody asks.
+    //
+    // Windowed to the last 30 days: "3 critical" means nothing without a
+    // period, and an all-time count only ever grows, so it stops being a
+    // signal within a month of go-live.
+    db.any(
+      `SELECT severity, count(*)::int AS count
+         FROM tbl_activity_events
+        WHERE hospitality_company_id = ANY($1)
+          AND occurred_at >= now() - interval '30 days'
+        GROUP BY severity`,
+      [companyIds]
+    ),
     db.any(
       `SELECT e.hotel_id, h.name AS hotel_name, count(*)::int AS count
          FROM tbl_activity_events e
@@ -308,7 +326,7 @@ export async function activityFacets(companyIds) {
     ),
   ]);
 
-  return { categories, actors, entityTypes, units };
+  return { categories, actors, entityTypes, units, severities };
 }
 
 /**
