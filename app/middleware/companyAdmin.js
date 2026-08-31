@@ -48,8 +48,12 @@ export const isCompanyAdmin = async (user) => {
          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
          JOIN tbl_permissions p ON p.id = rp.permission_id
         WHERE urs.user_id = $1
-          AND p.resource = 'company'
-          AND p.action = 'admin'
+          -- ::text, not a bare enum comparison: Postgres validates an enum
+          -- literal at parse time, so before migration 20260829094000 adds
+          -- 'company' to resource_type the whole statement fails rather than
+          -- returning nothing. Deploys land before migrations are applied.
+          AND p.resource::text = 'company'
+          AND p.action::text = 'admin'
         LIMIT 1`,
       [userId]
     );

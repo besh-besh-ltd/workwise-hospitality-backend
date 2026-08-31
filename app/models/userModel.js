@@ -476,7 +476,7 @@ user_book_demo: async (mobile) => {
                      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
                      JOIN tbl_permissions p ON p.id = rp.permission_id
                     WHERE urs.user_id = u.id
-                      AND p.resource = 'company' AND p.action = 'admin'
+                      AND p.resource::text = 'company' AND p.action::text = 'admin'
                  )) AS is_company_admin
            FROM tbl_users u WHERE u.id = $1`,
         [user_id]
@@ -845,8 +845,8 @@ user_book_demo: async (mobile) => {
                 JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
                 JOIN tbl_permissions p ON p.id = rp.permission_id
                WHERE urs.user_id = u.id
-                 AND p.resource = 'company'
-                 AND p.action = 'admin'
+                 AND p.resource::text = 'company'
+                 AND p.action::text = 'admin'
             )
           )`,
       [companyId, excludeUserId]
@@ -2304,8 +2304,8 @@ publishProfileReviews: async (reviewObj) => {
               JOIN tbl_role_permissions rp_a ON rp_a.role_id = urs_a.role_id
               JOIN tbl_permissions p_a ON p_a.id = rp_a.permission_id
              WHERE urs_a.user_id = tu.id
-               AND p_a.resource = 'company'
-               AND p_a.action = 'admin'
+               AND p_a.resource::text = 'company'
+               AND p_a.action::text = 'admin'
           )
         ) AS is_company_admin,
         COALESCE(

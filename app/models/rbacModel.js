@@ -116,7 +116,9 @@ const rbacModel = {
       `SELECT DISTINCT rp.role_id
          FROM tbl_role_permissions rp
          JOIN tbl_permissions p ON p.id = rp.permission_id
-        WHERE p.resource = 'company' AND p.action = 'admin'`,
+        -- ::text so this still parses before migration 20260829094000 adds
+        -- 'company' to the resource_type enum. See companyAdmin.js.
+        WHERE p.resource::text = 'company' AND p.action::text = 'admin'`,
       [],
       (r) => Number(r.role_id)
     );
