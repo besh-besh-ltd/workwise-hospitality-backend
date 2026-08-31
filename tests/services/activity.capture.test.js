@@ -213,3 +213,64 @@ describe("activity capture", () => {
     expect(gaps.some((g) => g.route.includes("/hospitality/company/:company_id"))).toBe(false);
   });
 });
+
+describe("what does NOT belong in the feed", () => {
+  // The original design wrote a row for every mutating request, named or not,
+  // on the principle that a gap in the registry should not become a gap in the
+  // trail. Opening the screen showed why that is wrong: the verb does not tell
+  // you whether anything happened. 57 of this codebase's POST routes are
+  // queries — /rfq/list-view, /users/get-dashboard-data,
+  // /rbac/me/permissions/bulk — and several fire on every page load, for every
+  // user. The feed filled with "performed POST /rbac/me/permissions/bulk".
+  //
+  // Completeness never rested on this layer: the row-level trigger records
+  // every actual data change with before/after and an actor regardless. This
+  // layer owes the reader a sentence, and "performed POST /x" is not one.
+  it("does not record a POST that is really a query", async () => {
+    const since = new Date().toISOString();
+    const client = await httpClient(ADMIN);
+
+    // A real, unregistered, read-shaped POST the frontend calls on page load.
+    // It must SUCCEED — a rejected request is dropped earlier for a different
+    // reason, which would make this pass against any implementation at all.
+    const res = await client
+      .post("/api/v1/rbac/me/permissions/bulk")
+      .send({ hotel_ids: [IDS.hotels.A1] });
+    expect(res.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 800));
+    const rows = await eventsSince(since);
+    expect(
+      rows.filter((e) => e.route_pattern === "/rbac/me/permissions/bulk")
+    ).toHaveLength(0);
+  });
+
+  it("still counts the unnamed route as a registry gap", async () => {
+    // Suppressing the row must not suppress the reporting: an event that
+    // genuinely should be in the feed is found by this counter, and silencing
+    // it would be how a real omission goes unnoticed forever.
+    resetUncataloguedRoutes();
+    const client = await httpClient(ADMIN);
+    const res = await client
+      .post("/api/v1/rbac/me/permissions/bulk")
+      .send({ hotel_ids: [IDS.hotels.A1] });
+    expect(res.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 400));
+    const gaps = getUncataloguedRoutes().map((g) => g.route);
+    expect(gaps.some((g) => g.includes("/rbac/me/permissions/bulk"))).toBe(true);
+  });
+
+  it("still records a named event", async () => {
+    // The guard must not have turned the feed off.
+    const since = new Date().toISOString();
+    const client = await httpClient(ADMIN);
+    await client.put(`/api/v1/hospitality/company/${COMPANY_ID}`).send({
+      name: "Company A — still recording",
+      pan: original.pan || "AAAPZ1234C",
+    });
+
+    const event = await waitForEvent(since, (e) => e.event_key === "company_updated");
+    expect(event).not.toBeNull();
+  });
+});

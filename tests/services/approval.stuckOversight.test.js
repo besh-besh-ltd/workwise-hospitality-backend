@@ -112,6 +112,18 @@ afterAll(async () => {
 });
 
 describe("classifying what is stuck", () => {
+  it("identifies the item by the number the rest of the product uses", async () => {
+    // entity_id is a primary key. An admin sent to chase "RFQ #112" will not
+    // find it — the listing, the emails and the PDF all say RFQ 1.
+    const { instanceId, rfqId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const { rfq_no } = await db.one("SELECT rfq_no FROM tbl_rfq WHERE id = $1", [rfqId]);
+
+    const client = await httpClient(ADMIN);
+    const row = rowFor((await client.get(STUCK_URL)).body, instanceId);
+    expect(row.entity_ref).toBe(String(rfq_no));
+    expect(row.entity_ref).not.toBe(String(rfqId));
+  });
+
   it("calls it waiting when a live person could act right now", async () => {
     const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
     const client = await httpClient(ADMIN);

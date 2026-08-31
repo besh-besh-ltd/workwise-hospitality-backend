@@ -53,6 +53,14 @@ const SCOPE = {
 
 const e = (def) => def;
 
+/** "3 September 2026" — a feed sentence must never contain an ISO instant. */
+const onDate = (value) => {
+  if (!value) return 'a set date';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'a set date';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
 export const EVENTS = [
   // ── Sourcing ────────────────────────────────────────────────────────────
   e({
@@ -391,9 +399,13 @@ export const EVENTS = [
     key: 'business_unit_removed',
     category: CATEGORIES.ORGANISATION, severity: 'critical',
     entity: { type: 'HOTEL', id: P('hotel_id') },
-    scope: SCOPE.params('company_id', 'hotel_id'),
+    // Entity first so an ARCHIVED unit is still named — its row survives. A
+    // hard delete leaves nothing to look up, so the params fall-back keeps the
+    // event scoped and the sentence degrades to "a business unit" rather than
+    // vanishing from the feed.
+    scope: [SCOPE.entity('HOTEL'), SCOPE.params('company_id', 'hotel_id')],
     summary: (c) =>
-      `${c.actor} ${c.params?.archive === 'true' ? 'archived' : 'deleted'} a business unit`,
+      `${c.actor} ${c.query?.archive === 'true' ? 'archived' : 'deleted'} ${c.entityLabel || 'a business unit'}`,
   }),
   e({
     method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/restore',
@@ -420,7 +432,7 @@ export const EVENTS = [
     category: CATEGORIES.APPROVALS, severity: 'notable',
     entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.actor(),
     summary: (c) =>
-      `${c.actor} arranged for someone to cover approvals until ${c.body?.ends_at || 'a set date'}`,
+      `${c.actor} arranged for someone to cover approvals until ${onDate(c.body?.ends_at)}`,
   }),
   e({
     method: 'DELETE', path: '/general/hospitality/approval/delegations/:id',

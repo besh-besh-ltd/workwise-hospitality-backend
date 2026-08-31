@@ -132,6 +132,29 @@ const captureEvent = async (req, res, responseBody) => {
 
   const definition = lookupEvent(req.method, pattern);
   const actor = resolveActor(req);
+
+  // An unnamed route does not get a row in the feed.
+  //
+  // The original design wrote one anyway, on the principle that capture should
+  // be complete and a gap in the registry should not become a gap in the
+  // trail. Running it showed why that is wrong: the verb does not tell you
+  // whether something happened. 57 of this codebase's POST routes are
+  // *queries* — `/rfq/list-view`, `/users/get-dashboard-data`,
+  // `/rbac/me/permissions/bulk` — and several fire on every page load for
+  // every user. The feed filled with "performed POST /rbac/me/permissions/bulk"
+  // and would have buried ~1,200 real events a day under an order of magnitude
+  // more noise, in the one screen whose entire value is being readable.
+  //
+  // Completeness is not lost, because it never rested here: the row-level
+  // audit trigger records every actual data change with before/after and an
+  // actor, whether or not the route is catalogued. This layer's job is the
+  // legible sentence, and a line reading "performed POST /x" is not one. The
+  // uncatalogued counter still reports the gap, which is how a genuinely
+  // missing event gets found and named.
+  //
+  // Workwise's own staff are the exception: for them the record that a request
+  // happened at all is the point, so an unnamed internal route still lands.
+  if (!definition && actor.actorType !== ACTOR_TYPES.WORKWISE_STAFF) return;
   const ctx = getRequestContext();
   const entityId = extractEntityId(definition?.entity?.id, { req, responseBody });
 
@@ -159,6 +182,7 @@ const captureEvent = async (req, res, responseBody) => {
     entityLabel: scope.entityLabel,
     body: req.body || {},
     params: req.params || {},
+    query: req.query || {},
     response: responseBody,
   };
 

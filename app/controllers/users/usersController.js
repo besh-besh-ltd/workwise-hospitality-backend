@@ -1309,6 +1309,12 @@ get_company_users_detailed: async (req, res, next) => {
       mobile: user.mobile,
       role: user.user_type,
       role_name: userTypeMap[user.user_type] || "Unknown",
+      // The single most consequential fact about a person on this screen, and
+      // it was being computed by the query and then dropped here: this
+      // response is an explicit field whitelist, so a new column reaches the
+      // client only if it is named. Without it the administrator badge could
+      // never render, whatever the model returned.
+      is_company_admin: user.is_company_admin === true,
       status: user.status === 1 ? "active" : "inactive",
       created_at: user.created_at,
       employee_type: user.employee_type,

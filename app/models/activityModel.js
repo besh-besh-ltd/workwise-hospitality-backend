@@ -102,8 +102,27 @@ const ENTITY_SCOPE_SQL = {
   MR: 'SELECT hospitality_company_id, hotel_id, COALESCE(mr_number::text, title) AS label FROM tbl_material_requisition WHERE id = $1',
   COMPANY: 'SELECT id AS hospitality_company_id, NULL::integer AS hotel_id, name AS label FROM tbl_hospitality_companies WHERE id = $1',
   HOTEL: 'SELECT hospitality_company_id, id AS hotel_id, name AS label FROM tbl_hospitality_company_hotels WHERE id = $1',
-  APPROVAL_INSTANCE:
-    'SELECT hospitality_company_id, hotel_id, entity_type AS label FROM tbl_approval_instances WHERE id = $1',
+  // The label has to name the thing being approved, not its type. Reading
+  // `entity_type` gave every approval line in the feed the shape "Priya
+  // approved RFQ" — grammatically broken and, worse, useless: *which* RFQ is
+  // the only fact the reader wanted. Resolved through to the underlying row.
+  APPROVAL_INSTANCE: `
+    SELECT ai.hospitality_company_id, ai.hotel_id,
+           COALESCE(
+             CASE ai.entity_type
+               WHEN 'RFQ'    THEN (SELECT 'RFQ ' || r.rfq_no FROM tbl_rfq r WHERE r.id = ai.entity_id)
+               WHEN 'TENDER' THEN (SELECT 'tender ' || r.rfq_no FROM tbl_rfq r WHERE r.id = ai.entity_id)
+               WHEN 'PO'     THEN (SELECT 'PO ' || po.po_number FROM tbl_rfq_purchase_order po WHERE po.id = ai.entity_id)
+               WHEN 'ARC'    THEN (SELECT 'rate contract ' || COALESCE(a.arc_number::text, a.title)
+                                     FROM tbl_arc a WHERE a.id = ai.entity_id)
+             END,
+             -- Anything else (TECHNICAL, NEGOTIATION, NEGOTIATION_QUOTE) has no
+             -- number a person would recognise, so it stays a readable noun
+             -- rather than a bare enum shouted in capitals.
+             lower(replace(ai.entity_type, '_', ' '))
+           ) AS label
+      FROM tbl_approval_instances ai
+     WHERE ai.id = $1`,
   APPROVAL_POLICY:
     'SELECT hospitality_company_id, hotel_id, entity_type AS label FROM tbl_approval_policies WHERE id = $1',
   // A person, as the subject of an event rather than its actor — which is what

@@ -148,6 +148,16 @@ export async function listStuckApprovals(
            ai.hotel_id, ai.created_at, ai.current_step, ai.initiated_by,
            s.id AS step_id, s.decision_rule, s.step_order,
            ${CLASSIFICATION} AS class,
+           -- The number a person would recognise, not the primary key. An
+           -- admin asked to chase "RFQ #112" cannot find it: the listing, the
+           -- emails and the documents all say RFQ 1. entity_id is an internal
+           -- id and belongs nowhere near a screen.
+           CASE ai.entity_type
+             WHEN 'RFQ'    THEN (SELECT r.rfq_no::text FROM tbl_rfq r WHERE r.id = ai.entity_id)
+             WHEN 'TENDER' THEN (SELECT r.rfq_no::text FROM tbl_rfq r WHERE r.id = ai.entity_id)
+             WHEN 'PO'     THEN (SELECT po.po_number::text FROM tbl_rfq_purchase_order po WHERE po.id = ai.entity_id)
+             WHEN 'ARC'    THEN (SELECT COALESCE(a.arc_number::text, a.title) FROM tbl_arc a WHERE a.id = ai.entity_id)
+           END AS entity_ref,
            (now()::date - ai.created_at::date)::int AS age_days
       FROM tbl_approval_instances ai
       ${CURRENT_STEP_JOIN}

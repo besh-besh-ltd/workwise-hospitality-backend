@@ -460,9 +460,27 @@ user_book_demo: async (mobile) => {
   },
   user_profile_login_detail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select name,status,user_type from tbl_users where id = $1', [
-        user_id
-      ])
+      // `is_company_admin` travels with the login payload because the frontend
+      // decides which dashboard and which route guard applies from it, and it
+      // decides that BEFORE it can ask the server anything else.
+      //
+      // Company administration is a capability now, so an administrator is an
+      // ordinary buyer (user_type 2) who additionally holds `company.admin`.
+      // Without this column the client sees only user_type, calls them a
+      // buyer, and AdminGuard bounces them out of every admin screen — the
+      // backend allows them in and the frontend will not let them through.
+      db.any(
+        `SELECT u.name, u.status, u.user_type,
+                (COALESCE(u.user_type = 7, false) OR EXISTS (
+                   SELECT 1 FROM tbl_user_role_scopes urs
+                     JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+                     JOIN tbl_permissions p ON p.id = rp.permission_id
+                    WHERE urs.user_id = u.id
+                      AND p.resource = 'company' AND p.action = 'admin'
+                 )) AS is_company_admin
+           FROM tbl_users u WHERE u.id = $1`,
+        [user_id]
+      )
         .then(function (data) {
           resolve(data);
         })

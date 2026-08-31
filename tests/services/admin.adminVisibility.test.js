@@ -75,12 +75,20 @@ describe("administrators are visible in People", () => {
     expect(Number(stats.total_count)).toBe(listed.n);
   });
 
-  it("says which listed users are administrators", async () => {
+  it("says which listed users are administrators, in the response the screen reads", async () => {
     // The row needs to show it: administrators used to be filtered out, so
     // nothing in the list ever had to distinguish them.
-    const { company_id } = await db.one("SELECT company_id FROM tbl_users WHERE id = $1", [ADMIN]);
-    const { users } = await userModel.getCompanyUsersDetailed(company_id, {});
+    //
+    // Asserted over HTTP, not against the model. The first version of this
+    // test called getCompanyUsersDetailed directly and passed for weeks while
+    // the badge never once appeared: the controller builds its response from
+    // an explicit field whitelist, and `is_company_admin` was not in it. The
+    // model was right and the screen still could not see it.
+    const client = await httpClient(ADMIN);
+    const res = await client.get("/api/v1/users/company-users-detailed?limit=200");
+    expect(res.status).toBe(200);
 
+    const users = res.body.data.users;
     const admin = users.find((u) => Number(u.id) === ADMIN);
     expect(admin.is_company_admin).toBe(true);
 
