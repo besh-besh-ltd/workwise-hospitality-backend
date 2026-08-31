@@ -353,6 +353,46 @@ const schemas = {
     })
   }),
 
+  /**
+   * Creating an account from the company admin screen.
+   *
+   * The point of this schema is `user_type`. The route is gated `acl([7])` and
+   * previously carried no body validation at all, so the controller took
+   * `user_type` straight from the request and inserted it — meaning any
+   * company admin could mint a `user_type = 8` account, which the codebase
+   * treats as unrestricted across every tenant. It was unreachable in practice
+   * only because the frontend hardcoded "2", which is exactly the protection
+   * that is being removed now that admins may create admins.
+   *
+   * 2 = buyer, 7 = company admin. Nothing else, ever, from this endpoint.
+   * Vendors are onboarded through their own flow.
+   */
+  create_buyer_company_user: Joi.object().keys({
+    name: Joi.string().trim().required(),
+    email: Joi.string().email({ tlds: { allow: false } }).required(),
+    mobile: Joi.string().trim().required(),
+    countryCode: Joi.string().optional().allow('', null),
+    user_type: Joi.number().valid(2, 7).default(2),
+    password: Joi.string().optional().allow('', null),
+    designation: Joi.string().optional().allow('', null),
+    employee_code: Joi.string().optional().allow('', null),
+    employee_type: Joi.string().optional().allow('', null),
+    payroll_company_id: Joi.number().integer().optional().allow(null),
+    department_ids: Joi.array().items(Joi.number()).optional(),
+    roles: Joi.array().items(
+      Joi.object().keys({
+        role_id: Joi.number().required(),
+        role_title: Joi.string().optional().allow(null).allow(''),
+        company_id: Joi.number().optional().allow(null),
+        hotel_id: Joi.number().optional().allow(null),
+        department_id: Joi.number().optional().allow(null),
+        process_id: Joi.number().integer().optional().allow(null),
+        permissions: Joi.object().optional()
+      })
+    ).optional(),
+    mappings: Joi.array().items(Joi.object()).optional()
+  }),
+
   update_profile: Joi.object().keys({
     email: Joi.string().email().optional(),
     name: Joi.string().optional(),

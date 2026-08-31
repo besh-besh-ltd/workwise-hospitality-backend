@@ -277,6 +277,45 @@ user_book_demo: async (mobile) => {
     });
   },
 
+  /**
+   * Whether an email or mobile is already in use, ignoring one account.
+   *
+   * Case-insensitive on purpose. The submit-time check compares
+   * `email = $1` against a lowercased input, so a stored "Priya@example.com"
+   * never matches "priya@example.com" and both accounts get created —
+   * production already holds four duplicated emails and six duplicated
+   * mobiles, one of them across four accounts.
+   *
+   * `excludeUserId` keeps an account from flagging its own details while it is
+   * being edited; a warning that fires every time teaches people to ignore it.
+   */
+  identity_taken: async ({ email = null, mobile = null, excludeUserId = null }) => {
+    const [emailRow, mobileRow] = await Promise.all([
+      email
+        ? db.oneOrNone(
+            `SELECT 1 FROM tbl_users
+              WHERE lower(email) = lower($1)
+                AND COALESCE(is_deleted, 0) = 0
+                AND ($2::int IS NULL OR id <> $2)
+              LIMIT 1`,
+            [String(email).trim(), excludeUserId]
+          )
+        : null,
+      mobile
+        ? db.oneOrNone(
+            `SELECT 1 FROM tbl_users
+              WHERE regexp_replace(mobile, '[^0-9]', '', 'g')
+                    = regexp_replace($1, '[^0-9]', '', 'g')
+                AND COALESCE(is_deleted, 0) = 0
+                AND ($2::int IS NULL OR id <> $2)
+              LIMIT 1`,
+            [String(mobile).trim(), excludeUserId]
+          )
+        : null,
+    ]);
+    return { email: Boolean(emailRow), mobile: Boolean(mobileRow) };
+  },
+
   user_email_exist: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_users where email = $1', [email])
@@ -421,9 +460,27 @@ user_book_demo: async (mobile) => {
   },
   user_profile_login_detail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select name,status,user_type from tbl_users where id = $1', [
-        user_id
-      ])
+      // `is_company_admin` travels with the login payload because the frontend
+      // decides which dashboard and which route guard applies from it, and it
+      // decides that BEFORE it can ask the server anything else.
+      //
+      // Company administration is a capability now, so an administrator is an
+      // ordinary buyer (user_type 2) who additionally holds `company.admin`.
+      // Without this column the client sees only user_type, calls them a
+      // buyer, and AdminGuard bounces them out of every admin screen — the
+      // backend allows them in and the frontend will not let them through.
+      db.any(
+        `SELECT u.name, u.status, u.user_type,
+                (COALESCE(u.user_type = 7, false) OR EXISTS (
+                   SELECT 1 FROM tbl_user_role_scopes urs
+                     JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+                     JOIN tbl_permissions p ON p.id = rp.permission_id
+                    WHERE urs.user_id = u.id
+                      AND p.resource::text = 'company' AND p.action::text = 'admin'
+                 )) AS is_company_admin
+           FROM tbl_users u WHERE u.id = $1`,
+        [user_id]
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -751,9 +808,75 @@ user_book_demo: async (mobile) => {
     });
   },
 
+  /**
+   * The per-request identity lookup behind `jwtUsr`.
+   *
+   * `is_deleted` is filtered here so a removed account stops working the
+   * moment it is removed, rather than surviving for the full 24-hour JWT life.
+   *
+   * `status` is deliberately NOT filtered, though it looks like it belongs.
+   * Nine production accounts carry `status = 0` and are in daily use — one
+   * with forty logins in ninety days — so adding the predicate would lock
+   * working people out mid-shift. Deactivation is therefore currently partial:
+   * `resolveApprovers` filters `status = 1`, so a deactivated user stops being
+   * offered as an approver, but nothing stops them signing in. Closing that is
+   * a decision with a data remediation attached, not a predicate.
+   */
+  /**
+   * How many administrators a company has.
+   *
+   * Counts both kinds while the legacy user type still exists: an account with
+   * `user_type = 7`, and an account holding the `company.admin` capability
+   * through any granted role scope. Soft-deleted accounts do not count — an
+   * administrator who cannot sign in is not cover.
+   */
+  countCompanyAdmins: async (companyId, excludeUserId = null) => {
+    const row = await db.one(
+      `SELECT count(DISTINCT u.id)::int AS n
+         FROM tbl_users u
+        WHERE u.company_id = $1
+          AND COALESCE(u.is_deleted, 0) = 0
+          AND ($2::int IS NULL OR u.id <> $2)
+          AND (
+            u.user_type = 7
+            OR EXISTS (
+              SELECT 1
+                FROM tbl_user_role_scopes urs
+                JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+                JOIN tbl_permissions p ON p.id = rp.permission_id
+               WHERE urs.user_id = u.id
+                 AND p.resource::text = 'company'
+                 AND p.action::text = 'admin'
+            )
+          )`,
+      [companyId, excludeUserId]
+    );
+    return row.n;
+  },
+
+  /**
+   * Refuses to leave a company with no administrator.
+   *
+   * Nobody inside the company could restore one — creating and promoting
+   * administrators is itself an administrator's power — so the company would
+   * be locked out of its own configuration until Workwise intervened with SQL.
+   * That is the trapdoor this whole phase exists to close.
+   */
+  assertNotLastCompanyAdmin: async (companyId, userId) => {
+    const remaining = await userModel.countCompanyAdmins(companyId, userId);
+    if (remaining > 0) return;
+    const err = new Error(
+      'This is the only administrator left. Give someone else administrator access first, ' +
+      'or the company will have nobody who can manage users, units and approvals.'
+    );
+    err.code = 'LAST_COMPANY_ADMIN';
+    err.status = 409;
+    throw err;
+  },
+
   user_detail_check: async (id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_users where id = $1', [id])
+      db.any('select * from tbl_users where id = $1 and coalesce(is_deleted, 0) = 0', [id])
         .then(function (data) {
           resolve(data);
         })
@@ -2153,7 +2276,6 @@ publishProfileReviews: async (reviewObj) => {
     const whereClause = `
       WHERE tu.company_id = $1
         AND tu.is_deleted = 0
-        AND tu.user_type != 7
         ${statusClause}
         ${searchClause}
         ${companyClause}
@@ -2167,6 +2289,25 @@ publishProfileReviews: async (reviewObj) => {
         tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status,
         tu.created_at, tu.employee_type, tu.employee_code, tu.designation,
         tu.payroll_company_id,
+        -- Administrators are listed here now, so the row has to be able to say
+        -- so. Computed from the capability rather than user_type, since an
+        -- administrator is an ordinary buyer holding company.admin; the legacy
+        -- user_type is accepted alongside it until those accounts migrate.
+        (
+          -- COALESCE, because user_type is nullable. NULL = 7 evaluates to
+          -- NULL, and NULL OR false is NULL, so without this the column comes
+          -- back null rather than false for anyone with no type set.
+          COALESCE(tu.user_type = 7, false)
+          OR EXISTS (
+            SELECT 1
+              FROM tbl_user_role_scopes urs_a
+              JOIN tbl_role_permissions rp_a ON rp_a.role_id = urs_a.role_id
+              JOIN tbl_permissions p_a ON p_a.id = rp_a.permission_id
+             WHERE urs_a.user_id = tu.id
+               AND p_a.resource::text = 'company'
+               AND p_a.action::text = 'admin'
+          )
+        ) AS is_company_admin,
         COALESCE(
           (SELECT json_agg(json_build_object('id', d.id, 'title', d.title) ORDER BY d.title)
            FROM tbl_user_department ud
@@ -2230,7 +2371,7 @@ publishProfileReviews: async (reviewObj) => {
         COUNT(DISTINCT hum.user_id) AS mapped_count
       FROM tbl_users tu
       LEFT JOIN tbl_hospitality_user_mappings hum ON hum.user_id = tu.id
-      WHERE tu.company_id = $1 AND tu.is_deleted = 0 AND tu.user_type != 7
+      WHERE tu.company_id = $1 AND tu.is_deleted = 0
     `;
     return db.one(query, [company_id]);
   },

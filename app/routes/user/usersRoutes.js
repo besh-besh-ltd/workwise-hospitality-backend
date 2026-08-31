@@ -18,6 +18,7 @@ import { validateDbBody } from '../../validations/dbValidation/userDbValidation.
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
+import { requireCompanyAdmin } from '../../middleware/companyAdmin.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -108,15 +109,18 @@ UsersRoutes.post('/verify-vendor-token', async (req, res) => {
 // COMPANY and can assign it arbitrary role scopes, department memberships,
 // and hospitality company/hotel mappings — the same authority surface as
 // update-user-detail (gated `user_type === 7` in the controller) and every
-// hospitality company-admin route in hospitalityRoutes.js (all `acl([7])`).
+// hospitality company-admin route in hospitalityRoutes.js (all `requireCompanyAdmin`).
 // Previously any authenticated user of any user_type could reach it and
-// grant role scopes to a brand-new account. acl([7]) matches the existing
+// grant role scopes to a brand-new account. requireCompanyAdmin matches the existing
 // sibling admin endpoint /company-users-detailed below and the isAdmin check
 // in update_user_detail — company admin only.
 UsersRoutes.post(
   '/create-buyer-company-user',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
+  // The body was previously unvalidated, so `user_type` reached the INSERT
+  // unchecked and a company admin could create a cross-tenant type-8 account.
+  validateBody(schemas.create_buyer_company_user),
   validateDbBody.user_exists,
   UsersController.create_buyer_company_users
 );
@@ -145,8 +149,26 @@ UsersRoutes.get(
 UsersRoutes.get(
   '/company-users-detailed',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   UsersController.get_company_users_detailed
+);
+
+// An administrator restoring access for a locked-out employee. The admin
+// triggers the reset and never sees the code — see the controller.
+UsersRoutes.post(
+  '/:user_id/send-password-reset',
+  passportSignIn,
+  requireCompanyAdmin,
+  UsersController.send_password_reset
+);
+
+// Is this email or mobile already taken? (UM-1) Admin-only, because it answers
+// a question about accounts that exist.
+UsersRoutes.get(
+  '/check-identity',
+  passportSignIn,
+  requireCompanyAdmin,
+  UsersController.check_identity
 );
 
 UsersRoutes.post(
@@ -335,7 +357,7 @@ UsersRoutes.get(
 UsersRoutes.get(
   '/buyer-account-limits',
   passportSignIn,
-    acl([7]),
+    requireCompanyAdmin,
   UsersController.getBuyerAccountLimits
 );
 UsersRoutes.post(

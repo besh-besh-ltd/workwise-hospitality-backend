@@ -412,6 +412,9 @@ export function verifyAIWebhookBody(req, res, next) {
   }
 
   // All good!
+  // Marks the caller as the AI webhook so the activity trail attributes what
+  // follows to the system rather than to nobody.
+  req.isWebhookRequest = true;
   next();
 }
 

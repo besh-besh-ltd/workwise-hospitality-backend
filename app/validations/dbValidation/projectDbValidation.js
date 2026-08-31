@@ -1,12 +1,15 @@
 import projectModel from '../../models/projectModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import Config from '../../config/app.config.js';
+import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 
 const validateDbBody = {
     project_exist: async ( req, res, next) => {
         try {
-            // Skip validation for admin users
-            if (req.user.user_type === 7) {
+            // Skip validation for company administrators. Keyed on the
+            // capability rather than user_type 7, so an administrator promoted
+            // the new way is treated the same as a legacy one.
+            if (await requestIsCompanyAdmin(req)) {
                 return next();
             }
             let errors = {};

@@ -42,6 +42,9 @@ return res.status(401).json({ error: 'Unauthorized: Invalid signature' });
 }
 
 logger.info({ scheduleId }, 'Verified scheduler request');
+// Marks the caller as the scheduler so the activity trail attributes what
+// follows to the system rather than to nobody. See middleware/requestContext.
+req.isSchedulerRequest = true;
 next();
 };
 

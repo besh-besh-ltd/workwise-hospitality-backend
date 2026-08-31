@@ -14,6 +14,8 @@ import rbacModel from '../models/rbacModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from './common.js';
 import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
+import { recordSystemEvent } from '../services/activity/systemEvents.js';
+import { CATEGORIES } from '../services/activity/eventRegistry.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -281,6 +283,20 @@ const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
   });
 
   logger.info({ rfq_no, rfqId: id, is_tender }, `[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no}`);
+
+  // Nothing about this reaches the activity trail through the HTTP capture —
+  // there is no request. Publishing on a schedule is exactly the kind of thing
+  // a buyer later asks "who did that?" about, and the honest answer is nobody.
+  recordSystemEvent({
+    eventKey: 'rfq_auto_published',
+    category: CATEGORIES.SOURCING,
+    severity: 'notable',
+    entityType: is_tender === 1 ? 'TENDER' : 'RFQ',
+    entityId: id,
+    summary: (label) =>
+      `${is_tender === 1 ? 'Tender' : 'RFQ'} ${label || rfq_no} was published automatically at its scheduled time`,
+    metadata: { rfq_no, source },
+  });
 
   // Send publish notification emails
   try {
@@ -723,6 +739,19 @@ export const runRfqStuckPublishWatchdogTick = async () => {
           failureReason: post.publish_failure_reason,
         });
         if (emailed) {
+          // A scheduled publish that has now failed its last retry. Critical
+          // because the buyer believes this RFQ went out and it did not — the
+          // email tells the creator, and this tells the company.
+          recordSystemEvent({
+            eventKey: 'rfq_publish_failed',
+            category: CATEGORIES.SOURCING,
+            severity: 'critical',
+            entityType: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entityId: rfq.id,
+            summary: (label) =>
+              `${rfq.is_tender === 1 ? 'Tender' : 'RFQ'} ${label || rfq.rfq_no} failed to publish at its scheduled time after ${post.publish_attempts} attempts`,
+            metadata: { rfq_no: rfq.rfq_no, reason: post.publish_failure_reason },
+          });
           await db.none(
             `UPDATE tbl_rfq SET publish_failure_notified_at = NOW() WHERE id = $1`,
             [rfq.id]
@@ -1015,6 +1044,17 @@ const handleNegotiationRoundExpiration = async (roundId) => {
         metadata: { round_id: roundId, round_number: round.round_number, rfq_product_id: round.rfq_product_id }
       }).catch(err => logError('[Negotiation Expiry] Failed to record lifecycle event', err));
 
+      recordSystemEvent({
+        eventKey: 'negotiation_round_expired',
+        category: CATEGORIES.NEGOTIATION,
+        severity: 'critical',
+        entityType: 'RFQ',
+        entityId: round.rfq_id,
+        summary: (label) =>
+          `Negotiation round ${round.round_number} on RFQ ${label || round.rfq_id} closed on its deadline with no quotes`,
+        metadata: { round_id: roundId, round_number: round.round_number },
+      });
+
       // Send expiry email
       try {
         const initiatorData = await userModel.getUserById(round.created_by);
@@ -1080,6 +1120,17 @@ const handleNegotiationRoundExpiration = async (roundId) => {
         performed_by: round.created_by,
         metadata: { round_id: roundId, round_number: round.round_number, rfq_product_id: round.rfq_product_id, quote_count: quoteCount }
       }).catch(err => logError('[Negotiation Expiry] Failed to record lifecycle event', err));
+
+      recordSystemEvent({
+        eventKey: 'negotiation_round_ended',
+        category: CATEGORIES.NEGOTIATION,
+        severity: 'notable',
+        entityType: 'RFQ',
+        entityId: round.rfq_id,
+        summary: (label) =>
+          `Negotiation round ${round.round_number} on RFQ ${label || round.rfq_id} closed on its deadline with ${quoteCount} quote(s)`,
+        metadata: { round_id: roundId, round_number: round.round_number, quote_count: quoteCount },
+      });
 
       // Send ended email
       try {

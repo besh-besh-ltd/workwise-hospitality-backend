@@ -6,6 +6,7 @@ import { acl, noAcl } from '../helper/common.js';
 import { validateBody, validateParam } from '../validations/paramValidation/userValidation.js';
 import { hierarchySchema } from '../validations/hierarchyValidation.js';
 import { hospitalityApprovalController, processController } from '../controllers/general/generalController.js';
+import { requireCompanyAdmin } from '../middleware/companyAdmin.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -32,41 +33,41 @@ GeneralRoutes.get(
 GeneralRoutes.get(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateParam(hierarchySchema.getHeirarchies),
   generalController.getHierarchies
 );
 GeneralRoutes.post(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.createHeirarchy),
   generalController.createHierarchy
 );
 GeneralRoutes.put(
   '/hierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.updateHierarchy),
   generalController.updateHierarchy
 );
 GeneralRoutes.delete(
   '/hierarchy/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   generalController.deleteHierarchy
 );
 GeneralRoutes.post(
   '/mapHierarchyToProject',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.mapHierarchyToProject),
   generalController.mapHierarchyToProject
 );
 GeneralRoutes.post(
   '/setDefaultHierarchy',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   validateBody(hierarchySchema.setDefaultHierarchy),
   generalController.setDefaultHierarchy
 );
@@ -89,7 +90,7 @@ GeneralRoutes.get(
 GeneralRoutes.post(
   '/hospitality/approval/processes',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.createProcess
 );
 GeneralRoutes.get(
@@ -101,13 +102,13 @@ GeneralRoutes.get(
 GeneralRoutes.put(
   '/hospitality/approval/processes/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.updateProcess
 );
 GeneralRoutes.delete(
   '/hospitality/approval/processes/:id',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   processController.deleteProcess
 );
 
@@ -115,7 +116,7 @@ GeneralRoutes.delete(
 GeneralRoutes.post(
   '/hospitality/approval/policies',
   passportSignIn,
-  acl([7]),
+  requireCompanyAdmin,
   hospitalityApprovalController.upsertApprovalPolicy
 );
 // SECURITY: this route previously had NO acl() at all, so vendors (user_type 3)
@@ -170,6 +171,51 @@ GeneralRoutes.get(
   '/hospitality/approval/will-be-final-approver',
   passportSignIn,
   hospitalityApprovalController.willBeFinalApprover
+);
+// Cover. Reading and arranging it are NOT admin-only: somebody going on leave
+// arranges their own, and the controller is what refuses to let them arrange
+// anybody else's. Gating the route on administrator would make the common case
+// impossible.
+GeneralRoutes.get(
+  '/hospitality/approval/delegations',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.getDelegations
+);
+GeneralRoutes.post(
+  '/hospitality/approval/delegations',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.createDelegationEntry
+);
+GeneralRoutes.delete(
+  '/hospitality/approval/delegations/:id',
+  passportSignIn,
+  noAcl([3]),
+  hospitalityApprovalController.revokeDelegationEntry
+);
+
+// The oversight screens. requireCompanyAdmin rather than acl([7]), so an
+// administrator promoted the new way — a buyer holding company.admin — reaches
+// them; reassignment in particular is a company-administration action, not
+// something an approver does for themselves.
+GeneralRoutes.get(
+  '/hospitality/approval/stuck',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.getStuckApprovals
+);
+GeneralRoutes.get(
+  '/hospitality/approval/stuck/:id/candidates',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.getReassignmentCandidates
+);
+GeneralRoutes.post(
+  '/hospitality/approval/stuck/:id/reassign',
+  passportSignIn,
+  requireCompanyAdmin,
+  hospitalityApprovalController.reassignStuckApprover
 );
 GeneralRoutes.get(
   '/hospitality/approval/instance/:id/change-history',
