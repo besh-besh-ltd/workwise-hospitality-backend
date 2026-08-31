@@ -1727,12 +1727,24 @@ const hospitalityApprovalController = {
         });
       }
 
-      await reassignApprover({
-        stepId: instance.step_id,
-        fromUserId,
-        toUserId,
-        reason,
-      });
+      try {
+        await reassignApprover({
+          stepId: instance.step_id,
+          fromUserId,
+          toUserId,
+          reason,
+        });
+      } catch (err) {
+        // Raised by the locked re-check inside the transaction: another
+        // administrator reassigned this same step in the moment between the
+        // check above and the write.
+        if (err?.code !== 'NOT_AN_APPROVER') throw err;
+        return res.status(409).json({
+          status: 0,
+          code: 'NOT_AN_APPROVER',
+          message: 'That person is not currently an approver on this step',
+        });
+      }
 
       return res.json({ status: 1, message: 'Reassigned' });
     } catch (e) {

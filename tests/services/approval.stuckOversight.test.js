@@ -295,6 +295,40 @@ describe("handing a stuck approval to somebody else", () => {
     expect(res.body.code).toBe("APPROVAL_NOT_PENDING");
   });
 
+  it("does not leave two live approvers when two admins act at once", async () => {
+    // Measured against the running server before this was fixed: two
+    // concurrent reassignments naming different recipients both passed the
+    // controller's check — it reads on a different connection from the write —
+    // and the step ended up with TWO live approvers. Under an ANY rule that is
+    // merely wrong; under ALL it silently makes the approval require somebody
+    // nobody intended to involve.
+    const { instanceId, stepId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+    const url = `${STUCK_URL}/${instanceId}/reassign`;
+
+    const [a, b] = await Promise.all([
+      client.post(url).send({
+        from_user_id: APPROVER, to_user_id: SUCCESSOR,
+        reason: "Concurrent reassignment, first recipient",
+      }),
+      client.post(url).send({
+        from_user_id: APPROVER, to_user_id: IDS.users.a1_proc_finance,
+        reason: "Concurrent reassignment, second recipient",
+      }),
+    ]);
+
+    // One wins, one is refused — the outcome must be unambiguous either way.
+    const codes = [a.status, b.status].sort();
+    expect(codes).toEqual([200, 409]);
+
+    const live = await db.any(
+      `SELECT approver_user_id FROM tbl_approval_step_approvers
+        WHERE approval_instance_step_id = $1 AND COALESCE(status,'PENDING') <> 'REMOVED'`,
+      [stepId]
+    );
+    expect(live).toHaveLength(1);
+  });
+
   it("is not something an ordinary buyer can do", async () => {
     const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
     const client = await httpClient(IDS.users.a1_proc_buyer);

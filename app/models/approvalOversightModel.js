@@ -244,6 +244,31 @@ export async function getStepApprover(stepId, userId) {
  */
 export async function reassignApprover({ stepId, fromUserId, toUserId, reason }) {
   return db.tx(async (t) => {
+    // Re-check the outgoing approver HERE, holding a row lock, even though the
+    // controller already checked.
+    //
+    // That check is a read on a different connection, so two administrators
+    // reassigning the same step at the same moment both pass it and both
+    // proceed — measured, not theorised: two concurrent requests naming
+    // different recipients left the step with TWO live approvers. Under an ANY
+    // rule that is merely wrong; under ALL it silently makes the approval
+    // require somebody nobody intended to involve.
+    //
+    // FOR UPDATE serialises the pair, so the second one arrives to find the
+    // row already tombstoned and is refused with the same code the controller
+    // would have used.
+    const current = await t.oneOrNone(
+      `SELECT id, status FROM tbl_approval_step_approvers
+        WHERE approval_instance_step_id = $1 AND approver_user_id = $2
+          FOR UPDATE`,
+      [stepId, fromUserId]
+    );
+    if (!current || current.status === 'REMOVED') {
+      const err = new Error('That person is not currently an approver on this step');
+      err.code = 'NOT_AN_APPROVER';
+      throw err;
+    }
+
     await t.none(
       `UPDATE tbl_approval_step_approvers
           SET status = 'REMOVED', removed_at = now(), removal_reason = $3
