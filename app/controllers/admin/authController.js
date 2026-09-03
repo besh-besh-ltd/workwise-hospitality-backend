@@ -201,8 +201,11 @@ const authController = {
         RESET_TOKEN_TTL_MINUTES
       );
 
+      // Hospitality has its own admin host; admin.letsworkwise.com is a
+      // different vertical, and pointing a reset link there would send the
+      // token to a panel that cannot consume it.
       const adminBaseUrl = (
-        process.env.ADMIN_BASE_URL || 'https://admin.letsworkwise.com'
+        process.env.ADMIN_BASE_URL || 'https://admin.hospitality.letsworkwise.com'
       ).replace(/\/+$/, '');
       const resetLink = `${adminBaseUrl}/reset-password?token=${token}`;
 
