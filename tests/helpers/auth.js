@@ -67,3 +67,49 @@ export async function authHeadersFor(userId) {
   const { headers } = await loginAs(userId);
   return headers;
 }
+
+/**
+ * Sign a JWT for the admin panel. Mirrors `passport.use('jwtAdm', ...)`, which
+ * differs from the user strategy in two ways that matter: the payload flag is
+ * `admin` rather than `user`, and the row is loaded via adminModel, whose
+ * predicate is `user_type NOT IN (2,3,4)`.
+ *
+ * Fixture users carry user_type NULL, and `NULL NOT IN (2,3,4)` is NULL — not
+ * true — so an un-stamped fixture user is invisible to every admin query.
+ * Callers must stamp an admin user_type first; `stampAdmin` below does it.
+ */
+export async function loginAsAdmin(userId) {
+  if (!Number.isInteger(userId)) {
+    throw new Error(`loginAsAdmin: userId must be an integer (got ${userId})`);
+  }
+  const user = await db.oneOrNone(
+    `SELECT id, name, status FROM tbl_users WHERE id = $1`,
+    [userId]
+  );
+  if (!user) throw new Error(`loginAsAdmin: user ${userId} not found`);
+
+  const now = Math.round(Date.now() / 1000);
+  const token = JWT.sign(
+    {
+      iss: "Des Technico",
+      sub: cryptr.encrypt(String(user.id)),
+      name: user.name,
+      admin: true,
+      ag: cryptr.encrypt(TEST_USER_AGENT),
+      iat: now,
+      exp: now + 60 * 60,
+    },
+    Config.jwt.secret
+  );
+  return {
+    token,
+    headers: { Authorization: `Bearer ${token}`, "User-Agent": TEST_USER_AGENT },
+  };
+}
+
+/** Give a fixture user an admin user_type. Returns the previous value. */
+export async function stampAdmin(userId, userType = 1) {
+  const row = await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [userId]);
+  await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [userId, userType]);
+  return row.user_type;
+}
