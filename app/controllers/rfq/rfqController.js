@@ -63,6 +63,7 @@ import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
 import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
+import { findUnansweredTechEvalLines, unansweredTechEvalMessage } from '../../services/techEvalQuoteGate.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
@@ -2618,7 +2619,19 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   }
 
   let rfqDetail = null;
-  
+
+  // Edits filed against a product that has no row on this RFQ cannot be
+  // written anywhere, so each branch inside the transaction skips them.
+  // Skipping quietly is how a whole class of bugs stayed invisible: the client
+  // believed it had added a product, the save answered 200, and the only trace
+  // was a log line nobody reads. Collect what we drop and hand it back, so the
+  // caller can tell the user something went missing instead of claiming
+  // success. Declared out here because the response is built after the tx.
+  const droppedWrites = [];
+  const noteDropped = (kind, key, productId, variant) => {
+    droppedWrites.push({ kind, key, product_variant_id: productId ?? null, variant: variant ?? null });
+  };
+
   await db.tx(async (t) => {
     rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
     if(rfqDetail)
@@ -2700,6 +2713,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               { rfq_id, productId, variant, specKey: rfqProductId },
               'saveRfqDraft: dropped specs for a product with no row on this RFQ'
             );
+            noteDropped('specs', rfqProductId, productId, variant);
             continue;
           }
 
@@ -2786,6 +2800,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               { rfq_id, productId: fileProductId, variant: fileVariant, fileKey: rfqProductId },
               'saveRfqDraft: dropped files for a product with no row on this RFQ'
             );
+            noteDropped('files', rfqProductId, fileProductId, fileVariant);
             continue;
           }
           const resolvedRfqProductId = fileProductRow.id;
@@ -2883,6 +2898,7 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
                 { rfq_id, productId, variant, commentKey: rfqProductId },
                 'saveRfqDraft: dropped comment for a product with no row on this RFQ'
               );
+              noteDropped('comment', rfqProductId, productId, variant);
             }
           }
     }
@@ -3277,7 +3293,15 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
     }
   });
 
-  return { status: 1, message: 'Draft has been saved successfully', rfq: {...rfqDetail} };
+  return {
+    status: 1,
+    message: 'Draft has been saved successfully',
+    rfq: {...rfqDetail},
+    // Empty on a clean save. Anything in here means the client sent edits for
+    // a product this RFQ does not have, which is a client-side bug — the UI
+    // must say so rather than report unqualified success.
+    dropped_writes: droppedWrites,
+  };
 };
 
 
@@ -4231,6 +4255,24 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
 };
 
 /**
+ * A refusal the evaluator can act on: bad state, not a server fault.
+ *
+ * The submit-for-approval handler used to classify failures by substring-
+ * matching the thrown message, so every wording change silently reclassified an
+ * error. On RFQ 536405 the engine threw "No NEW vendors have been evaluated for
+ * this round" while the handler tested for "No vendors have been evaluated" —
+ * the extra word dropped a valid 400 into the blanket 500 branch, and the
+ * evaluator was told only "Error submitting technical evaluation for approval".
+ * Carry the status and a stable code on the error instead.
+ */
+const techEvalRefusal = (code, message) => {
+  const err = new Error(message);
+  err.httpStatus = 400;
+  err.code = code;
+  return err;
+};
+
+/**
  * startApprovalForTechEval
  *
  * Submits a Technical Evaluation for approval by creating an approval instance.
@@ -4279,7 +4321,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!product) {
-    throw new Error('RFQ product not found');
+    throw techEvalRefusal('RFQ_PRODUCT_NOT_FOUND', 'RFQ product not found for the given RFQ');
   }
 
   // Get tech evaluation record
@@ -4291,12 +4333,12 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!techEval) {
-    throw new Error('Technical evaluation not found for this product');
+    throw techEvalRefusal('TECH_EVAL_NOT_FOUND', 'Technical evaluation not found for this product');
   }
 
   // Check if already complete
   if (techEval.is_complete) {
-    throw new Error('Technical evaluation is already complete with required number of passed vendors');
+    throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
   }
 
   // Check if there's already a pending/submitted round for this evaluation
@@ -4308,7 +4350,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (existingPendingRound) {
-    throw new Error(`Round ${existingPendingRound.round_number} is already ${existingPendingRound.status.toLowerCase()}. Please wait for approval before submitting again.`);
+    throw techEvalRefusal('TECH_EVAL_ROUND_PENDING', `Round ${existingPendingRound.round_number} is already ${existingPendingRound.status.toLowerCase()}. Please wait for approval before submitting again.`);
   }
 
   // Get vendor scores with pass/fail status
@@ -4319,7 +4361,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   );
 
   if (!vendorScores || vendorScores.length === 0) {
-    throw new Error('No vendors have been evaluated for this technical evaluation');
+    throw techEvalRefusal('TECH_EVAL_NO_VENDORS_SCORED', 'No vendors have been evaluated. Please score at least one vendor before submitting for approval.');
   }
 
   // Defense-in-depth: exclude vendors already verified in previous approved rounds
@@ -4347,7 +4389,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Ensure at least one NEW vendor has been evaluated for this round
   if (evaluatedVendors.length === 0) {
-    throw new Error('No new vendors have been evaluated for this round. Please score at least one vendor before submitting.');
+    throw techEvalRefusal('TECH_EVAL_NO_NEW_VENDORS_SCORED', 'No new vendors have been evaluated for this round. Please score at least one vendor before submitting.');
   }
 
   // Create round record FIRST to get round_id
@@ -5208,15 +5250,63 @@ const negSameNum = (a, b) => {
 };
 const negSameText = (a, b) => negText(a) === negText(b);
 
+// ---------------------------------------------------------------------------
+// Normalisation: an UNSET field is a data gap, not a commercial term.
+//
+// The vendor's client re-posts the FULL quote on every save — there is no
+// field-level delta — so this diff sees every field whether or not the vendor
+// touched it. Any lossy coercion between "what is stored" and "what the client
+// re-serialises" therefore manufactures a phantom change to a field the round
+// never opened, and the whole submission is refused.
+//
+// Two such coercions deadlocked real vendors (RFQ 560, 604, 734):
+//
+//   delivery_period  stored ''  ->  client sends 0   (`parseInt('') || 0`)
+//   tax_mode         stored NULL ->  client sends 'percentage'
+//
+// The second is the worse one: it resolves to `gst`, which is in
+// ALWAYS_FROZEN_FIELDS and can never be opened by any round, so those 330
+// production line items were permanently un-revisable.
+//
+// Both are normalised away below. This is deliberately NOT applied to
+// unit_price, tax or quantity: a zero price is a commercial statement, and
+// treating it as "unset" would let a vendor move a price the buyer never
+// opened for negotiation.
+// ---------------------------------------------------------------------------
+
+/** Mode columns default to 'percentage'; NULL and '' mean the same thing. */
+const NEG_MODE_DEFAULT = 'percentage';
+const negMode = (v) => negText(v) || NEG_MODE_DEFAULT;
+
+/**
+ * True when a delivery period was never actually stated.
+ *
+ * `tbl_quote_items.delivery_period` is `text NOT NULL`, so "never stated" is
+ * stored as '' rather than NULL. The wizard re-posts it through
+ * `parseInt(x) || 0` (SendQuoteWizard.js:1543), so an unstated period comes
+ * back as the number 0. '' and 0 are the same fact spelled two ways, and a
+ * delivery period of zero days is not a value this product accepts anywhere.
+ */
+const negDeliveryUnset = (v) => {
+  const t = negText(v);
+  if (t === '') return true;
+  const n = Number(t);
+  return Number.isFinite(n) && n === 0;
+};
+
 // A charge reduced to the shape a comparison cares about. `name` is excluded
 // on purpose: two charges with the same slug are the same charge, and buyers
 // rename them ("Freight" vs "FREIGHT CHARGES AS PER ACTUAL") without that
 // being a commercial change.
+// Modes go through negMode, not negText: a charge stored before the mode
+// columns were populated holds NULL, and the client re-serialises the same
+// charge as 'percentage'. Compared as raw text those differ, and the vendor is
+// told they changed a charge they never touched.
 const negChargeShape = (c) => ({
   amount: negNum(c?.amount),
-  amount_mode: negText(c?.amount_mode),
+  amount_mode: negMode(c?.amount_mode),
   tax: negNum(c?.tax),
-  tax_mode: negText(c?.tax_mode),
+  tax_mode: negMode(c?.tax_mode),
   comment: negText(c?.comment)
 });
 const negSameCharge = (a, b) => {
@@ -5374,7 +5464,9 @@ const negChangedProductFields = (product, storedItem) => {
   if (!storedItem) {
     if (negNum(product.unit_price)) changed.add(NEGOTIABLE_BASE_PRICE);
     if (negText(product.comment)) changed.add('comment');
-    if (negText(product.delivery_period)) changed.add('delivery_period');
+    // `parseInt('') || 0` again: a blank delivery period on a brand-new line
+    // arrives as 0, which is not the vendor stating anything.
+    if (!negDeliveryUnset(product.delivery_period)) changed.add('delivery_period');
     if (Array.isArray(product.document_files) && product.document_files.length > 0) {
       changed.add('documents');
     }
@@ -5401,7 +5493,7 @@ const negChangedProductFields = (product, storedItem) => {
 
   if (
     !negSameNum(product.tax, stored.tax) ||
-    !negSameText(product.tax_mode, stored.tax_mode)
+    negMode(product.tax_mode) !== negMode(stored.tax_mode)
   ) {
     changed.add(ALWAYS_FROZEN_FIELDS.tax);
   }
@@ -5409,8 +5501,13 @@ const negChangedProductFields = (product, storedItem) => {
     changed.add(ALWAYS_FROZEN_FIELDS.quantity);
   }
   if (!negSameText(product.comment, stored.comment)) changed.add('comment');
-  if (!negSameText(product.delivery_period, stored.delivery_period)) {
-    changed.add('delivery_period');
+  // Filling a delivery period that was never stated is not a renegotiation of
+  // it — there was nothing to negotiate. Only moving a period the vendor
+  // actually quoted counts as a change the buyer has to have opened.
+  if (!negDeliveryUnset(stored.delivery_period)) {
+    if (!negSameText(product.delivery_period, stored.delivery_period)) {
+      changed.add('delivery_period');
+    }
   }
   // The endpoint only ever APPENDS per-product files (it never diffs them), so
   // any non-empty list is an attempt to change the documents on this line.
@@ -6390,11 +6487,82 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // Restricted edit = tech-stuck OR dead-end OR a real (non-regret) quote has
-        // already been received. Only bid_end_date + vendor refresh are allowed.
-        const isRestrictedEdit = hasTechStuckProduct || hasDeadEndProduct || hasReceivedQuotes;
+        // 1e. Check for tech-eval-UNSTARTABLE products — the bid window has closed
+        //     and a product carrying technical clauses has a real (non-regret) quote
+        //     line against it, yet not one vendor answered the full clause set. No
+        //     vendor can be scored, so the RFQ-wide commercial gate can never open
+        //     for anybody and the RFQ is stuck permanently.
+        //
+        //     Deliberately a different question from hasTechStuckProduct above,
+        //     which means evaluation RAN and everyone failed. That predicate is also
+        //     read elsewhere to mark products terminally dead; these products are
+        //     alive and simply need the window re-opened so the vendor can answer.
+        //
+        //     Reported on RFQ 536289 (Orchid Panchgani): one vendor priced six
+        //     clause-bearing lines, answered none, and the window then shut. Neither
+        //     existing unlock branch described that state, so the creator could not
+        //     edit the RFQ at all and it could never be recovered. Kept in sync with
+        //     the has_tech_unstartable_product column in rfqModel.js, which drives
+        //     the client-side Edit button through canEditRfq().
+        const hasTechUnstartableProduct = !!(await t.oneOrNone(`
+          SELECT 1
+            FROM tbl_rfq_product_tech_evaluation te_un
+            JOIN tbl_rfq r_un ON r_un.id = te_un.rfq_id
+           WHERE te_un.rfq_id = $1
+             -- bid_end_date is naive-IST text; compare through Asia/Kolkata, never
+             -- bare CURRENT_TIMESTAMP (production's session zone is UTC).
+             AND CAST(NULLIF(TRIM(r_un.bid_end_date), '') AS TIMESTAMP)
+                 <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+             AND EXISTS (
+               SELECT 1
+                 FROM tbl_quote_items qi_un
+                 JOIN tbl_quotes q_un ON q_un.id = qi_un.quote_id
+                 JOIN tbl_rfq_products rp_un ON rp_un.id = te_un.tbl_rfq_product_id
+                WHERE q_un.rfq_id = te_un.rfq_id
+                  AND (q_un.is_regret IS NULL OR q_un.is_regret <> 1)
+                  AND qi_un.product_variant_id = rp_un.product_variant_id
+                  AND COALESCE(qi_un.variant, 0) = COALESCE(rp_un.variant, 0)
+             )
+             AND EXISTS (
+               SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses c_un
+                WHERE c_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND (c_un.clause_type <> 'sampling' OR c_un.clause_type IS NULL)
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv_un
+                WHERE cv_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND cv_un.status = 1
+             )
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM tbl_rfq_product_tech_evaluation_vendors_response vr_un
+                 JOIN tbl_rfq_product_tech_evaluation_clauses c2_un
+                   ON c2_un.id = vr_un.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE c2_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                  AND (c2_un.clause_type <> 'sampling' OR c2_un.clause_type IS NULL)
+                  AND COALESCE(TRIM(vr_un.vendor_response), '') NOT IN ('', 'N/A')
+                GROUP BY vr_un.vendor_id
+               HAVING COUNT(DISTINCT c2_un.id) = (
+                      SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses c3_un
+                       WHERE c3_un.tbl_rfq_product_tech_evaluation_id = te_un.id
+                         AND (c3_un.clause_type <> 'sampling' OR c3_un.clause_type IS NULL))
+             )
+           LIMIT 1
+        `, [rfq_id]));
 
-        assertEditAllowed(current, userId, { hasQuotes, hasDeadEndProduct, hasTechStuckProduct, hasReceivedQuotes });
+        // Restricted edit = tech-stuck OR tech-unstartable OR dead-end OR a real
+        // (non-regret) quote has already been received. Only bid_end_date + vendor
+        // refresh are allowed.
+        const isRestrictedEdit =
+          hasTechStuckProduct || hasTechUnstartableProduct || hasDeadEndProduct || hasReceivedQuotes;
+
+        assertEditAllowed(current, userId, {
+          hasQuotes,
+          hasDeadEndProduct,
+          hasTechStuckProduct,
+          hasTechUnstartableProduct,
+          hasReceivedQuotes
+        });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -8999,6 +9167,7 @@ const rfqController = {
         // Fields canEditRfq() needs so the client can gate the Edit button.
         is_quotes_present: r.is_quotes_present, has_dead_end_product: r.has_dead_end_product,
         has_tech_stuck_product: r.has_tech_stuck_product,
+        has_tech_unstartable_product: r.has_tech_unstartable_product,
         action_holders: actionMap[parseInt(r.id)] || null,
         // Approval affordances — let the card render Approve/Review and deep
         // link to the pending instance instead of falling back to Edit/Delete.
@@ -9387,6 +9556,29 @@ const rfqController = {
                 }
               }
             }
+          }
+        }
+
+        // Technical evaluation must be ANSWERED before a line can be quoted —
+        // on EVERY RFQ. The acceptance check below is scoped to reverse
+        // auctions, which left 623 of 675 RFQs with no server-side technical
+        // gate at all; enforcement was effectively browser-only, and both
+        // vendor clients fail open when tech_evaluation_status is absent.
+        // See app/services/techEvalQuoteGate.js for the full account.
+        //
+        // Deliberately a different question from the acceptance check: a vendor
+        // quoting has not been evaluated yet, so `status === 1` cannot be
+        // required here. This asks only whether they answered the clauses.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
           }
         }
 
@@ -14987,6 +15179,23 @@ sendFollowUpEmails: async (req, res) => {
           });
         }
 
+        // Same technical-evaluation gate as createQuote. updateQuoteItems is the
+        // other way a quote reaches the database, and it had NO technical check
+        // of any kind — not even the reverse-auction one — so a vendor could add
+        // or re-price a line on a product whose clauses they never answered.
+        {
+          const unanswered = await findUnansweredTechEvalLines(
+            { rfq_id: quoteExists[0].rfq_id, vendor_id: user.id, products },
+            null
+          );
+          if (unanswered.length > 0) {
+            return res.status(400).json({
+              status: 3,
+              message: unansweredTechEvalMessage(unanswered)
+            });
+          }
+        }
+
         // Check if past bid end date - but allow if there are active negotiation rounds
         if (bidEndDateTime && now > bidEndDateTime) {
           // Check if any active negotiation round exists for this RFQ
@@ -15010,6 +15219,24 @@ sendFollowUpEmails: async (req, res) => {
              WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()`,
             [quoteExists[0].rfq_id]
           );
+
+          // Does an ACTIVE round raise `documents` at RFQ level? Such a round
+          // names no product, but its ask is answerable from any line's
+          // uploader as well as the quote-wide one, so those lines must be
+          // allowed through the per-product check below.
+          const rfqLevelDocumentsAsk = await db.oneOrNone(
+            `SELECT 1 AS ok
+               FROM tbl_negotiation_rounds nr
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(p_->'vendor_targets','[]'::jsonb)) vt_
+               CROSS JOIN LATERAL jsonb_array_elements(COALESCE(vt_->'fields','[]'::jsonb)) f_
+              WHERE nr.rfq_id = $1 AND nr.status = 'ACTIVE' AND nr.end_date > NOW()
+                AND (p_->>'is_rfq_level')::boolean IS TRUE
+                AND lower(f_->>'name') = 'documents'
+              LIMIT 1`,
+            [quoteExists[0].rfq_id]
+          );
+          const hasRfqLevelDocumentsAsk = !!rfqLevelDocumentsAsk;
 
           // Only block if there are NO active negotiation rounds
           if (!activeNegotiationRounds || activeNegotiationRounds.length === 0) {
@@ -15050,10 +15277,29 @@ sendFollowUpEmails: async (req, res) => {
               );
 
               if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
-                return res.status(400).json({
-                  status: 3,
-                  message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
-                });
+                // Exemption: an RFQ-level `documents` round opens every line's
+                // uploader in the vendor wizard. A line carrying attachments is
+                // a legitimate answer to that ask even though the round names
+                // no product, so it must not be rejected here — otherwise the
+                // vendor uploads a file, sees it listed, and loses the whole
+                // submission to a 400.
+                //
+                // Scoped as narrowly as the request allows: only when such a
+                // round is live, and only for lines that actually carry files.
+                // NOTE: the line still arrives with its previously quoted
+                // values (the wizard disables those inputs but re-sends them),
+                // so this does not verify they are unchanged.
+                const answersDocumentsAsk =
+                  hasRfqLevelDocumentsAsk &&
+                  Array.isArray(product.document_files) &&
+                  product.document_files.length > 0;
+
+                if (!answersDocumentsAsk) {
+                  return res.status(400).json({
+                    status: 3,
+                    message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
+                  });
+                }
               }
             }
           }
@@ -17041,69 +17287,27 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError(error);
 
-      // Handle specific error cases
-      if (error.message?.includes('No approval policy found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'No approval policy configured for TECHNICAL in this scope'
-        });
-      }
-
-      if (error.message?.includes('already exists') || error.message?.includes('already been approved')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message
-        });
-      }
-
-      if (error.message?.includes('RFQ product not found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'RFQ product not found for the given RFQ'
-        });
-      }
-
-      if (error.message?.includes('Technical evaluation not found')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Technical evaluation not found for this product'
-        });
-      }
-
-      if (error.message?.includes('already complete')) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Technical evaluation is already complete'
-        });
-      }
-
-      if (error.message?.includes('No vendors have been evaluated')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message || 'No vendors have been evaluated. Please score at least one vendor before submitting for approval.'
-        });
-      }
-
-      if (error.message?.includes('already submitted') || error.message?.includes('already pending')) {
-        return res.status(400).json({
-          status: 0,
-          message: error.message
-        });
-      }
-
-      // The approval engine raises structured, actionable errors — most
-      // importantly APPROVAL_POLICY_RESOLVES_TO_NOBODY, which carries
-      // httpStatus 400 and the per-step diagnostics explaining WHICH step was
-      // dropped and why. This handler matched on message text alone, so that
-      // error matched nothing and fell through to the 500 below: the evaluator
-      // lost their submission and were told only "Error submitting technical
-      // evaluation". Honour the status the engine set, and pass the reason on.
+      // Every refusal this endpoint can raise carries its own status and a
+      // stable code — startApprovalForTechEval via techEvalRefusal, and the
+      // approval engine via APPROVAL_POLICY_RESOLVES_TO_NOBODY and friends
+      // (which also attach per-step diagnostics naming the dropped step).
+      // Classifying by substring instead is what turned a valid 400 into a 500
+      // on RFQ 536405: the engine said "No NEW vendors have been evaluated"
+      // and the ladder tested for "No vendors have been evaluated".
       if (error?.httpStatus) {
         return res.status(error.httpStatus).json({
           status: 0,
           message: error.message,
           ...(error.code ? { code: error.code } : {}),
           ...(error.diagnostics ? { diagnostics: error.diagnostics } : {})
+        });
+      }
+
+      if (error.message?.includes('No approval policy found')) {
+        return res.status(400).json({
+          status: 0,
+          code: 'NO_TECHNICAL_APPROVAL_POLICY',
+          message: 'No approval policy configured for TECHNICAL in this scope'
         });
       }
 

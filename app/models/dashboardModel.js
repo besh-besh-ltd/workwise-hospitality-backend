@@ -1,6 +1,7 @@
 import db from '../config/dbConn.js';
 import { buildScopeExistsClause } from '../services/authorizationService.js';
 import negotiationModel from './negotiationModel.js';
+import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 
 /**
  * Dashboard queries scope by buyer_company_id (covers ALL hospitality companies
@@ -173,7 +174,9 @@ function scopeFilter(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS
 async function resolveUserScope(user_id, selectedHotelIds = []) {
   // Check user type
   const userInfo = await db.oneOrNone(
-    `SELECT user_type, company_id FROM tbl_users WHERE id = $1`,
+    // `id` is selected because the capability check below needs it: the
+    // capability lives on the user's granted role scopes, not on the row.
+    `SELECT id, user_type, company_id FROM tbl_users WHERE id = $1`,
     [user_id]
   );
 
@@ -182,8 +185,11 @@ async function resolveUserScope(user_id, selectedHotelIds = []) {
   let buyer_company_id;
   let allAllowed = [];
 
-  if (parseInt(userInfo.user_type) === 7) {
-    // Admin (user_type=7): full access to all hospitality companies under their company
+  if (await isCompanyAdmin(userInfo)) {
+    // A company administrator: full access to every hospitality company under
+    // their own parent buyer company. Read from the capability rather than
+    // user_type 7, so an administrator promoted the new way — an ordinary
+    // buyer holding company.admin — gets the same dashboard, not a blank one.
     if (!userInfo.company_id) return null;
 
     buyer_company_id = userInfo.company_id;

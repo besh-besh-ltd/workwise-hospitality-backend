@@ -29,7 +29,7 @@ import crypto from "crypto";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
-import { loginAsAdmin, stampAdmin } from "../helpers/auth.js";
+import { loginAsInternalStaff, stampAdmin } from "../helpers/auth.js";
 
 const CHANGE = "/api/v1/admin/auth/change-password";
 const FORGOT = "/api/v1/admin/auth/forgot-password";
@@ -66,7 +66,7 @@ beforeAll(async () => {
   const row = await db.one(`SELECT email FROM tbl_users WHERE id = $1`, [ADMIN]);
   adminEmail = row.email;
   adminClient = await httpClient(null);
-  const { headers } = await loginAsAdmin(ADMIN);
+  const { headers } = await loginAsInternalStaff(ADMIN);
   adminClient.headers = headers;
 });
 

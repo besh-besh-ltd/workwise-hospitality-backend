@@ -483,6 +483,118 @@ describe("saveDraft — updates draft metadata before submission", () => {
       expect(row.comment).toBe("");
     });
 
+    // A dropped write is a client bug, and for a week the only sign of one was
+    // a log line. The buyer saw "Products saved successfully!" and lost the
+    // product they had just added. The response now names what it refused, so
+    // the UI can contradict its own success message.
+    it("reports the specs it refused instead of answering an unqualified success", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            specs: {
+              [`new:${OTHER_VARIANT_ID}:0`]: {
+                product_id: OTHER_VARIANT_ID, // never added to this RFQ
+                variant: 0,
+                Quantity: 25,
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      expect(m.calls.body.message.dropped_writes).toEqual([
+        {
+          kind: "specs",
+          key: `new:${OTHER_VARIANT_ID}:0`,
+          product_variant_id: OTHER_VARIANT_ID,
+          variant: 0,
+        },
+      ]);
+    });
+
+    it("reports a refused comment the same way", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            comment: {
+              [`new:${OTHER_VARIANT_ID}:0`]: {
+                product_id: OTHER_VARIANT_ID,
+                variant: 0,
+                comment: "nowhere to live",
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      expect(m.calls.body.message.dropped_writes).toEqual([
+        expect.objectContaining({ kind: "comment", product_variant_id: OTHER_VARIANT_ID }),
+      ]);
+    });
+
+    it("stays quiet when every edit landed", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          updatable: {
+            specs: {
+              [`${VARIANT_ID}`]: { product_id: VARIANT_ID, variant: 0, Quantity: 10 },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      expect(m.calls.body.message.dropped_writes).toEqual([]);
+    });
+
+    // The bug the client hit: save-draft has no channel for a new product and
+    // never inserts tbl_rfq_products. Pinning that here so nobody builds on
+    // the assumption again — a product must come from add-product-to-draft.
+    it("does not create a product row, however the client files the edit", async () => {
+      const { rfq_id } = await draftWithProduct();
+      const m = mockExpress({
+        user: { id: IDS.users.a1_proc_buyer },
+        body: saveBody(rfq_id, {
+          addable: [{ product_id: OTHER_VARIANT_ID, variant: 0 }],
+          updatable: {
+            specs: {
+              [`new:${OTHER_VARIANT_ID}:0`]: {
+                product_id: OTHER_VARIANT_ID,
+                variant: 0,
+                Quantity: 25,
+              },
+            },
+          },
+        }),
+      });
+      await rfqController.saveDraft(m.req, m.res);
+
+      expect(m.calls.status).toBe(200);
+      const rows = await db.any(
+        `SELECT product_variant_id FROM tbl_rfq_products WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+      expect(rows.map((r) => r.product_variant_id)).toEqual([VARIANT_ID]);
+      // and no orphan spec left behind for a product that does not exist
+      const specs = await db.any(
+        `SELECT 1 FROM tbl_rfq_products_specs WHERE rfq_id = $1 AND product_variant_id = $2`,
+        [rfq_id, OTHER_VARIANT_ID]
+      );
+      expect(specs).toHaveLength(0);
+      expect(m.calls.body.message.dropped_writes).not.toEqual([]);
+    });
+
     it("files for a product with no row on this RFQ are dropped without failing the save", async () => {
       const { rfq_id } = await draftWithProduct();
       const m = mockExpress({

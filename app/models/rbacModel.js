@@ -103,6 +103,27 @@ const rbacModel = {
 
   /* -------------------- ROLES & SCOPES -------------------- */
 
+  /**
+   * Role ids that carry the `company.admin` capability.
+   *
+   * Resolved from the permission rather than hardcoded to a title, so a
+   * company that builds its own administrator role — or renames the seeded one
+   * — is still recognised. Nothing should ever decide administration by
+   * matching a string.
+   */
+  rolesGrantingCompanyAdmin: async () => {
+    return db.map(
+      `SELECT DISTINCT rp.role_id
+         FROM tbl_role_permissions rp
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        -- ::text so this still parses before migration 20260829094000 adds
+        -- 'company' to the resource_type enum. See companyAdmin.js.
+        WHERE p.resource::text = 'company' AND p.action::text = 'admin'`,
+      [],
+      (r) => Number(r.role_id)
+    );
+  },
+
   assignUserRoleScopes: (scopes = [], t = null) => {
     if (!scopes.length) return Promise.resolve();
 
@@ -126,7 +147,22 @@ const rbacModel = {
       params
     );
 
-    return t ? run(t) : db.tx(run);
+    // uq_user_role_scope_tuple already refuses an exact duplicate. Without
+    // this, that refusal surfaced as a raw Postgres 23505 and the caller's
+    // generic catch turned it into a bare 500 — the admin was told the server
+    // had failed, when in fact they had asked for something they already had
+    // (UM-7). Rethrown as a named error the controller can report properly.
+    const withDuplicateContext = (err) => {
+      if (err?.code === '23505' && String(err?.constraint || '').includes('user_role_scope')) {
+        const duplicate = new Error('This role assignment already exists for this user.');
+        duplicate.code = 'DUPLICATE_ROLE_SCOPE';
+        duplicate.status = 409;
+        throw duplicate;
+      }
+      throw err;
+    };
+
+    return (t ? run(t) : db.tx(run)).catch(withDuplicateContext);
   },
   getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(

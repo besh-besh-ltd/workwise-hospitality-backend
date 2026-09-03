@@ -113,7 +113,10 @@ const pick = (obj, keys) => {
  * the round's own scope, so the page never has to guess (and never renders a
  * button the API would refuse).
  */
-export const deriveActions = ({ state, permissions, locked, vendorApprovalSummary, hasResponses }) => {
+export const deriveActions = ({
+  state, permissions, locked, vendorApprovalSummary, hasResponses,
+  viewerUserId = null, createdByUserId = null, isPendingForMe = false,
+}) => {
   const p = permissions || {};
   const s = String(state || '');
 
@@ -137,9 +140,38 @@ export const deriveActions = ({ state, permissions, locked, vendorApprovalSummar
   const anyPending = Number(summary.pending || 0) > 0;
   const anyRejected = Number(summary.rejected || 0) > 0;
 
+  // The author's own escape hatch, and the ONLY action here that is not gated
+  // on a permission. `can_reject` requires negotiation.approve, which the buyer
+  // who opened the round frequently does not hold — creating a round needs only
+  // acl([2, 8]). That asymmetry is what left buyers with no way to clear a
+  // round nobody approved: 179 production rounds died waiting, 107 of them
+  // blocking their own replacement for over 12 hours.
+  //
+  // Authorship is checked, not permission — POST /rounds/:id/withdraw enforces
+  // exactly the same rule, so this can never render a button the API refuses.
+  const isCreator =
+    viewerUserId != null && createdByUserId != null &&
+    Number(viewerUserId) === Number(createdByUserId);
+
   return {
-    can_approve: !!p.approve && preApproval,
-    can_reject: !!p.approve && preApproval,
+    // Gated on the VIEWER'S OWN pending record in the approval instance, not
+    // just on holding negotiation.approve in scope.
+    //
+    // Neither of the old operands was viewer-relative to the instance: all
+    // five approvers on a round hold the permission, and the round stays
+    // `awaiting_approval` until the LAST of them acts. So everyone who had
+    // already approved kept seeing "Review and approve", and the API answered
+    // `User has already acted on this step` (generalModel.js:3299) — breaking
+    // the one invariant this function exists to hold, written at the top of
+    // this file: never render a button the API would refuse.
+    can_approve: !!p.approve && preApproval && isPendingForMe,
+    can_reject: !!p.approve && preApproval && isPendingForMe,
+    can_withdraw: preApproval && isCreator,
+    // The three vendor-level gates are NOT given the same treatment, and that
+    // is deliberate. POST /rounds/:id/approve-vendor is acl([2,8]) + read
+    // scope + round status — it never consults the approval instance, so a
+    // non-approver's button is one the API honours. Tightening these would
+    // hide a working action, which is a different bug.
     can_approve_vendor: !!p.approve && preApproval && anyPending,
     can_reject_vendor: !!p.approve && preApproval && anyPending,
     can_resubmit_vendor: !!p.approve && preApproval && anyRejected,
@@ -245,6 +277,14 @@ const negotiationRoundDetailController = {
           locked: quoteVisibility.locked,
           vendorApprovalSummary: payload.approval?.vendor_approvals ?? null,
           hasResponses: payload.totals?.lines_responded > 0,
+          isPendingForMe: payload.approval?.is_pending_for_me === true,
+          viewerUserId: req.user?.id ?? null,
+          // `created_by` is an object {user_id, name, …}; the flat column is
+          // the fallback shape.
+          createdByUserId:
+            payload.round?.created_by?.user_id ??
+            payload.round?.created_by ??
+            null,
         }),
       };
 

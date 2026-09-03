@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog } from './app/helper/cronManager.js';
 import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
 import { logger } from './app/util/logger.js';
 
@@ -49,8 +49,11 @@ rescheduleAllMilestoneReminders();
 rescheduleAllRfqPublishJobs();
 startVendorAcceptanceReminderCron();
 rescheduleAllNegotiationRoundExpirations();
+// Backstop for the one-shot in-memory jobs above, which are lost on any restart.
+startNegotiationRoundClosureSweeper();
 rescheduleAllArcNegotiationRoundExpirations();
 startRfqStuckPublishWatchdog();
+startPoDocumentWatchdog();
 startArcAmendmentLifecycleCron();
 
 

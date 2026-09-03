@@ -17,6 +17,7 @@ import {
   removeArcNegotiationRoundExpiration,
 } from '../../helper/cronManager.js';
 import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
+import { parseAsUTC } from '../../helper/dbTime.js';
 
 /**
  * ARC Negotiation Controller
@@ -438,10 +439,16 @@ export async function listRounds(req, res) {
     // not just the arc-comm.evaluate permission the FE previously fell back to.
     const rounds = await arcNegotiationModel.getRoundsForArc(arcId, userId);
 
-    // Compute effective status (lazy-flip)
+    // Compute effective status (lazy-flip).
+    //
+    // parseAsUTC, not new Date(). end_date is a naive UTC column, and a bare
+    // "2026-08-13 07:00:00" handed to new Date() resolves through the NODE
+    // PROCESS timezone. Production runs UTC so this was accidentally right
+    // there — and 5h30m early on an IST dev box, silently flipping live rounds
+    // to ENDED before their window closed.
     const enriched = rounds.map((r) => {
       let effectiveStatus = r.status;
-      if (r.status === 'ACTIVE' && new Date(r.end_date) <= new Date()) {
+      if (r.status === 'ACTIVE' && parseAsUTC(r.end_date) <= new Date()) {
         effectiveStatus = 'ENDED';
       }
       return { ...r, effective_status: effectiveStatus };
@@ -535,7 +542,10 @@ export async function listVendorRounds(req, res) {
 
     // Enrich with per-round per-item data for this vendor
     const enriched = await Promise.all(myRounds.map(async (r) => {
-      const effectiveStatus = (r.status === 'ACTIVE' && new Date(r.end_date) <= new Date()) ? 'ENDED' : r.status;
+      // Same naive-UTC parse as listRounds above — this is the VENDOR's copy
+      // of the same lazy-flip, and getting it wrong closes a vendor's window
+      // early rather than merely mislabelling it for the buyer.
+      const effectiveStatus = (r.status === 'ACTIVE' && parseAsUTC(r.end_date) <= new Date()) ? 'ENDED' : r.status;
       const isActive = effectiveStatus === 'ACTIVE';
 
       // Determine covered item ids for this vendor in this round
@@ -655,7 +665,10 @@ export async function submitVendorQuote(req, res) {
     if (round.status !== 'ACTIVE') {
       return bad(res, 400, `Round is not active (status: ${round.status})`);
     }
-    if (new Date(round.end_date) <= new Date()) {
+    // Naive UTC column — parseAsUTC, not new Date(). This one REFUSES a
+    // vendor's revised rate, so getting it wrong locks a vendor out of a round
+    // that is still open.
+    if (parseAsUTC(round.end_date) <= new Date()) {
       return bad(res, 400, 'Round has ended — deadline has passed');
     }
 

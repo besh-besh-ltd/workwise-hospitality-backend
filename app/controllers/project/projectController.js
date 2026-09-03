@@ -6,6 +6,7 @@ import rfqModel from "../../models/rfqModel.js";
 import db from "../../config/dbConn.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
+import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 
 /**
  * TENANT gate for a single project.
@@ -36,10 +37,13 @@ export async function userCanAccessProject(req, projectId) {
 
   // Platform super admin (8) keeps the cross-tenant reach it has everywhere
   // else in the codebase (mrController.isSuperAdmin,
-  // resolveHospitalityCompanyScope). user_type 7 is a COMPANY admin and does not.
+  // resolveHospitalityCompanyScope). A COMPANY admin does not — their reach
+  // stops at their own parent buyer company, which is what the query below
+  // enforces. Read from the capability rather than user_type 7, so an
+  // administrator promoted the new way is not silently demoted to a buyer.
   if (Number(req.user?.user_type) === 8) return true;
 
-  const isCompanyAdmin = Number(req.user?.user_type) === 7;
+  const isCompanyAdmin = await requestIsCompanyAdmin(req);
   const companyId = req.user?.company_id != null ? Number(req.user.company_id) : null;
 
   const row = await db.one(
@@ -156,7 +160,7 @@ const projectController = {
         return res.status(403).json(FORBIDDEN_PROJECT);
       }
 
-      if (user_type === 7) {
+      if (await requestIsCompanyAdmin(req)) {
         projectDetails = await projectModel.getProjectByIdForAdmin(
           project_id,
           limit,
@@ -215,7 +219,7 @@ const projectController = {
       }
 
       const file = 'yes'; // we want file hence explictly assigning tis value for feching project files and docs.
-      if (user_type === 7) {
+      if (await requestIsCompanyAdmin(req)) {
         projectDetails = await projectModel.getProjectTableDataByIdForAdmin(
           project_id,
           user_id,
@@ -359,7 +363,7 @@ const projectController = {
       let projects = [];
 
       // get all proejct created by anyone in the company, this is only for company admin
-      if (user_type == 7) {
+      if (await requestIsCompanyAdmin(req)) {
         projects = await projectModel.getAllProjectsByCompany(company_id);
       } else {
         // users can only access their own projects or projects they are a member of
@@ -428,7 +432,7 @@ const projectController = {
         });
       }
 
-      if (user_type === 7 || user_type === 8 || user_type === 2) {
+      if ((await requestIsCompanyAdmin(req)) || user_type === 8 || user_type === 2) {
         // Admin can update any project
         const tbl_project_data = {
           name,
@@ -570,7 +574,7 @@ const projectController = {
       // Owner, or company admin of the project's OWN company. The previous
       // `user_type === 7 → canModify = true` let any tenant's admin bolt
       // themselves onto any tenant's project.
-      const canModify = Number(req.user?.user_type) === 7
+      const canModify = (await requestIsCompanyAdmin(req))
         ? await userCanAccessProject(req, project_id)
         : (await projectModel.checkProjectOwnership(project_id, current_user_id)) !== null;
 
@@ -662,7 +666,7 @@ const projectController = {
       const current_user_id = req.user.id;
 
       // Owner, or company admin of the project's OWN company (see addTeamMember).
-      const canModify = Number(req.user?.user_type) === 7
+      const canModify = (await requestIsCompanyAdmin(req))
         ? await userCanAccessProject(req, project_id)
         : (await projectModel.checkProjectOwnership(project_id, current_user_id)) !== null;
 

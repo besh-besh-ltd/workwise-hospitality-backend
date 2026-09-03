@@ -69,24 +69,28 @@ export async function authHeadersFor(userId) {
 }
 
 /**
- * Sign a JWT for the admin panel. Mirrors `passport.use('jwtAdm', ...)`, which
- * differs from the user strategy in two ways that matter: the payload flag is
- * `admin` rather than `user`, and the row is loaded via adminModel, whose
- * predicate is `user_type NOT IN (2,3,4)`.
+ * Sign a JWT for Workwise's own internal console, which authenticates through
+ * `passport.use('jwtAdm', ...)` rather than 'jwtUsr'.
  *
- * Fixture users carry user_type NULL, and `NULL NOT IN (2,3,4)` is NULL — not
- * true — so an un-stamped fixture user is invisible to every admin query.
- * Callers must stamp an admin user_type first; `stampAdmin` below does it.
+ * The difference that matters is one claim: `admin: true` instead of
+ * `user: true`. That claim is the only thing separating "this person is
+ * working inside a customer's account as Workwise staff" from "this person is
+ * a customer's own administrator" — three production accounts can sign in to
+ * both consoles, so the account cannot tell them apart and the token must.
+ *
+ * Note jwtAdm checks `payload.ag` is present but, unlike jwtUsr, does not
+ * compare it to tbl_users.user_agent.
  */
-export async function loginAsAdmin(userId) {
+export async function loginAsInternalStaff(userId) {
   if (!Number.isInteger(userId)) {
-    throw new Error(`loginAsAdmin: userId must be an integer (got ${userId})`);
+    throw new Error(`loginAsInternalStaff: userId must be an integer (got ${userId})`);
   }
   const user = await db.oneOrNone(
     `SELECT id, name, status FROM tbl_users WHERE id = $1`,
     [userId]
   );
-  if (!user) throw new Error(`loginAsAdmin: user ${userId} not found`);
+  if (!user) throw new Error(`loginAsInternalStaff: user ${userId} not found`);
+  if (user.status !== 1) throw new Error(`loginAsInternalStaff: user ${userId} is inactive`);
 
   const now = Math.round(Date.now() / 1000);
   const token = JWT.sign(
@@ -107,7 +111,15 @@ export async function loginAsAdmin(userId) {
   };
 }
 
-/** Give a fixture user an admin user_type. Returns the previous value. */
+/**
+ * Give a fixture user a user_type the admin console will accept, returning the
+ * previous value so a suite can put it back.
+ *
+ * adminModel scopes every lookup with `user_type NOT IN (2,3,4)`. Fixture users
+ * carry user_type NULL, and `NULL NOT IN (2,3,4)` evaluates to NULL rather than
+ * true — so an un-stamped fixture user is invisible to every admin query, and a
+ * token signed by loginAsInternalStaff above will authenticate against nothing.
+ */
 export async function stampAdmin(userId, userType = 1) {
   const row = await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [userId]);
   await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [userId, userType]);

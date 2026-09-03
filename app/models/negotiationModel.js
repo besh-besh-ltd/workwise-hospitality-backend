@@ -1,15 +1,40 @@
 import db, { pgp } from '../config/dbConn.js';
+import {
+  NEGOTIATION_TIMESTAMP_KEYS,
+  isoOrNull,
+  parseAsUTC,
+  withIsoTimestamps,
+} from '../helper/dbTime.js';
+import { getBidEndMomentIst } from '../helper/quoteVisibility.js';
 
-// Helper: parse date strings as UTC when no timezone suffix is present
-// PostgreSQL returns timestamp without time zone as bare strings (e.g. "2026-03-27 18:54:00")
-// which new Date() would incorrectly interpret as local time
-const parseAsUTC = (dateValue) => {
-  if (!dateValue) return null;
-  if (dateValue instanceof Date) return dateValue;
-  const str = String(dateValue);
-  if (str.includes('+') || str.includes('Z')) return new Date(str);
-  return new Date(str.replace(' ', 'T') + 'Z');
+/**
+ * A naive-IST text column -> a real ISO instant.
+ *
+ * `bid_end_date`, `vendor_clarification_date` and the ARC `submission_end_at`
+ * store IST wall clock with no offset. Feeding one to isoOrNull/parseAsUTC
+ * reads it as UTC and lands the instant 5h30m early — the same defect as the
+ * negotiation timestamps, in the opposite direction. dbTime.js names all three.
+ */
+const istTextToIso = (raw) => {
+  const m = getBidEndMomentIst(raw);
+  return m ? m.toDate().toISOString() : null;
 };
+
+// These two used to be defined here, one copy per module that needed them.
+// They now live in app/helper/dbTime.js with the reasoning attached, and are
+// re-exported so existing importers of this module keep working.
+export { parseAsUTC, isoOrNull };
+
+// The listing queries alias their timestamp columns — same naive-UTC contract,
+// different names — so they cannot reuse NEGOTIATION_TIMESTAMP_KEYS verbatim.
+const ROUND_LIST_TIMESTAMP_KEYS = [
+  'round_created_at',
+  'end_date',
+  'approved_at',
+  'published_at',
+  'closed_at',
+];
+const PARENT_LIST_TIMESTAMP_KEYS = ['first_round_at', 'last_activity_at', 'next_deadline'];
 
 // ============= READ-SCOPE (RBAC MATRIX) =============
 // P0 FIX: the negotiation listings used to scope rows to the caller's
@@ -193,10 +218,6 @@ const num = (v) => {
 };
 const round2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
 const round4 = (v) => (v == null ? null : Math.round(v * 10000) / 10000);
-const isoOrNull = (v) => {
-  const d = parseAsUTC(v);
-  return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
-};
 
 // The (product | arc item | rfq-level) slots a round negotiates over.
 export const getRoundItemSlots = (round) => {
@@ -328,7 +349,14 @@ export const NEG_STATE = {
 // approval") for the same round; one table now feeds both.
 export const NEG_STATE_PRESENTATION = {
   [NEG_STATE.AWAITING_APPROVAL]: {
-    label: 'Awaiting your approval',
+    // NOT "Awaiting YOUR approval". This table is keyed on the round's state
+    // and nothing else — there is no viewer in scope here and never was, so a
+    // possessive baked into a state constant is a claim the constant cannot
+    // support. It told all five approvers on a round the same thing, sixteen
+    // hours after one of them had already approved. The viewer-relative
+    // wording is computed at render time, where the viewer exists:
+    // frontend negotiationStates.negStateHeaderLabel, off approval.my_status.
+    label: 'Awaiting approval',
     description: 'Waiting for an internal approver before vendors are notified.',
     tone: 'committee',
     badge: 'committee',
@@ -1569,6 +1597,38 @@ const negotiationModel = {
         inst.status === 'PENDING' && currentStep
           ? currentStep.approvers.filter((a) => a.status === 'PENDING')
           : [];
+
+      // WHERE THE VIEWER STANDS on this instance — the fact the page needs to
+      // stop telling somebody a round awaits "your" approval sixteen hours
+      // after they approved it.
+      //
+      // 96% of negotiation rounds go through a multi-approver ALL step, and
+      // the average gap between the first approval and the last is 8.4 hours
+      // (max 4.8 days). For all of that time the round is legitimately still
+      // `awaiting_approval` — but not from everyone.
+      //
+      // Read over EVERY step, not just the current one: an approver can sit on
+      // step 1 (approved) and step 3 (pending) of the same chain, and the
+      // answer that matters to them is the one that needs an action. Removed
+      // approvers are already filtered out above, so they correctly read null.
+      const myRecords =
+        viewerUserId == null
+          ? []
+          : instSteps.flatMap((s) =>
+              s.approvers.filter((a) => Number(a.user_id) === Number(viewerUserId))
+            );
+      const myStatuses = new Set(myRecords.map((a) => String(a.status || '').toUpperCase()));
+      const myStatus =
+        myRecords.length === 0
+          ? null
+          : myStatuses.has('PENDING')
+            ? 'PENDING'
+            : myStatuses.has('REJECTED')
+              ? 'REJECTED'
+              : myStatuses.has('APPROVED')
+                ? 'APPROVED'
+                : null;
+
       return {
         instance_id: Number(inst.id),
         round_id: Number(inst.entity_id),
@@ -1585,6 +1645,8 @@ const negotiationModel = {
         },
         steps: instSteps,
         pending_with: pendingWith,
+        pending_count: pendingWith.length,
+        my_status: myStatus,
         is_pending_for_me:
           viewerUserId != null && pendingWith.some((a) => Number(a.user_id) === Number(viewerUserId)),
       };
@@ -1879,6 +1941,11 @@ const negotiationModel = {
       instances: approvalInstances,
       status: approvalInstances[0]?.status ?? null,
       pending_with: approvalInstances[0]?.pending_with ?? [],
+      // How many approvers this round is STILL waiting on, and where the
+      // viewer stands among them. Both are read off the newest instance —
+      // the same one `status` and `pending_with` come from.
+      pending_count: approvalInstances[0]?.pending_count ?? 0,
+      my_status: approvalInstances[0]?.my_status ?? null,
       is_pending_for_me: approvalInstances.some((i) => i.is_pending_for_me),
       vendor_approvals: {
         total: vendorApprovals.length,
@@ -1998,9 +2065,23 @@ const negotiationModel = {
         title: primary.parent_rfq_title ?? primary.parent_arc_title ?? null,
         status: primary.parent_rfq_status ?? primary.parent_arc_status ?? null,
         is_tender: primary.parent_is_tender == null ? null : Number(primary.parent_is_tender),
-        bid_end_date: primary.parent_bid_end_date ?? null,
-        vendor_clarification_date: isoOrNull(primary.parent_vendor_clarification_date),
-        submission_end_at: isoOrNull(primary.parent_arc_submission_end_at),
+        // THREE IST columns on this payload, not one. Everything else here is
+        // naive UTC and goes through isoOrNull; these hold naive IST wall clock
+        // and would come out 5h30m early if they did — see the warning in
+        // helper/dbTime.js, which names all three.
+        //
+        // The rest of the codebase already agrees they are IST:
+        // rfqController.js:17702 parses vendor_clarification_date with
+        // getBidEndMomentIst, and arcController.js:77,813 parse
+        // submission_end_at with arcMomentIst. This payload was the odd one out.
+        //
+        // Caught in review: the first pass fixed bid_end_date and left its two
+        // immediate neighbours wrong, under a comment claiming there was only
+        // one. Dormant today (no frontend consumer reads either field), which
+        // is exactly how the original tickets started.
+        bid_end_date: istTextToIso(primary.parent_bid_end_date),
+        vendor_clarification_date: istTextToIso(primary.parent_vendor_clarification_date),
+        submission_end_at: istTextToIso(primary.parent_arc_submission_end_at),
         hospitality_company_id: primary.parent_company_id == null ? null : Number(primary.parent_company_id),
         company_name: primary.parent_company_name ?? null,
         hotel_id: primary.parent_hotel_id == null ? null : Number(primary.parent_hotel_id),
@@ -2058,6 +2139,9 @@ const negotiationModel = {
 
     const rows = await db.any(query, values);
     rows.forEach(normalizeProductNames);
+    // `SELECT nr.*` puts every naive UTC column on the wire unlabelled. Give
+    // each one an explicit offset before it leaves — see helper/dbTime.js.
+    rows.forEach(r => withIsoTimestamps(r, NEGOTIATION_TIMESTAMP_KEYS));
     // Vendor reads must not leak other vendors' targets.
     if (vendorId) rows.forEach(r => stripProductsForVendor(r, vendorId));
     return rows;
@@ -2283,7 +2367,7 @@ const negotiationModel = {
   // null ONLY for super admins (user_type 8). The companyIds clause is kept as
   // defence in depth — both must hold.
   getNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
-    return db.any(
+    const rows = await db.any(
       `SELECT nr.id                 AS round_id,
               -- The DISPLAYED round number: this round's position in the whole
               -- RFQ, computed at read time. The stored column restarts at 1 per
@@ -2354,6 +2438,7 @@ const negotiationModel = {
         ORDER BY nr.created_at DESC`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, ROUND_LIST_TIMESTAMP_KEYS));
   },
 
   // ARC negotiation round list: one row per ARC negotiation round, shaped to the
@@ -2361,7 +2446,7 @@ const negotiationModel = {
   // bucket/facet/sort/paginate logic works over the concatenated array unchanged.
   // Scoped to a.hospitality_company_id = ANY(companyIds) — same guard as the RFQ branch.
   getArcNegotiationRoundList: async ({ companyIds = null, hotelId = null, userId = null }) => {
-    return db.any(
+    const rows = await db.any(
       `SELECT nr.id                 AS round_id,
               -- Same read-time position as the RFQ branch. ARC allocation is
               -- already contract-wide, so this agrees with the stored value.
@@ -2431,6 +2516,7 @@ const negotiationModel = {
         ORDER BY nr.created_at DESC`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, ROUND_LIST_TIMESTAMP_KEYS));
   },
 
   // ==========================================================================
@@ -2460,7 +2546,7 @@ const negotiationModel = {
   // defence in depth — both must hold.
   getNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     const stateExpr = 'r.neg_status';
-    return db.any(
+    const rows = await db.any(
       `SELECT 'RFQ:' || r.rfq_id            AS parent_key,
               'RFQ'::text                   AS source_type,
               r.rfq_id,
@@ -2557,6 +2643,7 @@ const negotiationModel = {
         ORDER BY last_activity_at DESC NULLS LAST`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, PARENT_LIST_TIMESTAMP_KEYS));
   },
 
   // ARC counterpart, shaped to the EXACT same column contract so the
@@ -2565,7 +2652,7 @@ const negotiationModel = {
   // precisely why filters.parentKey exists alongside filters.rfqId.
   getArcNegotiationParentList: async ({ companyIds = null, hotelId = null, userId = null }) => {
     const stateExpr = 'r.neg_status';
-    return db.any(
+    const rows = await db.any(
       `SELECT 'ARC:' || r.arc_id            AS parent_key,
               'ARC'::text                   AS source_type,
               NULL::int                     AS rfq_id,
@@ -2652,6 +2739,7 @@ const negotiationModel = {
         ORDER BY last_activity_at DESC NULLS LAST`,
       [companyIds, hotelId, userId]
     );
+    return rows.map((r) => withIsoTimestamps(r, PARENT_LIST_TIMESTAMP_KEYS));
   },
 
   // ==========================================================================
@@ -2958,9 +3046,26 @@ const negotiationModel = {
       ? `('PENDING_APPROVAL', 'ACTIVE', 'ENDED', 'CLOSED')`
       : `('PENDING_APPROVAL', 'ACTIVE')`;
 
-    // When not including ended rounds, also exclude rounds whose end_date has passed
-    // (cron may not have updated the status to ENDED yet)
-    const endDateFilter = includeEnded ? '' : `AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())`;
+    // When not including ended rounds, also exclude rounds whose end_date has
+    // passed — the closer is a one-shot in-memory job and does miss its window
+    // (measured in production: 38 of 806 rounds closed late, 29 of them only
+    // when the server next restarted, one 45 hours after its deadline).
+    //
+    // This deliberately covers PENDING_APPROVAL as well as ACTIVE. It used to
+    // read `(nr.status != 'ACTIVE' OR nr.end_date > NOW())`, which short-
+    // circuits for a pending round and never looks at its deadline — so a
+    // round nobody approved kept blocking its fields with no time-based
+    // escape at all. A pending round past its deadline cannot become live;
+    // it can only expire, so it must not block a replacement.
+    //
+    // `now() AT TIME ZONE 'UTC'`, not bare `NOW()`: end_date is a naive column
+    // holding UTC, and comparing it against a timestamptz makes Postgres
+    // reinterpret the naive side in the SESSION timezone. That is exact under
+    // production's UTC session and 5h30m wrong under a local Asia/Kolkata one
+    // — in the releasing direction, so a stuck block is invisible in dev.
+    const endDateFilter = includeEnded
+      ? ''
+      : `AND nr.end_date > (now() AT TIME ZONE 'UTC')`;
 
     const rows = await db.any(
       `SELECT
@@ -3801,6 +3906,12 @@ const negotiationModel = {
     // Try round.id first, then fall back to matching via metadata.round_id from the product bucket.
     const enrichedRounds = roundsHistory.map(round => {
       normalizeProductNames(round);
+      // `SELECT nr.*` again — label the naive UTC columns before the approval
+      // page reads them. This is the row behind ticket 1: ApproveRoundPage
+      // hands round.end_date straight to StepReview, which parsed the bare
+      // string as local wall clock and rendered 07:00 AM for a 12:30 PM
+      // deadline. See helper/dbTime.js.
+      withIsoTimestamps(round, NEGOTIATION_TIMESTAMP_KEYS);
       let roundApprovals = negotiationInstances[String(round.id)] || [];
       if (roundApprovals.length === 0) {
         // Backward compat: old instances keyed by rfq_product_id

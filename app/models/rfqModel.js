@@ -2858,6 +2858,78 @@ WHERE NOT EXISTS (
             AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
         )
       ) AS has_tech_stuck_product,
+      -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+      -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+      -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+      -- never open for anybody.
+      --
+      -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+      -- means evaluation RAN and every vendor failed, and it is also read further down
+      -- this file to mark products terminally dead and drop them from downstream stages.
+      -- Here evaluation never STARTED and the products are perfectly alive, so the two
+      -- must not share a predicate.
+      --
+      -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+      -- clause-bearing lines without answering a single clause, the window then closed,
+      -- and assertEditAllowed refused every edit because neither existing unlock branch
+      -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+      (
+        SELECT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+          WHERE _te_unstart.rfq_id = RFQ.id
+            -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+            -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+            -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+            -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+            -- whole listing query for every user, not just this subselect.
+            AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+            -- a vendor has real commercial interest riding on this product: a
+            -- non-regret quote line exists for it. Without this the flag also fires on
+            -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+            -- those are already unlocked by the zero-participation branch anyway, since
+            -- they carry no tbl_quotes row at all.
+            AND EXISTS (
+              SELECT 1
+              FROM tbl_quote_items _qi
+              JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+              JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+              WHERE _q.rfq_id = _te_unstart.rfq_id
+                AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                AND _qi.product_variant_id = _rp_u.product_variant_id
+                AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+            )
+            -- the product actually carries clauses a vendor is expected to answer
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+              WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+            )
+            -- nobody already holds a technical pass here
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+              WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND _cv.status = 1
+            )
+            -- and no vendor has answered the FULL non-sampling clause set, which is what
+            -- getVendorScoresForTechEval needs before it can score anyone at all
+            AND NOT EXISTS (
+              SELECT 1
+              FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+              JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+              WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+              GROUP BY _vr.vendor_id
+              HAVING COUNT(DISTINCT _c2.id) = (
+                SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+              )
+            )
+        )
+      ) AS has_tech_unstartable_product,
 
       ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
@@ -2879,6 +2951,22 @@ WHERE NOT EXISTS (
         AND TQ.created_by = $2
       LIMIT 1
     )` : `NULL`} AS "quote_details",
+
+    -- The vendor's own company-profile GSTIN, so the quote form can SEED an
+    -- empty GSTIN box instead of asking for it again on every RFQ. It travels
+    -- ALONGSIDE quote_details.gstin rather than being COALESCEd into it: the
+    -- quote's own value is what the vendor submitted for THIS delivery
+    -- location and must never be overwritten by the head-office one. NULLIF on
+    -- the trimmed value because a blank profile field is "absent", not a
+    -- GSTIN to prefill. purchaseOrderModel already applies the same fallback
+    -- when it builds a PO ('gstin', COALESCE(TQ.gstin, TCSUP.gstin)).
+    ${user_type == 3 ? `(
+      SELECT NULLIF(BTRIM(VC.gstin), '')
+      FROM tbl_users VU
+      JOIN tbl_company VC ON VC.id = VU.company_id
+      WHERE VU.id = $2
+      LIMIT 1
+    )` : `NULL`} AS "vendor_profile_gstin",
 
     ${user_type == 3 ? `(
       SELECT json_agg(json_build_object(
@@ -3385,7 +3473,7 @@ LIMIT 1;`;
             SELECT 1 FROM tbl_rfq_purchase_order _po
             JOIN tbl_purchase_order_product _pop ON _pop.purchase_order_id = _po.id
             WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
-              AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+              AND _po.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
         ) AS has_approved_po
         -- is_dead_end: this product has all eligible vendors' POs rejected with no replacement
         ,(
@@ -4009,7 +4097,7 @@ LIMIT 2;
                     SELECT 1 FROM tbl_rfq_purchase_order _po2
                     JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
                     WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                      AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                      AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
                   FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
                 ) _chk
@@ -4028,7 +4116,7 @@ LIMIT 2;
                     SELECT 1 FROM tbl_rfq_purchase_order _po3
                     JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
                     WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                      AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                      AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
                   FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
                 ) _chk2
@@ -4128,6 +4216,78 @@ LIMIT 2;
                 AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
             )
           ) AS has_tech_stuck_product,
+          -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+          -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+          -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+          -- never open for anybody.
+          --
+          -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+          -- means evaluation RAN and every vendor failed, and it is also read further down
+          -- this file to mark products terminally dead and drop them from downstream stages.
+          -- Here evaluation never STARTED and the products are perfectly alive, so the two
+          -- must not share a predicate.
+          --
+          -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+          -- clause-bearing lines without answering a single clause, the window then closed,
+          -- and assertEditAllowed refused every edit because neither existing unlock branch
+          -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+          (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+              WHERE _te_unstart.rfq_id = RFQ.id
+                -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+                -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+                -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+                -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+                -- whole listing query for every user, not just this subselect.
+                AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                    <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                -- a vendor has real commercial interest riding on this product: a
+                -- non-regret quote line exists for it. Without this the flag also fires on
+                -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+                -- those are already unlocked by the zero-participation branch anyway, since
+                -- they carry no tbl_quotes row at all.
+                AND EXISTS (
+                  SELECT 1
+                  FROM tbl_quote_items _qi
+                  JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+                  JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+                  WHERE _q.rfq_id = _te_unstart.rfq_id
+                    AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                    AND _qi.product_variant_id = _rp_u.product_variant_id
+                    AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+                )
+                -- the product actually carries clauses a vendor is expected to answer
+                AND EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+                  WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+                )
+                -- nobody already holds a technical pass here
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                  WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND _cv.status = 1
+                )
+                -- and no vendor has answered the FULL non-sampling clause set, which is what
+                -- getVendorScoresForTechEval needs before it can score anyone at all
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+                  JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                    ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+                  WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                    AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+                  GROUP BY _vr.vendor_id
+                  HAVING COUNT(DISTINCT _c2.id) = (
+                    SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                    WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                      AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+                  )
+                )
+            )
+          ) AS has_tech_unstartable_product,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -4288,7 +4448,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po2
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
         END) = true
         OR (SELECT CASE
@@ -4298,7 +4458,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po3
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END) = true
       )` : ''}
@@ -4311,7 +4471,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po2
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
         END) = true
         AND NOT (SELECT CASE
@@ -4321,7 +4481,7 @@ LIMIT 2;
               SELECT 1 FROM tbl_rfq_purchase_order _po3
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END)
       )` : ''}
@@ -4459,18 +4619,29 @@ LIMIT 2;
           rfq_id,
           COUNT(*)::int AS total_pos,
           COUNT(*) FILTER (WHERE status = 'pending_approval')::int AS pending_approval_pos,
-          COUNT(*) FILTER (WHERE status IN ('approved','sent','dispatched','GRN','completed','invoice_raised'))::int AS approved_pos
+          COUNT(*) FILTER (WHERE status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised'))::int AS approved_pos
         FROM tbl_rfq_purchase_order
         WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
       ),
-      -- Distinct products covered by approved POs
+      -- Distinct products covered by approved POs.
+      --
+      -- acceptance_pending belongs in this list: it is the state a PO enters
+      -- once internal approval COMPLETES and before the vendor accepts
+      -- (acceptPO flips acceptance_pending -> approved; see poDashboardModel.js
+      -- :1782, which uses the same set). Omitting it meant a fully-approved PO
+      -- counted for nothing here, so the CASE below fell past both
+      -- APPROVED_COMPLETED and PO_APPROVAL down to AWAITING_PO -- telling the
+      -- PO initiators to raise an order that already existed and was approved,
+      -- and holding the RFQ in the Ongoing tab. Every PO passes through this
+      -- state, so it affected every RFQ awaiting vendor acceptance (20 live
+      -- when this was found, e.g. RFQ 536374 / PO 138756).
       po_products_approved AS (
         SELECT po.rfq_id, COUNT(DISTINCT pop.rfq_product_id)::int AS products_with_approved_po
         FROM tbl_rfq_purchase_order po
         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
         WHERE po.rfq_id = ANY($1::int[])
-          AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+          AND po.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
         GROUP BY po.rfq_id
       ),
       -- Whether tech eval is configured for this RFQ (+ count of TE products)
@@ -6106,14 +6277,14 @@ LIMIT 2;
           ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
           OR (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
           ELSE (SELECT COUNT(*) FILTER (WHERE _ha) > 0 AND COUNT(*) FILTER (WHERE NOT _ha) > 0
             FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po3
             JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
             WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
-            AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2) END) = true
         )` : ''}
         ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
@@ -6122,7 +6293,7 @@ LIMIT 2;
           ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
-            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
         )` : ''}
         ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
@@ -11466,23 +11637,27 @@ ORDER BY m.created_at;
                     te.rfq_id,
                     te.tbl_rfq_product_id AS rfq_product_id,
                     vr.vendor_id,
-                    COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
+                    COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
                     COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    -- has_marks: true if ANY clause has been actually scored (score_timestamp differs from creation timestamp)
-                    BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
+                    -- has_marks: true if ANY clause carries a buyer's marks. buyer_id is
+                    -- written only by the buyer-scoring endpoint, so it is the record of a
+                    -- human assessment. Timestamps are not: a vendor re-submitting their
+                    -- answer moves "timestamp" and leaves score_timestamp behind, which is
+                    -- how RFQ 536405 recorded a 0% failure nobody had ever assessed.
+                    BOOL_OR(vr.buyer_id IS NOT NULL) AS has_marks,
                     CASE
-                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+                        WHEN NOT BOOL_OR(vr.buyer_id IS NOT NULL) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
-                        THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+                        THEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
                         ELSE 0
                     END AS calculated_score,
                     te.minimum_passing_score,
                     -- is_passed: only calculated when ALL clauses are scored
                     CASE
-                        WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+                        WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
                         THEN CASE
-                            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
+                            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
                             THEN true
                             ELSE false
                         END
@@ -14289,7 +14464,7 @@ ORDER BY tq.timestamp DESC;
                   JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
                   WHERE _po2.rfq_id = RFQ.id
                     AND _pop2.rfq_product_id = _rp3.id
-                    AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                    AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                 ) AS has_approved
                 FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
               ) _chk
@@ -14418,6 +14593,78 @@ ORDER BY tq.timestamp DESC;
               AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
           )
         ) AS has_tech_stuck_product
+      , -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
+        -- technical clauses that NOT ONE vendor answered in full, so no vendor can ever be
+        -- scored and the RFQ-wide commercial gate (see vendorCondition in this file) can
+        -- never open for anybody.
+        --
+        -- Deliberately NOT the same question as has_tech_stuck_product above. That one
+        -- means evaluation RAN and every vendor failed, and it is also read further down
+        -- this file to mark products terminally dead and drop them from downstream stages.
+        -- Here evaluation never STARTED and the products are perfectly alive, so the two
+        -- must not share a predicate.
+        --
+        -- Reported on RFQ 536289 (Orchid Panchgani, Aug 2026): one vendor priced six
+        -- clause-bearing lines without answering a single clause, the window then closed,
+        -- and assertEditAllowed refused every edit because neither existing unlock branch
+        -- described the state. Nobody could re-open the RFQ. This flag is that missing exit.
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+            WHERE _te_unstart.rfq_id = RFQ.id
+              -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
+              -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
+              -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
+              -- NULLIF+TRIM because 31 production rows hold '' and a bare cast aborts the
+              -- whole listing query for every user, not just this subselect.
+              AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                  <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+              -- a vendor has real commercial interest riding on this product: a
+              -- non-regret quote line exists for it. Without this the flag also fires on
+              -- RFQs nobody engaged with (37 in production vs the 1 genuine deadlock), and
+              -- those are already unlocked by the zero-participation branch anyway, since
+              -- they carry no tbl_quotes row at all.
+              AND EXISTS (
+                SELECT 1
+                FROM tbl_quote_items _qi
+                JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+                JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+                WHERE _q.rfq_id = _te_unstart.rfq_id
+                  AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                  AND _qi.product_variant_id = _rp_u.product_variant_id
+                  AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+              )
+              -- the product actually carries clauses a vendor is expected to answer
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+                WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+              )
+              -- nobody already holds a technical pass here
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND _cv.status = 1
+              )
+              -- and no vendor has answered the FULL non-sampling clause set, which is what
+              -- getVendorScoresForTechEval needs before it can score anyone at all
+              AND NOT EXISTS (
+                SELECT 1
+                FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+                JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                  ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                  AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+                GROUP BY _vr.vendor_id
+                HAVING COUNT(DISTINCT _c2.id) = (
+                  SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                  WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+                )
+              )
+          )
+        ) AS has_tech_unstartable_product
         , D.title AS department_name
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
@@ -15951,24 +16198,24 @@ ORDER BY tq.timestamp DESC;
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
         MAX(rpv.id) AS rfq_product_vendor_id,
-        COUNT(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN 1 END) AS evaluated_clauses_count,
+        COUNT(CASE WHEN vr.buyer_id IS NOT NULL THEN 1 END) AS evaluated_clauses_count,
         COUNT(c.id) AS total_clauses_count,
-        BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
-        BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS is_fully_evaluated,
-        COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
+        BOOL_OR(vr.buyer_id IS NOT NULL) AS has_marks,
+        BOOL_AND(vr.buyer_id IS NOT NULL) AS is_fully_evaluated,
+        COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
         COALESCE(SUM(c.weightage), 0) AS total_weightage,
         CASE
-          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+          WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
-          THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+          THEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
           ELSE 0
         END AS calculated_score,
         $2::NUMERIC AS minimum_passing_score,
         CASE
-          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
+          WHEN NOT BOOL_AND(vr.buyer_id IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN CASE
-            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
+            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.buyer_id IS NOT NULL THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
             THEN true
             ELSE false
           END
@@ -16205,6 +16452,15 @@ ORDER BY tq.timestamp DESC;
     // Find pending vendors (have tech eval responses, not yet scored) sorted by
     // rfq_product_vendor_id DESC so the highest-ranked (L6, L7, etc.) comes first.
     // This ensures when L1 fails, we pick L6 (next in line) not L3 (already in top 5).
+    //
+    // Only vendors who submitted a priced quote for THIS line are eligible. A
+    // vendor who answered the technical clauses but never bid cannot be scored
+    // by the buyer — the evaluation grid hides non-bidders by default — so
+    // promoting one leaves the evaluation permanently unfinishable. RFQ 536405
+    // froze exactly this way: a failed vendor was replaced by a non-bidder, and
+    // the RFQ could not leave the technical stage. This matches the quote test
+    // already used by getNextVendorsForProduct and by the grid's
+    // has_submitted_quote flag.
     let query = `
       SELECT DISTINCT ON (vr.vendor_id)
         vr.vendor_id,
@@ -16222,6 +16478,17 @@ ORDER BY tq.timestamp DESC;
         AND rpv.product_variant_id = rp.product_variant_id
         AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)
       WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          JOIN tbl_quote_items tqi ON tqi.quote_id = tq.id
+          WHERE tq.rfq_id = $3
+            AND tq.created_by = vr.vendor_id
+            AND tq.is_regret <> 1
+            AND tqi.product_variant_id = rp.product_variant_id
+            AND COALESCE(tqi.variant, 0) = COALESCE(rp.variant, 0)
+            AND tqi.total_price > 0
+        )
     `;
 
     const params = [tech_evaluation_id, rfq_product_id, rfq_id];

@@ -1,8 +1,8 @@
 import {
   submitApprovalAction as submitApprovalActionModel,
   getApprovalInstanceById,
+  notifyNextApprovalStep,
 } from '../models/generalModel.js';
-import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.js';
@@ -125,6 +125,28 @@ const postActionRegistry = {
  * @returns {Promise<Object>} Result from submitApprovalAction (instance_status, step_status, etc.)
  */
 export async function executeApprovalAction(args) {
+  const instance = await getApprovalInstanceById(args.approval_instance_id);
+
+  // PO approvals are all-or-nothing: the decision and the PO document commit
+  // together, or neither does. They take their own path because that guarantee
+  // needs one transaction spanning both, which the generic sequence below
+  // cannot provide — see poApprovalService.js.
+  //
+  // APPROVE only. A rejection produces no document, so it has nothing to be
+  // atomic with, and its handler is actively hostile to being run inside an
+  // open transaction: handlePORejectionByInstance opens its own `db.tx` and
+  // re-reads the instance to confirm it is REJECTED. On a separate connection
+  // that read still sees PENDING, so it would return early and the vendor
+  // de-finalization would silently never happen. Rejections stay on the
+  // post-commit path below, where they have always worked.
+  if (
+    instance?.entity_type === 'PO' &&
+    instance.entity_id &&
+    String(args.action || '').toUpperCase() === 'APPROVE'
+  ) {
+    return executePoApproval(args, instance);
+  }
+
   // 1. Run the underlying transactional model action (status updates only).
   const result = await submitApprovalActionModel(args);
 
@@ -141,6 +163,67 @@ export async function executeApprovalAction(args) {
   }
 
   return result;
+}
+
+/**
+ * A PO approval, committed together with the document that records it.
+ *
+ * Regeneration used to be a step that ran after the decision had already
+ * committed, wrapped in a catch that logged and carried on. Sixteen production
+ * POs show what that produced: an approval recorded in the database and a
+ * document, served from S3, that does not mention it. The approvers were told
+ * nothing — the endpoint returned 200 either way — and several of them clicked
+ * Approve three or four more times trying to make something happen.
+ *
+ * Now a document that cannot be produced takes the approval down with it, and
+ * the approver is told to try again.
+ *
+ * Ordering: decision, then document (built through the same transaction, so it
+ * prints this approver as "Approved"), then the entity transition, then COMMIT,
+ * and only then the emails.
+ */
+async function executePoApproval(args, instance) {
+  const { executePoApprovalAtomically } = await import('./poApprovalService.js');
+  const { writePoDocument } = await import('./poDocumentService.js');
+
+  return executePoApprovalAtomically(
+    {
+      po_id: instance.entity_id,
+      approval_instance_id: args.approval_instance_id,
+      approval_instance_step_id: args.approval_instance_step_id,
+      approver_user_id: args.approver_user_id,
+      action: args.action,
+      comment: args.comment,
+    },
+    {
+      writeDocument: writePoDocument,
+
+      // Inside the transaction: the PO status transition and its lifecycle row.
+      // Only APPROVED reaches here — rejections never take this path.
+      postAction: async (tx, result) => {
+        if (result.instance_status !== 'APPROVED') return;
+        const handler = await postActionRegistry.PO.APPROVED();
+        if (handler) {
+          await handler(args.approval_instance_id, args.approver_user_id, {
+            status: result.instance_status,
+            comment: args.comment,
+            txContext: tx,
+          });
+        }
+      },
+
+      // After the commit: everything that leaves the building.
+      afterCommit: async (result) => {
+        await notifyNextApprovalStep(args.approval_instance_id, result);
+        if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
+          await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
+            status: result.instance_status,
+            comment: args.comment,
+          });
+        }
+      },
+    }
+  );
 }
 
 /**

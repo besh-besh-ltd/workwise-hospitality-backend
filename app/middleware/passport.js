@@ -154,7 +154,13 @@ passport.use(
         const user = await adminModel.getUserById(cryptr.decrypt(payload.sub));
 
         if (user.length > 0) {
-          return done(null, user[0]);
+          // The token, not the account, is what makes this Workwise staff.
+          // Three accounts hold user_type 7 and can sign in to both consoles;
+          // the same person reading a client's RFQ through the client app is
+          // that client's administrator, and reading it here is Workwise
+          // looking at a customer. Only the token that was minted for this
+          // console can tell those apart, so the mark is set here.
+          return done(null, { ...user[0], is_internal_admin: true });
         } else {
           return done(null, false, { message: 'Unauthorized' });
         }
