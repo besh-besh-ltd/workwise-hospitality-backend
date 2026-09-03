@@ -38,7 +38,23 @@ export const adminAuthSchemas = {
   }),
 
   forgot_password: Joi.object().keys({
-    email: Joi.string().email().max(100).required().label('Email')
+    /**
+     * `tlds: { allow: false }` disables Joi's IANA TLD allowlist, keeping the
+     * structural check (a local part, an @, a domain) and dropping the
+     * "is this a real top-level domain" one.
+     *
+     * Two reasons. Corporate and internal domains are legitimate for admin
+     * accounts on a B2B product and the allowlist rejects them — the repo's own
+     * fixtures are all @test.local, which the default rules refuse. And the
+     * check buys nothing here: this endpoint answers identically whether or not
+     * the address matches an admin, so an unparseable address is already
+     * indistinguishable from an unknown one.
+     */
+    email: Joi.string()
+      .email({ tlds: { allow: false } })
+      .max(100)
+      .required()
+      .label('Email')
   }),
 
   reset_password: Joi.object().keys({
