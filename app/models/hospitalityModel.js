@@ -1,4 +1,5 @@
 import db, { pgp } from '../config/dbConn.js';
+import { notSupersededByCancellation } from './subscriptionEligibility.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -1117,6 +1118,7 @@ eligible_category_vendors AS (
     JOIN product_categories pc ON pc.category_id = s.item_id
     WHERE s.item_type = 'category'
       AND s.status IN ('active', 'expired')
+      AND ${notSupersededByCancellation('s')}
 ),
 
 eligible_hotel_vendors AS (
@@ -1127,6 +1129,7 @@ eligible_hotel_vendors AS (
     WHERE s.item_type = 'hotel'
       AND s.item_id = ANY ($2)
       AND s.status IN ('active', 'expired')
+      AND ${notSupersededByCancellation('s')}
 )
 
 SELECT vv.vendor_id
@@ -2042,14 +2045,18 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         WHERE vendor_id = $1 AND status = true AND is_approved = true
       ),
       vendor_hotels AS (
-        SELECT item_id AS hotel_id
-        FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'hotel' AND status IN ('active', 'expired')
+        SELECT vh.item_id AS hotel_id
+        FROM tbl_vendor_hotel_category_subscription vh
+        WHERE vh.vendor_id = $1 AND vh.item_type = 'hotel'
+          AND vh.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('vh')}
       ),
       vendor_cats AS (
-        SELECT item_id AS category_id
-        FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'category' AND status IN ('active', 'expired')
+        SELECT vc.item_id AS category_id
+        FROM tbl_vendor_hotel_category_subscription vc
+        WHERE vc.vendor_id = $1 AND vc.item_type = 'category'
+          AND vc.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('vc')}
       ),
       -- Products that have an approved PO (approved/sent/GRN/completed)
       finalized_products AS (

@@ -18,6 +18,7 @@ import {
   isEntityChangeMaterial,
   isTimestampField
 } from './rfqEditableFields.js';
+import { notSupersededByCancellation } from '../../models/subscriptionEligibility.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -684,6 +685,7 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
              WHERE s.item_type = 'hotel'
                AND s.item_id = ANY ($2)
                AND s.status IN ('active', 'expired')
+               AND ${notSupersededByCancellation('s')}
            )
            SELECT vv.vendor_id
            FROM variant_vendors vv

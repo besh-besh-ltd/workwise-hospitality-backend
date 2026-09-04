@@ -250,6 +250,8 @@ BEGIN
     ELSIF TG_OP = 'UPDATE' THEN
         v_old := to_jsonb(OLD);
         v_new := to_jsonb(NEW);
+    ELSIF TG_OP = 'INSERT' THEN
+        v_new := to_jsonb(NEW);
     END IF;
 
     INSERT INTO audit_log_temp (
@@ -9962,6 +9964,13 @@ CREATE TRIGGER tbl_offer_update BEFORE UPDATE ON public.tbl_offer FOR EACH ROW E
 --
 -- Name: tbl_quote_finalization tbl_quote_finalization_audit; Type: TRIGGER; Schema: public; Owner: -
 --
+
+--
+-- Name: tbl_vendor_hotel_category_subscription tbl_vendor_hotel_category_subscription_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER tbl_vendor_hotel_category_subscription_audit AFTER INSERT OR DELETE OR UPDATE ON public.tbl_vendor_hotel_category_subscription FOR EACH ROW EXECUTE FUNCTION public.log_changes_direct();
+
 
 CREATE TRIGGER tbl_quote_finalization_audit AFTER DELETE OR UPDATE ON public.tbl_quote_finalization FOR EACH ROW EXECUTE FUNCTION public.log_changes_direct();
 

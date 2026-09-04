@@ -20,6 +20,7 @@ import {
   getApprovalInstanceDetails,
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
+import { notSupersededByCancellation } from '../../models/subscriptionEligibility.js';
 
 /**
  * ARC v2 — Buyer-side controller for the ARC root entity.
@@ -1391,6 +1392,7 @@ export async function listEligibleVendors(req, res) {
         WHERE u.user_type = 3
           AND u.status = 1
           AND vhcs.status IN ('active', 'expired')
+          AND ${notSupersededByCancellation('vhcs')}
           AND (
             (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
             OR
