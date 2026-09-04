@@ -42,6 +42,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
+import { isCompanyAdmin, requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
 import {
   simulateApproverImpact,
@@ -427,6 +428,102 @@ const add_vendor_product = async (productDetails, vendorId) => {
 
 
 const UsersController = {
+  /**
+   * Is this email or mobile already taken? (UM-1)
+   *
+   * Duplicates were only caught on submit, after the whole form had been
+   * filled in, and came back as a generic error. This lets the form say so as
+   * the field is left.
+   *
+   * Answers strictly yes or no. Returning the matching account would turn a
+   * form-validation helper into a directory-enumeration tool.
+   */
+  /**
+   * An administrator restoring access for somebody who is locked out (T0).
+   *
+   * The password routes are otherwise strictly self-service, so an admin could
+   * not help at all and the request went to Workwise instead.
+   *
+   * The admin triggers the reset; they never see or choose the password. That
+   * reuses the existing OTP flow rather than opening a second credential path,
+   * and it keeps the property that matters: an administrator can restore
+   * access without gaining the ability to impersonate the person.
+   */
+  send_password_reset: async (req, res) => {
+    try {
+      const targetUserId = Number(req.params.user_id);
+      if (!Number.isFinite(targetUserId) || targetUserId <= 0) {
+        return res.status(400).json({ status: 0, message: 'Invalid user' });
+      }
+
+      const target = await db.oneOrNone(
+        `SELECT id, name, email, company_id
+           FROM tbl_users
+          WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+        [targetUserId]
+      );
+      if (!target) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      // Tenant boundary. An administrator restores access inside their own
+      // company and nowhere else; a user from another company is reported the
+      // same way as one that does not exist, so this cannot be used to probe
+      // for accounts.
+      if (Number(target.company_id) !== Number(req.user.company_id)) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      const otp = generateOTPRandomNo();
+      await userModel.update_user_otp_resend({ otp, email: target.email });
+
+      const link = `${process.env.FRONT_BASE_URL || 'https://hospitality.letsworkwise.com'}/validate-otp?otp=${otp}`;
+      let html = fs.readFileSync(`${Config.template_path}/otp_resend_template.txt`).toString();
+      for (const [key, value] of [['name', target.name], ['otp', otp], ['link', link]]) {
+        html = html.replaceAll(`[${key}]`, value);
+      }
+
+      sendMail({
+        to: target.email,
+        from: Config.webmasterMail,
+        subject: 'Work wise | Password reset',
+        html,
+        is_otp: true
+      });
+
+      // Deliberately no OTP in the response. Returning it would turn a
+      // recovery tool into an impersonation one.
+      return res.status(200).json({
+        status: 1,
+        message: `A password reset has been emailed to ${target.email}.`
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: 'Could not send the password reset' });
+    }
+  },
+
+  check_identity: async (req, res) => {
+    try {
+      const { email, mobile, exclude_user_id: excludeUserId } = req.query;
+      const taken = await userModel.identity_taken({
+        email: email || null,
+        mobile: mobile || null,
+        excludeUserId: excludeUserId ? Number(excludeUserId) : null,
+      });
+      return res.status(200).json({
+        status: 1,
+        data: {
+          email: { taken: taken.email },
+          mobile: { taken: taken.mobile },
+        },
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: 'Could not check availability' });
+    }
+  },
+
   userBookDemo: async (req, res, next) => {
     try {
       const { mobile } = req.body;
@@ -920,7 +1017,12 @@ create_buyer_company_users: async (req, res, next) => {
       name,
       email,
       mobile,
-      user_type,
+      // Defaulted here, not in the Joi schema: validateBody writes the
+      // validated result to `req.value.body` and leaves `req.body` untouched
+      // (userValidation.js:155), so a schema `.default()` never reaches a
+      // controller that reads req.body. The schema still constrains the value
+      // to 2 or 7; this only covers the omitted case.
+      user_type = 2,
       password,
       employee_code,
       employee_type,
@@ -1150,6 +1252,16 @@ create_buyer_company_users: async (req, res, next) => {
     });
 
   } catch (err) {
+    // A duplicate role assignment is the admin asking for something they
+    // already have, not a server failure. It used to surface as a bare 500
+    // (UM-7), which tells them nothing about what to do next.
+    if (err?.code === 'DUPLICATE_ROLE_SCOPE') {
+      return res.status(409).json({
+        status: 0,
+        code: 'DUPLICATE_ROLE_SCOPE',
+        message: err.message
+      });
+    }
     logError("create_buyer_company_users error", err);
     return res.status(500).json({
       status: false,
@@ -1197,6 +1309,12 @@ get_company_users_detailed: async (req, res, next) => {
       mobile: user.mobile,
       role: user.user_type,
       role_name: userTypeMap[user.user_type] || "Unknown",
+      // The single most consequential fact about a person on this screen, and
+      // it was being computed by the query and then dropped here: this
+      // response is an explicit field whitelist, so a new column reaches the
+      // client only if it is named. Without it the administrator badge could
+      // never render, whatever the model returned.
+      is_company_admin: user.is_company_admin === true,
       status: user.status === 1 ? "active" : "inactive",
       created_at: user.created_at,
       employee_type: user.employee_type,
@@ -1254,7 +1372,6 @@ get_company_users: async (req, res, next) => {
     };
     
     const formattedUsers = users
-      .filter(user => user.user_type !== 7)
       .map(user => ({
         id: user.id,
         name: user.name,
@@ -2121,7 +2238,11 @@ update_user_detail: async (req, res, next) => {
   try {
     const loggedInUser = req.user;
     const reqData = req.body;
-    const isAdmin = loggedInUser.user_type === 7;
+    // The capability, not the type. This route has no gate of its own — it
+    // also serves self-edit — so this line is the whole control over who may
+    // edit somebody else's account, and reading it off user_type would have
+    // left a capability-holding administrator unable to manage a single user.
+    const isAdmin = await requestIsCompanyAdmin(req);
 
     const targetUserId =
       reqData.user_id && isAdmin
@@ -2268,6 +2389,45 @@ update_user_detail: async (req, res, next) => {
       };
 
       logger.info(`[UpdateUser ${targetUserId}] role scopes: old=${oldRoleScopes.length}, new=${newRoleScopes?.length ?? 'n/a'}, removedScopes=${removedScopes.length}, addedScopes=${addedScopes.length}`);
+
+      /* ---- LAST ADMINISTRATOR ----
+         Deactivating an administrator, or taking away the role that carries
+         `company.admin`, must not leave the company with nobody who can
+         administer it. Nobody inside could restore one — creating and
+         promoting administrators is itself an administrator's power — so the
+         company would be locked out of its own configuration until Workwise
+         intervened with SQL.
+
+         Checked before the write, so the refusal costs nothing and leaves no
+         partial state. */
+      const targetUserRow = await db.oneOrNone(
+        'SELECT user_type, company_id FROM tbl_users WHERE id = $1',
+        [targetUserId]
+      );
+
+      if (targetUserRow && await isCompanyAdmin({ id: targetUserId, user_type: targetUserRow.user_type })) {
+        const adminRoleIds = await rbacModel.rolesGrantingCompanyAdmin();
+        const keepsCapability =
+          newRoleIds === null
+            ? true // roles untouched by this request
+            : newRoleIds.some((id) => adminRoleIds.includes(Number(id)));
+        const keepsLegacyType = Number(targetUserRow.user_type) === 7;
+
+        if (statusDeactivating || !(keepsCapability || keepsLegacyType)) {
+          try {
+            await userModel.assertNotLastCompanyAdmin(targetUserRow.company_id, targetUserId);
+          } catch (guardErr) {
+            if (guardErr?.code === 'LAST_COMPANY_ADMIN') {
+              return res.status(409).json({
+                status: 0,
+                code: 'LAST_COMPANY_ADMIN',
+                message: guardErr.message
+              });
+            }
+            throw guardErr;
+          }
+        }
+      }
 
       /* ---- FULL-WIPE BACKSTOP ----
          `roles: []` / `department_ids: []` mean "replace everything with
@@ -2519,6 +2679,13 @@ update_user_detail: async (req, res, next) => {
     });
 
   } catch (err) {
+    if (err?.code === 'DUPLICATE_ROLE_SCOPE') {
+      return res.status(409).json({
+        status: 0,
+        code: 'DUPLICATE_ROLE_SCOPE',
+        message: err.message
+      });
+    }
     logError(err);
     return res.status(400).json({
       status: false,

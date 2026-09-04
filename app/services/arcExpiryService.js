@@ -2,6 +2,8 @@ import db from '../config/dbConn.js';
 import { logger } from '../util/logger.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { notifyArcEvent } from './arcNotificationService.js';
+import { recordSystemEvent } from './activity/systemEvents.js';
+import { CATEGORIES } from './activity/eventRegistry.js';
 
 /**
  * ARC expiry sweep — the time-driven trigger for the EXPIRING_SOON / EXPIRED
@@ -75,6 +77,17 @@ export async function runArcExpirySweep({ now = new Date() } = {}) {
         });
       });
       summary.expired += 1;
+      // A live rate contract lapsing is one of the most consequential things
+      // that happens with no request behind it — prices stop being honoured
+      // and nobody was told. Post-commit, like the notification below.
+      await recordSystemEvent({
+        eventKey: 'rate_contract_expired',
+        category: CATEGORIES.CONTRACTS,
+        severity: 'critical',
+        entityType: 'ARC',
+        entityId: arcId,
+        summary: (label) => `Rate contract ${label || arcId} reached the end of its term and expired`,
+      });
       // Post-commit: never inside the tx (slow email/push, and a rollback must
       // not have already notified).
       await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.EXPIRED, actorId: null, payload: {} });

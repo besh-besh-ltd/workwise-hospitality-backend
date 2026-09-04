@@ -68,13 +68,17 @@
     },
     {
       "name": "security-approval",
-      "pattern": "tests/services/(security\\.|approval|authorizationService|rbac\\.|userRoleScope\\.|arc\\.approvers)",
+      "pattern": "tests/services/(security\\.|approval|authorizationService|rbac\\.|userRoleScope\\.|hospitality\\.|arc\\.approvers)",
       "description": "Tenant-scope/IDOR regressions, the approval engine, RBAC and process scoping"
     },
     {
       "name": "platform",
       "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification)",
       "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, and harness self-checks"
+    },
+    {
+      "name": "activity",
+      "pattern": "tests/services/(activity|admin)\\."
     },
     {
       "name": "arc-core",

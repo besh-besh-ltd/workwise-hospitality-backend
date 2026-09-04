@@ -2952,6 +2952,22 @@ WHERE NOT EXISTS (
       LIMIT 1
     )` : `NULL`} AS "quote_details",
 
+    -- The vendor's own company-profile GSTIN, so the quote form can SEED an
+    -- empty GSTIN box instead of asking for it again on every RFQ. It travels
+    -- ALONGSIDE quote_details.gstin rather than being COALESCEd into it: the
+    -- quote's own value is what the vendor submitted for THIS delivery
+    -- location and must never be overwritten by the head-office one. NULLIF on
+    -- the trimmed value because a blank profile field is "absent", not a
+    -- GSTIN to prefill. purchaseOrderModel already applies the same fallback
+    -- when it builds a PO ('gstin', COALESCE(TQ.gstin, TCSUP.gstin)).
+    ${user_type == 3 ? `(
+      SELECT NULLIF(BTRIM(VC.gstin), '')
+      FROM tbl_users VU
+      JOIN tbl_company VC ON VC.id = VU.company_id
+      WHERE VU.id = $2
+      LIMIT 1
+    )` : `NULL`} AS "vendor_profile_gstin",
+
     ${user_type == 3 ? `(
       SELECT json_agg(json_build_object(
         'file_url', TQF.file_url

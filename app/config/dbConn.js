@@ -1,6 +1,7 @@
 import pg from 'pg-promise';
 import dotenv from 'dotenv';
 import { logger } from '../util/logger.js';
+import { getActorUserId, getRequestId } from '../util/requestContext.js';
 
 dotenv.config();
 
@@ -12,6 +13,58 @@ const initOptions = {
       logger.error({ cn: e.cn }, 'Database connection error');
       logger.error({ event: error.message || error }, 'Database error event');
     }
+  },
+
+  /**
+   * Stamps the acting user onto the session so the row-level audit trigger
+   * can attribute what follows to a person.
+   *
+   * The trigger runs inside Postgres and has no way to know who is acting;
+   * that is why `changed_by` read the literal 'postgres' for 105,000 rows.
+   * It now reads `current_setting('app.actor_id')`, which has to be put there
+   * by whoever holds the connection.
+   *
+   * Why here rather than at the start of each transaction: writes happen both
+   * inside `db.tx` and through bare `db.none`/`db.any` calls, so a
+   * transaction-only hook would miss a large share of them. `connect` fires on
+   * every acquisition from the pool, which covers both.
+   *
+   * Why the un-awaited query is safe: node-postgres serialises statements per
+   * connection in the order they are queued, and pg-promise fires this handler
+   * synchronously before the caller's continuation runs. The SET is therefore
+   * always queued ahead of the query it is meant to describe.
+   *
+   * Why the cache: this would otherwise add a round trip to every acquisition,
+   * and round trips — not slow SQL — are what this application's latency is
+   * made of. A pooled connection keeps its settings, so re-stamping one that
+   * already carries the right values is pure cost. Inside `db.tx` the whole
+   * transaction is one acquisition and therefore one stamp.
+   *
+   * Stamping unconditionally (including to empty) is what stops the previous
+   * request's actor leaking onto a reused connection.
+   */
+  connect({ client }) {
+    const actorId = getActorUserId();
+    const requestId = getRequestId();
+    const desired = `${actorId ?? ''}|${requestId ?? ''}`;
+
+    if (client.$wwAuditContext === desired) return;
+    client.$wwAuditContext = desired;
+
+    // set_config takes parameters; `SET` does not. is_local=false because the
+    // value must outlive any single statement on this connection.
+    client
+      .query(
+        `SELECT set_config('app.actor_id', $1, false),
+                set_config('app.request_id', $2, false)`,
+        [actorId == null ? '' : String(actorId), requestId ?? '']
+      )
+      .catch((err) => {
+        // Never let audit stamping break a request. A row with no actor is a
+        // gap in the trail; a failed query is a broken feature.
+        client.$wwAuditContext = null;
+        logger.warn({ err: err.message }, 'Could not stamp audit context on connection');
+      });
   }
 };
 const pgp = pg(initOptions);

@@ -10,6 +10,14 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { sendVendorBulkRfqJoinNotification, sendVendorAutoAddedToRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
+import {
+  previewHotelDeletion,
+  previewCompanyDeletion,
+  hardDeleteHotel,
+  hardDeleteCompany,
+  archiveHotel,
+  archiveCompany
+} from '../../models/unitDeletionModel.js';
 import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import productModel from '../../models/productModel.js';
@@ -384,6 +392,44 @@ const _sendSubscriptionConfirmationEmail = async ({
   }
 };
 
+
+/**
+ * The company named in the URL, if it belongs to the caller's buyer company.
+ *
+ * 404 rather than 403 on a miss, matching every sibling handler: an admin of
+ * another tenant should not be able to learn that the row exists.
+ */
+async function resolveCompanyInTenant(req, res) {
+  const company = req.companyDetails;
+  const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+  const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+  if (!record || record.buyer_company_id !== company.id) {
+    res.status(404).json({ status: 2, message: 'Hospitality company not found' });
+    return null;
+  }
+  return record;
+}
+
+/**
+ * The hotel named in the URL, if it sits under a company the caller owns.
+ *
+ * `includeArchived` for the one caller that needs it: restoring an archived
+ * unit has to be able to find it, and every other reader deliberately cannot.
+ */
+async function resolveHotelInTenant(req, res, { includeArchived = false } = {}) {
+  const record = await resolveCompanyInTenant(req, res);
+  if (!record) return null;
+  const hotelId = parseInt(req.params.hotel_id, 10);
+  const hotelRecord = includeArchived
+    ? await hospitalityModel.getHotelByIdIncludingArchived(hotelId)
+    : await hospitalityModel.getHotelById(hotelId);
+  if (!hotelRecord || hotelRecord.hospitality_company_id !== record.id) {
+    res.status(404).json({ status: 2, message: 'Hotel not found in selected company' });
+    return null;
+  }
+  return { company: record, hotel: hotelRecord, hotelId };
+}
+
 const HospitalityController = {
   listCompanies: async (req, res) => {
     try {
@@ -729,6 +775,21 @@ const HospitalityController = {
         });
       }
 
+      // One Head Office per company. Without this, calling the endpoint twice
+      // produced a second one — identical in every field, since it is copied
+      // from the company — and nothing downstream could tell them apart.
+      // The database enforces it too (uq_one_head_office_per_company); this is
+      // here so the answer is a sentence rather than a constraint violation.
+      const existingHO = await hospitalityModel.getHeadOffice(hospitalityCompanyId);
+      if (existingHO) {
+        return res.status(409).json({
+          status: 0,
+          code: 'HEAD_OFFICE_EXISTS',
+          message: `${existingHO.name} is already this company's Head Office`,
+          data: { id: existingHO.id, name: existingHO.name }
+        });
+      }
+
       const created = await hospitalityModel.createHOFromCompany(
         hospitalityCompanyId,
         req.user.id
@@ -753,6 +814,130 @@ const HospitalityController = {
         data: created,
         message: 'Head Office business unit created successfully'
       });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * What would happen if this business unit were deleted.
+   * GET /company/:company_id/hotels/:hotel_id/delete-preflight
+   */
+  previewHotelDelete: async (req, res) => {
+    try {
+      const scoped = await resolveHotelInTenant(req, res);
+      if (!scoped) return;
+      const preview = await previewHotelDeletion(scoped.hotelId);
+      return res.status(200).json({ status: 1, data: preview });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Delete the unit, or archive it.
+   * DELETE /company/:company_id/hotels/:hotel_id
+   *
+   * `?archive=true` archives instead. A hard delete is refused outright when
+   * anything at all refers to the unit — the reference list is returned with
+   * the refusal, because "no" without "because of these 40 things" leaves the
+   * admin nowhere.
+   */
+  deleteHotel: async (req, res) => {
+    try {
+      const scoped = await resolveHotelInTenant(req, res);
+      if (!scoped) return;
+
+      if (String(req.query.archive) === 'true') {
+        await archiveHotel(scoped.hotelId, true);
+        return res.status(200).json({ status: 1, message: 'Business unit archived' });
+      }
+
+      try {
+        const removed = await hardDeleteHotel(scoped.hotelId);
+        if (!removed) {
+          return res.status(404).json({ status: 2, message: 'Business unit not found' });
+        }
+        return res.status(200).json({ status: 1, message: 'Business unit deleted' });
+      } catch (err) {
+        if (err?.code !== 'UNIT_IN_USE') throw err;
+        // Re-checked inside the delete transaction, so this can fire even
+        // after a clean pre-flight — somebody raised an RFQ in between.
+        const preview = await previewHotelDeletion(scoped.hotelId);
+        return res.status(409).json({
+          status: 0,
+          code: 'UNIT_IN_USE',
+          message: 'This business unit is still in use and cannot be deleted. Archive it instead.',
+          data: preview,
+        });
+      }
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /** Put an archived unit back into use. */
+  restoreHotel: async (req, res) => {
+    try {
+      const scoped = await resolveHotelInTenant(req, res, { includeArchived: true });
+      if (!scoped) return;
+      await archiveHotel(scoped.hotelId, false);
+      return res.status(200).json({ status: 1, message: 'Business unit restored' });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * What would happen if this company were deleted.
+   * GET /company/:company_id/delete-preflight
+   */
+  previewCompanyDelete: async (req, res) => {
+    try {
+      const record = await resolveCompanyInTenant(req, res);
+      if (!record) return;
+      const preview = await previewCompanyDeletion(record.id);
+      return res.status(200).json({ status: 1, data: preview });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Delete the company, or archive it.
+   * DELETE /company/:company_id
+   */
+  deleteCompany: async (req, res) => {
+    try {
+      const record = await resolveCompanyInTenant(req, res);
+      if (!record) return;
+
+      if (String(req.query.archive) === 'true') {
+        await archiveCompany(record.id, true);
+        return res.status(200).json({ status: 1, message: 'Company archived' });
+      }
+
+      try {
+        const removed = await hardDeleteCompany(record.id);
+        if (!removed) {
+          return res.status(404).json({ status: 2, message: 'Company not found' });
+        }
+        return res.status(200).json({ status: 1, message: 'Company deleted' });
+      } catch (err) {
+        if (err?.code !== 'COMPANY_IN_USE') throw err;
+        const preview = await previewCompanyDeletion(record.id);
+        return res.status(409).json({
+          status: 0,
+          code: 'COMPANY_IN_USE',
+          message: 'This company is still in use and cannot be deleted. Archive it instead.',
+          data: preview,
+        });
+      }
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);
@@ -2584,10 +2769,24 @@ const HospitalityController = {
         return res.status(404).json({ status: 2, message: 'Hotel not found in selected company' });
       }
 
-      const users = await hospitalityModel.getUsersForHotelWithPassword(hospitalityCompanyId, hotelId);
+      // UM-12: send to chosen people rather than to everybody at the unit.
+      // The list narrows the eligible set; it cannot extend it, so naming an
+      // id outside this unit selects nobody rather than mailing them.
+      const requestedIds = Array.isArray(req.body?.user_ids) ? req.body.user_ids : null;
+
+      const users = await hospitalityModel.getUsersForHotelWithPassword(
+        hospitalityCompanyId,
+        hotelId,
+        requestedIds
+      );
 
       if (!users || users.length === 0) {
-        return res.status(200).json({ status: 2, message: 'No users mapped to this business unit' });
+        return res.status(200).json({
+          status: 2,
+          message: requestedIds?.length
+            ? 'None of the selected people are mapped to this business unit'
+            : 'No users mapped to this business unit'
+        });
       }
 
       const DEFAULT_PASSWORD = 'Workwise@123';

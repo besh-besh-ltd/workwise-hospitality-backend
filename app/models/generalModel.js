@@ -128,6 +128,7 @@ import fs from "fs";
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
+import { applyDelegations } from './approvalDelegationModel.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -2220,6 +2221,21 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
 
   // Remove duplicates
   let finalApprovers = [...new Set(userIds)];
+
+  // Cover, applied last so it sees exactly who would otherwise have been asked.
+  //
+  // This is the single point where delegation takes effect, which is what
+  // makes it forward-only: resolution happens as an approval instance is
+  // created, so an instance that already exists keeps the approvers it was
+  // created with. Moving one of those is reassignment, a different action with
+  // different guards.
+  //
+  // All eight callers get it, deliberately. The propagation service resolving
+  // a newly-added step is making a new assignment; simulateApproverImpact and
+  // willBeFinalApprover are asking who would be asked, and an answer that
+  // ignored cover would disagree with what actually happens.
+  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t);
+
   return finalApprovers;
 }
 
@@ -3036,6 +3052,12 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
         u.name as user_name,
         u.email as user_email,
         u.designation as user_designation,
+        -- Whether this person could still act at all. A deactivated account
+        -- leaves its approver row PENDING forever — the engine deliberately
+        -- keeps the row rather than deleting it — so without this the panel
+        -- shows a name and the word "Waiting" about somebody who cannot log
+        -- in. Production carries 24 such rows across 19 live approvals.
+        (u.status = 1 AND COALESCE(u.is_deleted, 0) = 0) AS account_active,
         (
           SELECT d.title
           FROM tbl_user_department ud
@@ -3057,6 +3079,7 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       user_department: ap.user_department,
       employee_code: ap.employee_code,
       status: ap.status,
+      account_active: ap.account_active !== false,
       acted_at: ap.acted_at,
       comment: ap.comment,
       added_mid_flight: ap.added_mid_flight || false,

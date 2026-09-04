@@ -523,7 +523,22 @@ export async function getRequestDetail(req, res) {
       await arcModel.recordVendorResponse(arcId, vendorId, 'viewed');
       await logArcEvent({ arcId, eventType: ARC_EVENT_TYPES.VENDOR_VIEWED, actorId: vendorId, payload: {} });
     }
-    return ok(res, { arc, items, invitation, quote, lines, tech_envelope });
+    // The vendor's own company-profile GSTIN, so the quote form can SEED an
+    // empty GSTIN box instead of asking for it again on every contract.
+    // Travels ALONGSIDE quote.gstin_used, never merged into it: what the
+    // vendor submitted for THIS contract must survive a reload untouched.
+    // Blank profile fields are "absent", not a GSTIN to prefill.
+    const profile = await db.oneOrNone(
+      `SELECT NULLIF(BTRIM(c.gstin), '') AS gstin
+         FROM tbl_users u
+         JOIN tbl_company c ON c.id = u.company_id
+        WHERE u.id = $1`,
+      [vendorId]
+    );
+    return ok(res, {
+      arc, items, invitation, quote, lines, tech_envelope,
+      vendor_profile_gstin: profile?.gstin || null,
+    });
   } catch (err) {
     logger.error({ err }, '[vendorController.getRequestDetail]');
     return bad(res, 500, err.message || 'Internal error', 3);
