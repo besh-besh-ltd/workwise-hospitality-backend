@@ -272,25 +272,23 @@ describe("POST /admin/auth/forgot-password", () => {
   });
 });
 
+// The controller only ever mails the raw token, so tests plant a known one.
+const plantToken = async ({ minutesFromNow = 30, used = false } = {}) => {
+  const token = crypto.randomBytes(32).toString("hex");
+  await db.none(
+    `UPDATE tbl_users
+        SET pwd_reset_token_hash = $2,
+            pwd_reset_expires_at = NOW() + ($3 || ' minutes')::interval,
+            pwd_reset_used_at = $4,
+            pwd_reset_attempts = 1
+      WHERE id = $1`,
+    [ADMIN, sha256(token), String(minutesFromNow), used ? new Date() : null]
+  );
+  return token;
+};
+
 // ---------------------------------------------------------------------------
 describe("POST /admin/auth/reset-password", () => {
-  // The controller only ever mails the raw token, so tests plant a known one.
-  const plantToken = async (
-    { minutesFromNow = 30, used = false } = {}
-  ) => {
-    const token = crypto.randomBytes(32).toString("hex");
-    await db.none(
-      `UPDATE tbl_users
-          SET pwd_reset_token_hash = $2,
-              pwd_reset_expires_at = NOW() + ($3 || ' minutes')::interval,
-              pwd_reset_used_at = $4,
-              pwd_reset_attempts = 1
-        WHERE id = $1`,
-      [ADMIN, sha256(token), String(minutesFromNow), used ? new Date() : null]
-    );
-    return token;
-  };
-
   it("resets the password and burns the token", async () => {
     const token = await plantToken();
 
@@ -402,5 +400,114 @@ describe("POST /admin/auth/reset-password", () => {
 
     expect(res.status).toBe(400);
     expect(await passwordHashOf(ADMIN)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-use is a property of one LINK, not of the account.
+//
+// Raised in review as "the admin can only ever change their password once".
+// It cannot happen, and these tests are here so nobody has to re-derive that
+// from the SQL. Two lines carry the guarantee:
+//
+//   updateAdminPassword  has no guard at all -- it is a plain UPDATE
+//   setAdminResetToken   sets `pwd_reset_used_at = NULL` when issuing a link,
+//                        clearing the marker the previous reset left behind
+//
+// The only restriction anywhere is a 30-minute, 5-link throttle on how fast
+// links can be mailed, and the last test proves that lifts on its own.
+describe("password changes are repeatable", () => {
+  it("lets an admin change their password over and over", async () => {
+    const chain = ["FirstChange11", "SecondChange22", "ThirdChange33"];
+    let current = CURRENT_PASSWORD;
+
+    for (const next of chain) {
+      const res = await asAdmin(CHANGE).send({
+        current_password: current,
+        password: next,
+        confirm_password: next,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(1);
+      expect(await bcrypt.compare(next, await passwordHashOf(ADMIN))).toBe(true);
+      current = next;
+    }
+
+    // Three successful changes, and the account is not left in a locked state.
+    const state = await resetStateOf(ADMIN);
+    expect(state.pwd_reset_used_at).toBeNull();
+    expect(Number(state.pwd_reset_attempts)).toBe(0);
+  });
+
+  it("issues and honours a second reset link after the first was consumed", async () => {
+    const anon = await httpClient(null);
+
+    const first = await plantToken();
+    const one = await anon
+      .post(RESET)
+      .send({ token: first, password: "ResetOnce111", confirm_password: "ResetOnce111" });
+    expect(one.body.status).toBe(1);
+    // The consumed link left a used-at marker behind.
+    expect((await resetStateOf(ADMIN)).pwd_reset_used_at).not.toBeNull();
+
+    // A fresh request must clear it, or every later reset would be refused.
+    await anon.post(FORGOT).send({ email: adminEmail });
+    const afterReissue = await resetStateOf(ADMIN);
+    expect(afterReissue.pwd_reset_used_at).toBeNull();
+    expect(afterReissue.pwd_reset_token_hash).not.toBeNull();
+
+    const second = await plantToken();
+    const two = await anon
+      .post(RESET)
+      .send({ token: second, password: "ResetTwice22", confirm_password: "ResetTwice22" });
+
+    expect(two.status).toBe(200);
+    expect(two.body.status).toBe(1);
+    expect(await bcrypt.compare("ResetTwice22", await passwordHashOf(ADMIN))).toBe(true);
+  });
+
+  it("still works after a reset, via the ordinary change form", async () => {
+    // Reset, then change again with the reset password as the current one.
+    const token = await plantToken();
+    const anon = await httpClient(null);
+    await anon
+      .post(RESET)
+      .send({ token, password: "AfterReset123", confirm_password: "AfterReset123" });
+
+    const res = await asAdmin(CHANGE).send({
+      current_password: "AfterReset123",
+      password: "ChangedAgain45",
+      confirm_password: "ChangedAgain45",
+    });
+
+    expect(res.status).toBe(200);
+    expect(await bcrypt.compare("ChangedAgain45", await passwordHashOf(ADMIN))).toBe(true);
+  });
+
+  it("lifts the mail throttle once the window lapses", async () => {
+    const anon = await httpClient(null);
+    for (let i = 0; i < 5; i += 1) {
+      await anon.post(FORGOT).send({ email: adminEmail });
+    }
+    const capped = (await resetStateOf(ADMIN)).pwd_reset_token_hash;
+
+    // At the cap, no new link.
+    await anon.post(FORGOT).send({ email: adminEmail });
+    expect((await resetStateOf(ADMIN)).pwd_reset_token_hash).toBe(capped);
+
+    // Age the window out rather than waiting 30 real minutes.
+    await db.none(
+      `UPDATE tbl_users SET pwd_reset_expires_at = NOW() - interval '1 minute' WHERE id = $1`,
+      [ADMIN]
+    );
+
+    await anon.post(FORGOT).send({ email: adminEmail });
+    const afterLapse = await resetStateOf(ADMIN);
+
+    expect(afterLapse.pwd_reset_token_hash).not.toBe(capped);
+    expect(afterLapse.pwd_reset_token_hash).not.toBeNull();
+    // The counter restarts rather than staying pinned at the cap forever.
+    expect(Number(afterLapse.pwd_reset_attempts)).toBe(1);
   });
 });
