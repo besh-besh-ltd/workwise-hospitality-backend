@@ -23,6 +23,7 @@
     "migrations/20260829093000_rename_tender_creator_role.sql",
     "migrations/20260829094000_company_admin_capability.sql",
     "migrations/20260829095000_approval_delegations.sql",
-    "migrations/20260829096000_head_office_flag.sql"
+    "migrations/20260829096000_head_office_flag.sql",
+    "migrations/20260812100000_admin_password_reset.sql"
   ]
 }

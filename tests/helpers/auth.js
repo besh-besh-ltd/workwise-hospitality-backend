@@ -110,3 +110,18 @@ export async function loginAsInternalStaff(userId) {
     headers: { Authorization: `Bearer ${token}`, "User-Agent": TEST_USER_AGENT },
   };
 }
+
+/**
+ * Give a fixture user a user_type the admin console will accept, returning the
+ * previous value so a suite can put it back.
+ *
+ * adminModel scopes every lookup with `user_type NOT IN (2,3,4)`. Fixture users
+ * carry user_type NULL, and `NULL NOT IN (2,3,4)` evaluates to NULL rather than
+ * true — so an un-stamped fixture user is invisible to every admin query, and a
+ * token signed by loginAsInternalStaff above will authenticate against nothing.
+ */
+export async function stampAdmin(userId, userType = 1) {
+  const row = await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [userId]);
+  await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [userId, userType]);
+  return row.user_type;
+}
