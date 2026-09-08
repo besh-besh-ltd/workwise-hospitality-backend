@@ -474,6 +474,125 @@ describe("FIX 3 — server-side negotiation field restriction", () => {
 });
 
 // ===========================================================================
+//  Per-charge GST — an untouched charge must not read as changed
+// ===========================================================================
+//
+// Reported on RFQ #536312 (vendor 834, round 1005). The buyer opened
+// `base_price` only. The vendor lowered the unit price 320 -> 310, touched
+// nothing else, and was refused with:
+//
+//     Not open for negotiation: freight.
+//
+// The server was right and the client was wrong. The quote wizard hydrated
+// every charge's GST from `charge_tax` / `tax_on_charge` — keys this backend
+// has never emitted — so it re-posted `tax: null` over whatever rate was
+// stored, and `negSameCharge` correctly reported a different charge. Fixed on
+// the client, in buildInitialQuoteProducts.
+//
+// These pin the server half of the contract so that fix cannot later be
+// "corrected" by loosening the comparison. The second case is the
+// load-bearing one: if null compared equal to any rate, a real GST change
+// would ride in under a base_price-only round — silently moving a number the
+// buyer awards a PO against.
+
+describe("negotiation allowlist — per-charge GST", () => {
+  /** Freight carrying its own GST — the shape tbl_quote_items actually stores. */
+  const TAXED_FREIGHT = (over = {}) => ({
+    name: "Freight",
+    slug: "freight",
+    amount: 1050,
+    amount_mode: "absolute",
+    tax: 5,
+    tax_mode: "percentage",
+    comment: "as per actual",
+    ...over,
+  });
+
+  it("accepts a base_price revision when an untouched charge keeps its GST", async () => {
+    const { rfq_id, rfq_no } = await makeOpenRfq({ variantIds: [1] });
+    const quoteId = await seedQuote(VENDOR_A, rfq_id, rfq_no, [
+      productPayload({ unit_price: 320, other_charges: [TAXED_FREIGHT()] }),
+    ]);
+    await makeActiveRound(rfq_id, await rfqProductId(rfq_id, 1), VENDOR_A, ["base_price"]);
+
+    const res = await putQuote(
+      VENDOR_A,
+      quoteId,
+      updateBody(rfq_id, rfq_no, [
+        productPayload({ unit_price: 310, other_charges: [TAXED_FREIGHT()] }),
+      ])
+    );
+
+    expect(res.status).toBe(200);
+
+    const after = await db.one(
+      `SELECT unit_price, other_charges FROM tbl_quote_items WHERE quote_id = $1`,
+      [quoteId]
+    );
+    expect(Number(after.unit_price)).toBe(310);
+    const charges = Array.isArray(after.other_charges)
+      ? after.other_charges
+      : JSON.parse(after.other_charges);
+    // The rate the vendor stated survives the revision rather than being nulled.
+    expect(Number(charges.find((c) => c.slug === "freight").tax)).toBe(5);
+  });
+
+  it("still refuses a charge whose GST actually moved", async () => {
+    const { rfq_id, rfq_no } = await makeOpenRfq({ variantIds: [1] });
+    const quoteId = await seedQuote(VENDOR_A, rfq_id, rfq_no, [
+      productPayload({ unit_price: 320, other_charges: [TAXED_FREIGHT()] }),
+    ]);
+    await makeActiveRound(rfq_id, await rfqProductId(rfq_id, 1), VENDOR_A, ["base_price"]);
+
+    // Byte-for-byte what the broken wizard sent: the same charge, rate nulled.
+    const res = await putQuote(
+      VENDOR_A,
+      quoteId,
+      updateBody(rfq_id, rfq_no, [
+        productPayload({
+          unit_price: 310,
+          other_charges: [TAXED_FREIGHT({ tax: null })],
+        }),
+      ])
+    );
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toMatch(/freight/);
+
+    // Refused means refused: the price must not have moved either.
+    const after = await db.one(
+      `SELECT unit_price FROM tbl_quote_items WHERE quote_id = $1`,
+      [quoteId]
+    );
+    expect(Number(after.unit_price)).toBe(320);
+  });
+
+  it("treats an untaxed charge (0) and one inheriting the base rate (null) as different", async () => {
+    const { rfq_id, rfq_no } = await makeOpenRfq({ variantIds: [1] });
+    const quoteId = await seedQuote(VENDOR_A, rfq_id, rfq_no, [
+      productPayload({ unit_price: 320, other_charges: [TAXED_FREIGHT({ tax: 0 })] }),
+    ]);
+    await makeActiveRound(rfq_id, await rfqProductId(rfq_id, 1), VENDOR_A, ["base_price"]);
+
+    // 0 means "no tax on this charge"; null means "inherit the product's rate".
+    // Collapsing one into the other re-applies a tax the vendor waived.
+    const res = await putQuote(
+      VENDOR_A,
+      quoteId,
+      updateBody(rfq_id, rfq_no, [
+        productPayload({
+          unit_price: 310,
+          other_charges: [TAXED_FREIGHT({ tax: null })],
+        }),
+      ])
+    );
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toMatch(/freight/);
+  });
+});
+
+// ===========================================================================
 //  FIX 4 — negotiation-round quote writes must not fail silently
 // ===========================================================================
 
