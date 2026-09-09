@@ -119,6 +119,7 @@ async function makeRfqWithProduct() {
   return { rfq_id, rfq_product_row_id: line.id };
 }
 
+/** Returns the envelope: { rows, facets, tab_counts, total, page, limit }. */
 async function listView(userId, body = {}) {
   const client = await httpClient(userId);
   const res = await client.post("/api/v1/rfq/list-view").send({ tab: "all", limit: 200, ...body });
@@ -127,8 +128,20 @@ async function listView(userId, body = {}) {
   return res.body.data;
 }
 
+const rowFor = (data, rfq_id) =>
+  (data.rows || []).find((r) => Number(r.id) === Number(rfq_id));
+
+/** Category titles on one RFQ's card. */
 const titlesFor = (row) =>
   (row?.categories || []).map((c) => c?.title).filter(Boolean);
+
+/**
+ * The CATEGORY filter panel. `facets.categoryId` is [{ key, label, count }],
+ * built over the whole tab scope rather than the current page, so these
+ * assertions do not depend on where our RFQ lands in the paging.
+ */
+const facetLabels = (data) =>
+  (data.facets?.categoryId || []).map((f) => f?.label).filter(Boolean);
 
 describe("RFQ listing — categories come from the RFQ's products", () => {
   it("reports the product's own category and ignores a same-numbered decoy", async () => {
@@ -151,13 +164,20 @@ describe("RFQ listing — categories come from the RFQ's products", () => {
     expect(rfq_product_row_id).not.toBe(variant.product_id);
     await mapCategory(rfq_product_row_id, decoy);
 
-    const rows = await listView(CREATOR);
-    const mine = rows.find((r) => Number(r.id) === Number(rfq_id));
+    const data = await listView(CREATOR);
+    const mine = rowFor(data, rfq_id);
     expect(mine).toBeTruthy();
 
     const titles = titlesFor(mine);
     expect(titles).toContain(real.title);
     expect(titles).not.toContain(decoy.title);
+
+    // The CATEGORY filter panel is fed by the same value and was the more
+    // damaging half of the defect: filtering by a category returned RFQs that
+    // had nothing to do with it.
+    const facet = facetLabels(data);
+    expect(facet).toContain(real.title);
+    expect(facet).not.toContain(decoy.title);
   });
 
   it("returns no categories when the RFQ's product has none", async () => {
@@ -174,9 +194,10 @@ describe("RFQ listing — categories come from the RFQ's products", () => {
     // one would confidently label this RFQ with the decoy's category.
     await mapCategory(rfq_product_row_id, decoy);
 
-    const rows = await listView(CREATOR);
-    const mine = rows.find((r) => Number(r.id) === Number(rfq_id));
+    const data = await listView(CREATOR);
+    const mine = rowFor(data, rfq_id);
     expect(mine).toBeTruthy();
     expect(titlesFor(mine)).not.toContain(decoy.title);
+    expect(facetLabels(data)).not.toContain(decoy.title);
   });
 });
