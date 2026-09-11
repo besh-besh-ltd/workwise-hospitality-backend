@@ -97,8 +97,13 @@ const hospitalityModel = {
               'name', hh.name,
               'city', hh.city,
               'state', hh.state,
-              'status', hh.status
-            ) ORDER BY hh.name
+              'status', hh.status,
+              -- The flag exists and is enforced by a partial unique index, but
+              -- this hand-written projection never carried it, so no screen
+              -- could mark which unit is the Head Office even after the
+              -- migration that records it.
+              'is_head_office', COALESCE(hh.is_head_office, false)
+            ) ORDER BY hh.is_head_office DESC NULLS LAST, hh.name
           )
           FROM tbl_hospitality_company_hotels hh
           WHERE hh.hospitality_company_id = hc.id

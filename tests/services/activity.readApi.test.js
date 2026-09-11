@@ -190,6 +190,52 @@ describe("activity detail", () => {
     expect(res.status).toBe(404);
   });
 
+  // Everything a request touched came back, whatever table it was in and
+  // however much of it there was. A purchase-order approval writes to
+  // tbl_approval_instances, tbl_approval_instance_steps,
+  // tbl_approval_step_approvers and tbl_rfq as one request, so expanding
+  // "Priya approved purchase order 138800" produced four blocks with nothing
+  // to say which one the sentence was about.
+  it("puts the entity the sentence is about first", async () => {
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const { id } = await seedEvent({ entityType: "PO", entityId: 528 });
+    await db.none(
+      "UPDATE tbl_activity_events SET request_id = $1 WHERE id = $2", [requestId, id]
+    );
+    await db.none(
+      `INSERT INTO tbl_audit_row_changes (table_name, operation, record_id, new_data, changed_by, changed_at, request_id)
+       VALUES ('tbl_approval_step_approvers','UPDATE',9,'{"status":"APPROVED"}','t',now(),$1),
+              ('tbl_rfq_purchase_order','UPDATE',528,'{"status":"approved"}','t',now(),$1)`,
+      [requestId]
+    );
+    const client = await httpClient(ADMIN_A);
+
+    const res = await client.get(`/api/v1/activity/${id}/changes`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.changes[0].table_name).toBe("tbl_rfq_purchase_order");
+  });
+
+  it("does not return an unbounded number of row changes", async () => {
+    // A bulk operation writes hundreds of audit rows under one request id.
+    const requestId = "22222222-2222-4222-8222-222222222222";
+    const { id } = await seedEvent();
+    await db.none(
+      "UPDATE tbl_activity_events SET request_id = $1 WHERE id = $2", [requestId, id]
+    );
+    await db.none(
+      `INSERT INTO tbl_audit_row_changes (table_name, operation, record_id, new_data, changed_by, changed_at, request_id)
+       SELECT 'tbl_rfq_product_vendors','UPDATE', g, '{"variant":1}', 't', now(), $1
+         FROM generate_series(1, 260) g`,
+      [requestId]
+    );
+    const client = await httpClient(ADMIN_A);
+
+    const res = await client.get(`/api/v1/activity/${id}/changes`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.changes.length).toBeLessThanOrEqual(200);
+    expect(res.body.data.truncated).toBe(true);
+  });
+
   it("returns the event with no changes when it has no request to join on", async () => {
     const { id } = await seedEvent({ summary: "Backfilled long ago" });
     const client = await httpClient(ADMIN_A);

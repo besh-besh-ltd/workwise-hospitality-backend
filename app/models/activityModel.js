@@ -17,6 +17,27 @@ import { logger } from '../util/logger.js';
  */
 
 const SEVERITIES = new Set(['routine', 'notable', 'critical']);
+
+/**
+ * The table an event's own entity lives in, so its row change can be sorted to
+ * the top of the expansion. Only the entity types the registry actually emits
+ * need an entry; anything unmapped simply keeps insertion order.
+ */
+const ENTITY_TABLES = {
+  RFQ: 'tbl_rfq',
+  PO: 'tbl_rfq_purchase_order',
+  QUOTE: 'tbl_quotes',
+  USER: 'tbl_users',
+  ROLE: 'tbl_roles',
+  COMPANY: 'tbl_hospitality_companies',
+  BUSINESS_UNIT: 'tbl_hospitality_company_hotels',
+  APPROVAL_POLICY: 'tbl_approval_policies',
+  APPROVAL: 'tbl_approval_instances',
+  DEPARTMENT: 'tbl_department',
+};
+
+/** One expansion is a reading aid, not a data export. */
+const CHANGE_LIMIT = 200;
 const SOURCES = new Set(['HTTP', 'CRON', 'WEBHOOK', 'BACKFILL']);
 
 export async function recordActivityEvent(event, txContext = null) {
@@ -346,15 +367,33 @@ export async function activityChanges(eventId, companyIds) {
   );
   if (!event) return null;
 
+  // Every row change the request produced, but ordered so the one the
+  // sentence is about comes first, and capped.
+  //
+  // Joining on request_id alone is right — that is what ties a business event
+  // to the rows it moved — but a purchase-order approval writes to
+  // tbl_approval_instances, tbl_approval_instance_steps,
+  // tbl_approval_step_approvers and tbl_rfq in one request. Expanding "Priya
+  // approved purchase order 138800" gave four blocks with nothing marking
+  // which was the purchase order. Sorting the event's own entity to the top
+  // answers that without hiding the rest, which a reader auditing a change
+  // still needs.
+  //
+  // The cap is for bulk operations: a vendor-mapping refresh writes hundreds
+  // of rows under one request id, and the expansion would have rendered all of
+  // them. `truncated` tells the UI to say so rather than quietly stopping.
   const changes = event.request_id
     ? await db.any(
         `SELECT table_name, operation, record_id, old_data, new_data, changed_at
            FROM tbl_audit_row_changes
           WHERE request_id = $1
-          ORDER BY id`,
-        [event.request_id]
+          ORDER BY ($2::text IS NOT NULL AND table_name = $2::text) DESC, id
+          LIMIT $3`,
+        [event.request_id, ENTITY_TABLES[event.entity_type] || null, CHANGE_LIMIT + 1]
       )
     : [];
 
-  return { event, changes };
+  const truncated = changes.length > CHANGE_LIMIT;
+
+  return { event, changes: changes.slice(0, CHANGE_LIMIT), truncated };
 }
