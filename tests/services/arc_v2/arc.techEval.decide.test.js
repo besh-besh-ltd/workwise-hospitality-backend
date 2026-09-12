@@ -165,6 +165,48 @@ describe("ARC tech-eval — approver approve/reject/amend", () => {
     expect(instances.length).toBe(2);
   });
 
+  test("amending a mark demands a reason, and writes nothing without one", async () => {
+    // A comment was required on REJECT only. On amend-then-approve it was
+    // optional — and that same comment is what lands in
+    // tbl_arc_tech_eval_edit_history.comment, so an approver could rewrite
+    // every mark and leave the history row saying NULL. The synthesised
+    // "[Edited before approval] response 12 buyer_marks: 5 -> 8" is a machine
+    // diff, not a reason. Client feedback item 5.
+    const before = await db.one(
+      `SELECT buyer_marks, buyer_remark FROM tbl_arc_item_tech_evaluation_vendors_response WHERE id = $1`,
+      [responseId]);
+
+    const res = await approverClient
+      .post(`/api/v1/arc-v2/evaluation/${arcId}/tech-eval/decide`)
+      .send({
+        decision: "approve",
+        amend: { marks: [{ response_id: responseId, buyer_marks: 8 }] },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/reason|comment/i);
+
+    // Nothing happened: a 400 that still moved the marks would be worse than
+    // no validation at all.
+    const after = await db.one(
+      `SELECT buyer_marks, buyer_remark FROM tbl_arc_item_tech_evaluation_vendors_response WHERE id = $1`,
+      [responseId]);
+    expect(Number(after.buyer_marks)).toBe(Number(before.buyer_marks));
+    expect(after.buyer_remark).toBe(before.buyer_remark);
+
+    const { cnt } = await db.one(
+      `SELECT COUNT(*)::int AS cnt FROM tbl_arc_tech_eval_edit_history WHERE arc_id = $1`,
+      [arcId]);
+    expect(cnt).toBe(0);
+
+    // ...and the approval is still open, so the real amend below can proceed.
+    const inst = await db.one(
+      `SELECT status FROM tbl_approval_instances
+        WHERE entity_type = 'ARC_TECH' AND entity_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [arcId]);
+    expect(inst.status).toBe("PENDING");
+  });
+
   test("amend-then-approve: marks edited, history written, qualification recomputed", async () => {
     const decide = await approverClient
       .post(`/api/v1/arc-v2/evaluation/${arcId}/tech-eval/decide`)
@@ -212,6 +254,19 @@ describe("ARC tech-eval — approver approve/reject/amend", () => {
 
     const arcRow = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
     expect(arcRow.status).toBe("tech_eval_approved");
+  });
+
+  test("a decision that amends nothing is never refused for a missing reason", async () => {
+    // The guard must key on "did you edit a mark", not on the decision itself:
+    // a plain approve has nothing to justify and must stay frictionless. Run
+    // here, after the amend test, so the instance is already settled — the
+    // request is refused for being settled, which is exactly the point: it is
+    // NOT refused for the reason this batch added.
+    const res = await approverClient
+      .post(`/api/v1/arc-v2/evaluation/${arcId}/tech-eval/decide`)
+      .send({ decision: "approve" });
+
+    expect(res.body.message || "").not.toMatch(/reason/i);
   });
 
   test("after approval the technical stage is immutable (409 STAGE_IMMUTABLE)", async () => {

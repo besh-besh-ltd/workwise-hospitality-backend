@@ -729,6 +729,20 @@ export async function decideTechEval(req, res) {
     if (decision === 'reject' && !comment) {
       return bad(res, 400, 'A reason (comment) is required when rejecting');
     }
+    // The mirror of the rule above. An approver who edits an evaluator's marks
+    // before approving is overriding someone else's judgement, and this same
+    // `comment` is what lands in tbl_arc_tech_eval_edit_history.comment — so
+    // without it the history row records the change and nothing about why.
+    // The synthesised "[Edited before approval] response 12 buyer_marks: 5 → 8"
+    // is a machine diff, not a reason.
+    //
+    // Keyed on "was a mark actually edited", not on the decision: a plain
+    // approve has nothing to justify and stays frictionless. Note an amend is
+    // only honoured on approve (see the branch below), so this cannot fire on
+    // a reject, which already demanded a comment.
+    if ((amendMarks.length > 0 || universalAmendMarks.length > 0) && !comment) {
+      return bad(res, 400, 'A reason (comment) is required when you amend a mark');
+    }
 
     const instance = await db.oneOrNone(
       `SELECT * FROM tbl_approval_instances
