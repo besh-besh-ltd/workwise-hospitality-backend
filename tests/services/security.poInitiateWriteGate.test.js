@@ -446,3 +446,119 @@ describe("a user with awarding.create on the PO's scope can still initiate", () 
     expect(inst.status).toBe("PENDING");
   });
 });
+
+// ── Two defects found next door to this gate ────────────────────────────────
+//
+// Both surfaced while working client feedback item 10 ("the system should
+// guide the Commercial Approver on how to initiate a draft PO"). Neither is a
+// permission hole; both are the gate disagreeing with what the user is told.
+
+describe("initiating a PO that has already been initiated", () => {
+  it("reports that nothing happened, instead of a second success", async () => {
+    // purchaseOrderModel returns { already_initiated: true } and does nothing,
+    // but the controller answered `status: 1, "Purchase order has been
+    // initiated"` regardless — so a double-click, or a PO that auto-initiate
+    // already claimed, looked like a fresh success. The frontend toasts that
+    // message verbatim.
+    const { po_id } = await makeDraftPo();
+
+    const first = await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+    expect(first.status).toBe(200);
+    expect(first.body?.data?.already_initiated).toBeFalsy();
+
+    const second = await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+
+    expect(second.status).toBe(200);
+    expect(second.body?.data?.already_initiated).toBe(true);
+    expect(second.body?.message).toMatch(/already/i);
+  });
+
+  it("does not create a second approval instance for it", async () => {
+    const { po_id } = await makeDraftPo();
+
+    await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+    await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+
+    const { cnt } = await db.one(
+      `SELECT COUNT(*)::int AS cnt FROM tbl_approval_instances
+        WHERE entity_type = 'PO' AND entity_id = $1`,
+      [po_id]
+    );
+    expect(cnt).toBe(1);
+  });
+});
+
+describe("the Action Required list agrees with the initiate gate", () => {
+  // poDashboardModel decided whether to put initiatable POs in a user's
+  // Action Required bucket with ONE boolean — "does this user hold
+  // awarding.create anywhere in this company" — while assertPoInitiateAccess
+  // evaluates the grant against the PO's OWN hotel and department. So a user
+  // granted at hotel A2 was shown A1's drafts and then 403'd on the click.
+
+  it("does not offer a draft PO to a user whose awarding.create is at another hotel", async () => {
+    const { po_id } = await makeDraftPo({ hotel: IDS.hotels.A1 });
+
+    const res = await wrongHotelClient.get("/api/v1/po/list?status=action-required");
+
+    expect(res.status).toBe(200);
+    expect((res.body.data || []).map((r) => r.id)).not.toContain(po_id);
+  });
+
+  it("and does not count it either — the tab badge must match the tab", async () => {
+    const { po_id } = await makeDraftPo({ hotel: IDS.hotels.A1 });
+
+    const before = await wrongHotelClient.get("/api/v1/po/list?status=action-required");
+    const countedIds = (before.body.data || []).map((r) => r.id);
+    expect(countedIds).not.toContain(po_id);
+    // the badge is computed by a separate query, so assert it independently
+    expect(before.body.status_counts.action_required).toBe(countedIds.length);
+  });
+
+  it("still offers it to the user whose grant IS at the PO's hotel", async () => {
+    // The guard against over-correcting: the fix must not empty the bucket.
+    const { po_id } = await makeDraftPo({ hotel: IDS.hotels.A1 });
+
+    const res = await writerClient.get("/api/v1/po/list?status=action-required");
+
+    expect(res.status).toBe(200);
+    expect((res.body.data || []).map((r) => r.id)).toContain(po_id);
+    expect(res.body.status_counts.action_required).toBeGreaterThanOrEqual(1);
+  });
+
+  it("anyone listed in Action Required as an initiator can actually initiate it", async () => {
+    // The property that ties the two predicates together: whatever the list
+    // offers, the endpoint must accept.
+    const { po_id } = await makeDraftPo({ hotel: IDS.hotels.A1 });
+
+    const res = await writerClient.get("/api/v1/po/list?status=action-required");
+    const offered = (res.body.data || []).find((r) => r.id === po_id);
+    expect(offered).toBeDefined();
+
+    const act = await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+    expect(act.status).toBe(200);
+  });
+
+  it("keeps offering a PO the user is the pending approver on, grant or no grant", async () => {
+    // The approver half of the clause must be untouched by the scope fix.
+    const { po_id } = await makeDraftPo({ hotel: IDS.hotels.A1 });
+    await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+
+    const inst = await db.one(
+      `SELECT approval_instance_id AS id FROM tbl_rfq_purchase_order WHERE id = $1`,
+      [po_id]
+    );
+    const approver = await db.oneOrNone(
+      `SELECT sa.approver_user_id AS uid
+         FROM tbl_approval_step_approvers sa
+         JOIN tbl_approval_instance_steps st ON st.id = sa.approval_instance_step_id
+        WHERE st.approval_instance_id = $1 AND sa.status = 'PENDING'
+        LIMIT 1`,
+      [inst.id]
+    );
+    if (!approver) return; // policy resolved to nobody in this fixture
+
+    const client = await httpClient(approver.uid);
+    const res = await client.get("/api/v1/po/list?status=action-required");
+    expect((res.body.data || []).map((r) => r.id)).toContain(po_id);
+  });
+});

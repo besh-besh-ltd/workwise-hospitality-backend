@@ -301,35 +301,44 @@ async function fetchCurrentApproverInfo(instanceIds) {
   return map;
 }
 
-// Whether the user holds awarding.create within scope — decides if "Initiate
-// PO" items belong in their Action Required bucket. Company is matched when a
-// hospitality scope is present; otherwise any awarding.create grant qualifies.
-// Best-effort + read-only: if the permission catalogue differs this returns
-// false and Action Required simply falls back to approval-only items.
-async function userHasAwardingCreate(scope) {
-  try {
-    const row = await db.oneOrNone(
-      `SELECT EXISTS(
-         SELECT 1
-         FROM tbl_user_role_scopes urs
-         JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-         JOIN tbl_permissions p ON p.id = rp.permission_id
-         WHERE urs.user_id = $1
-           AND p.resource = 'awarding' AND p.action = 'create'
-           AND ($2::int[] IS NULL OR urs.company_id = ANY($2::int[]))
-       ) AS has`,
-      [scope.userId, Array.isArray(scope.hospitalityCompanyIds) ? scope.hospitalityCompanyIds : null]
-    );
-    return !!(row && row.has);
-  } catch (e) {
-    return false;
+// The write grant that authorizes initiating a PO. Mirrors
+// purchaseOrderModel.PO_INITIATE_PERMISSIONS — kept local for the same reason
+// PO_SCOPE_PERMISSIONS above is, so this file carries no import cycle. There is
+// no `awarding.update` row in tbl_permissions today, so the effective grant is
+// `awarding.create`; the pair is listed to match the gate exactly.
+const PO_INITIATE_PERMISSIONS = ["awarding.create", "awarding.update"];
+
+// OR-composition of the canonical EXISTS clause across the initiate
+// permissions, correlated to the PO's OWN scope tuple through the given alias.
+// Same shape as scopedExistsFor, different permission list.
+function initiateExistsFor(userId, alias, values, startIndex) {
+  let i = startIndex;
+  const clauses = [];
+  for (const perm of PO_INITIATE_PERMISSIONS) {
+    const built = buildScopeExistsClause(userId, perm, alias, i);
+    clauses.push(built.clause);
+    values.push(...built.params);
+    i += built.paramsConsumed;
   }
+  return { clause: `(${clauses.join(" OR ")})`, nextIndex: i };
 }
 
 // SQL fragment (references po + tai + $1=userId) matching POs that need THIS
-// user's action: they are the current pending approver, or — when they can
-// create POs — the PO is in an initiatable state (draft / approved-not-sent).
-function actionRequiredClause(hasCreate) {
+// user's action: they are the current pending approver, or the PO is in an
+// initiatable state (draft / approved-not-sent) AND they hold the write grant
+// on THAT PO's own scope.
+//
+// ── THE DEFECT THIS CLOSES ─────────────────────────────────────────────────
+// The initiatable half used to be gated by a single company-wide boolean:
+// "does this user hold awarding.create anywhere in this company". But the gate
+// on the action itself, purchaseOrderModel.assertPoInitiateAccess, evaluates
+// the grant against the PO's OWN company x hotel x department x process tuple.
+// The two disagreed, so a user granted at hotel A2 was shown hotel A1's drafts
+// in Action Required — and got a 403 when they clicked one. The list now uses
+// the same 4-axis predicate the endpoint does, correlated per row.
+//
+// Mutates `values`; returns { clause, nextIndex }.
+function actionRequiredClause(scope, values, startIndex) {
   const approverExists = `(
     po.approval_instance_id IS NOT NULL AND tai.status = 'PENDING' AND EXISTS (
       SELECT 1
@@ -342,8 +351,49 @@ function actionRequiredClause(hasCreate) {
         AND sa.approver_user_id = $1
     )
   )`;
-  const initiatable = hasCreate ? ` OR po.status IN ('draft', 'approved')` : "";
-  return `(${approverExists}${initiatable})`;
+
+  const initiatableStatus = `po.status IN ('draft', 'approved')`;
+
+  // Super admin (hospitalityCompanyIds === null) holds no tbl_user_role_scopes
+  // rows at all, exactly as in buildScopeClause above, so any scope-correlated
+  // predicate would refuse them. assertPoInitiateAccess returns early for them
+  // for the same reason.
+  if (scope.hospitalityCompanyIds === null) {
+    return {
+      clause: `(${approverExists} OR ${initiatableStatus})`,
+      nextIndex: startIndex,
+    };
+  }
+
+  // Legacy callers with no hospitality mappings have no scope row to correlate
+  // against either; buildScopeClause has already narrowed them to their own
+  // company via po.company_id, so the status alone is the honest answer here.
+  if (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length === 0) {
+    return {
+      clause: `(${approverExists} OR ${initiatableStatus})`,
+      nextIndex: startIndex,
+    };
+  }
+
+  let i = startIndex;
+  // RFQ-backed POs correlate through the joined `rfq` alias; call-off POs
+  // through their ARC via a self-contained EXISTS, so this holds regardless of
+  // the caller's join block — same split as buildScopeClause.
+  const rfqGrant = initiateExistsFor(scope.userId, "rfq", values, i);
+  i = rfqGrant.nextIndex;
+  const arcGrant = initiateExistsFor(scope.userId, "aa", values, i);
+  i = arcGrant.nextIndex;
+
+  const initiatable = `(${initiatableStatus} AND (
+    ${rfqGrant.clause}
+    OR (po.is_call_off = TRUE AND EXISTS (
+      SELECT 1 FROM tbl_arc_contract cc
+        JOIN tbl_arc aa ON aa.id = cc.arc_id
+       WHERE cc.id = po.arc_contract_id AND ${arcGrant.clause}
+    ))
+  ))`;
+
+  return { clause: `(${approverExists} OR ${initiatable})`, nextIndex: i };
 }
 
 // Shared SELECT columns + joins used by list / awaiting / tracking. The query
@@ -461,7 +511,7 @@ function mapPoCoreRow(r) {
 // ===========================================================================
 // Builds the WHERE fragment shared by the paged list AND the Excel export, so
 // the two can never disagree about which rows the user is looking at. Returns
-// { whereClause, values, hasCreate } — `values` already holds $1 = userId.
+// { whereClause, values } — `values` already holds $1 = userId.
 async function buildPoListWhere(scope, { status = "all", search = "", vendorId, dateFrom, dateTo } = {}) {
   const conditions = [];
   const values = [];
@@ -474,15 +524,13 @@ async function buildPoListWhere(scope, { status = "all", search = "", vendorId, 
   conditions.push(scoped.clause);
   idx = scoped.nextIndex;
 
-  // awarding.create gate is needed both for the action-required tab and the
-  // action_required count in status_counts.
-  const hasCreate = await userHasAwardingCreate(scope);
-
   // Status filter. "action-required" is the user-specific actionable view
-  // (current approver OR initiatable when they can create POs); the rest map to
-  // raw po_status buckets.
+  // (current approver OR initiatable by THIS user on THIS PO's own scope); the
+  // rest map to raw po_status buckets.
   if (status === "action-required") {
-    conditions.push(actionRequiredClause(hasCreate));
+    const ar = actionRequiredClause(scope, values, idx);
+    conditions.push(ar.clause);
+    idx = ar.nextIndex;
   } else if (status && status !== "all" && STATUS_BUCKETS[status]) {
     conditions.push(`po.status = ANY($${idx++}::po_status[])`);
     values.push(STATUS_BUCKETS[status]);
@@ -509,7 +557,7 @@ async function buildPoListWhere(scope, { status = "all", search = "", vendorId, 
 
   idx = applyPoFacetFilters({ vendorId, dateFrom, dateTo }, conditions, values, idx);
 
-  return { whereClause: `WHERE ${conditions.join(" AND ")}`, values, nextIndex: idx, hasCreate };
+  return { whereClause: `WHERE ${conditions.join(" AND ")}`, values, nextIndex: idx };
 }
 
 export async function getPOList(scope, { status = "all", search = "", page = 1, limit = 20, sort = "newest", vendorId, dateFrom, dateTo } = {}) {
@@ -517,7 +565,7 @@ export async function getPOList(scope, { status = "all", search = "", page = 1, 
   const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
   const offset = (pg - 1) * lim;
 
-  const { whereClause, values, nextIndex: idx, hasCreate } =
+  const { whereClause, values, nextIndex: idx } =
     await buildPoListWhere(scope, { status, search, vendorId, dateFrom, dateTo });
   const orderClause = sort === "oldest" ? "po.created_at ASC" : "po.created_at DESC";
 
@@ -537,7 +585,7 @@ export async function getPOList(scope, { status = "all", search = "", page = 1, 
     values
   );
 
-  const statusCounts = await getStatusCounts(scope, hasCreate);
+  const statusCounts = await getStatusCounts(scope);
   const vendors = await getVendorFacets(scope);
 
   // Attach current pending-step approver info (step label + approver names) so
@@ -601,7 +649,7 @@ export async function getPOListForExport(scope, { status = "all", search = "", s
 }
 
 // Per-bucket counts for the list page tabs (scope only, ignores status/search).
-async function getStatusCounts(scope, hasCreate = false) {
+async function getStatusCounts(scope) {
   const values = [];
   const scoped = buildScopeClause(scope, values, 1);
   const rows = await db.any(
@@ -625,10 +673,11 @@ async function getStatusCounts(scope, hasCreate = false) {
   // scope clause shifted by one param.
   const arValues = [scope.userId];
   const arScoped = buildScopeClause(scope, arValues, 2);
+  const arClause = actionRequiredClause(scope, arValues, arScoped.nextIndex);
   const arRow = await db.one(
     `SELECT COUNT(*)::int AS cnt
      ${poCoreJoins()}
-     WHERE ${arScoped.clause} AND ${actionRequiredClause(hasCreate)}`,
+     WHERE ${arScoped.clause} AND ${arClause.clause}`,
     arValues
   );
 
@@ -1259,19 +1308,39 @@ export async function getPODetailFull(po_id, scope) {
   // what is missing. Call-off POs are sourced from an ARC/MR, not from RFQ
   // finalization, so the question does not apply and coverage is reported as
   // complete.
-  let productCoverage = { rfq_product_count: 0, po_product_count: 0, covers_all_products: true };
+  let productCoverage = {
+    rfq_product_count: 0,
+    po_product_count: 0,
+    covers_all_products: true,
+    mergeable_draft_count: 0,
+  };
   if (!po.is_call_off && po.rfq_id) {
     const cov = await db.one(
       `SELECT
          (SELECT count(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = $2) AS rfq_product_count,
          (SELECT count(DISTINCT pop.rfq_product_id)::int
             FROM tbl_purchase_order_product pop
-           WHERE pop.purchase_order_id = $1) AS po_product_count`,
-      [poId, po.rfq_id]
+           WHERE pop.purchase_order_id = $1) AS po_product_count,
+         -- Sibling drafts this PO could be folded into before it is initiated.
+         -- Same predicate mergeDraftPOs accepts: same RFQ, same vendor, all
+         -- still draft. Production RFQ 808 carries two such drafts covering 1
+         -- and 2 of its 3 products; initiating them separately produces two
+         -- purchase orders where the buyer wanted one, and initiating is the
+         -- point of no return, so the count has to be on screen BEFORE then.
+         (SELECT count(*)::int
+            FROM tbl_rfq_purchase_order sib
+           WHERE sib.rfq_id = $2
+             AND sib.finalized_vendor_id = $3
+             AND sib.status = 'draft'
+             AND sib.id <> $1) AS mergeable_draft_count`,
+      [poId, po.rfq_id, po.finalized_vendor_id]
     );
     productCoverage = {
       rfq_product_count: cov.rfq_product_count,
       po_product_count: cov.po_product_count,
+      // Only meaningful while THIS PO is itself a draft — once it has moved on
+      // it can no longer participate in a merge.
+      mergeable_draft_count: po.status === "draft" ? cov.mergeable_draft_count : 0,
       // Only a PO carrying every product of its RFQ is "complete". Equality is
       // deliberate over >=: a PO can never hold more RFQ products than the RFQ
       // has, and if that ever became true it is a data fault we should not

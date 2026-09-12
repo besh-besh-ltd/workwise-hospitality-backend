@@ -476,10 +476,30 @@ export const initiatePO = async (req, res) => {
       }
     }
 
+    // initiatePurchaseOrder is idempotent: a PO already past `draft` is a
+    // no-op that returns { already_initiated: true }. Reporting that as
+    // "Purchase order has been initiated" made a double-click, or a PO that
+    // auto-initiate had already claimed, look like a fresh success — and the
+    // frontend toasts this message verbatim. Not an error (the PO IS
+    // initiated), just not by this call.
+    if (result?.already_initiated) {
+      return res.json({
+        status: 1,
+        message: result.message || "This purchase order was already initiated.",
+        data: {
+          already_initiated: true,
+          approval_required: result.approval_required ?? null,
+          approval_type: result.approval_type || null,
+          approval_instance_id: result.approval_instance_id || null
+        }
+      })
+    }
+
     return res.json({
       status: 1,
       message: "Purchase order has been initiated",
       data: {
+        already_initiated: false,
         approval_required: result.approval_required,
         approval_type: result.approval_type || 'legacy',
         approval_instance_id: result.approval_instance_id || null
