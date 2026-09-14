@@ -557,7 +557,17 @@ const arcModel = {
               c.clause_text,
               c.weightage,
               c.clause_type,
-              c.is_mandatory
+              c.is_mandatory,
+              -- Buyer-authored reference documents for the clause. Aggregated
+              -- here so resuming the wizard repaints the attachments; without
+              -- them the next Save-draft would re-insert the clause with an
+              -- empty file list and silently drop them (setupTechEval clears
+              -- and re-inserts the whole clause set on every save).
+              COALESCE((
+                SELECT json_agg(json_build_object('id', f.id, 'file_url', f.file_url) ORDER BY f.id)
+                  FROM tbl_arc_item_tech_evaluation_clauses_files f
+                 WHERE f.arc_item_tech_evaluation_clauses_id = c.id
+              ), '[]'::json) AS reference_files
          FROM tbl_arc_item_tech_evaluation te
          JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
          LEFT JOIN tbl_arc_item_tech_evaluation_clauses c
@@ -580,6 +590,7 @@ const arcModel = {
           weightage: r.weightage,
           clause_type: r.clause_type,
           is_mandatory: r.is_mandatory,
+          reference_files: r.reference_files || [],
         });
       }
     }
