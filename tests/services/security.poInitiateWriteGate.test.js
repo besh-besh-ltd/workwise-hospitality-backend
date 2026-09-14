@@ -562,3 +562,177 @@ describe("the Action Required list agrees with the initiate gate", () => {
     expect((res.body.data || []).map((r) => r.id)).toContain(po_id);
   });
 });
+
+// ── Sending a rejected PO back to the person who can amend it ───────────────
+//
+// Client feedback item 7. The reject screen has always PROMISED this —
+// PODetail.js: "will be rejected and returned to the initiator" — and nothing
+// did it. Production carries 46 rejected PO approvals and exactly ONE PO that
+// was ever resubmitted; the rest simply stopped.
+//
+// Two different people are involved and the code conflated them:
+//   tbl_approval_instances.initiated_by  — whoever pressed Initiate
+//   tbl_rfq_purchase_order.initiated_by  — whoever created the draft, and the
+//                                          ONLY person handleUpdatePO lets
+//                                          edit it
+// The generic approval-outcome notice goes to the first. The person who has to
+// act is the second.
+
+const notificationsFor = (userId, type) => db.any(
+  `SELECT type, title, message, action_url, additional_data
+     FROM tbl_notifications
+    WHERE recipient_user_id = $1 AND type = $2
+    ORDER BY id DESC`,
+  [userId, type]
+);
+
+/** Initiate, then reject as whoever the policy put on the current step. */
+async function initiateThenReject(po_id, comment = "Rates do not match the negotiated sheet") {
+  await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+  const inst = await db.one(
+    `SELECT approval_instance_id AS id FROM tbl_rfq_purchase_order WHERE id = $1`, [po_id]);
+  const approver = await db.oneOrNone(
+    `SELECT sa.approver_user_id AS uid
+       FROM tbl_approval_step_approvers sa
+       JOIN tbl_approval_instance_steps st ON st.id = sa.approval_instance_step_id
+      WHERE st.approval_instance_id = $1 AND sa.status = 'PENDING'
+      LIMIT 1`, [inst.id]);
+  if (!approver) return null;
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [approver.uid]);
+  const client = await httpClient(approver.uid);
+  // `remarks` is the key this endpoint reads and the key the browser sends
+  // (PODetail.decide → handlePOApproval({ decision, type, remarks })). The
+  // generic /approval/action endpoint calls the same field `comment`.
+  const res = await client.post(`/api/v1/po/approve/${po_id}`).send({ decision: "rejected", remarks: comment });
+  return { res, approverId: approver.uid };
+}
+
+describe("a rejected PO goes back to whoever can amend it", () => {
+  beforeEach(async () => {
+    await db.none(`DELETE FROM tbl_notifications WHERE type = 'po_sent_back'`);
+  });
+
+  it("notifies the PO's own originator, not only the approval's initiator", async () => {
+    const { po_id } = await makeDraftPo();
+    const out = await initiateThenReject(po_id);
+    if (!out) return; // no approver resolved in this fixture
+
+    expect(out.res.status).toBe(200);
+
+    // CREATOR is tbl_rfq_purchase_order.initiated_by (see makeDraftPo) and is
+    // the only person handleUpdatePO authorises to edit it.
+    const notes = await notificationsFor(CREATOR, "po_sent_back");
+    expect(notes.length).toBe(1);
+  });
+
+  it("tells them to amend and resubmit, and carries the reason", async () => {
+    const { po_id } = await makeDraftPo();
+    const out = await initiateThenReject(po_id, "Freight is double the quote");
+    if (!out) return;
+
+    const [note] = await notificationsFor(CREATOR, "po_sent_back");
+    expect(`${note.title} ${note.message}`).toMatch(/amend/i);
+    expect(note.message).toMatch(/Freight is double the quote/);
+  });
+
+  it("deep-links to the purchase order, with a relative in-app url", async () => {
+    const { po_id } = await makeDraftPo();
+    const out = await initiateThenReject(po_id);
+    if (!out) return;
+
+    const [note] = await notificationsFor(CREATOR, "po_sent_back");
+    expect(note.action_url).toMatch(/purchase-order/);
+    // rule 1 of notificationLinks: an in-app row stays relative so it resolves
+    // on local, staging and production alike.
+    expect(note.action_url.startsWith("http")).toBe(false);
+  });
+
+  it("does not notify the originator when they are the one who rejected it", async () => {
+    // They already know; a "sent back to you" from yourself is noise.
+    const { po_id } = await makeDraftPo();
+    await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+    const inst = await db.one(
+      `SELECT approval_instance_id AS id FROM tbl_rfq_purchase_order WHERE id = $1`, [po_id]);
+    // Put the PO's own originator on the pending step, then have them reject.
+    await db.none(
+      `UPDATE tbl_approval_step_approvers SET approver_user_id = $2
+        WHERE approval_instance_step_id IN (
+          SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = $1)
+          AND status = 'PENDING'`, [inst.id, CREATOR]);
+    const client = await httpClient(CREATOR);
+    await client.post(`/api/v1/po/approve/${po_id}`).send({ decision: "rejected", comment: "mine" });
+
+    expect(await notificationsFor(CREATOR, "po_sent_back")).toHaveLength(0);
+  });
+
+  it("still marks the PO rejected — the send-back is additive", async () => {
+    const { po_id } = await makeDraftPo();
+    const out = await initiateThenReject(po_id);
+    if (!out) return;
+
+    const po = await db.one(`SELECT status FROM tbl_rfq_purchase_order WHERE id = $1`, [po_id]);
+    expect(po.status).toBe("rejected");
+  });
+});
+
+describe("PUT /po/:po_id refuses a purchase order that has moved on", () => {
+  // handleUpdatePO had NO status check at all: it authorised the creator (or a
+  // legacy hierarchy member) and then applied the changes, so an `approved` or
+  // `sent` PO — one a vendor may already be acting on — was editable through
+  // the same door. Found while wiring item 7; it is a defect in its own right.
+
+  const editQty = (client, po_id, rfqProductId) =>
+    client.put(`/api/v1/po/${po_id}`).send({
+      changes: [{ path: `product[${rfqProductId}].quantity`, newValue: 9 }],
+    });
+
+  it("allows an edit while the PO is still a draft", async () => {
+    const { po_id } = await makeDraftPo();
+    const row = await db.one(
+      `SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+
+    const res = await editQty(creatorClient, po_id, row.rfq_product_id);
+    expect(res.status).toBe(200);
+  });
+
+  it("allows an edit after rejection — that is the whole point of sending it back", async () => {
+    const { po_id } = await makeDraftPo();
+    const row = await db.one(
+      `SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+    await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'rejected' WHERE id = $1`, [po_id]);
+
+    const res = await editQty(creatorClient, po_id, row.rfq_product_id);
+    expect(res.status).toBe(200);
+  });
+
+  it("still allows an edit while the PO sits with approvers", async () => {
+    // Not an oversight: production PO 440 was edited in exactly this state and
+    // po.globalChargeRecompute.test.js pins the arithmetic for it. Whether an
+    // approver may be shown one thing and asked to approve another is a
+    // product decision, and a separate one from this batch.
+    const { po_id } = await makeDraftPo();
+    const row = await db.one(
+      `SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+    await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'pending_approval' WHERE id = $1`, [po_id]);
+
+    const res = await editQty(creatorClient, po_id, row.rfq_product_id);
+    expect(res.status).toBe(200);
+  });
+
+  for (const status of ["approved", "acceptance_pending", "sent", "completed"]) {
+    it(`refuses an edit once the PO is ${status}`, async () => {
+      const { po_id } = await makeDraftPo();
+      const row = await db.one(
+        `SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+      await db.none(`UPDATE tbl_rfq_purchase_order SET status = $2 WHERE id = $1`, [po_id, status]);
+
+      const res = await editQty(creatorClient, po_id, row.rfq_product_id);
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.body?.message || "").toMatch(/no longer be edited/i);
+
+      const after = await db.one(
+        `SELECT quantity FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+      expect(Number(after.quantity)).toBe(1);
+    });
+  }
+});

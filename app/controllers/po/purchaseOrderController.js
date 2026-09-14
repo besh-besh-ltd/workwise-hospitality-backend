@@ -22,6 +22,8 @@ import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
+import { dispatch as dispatchNotification } from "../../services/notificationService.js";
+import { buyerPoDetail } from "../../services/notificationLinks.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -664,6 +666,9 @@ export const approvePO = async (req, res) => {
 
             afterCommit: async (result) => {
               await notifyNextApprovalStep(po.approval_instance_id, result);
+              if (result.instance_status === 'REJECTED') {
+                await notifyPoSentBack(po_id, userId, remarks);
+              }
             },
           }
         );
@@ -799,6 +804,58 @@ export const approvePO = async (req, res) => {
       message: error.message || 'An error occurred while approving the PO.',
       error
     });
+  }
+};
+
+/**
+ * Send a rejected purchase order back to the person who can actually amend it.
+ *
+ * The reject dialog has always promised this — "will be rejected and returned
+ * to the initiator" — and nothing did it. Production carries 46 rejected PO
+ * approvals and exactly ONE PO that was ever resubmitted.
+ *
+ * Addressed to `tbl_rfq_purchase_order.initiated_by`, NOT to the approval
+ * instance's `initiated_by`. Those are two different people: the second is
+ * whoever pressed Initiate, the first is whoever created the draft — and
+ * handleUpdatePO authorises only the first to edit it. The generic
+ * approval-outcome notice (approvalActionService.notifyApprovalOutcome) still
+ * tells the approval's initiator separately; this one tells the person with
+ * work to do.
+ *
+ * Post-commit and never throws: a notification must not make a committed
+ * rejection look like it failed.
+ */
+export const notifyPoSentBack = async (po_id, rejectedBy, comment) => {
+  try {
+    const po = await db.oneOrNone(
+      `SELECT po.id, po.po_number, po.initiated_by, po.rfq_id, r.rfq_no
+         FROM tbl_rfq_purchase_order po
+         LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+        WHERE po.id = $1`,
+      [po_id]
+    );
+    if (!po || !po.initiated_by) return;
+    // They just rejected it themselves — a "sent back to you" from yourself is
+    // noise, and mirrors the same guard in notifyApprovalOutcome.
+    if (Number(po.initiated_by) === Number(rejectedBy)) return;
+
+    const label = `PO #${po.po_number || po.id}`;
+    await dispatchNotification({
+      userIds: [Number(po.initiated_by)],
+      senderUserId: rejectedBy || null,
+      category: 'po',
+      type: 'po_sent_back',
+      title: `Sent back to you: ${label}`,
+      body: comment
+        ? `${label} was rejected and returned to you to amend and resubmit — "${comment}"`
+        : `${label} was rejected and returned to you to amend and resubmit.`,
+      data: { po_id: po.id, rfq_id: po.rfq_id, rfq_no: po.rfq_no || null },
+      // Relative on purpose (rule 1 of notificationLinks): the stored row
+      // resolves against whichever origin the reader is on.
+      actionUrl: buyerPoDetail(po.id),
+    });
+  } catch (err) {
+    logError('PO sent-back notification failed', err);
   }
 };
 
@@ -1100,6 +1157,8 @@ export const handlePORejectionByInstance = async (approval_instance_id, approver
 
       await handlePORejection(purchaseOrder, approver_user_id, t);
     });
+    // Post-commit: the tx above owns the state change, this only tells someone.
+    await notifyPoSentBack(po_id, approver_user_id, ctx.comment);
   } catch (error) {
     logError('Error handling PO rejection by instance', error);
   }

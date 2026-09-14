@@ -1357,6 +1357,11 @@ export async function getPODetailFull(po_id, scope) {
     status_label: humanizeStatus(po.status),
     total_value: po.total_value != null ? Number(po.total_value) : 0,
     is_call_off: !!po.is_call_off,
+    // Who created the draft. NOT the same person as whoever pressed Initiate
+    // (that is the approval instance's own initiated_by), and the only person
+    // handleUpdatePO authorises to edit it — so this is who a rejected PO has
+    // to go back to, and who the page can tell "this is yours to amend".
+    initiated_by: po.initiated_by != null ? Number(po.initiated_by) : null,
     // The PO's OWN scope keys, sourced from its parent RFQ or (call-off) its
     // ARC — the same COALESCE the scope predicate above evaluates. A client
     // deciding whether to offer a write action on THIS purchase order has to
