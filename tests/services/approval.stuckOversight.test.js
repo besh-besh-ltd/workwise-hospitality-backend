@@ -19,7 +19,18 @@ import { IDS } from "../fixtures/ids.js";
 
 const ADMIN = IDS.users.companyA_admin;
 const APPROVER = IDS.users.a1_proc_poApp;
+// Reassignment now applies the approval engine's own rule, so the successor
+// has to be somebody who could genuinely approve an RFQ: read AND approve on
+// `rfq`. Tender Approver (role 4) is the role that carries both.
+// a1_proc_commApp keeps working as the successor — the fixture grants it
+// TENDER_APPROVER as well as Commercial Approver, precisely so USER-source
+// policy steps naming it survive the same gate (see tests/fixtures/users.js).
+//
+// For the negative case we need somebody who holds a role scope in this
+// company but no rfq read+approve: the technical evaluator, whose roles grant
+// te.* and nothing on rfq.
 const SUCCESSOR = IDS.users.a1_proc_commApp;
+const CAN_NOT_APPROVE_RFQ = IDS.users.a1_proc_techEval;
 const STUCK_URL = "/api/v1/general/hospitality/approval/stuck";
 
 let restoreAdminType;
@@ -284,6 +295,59 @@ describe("handing a stuck approval to somebody else", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("NOT_ELIGIBLE");
+  });
+
+  it("refuses somebody who is in the company but cannot approve this entity", async () => {
+    // The gap this closes: the old test was "holds any role scope in this
+    // company", so a Commercial Approver — who has neither rfq.read nor
+    // rfq.approve — could be handed an RFQ approval and would then be the
+    // authorization, because nothing re-checks at decision time.
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+
+    const res = await client
+      .post(`${STUCK_URL}/${instanceId}/reassign`)
+      .send({
+        from_user_id: APPROVER,
+        to_user_id: CAN_NOT_APPROVE_RFQ,
+        reason: "Handing it to somebody whose role cannot approve an RFQ",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("NOT_ELIGIBLE");
+  });
+
+  it("tells the admin who can be chosen and who cannot, rather than hiding them", async () => {
+    // An admin hunting for a name they expect to see needs to be told why it
+    // is unavailable. A list that silently omits people just produces the next
+    // ticket, so ineligible colleagues are returned and marked.
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+
+    const res = await client.get(`${STUCK_URL}/${instanceId}/candidates`);
+    expect(res.status).toBe(200);
+
+    const byId = new Map(res.body.data.map((c) => [Number(c.id), c]));
+
+    expect(byId.get(SUCCESSOR)?.eligible).toBe(true);
+    expect(byId.get(CAN_NOT_APPROVE_RFQ)).toBeDefined();
+    expect(byId.get(CAN_NOT_APPROVE_RFQ).eligible).toBe(false);
+
+    // Selectable names first, so the useful half of the list is at the top.
+    const firstIneligible = res.body.data.findIndex((c) => !c.eligible);
+    const lastEligible = res.body.data.map((c) => !!c.eligible).lastIndexOf(true);
+    if (firstIneligible !== -1 && lastEligible !== -1) {
+      expect(lastEligible).toBeLessThan(firstIneligible);
+    }
+  });
+
+  it("never offers anybody from another company", async () => {
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+
+    const res = await client.get(`${STUCK_URL}/${instanceId}/candidates`);
+    const ids = res.body.data.map((c) => Number(c.id));
+    expect(ids).not.toContain(IDS.users.companyB_admin);
   });
 
   it("refuses once the step has been decided", async () => {

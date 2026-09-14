@@ -213,6 +213,68 @@ describe("archiving instead", () => {
   });
 });
 
+describe("finding an archived unit again", () => {
+  // Archiving used to be a one-way door. Every list query hard-coded
+  // `is_deleted = 0`, no endpoint took a flag to include them, and the
+  // frontend's restoreHotel had zero call sites — so a unit an admin archived
+  // left the product entirely and could only be recovered by hand in SQL.
+  // "Hidden everywhere" was accurate; "recoverable" was not.
+  it("is hidden from the normal list, as archiving should be", async () => {
+    const hotelId = await makeHotel();
+    const client = await httpClient(ADMIN);
+    await client.delete(`${base}/hotels/${hotelId}?archive=true`);
+
+    const res = await client.get(`${base}/hotels`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((h) => Number(h.id))).not.toContain(hotelId);
+  });
+
+  it("can be listed back on request, marked as archived", async () => {
+    const hotelId = await makeHotel();
+    const client = await httpClient(ADMIN);
+    await client.delete(`${base}/hotels/${hotelId}?archive=true`);
+
+    const res = await client.get(`${base}/hotels?include_archived=true`);
+    expect(res.status).toBe(200);
+
+    const found = res.body.data.find((h) => Number(h.id) === hotelId);
+    expect(found).toBeDefined();
+    expect(Number(found.is_deleted)).toBe(1);
+  });
+
+  it("still lists the live units alongside them", async () => {
+    const hotelId = await makeHotel();
+    const client = await httpClient(ADMIN);
+    await client.delete(`${base}/hotels/${hotelId}?archive=true`);
+
+    const res = await client.get(`${base}/hotels?include_archived=true`);
+    const live = res.body.data.filter((h) => Number(h.is_deleted) === 0);
+    expect(live.length).toBeGreaterThan(0);
+  });
+
+  it("does not expose another company's archived units", async () => {
+    const hotelId = await makeHotel();
+    const client = await httpClient(ADMIN);
+    await client.delete(`${base}/hotels/${hotelId}?archive=true`);
+
+    // Company B's admin is a real administrator here, so this proves the
+    // tenancy scoping rather than passing on a 403 from the route gate.
+    const { user_type: wasType } = await db.one(
+      "SELECT user_type FROM tbl_users WHERE id = $1", [IDS.users.companyB_admin]
+    );
+    await db.none("UPDATE tbl_users SET user_type = 7 WHERE id = $1", [IDS.users.companyB_admin]);
+    try {
+      const other = await httpClient(IDS.users.companyB_admin);
+      const res = await other.get(`${base}/hotels?include_archived=true`);
+      expect(res.status).toBe(404);
+    } finally {
+      await db.none(
+        "UPDATE tbl_users SET user_type = $2 WHERE id = $1", [IDS.users.companyB_admin, wasType]
+      );
+    }
+  });
+});
+
 describe("who may do it", () => {
   it("is not something an ordinary buyer can do", async () => {
     const hotelId = await makeHotel();

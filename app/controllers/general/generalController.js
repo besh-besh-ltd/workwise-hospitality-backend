@@ -1647,9 +1647,14 @@ const hospitalityApprovalController = {
         return res.status(404).json({ status: 2, message: 'Approval not found' });
       }
 
+      // Pass the instance's own scope so each candidate is judged by the rule
+      // the approval engine itself uses, not merely "is in this company".
       const data = await listReassignmentCandidates(instance.hospitality_company_id, {
         hotelId: instance.hotel_id || null,
         search: req.query.search || null,
+        entityType: instance.entity_type,
+        departmentId: instance.department_id || null,
+        processId: instance.process_id || null,
       });
       return res.json({ status: 1, data });
     } catch (e) {
@@ -1713,13 +1718,20 @@ const hospitalityApprovalController = {
         });
       }
 
-      // The incoming approver must be somebody the company could have put
-      // there in the first place — same tenant, active account. Otherwise
-      // reassignment becomes a way to grant authority the role model refuses.
+      // The incoming approver must be somebody the approval engine would have
+      // installed here itself — read AND approve on this entity's resource,
+      // compatible on company, hotel, department and process. The weaker test
+      // this used to run ("holds any role scope in the company") let an admin
+      // hand spend authority to someone the engine refuses, and nothing
+      // re-checks afterwards because the approver snapshot IS the
+      // authorization.
       const candidates = await listReassignmentCandidates(instance.hospitality_company_id, {
         hotelId: instance.hotel_id || null,
+        entityType: instance.entity_type,
+        departmentId: instance.department_id || null,
+        processId: instance.process_id || null,
       });
-      if (!candidates.some((c) => Number(c.id) === toUserId)) {
+      if (!candidates.some((c) => Number(c.id) === toUserId && c.eligible)) {
         return res.status(400).json({
           status: 3,
           code: 'NOT_ELIGIBLE',

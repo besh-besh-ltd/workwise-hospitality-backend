@@ -191,13 +191,25 @@ const hospitalityModel = {
     );
   },
 
-  getHotelsByCompany: async (companyId) => {
+  /**
+   * A company's business units.
+   *
+   * Archived units are hidden by default — that is what archiving is for.
+   * `includeArchived` is the way back: without it an archived unit left the
+   * product altogether, because every reader hard-coded `is_deleted = 0` and
+   * no endpoint took a flag. Restoring one meant knowing its id and calling
+   * the restore endpoint by hand.
+   *
+   * Live units sort first so the ordinary list is unchanged when the flag is
+   * on and an archived section can simply take the tail.
+   */
+  getHotelsByCompany: async (companyId, { includeArchived = false } = {}) => {
     return db.any(
       `SELECT * FROM tbl_hospitality_company_hotels
        WHERE hospitality_company_id = $1
-         AND is_deleted = 0
-       ORDER BY created_at DESC`,
-      [companyId]
+         AND ($2 = true OR is_deleted = 0)
+       ORDER BY is_deleted ASC, created_at DESC`,
+      [companyId, includeArchived]
     );
   },
 
