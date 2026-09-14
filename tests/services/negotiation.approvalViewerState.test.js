@@ -330,6 +330,14 @@ describe("Negotiation approval — where the VIEWER stands", () => {
       // someone makes on purpose rather than a tidy-up.
       const d = await detailAs(clientA);
       expect(d.actions.can_approve_vendor).toBe(true);
+      // The per-line gates are NOT in that exemption: they ride the SAME
+      // request as the round approval (POST /rounds/:id/approve, body.lines),
+      // so they must track can_approve exactly — including here, where this
+      // approver has already acted and the API would refuse them.
+      // Client feedback item 8.
+      expect(d.actions.can_approve_line).toBe(d.actions.can_approve);
+      expect(d.actions.can_reject_line).toBe(d.actions.can_reject);
+      expect(d.actions.can_approve_line).toBe(false);
       expect(d.actions.can_reject_vendor).toBe(true);
     });
   });
