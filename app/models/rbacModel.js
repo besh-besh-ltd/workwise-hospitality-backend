@@ -404,13 +404,31 @@ const rbacModel = {
 
   /* -------------------- ROLES -------------------- */
 
+  /**
+   * The roles this user may see.
+   *
+   * A custom role belongs to the company, not to whoever happened to click
+   * Create. Filtering on `created_by = <caller>` meant Admin B could not see a
+   * role Admin A had made — the Access page's "Your roles" read 0 for everyone
+   * but the author, while the same role still appeared in the assignment
+   * dropdowns. That inconsistency is what made the roles screen look broken.
+   *
+   * Three ways in, deliberately a superset of the old rule so nobody loses
+   * sight of a role they can see today: system roles, your own, and anything
+   * created by somebody in your company. The last clause requires a company on
+   * BOTH sides — legacy creators carry a NULL company_id, and a plain join
+   * would have made their roles invisible to everyone including themselves.
+   */
   getRoles: (user) => {
     return db.any(`
-      SELECT *
-      FROM tbl_roles
-      WHERE created_by IS NULL OR created_by = $1
-      ORDER BY title
-    `, [user.id]);
+      SELECT r.*
+      FROM tbl_roles r
+      LEFT JOIN tbl_users creator ON creator.id = r.created_by
+      WHERE r.created_by IS NULL
+         OR r.created_by = $1
+         OR ($2::int IS NOT NULL AND creator.company_id = $2)
+      ORDER BY r.title
+    `, [user.id, user.company_id ?? null]);
   },
 
   getPermissionsByRoleId: (roleId) => {

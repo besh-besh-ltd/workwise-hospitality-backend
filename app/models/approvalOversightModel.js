@@ -1,4 +1,5 @@
 import db from '../config/dbConn.js';
+import { ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 
 /**
  * What is stuck, and what an administrator can actually do about it.
@@ -210,7 +211,7 @@ export async function listStuckApprovals(
 export async function getStuckInstance(instanceId) {
   return db.oneOrNone(
     `SELECT ai.id, ai.status, ai.entity_type, ai.entity_id,
-            ai.hospitality_company_id, ai.hotel_id, ai.department_id,
+            ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id,
             s.id AS step_id, s.step_order, s.status AS step_status
        FROM tbl_approval_instances ai
        ${CURRENT_STEP_JOIN}
@@ -306,16 +307,60 @@ export async function reassignApprover({ stepId, fromUserId, toUserId, reason })
 }
 
 /**
- * Who may be handed a step.
+ * Who may be handed a step, and who may not.
  *
  * Restricted to people who already hold a role scope in the same company, so
  * reassignment cannot reach outside the tenant or hand authority to somebody
  * with no standing in the business at all. Deactivated accounts are excluded:
  * moving a step to one would produce exactly the blockage being cleared.
+ *
+ * That test alone was too weak. "Holds any role scope in this company" let a
+ * storekeeper with `rfq.read` — or somebody whose role grants nothing at all —
+ * appear in the list for a purchase-order approval, and the write path checked
+ * against this same list, so the reassignment went through. Because the
+ * approver snapshot IS the authorization (generalModel: nothing re-checks at
+ * decision time), that handed real spend authority to a person the approval
+ * engine would have refused to install in the first place.
+ *
+ * `eligible` now applies the engine's own rule — the USER branch of
+ * policyStepApproverEligibility: read AND approve on the entity's resource,
+ * compatible on company, hotel, department and process.
+ *
+ * Ineligible people are RETURNED, not dropped. An admin looking for a name
+ * they expect to see needs to be told why it cannot be chosen; a list that
+ * silently omits them just produces the next ticket. The caller decides
+ * whether to disable or hide, and the write path refuses anything not
+ * `eligible`.
  */
-export async function listReassignmentCandidates(companyId, { hotelId = null, search = null } = {}) {
+export async function listReassignmentCandidates(
+  companyId,
+  { hotelId = null, search = null, entityType = null, departmentId = null, processId = null } = {}
+) {
+  // No entity type means no resource to test against, so eligibility is
+  // unknowable rather than false — report everyone as eligible and let the
+  // caller's own guard decide. Callers that can supply it always should.
+  const resource = entityType
+    ? ENTITY_APPROVE_RESOURCE_MAP[entityType] || String(entityType).toLowerCase()
+    : null;
+
   return db.any(
-    `SELECT DISTINCT u.id, u.name, u.email
+    `SELECT DISTINCT u.id, u.name, u.email,
+            CASE WHEN $/resource/::text IS NULL THEN true ELSE EXISTS (
+              SELECT 1
+                FROM tbl_user_role_scopes s
+                JOIN tbl_role_permissions rp ON rp.role_id = s.role_id
+                JOIN tbl_permissions p ON p.id = rp.permission_id
+               WHERE s.user_id = u.id
+                 AND p.resource::text = $/resource/
+                 AND p.action IN ('read', 'approve')
+                 AND s.company_id = $/companyId/
+                 AND (s.hotel_id IS NULL OR s.hotel_id = $/hotelId/)
+                 AND ($/departmentId/::int IS NULL OR s.department_id IS NULL
+                      OR s.department_id = $/departmentId/)
+                 AND (s.process_id IS NULL OR s.process_id = $/processId/)
+               GROUP BY s.user_id
+              HAVING COUNT(DISTINCT p.action) = 2
+            ) END AS eligible
        FROM tbl_users u
        JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
       WHERE urs.company_id = $/companyId/
@@ -324,8 +369,8 @@ export async function listReassignmentCandidates(companyId, { hotelId = null, se
         AND COALESCE(u.is_deleted, 0) = 0
         AND ($/search/::text IS NULL OR u.name ILIKE '%' || $/search/ || '%'
                                      OR u.email ILIKE '%' || $/search/ || '%')
-      ORDER BY u.name
+      ORDER BY eligible DESC, u.name
       LIMIT 100`,
-    { companyId, hotelId, search }
+    { companyId, hotelId, search, resource, departmentId, processId }
   );
 }

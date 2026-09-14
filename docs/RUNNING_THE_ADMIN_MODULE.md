@@ -5,9 +5,13 @@ argue for repeating it before every release of this module.
 
 ## The environment
 
-The worktree's `.env` points at staging RDS, where these migrations are **not
-applied** — and access there is read-only. A real end-to-end run therefore needs
-a local database built from the repo:
+The worktree's `.env` points at staging RDS. **The seven company-admin
+migrations are now applied to both staging and production** (production on
+2026-09-04), so the paragraph that used to warn they were missing no longer
+applies. Staging access is read-only by default; ask before writing to it.
+
+A local database is still the right thing for a real end-to-end run — it is
+disposable, and it carries the fixture users these tests assume:
 
 ```bash
 cd .worktrees/admin-be
@@ -16,8 +20,11 @@ TEST_RUN_ID=e2elive npm run test:setup   # schema.sql + seed + every pending mig
 # (HOST=localhost, empty password, TEST_DB_NO_SSL=1) and start the server.
 ```
 
-Frontend: `npx next dev -p 3111` **without** `--turbopack`. Turbopack refuses
+Frontend: `npx next dev -p 3111` **without** `--turbopack` — Turbopack refuses
 the worktree's symlinked `node_modules` ("Symlink node_modules is invalid").
+Running `npm ci` in the worktree replaces that symlink with a real directory,
+after which `--turbopack` works; note that it also makes git see the tracked
+symlink as deleted, so keep it out of your commit.
 
 Auth for probing: mint a JWT the way `tests/helpers/auth.js` does — `sub` is the
 cryptr-encrypted id, `ag` the cryptr-encrypted user agent, which must equal
