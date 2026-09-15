@@ -279,6 +279,12 @@ const arcModel = {
                 COALESCE(co_agg.call_off_count, 0)::int AS call_off_count,
                 COALESCE(amend_agg.requested_amendments, 0)::int AS requested_amendments,
                 COALESCE(amend_agg.active_amendments, 0)::int AS active_amendments,
+                -- A Manual ARC is an ordinary tbl_arc row plus a companion
+                -- tbl_arc_manual_entry row; without this marker the listing
+                -- cannot tell the two kinds of draft apart and routes BOTH to
+                -- the create wizard, which is the wrong page for a manual one.
+                COALESCE(me.is_manual, FALSE) AS is_manual,
+                me.target_stage AS manual_target_stage,
                 -- DECISION-3: derived chip — true when a non-terminal ARC round is live
                 EXISTS(
                   SELECT 1 FROM tbl_negotiation_rounds nr
@@ -291,6 +297,7 @@ const arcModel = {
            LEFT JOIN tbl_category cat ON cat.id = a.category_id
            LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
            LEFT JOIN tbl_department d ON d.id = a.department_id
+           LEFT JOIN tbl_arc_manual_entry me ON me.arc_id = a.id
            LEFT JOIN LATERAL (
              SELECT COUNT(*) AS item_count,
                     json_agg(pv.name ORDER BY ai.id) FILTER (WHERE pv.name IS NOT NULL) AS item_names,

@@ -2,6 +2,7 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
+import arcManualEntryModel from '../../models/arc_v2/arcManualEntryModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
@@ -160,6 +161,24 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   return { floated: true, arc: res.updated, invitations: res.invitations, _notifyArc: arc, _actorId: actorId };
 }
 
+/**
+ * A Manual ARC (back-office backfill) lives in tbl_arc exactly like a wizard
+ * ARC, so every create-wizard write endpoint would happily mutate one. That is
+ * destructive, not merely untidy: updateDraft reconciles the item set and the
+ * invitation list against whatever the wizard sends, so a resumed manual draft
+ * whose items never hydrated arrives as `items: []` and DELETES the manually
+ * entered rate schedule; publish would float a historical backfill to real
+ * vendors. The manual workspace owns these records — refuse here and send the
+ * caller there.
+ */
+async function rejectIfManualEntry(res, arcId, verb) {
+  const manual = await arcManualEntryModel.getByArc(arcId);
+  if (!manual) return false;
+  bad(res, 409,
+    `This is a manually-entered rate contract — ${verb} it in the Manual ARC workspace`, 0);
+  return true;
+}
+
 export async function createDraft(req, res) {
   try {
     const userId = req.user?.id;
@@ -265,6 +284,7 @@ export async function updateDraft(req, res) {
     if (!(await userCanAccessHotel(req, existing))) {
       return bad(res, 403, 'You do not have access to this rate contract');
     }
+    if (await rejectIfManualEntry(res, id, 'edit')) return;
 
     // GROUP D (Sr 17/20 fix): updateDraft previously only whitelisted scalar
     // columns (see arcModel.updateDraft), so re-saving a RESUMED draft silently
@@ -354,6 +374,7 @@ export async function publish(req, res) {
     if (!['draft','publish_rejected'].includes(arc.status)) {
       return bad(res, 409, `Cannot publish ARC in status ${arc.status}`);
     }
+    if (await rejectIfManualEntry(res, id, 'finalise')) return;
     // Server-side completeness + window validation (audit M1). The wizard
     // surfaces these earlier — this is the fail-safe.
     const missing = [];
@@ -1102,11 +1123,18 @@ export async function getById(req, res) {
     if (!(await userCanAccessHotel(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
-    const [items, invitations, techEvalByItem] = await Promise.all([
+    const [items, invitations, techEvalByItem, manual] = await Promise.all([
       arcModel.listItems(id),
       arcModel.listInvitations(id),
       arcModel.listTechEvalForArc(id),
+      arcManualEntryModel.getByArc(id),
     ]);
+    // A Manual ARC draft is an ordinary tbl_arc row + a companion
+    // tbl_arc_manual_entry row. The create wizard resumes from THIS payload, so
+    // it needs the marker to bounce a manual draft to the manual workspace
+    // instead of hydrating it into the wrong six steps.
+    arc.is_manual = !!manual?.is_manual;
+    arc.manual_target_stage = manual?.target_stage ?? null;
     // Attach the per-item tech-eval CONFIG (min-pass + clauses) so the create
     // wizard's Tech step rehydrates from this single round-trip on draft resume.
     // Additive: items[].tech_eval is null when no config exists for that item.
@@ -1166,6 +1194,12 @@ export async function getLifecycle(req, res) {
         }
       }
     }
+
+    // Same marker getById carries: the ARC record page redirects a draft into a
+    // wizard, and it must pick the manual workspace for a manual draft.
+    const manual = await arcManualEntryModel.getByArc(id);
+    lifecycle.arc.is_manual = !!manual?.is_manual;
+    lifecycle.arc.manual_target_stage = manual?.target_stage ?? null;
 
     return ok(res, { ...lifecycle, permissions });
   } catch (err) {
