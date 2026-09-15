@@ -646,8 +646,12 @@ const HospitalityController = {
         });
       }
 
+      // Opt-in, so every existing caller keeps the hidden-by-default behaviour
+      // archiving depends on.
+      const includeArchived = String(req.query.include_archived) === 'true';
       const hotels = await hospitalityModel.getHotelsByCompany(
-        hospitalityCompanyId
+        hospitalityCompanyId,
+        { includeArchived }
       );
 
       return res.status(200).json({
