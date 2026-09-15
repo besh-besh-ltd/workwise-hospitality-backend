@@ -1195,6 +1195,12 @@ export async function getLifecycle(req, res) {
       }
     }
 
+    // Same marker getById carries: the ARC record page redirects a draft into a
+    // wizard, and it must pick the manual workspace for a manual draft.
+    const manual = await arcManualEntryModel.getByArc(id);
+    lifecycle.arc.is_manual = !!manual?.is_manual;
+    lifecycle.arc.manual_target_stage = manual?.target_stage ?? null;
+
     return ok(res, { ...lifecycle, permissions });
   } catch (err) {
     logger.error({ err }, '[arcController.getLifecycle]');

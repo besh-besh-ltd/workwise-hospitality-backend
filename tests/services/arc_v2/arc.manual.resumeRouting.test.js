@@ -27,6 +27,8 @@
 //   R4  PATCH /arc-v2/:id on a manual ARC → 409, items + invitations intact.
 //   R5  POST /arc-v2/:id/publish on a manual ARC → 409, still a draft.
 //   R6  the ordinary create-wizard draft is still fully PATCHable (no collateral).
+//   R7  the lifecycle payload carries the marker too — the ARC record page
+//       redirects a draft into a wizard and must pick the right one.
 
 import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
@@ -178,6 +180,20 @@ describe("ARC v2 manual — draft is identifiable and create-wizard-proof", () =
     expect(String(res.body.message)).toMatch(/manual/i);
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [id]);
     expect(arc.status).toBe("draft");
+  });
+
+  test("R7 — the lifecycle payload flags a manual draft", async () => {
+    const manualId = await newManualDraft("draft");
+    const wizardId = await newWizardDraft();
+
+    const manualRes = await client.get(`${BASE}/${manualId}/lifecycle`);
+    expect(manualRes.status).toBe(200);
+    expect(manualRes.body.data.arc.is_manual).toBe(true);
+    expect(manualRes.body.data.arc.manual_target_stage).toBe("draft");
+
+    const wizardRes = await client.get(`${BASE}/${wizardId}/lifecycle`);
+    expect(wizardRes.status).toBe(200);
+    expect(wizardRes.body.data.arc.is_manual).toBeFalsy();
   });
 
   test("R6 — an ordinary draft is still fully editable through the wizard", async () => {
