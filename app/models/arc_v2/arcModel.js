@@ -235,6 +235,8 @@ const arcModel = {
       hotel: 'a.hotel_id',
       department: 'a.department_id',
       process: 'a.process_id',
+      arcId: 'a.id',
+      isGroup: 'a.is_group',
     }, p);
     if (scope.paramsConsumed > 0) {
       conditions.push(scope.clause);
@@ -242,7 +244,11 @@ const arcModel = {
       p += scope.paramsConsumed;
     }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
+      // A group rate contract matches the facet through any hotel it covers.
+      conditions.push(`(a.hotel_id = ANY($${p}::int[]) OR (a.is_group AND EXISTS (
+        SELECT 1 FROM tbl_arc_hotel_mappings ahm
+         WHERE ahm.arc_id = a.id AND ahm.hotel_id = ANY($${p}::int[]))))`);
+      p++;
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {
@@ -437,6 +443,8 @@ const arcModel = {
       hotel: 'a.hotel_id',
       department: 'a.department_id',
       process: 'a.process_id',
+      arcId: 'a.id',
+      isGroup: 'a.is_group',
     }, p);
     if (scope.paramsConsumed > 0) {
       conditions.push(scope.clause);
@@ -444,7 +452,11 @@ const arcModel = {
       p += scope.paramsConsumed;
     }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
+      // A group rate contract matches the facet through any hotel it covers.
+      conditions.push(`(a.hotel_id = ANY($${p}::int[]) OR (a.is_group AND EXISTS (
+        SELECT 1 FROM tbl_arc_hotel_mappings ahm
+         WHERE ahm.arc_id = a.id AND ahm.hotel_id = ANY($${p}::int[]))))`);
+      p++;
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {

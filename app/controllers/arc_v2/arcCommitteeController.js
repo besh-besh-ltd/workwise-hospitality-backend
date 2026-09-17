@@ -8,7 +8,7 @@ import { logger } from '../../util/logger.js';
 import { generateContractsForArc, generateContractPdfsForArc } from './arcContractController.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Committee approval controller.
@@ -40,8 +40,9 @@ export async function getCommitteeView(req, res) {
     // Tenant isolation: the committee view exposes winning-vendor identities,
     // allocated quantities, and full negotiated price/term snapshots — must not
     // be cross-tenant readable via id enumeration. Derive access from the ARC's
-    // own hotel_id (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // own hotel_id (super-admin bypass), never trust the id alone. Staff at
+    // any hotel a group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const comm = await arcEvalModel.getCommEval(arcId);

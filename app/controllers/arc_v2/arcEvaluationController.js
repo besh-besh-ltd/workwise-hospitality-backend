@@ -13,7 +13,7 @@ import {
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import axios from 'axios';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 /**
@@ -676,7 +676,7 @@ export async function getTechEvalApproval(req, res) {
     // history. Gate on the ARC's OWN scope instead of on a permission.
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    if (!(await userCanAccessArc(req, arc))) {
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const instance = await db.oneOrNone(

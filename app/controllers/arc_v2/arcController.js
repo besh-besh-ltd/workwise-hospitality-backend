@@ -8,7 +8,7 @@ import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
-import { userCanAccessArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { arcVendorRequests } from '../../services/notificationLinks.js';
@@ -662,7 +662,7 @@ export async function getPublishApproval(req, res) {
     // requireArcPermission, so existence is not leaked differently here).
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    if (!(await userCanAccessHotel(req, arc))) {
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const instance = await db.oneOrNone(
@@ -1127,7 +1127,8 @@ export async function getById(req, res) {
     // Mirror createDraft/publish — derive access from req.user (super-admin
     // bypass), never trust the id alone. A valid policy approver is always
     // hotel/company-mapped, so they retain read access.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // Read access: staff at any hotel a group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const [items, invitations, techEvalByItem, manual] = await Promise.all([
@@ -1178,7 +1179,10 @@ export async function getLifecycle(req, res) {
     if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
     // Tenant guard — the lifecycle now carries approver/evaluator PII (names,
     // emails, mobiles), so it must not be cross-tenant readable. Mirror getById.
-    if (!(await userCanAccessHotel(req, lifecycle.arc))) {
+    // Read access (covered hotels of a group ARC included). The permissions
+    // below still resolve at the LEAD hotel — reading does not make a covered
+    // hotel's staff evaluators of a centrally-run contract.
+    if (!(await userCanReadArc(req, lifecycle.arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 

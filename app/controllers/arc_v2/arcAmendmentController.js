@@ -4,7 +4,7 @@ import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import { prepareAddendumForSignature } from '../../services/arcAddendumService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import {
   createApprovalInstance,
   submitApprovalAction,
@@ -376,14 +376,14 @@ export async function listAmendments(req, res) {
     // back to its ARC and gate on the ARC's OWN scope — never on the id alone.
     const scopeArc = await db.oneOrNone(
       arcId
-        ? `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id
+        ? `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id, a.is_group
              FROM tbl_arc a WHERE a.id = $1`
-        : `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id
+        : `SELECT a.id, a.hospitality_company_id, a.hotel_id, a.department_id, a.process_id, a.is_group
              FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id WHERE c.id = $1`,
       [arcId || contractId]
     );
     if (!scopeArc) return bad(res, 404, 'Rate contract not found', 2);
-    if (!(await userCanAccessArc(req, scopeArc))) {
+    if (!(await userCanReadArc(req, scopeArc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const rows = arcId

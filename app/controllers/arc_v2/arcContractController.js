@@ -14,7 +14,7 @@ import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -835,7 +835,7 @@ export async function getVendorDocumentsBundle(req, res) {
     // (PAN/GST/MSME/FSSAI/cancelled-cheque). Gate on the contract's ARC hotel —
     // never trust the contractId alone (sequential ids → trivially enumerable).
     const contractArc = await arcModel.getById(contract.arc_id);
-    if (!contractArc || !(await userCanAccessHotel(req, contractArc))) {
+    if (!contractArc || !(await userCanReadArc(req, contractArc))) {
       return bad(res, 403, 'You do not have access to this contract', 3);
     }
     const vendorId = contract.vendor_id;
@@ -888,8 +888,9 @@ export async function getActiveSummary(req, res) {
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     // Tenant isolation: active-summary exposes contracts, call-off PO prices,
     // amendment price changes, and buyer PII — gate on the ARC's own hotel_id
-    // (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // (super-admin bypass), never trust the id alone. Staff at any hotel a
+    // group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
