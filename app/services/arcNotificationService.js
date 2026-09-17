@@ -634,6 +634,18 @@ const EVENT_CONFIG = {
     body:         (arc) => `A call-off order against ${arc.title} (${arc.arc_number}) was rejected.`,
     url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
+
+  // Group rate contract — PRD default: a hotel may order past its share while
+  // the group total has room, and HO is told.
+  [ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE]: {
+    audiences:    [AUDIENCE.CREATOR],
+    email:        true,
+    vendorFacing: false,
+    title:        'A hotel ordered past its share',
+    body:         (arc, payload = {}) =>
+      `${payload.hotel_name || 'A hotel'} has now called off ${payload.consumed_qty} against its share of ${payload.committed_qty} on ${arc.title} (${arc.arc_number}). The group total still has room.`,
+    url:          (arc) => buyerArc(arc),
+  },
 };
 
 // ─── Recipient resolution ─────────────────────────────────────────────────────

@@ -129,7 +129,10 @@ export const resolvePoTenancy = async (po_id, dbCtx = db) => {
             po.status,
             COALESCE(r.hospitality_company_id, hh.hospitality_company_id,
                      a.hospitality_company_id)              AS hospitality_company_id,
-            COALESCE(r.hotel_id, a.hotel_id)                AS hotel_id,
+            -- A call-off PO belongs to the hotel that raised its requisition
+            -- (a group rate contract's ordering hotel; for a single-hotel ARC
+            -- the same hotel as the ARC).
+            COALESCE(r.hotel_id, mr.hotel_id, a.hotel_id)   AS hotel_id,
             COALESCE(r.department_id, a.department_id)      AS department_id,
             COALESCE(r.process_id, a.process_id)            AS process_id
        FROM tbl_rfq_purchase_order po
@@ -137,6 +140,7 @@ export const resolvePoTenancy = async (po_id, dbCtx = db) => {
        LEFT JOIN tbl_hospitality_company_hotels hh  ON hh.id = r.hotel_id
        LEFT JOIN tbl_arc_contract ac                ON ac.id = po.arc_contract_id
        LEFT JOIN tbl_arc a                          ON a.id  = ac.arc_id
+       LEFT JOIN tbl_material_requisition mr        ON mr.id = po.source_mr_id
       WHERE po.id = $1`,
     [id]
   );

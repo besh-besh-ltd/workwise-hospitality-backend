@@ -105,6 +105,9 @@ export const ARC_EVENT_TYPES = Object.freeze({
   // Call-off
   CALL_OFF_RELEASED: 'call_off_released',
   CALL_OFF_REJECTED: 'call_off_rejected',
+  // Group rate contract: a hotel's call-offs went past its share of the
+  // committed quantity (allowed while the group total has room).
+  CALL_OFF_OVER_HOTEL_SHARE: 'call_off_over_hotel_share',
 });
 
 export async function logArcEvent({ arcId, eventType, actorId = null, payload = {}, txContext = null }) {

@@ -38,7 +38,7 @@ function fmtDate(d) {
 /**
  * Pure, deterministic HTML for a call-off PO. `ctx` shape:
  *   { po: { po_number, total_value, created_at },
- *     buyer: { company_name, hotel_name },
+ *     buyer: { company_name, hotel_name, gst, delivery_address },
  *     vendor: { name, email },
  *     arc: { arc_number, arc_title, mr_number },
  *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, total_price }] }
@@ -99,6 +99,8 @@ export function renderCallOffPoHtml(ctx) {
       <div class="party"><div class="lbl">Buyer</div>
         <div class="nm">${esc(buyer.company_name || '—')}</div>
         <div>${esc(buyer.hotel_name || '')}</div>
+        ${buyer.gst ? `<div>GSTIN: ${esc(buyer.gst)}</div>` : ''}
+        ${buyer.delivery_address ? `<div>Deliver to: ${esc(buyer.delivery_address)}</div>` : ''}
       </div>
       <div class="party"><div class="lbl">Supplier</div>
         <div class="nm">${esc(vendor.name || '—')}</div>
@@ -128,15 +130,19 @@ export async function loadCallOffPoContext(poId, runner = db) {
     `SELECT po.id AS po_id, po.po_number, po.total_value, po.created_at,
             v.name AS vendor_name, v.email AS vendor_email,
             a.arc_number, a.title AS arc_title,
-            h.name AS hotel_name, hc.name AS company_name,
+            h.name AS hotel_name, h.gst AS hotel_gst,
+            COALESCE(h.delivery_address, h.full_address) AS hotel_delivery_address,
+            hc.name AS company_name,
             mr.mr_number
        FROM tbl_rfq_purchase_order po
        JOIN tbl_arc_contract c ON c.id = po.arc_contract_id
        JOIN tbl_arc a ON a.id = c.arc_id
        LEFT JOIN tbl_users v ON v.id = po.finalized_vendor_id
-       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
-       LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       -- The buyer is the hotel that raised the requisition. For a single-hotel
+       -- ARC that is the ARC's hotel; for a group ARC it is the ordering hotel.
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = COALESCE(mr.hotel_id, a.hotel_id)
+       LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
       WHERE po.id = $1`,
     [poId]
   );
@@ -153,7 +159,10 @@ export async function loadCallOffPoContext(poId, runner = db) {
   );
   return {
     po: { po_number: head.po_number, total_value: head.total_value, created_at: head.created_at },
-    buyer: { company_name: head.company_name, hotel_name: head.hotel_name },
+    buyer: {
+      company_name: head.company_name, hotel_name: head.hotel_name,
+      gst: head.hotel_gst, delivery_address: head.hotel_delivery_address,
+    },
     vendor: { name: head.vendor_name, email: head.vendor_email },
     arc: { arc_number: head.arc_number, arc_title: head.arc_title, mr_number: head.mr_number },
     lines,

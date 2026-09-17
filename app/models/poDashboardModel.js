@@ -158,6 +158,10 @@ function buildScopeClause(scope, values, startIndex) {
   const rfqConds = [rfqScoped.clause];
   narrowFor("rfq", rfqConds);
 
+  // A call-off PO is scoped as its ARC, but at the hotel that raised the
+  // requisition: for a group rate contract that is the ordering hotel, so each
+  // hotel sees its own call-offs (and not the others'); for a single-hotel ARC
+  // it is the ARC's own hotel, exactly as before.
   const arcScoped = scopedExistsFor(scope.userId, "aa", values, i);
   i = arcScoped.nextIndex;
   const arcConds = [arcScoped.clause];
@@ -166,8 +170,16 @@ function buildScopeClause(scope, values, startIndex) {
   parts.push(`(
     (${rfqConds.join(" AND ")})
     OR (po.is_call_off = TRUE AND EXISTS (
-      SELECT 1 FROM tbl_arc_contract cc
-        JOIN tbl_arc aa ON aa.id = cc.arc_id
+      SELECT 1
+        FROM tbl_arc_contract cc
+        JOIN tbl_arc arc_row ON arc_row.id = cc.arc_id
+        LEFT JOIN tbl_material_requisition mr_row ON mr_row.id = po.source_mr_id
+        CROSS JOIN LATERAL (
+          SELECT arc_row.hospitality_company_id,
+                 COALESCE(mr_row.hotel_id, arc_row.hotel_id) AS hotel_id,
+                 arc_row.department_id,
+                 arc_row.process_id
+        ) aa
        WHERE cc.id = po.arc_contract_id AND ${arcConds.join(" AND ")}
     ))
   )`);
@@ -841,12 +853,12 @@ export async function getPODetailFull(po_id, scope) {
     if (Array.isArray(scope.hospitalityCompanyIds)) {
       const dRfq = scopedExistsFor(scope.userId, "rfq", values, i);
       i = dRfq.nextIndex;
-      const dArc = scopedExistsFor(scope.userId, "arc", values, i);
+      const dArc = scopedExistsFor(scope.userId, "arc_scope", values, i);
       i = dArc.nextIndex;
       conds.push(`(${dRfq.clause} OR ${dArc.clause})`);
     }
     if (scope.hotelIds && scope.hotelIds.length > 0) {
-      conds.push(`COALESCE(rfq.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`);
+      conds.push(`COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`);
       values.push(scope.hotelIds);
     }
     if (scope.departmentId) {
@@ -859,7 +871,7 @@ export async function getPODetailFull(po_id, scope) {
     `SELECT po.*,
             rfq.rfq_no, rfq.title AS rfq_title, rfq.created_by AS rfq_created_by,
             COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) AS hospitality_company_id,
-            COALESCE(rfq.hotel_id, arc.hotel_id) AS hotel_id,
+            COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) AS hotel_id,
             COALESCE(rfq.department_id, arc.department_id) AS department_id,
             COALESCE(THC.name, ATHC.name, TC.company_name) AS company_name,
             COALESCE(THCH.name, ATHCH.name) AS business_unit,
@@ -887,9 +899,14 @@ export async function getPODetailFull(po_id, scope) {
      LEFT JOIN tbl_arc_contract acon ON acon.id = po.arc_contract_id
      LEFT JOIN tbl_arc arc ON arc.id = acon.arc_id
      LEFT JOIN tbl_hospitality_companies ATHC ON ATHC.id = arc.hospitality_company_id
-     LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = arc.hotel_id
-     LEFT JOIN tbl_department ADEPT ON ADEPT.id = arc.department_id
      LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+     -- Call-off POs: the ordering hotel (see buildScopeClause).
+     LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = COALESCE(mr.hotel_id, arc.hotel_id)
+     LEFT JOIN tbl_department ADEPT ON ADEPT.id = arc.department_id
+     LEFT JOIN LATERAL (
+       SELECT arc.hospitality_company_id, COALESCE(mr.hotel_id, arc.hotel_id) AS hotel_id,
+              arc.department_id, arc.process_id
+     ) arc_scope ON TRUE
      LEFT JOIN tbl_users INI ON INI.id = po.initiated_by
      LEFT JOIN tbl_approval_instances tai ON tai.id = po.approval_instance_id
      WHERE po.id = $1 AND ${scopeClause}`,
