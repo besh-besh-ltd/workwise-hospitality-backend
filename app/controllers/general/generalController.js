@@ -1016,10 +1016,13 @@ const hospitalityApprovalController = {
         if (createCompanyId === null) return;
 
         // Validate entity_type. Includes the process-free ARC (Rate Contract)
-        // v2 stage types so the admin wizard can create per-stage ARC policies.
+        // v2 stage types so the admin wizard can create per-stage ARC policies,
+        // and the GROUP rate contract workflow (ARC_GROUP*), which governs ARCs
+        // covering several hotels — see helper/arc_v2/arcPolicy.js.
         const validEntityTypes = [
           'RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE',
           'ARC_TECH', 'ARC_NEGOTIATION', 'ARC_COMMITTEE', 'ARC_AMENDMENT', 'ARC_PUBLISH',
+          'ARC_GROUP', 'ARC_GROUP_TECH', 'ARC_GROUP_NEGOTIATION', 'ARC_GROUP_COMMITTEE', 'ARC_GROUP_AMENDMENT',
         ];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({

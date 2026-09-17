@@ -5,11 +5,11 @@ import { prepareAddendumForSignature } from '../../services/arcAddendumService.j
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
+import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import {
   createApprovalInstance,
   submitApprovalAction,
   getApprovalInstanceDetails,
-  findBestMatchingPolicyTx,
 } from '../../models/generalModel.js';
 
 /**
@@ -241,7 +241,8 @@ export async function requestAmendment(req, res) {
               a.hospitality_company_id,
               a.hotel_id,
               a.department_id,
-              a.process_id
+              a.process_id,
+              a.is_group
          FROM tbl_arc_contract c
          JOIN tbl_arc a ON a.id = c.arc_id
         WHERE c.id = $1`,
@@ -266,26 +267,13 @@ export async function requestAmendment(req, res) {
         `Amendment #${conflict.id} (${state}) means ${what} is already in flight — wait for it to be approved, declined, or to end before raising another.`);
     }
 
-    // Resolve the approval policy. Prefer ARC_AMENDMENT; fall back to ARC.
+    // Resolve the approval policy. Prefer ARC_AMENDMENT; fall back to ARC (or
+    // the ARC_GROUP pair for a group rate contract — helper/arc_v2/arcPolicy.js).
     const result = await db.tx(async (t) => {
-      let policy = await findBestMatchingPolicyTx({
-        entity_type: 'ARC_AMENDMENT',
-        hospitality_company_id: ctxRow.hospitality_company_id,
-        hotel_id:               ctxRow.hotel_id,
-        department_id:          ctxRow.department_id,
-        process_id:             ctxRow.process_id,
-      }, t);
+      const policy = await resolveArcPolicyFor(ctxRow, 'ARC_AMENDMENT', t);
       if (!policy) {
-        policy = await findBestMatchingPolicyTx({
-          entity_type: 'ARC',
-          hospitality_company_id: ctxRow.hospitality_company_id,
-          hotel_id:               ctxRow.hotel_id,
-          department_id:          ctxRow.department_id,
-          process_id:             ctxRow.process_id,
-        }, t);
-      }
-      if (!policy) {
-        throw Object.assign(new Error('No approval policy configured for ARC amendments in this scope.'), { httpStatus: 400 });
+        throw noArcPolicyError(ctxRow,
+          'No approval policy configured for ARC amendments in this scope.', 'amendment');
       }
 
       // Insert the amendment row first so we have an id to bind the

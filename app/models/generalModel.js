@@ -95,6 +95,20 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // is the worst instance of this class, not the mildest.
   'ARC_AMENDMENT': 'arc',
 
+  // GROUP rate contract workflow — POLICY entity types only. A group ARC's
+  // approval instances keep the single-ARC instance types above (ARC_PUBLISH,
+  // ARC_TECH, …); only the policy lookup picks these (helper/arc_v2/arcPolicy.js).
+  // They are listed here because the admin save path validates a policy's ROLE
+  // steps against its entity_type (findUnqualifiableRoleSteps), and each must
+  // demand exactly the permission its single-ARC twin demands — otherwise a
+  // step that qualifies at save time would be dropped when the instance is
+  // created, or the reverse.
+  'ARC_GROUP': 'arc',
+  'ARC_GROUP_TECH': 'arc-tech',
+  'ARC_GROUP_NEGOTIATION': 'arc-comm',
+  'ARC_GROUP_COMMITTEE': 'arc-committee',
+  'ARC_GROUP_AMENDMENT': 'arc',
+
   // ── THE FULL ARC-STAGE PERMISSION PICTURE (as of 20260803110000) ───────────
   //   arc            read/create/admin (20260608100800) + approve (legacy)
   //   arc-tech       evaluate (20260608100800) + read (20260611100000)

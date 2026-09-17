@@ -9,11 +9,11 @@ import { logger } from '../../util/logger.js';
 import {
   createApprovalInstance,
   getApprovalInstanceDetails,
-  findBestMatchingPolicyTx,
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import axios from 'axios';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
+import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 /**
@@ -62,13 +62,6 @@ function fail(res, err, tag) {
   return bad(res, 500, err.message || 'Internal error', 3);
 }
 
-// Resolve the ARC_<TYPE> approval policy with fallback to the generic 'ARC'
-// policy (same chain as amendments).
-async function resolveArcPolicy(entityType, scope, t) {
-  let policy = await findBestMatchingPolicyTx({ entity_type: entityType, ...scope }, t);
-  if (!policy) policy = await findBestMatchingPolicyTx({ entity_type: 'ARC', ...scope }, t);
-  return policy;
-}
 
 // ============================================================
 // TECH EVAL endpoints
@@ -590,16 +583,10 @@ export async function submitTechEval(req, res) {
       // Route through the central engine (entity_type ARC_TECH, fallback
       // to the generic ARC policy — same chain as amendments). The
       // registered hooks flip the ARC to tech_eval_approved / _rejected.
-      const policy = await resolveArcPolicy('ARC_TECH', {
-        hospitality_company_id: arc.hospitality_company_id,
-        hotel_id:               arc.hotel_id,
-        department_id:          arc.department_id,
-        process_id:             arc.process_id,
-      }, t);
+      const policy = await resolveArcPolicyFor(arc, 'ARC_TECH', t);
       if (!policy) {
-        const err = new Error('No approval policy configured for ARC technical evaluation in this scope.');
-        err.httpStatus = 400;
-        throw err;
+        throw noArcPolicyError(arc,
+          'No approval policy configured for ARC technical evaluation in this scope.', 'technical evaluation');
       }
       const engineResult = await createApprovalInstance({
         entity_type:            'ARC_TECH',
@@ -1177,16 +1164,10 @@ export async function finalizeCommEval(req, res) {
 
       // Spawn the committee approval through the central engine — the
       // Awarding stage becomes actionable the moment commercial finalizes.
-      const policy = await resolveArcPolicy('ARC_COMMITTEE', {
-        hospitality_company_id: arc.hospitality_company_id,
-        hotel_id:               arc.hotel_id,
-        department_id:          arc.department_id,
-        process_id:             arc.process_id,
-      }, t);
+      const policy = await resolveArcPolicyFor(arc, 'ARC_COMMITTEE', t);
       if (!policy) {
-        const err = new Error('No approval policy configured for the ARC committee in this scope.');
-        err.httpStatus = 400;
-        throw err;
+        throw noArcPolicyError(arc,
+          'No approval policy configured for the ARC committee in this scope.', 'committee');
       }
       const engineResult = await createApprovalInstance({
         entity_type:            'ARC_COMMITTEE',
@@ -1396,15 +1377,10 @@ async function resolveClarification(req, res, mode) {
       let reapprove = null;
       if (remainingOpen === 0) {
         const arc = await arcModel.getById(arcId, t);
-        const policy = await resolveArcPolicy('ARC_COMMITTEE', {
-          hospitality_company_id: arc.hospitality_company_id,
-          hotel_id:               arc.hotel_id,
-          department_id:          arc.department_id,
-          process_id:             arc.process_id,
-        }, t);
+        const policy = await resolveArcPolicyFor(arc, 'ARC_COMMITTEE', t);
         if (!policy) {
-          const err = new Error('No approval policy configured for the ARC committee in this scope.');
-          err.httpStatus = 400; throw err;
+          throw noArcPolicyError(arc,
+            'No approval policy configured for the ARC committee in this scope.', 'committee');
         }
         const engineResult = await createApprovalInstance({
           entity_type:            'ARC_COMMITTEE',

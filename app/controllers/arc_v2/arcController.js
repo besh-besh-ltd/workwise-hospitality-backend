@@ -10,6 +10,7 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { userCanAccessArc, userCanReadArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
+import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
@@ -17,7 +18,6 @@ import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/
 import { currentFinancialYearIst } from '../../helper/financialYear.js';
 import {
   createApprovalInstance,
-  findBestMatchingPolicyTx,
   cancelApprovalInstance,
   getApprovalInstanceDetails,
 } from '../../models/generalModel.js';
@@ -426,22 +426,17 @@ export async function publish(req, res) {
     }
 
     // Publish no longer floats directly. It resolves the ARC's approval policy
-    // (matched as entity_type 'ARC'), creates an ARC_PUBLISH approval instance,
+    // (entity_type 'ARC', or 'ARC_GROUP' for a group rate contract — see
+    // helper/arc_v2/arcPolicy.js), creates an ARC_PUBLISH approval instance,
     // and parks the ARC in pending_publish_approval. The ARC goes live ONLY when
     // the instance reaches APPROVED — the registered hook (handleArcPublishApproval)
     // calls floatArc. No policy → hard 400; the ARC stays draft/publish_rejected.
     const result = await db.tx(async (t) => {
-      const policy = await findBestMatchingPolicyTx({
-        entity_type:            'ARC',
-        hospitality_company_id: arc.hospitality_company_id,
-        hotel_id:               arc.hotel_id,
-        department_id:          arc.department_id,
-        process_id:             arc.process_id,
-      }, t);
+      const policy = await resolveArcPolicyFor(arc, 'ARC', t);
       if (!policy) {
-        const err = new Error('No approval policy configured to publish a rate contract in this scope. Configure an ARC approval policy (Settings → Approvals) for this company/hotel/department, then publish again.');
-        err.httpStatus = 400;
-        throw err;
+        throw noArcPolicyError(arc,
+          'No approval policy configured to publish a rate contract in this scope. Configure an ARC approval policy (Settings → Approvals) for this company/hotel/department, then publish again.',
+          'publish');
       }
       const engineResult = await createApprovalInstance({
         entity_type:            'ARC_PUBLISH',
