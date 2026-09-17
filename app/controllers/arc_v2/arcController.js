@@ -3,6 +3,7 @@ import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import arcManualEntryModel from '../../models/arc_v2/arcManualEntryModel.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
@@ -11,6 +12,7 @@ import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../
 import { userCanAccessArc, userCanReadArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
+import { resolveGroupCoverage, normalizeGroupItems } from '../../helper/arc_v2/arcGroupDraft.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
@@ -62,6 +64,13 @@ function bad(res, status, message, code = 0) {
 // Prefer passing the ARC ROW (not just its hotel id) — the row form also
 // enforces the department and process axes.
 const userCanAccessHotel = userCanAccessArc;
+
+const positiveIds = (ids) => [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+const sameIdSet = (a, b) => {
+  const x = positiveIds(a).sort((m, n) => m - n);
+  const y = positiveIds(b).sort((m, n) => m - n);
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+};
 
 // `hotel_ids=a,b,c` (group) or the legacy single `hotel_id` → distinct positive ids.
 function parseHotelIdsParam(query = {}) {
@@ -207,6 +216,23 @@ export async function createDraft(req, res) {
     if (!(await userCanAccessHotel(req, hotelId))) {
       return bad(res, 403, 'You do not have access to this hotel');
     }
+    // GROUP rate contract: hotel_id is the lead hotel, hotel_ids every covered
+    // hotel, and each item carries its per-hotel split (hotel_qtys). Coverage
+    // and quantities are validated and re-derived server-side.
+    const isGroup = body.is_group === true;
+    let coverage = null;
+    let incomingItems = Array.isArray(body.items) ? body.items : [];
+    if (isGroup) {
+      try {
+        coverage = await resolveGroupCoverage(req, {
+          hotel_id: hotelId, hotel_ids: body.hotel_ids, department_id: body.department_id,
+        });
+        incomingItems = normalizeGroupItems(incomingItems, coverage.hotelIds);
+      } catch (e) {
+        if (e.httpStatus) return bad(res, e.httpStatus, e.message);
+        throw e;
+      }
+    }
     const data = {
       // arc_number is minted below, INSIDE the tx (FY-scoped atomic upsert) —
       // never trust a client-supplied arc_number (L1).
@@ -234,6 +260,7 @@ export async function createDraft(req, res) {
       // product vs service — collected by the wizard's Basics step (defaults to
       // 'product' so resume can rehydrate it). Stored on tbl_arc.type.
       type: body.type || 'product',
+      is_group: isGroup,
       created_by: userId,
     };
     // Respond-AFTER-commit: build the payload inside the tx, send it only once
@@ -247,12 +274,17 @@ export async function createDraft(req, res) {
       // (skipped serial on rollback is fine; a duplicate would not be).
       const arcNumber = await arcModel.nextArcNumber(currentFinancialYearIst(), t);
       const arc = await arcModel.createDraft({ ...data, arc_number: arcNumber }, t);
+      if (isGroup) await arcHotelModel.reconcileArcHotels(arc.id, coverage.hotelIds, userId, t);
       // Seed items if any were provided up-front (multi-step wizard might add them later via PATCH).
-      const items = Array.isArray(body.items) ? body.items : [];
       const createdItems = [];
-      for (const it of items) {
+      for (const it of incomingItems) {
         if (!it.product_variant_id || it.indicative_qty == null) continue;
-        createdItems.push(await arcModel.addItem(arc.id, it, t));
+        const item = await arcModel.addItem(arc.id, it, t);
+        if (isGroup) {
+          await arcHotelModel.setItemHotelQtys(item.id, it.hotel_qtys, t);
+          item.hotel_qtys = it.hotel_qtys;
+        }
+        createdItems.push(item);
       }
       // Invitations (if invitation-only).
       if (data.eligibility_type === 'invitation' && Array.isArray(body.invited_vendor_ids)) {
@@ -293,21 +325,64 @@ export async function updateDraft(req, res) {
     }
     if (await rejectIfManualEntry(res, id, 'edit')) return;
 
+    // GROUP rate contract shape. A draft is (or becomes) a group when is_group
+    // is sent true, or it already is one and is_group is not sent false.
+    // Coverage — lead hotel, covered hotels, department — is re-validated only
+    // when it actually changes, so the lead hotel's buyer can edit terms
+    // without needing access to every covered hotel, but nobody can move the
+    // contract onto hotels they cannot act at.
+    const sent = (key) => Object.prototype.hasOwnProperty.call(body, key);
+    const wantsGroup = body.is_group === true || (existing.is_group && body.is_group !== false);
+    let group = null; // { leadHotelId, hotelIds, changed }
+    let incomingItems = Array.isArray(body.items) ? body.items : null;
+    if (wantsGroup) {
+      try {
+        const currentIds = await arcHotelModel.arcHotelIds(existing);
+        const nextLead = sent('hotel_id') ? Number(body.hotel_id) : Number(existing.hotel_id);
+        const nextIds = sent('hotel_ids') ? positiveIds(body.hotel_ids) : currentIds;
+        const nextDept = sent('department_id') ? Number(body.department_id) : Number(existing.department_id);
+        const unchanged = existing.is_group
+          && nextLead === Number(existing.hotel_id)
+          && sameIdSet(nextIds, currentIds)
+          && nextDept === Number(existing.department_id);
+        if (unchanged) {
+          group = { leadHotelId: nextLead, hotelIds: currentIds, changed: false };
+        } else {
+          const cov = await resolveGroupCoverage(req, {
+            hotel_id: nextLead, hotel_ids: nextIds, department_id: nextDept,
+            expectedCompanyId: existing.hospitality_company_id,
+          });
+          group = { leadHotelId: cov.leadHotelId, hotelIds: cov.hotelIds, changed: true };
+        }
+        if (incomingItems) incomingItems = normalizeGroupItems(incomingItems, group.hotelIds);
+      } catch (e) {
+        if (e.httpStatus) return bad(res, e.httpStatus, e.message);
+        throw e;
+      }
+    }
+
     // GROUP D (Sr 17/20 fix): updateDraft previously only whitelisted scalar
     // columns (see arcModel.updateDraft), so re-saving a RESUMED draft silently
     // dropped item / vendor-invitation edits — a data-loss trap for the new
     // "Save draft & exit" round-trip. Reconcile the item set and invitation
     // list here too, mirroring how createDraft seeds them, all inside one tx.
     const result = await db.tx(async (t) => {
-      const updated = await arcModel.updateDraft(id, body, t);
+      let updated = await arcModel.updateDraft(id, body, t);
+      if (group?.changed) {
+        updated = await arcModel.setGroupShape(id, { is_group: true, hotel_id: group.leadHotelId }, t);
+        await arcHotelModel.reconcileArcHotels(id, group.hotelIds, req.user.id, t);
+      } else if (existing.is_group && body.is_group === false) {
+        await arcHotelModel.clearGroupRows(id, t);
+        updated = await arcModel.setGroupShape(id, { is_group: false, hotel_id: existing.hotel_id }, t);
+      }
 
       // Item set — delete/update/insert so add, edit (spec/qty/uom), and
       // remove of items on a resumed draft all persist. Only reconciled when
       // the caller actually sent an `items` array, so a scalar-only PATCH
       // (e.g. `{ type: 'service' }`) never touches — let alone wipes — it.
       let items = await arcModel.listItems(id, t);
-      if (Array.isArray(body.items)) {
-        const incoming = body.items.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
+      if (Array.isArray(incomingItems)) {
+        const incoming = incomingItems.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
         const byVariant = new Map(items.map((it) => [Number(it.product_variant_id), it]));
         const keepVariantIds = new Set(incoming.map((it) => Number(it.product_variant_id)));
         // Drop items the wizard no longer has selected. tbl_arc_item_tech_evaluation
@@ -328,7 +403,17 @@ export async function updateDraft(req, res) {
               }, t)
             : await arcModel.addItem(id, it, t));
         }
+        if (group) {
+          for (let i = 0; i < incoming.length; i++) {
+            await arcHotelModel.setItemHotelQtys(nextItems[i].id, incoming[i].hotel_qtys, t);
+            nextItems[i].hotel_qtys = incoming[i].hotel_qtys;
+          }
+        }
         items = nextItems;
+      } else if (group?.changed) {
+        // Coverage narrowed without the items being resent.
+        await arcHotelModel.pruneItemHotelQtys(id, group.hotelIds, t);
+        items = await arcModel.listItems(id, t);
       }
 
       // Vendor invitations — same delete-and-replace `setInvitations` createDraft
@@ -1143,6 +1228,13 @@ export async function getById(req, res) {
     // Additive: items[].tech_eval is null when no config exists for that item.
     for (const it of items) {
       it.tech_eval = techEvalByItem[String(it.id)] || null;
+    }
+    // Covered hotels (lead first) for every ARC; a group ARC also returns each
+    // item's per-hotel split so the wizard can resume it.
+    arc.hotels = await arcHotelModel.listArcHotels(arc);
+    if (arc.is_group) {
+      const split = await arcHotelModel.listItemHotelQtys(id);
+      for (const it of items) it.hotel_qtys = split[String(it.id)] || [];
     }
     return ok(res, { arc, items, invitations });
   } catch (err) {

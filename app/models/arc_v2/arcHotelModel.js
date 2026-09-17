@@ -128,6 +128,28 @@ const arcHotelModel = {
   },
 
   /**
+   * Coverage narrowed without the items being resent: drop each item's
+   * quantity for hotels no longer covered and re-total indicative_qty.
+   */
+  pruneItemHotelQtys: async (arcId, hotelIds, txContext = null) => {
+    const runner = txContext || db;
+    await runner.none(
+      `DELETE FROM tbl_arc_item_hotel_qty q
+        USING tbl_arc_item i
+        WHERE i.id = q.arc_item_id AND i.arc_id = $1 AND q.hotel_id <> ALL($2::int[])`,
+      [arcId, toIds(hotelIds)]
+    );
+    await runner.none(
+      `UPDATE tbl_arc_item i
+          SET indicative_qty = t.total, updated_at = CURRENT_TIMESTAMP
+         FROM (SELECT arc_item_id, SUM(indicative_qty) AS total
+                 FROM tbl_arc_item_hotel_qty GROUP BY arc_item_id) t
+        WHERE t.arc_item_id = i.id AND i.arc_id = $1`,
+      [arcId]
+    );
+  },
+
+  /**
    * Drop coverage and per-hotel quantities — a group draft becoming a
    * single-hotel draft.
    */

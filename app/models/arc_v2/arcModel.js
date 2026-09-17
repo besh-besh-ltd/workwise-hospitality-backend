@@ -47,6 +47,7 @@ const arcModel = {
       delivery_expected = null,
       penalty_clause = null,
       type = 'product',
+      is_group = false,
       created_by,
     } = data;
     return runner.one(
@@ -57,7 +58,7 @@ const arcModel = {
           submission_start_at, submission_end_at, contract_start_at, contract_end_at,
           technical_response_required, sample_required, eligibility_type,
           escalation_clause_json, payment_terms_expected, delivery_expected, penalty_clause,
-          type, created_by)
+          type, created_by, is_group)
        VALUES
          ($1, $2, $3, $4, $5::jsonb,
           $6, $7, $8, $9,
@@ -65,7 +66,7 @@ const arcModel = {
           $10, $11, $12, $13,
           $14, $15, $16,
           $17::jsonb, $18, $19, $20,
-          $21, $22)
+          $21, $22, $23)
        RETURNING *`,
       [
         arc_number, title, description, category_id, JSON.stringify(sub_category_ids),
@@ -73,8 +74,23 @@ const arcModel = {
         submission_start_at, submission_end_at, contract_start_at, contract_end_at,
         technical_response_required, sample_required, eligibility_type,
         JSON.stringify(escalation_clause_json || {}), payment_terms_expected, delivery_expected, penalty_clause,
-        type ?? 'product', created_by,
+        type ?? 'product', created_by, !!is_group,
       ]
+    );
+  },
+
+  /**
+   * Set whether a DRAFT is a group rate contract and which hotel leads it.
+   * hotel_id is otherwise not patchable (updateDraft); a group draft's lead
+   * may move only among hotels its coverage check already validated.
+   */
+  setGroupShape: async (id, { is_group, hotel_id }, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_arc
+          SET is_group = $2, hotel_id = $3, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status IN ('draft','publish_rejected')
+       RETURNING *`,
+      [id, !!is_group, hotel_id]
     );
   },
 
