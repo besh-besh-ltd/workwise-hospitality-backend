@@ -255,6 +255,37 @@ const arcHotelModel = {
   },
 
   /**
+   * A contract's per-hotel ledger: the hotels it supplies and, per contract
+   * line, each hotel's committed and consumed quantity. Empty for a
+   * single-hotel contract.
+   *
+   * @returns {{ hotels: Array<{ hotel_id, name, city, state }>,
+   *             byLine: { [line_id]: Array<{ hotel_id, committed_qty, consumed_qty }> } }}
+   */
+  listContractHotels: async (contractId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT clh.arc_contract_line_id AS line_id, clh.hotel_id, h.name, h.city, h.state,
+              clh.committed_qty, clh.consumed_qty
+         FROM tbl_arc_contract_line_hotel clh
+         JOIN tbl_arc_contract_line l ON l.id = clh.arc_contract_line_id
+         JOIN tbl_hospitality_company_hotels h ON h.id = clh.hotel_id
+        WHERE l.arc_contract_id = $1
+        ORDER BY clh.arc_contract_line_id, clh.hotel_id`,
+      [contractId]
+    );
+    const hotels = new Map();
+    const byLine = {};
+    for (const r of rows) {
+      const hotelId = Number(r.hotel_id);
+      if (!hotels.has(hotelId)) hotels.set(hotelId, { hotel_id: hotelId, name: r.name, city: r.city, state: r.state });
+      (byLine[String(r.line_id)] ||= []).push({
+        hotel_id: hotelId, committed_qty: Number(r.committed_qty), consumed_qty: Number(r.consumed_qty),
+      });
+    }
+    return { hotels: [...hotels.values()].sort((a, b) => a.hotel_id - b.hotel_id), byLine };
+  },
+
+  /**
    * Bring a contract line's per-hotel ledger in line with its award.
    *
    * committed_qty follows the award; consumed_qty is NEVER reset, so a

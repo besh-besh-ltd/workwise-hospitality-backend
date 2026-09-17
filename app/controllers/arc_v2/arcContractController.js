@@ -568,7 +568,7 @@ export async function getContractDetail(req, res) {
       // ARC context the detail page's hero/doc sections need: term, category,
       // BU, escalation, eligibility, and the buyer contact (creator).
       db.oneOrNone(
-        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status,
+        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
                 a.contract_start_at, a.contract_end_at,
                 a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
                 a.escalation_clause_json, a.eligibility_type,
@@ -638,10 +638,19 @@ export async function getContractDetail(req, res) {
         if (/relation .* does not exist/i.test(err.message)) return [];
         throw err;
       });
+    // GROUP rate contract: the hotels this vendor supplies and each line's
+    // per-hotel quantity. Hotels the vendor did not win are not disclosed.
+    let hotels = [];
+    if (arcInfo?.is_group) {
+      const ledger = await arcHotelModel.listContractHotels(id);
+      hotels = ledger.hotels;
+      for (const line of lines) line.hotels = ledger.byLine[String(line.id)] || [];
+    }
     return ok(res, {
       contract, lines, arc: arcInfo, callOffs,
       amendments: amendments.map(arcAmendmentModel.vendorView),
       clarifications,
+      hotels,
     });
   } catch (err) {
     logger.error({ err }, '[contractController.getContractDetail]');

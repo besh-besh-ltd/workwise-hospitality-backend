@@ -192,6 +192,22 @@ describe("Group ARC — award by hotel and per-hotel contracts", () => {
       expect(alphaAward.hotels).toEqual([{ hotel_id: A1, allocated_qty: 400 }, { hotel_id: A2, allocated_qty: 350 }]);
     });
 
+    test("the winning vendor's contract view names its hotels and each line's per-hotel quantity", async () => {
+      const contract = await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, ALPHA]);
+      const vendor = await httpClient(ALPHA);
+      const res = await vendor.get(`/api/v1/arc-v2/vendor/contracts/${contract.id}`);
+      expect(res.status).toBe(200);
+      const d = res.body.data;
+      expect(d.arc.is_group).toBe(true);
+      // Only the hotels this vendor supplies — never the hotel it did not win.
+      expect(d.hotels.map((h) => h.hotel_id)).toEqual([A1, A2]);
+      expect(d.hotels[0]).toEqual(expect.objectContaining({ name: expect.any(String) }));
+      expect(d.lines[0].hotels).toEqual([
+        { hotel_id: A1, committed_qty: 400, consumed_qty: 0 },
+        { hotel_id: A2, committed_qty: 350, consumed_qty: 0 },
+      ]);
+    });
+
     test("regenerating contracts keeps what each hotel has already consumed", async () => {
       const contract = await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, ALPHA]);
       await db.none(
