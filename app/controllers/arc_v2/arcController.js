@@ -1356,18 +1356,39 @@ export async function getDepartmentsForCategory(req, res) {
 
 // Departments the current user is mapped to in a given hotel (drives the ARC
 // create department picker — independent of the category→department mapping).
+// A group rate contract has ONE department, so `hotel_ids=a,b,c` returns the
+// departments the user holds at EVERY listed hotel.
 export async function getDepartmentsForHotel(req, res) {
   try {
-    const hotelId = Number(req.query.hotel_id);
     const userId  = req.user?.id;
-    if (!hotelId || !userId) return bad(res, 400, 'hotel_id is required', 2);
+    const isGroupQuery = req.query.hotel_ids != null;
+    const hotelIds = parseHotelIdsParam(req.query);
+    if (hotelIds.length === 0 || !userId) return bad(res, 400, 'hotel_id is required', 2);
+    // A group query names hotels the client chose; each must be in scope
+    // before we answer anything about it.
+    if (isGroupQuery) {
+      for (const hotelId of hotelIds) {
+        if (!(await userCanAccessHotel(req, hotelId))) {
+          return bad(res, 403, 'You do not have access to this hotel', 3);
+        }
+      }
+    }
     // Super admins have no role-scope rows to derive from → every department.
     if (Number(req.user?.user_type) === 8) {
       const all = await db.any('SELECT id, title FROM tbl_department ORDER BY title');
       return ok(res, { departments: all });
     }
-    const departments = await arcModel.getDepartmentsForUserInHotel({ user_id: userId, hotel_id: hotelId });
-    return ok(res, { departments });
+    let departments = null;
+    for (const hotelId of hotelIds) {
+      const atHotel = await arcModel.getDepartmentsForUserInHotel({ user_id: userId, hotel_id: hotelId });
+      if (departments === null) {
+        departments = atHotel;
+      } else {
+        const held = new Set(atHotel.map((d) => Number(d.id)));
+        departments = departments.filter((d) => held.has(Number(d.id)));
+      }
+    }
+    return ok(res, { departments: departments || [] });
   } catch (err) {
     logger.error({ err }, '[arcController.getDepartmentsForHotel]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -1423,7 +1444,8 @@ export async function listAccessibleHotels(req, res) {
       hotel: 'h.id',
     }, 2);
     const rows = await db.any(
-      `SELECT h.id, h.hospitality_company_id, h.name, h.city, h.keys
+      `SELECT h.id, h.hospitality_company_id, h.name, h.city, h.state, h.keys,
+              COALESCE(h.is_head_office, false) AS is_head_office
          FROM tbl_hospitality_company_hotels h
         WHERE ($1::int[] IS NULL OR h.hospitality_company_id = ANY($1::int[]))
           AND COALESCE(h.is_deleted, 0) = 0
