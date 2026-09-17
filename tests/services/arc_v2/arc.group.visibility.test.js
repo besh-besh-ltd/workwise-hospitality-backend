@@ -94,6 +94,8 @@ describe("Group ARC — covered hotels read it, the lead hotel manages it", () =
     // Reading does not make them an evaluator: permissions resolve at the lead hotel.
     expect(lifecycle.body.data.permissions["arc-tech"]).toEqual([]);
     expect(lifecycle.body.data.permissions["arc-comm"]).toEqual([]);
+    // The page names the hotels the contract covers, lead first.
+    expect(lifecycle.body.data.arc.hotels.map((h) => [h.hotel_id, h.is_lead])).toEqual([[A1, true], [A2, false], [A3, false]]);
   });
 
   test("staff at a covered hotel cannot edit or publish it — that stays with the lead hotel", async () => {

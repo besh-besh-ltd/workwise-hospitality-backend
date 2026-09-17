@@ -1336,6 +1336,8 @@ export async function getLifecycle(req, res) {
     const manual = await arcManualEntryModel.getByArc(id);
     lifecycle.arc.is_manual = !!manual?.is_manual;
     lifecycle.arc.manual_target_stage = manual?.target_stage ?? null;
+    // A group rate contract names the hotels it covers (lead first).
+    lifecycle.arc.hotels = lifecycle.arc.is_group ? await arcHotelModel.listArcHotels(lifecycle.arc) : [];
 
     return ok(res, { ...lifecycle, permissions });
   } catch (err) {
