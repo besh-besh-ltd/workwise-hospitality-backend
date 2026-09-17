@@ -2,6 +2,7 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
@@ -78,11 +79,24 @@ export async function getCommitteeView(req, res) {
           '[committeeController.getCommitteeView] instance detail load failed');
       }
     }
+    // GROUP rate contract: the committee approves the award hotel by hotel, so
+    // it needs the hotels, each item's per-hotel quantity and each award's split.
+    let group = {};
+    if (arc.is_group) {
+      const [hotels, item_hotel_qtys, awardHotels] = await Promise.all([
+        arcHotelModel.listArcHotels(arc),
+        arcHotelModel.listItemHotelQtys(arcId),
+        comm ? arcHotelModel.listAwardHotels(comm.id) : {},
+      ]);
+      for (const a of awards) a.hotels = awardHotels[String(a.id)] || [];
+      group = { hotels, item_hotel_qtys };
+    }
     return ok(res, {
       arc: { ...arc, ...(ctx || {}) },
       comm_evaluation: comm, awards, items,
       approval_instance: instance,
       approval,
+      ...group,
     });
   } catch (err) {
     logger.error({ err }, '[committeeController.getCommitteeView]');

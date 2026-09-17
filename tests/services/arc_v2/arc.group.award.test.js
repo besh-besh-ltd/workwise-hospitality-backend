@@ -182,6 +182,16 @@ describe("Group ARC — award by hotel and per-hotel contracts", () => {
       ]);
     });
 
+    test("the committee sees every covered hotel and each award's per-hotel split", async () => {
+      const res = await buyer.get(`/api/v1/arc-v2/committee/${arcId}`);
+      expect(res.status).toBe(200);
+      const d = res.body.data;
+      expect(d.hotels.map((h) => [h.hotel_id, h.is_lead])).toEqual([[A1, true], [A2, false], [A3, false]]);
+      expect(d.item_hotel_qtys[String(itemId)].map((r) => r.hotel_id)).toEqual([A1, A2, A3]);
+      const alphaAward = d.awards.find((a) => Number(a.awarded_vendor_id) === ALPHA);
+      expect(alphaAward.hotels).toEqual([{ hotel_id: A1, allocated_qty: 400 }, { hotel_id: A2, allocated_qty: 350 }]);
+    });
+
     test("regenerating contracts keeps what each hotel has already consumed", async () => {
       const contract = await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, ALPHA]);
       await db.none(
