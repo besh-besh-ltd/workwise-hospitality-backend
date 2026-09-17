@@ -9,6 +9,7 @@ import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { userCanAccessArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
+import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
@@ -61,6 +62,12 @@ function bad(res, status, message, code = 0) {
 // Prefer passing the ARC ROW (not just its hotel id) — the row form also
 // enforces the department and process axes.
 const userCanAccessHotel = userCanAccessArc;
+
+// `hotel_ids=a,b,c` (group) or the legacy single `hotel_id` → distinct positive ids.
+function parseHotelIdsParam(query = {}) {
+  const raw = query.hotel_ids != null ? String(query.hotel_ids).split(',') : [query.hotel_id];
+  return [...new Set(raw.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+}
 
 // Notify every invited vendor that an ARC was floated (audit C2). Best-effort
 // and post-commit: a notification/email failure must NEVER roll back or block
@@ -133,8 +140,8 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   // createDraft.
   let vendorIds;
   if (arc.eligibility_type === 'open') {
-    const eligible = await arcModel.getEligibleVendorsForCategory(
-      { category_id: arc.category_id, hotel_id: arc.hotel_id }, runner);
+    const eligible = await resolveArcVendorCoverage(
+      { category_id: arc.category_id, hotel_ids: [arc.hotel_id] }, runner);
     vendorIds = eligible.map((v) => Number(v.id));
   } else {
     const inv = await arcModel.listInvitations(arcId, runner);
@@ -406,8 +413,8 @@ export async function publish(req, res) {
     // "invitation" uses the rows set at createDraft.
     let vendorIds;
     if (arc.eligibility_type === 'open') {
-      const eligible = await arcModel.getEligibleVendorsForCategory(
-        { category_id: arc.category_id, hotel_id: arc.hotel_id }
+      const eligible = await resolveArcVendorCoverage(
+        { category_id: arc.category_id, hotel_ids: [arc.hotel_id] }
       );
       vendorIds = eligible.map((v) => Number(v.id));
     } else {
@@ -1403,37 +1410,32 @@ export async function searchProductVariants(req, res) {
   }
 }
 
-// Returns vendors eligible for the (category, hotel) pair via the existing
-// vendor_hotel_category_subscription table.
+// Vendors eligible for a category across one hotel (`hotel_id`) or the hotels
+// of a group rate contract (`hotel_ids=a,b,c`). Each vendor carries the hotels
+// it covers and the ones needing renewal — see helper/arc_v2/arcEligibility.js.
 export async function listEligibleVendors(req, res) {
   try {
     const categoryId = Number(req.query.category_id);
-    const hotelId    = Number(req.query.hotel_id);
-    if (!categoryId || !hotelId) return bad(res, 400, 'category_id and hotel_id are required');
-    // hotel_id arrives from the client and the response carries vendor PII
-    // (name, email, mobile), so the hotel must be validated against the
-    // caller's own scope — otherwise any buyer could enumerate every tenant's
-    // vendor panel by walking hotel ids.
-    if (!(await userCanAccessHotel(req, hotelId))) {
-      return bad(res, 403, 'You do not have access to this hotel', 3);
+    const hotelIds = parseHotelIdsParam(req.query);
+    if (!categoryId || hotelIds.length === 0) {
+      return bad(res, 400, 'category_id and hotel_id (or hotel_ids) are required');
     }
-    const rows = await db.any(
-      `SELECT DISTINCT u.id, u.name, u.email, u.mobile
-         FROM tbl_users u
-         JOIN tbl_vendor_hotel_category_subscription vhcs
-           ON vhcs.vendor_id = u.id
-        WHERE u.user_type = 3
-          AND u.status = 1
-          AND vhcs.status IN ('active', 'expired')
-          AND (
-            (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
-            OR
-            (vhcs.item_type = 'category' AND vhcs.item_id = $1)
-          )
-        ORDER BY u.name`,
-      [categoryId, hotelId]
-    );
-    return ok(res, { vendors: rows });
+    // The hotels arrive from the client and the response carries vendor PII
+    // (name, email, mobile), so EVERY hotel must be validated against the
+    // caller's own scope — otherwise any buyer could enumerate another
+    // tenant's vendor panel by slipping one foreign hotel into the list.
+    for (const hotelId of hotelIds) {
+      if (!(await userCanAccessHotel(req, hotelId))) {
+        return bad(res, 403, 'You do not have access to this hotel', 3);
+      }
+    }
+    const mappings = await rbacModel.getHotelCompanyMappings(hotelIds);
+    if (mappings.length !== hotelIds.length) return bad(res, 400, 'invalid hotel_ids');
+    if (new Set(mappings.map((m) => Number(m.hospitality_company_id))).size > 1) {
+      return bad(res, 400, 'All hotels must belong to the same company');
+    }
+    const vendors = await resolveArcVendorCoverage({ category_id: categoryId, hotel_ids: hotelIds });
+    return ok(res, { vendors });
   } catch (err) {
     logger.error({ err }, '[arcController.listEligibleVendors]');
     return bad(res, 500, err.message || 'Internal error', 3);

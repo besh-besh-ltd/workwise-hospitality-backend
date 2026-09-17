@@ -708,29 +708,9 @@ const arcModel = {
     );
   },
 
-  // ============================================================
-  // Vendor eligibility for ARC (category-based — mirrors RFQ's variant-based
-  // helper but joins through tbl_product_categories at category granularity).
-  // ============================================================
-
-  getEligibleVendorsForCategory: async ({ category_id, hotel_id }, txContext = null) => {
-    return (txContext || db).any(
-      `SELECT DISTINCT u.id, u.name, u.email
-         FROM tbl_users u
-         JOIN tbl_vendor_hotel_category_subscription vhcs
-           ON vhcs.vendor_id = u.id
-        WHERE u.user_type = 3
-          AND u.status = 1
-          AND vhcs.status IN ('active','expired')
-          AND (
-            (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
-            OR
-            (vhcs.item_type = 'category' AND vhcs.item_id = $1)
-          )
-        ORDER BY u.name`,
-      [category_id, hotel_id]
-    );
-  },
+  // Vendor eligibility lives in helper/arc_v2/arcEligibility.js
+  // (resolveArcVendorCoverage) — one resolver for the wizard picker, publish
+  // and float, using the RFQ rule (category AND hotel subscription).
 };
 
 const STATUS_GROUPS = {

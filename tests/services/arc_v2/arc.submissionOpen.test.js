@@ -31,6 +31,7 @@ import { db } from '../../setup/db.js';
 import { IDS } from '../../fixtures/ids.js';
 import { TEST_CATEGORIES } from '../../fixtures/vendors.js';
 import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from '../../helpers/arcPublishPolicy.js';
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -178,7 +179,10 @@ async function cleanupArc(arcId) {
 describe('ARC v2 — Sr 27 Option C: hidden-until-open + deferred float notification', () => {
   let buyerClient, vendorClient;
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`, [BUYER]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
     buyerClient  = await httpClient(BUYER);
@@ -186,6 +190,7 @@ describe('ARC v2 — Sr 27 Option C: hidden-until-open + deferred float notifica
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     // Approval-instance/policy teardown first (mirrors arc.publish.vendors.test.js
     // / arc.publishApproval.test.js convention), then the ARC rows themselves.
     for (const policyId of createdPolicyIds) {

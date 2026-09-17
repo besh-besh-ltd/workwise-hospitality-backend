@@ -28,6 +28,7 @@ import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
 import pricingEngine from "../../../app/services/pricingEngine.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -117,7 +118,10 @@ describe("ARC v2 — Phase 2: server-authoritative quote pricing", () => {
 
   // ── setup / teardown ────────────────────────────────────────────────────────
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = ANY($1::int[])`, [[BUYER, COMM_EVAL]]);
     await db.none(
       `UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = ANY($1::int[])`,
@@ -140,6 +144,7 @@ describe("ARC v2 — Phase 2: server-authoritative quote pricing", () => {
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     await cleanupArcEvalPerms(db, [BUYER, COMM_EVAL]);
     if (createdArcIds.length) {
       await db.none(

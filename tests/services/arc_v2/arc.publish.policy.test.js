@@ -42,6 +42,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const HC        = IDS.hospitality.A;          // 10001
 const HOTEL     = IDS.hotels.A1;              // 10101
@@ -136,7 +137,10 @@ describe("ARC v2 — Track D: process-NULL publish policy resolution", () => {
   const createdArcs = [];
   const ALL_POLICY_IDS = [POLICY_NULL_PROC, POLICY_PROC];
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     // acl([2,8]) gates on user_type; vendor must be an active vendor user so the
     // open ARC resolves ≥1 eligible vendor (so we hit policy resolution, not M2).
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id IN ($1,$2)`, [BUYER, APPROVER]);
@@ -151,6 +155,7 @@ describe("ARC v2 — Track D: process-NULL publish policy resolution", () => {
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     for (const arcId of createdArcs) await cleanupArc(arcId);
     for (const pid of ALL_POLICY_IDS) {
       await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [pid]);

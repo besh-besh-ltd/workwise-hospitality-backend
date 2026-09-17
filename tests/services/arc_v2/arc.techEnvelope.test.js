@@ -26,6 +26,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -80,7 +81,10 @@ describe("ARC v2 — technical envelope (two-envelope vendor flow + security)", 
     return { arcId: Number(arc.id), itemId: Number(item.id), teId: Number(te.id), clauseIds };
   }
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`, [BUYER]);
     await db.none(
       `UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = ANY($1::int[])`,
@@ -132,6 +136,7 @@ describe("ARC v2 — technical envelope (two-envelope vendor flow + security)", 
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     if (createdArcIds.length) {
       await db.none(
         `DELETE FROM tbl_arc_item_tech_evaluation_vendors_response_files

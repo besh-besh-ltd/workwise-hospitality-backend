@@ -18,6 +18,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const BUYER        = IDS.users.a1_proc_buyer;     // ARC creator
 const NON_CREATOR  = IDS.users.a1_proc_commEval;  // same hotel, NO arc-comm.* RBAC perm by default
@@ -83,7 +84,10 @@ async function eventRows(arcId, eventType = "deadline_extended") {
 
 let buyerClient, nonCreatorClient, evalClient, crossTenantClient, vendorClient;
 
+// ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+let hotelSubIds = [];
 beforeAll(async () => {
+  hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
   await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`,
     [[BUYER, NON_CREATOR, EVAL_USER, CROSS_TENANT]]);
   await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR]);
@@ -101,6 +105,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await revokeVendorSubs(hotelSubIds);
   for (const arcId of createdArcIds) {
     await db.none(`DELETE FROM tbl_arc_quote_line WHERE arc_quote_id IN (SELECT id FROM tbl_arc_quote WHERE arc_id = $1)`, [arcId]);
     await db.none(`DELETE FROM tbl_arc_quote WHERE arc_id = $1`, [arcId]);

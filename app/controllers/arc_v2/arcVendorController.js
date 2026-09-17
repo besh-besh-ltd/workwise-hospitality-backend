@@ -9,6 +9,7 @@ import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
 import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
+import { vendorCanSubmitForHotels } from '../../helper/arc_v2/arcEligibility.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
@@ -124,18 +125,14 @@ async function vendorInvitedToArc(arcId, vendorId) {
   return !!row;
 }
 
-// H1 — submitting a binding quote requires a CURRENTLY ACTIVE subscription for
-// the ARC's hotel or category (lapsed/expired vendors may draft but not send).
+// H1 — submitting a binding quote requires CURRENTLY ACTIVE subscriptions:
+// the ARC's category AND its hotel (lapsed/expired vendors may draft but not
+// send). Same rule the invitation uses — see helper/arc_v2/arcEligibility.js.
 async function vendorHasActiveSubscription(vendorId, arc) {
-  const row = await db.oneOrNone(
-    `SELECT 1 FROM tbl_vendor_hotel_category_subscription
-      WHERE vendor_id = $1 AND status = 'active'
-        AND ((item_type = 'hotel'    AND item_id = $2)
-          OR (item_type = 'category' AND item_id = $3))
-      LIMIT 1`,
-    [vendorId, arc.hotel_id, arc.category_id]
-  );
-  return !!row;
+  return vendorCanSubmitForHotels(vendorId, {
+    category_id: arc.category_id,
+    hotel_ids: [arc.hotel_id],
+  });
 }
 
 // H3 — any supplied rate/gst must be a non-negative number (draft tolerance:
