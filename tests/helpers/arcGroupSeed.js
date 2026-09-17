@@ -100,12 +100,21 @@ export function openSubmissionWindow() {
   };
 }
 
-/** Delete ARCs created by a suite, with the rows that do not cascade. */
+/**
+ * Delete ARCs created by a suite, with the rows that do not cascade — in
+ * foreign-key order: contracts reference items (RESTRICT) and awards reference
+ * quote lines (RESTRICT), so both go before the rows they point at.
+ */
 export async function deleteArcs(arcIds, runner = db) {
   const ids = (arcIds || []).map(Number).filter(Boolean);
   if (!ids.length) return;
   await runner.none(`DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = ANY($1::text[])`, [ids.map(String)]);
   await runner.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_contract_clarification WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_contract_signature_otp WHERE arc_contract_id IN (SELECT id FROM tbl_arc_contract WHERE arc_id = ANY($1::bigint[]))`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_contract_line WHERE arc_contract_id IN (SELECT id FROM tbl_arc_contract WHERE arc_id = ANY($1::bigint[]))`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_contract WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_comm_evaluation WHERE arc_id = ANY($1::bigint[])`, [ids]);
   await runner.none(`DELETE FROM tbl_arc_quote_line WHERE arc_quote_id IN (SELECT id FROM tbl_arc_quote WHERE arc_id = ANY($1::bigint[]))`, [ids]);
   await runner.none(`DELETE FROM tbl_arc_quote_version WHERE arc_id = ANY($1::bigint[])`, [ids]);
   await runner.none(`DELETE FROM tbl_arc_quote WHERE arc_id = ANY($1::bigint[])`, [ids]);
