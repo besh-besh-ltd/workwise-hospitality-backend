@@ -9,7 +9,8 @@ import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
 import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
-import { vendorCanSubmitForHotels } from '../../helper/arc_v2/arcEligibility.js';
+import { vendorCanSubmitForHotels, resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
@@ -128,10 +129,14 @@ async function vendorInvitedToArc(arcId, vendorId) {
 // H1 — submitting a binding quote requires CURRENTLY ACTIVE subscriptions:
 // the ARC's category AND its hotel (lapsed/expired vendors may draft but not
 // send). Same rule the invitation uses — see helper/arc_v2/arcEligibility.js.
+//
+// A GROUP rate contract checks the hotels this vendor was invited for: being
+// active at any one of them is enough to quote, since awards are limited to
+// the vendor's invited hotels anyway.
 async function vendorHasActiveSubscription(vendorId, arc) {
   return vendorCanSubmitForHotels(vendorId, {
     category_id: arc.category_id,
-    hotel_ids: [arc.hotel_id],
+    hotel_ids: await arcHotelModel.vendorInvitedHotelIds(arc, vendorId),
   });
 }
 
@@ -425,6 +430,13 @@ export async function listRequests(req, res) {
     const rows = await db.any(
       `SELECT a.id, a.arc_number, a.title, a.status, a.category_id, a.hotel_id,
               a.submission_start_at, a.submission_end_at,
+              a.is_group,
+              -- A group rate contract: the hotels THIS vendor may quote for.
+              CASE WHEN a.is_group THEN COALESCE((
+                SELECT array_agg(ih.hotel_id ORDER BY ih.hotel_id)
+                  FROM tbl_arc_invitation_hotel ih
+                 WHERE ih.arc_invitation_id = i.id), '{}')
+              ELSE ARRAY[a.hotel_id] END AS invited_hotel_ids,
               i.status AS invitation_status, i.invited_at, i.responded_at,
               q.id AS quote_id, q.submitted_at AS quote_submitted_at
          FROM tbl_arc a
@@ -442,6 +454,7 @@ export async function listRequests(req, res) {
         ORDER BY a.submission_end_at`,
       [vendorId]
     );
+    for (const r of rows) r.invited_hotel_ids = (r.invited_hotel_ids || []).map(Number);
     return ok(res, { requests: rows });
   } catch (err) {
     logger.error({ err }, '[vendorController.listRequests]');
@@ -532,9 +545,30 @@ export async function getRequestDetail(req, res) {
         WHERE u.id = $1`,
       [vendorId]
     );
+    // GROUP rate contract: the vendor sees only the hotels it was invited for,
+    // each item's quantity at those hotels (and a total over them — what it can
+    // be awarded), and which of its hotels need a subscription renewal before it
+    // can submit. Other hotels' names and volumes are not disclosed.
+    let renewal_needed_hotel_ids = [];
+    if (arc.is_group) {
+      const invitedHotelIds = await arcHotelModel.vendorInvitedHotelIds(arc, vendorId);
+      const invited = new Set(invitedHotelIds);
+      arc.hotels = (await arcHotelModel.listArcHotels(arc))
+        .filter((h) => invited.has(h.hotel_id))
+        .map(({ hotel_id, name, city, state }) => ({ hotel_id, name, city, state }));
+      const split = await arcHotelModel.listItemHotelQtys(arcId);
+      for (const it of items) {
+        it.hotel_qtys = (split[String(it.id)] || []).filter((q) => invited.has(q.hotel_id));
+        it.indicative_qty = it.hotel_qtys.reduce((sum, q) => sum + q.indicative_qty, 0);
+      }
+      const coverage = await resolveArcVendorCoverage({ category_id: arc.category_id, hotel_ids: invitedHotelIds });
+      const mine = coverage.find((v) => Number(v.id) === Number(vendorId));
+      renewal_needed_hotel_ids = mine ? mine.renewal_needed_hotel_ids : invitedHotelIds;
+    }
     return ok(res, {
       arc, items, invitation, quote, lines, tech_envelope,
       vendor_profile_gstin: profile?.gstin || null,
+      renewal_needed_hotel_ids,
     });
   } catch (err) {
     logger.error({ err }, '[vendorController.getRequestDetail]');

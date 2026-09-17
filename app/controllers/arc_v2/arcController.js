@@ -123,6 +123,45 @@ export async function notifyVendorsOfFloat(arc, invitations, actorId) {
 }
 
 /**
+ * Who is invited to quote, and for which hotels.
+ *
+ *   open        → every eligible vendor (category AND hotel subscription) for
+ *                 at least one covered hotel
+ *   invitation  → the buyer's picks. For a GROUP ARC, picks that serve none of
+ *                 the covered hotels are reported (publish refuses them) and
+ *                 left out; a single-hotel ARC keeps the buyer's pick as before.
+ *
+ * Also returns the covered hotels no invited vendor serves, so the buyer knows
+ * before floating that a hotel may end up without a supplier.
+ *
+ * @returns {{ vendorIds: number[], hotelIdsByVendor: Map<number, number[]>,
+ *             uncoveredHotelIds: number[], picksServingNoHotel: Array<{id, name}> }}
+ */
+async function resolveArcVendorPanel(arc, runner = db) {
+  const hotelIds = await arcHotelModel.arcHotelIds(arc, runner);
+  const coverage = await resolveArcVendorCoverage({ category_id: arc.category_id, hotel_ids: hotelIds }, runner);
+  const hotelIdsByVendor = new Map(coverage.map((v) => [Number(v.id), v.hotel_ids]));
+  let vendorIds;
+  let picksServingNoHotel = [];
+  if (arc.eligibility_type === 'open') {
+    vendorIds = [...hotelIdsByVendor.keys()];
+  } else {
+    const picked = await arcModel.listInvitations(arc.id, runner);
+    if (arc.is_group) {
+      vendorIds = picked.map((i) => Number(i.vendor_id)).filter((id) => hotelIdsByVendor.has(id));
+      picksServingNoHotel = picked
+        .filter((i) => !hotelIdsByVendor.has(Number(i.vendor_id)))
+        .map((i) => ({ id: Number(i.vendor_id), name: i.vendor_name || null }));
+    } else {
+      vendorIds = picked.map((i) => Number(i.vendor_id));
+    }
+  }
+  const served = new Set(vendorIds.flatMap((id) => hotelIdsByVendor.get(id) || []));
+  const uncoveredHotelIds = arc.is_group ? hotelIds.filter((h) => !served.has(h)) : [];
+  return { vendorIds, hotelIdsByVendor, uncoveredHotelIds, picksServingNoHotel };
+}
+
+/**
  * Float an ARC live: resolve + persist the vendor panel, flip to 'floated',
  * and return the data needed to notify vendors. This is the reusable extraction
  * of today's publish side-effects, called by the post-approval hook (and never
@@ -144,25 +183,19 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   const arc = await arcModel.getById(arcId, runner);
   if (!arc) return { floated: false, reason: 'arc_not_found' };
 
-  // Resolve the vendor panel (same logic as today's publish): "open" resolves
-  // eligible vendors for (category, hotel); "invitation" uses the rows set at
-  // createDraft.
-  let vendorIds;
-  if (arc.eligibility_type === 'open') {
-    const eligible = await resolveArcVendorCoverage(
-      { category_id: arc.category_id, hotel_ids: [arc.hotel_id] }, runner);
-    vendorIds = eligible.map((v) => Number(v.id));
-  } else {
-    const inv = await arcModel.listInvitations(arcId, runner);
-    vendorIds = inv.map((i) => Number(i.vendor_id));
-  }
+  // Resolve the vendor panel (same logic as publish — resolveArcVendorPanel),
+  // re-checked now because subscriptions can lapse while publish awaits approval.
+  const panel = await resolveArcVendorPanel(arc, runner);
+  const vendorIds = panel.vendorIds;
   if (vendorIds.length === 0) return { floated: false, reason: 'no_vendors' };
 
   const items = await arcModel.listItems(arcId, runner);
 
   const doFloat = async (t) => {
     const updated = await arcModel.setStatus(arcId, 'floated', {}, t);
-    if (arc.eligibility_type === 'open') await arcModel.setInvitations(arcId, vendorIds, t);
+    // A group ARC also drops hand-picked vendors that no longer serve any hotel.
+    if (arc.eligibility_type === 'open' || arc.is_group) await arcModel.setInvitations(arcId, vendorIds, t);
+    if (arc.is_group) await arcHotelModel.setInvitationHotels(arcId, panel.hotelIdsByVendor, t);
     const invitations = await arcModel.listInvitations(arcId, t);
     await logArcEvent({
       arcId, eventType: ARC_EVENT_TYPES.PUBLISHED, actorId,
@@ -494,18 +527,14 @@ export async function publish(req, res) {
     if (missing.length > 0) return bad(res, 400, `Missing or invalid: ${missing.join(', ')}`);
 
     // Resolve the vendor panel BEFORE flipping so we can refuse to float to
-    // nobody (audit M2). "open" resolves eligible vendors for (category, hotel);
-    // "invitation" uses the rows set at createDraft.
-    let vendorIds;
-    if (arc.eligibility_type === 'open') {
-      const eligible = await resolveArcVendorCoverage(
-        { category_id: arc.category_id, hotel_ids: [arc.hotel_id] }
-      );
-      vendorIds = eligible.map((v) => Number(v.id));
-    } else {
-      const inv = await arcModel.listInvitations(id);
-      vendorIds = inv.map((i) => Number(i.vendor_id));
+    // nobody (audit M2) — see resolveArcVendorPanel.
+    const panel = await resolveArcVendorPanel(arc);
+    if (panel.picksServingNoHotel.length > 0) {
+      const names = panel.picksServingNoHotel.map((v) => (v.name ? `${v.name} (#${v.id})` : `#${v.id}`)).join(', ');
+      return bad(res, 400,
+        `These invited vendors cannot serve any of this rate contract's hotels — remove them or pick vendors subscribed to these hotels: ${names}`);
     }
+    const vendorIds = panel.vendorIds;
     if (vendorIds.length === 0) {
       return bad(res, 400, 'No eligible vendors to invite — cannot float this rate contract to nobody');
     }
@@ -563,6 +592,7 @@ export async function publish(req, res) {
         approval_instance_id: result.approval_instance_id,
         floated: didFloat,
         vendor_count: floatedInvites.length,
+        uncovered_hotel_ids: panel.uncoveredHotelIds,
       }, didFloat ? 'ARC floated' : 'ARC publish auto-approved but could not float');
     }
 
@@ -570,6 +600,7 @@ export async function publish(req, res) {
       arc: { ...arc, status: 'pending_publish_approval' },
       approval_instance_id: result.approval_instance_id,
       floated: false,
+      uncovered_hotel_ids: panel.uncoveredHotelIds,
     }, 'Submitted for publish approval');
   } catch (err) {
     // A no-policy (or any pre-mapped) failure surfaces its actionable message

@@ -88,3 +88,26 @@ export async function restoreUserTypes(before, runner = db) {
     await runner.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [row.id, row.user_type]);
   }
 }
+
+/** A valid, already-open submission window (ISO strings), as publish requires. */
+export function openSubmissionWindow() {
+  const now = Date.now();
+  return {
+    submission_start_at: new Date(now - 2 * 86400_000).toISOString(),
+    submission_end_at: new Date(now + 10 * 86400_000).toISOString(),
+    contract_start_at: new Date(now + 30 * 86400_000).toISOString(),
+    contract_end_at: new Date(now + 365 * 86400_000).toISOString(),
+  };
+}
+
+/** Delete ARCs created by a suite, with the rows that do not cascade. */
+export async function deleteArcs(arcIds, runner = db) {
+  const ids = (arcIds || []).map(Number).filter(Boolean);
+  if (!ids.length) return;
+  await runner.none(`DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = ANY($1::text[])`, [ids.map(String)]);
+  await runner.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_quote_line WHERE arc_quote_id IN (SELECT id FROM tbl_arc_quote WHERE arc_id = ANY($1::bigint[]))`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_quote_version WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc_quote WHERE arc_id = ANY($1::bigint[])`, [ids]);
+  await runner.none(`DELETE FROM tbl_arc WHERE id = ANY($1::bigint[])`, [ids]);
+}

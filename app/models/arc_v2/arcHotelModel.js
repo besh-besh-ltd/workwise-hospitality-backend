@@ -6,6 +6,7 @@ import db from '../../config/dbConn.js';
  * The ONLY module that reads or writes the group-only tables:
  *   tbl_arc_hotel_mappings            hotels a group ARC covers (lead included)
  *   tbl_arc_item_hotel_qty            expected quantity per item per hotel
+ *   tbl_arc_invitation_hotel          hotels each invited vendor may quote for
  *
  * tbl_arc.hotel_id is the LEAD hotel. A single-hotel ARC (is_group = false)
  * has no rows here, and every reader below answers for it from the lead hotel,
@@ -147,6 +148,64 @@ const arcHotelModel = {
         WHERE t.arc_item_id = i.id AND i.arc_id = $1`,
       [arcId]
     );
+  },
+
+  /**
+   * Record, for each invited vendor, the covered hotels it may quote for and
+   * win. Replaces the ARC's previous snapshot.
+   *
+   * @param {Map<number, number[]>} hotelIdsByVendor — vendor id → hotel ids
+   */
+  setInvitationHotels: async (arcId, hotelIdsByVendor, txContext = null) => {
+    const runner = txContext || db;
+    await runner.none(
+      `DELETE FROM tbl_arc_invitation_hotel
+        WHERE arc_invitation_id IN (SELECT id FROM tbl_arc_invitation WHERE arc_id = $1)`,
+      [arcId]
+    );
+    for (const [vendorId, hotelIds] of hotelIdsByVendor) {
+      await runner.none(
+        `INSERT INTO tbl_arc_invitation_hotel (arc_invitation_id, hotel_id)
+         SELECT i.id, h FROM tbl_arc_invitation i, UNNEST($3::int[]) AS h
+          WHERE i.arc_id = $1 AND i.vendor_id = $2
+         ON CONFLICT (arc_invitation_id, hotel_id) DO NOTHING`,
+        [arcId, Number(vendorId), toIds(hotelIds)]
+      );
+    }
+  },
+
+  /** { [vendor_id]: hotel_id[] } — each list ascending. */
+  listInvitationHotels: async (arcId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT i.vendor_id, ih.hotel_id
+         FROM tbl_arc_invitation_hotel ih
+         JOIN tbl_arc_invitation i ON i.id = ih.arc_invitation_id
+        WHERE i.arc_id = $1
+        ORDER BY i.vendor_id, ih.hotel_id`,
+      [arcId]
+    );
+    const byVendor = {};
+    for (const r of rows) (byVendor[String(r.vendor_id)] ||= []).push(Number(r.hotel_id));
+    return byVendor;
+  },
+
+  /**
+   * The hotels this vendor may quote for on this ARC. A single-hotel ARC: its
+   * hotel. A group ARC: the vendor's invitation snapshot (empty if not invited).
+   *
+   * @param {{ id, hotel_id, is_group }} arc
+   */
+  vendorInvitedHotelIds: async (arc, vendorId, txContext = null) => {
+    if (!arc.is_group) return [Number(arc.hotel_id)];
+    const rows = await (txContext || db).any(
+      `SELECT ih.hotel_id
+         FROM tbl_arc_invitation_hotel ih
+         JOIN tbl_arc_invitation i ON i.id = ih.arc_invitation_id
+        WHERE i.arc_id = $1 AND i.vendor_id = $2
+        ORDER BY ih.hotel_id`,
+      [arc.id, Number(vendorId)]
+    );
+    return rows.map((r) => Number(r.hotel_id));
   },
 
   /**
