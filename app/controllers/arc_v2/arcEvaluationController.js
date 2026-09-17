@@ -14,6 +14,7 @@ import { executeApprovalAction, dispatchPostApprovalAction } from '../../service
 import axios from 'axios';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 
 /**
@@ -1012,7 +1013,21 @@ export async function getCommEval(req, res) {
         if (/relation .* does not exist/i.test(err.message)) return [];
         throw err;
       });
-    return ok(res, { arc, comm_evaluation: comm, items, quotes: redacted, awards, qualified_by_item, clarifications });
+    // GROUP rate contract: the hotels, each item's per-hotel quantity, which
+    // hotels each vendor was invited for, and each award's per-hotel split —
+    // everything the allocation matrix needs to award hotel by hotel.
+    let group = {};
+    if (arc.is_group) {
+      const [hotels, item_hotel_qtys, invitation_hotels, awardHotels] = await Promise.all([
+        arcHotelModel.listArcHotels(arc),
+        arcHotelModel.listItemHotelQtys(arcId),
+        arcHotelModel.listInvitationHotels(arcId),
+        comm ? arcHotelModel.listAwardHotels(comm.id) : {},
+      ]);
+      for (const a of awards) a.hotels = awardHotels[String(a.id)] || [];
+      group = { hotels, item_hotel_qtys, invitation_hotels };
+    }
+    return ok(res, { arc, comm_evaluation: comm, items, quotes: redacted, awards, qualified_by_item, clarifications, ...group });
   } catch (err) {
     logger.error({ err }, '[evalController.getCommEval]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -1025,6 +1040,12 @@ export async function getCommEval(req, res) {
  *
  * Enforces the reconciliation invariant: SUM(allocated_qty) for the item must
  * equal tbl_arc_item.indicative_qty.
+ *
+ * GROUP rate contract — each allocation also names a hotel_id, and the rules
+ * are per hotel: the hotel must be covered, the vendor must have been invited
+ * for it, and a hotel's allocations must add up to its expected quantity (or be
+ * absent — a hotel no invited vendor serves may stay unawarded). The allocations
+ * are stored as one award per vendor (its total) plus that award's hotel split.
  */
 export async function saveAllocation(req, res) {
   try {
@@ -1043,12 +1064,42 @@ export async function saveAllocation(req, res) {
       // Empty allocations[] = explicit CLEAR — the item returns to pending.
       // Non-empty allocations must reconcile to the indicative qty and only
       // name vendors the (approved) technical evaluation qualified.
-      if (allocations.length > 0) {
+      const isGroup = !!lifecycle.arc.is_group;
+      if (allocations.length > 0 && isGroup) {
+        const coveredHotelIds = await arcHotelModel.arcHotelIds(lifecycle.arc, t);
+        const invitedHotels = await arcHotelModel.listInvitationHotels(arcId, t);
+        const expected = new Map(
+          ((await arcHotelModel.listItemHotelQtys(arcId, t))[String(item_id)] || [])
+            .map((r) => [r.hotel_id, r.indicative_qty])
+        );
+        const perHotel = new Map();
+        for (const a of allocations) {
+          const hotelId = Number(a.hotel_id);
+          const vendorId = Number(a.awarded_vendor_id);
+          const qty = Number(a.allocated_qty);
+          if (!coveredHotelIds.includes(hotelId)) {
+            return deferBad(400, `Hotel ${a.hotel_id} is not covered by this rate contract`);
+          }
+          if (!(invitedHotels[String(vendorId)] || []).includes(hotelId)) {
+            return deferBad(400, `Vendor ${vendorId} was not invited to supply hotel ${hotelId}`);
+          }
+          if (!(qty > 0)) return deferBad(400, 'Each allocation needs a quantity greater than zero');
+          perHotel.set(hotelId, (perHotel.get(hotelId) || 0) + qty);
+        }
+        for (const [hotelId, sum] of perHotel) {
+          const target = expected.get(hotelId) || 0;
+          if (Math.abs(sum - target) > 1e-6) {
+            return deferBad(400, `Allocations for hotel ${hotelId} (${sum}) must equal its expected quantity (${target})`);
+          }
+        }
+      } else if (allocations.length > 0) {
         const sum = allocations.reduce((s, a) => s + Number(a.allocated_qty || 0), 0);
         const target = Number(item.indicative_qty);
         if (Math.abs(sum - target) > 1e-6) {
           return deferBad(400, `Allocations sum (${sum}) must equal indicative_qty (${target})`);
         }
+      }
+      if (allocations.length > 0) {
         // §5.2 — universal (ARC-wide) knockout applies to EVERY item, incl.
         // clause-less ones. Check it FIRST so a globally-failed vendor gets the
         // accurate ARC-wide reason even on clause-bearing items (otherwise the
@@ -1080,7 +1131,27 @@ export async function saveAllocation(req, res) {
         });
         commEvalJustOpened = true;
       }
-      const inserted = await arcEvalModel.setItemAwards(comm.id, item_id, allocations, t);
+      let inserted;
+      if (isGroup) {
+        // One award per vendor — its total across hotels — plus the hotel split.
+        const byVendor = new Map();
+        for (const a of allocations) {
+          const vendorId = Number(a.awarded_vendor_id);
+          const entry = byVendor.get(vendorId) || { ...a, allocated_qty: 0, hotels: [] };
+          entry.allocated_qty += Number(a.allocated_qty);
+          entry.hotels.push({ hotel_id: Number(a.hotel_id), allocated_qty: Number(a.allocated_qty) });
+          byVendor.set(vendorId, entry);
+        }
+        const vendorAwards = [...byVendor.values()];
+        inserted = await arcEvalModel.setItemAwards(comm.id, item_id, vendorAwards, t);
+        for (const award of inserted) {
+          const entry = byVendor.get(Number(award.awarded_vendor_id));
+          await arcHotelModel.setAwardHotels(award.id, entry.hotels, t);
+          award.hotels = entry.hotels;
+        }
+      } else {
+        inserted = await arcEvalModel.setItemAwards(comm.id, item_id, allocations, t);
+      }
       await arcEvalModel.appendCommEvalHistory(
         comm.id, allocations.length ? 'allocation_saved' : 'allocation_cleared',
         { item_id, allocations }, userId, t);
@@ -1125,16 +1196,43 @@ export async function finalizeCommEval(req, res) {
       }
       // Validate every item has allocations that sum to indicative_qty.
       const awards = await arcEvalModel.listAwards(comm.id, t);
-      const byItem = new Map();
-      for (const a of awards) {
-        const key = String(a.arc_item_id);
-        byItem.set(key, (byItem.get(key) || 0) + Number(a.allocated_qty));
-      }
       const itemsMissing = [];
-      for (const item of items) {
-        const got = byItem.get(String(item.id)) || 0;
-        if (Math.abs(got - Number(item.indicative_qty)) > 1e-6) {
-          itemsMissing.push({ item_id: item.id, indicative_qty: item.indicative_qty, allocated: got });
+      // GROUP: hotels a finalized award leaves without a supplier (reported, allowed).
+      const unawarded = [];
+      if (arc.is_group) {
+        // Per hotel: allocations add up to the hotel's expected quantity, or the
+        // hotel is left unawarded. Every item must be awarded at SOME hotel.
+        const expectedByItem = await arcHotelModel.listItemHotelQtys(arcId, t);
+        const awardHotels = await arcHotelModel.listAwardHotels(comm.id, t);
+        for (const item of items) {
+          const got = new Map();
+          for (const a of awards.filter((x) => Number(x.arc_item_id) === Number(item.id))) {
+            for (const h of awardHotels[String(a.id)] || []) got.set(h.hotel_id, (got.get(h.hotel_id) || 0) + h.allocated_qty);
+          }
+          let awardedSomewhere = false;
+          for (const row of expectedByItem[String(item.id)] || []) {
+            const allocated = got.get(row.hotel_id) || 0;
+            if (allocated === 0) {
+              if (row.indicative_qty > 0) unawarded.push({ item_id: Number(item.id), hotel_id: row.hotel_id });
+            } else if (Math.abs(allocated - row.indicative_qty) > 1e-6) {
+              itemsMissing.push({ item_id: item.id, hotel_id: row.hotel_id, indicative_qty: row.indicative_qty, allocated });
+            } else {
+              awardedSomewhere = true;
+            }
+          }
+          if (!awardedSomewhere) itemsMissing.push({ item_id: item.id, allocated: 0 });
+        }
+      } else {
+        const byItem = new Map();
+        for (const a of awards) {
+          const key = String(a.arc_item_id);
+          byItem.set(key, (byItem.get(key) || 0) + Number(a.allocated_qty));
+        }
+        for (const item of items) {
+          const got = byItem.get(String(item.id)) || 0;
+          if (Math.abs(got - Number(item.indicative_qty)) > 1e-6) {
+            itemsMissing.push({ item_id: item.id, indicative_qty: item.indicative_qty, allocated: got });
+          }
         }
       }
       if (itemsMissing.length > 0) {
@@ -1196,7 +1294,7 @@ export async function finalizeCommEval(req, res) {
         actorId: userId, payload: { item_count: items.length, approval_instance_id: instanceRow.id }, txContext: t,
       });
       return {
-        __data: { comm_evaluation: updated, approval_instance_id: instanceRow.id },
+        __data: { comm_evaluation: updated, approval_instance_id: instanceRow.id, unawarded },
         __autoApproved: engineResult.autoApproved === true,
       };
     });
@@ -1341,6 +1439,14 @@ async function resolveClarification(req, res, mode) {
 
       let oldValue = cl.old_value ?? null;
       let newValue = oldValue;
+      if (mode === 'revise' && cl.field === 'committed_qty') {
+        const arcRow = await arcModel.getById(arcId, t);
+        if (arcRow?.is_group) {
+          // A group award's quantity is a sum across hotels; changing it here
+          // would silently break the per-hotel split. Uphold, or re-award.
+          return deferBad(409, 'Per-hotel quantities on a group rate contract cannot be revised through a clarification — uphold it instead.');
+        }
+      }
       if (mode === 'revise') {
         if (req.body?.value === undefined || req.body?.value === null || req.body?.value === '') {
           return deferBad(400, 'A revised value is required');

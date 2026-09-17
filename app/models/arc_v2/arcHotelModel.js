@@ -7,6 +7,8 @@ import db from '../../config/dbConn.js';
  *   tbl_arc_hotel_mappings            hotels a group ARC covers (lead included)
  *   tbl_arc_item_hotel_qty            expected quantity per item per hotel
  *   tbl_arc_invitation_hotel          hotels each invited vendor may quote for
+ *   tbl_arc_comm_evaluation_award_hotel  how an award (item × vendor) splits by hotel
+ *   tbl_arc_contract_line_hotel       per-hotel ledger of a contract line
  *
  * tbl_arc.hotel_id is the LEAD hotel. A single-hotel ARC (is_group = false)
  * has no rows here, and every reader below answers for it from the lead hotel,
@@ -206,6 +208,81 @@ const arcHotelModel = {
       [arc.id, Number(vendorId)]
     );
     return rows.map((r) => Number(r.hotel_id));
+  },
+
+  /**
+   * Replace an award's per-hotel split (rows with a positive quantity only).
+   *
+   * @param {Array<{ hotel_id: number, allocated_qty: number }>} rows
+   */
+  setAwardHotels: async (awardId, rows, txContext = null) => {
+    const runner = txContext || db;
+    await runner.none(
+      `DELETE FROM tbl_arc_comm_evaluation_award_hotel WHERE arc_comm_evaluation_award_id = $1`,
+      [awardId]
+    );
+    for (const row of rows || []) {
+      if (!(Number(row.allocated_qty) > 0)) continue;
+      await runner.none(
+        `INSERT INTO tbl_arc_comm_evaluation_award_hotel (arc_comm_evaluation_award_id, hotel_id, allocated_qty)
+         VALUES ($1, $2, $3)`,
+        [awardId, Number(row.hotel_id), Number(row.allocated_qty)]
+      );
+    }
+  },
+
+  /** { [award_id]: [{ hotel_id, allocated_qty }] } for a commercial evaluation. */
+  listAwardHotels: async (commEvalId, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT h.arc_comm_evaluation_award_id AS award_id, h.hotel_id, h.allocated_qty
+         FROM tbl_arc_comm_evaluation_award_hotel h
+         JOIN tbl_arc_comm_evaluation_award a ON a.id = h.arc_comm_evaluation_award_id
+        WHERE a.arc_comm_evaluation_id = $1
+        ORDER BY h.arc_comm_evaluation_award_id, h.hotel_id`,
+      [commEvalId]
+    );
+    const byAward = {};
+    for (const r of rows) {
+      (byAward[String(r.award_id)] ||= []).push({ hotel_id: Number(r.hotel_id), allocated_qty: Number(r.allocated_qty) });
+    }
+    return byAward;
+  },
+
+  /**
+   * Bring a contract line's per-hotel ledger in line with its award.
+   *
+   * committed_qty follows the award; consumed_qty is NEVER reset, so a
+   * clarification-driven regeneration keeps what each hotel has already
+   * called off. A hotel dropped from the award loses its row, unless it has
+   * already consumed something — then its row stays, committed at 0, so the
+   * usage history survives.
+   *
+   * @param {Array<{ hotel_id: number, allocated_qty: number }>} awardHotels
+   */
+  syncContractLineHotels: async (contractLineId, awardHotels, txContext = null) => {
+    const runner = txContext || db;
+    const keep = [];
+    for (const row of awardHotels || []) {
+      keep.push(Number(row.hotel_id));
+      await runner.none(
+        `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (arc_contract_line_id, hotel_id) DO UPDATE
+           SET committed_qty = EXCLUDED.committed_qty, updated_at = CURRENT_TIMESTAMP`,
+        [contractLineId, Number(row.hotel_id), Number(row.allocated_qty)]
+      );
+    }
+    await runner.none(
+      `DELETE FROM tbl_arc_contract_line_hotel
+        WHERE arc_contract_line_id = $1 AND hotel_id <> ALL($2::int[]) AND consumed_qty = 0`,
+      [contractLineId, keep]
+    );
+    await runner.none(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET committed_qty = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE arc_contract_line_id = $1 AND hotel_id <> ALL($2::int[])`,
+      [contractLineId, keep]
+    );
   },
 
   /**
