@@ -1019,7 +1019,9 @@ export async function getActiveSummary(req, res) {
                 cl.arc_item_id,
                 ai.product_variant_id,
                 pv.name          AS variant_name,
-                ai.uom
+                ai.uom,
+                mr.hotel_id,
+                mh.name          AS hotel_name
            FROM tbl_arc_callof_po cp
            JOIN tbl_arc_contract       c  ON c.id  = cp.arc_contract_id
            JOIN tbl_arc_contract_line  cl ON cl.id = cp.arc_contract_line_id
@@ -1027,6 +1029,7 @@ export async function getActiveSummary(req, res) {
            LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
            LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
            LEFT JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+           LEFT JOIN tbl_hospitality_company_hotels mh ON mh.id = mr.hotel_id
            LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
           WHERE c.arc_id = $1
           ORDER BY cp.released_at DESC`,
@@ -1091,7 +1094,11 @@ export async function getActiveSummary(req, res) {
       contract:    c,
       consumption: await arcContractModel.consumptionForContract(c.id),
     })));
-    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums });
+    // GROUP rate contract: how each covered hotel is using it (PRD §8 step 8).
+    const group = arc.is_group
+      ? { hotels: await arcHotelModel.listArcHotels(arc), ...(await arcHotelModel.hotelUsageForArc(arc)) }
+      : {};
+    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums, ...group });
   } catch (err) {
     logger.error({ err }, '[contractController.getActiveSummary]');
     return bad(res, 500, err.message || 'Internal error', 3);

@@ -20,6 +20,7 @@
 import db from '../config/dbConn.js';
 import arcModel from '../models/arc_v2/arcModel.js';
 import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
+import arcHotelModel from '../models/arc_v2/arcHotelModel.js';
 import rbacModel from '../models/rbacModel.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { sendMail, logError } from '../helper/common.js';
@@ -51,6 +52,10 @@ const AUDIENCE = Object.freeze({
   AWARDED_VENDORS:  'awarded_vendors',
   INVITED_VENDORS:  'invited_vendors',
   EVENT_VENDOR:     'event_vendor',
+  // GROUP rate contract only: staff who raise requisitions (mr.create) at any
+  // hotel the contract covers — they are the ones who order against it. Empty
+  // for a single-hotel ARC, so its audiences are unchanged.
+  COVERED_HOTEL_BUYERS: 'covered_hotel_buyers',
 });
 
 // Audiences whose members are vendors; every other audience is buyer-side.
@@ -373,7 +378,8 @@ const EVENT_CONFIG = {
   },
 
   [ARC_EVENT_TYPES.CONTRACT_ACTIVE]: {
-    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
+    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS, AUDIENCE.COVERED_HOTEL_BUYERS],
+    emailAudiences: [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
     email:        true,
     vendorFacing: false,
     title:        'Rate contract active',
@@ -517,7 +523,8 @@ const EVENT_CONFIG = {
   // ── Expiry / renewal (cron-driven — wired only if cron exists) ────────────
 
   [ARC_EVENT_TYPES.EXPIRING_SOON]: {
-    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
+    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS, AUDIENCE.COVERED_HOTEL_BUYERS],
+    emailAudiences: [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
     email:        true,
     vendorFacing: false,
     title:        'Rate contract expiring soon',
@@ -528,7 +535,8 @@ const EVENT_CONFIG = {
   },
 
   [ARC_EVENT_TYPES.EXPIRED]: {
-    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
+    audiences:    [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS, AUDIENCE.COVERED_HOTEL_BUYERS],
+    emailAudiences: [AUDIENCE.CREATOR, AUDIENCE.AWARDED_VENDORS],
     email:        true,
     vendorFacing: false,
     title:        'Rate contract expired',
@@ -730,6 +738,14 @@ async function resolveOneAudience(audience, arc, payload) {
             [arc.hotel_id], 'arc-comm', ['read'], arc.department_id
           );
         }
+        return tag(users);
+      }
+      case AUDIENCE.COVERED_HOTEL_BUYERS: {
+        if (!arc.is_group) return [];
+        const hotelIds = await arcHotelModel.arcHotelIds(arc);
+        const users = await rbacModel.getUsersWithModuleActionsForHotels(
+          hotelIds, 'mr', ['create'], arc.department_id
+        );
         return tag(users);
       }
       case AUDIENCE.AWARDED_VENDORS: {

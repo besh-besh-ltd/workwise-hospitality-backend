@@ -1066,6 +1066,13 @@ export async function getArcListView(req, res) {
     const pairs = (ids, names) => { const a = parseArr(ids); const b = parseArr(names); const out = []; a.forEach((id, i) => { if (id != null) out.push({ id: String(id), label: b[i] != null ? String(b[i]) : `#${id}` }); }); return out; };
     const prodPairs = (r) => pairs(r.product_variant_ids, r.item_names);
     const vendPairs = (r) => pairs(r.awarded_vendor_ids, r.awarded_vendor_names);
+    // Every hotel a row covers (a group rate contract counts under each).
+    const hotelPairs = (r) => {
+      const ids = Array.isArray(r.hotel_ids) && r.hotel_ids.length ? r.hotel_ids : [r.hotel_id];
+      const names = Array.isArray(r.hotel_names) ? r.hotel_names : [r.hotel_name];
+      return ids.filter((id) => id != null)
+        .map((id, idx) => ({ id: String(id), label: names[idx] || `Hotel ${id}` }));
+    };
 
     // 3. tab counts.
     const tab_counts = { all: rows.length, pending: 0, drafts: 0, ongoing: 0, approved: 0, active: 0, ended: 0 };
@@ -1085,7 +1092,7 @@ export async function getArcListView(req, res) {
     const BUCKET_LABEL = { draft: 'Draft', floated: 'Floated', eval: 'In Evaluation', committee: 'Committee Review', awaiting: 'Awaiting Vendor', active: 'Active', expiring: 'Expiring Soon', expired: 'Ended' };
     for (const r of tabRows) {
       bump(fm.status, r._bucket, BUCKET_LABEL[r._bucket] || r._bucket);
-      if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+      for (const hp of hotelPairs(r)) bump(fm.buId, hp.id, hp.label);
       if (r.category_id != null) bump(fm.categoryId, String(r.category_id), r.category_title || `Category ${r.category_id}`);
       if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
       for (const p of prodPairs(r)) bump(fm.productId, p.id, p.label);
@@ -1104,13 +1111,13 @@ export async function getArcListView(req, res) {
     // 6. facet + search filtering.
     const filtered = tabRows.filter((r) => {
       if (filters.status.length && !filters.status.includes(r._bucket)) return false;
-      if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+      if (filters.buId.length && !hotelPairs(r).some((hp) => filters.buId.includes(hp.id))) return false;
       if (filters.categoryId.length && !filters.categoryId.includes(String(r.category_id))) return false;
       if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
       if (filters.productId.length && !prodPairs(r).some((p) => filters.productId.includes(p.id))) return false;
       if (filters.vendorId.length && !vendPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
       if (search) {
-        const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${r.hotel_name || ''}`.toLowerCase();
+        const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${hotelPairs(r).map((hp) => hp.label).join(' ')}`.toLowerCase();
         if (!hay.includes(search)) return false;
       }
       // FY / custom creation-date window (server-authoritative; AND with other facets).

@@ -287,6 +287,11 @@ const arcModel = {
                 a.created_by, u.name AS created_by_name,
                 cat.title AS category_title,
                 h.name AS hotel_name, h.city AS hotel_city,
+                a.is_group,
+                -- Every hotel the ARC covers, the lead hotel first. A single-hotel
+                -- ARC covers just its hotel.
+                CASE WHEN a.is_group AND cov.hotel_ids IS NOT NULL THEN cov.hotel_ids ELSE ARRAY[a.hotel_id] END AS hotel_ids,
+                CASE WHEN a.is_group AND cov.hotel_names IS NOT NULL THEN cov.hotel_names ELSE ARRAY[h.name] END AS hotel_names,
                 d.title AS department_title,
                 COALESCE(item_agg.item_count, 0)::int AS item_count,
                 COALESCE(item_agg.item_names, '[]'::json) AS item_names,
@@ -320,6 +325,13 @@ const arcModel = {
            LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
            LEFT JOIN tbl_department d ON d.id = a.department_id
            LEFT JOIN tbl_arc_manual_entry me ON me.arc_id = a.id
+           LEFT JOIN LATERAL (
+             SELECT array_agg(m.hotel_id ORDER BY (m.hotel_id = a.hotel_id) DESC, mh.name, m.hotel_id) AS hotel_ids,
+                    array_agg(mh.name    ORDER BY (m.hotel_id = a.hotel_id) DESC, mh.name, m.hotel_id) AS hotel_names
+               FROM tbl_arc_hotel_mappings m
+               JOIN tbl_hospitality_company_hotels mh ON mh.id = m.hotel_id
+              WHERE m.arc_id = a.id
+           ) cov ON TRUE
            LEFT JOIN LATERAL (
              SELECT COUNT(*) AS item_count,
                     json_agg(pv.name ORDER BY ai.id) FILTER (WHERE pv.name IS NOT NULL) AS item_names,

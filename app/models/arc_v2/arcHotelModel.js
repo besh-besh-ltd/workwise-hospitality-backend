@@ -21,6 +21,12 @@ import db from '../../config/dbConn.js';
 
 const toIds = (ids) => [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
 
+// Purchase-order statuses that represent real spend: released or further along,
+// and not rejected or cancelled. Shared by on- and off-contract spend so the two
+// sides of the on-contract percentage are measured the same way.
+const SPEND_STATUSES = ['acceptance_pending', 'approved', 'sent', 'dispatched', 'GRN', 'invoice_raised', 'completed'];
+const round1 = (n) => Math.round(n * 10) / 10;
+
 const arcHotelModel = {
   /**
    * Make the ARC's coverage exactly `hotelIds`. Returns the stored ids, ascending.
@@ -283,6 +289,113 @@ const arcHotelModel = {
         WHERE arc_contract_line_id = $1 AND hotel_id <> ALL($2::int[])`,
       [contractLineId, keep]
     );
+  },
+
+  /**
+   * How each covered hotel is using a live group rate contract.
+   *
+   *   committed / consumed        quantity and value from the per-hotel ledger
+   *   utilisation_pct             consumed ÷ committed
+   *   call_off_count / last_...   call-off POs released for the hotel (not rejected)
+   *   on_contract_value           spend through this contract's call-offs
+   *   off_contract_value          spend on the SAME products on ordinary POs at
+   *                               the hotel during the contract period
+   *   on_contract_pct             on ÷ (on + off); null when the hotel spent nothing
+   *
+   * not_ordering_hotel_ids: hotels with a share that have not ordered yet,
+   * leaving out hotels head office has paused.
+   *
+   * @param {{ id, hotel_id, is_group, contract_start_at, contract_end_at }} arc
+   */
+  hotelUsageForArc: async (arc, txContext = null) => {
+    const runner = txContext || db;
+    const hotels = await arcHotelModel.listArcHotels(arc, runner);
+    const hotelIds = hotels.map((h) => h.hotel_id);
+    const [ledger, callOffs, onContract, offContract] = await Promise.all([
+      runner.any(
+        `SELECT clh.hotel_id,
+                SUM(clh.committed_qty) AS committed_qty,
+                SUM(clh.consumed_qty)  AS consumed_qty,
+                SUM(COALESCE(clh.unit_rate_override, cl.unit_rate) * clh.committed_qty) AS committed_value,
+                SUM(COALESCE(clh.unit_rate_override, cl.unit_rate) * clh.consumed_qty)  AS consumed_value,
+                bool_and(clh.is_suspended) AS is_suspended
+           FROM tbl_arc_contract_line_hotel clh
+           JOIN tbl_arc_contract_line cl ON cl.id = clh.arc_contract_line_id
+           JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
+          WHERE c.arc_id = $1
+          GROUP BY clh.hotel_id`,
+        [arc.id]
+      ),
+      runner.any(
+        `SELECT mr.hotel_id, COUNT(DISTINCT cp.po_id)::int AS call_off_count, MAX(cp.released_at) AS last_call_off_at
+           FROM tbl_arc_callof_po cp
+           JOIN tbl_arc_contract c ON c.id = cp.arc_contract_id
+           JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+           JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
+          WHERE c.arc_id = $1 AND po.status::text = ANY($2::text[])
+          GROUP BY mr.hotel_id`,
+        [arc.id, SPEND_STATUSES]
+      ),
+      runner.any(
+        `SELECT mr.hotel_id, SUM(pop.total_price) AS value
+           FROM tbl_rfq_purchase_order po
+           JOIN tbl_arc_contract c ON c.id = po.arc_contract_id
+           JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+          WHERE po.is_call_off AND c.arc_id = $1 AND po.status::text = ANY($2::text[])
+          GROUP BY mr.hotel_id`,
+        [arc.id, SPEND_STATUSES]
+      ),
+      runner.any(
+        `SELECT r.hotel_id, SUM(pop.total_price) AS value
+           FROM tbl_rfq_purchase_order po
+           JOIN tbl_rfq r ON r.id = po.rfq_id
+           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+           LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+          WHERE NOT COALESCE(po.is_call_off, false)
+            AND r.hotel_id = ANY($2::int[])
+            AND COALESCE(pop.product_variant_id, rp.product_variant_id)
+                  IN (SELECT product_variant_id FROM tbl_arc_item WHERE arc_id = $1)
+            AND po.status::text = ANY($3::text[])
+            AND ($4::timestamp IS NULL OR po.created_at >= $4::timestamp)
+            AND ($5::timestamp IS NULL OR po.created_at <= $5::timestamp)
+          GROUP BY r.hotel_id`,
+        [arc.id, hotelIds, SPEND_STATUSES, arc.contract_start_at || null, arc.contract_end_at || null]
+      ),
+    ]);
+    const byHotel = (rows) => new Map(rows.map((r) => [Number(r.hotel_id), r]));
+    const L = byHotel(ledger);
+    const C = byHotel(callOffs);
+    const ON = byHotel(onContract);
+    const OFF = byHotel(offContract);
+
+    const hotel_usage = hotels.map((h) => {
+      const l = L.get(h.hotel_id) || {};
+      const committed = Number(l.committed_qty || 0);
+      const consumed = Number(l.consumed_qty || 0);
+      const on = Number(ON.get(h.hotel_id)?.value || 0);
+      const off = Number(OFF.get(h.hotel_id)?.value || 0);
+      return {
+        hotel_id: h.hotel_id,
+        name: h.name,
+        is_lead: h.is_lead,
+        committed_qty: committed,
+        consumed_qty: consumed,
+        committed_value: Number(l.committed_value || 0),
+        consumed_value: Number(l.consumed_value || 0),
+        utilisation_pct: committed > 0 ? round1((consumed / committed) * 100) : 0,
+        call_off_count: Number(C.get(h.hotel_id)?.call_off_count || 0),
+        last_call_off_at: C.get(h.hotel_id)?.last_call_off_at || null,
+        is_suspended: !!l.is_suspended,
+        on_contract_value: on,
+        off_contract_value: off,
+        on_contract_pct: on + off > 0 ? round1((on / (on + off)) * 100) : null,
+      };
+    });
+    const not_ordering_hotel_ids = hotel_usage
+      .filter((u) => u.committed_qty > 0 && !u.is_suspended && u.call_off_count === 0)
+      .map((u) => u.hotel_id);
+    return { hotel_usage, not_ordering_hotel_ids };
   },
 
   /**
