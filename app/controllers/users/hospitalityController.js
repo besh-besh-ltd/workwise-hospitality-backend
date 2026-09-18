@@ -107,21 +107,57 @@ const _autoMapProductsForCategories = async (vendorId, categoryIds) => {
 // ============================================================
 // WH-74: Remove product variant mappings when vendor unsubscribes from
 // categories. Finds all variants under the given category IDs and deletes
-// the vendor's mappings for them.
+// the vendor's mappings for them — EXCEPT the ones a category the vendor
+// kept still covers.
+//
+// A product can carry several categories, and a sub-category's products
+// always carry the parent category too. Deleting by removed-category alone
+// therefore stripped vendors of products they were still subscribed to:
+// prod incident 2026-09-17 (RFQ 536603), where a vendor removed the FREE
+// ELECTRICAL ITEMS sub-category and lost all 1,296 of its mappings while
+// the PAID parent ENGINEERING stayed active. They saw 2 of 11 products.
+//
+// The coverage check reads only subscription rows this modification did NOT
+// touch, so it behaves the same whether or not the cancellation is visible
+// to this connection yet (the paid path applies cancellations inside a
+// transaction this function cannot see).
 // ============================================================
 const _unmapProductsForCategories = async (vendorId, categoryIds) => {
   if (!categoryIds || !categoryIds.length) return;
 
+  const removedCategoryIds = [...new Set(
+    categoryIds.map(id => parseInt(id)).filter(Boolean)
+  )];
+  if (!removedCategoryIds.length) return;
+
   const variants = await rfqModel.getProductsByCategories(
-    categoryIds.map(id => ({ id }))
+    removedCategoryIds.map(id => ({ id }))
   );
   if (!variants || !variants.length) return;
 
   const variantIds = [...new Set(
     variants.map(v => parseInt(v.variant_id)).filter(Boolean)
   )];
-  if (variantIds.length) {
-    await productModel.removeVariantMappingsForVendor(vendorId, variantIds);
+  if (!variantIds.length) return;
+
+  const stillCovered = await db.any(
+    `SELECT DISTINCT pv.id AS variant_id
+       FROM tbl_product_variant pv
+       JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+       JOIN tbl_vendor_hotel_category_subscription s
+         ON s.vendor_id = $1
+        AND s.item_type IN ('category', 'subcategory')
+        AND s.item_id = pc.category_id
+        AND s.status = 'active'
+      WHERE pv.id = ANY($2::int[])
+        AND pc.category_id <> ALL($3::int[])`,
+    [vendorId, variantIds, removedCategoryIds]
+  );
+  const covered = new Set(stillCovered.map(r => Number(r.variant_id)));
+
+  const orphanedVariantIds = variantIds.filter(id => !covered.has(id));
+  if (orphanedVariantIds.length) {
+    await productModel.removeVariantMappingsForVendor(vendorId, orphanedVariantIds);
   }
 };
 
@@ -4594,11 +4630,16 @@ const _applyModificationFromMetadata = async (payment, t) => {
     );
   }
 
-  // 2. Cascade-cancel children of removed parents
+  // 2. Cascade-cancel children of removed parents. Their ids feed step 5:
+  // a cascaded child is cancelled inside this transaction, so the unmap's
+  // coverage check (which runs outside it) would otherwise still read the
+  // child as active and treat the parent's products as covered.
+  let cascadedSubcategoryIds = [];
   if (Array.isArray(metadata.cascade_parent_category_ids) && metadata.cascade_parent_category_ids.length > 0) {
-    await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
+    const cascaded = await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
       vendorId, metadata.cascade_parent_category_ids, { tx: t }
     );
+    cascadedSubcategoryIds = (cascaded || []).map(row => row.item_id).filter(Boolean);
   }
 
   // 3. Insert/upsert additions
@@ -4658,7 +4699,7 @@ const _applyModificationFromMetadata = async (payment, t) => {
       ? metadata.cascade_parent_category_ids.filter(Boolean)
       : [];
 
-    let cancelledCatIds = [...cascadeParentIds];
+    let cancelledCatIds = [...cascadeParentIds, ...cascadedSubcategoryIds];
 
     // Look up category IDs from the cancelled subscription row IDs
     if (cancelSubIds.length > 0) {
