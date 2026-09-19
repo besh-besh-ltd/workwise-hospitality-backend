@@ -83,8 +83,6 @@ export default {
     { key: "hotel_ids", type: "hotels", label: "Business unit" },
   ],
 
-  estimateRows: async () => 0, // three small summary sheets; never background
-
   async fetch(scope, period) {
     const [months, properties, categories, totals] = await Promise.all([
       spendByMonth(scope, period),

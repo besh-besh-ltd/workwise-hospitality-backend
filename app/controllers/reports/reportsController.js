@@ -26,8 +26,13 @@ import { logError } from "../../helper/common.js";
 import { deriveScope } from "../po/poDashboardController.js";
 import { allReports, getReport, isRunnable } from "../../services/reports/definitions/index.js";
 import { resolvePeriod, resolveHotelIds } from "../../services/reports/filters.js";
-import { workbook, sendWorkbook, datedFilename } from "../../services/reports/excelKit.js";
-import reportsModel from "../../models/reportsModel.js";
+import {
+  workbook,
+  sendWorkbook,
+  datedFilename,
+  writeReportInfo,
+} from "../../services/reports/excelKit.js";
+import reportsModel, { REPORT_ROW_CAP } from "../../models/reportsModel.js";
 
 // tbl_users.user_type: 3 = Vendor, 8 = Super Admin.
 const VENDOR_USER_TYPE = 3;
@@ -188,6 +193,23 @@ export const download = async (req, res) => {
     const wb = workbook("Workwise");
     def.buildWorkbook(wb, data, { generatedBy: req.user.name || req.user.email || null });
 
+    // A report that hit the row ceiling is INCOMPLETE, and a workbook that
+    // does not say so is the worst outcome here — it looks whole and is short.
+    // The provenance sheet only appears in that case, so a normal export is
+    // not cluttered by a sheet that always says "fine".
+    const rowCount = data.rows?.length ?? null;
+    const truncated = rowCount !== null && rowCount >= REPORT_ROW_CAP;
+    if (truncated) {
+      writeReportInfo(wb, {
+        title: def.title,
+        generatedBy: req.user.name || req.user.email || null,
+        filters: [["Period", period.label], ["Business units", hotelIds.length ? hotelIds.join(", ") : "all in scope"]],
+        rowCount,
+        truncated: true,
+        rowCap: REPORT_ROW_CAP,
+      });
+    }
+
     // Ledger first: a row that records a disclosure which then failed to send
     // is harmless, one that sends and is never recorded is not.
     await reportsModel
@@ -201,7 +223,7 @@ export const download = async (req, res) => {
         filters: { fy: period.label, from: period.from, to: period.to, hotel_ids: hotelIds },
         mode: "SYNC",
         status: "READY",
-        rowCount: data.rows?.length ?? null,
+        rowCount,
       })
       .catch((e) => logError("reports.download: ledger write failed", e));
 

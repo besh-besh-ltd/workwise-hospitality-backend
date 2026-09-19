@@ -79,8 +79,6 @@ export default {
     { key: "hotel_ids", type: "hotels", label: "Business unit" },
   ],
 
-  estimateRows: async () => 0,
-
   async fetch(scope, period) {
     const [parents, leaves, grid, totals] = await Promise.all([
       spendByCategory(scope, period, { level: "parent" }),
