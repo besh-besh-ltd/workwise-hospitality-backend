@@ -81,6 +81,11 @@
       "pattern": "tests/services/(activity|admin)\\."
     },
     {
+      "name": "reports",
+      "pattern": "tests/services/reports\\.",
+      "description": "Reports module: catalogue entitlement, tenant scope, workbook structure and spend reconciliation"
+    },
+    {
       "name": "arc-core",
       "pattern": "tests/services/arc_v2/arc\\.",
       "split": 2,
