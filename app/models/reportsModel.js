@@ -44,9 +44,6 @@ export const SPEND_STATUSES = [
   "completed",
 ];
 
-/** Rows above this are built in the background rather than streamed inline. */
-export const SYNC_ROW_LIMIT = 2000;
-
 /** Hard ceiling on any single report, background or not. */
 export const REPORT_ROW_CAP = 50000;
 
@@ -200,24 +197,6 @@ export async function spendByVendor(scope, { from, to, priorFrom, priorTo }) {
      LIMIT ${REPORT_ROW_CAP}`;
 
   return db.any(sql, values);
-}
-
-/**
- * Row estimate for the sync-vs-background decision. Counts vendors, which is
- * what spendByVendor returns one row per.
- */
-export async function spendByVendorRowEstimate(scope, { from, to }) {
-  const values = [];
-  const base = spendBase(scope, { from, to }, values, 1);
-  const row = await db.one(
-    `SELECT COUNT(DISTINCT po.finalized_vendor_id)::int AS n
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-      WHERE ${base.where}`,
-    values
-  );
-  return row.n;
 }
 
 /**
@@ -1083,10 +1062,8 @@ export async function listExports(userId, limit = 50) {
 
 export default {
   SPEND_STATUSES,
-  SYNC_ROW_LIMIT,
   REPORT_ROW_CAP,
   spendByVendor,
-  spendByVendorRowEstimate,
   spendByMonth,
   spendByProperty,
   spendByCategory,

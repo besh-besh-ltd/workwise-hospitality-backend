@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { FMT, istDate, istDateLabel, reportSheet, writeReportSheet } from "../excelKit.js";
-import { spendByVendor, spendByVendorRowEstimate } from "../../../models/reportsModel.js";
+import { spendByVendor } from "../../../models/reportsModel.js";
 
 const PARETO_CUT = 0.8;
 
@@ -88,8 +88,6 @@ export default {
     { key: "fy", type: "fy", label: "Financial year" },
     { key: "hotel_ids", type: "hotels", label: "Business unit" },
   ],
-
-  estimateRows: (scope, period) => spendByVendorRowEstimate(scope, period),
 
   async fetch(scope, period) {
     const raw = await spendByVendor(scope, period);

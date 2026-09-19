@@ -84,7 +84,6 @@ export default {
   readiness: { state: "ready" },
   filters: [{ key: "hotel_ids", type: "hotels", label: "Business unit" }],
 
-  estimateRows: async () => 0,
 
   async fetch(scope) {
     const raw = await openPoRegister(scope);
