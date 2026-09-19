@@ -26,6 +26,9 @@ import spendSummary from "./spendSummary.js";
 import spendByCategory from "./spendByCategory.js";
 import spendByProperty from "./spendByProperty.js";
 import spendByVendor from "./spendByVendor.js";
+import openPoRegister from "./openPoRegister.js";
+import poAgingByApprover from "./poAgingByApprover.js";
+import poApprovalTat from "./poApprovalTat.js";
 
 /** A report that is declared but not yet runnable. */
 const stub = (def) => ({ filters: [], ...def });
@@ -70,24 +73,8 @@ const DEFINITIONS = [
   }),
 
   // ── 3.3 Purchase Orders ──────────────────────────────────────────────────
-  stub({
-    key: "open_po_register",
-    number: "3.1",
-    family: "Purchase Orders",
-    title: "Open PO Register",
-    description: "Every open purchase order with its age, summarised by ageing bucket.",
-    permission: "reports.open_po_register",
-    readiness: { state: "coming_soon" },
-  }),
-  stub({
-    key: "po_aging_by_approver",
-    number: "3.2",
-    family: "Purchase Orders",
-    title: "PO Aging by Approver",
-    description: "Approvals waiting, who they are waiting on, and which have passed their SLA.",
-    permission: "reports.po_aging_by_approver",
-    readiness: { state: "coming_soon" },
-  }),
+  openPoRegister,
+  poAgingByApprover,
   stub({
     key: "po_cancel_amend",
     number: "3.3",
@@ -164,15 +151,7 @@ const DEFINITIONS = [
   }),
 
   // ── 3.6 Operational KPIs ─────────────────────────────────────────────────
-  stub({
-    key: "po_approval_tat",
-    number: "6.1",
-    family: "Operational KPIs",
-    title: "PO Approval TAT",
-    description: "Approval turnaround by value band, by approver and by stage, against SLA.",
-    permission: "reports.po_approval_tat",
-    readiness: { state: "coming_soon" },
-  }),
+  poApprovalTat,
 ];
 
 const BY_KEY = new Map(DEFINITIONS.map((d) => [d.key, d]));

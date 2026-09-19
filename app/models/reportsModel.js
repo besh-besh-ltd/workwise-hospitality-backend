@@ -538,6 +538,262 @@ export async function spendTotals(scope, { from, to, priorFrom, priorTo }) {
 }
 
 // ---------------------------------------------------------------------------
+// Purchase orders and approvals
+//
+// TIMESTAMP CONTRACT — read before touching anything below.
+//
+// The approval tables are `timestamp without time zone` holding UTC, and
+// dbConn.js sets a type parser that hands them to Node as RAW STRINGS rather
+// than Dates. Any elapsed time must therefore be computed in SQL; doing it in
+// JavaScript means parsing a naive string in the server's local zone, which is
+// wrong by the local offset and silently correct on a UTC box.
+//
+// "Now" for those columns is NOW() AT TIME ZONE 'UTC' — a naive UTC timestamp
+// comparable with the column. NOW() alone is a timestamptz and comparing the
+// two makes Postgres coerce, not convert.
+//
+// tbl_rfq_purchase_order.created_at, by contrast, IS timestamptz. Different
+// table, different rule.
+// ---------------------------------------------------------------------------
+
+/** Statuses where an order is raised but not yet closed out. */
+export const OPEN_PO_STATUSES = ["approved", "sent", "dispatched", "invoice_raised", "acceptance_pending"];
+
+/**
+ * The PO-level scope skeleton, without the spend window or status filter —
+ * PO-operational reports ask "what is open right now", not "what did we spend".
+ */
+function poBase(scope, values, startIndex) {
+  const scoped = buildScopeClause(scope, values, startIndex);
+  return { where: scoped.clause, nextIndex: scoped.nextIndex };
+}
+
+/**
+ * Report 3.1 — every open purchase order with its age.
+ *
+ * Age is measured from the PO date. The approved sample ages against an
+ * expected delivery date and shows how much of each order is still
+ * outstanding; neither exists here — there is no promised-delivery column and
+ * no goods-receipt quantity anywhere — so the column is labelled "Days Open"
+ * rather than implying a missed delivery that was never scheduled.
+ */
+export async function openPoRegister(scope) {
+  const values = [];
+  let i = 1;
+  const statusIdx = i++;
+  values.push(OPEN_PO_STATUSES);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `SELECT po.id,
+            po.po_number,
+            po.created_at,
+            po.status::text                         AS status,
+            po.total_value::float8                  AS total_value,
+            h.name                                  AS hotel_name,
+            d.title                                 AS department,
+            ${VENDOR_NAME}                          AS vendor_name,
+            rfq.rfq_no                              AS rfq_no,
+            (EXTRACT(EPOCH FROM (NOW() - po.created_at)) / 86400.0)::int AS days_open
+       FROM tbl_rfq_purchase_order po
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_hospitality_company_hotels h
+              ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
+       LEFT JOIN tbl_department d
+              ON d.id = COALESCE(rfq.department_id, mr.department_id)
+       LEFT JOIN tbl_users v  ON v.id = po.finalized_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+      WHERE po.status = ANY($${statusIdx}::po_status[])
+        AND ${base.where}
+      ORDER BY po.created_at ASC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 3.2 — approvals still waiting, and who they are waiting on.
+ *
+ * One row per (pending approver, pending step). A step with decision rule ANY
+ * lists every approver who could act, because any one of them is the
+ * bottleneck until somebody does.
+ */
+export async function pendingPoApprovals(scope) {
+  const values = [];
+  const base = poBase(scope, values, 1);
+
+  return db.any(
+    `SELECT po.id                                   AS po_id,
+            po.po_number,
+            po.total_value::float8                  AS total_value,
+            po.created_at                           AS po_created_at,
+            h.name                                  AS hotel_name,
+            d.title                                 AS department,
+            ${VENDOR_NAME}                          AS vendor_name,
+            s.step_order::int                       AS step_order,
+            s.decision_rule                         AS decision_rule,
+            s.created_at                            AS step_opened_at,
+            ps.sla_hours::int                       AS sla_hours,
+            a.approver_user_id                      AS approver_id,
+            au.name                                 AS approver_name,
+            au.designation                          AS approver_designation,
+            (EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'UTC') - s.created_at)) / 3600.0)::float8
+                                                    AS hours_pending
+       FROM tbl_approval_instances ai
+       JOIN tbl_rfq_purchase_order po
+              ON po.id = ai.entity_id AND ai.entity_type = 'PO'
+       JOIN tbl_approval_instance_steps s
+              ON s.approval_instance_id = ai.id AND s.status = 'PENDING'
+       JOIN tbl_approval_step_approvers a
+              ON a.approval_instance_step_id = s.id AND a.status = 'PENDING'
+       LEFT JOIN tbl_approval_policy_steps ps ON ps.id = s.policy_step_id
+       LEFT JOIN tbl_users au ON au.id = a.approver_user_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_hospitality_company_hotels h
+              ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
+       LEFT JOIN tbl_department d
+              ON d.id = COALESCE(rfq.department_id, mr.department_id)
+       LEFT JOIN tbl_users v  ON v.id = po.finalized_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+      WHERE ai.status = 'PENDING'
+        AND ${base.where}
+      ORDER BY s.created_at ASC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 6.1 — turnaround on approvals that COMPLETED in the window.
+ *
+ * Measured on completed instances only: a still-pending approval has no
+ * turnaround yet, and counting its elapsed time as a TAT would drag the
+ * average towards whatever is currently stuck.
+ */
+export async function poApprovalTat(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `SELECT ai.id                                   AS instance_id,
+            po.id                                   AS po_id,
+            po.po_number,
+            po.total_value::float8                  AS total_value,
+            ai.status                               AS status,
+            ai.created_at                           AS submitted_at,
+            ai.completed_at                         AS completed_at,
+            (EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600.0)::float8 AS tat_hours
+       FROM tbl_approval_instances ai
+       JOIN tbl_rfq_purchase_order po
+              ON po.id = ai.entity_id AND ai.entity_type = 'PO'
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+      WHERE ai.completed_at IS NOT NULL
+        AND ai.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ai.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ${base.where}
+      ORDER BY ai.completed_at DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/** Report 6.1 sheet 2 — per-approver decision time over the same window. */
+export async function poApprovalTatByApprover(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `SELECT a.approver_user_id                      AS approver_id,
+            au.name                                 AS approver_name,
+            au.designation                          AS approver_designation,
+            s.step_order::int                       AS step_order,
+            COUNT(*)::int                           AS decisions,
+            AVG(EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0)::float8 AS avg_hours,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+              ORDER BY EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0
+            )::float8                               AS median_hours,
+            PERCENTILE_CONT(0.9) WITHIN GROUP (
+              ORDER BY EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0
+            )::float8                               AS p90_hours,
+            MAX(ps.sla_hours)::int                  AS sla_hours,
+            COUNT(*) FILTER (
+              WHERE ps.sla_hours IS NOT NULL
+                AND EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0 > ps.sla_hours
+            )::int                                  AS breaches
+       FROM tbl_approval_step_approvers a
+       JOIN tbl_approval_instance_steps s ON s.id = a.approval_instance_step_id
+       JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
+       JOIN tbl_rfq_purchase_order po
+              ON po.id = ai.entity_id AND ai.entity_type = 'PO'
+       LEFT JOIN tbl_approval_policy_steps ps ON ps.id = s.policy_step_id
+       LEFT JOIN tbl_users au ON au.id = a.approver_user_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+      WHERE a.acted_at IS NOT NULL
+        AND a.status IN ('APPROVED', 'REJECTED')
+        AND a.acted_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND a.acted_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ${base.where}
+      GROUP BY 1, 2, 3, 4
+      ORDER BY decisions DESC, avg_hours DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/** Report 6.1 sheet 3 — where in the chain the time actually goes. */
+export async function poApprovalTatByStage(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `SELECT s.step_order::int                       AS step_order,
+            COUNT(*)::int                           AS approvals,
+            AVG(EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0)::float8 AS avg_hours,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+              ORDER BY EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0
+            )::float8                               AS median_hours,
+            PERCENTILE_CONT(0.9) WITHIN GROUP (
+              ORDER BY EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0
+            )::float8                               AS p90_hours,
+            MAX(ps.sla_hours)::int                  AS sla_hours
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
+       JOIN tbl_rfq_purchase_order po
+              ON po.id = ai.entity_id AND ai.entity_type = 'PO'
+       LEFT JOIN tbl_approval_policy_steps ps ON ps.id = s.policy_step_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+      WHERE s.completed_at IS NOT NULL
+        AND s.status = 'APPROVED'
+        AND s.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND s.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ${base.where}
+      GROUP BY 1
+      ORDER BY 1`,
+    values
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entitlement
 // ---------------------------------------------------------------------------
 
@@ -633,6 +889,12 @@ export default {
   spendByCategoryProperty,
   interPropertyRateVariance,
   spendTotals,
+  OPEN_PO_STATUSES,
+  openPoRegister,
+  pendingPoApprovals,
+  poApprovalTat,
+  poApprovalTatByApprover,
+  poApprovalTatByStage,
   permittedReportActions,
   recordExport,
   listExports,
