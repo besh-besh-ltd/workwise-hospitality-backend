@@ -2172,11 +2172,17 @@ WHERE NOT EXISTS (
             ) AS unseen_query_count,
             ARRAY(
                 SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_variant_id,
+                    -- tbl_product_categories.product_id is a tbl_product id.
+                    -- RFQ_P.id is the tbl_rfq_products ROW id -- a different key
+                    -- space entirely -- so matching them returned the categories
+                    -- of whichever product happened to share a number with this
+                    -- RFQ line. Reach the product through the variant.
                     'product_categories', (
                         SELECT json_agg(json_build_object('category_id',TPC.category_id,'category_name',TC.title))
-                        FROM tbl_product_categories TPC
+                        FROM tbl_product_variant PV_CAT
+                        JOIN tbl_product_categories TPC ON TPC.product_id = PV_CAT.product_id
                         LEFT JOIN tbl_category TC ON TC.id = TPC.category_id
-                        WHERE TPC.product_id = RFQ_P.id
+                        WHERE PV_CAT.id = RFQ_P.product_variant_id
                     ),
                     'product_specs', (
                         SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_variant_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
@@ -4033,10 +4039,24 @@ LIMIT 2;
           -- Facet fields for the management listing (Business Unit / Department / Category)
           (SELECT name FROM tbl_hospitality_company_hotels WHERE id = RFQ.hotel_id) AS hotel_name,
           (SELECT title FROM tbl_department WHERE id = RFQ.department_id) AS department_title,
+          -- Categories come from the RFQ's PRODUCTS, reached through the
+          -- variant: tbl_rfq_products -> tbl_product_variant.product_id ->
+          -- tbl_product_categories.product_id (a tbl_product id).
+          --
+          -- This used to join TPC.product_id = RP_CAT.id, matching a product
+          -- id against a tbl_rfq_products ROW id. Two unrelated key spaces, so
+          -- every RFQ was labelled with the categories of whatever product
+          -- happened to share a number with its line row -- and because that id
+          -- differs per RFQ, the same product produced a different wrong
+          -- category on every RFQ (reported on #536476, an IT/SOFTWARE product
+          -- shown as "PACKING MATERIAL, FNB PAPER PLASTIC PKGNG"). This feeds
+          -- the listing CATEGORY facet as well as the card label, so the
+          -- category filter matched nothing it claimed to.
           COALESCE((
             SELECT json_agg(DISTINCT jsonb_build_object('id', TC.id, 'title', TC.title))
             FROM tbl_rfq_products RP_CAT
-            JOIN tbl_product_categories TPC ON TPC.product_id = RP_CAT.id
+            JOIN tbl_product_variant PV_CAT ON PV_CAT.id = RP_CAT.product_variant_id
+            JOIN tbl_product_categories TPC ON TPC.product_id = PV_CAT.product_id
             JOIN tbl_category TC ON TC.id = TPC.category_id
             WHERE RP_CAT.rfq_id = RFQ.id
           ), '[]'::json) AS categories,

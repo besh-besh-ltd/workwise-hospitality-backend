@@ -579,6 +579,37 @@ describe("GET /po/detail/:po_id — product coverage", () => {
     expect(res.body.data.covers_all_products).toBe(false);
   });
 
+  it("names how many sibling drafts could be merged into this one first", async () => {
+    // Initiating is the point of no return: whatever is not on the PO becomes a
+    // SEPARATE purchase order. Production RFQ 808 carries two drafts for the
+    // same vendor covering 1 and 2 of its 3 products, and nothing on the page
+    // said so — so the buyer initiated one and got two POs. Client item 10.
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const poA = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(poA, rfq_product_id, quote_id);
+    const poB = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(poB, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${poA}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.mergeable_draft_count).toBe(1);
+  });
+
+  it("counts no mergeable sibling once this PO has left draft", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const poA = await makePo({ rfq_id, status: "pending_approval", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(poA, rfq_product_id, quote_id);
+    const poB = await makePo({ rfq_id, status: "draft", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(poB, rfq_product_id, quote_id);
+
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${poA}`);
+
+    expect(res.body.data.mergeable_draft_count).toBe(0);
+  });
+
   it("counts a product once even if it appears on several PO lines", async () => {
     const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
     await addRfqProduct(rfq_id, 2);
