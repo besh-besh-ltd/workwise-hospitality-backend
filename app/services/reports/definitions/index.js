@@ -23,6 +23,8 @@
 // ============================================================================
 
 import spendSummary from "./spendSummary.js";
+import spendByCategory from "./spendByCategory.js";
+import spendByProperty from "./spendByProperty.js";
 import spendByVendor from "./spendByVendor.js";
 
 /** A report that is declared but not yet runnable. */
@@ -31,24 +33,8 @@ const stub = (def) => ({ filters: [], ...def });
 const DEFINITIONS = [
   // ── 3.1 Spend Analytics ──────────────────────────────────────────────────
   spendSummary,
-  stub({
-    key: "spend_by_category",
-    number: "1.2",
-    family: "Spend Analytics",
-    title: "Spend by Category",
-    description: "Category and sub-category spend with prior-year comparison and a category-by-property matrix.",
-    permission: "reports.spend_by_category",
-    readiness: { state: "coming_soon" },
-  }),
-  stub({
-    key: "spend_by_property",
-    number: "1.3",
-    family: "Spend Analytics",
-    title: "Spend by Property",
-    description: "Per-property spend and ranking, plus items whose rate varies materially between properties.",
-    permission: "reports.spend_by_property",
-    readiness: { state: "coming_soon" },
-  }),
+  spendByCategory,
+  spendByProperty,
   spendByVendor,
 
   // ── 3.2 Vendor Reports ───────────────────────────────────────────────────
