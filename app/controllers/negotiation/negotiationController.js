@@ -2,6 +2,7 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
 import negotiationModel, { getCoveredProductIds, getVendorFieldsForProduct,
+  applyLineDecisions, anyLineApproved, isLineRejected,
   NEG_STATE, NEG_STATE_ORDER, NEG_STATE_PRESENTATION,
   NEG_PARENT_STATE_ORDER, NEG_PARENT_ACTION_STATES } from '../../models/negotiationModel.js';
 import moment from 'moment-timezone';
@@ -261,12 +262,18 @@ const notifyNegotiationRoundLive = async (round_id, roundRow, rfqData) => {
       (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
     );
     // Multi rounds: per-vendor per-product fields live in products[].
+    // A line the approver REFUSED to publish must never reach the vendor — the
+    // whole point of per-line approval (client feedback item 8). Absence of an
+    // `approval` key means approved, so every pre-existing round is unaffected.
     const productsForVendor = (vid) => (Array.isArray(round?.products) ? round.products : [])
-      .map(p => ({
-        rfq_product_id: p?.rfq_product_id ?? null,
-        is_rfq_level: p?.is_rfq_level === true,
-        fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
-      }))
+      .map(p => {
+        const vt = (p?.vendor_targets || []).find(v => Number(v?.vendor_id) === vid);
+        return {
+          rfq_product_id: p?.rfq_product_id ?? null,
+          is_rfq_level: p?.is_rfq_level === true,
+          fields: isLineRejected(vt) ? [] : (vt?.fields || []),
+        };
+      })
       .filter(p => p.fields.length > 0);
 
     const vendorsWithTokens = await Promise.all(
@@ -1041,6 +1048,16 @@ const NegotiationController = {
 
           for (const round of relevantRounds) {
             if (!Array.isArray(round.vendor_ids) || !round.vendor_ids.includes(vid)) continue;
+            // A line the approver REFUSED to publish never reached the vendor,
+            // so it is not "covered" by anything and must not block a new round
+            // on the same field. Without this, rejecting a line would strand it
+            // forever — the same class of dead end that blocked RFQ #536326 for
+            // 24.5 hours and drove the withdraw endpoint.
+            const lineEntry = (Array.isArray(round.products) ? round.products : []).find(e =>
+              pid === 'RFQ_LEVEL' ? e?.is_rfq_level === true : Number(e?.rfq_product_id) === Number(pid)
+            );
+            const lineTarget = (lineEntry?.vendor_targets || []).find(v => Number(v?.vendor_id) === vid);
+            if (isLineRejected(lineTarget)) continue;
             const activeFields = getVendorFieldsForProduct(round, vid, pid).map(f => f?.name).filter(Boolean);
             const overlappingFields = newFields.filter(f => activeFields.includes(f));
             if (overlappingFields.length > 0) {
@@ -1305,12 +1322,17 @@ const NegotiationController = {
                 (emailContext.vendorApprovals || []).map(va => [va.vendor_id, va])
               );
               // Multi rounds: per-vendor per-product fields live in products[].
+              // Same rule as notifyNegotiationRoundLive: a line the approver
+              // refused is withheld from the vendor.
               const productsForVendor = (vid) => (Array.isArray(result.products) ? result.products : [])
-                .map(p => ({
-                  rfq_product_id: p?.rfq_product_id ?? null,
-                  is_rfq_level: p?.is_rfq_level === true,
-                  fields: ((p?.vendor_targets || []).find(vt => Number(vt?.vendor_id) === vid)?.fields) || []
-                }))
+                .map(p => {
+                  const vt = (p?.vendor_targets || []).find(v => Number(v?.vendor_id) === vid);
+                  return {
+                    rfq_product_id: p?.rfq_product_id ?? null,
+                    is_rfq_level: p?.is_rfq_level === true,
+                    fields: isLineRejected(vt) ? [] : (vt?.fields || []),
+                  };
+                })
                 .filter(p => p.fields.length > 0);
               const vendorsWithTokens = await Promise.all(
                 vendors.map(async (v) => {
@@ -1538,6 +1560,9 @@ const NegotiationController = {
       const round_id = parseInt(req.params.id);
       const user_id = req.user.id;
       const { remarks } = req.body;
+      // Optional per-line verdicts. Omitted (every caller before this change,
+      // and the generic approval queue) means "approve the whole round".
+      const lineDecisions = Array.isArray(req.body?.lines) ? req.body.lines : null;
 
       if (!round_id) {
         return res.status(400).json({
@@ -1586,6 +1611,33 @@ const NegotiationController = {
           status: 2,
           message: 'This round\'s deadline has already passed, so it can no longer be approved. Create a new round instead.'
         });
+      }
+
+      // ── Per-line verdicts (client feedback item 8) ────────────────────
+      // Recorded on the round BEFORE the engine runs, because the vendor
+      // invitation is built from `products` at activation and must not carry a
+      // line the approver refused. Runs only after the PENDING_APPROVAL and
+      // deadline guards above, so a repeated click writes nothing.
+      if (lineDecisions && lineDecisions.length > 0) {
+        const { products: nextProducts, error } = applyLineDecisions(
+          round.products, lineDecisions, user_id
+        );
+        if (error) {
+          return res.status(400).json({ status: 2, message: error });
+        }
+        // Publishing a round with every line refused would invite the vendor to
+        // answer an empty negotiation. That is a rejection, and the caller
+        // should say so through the reject endpoint, which cancels the round
+        // and tells the creator why.
+        if (!anyLineApproved(nextProducts)) {
+          return res.status(400).json({
+            status: 2,
+            code: 'ALL_LINES_REJECTED',
+            message: 'Every line on this round was rejected. Reject the round instead, so it is cancelled and the creator is told.'
+          });
+        }
+        await negotiationModel.saveRoundProducts(round_id, nextProducts);
+        round.products = nextProducts;
       }
 
       // Get approval instance and submit APPROVE action

@@ -74,6 +74,53 @@ async function resolveArcPolicy(entityType, scope, t) {
 // TECH EVAL endpoints
 // ============================================================
 
+// Buyer-authored reference documents attached to a clause. Validated here for
+// the same reason the weights are: the wizard gate can be skipped by resuming a
+// draft and jumping to Review.
+//
+// Capped because the list is re-inserted verbatim on every draft save, so an
+// unbounded array is an unbounded write. The urls come from the shared upload
+// endpoint (multer-s3), which is what produces the S3 URL the FE hands back.
+const CLAUSE_FILES_MAX = 10;
+const CLAUSE_FILE_URL_MAX = 2000;
+
+// Fold each clause's buyer-authored reference documents onto it, in one
+// round-trip rather than one per clause.
+async function attachReferenceFiles(clauses, lister) {
+  const rows = Array.isArray(clauses) ? clauses : [];
+  if (rows.length === 0) return rows;
+  const files = await lister(rows.map((c) => c.id));
+  const byClause = new Map();
+  for (const f of files) {
+    const key = String(f.clause_id);
+    if (!byClause.has(key)) byClause.set(key, []);
+    byClause.get(key).push({ id: f.id, file_url: f.file_url });
+  }
+  return rows.map((c) => ({ ...c, reference_files: byClause.get(String(c.id)) || [] }));
+}
+
+function validateClauseFiles(clauses) {
+  for (let i = 0; i < clauses.length; i++) {
+    const raw = (clauses[i] || {}).file_urls;
+    if (raw === undefined || raw === null) continue;
+    if (!Array.isArray(raw)) {
+      return `Clause ${i + 1}: file_urls must be a list of uploaded file URLs.`;
+    }
+    if (raw.length > CLAUSE_FILES_MAX) {
+      return `Clause ${i + 1}: at most ${CLAUSE_FILES_MAX} reference documents.`;
+    }
+    for (const u of raw) {
+      if (typeof u !== 'string' || !u.trim()) {
+        return `Clause ${i + 1}: every reference document must be an uploaded file URL.`;
+      }
+      if (u.length > CLAUSE_FILE_URL_MAX) {
+        return `Clause ${i + 1}: a reference document URL is too long.`;
+      }
+    }
+  }
+  return null;
+}
+
 export async function setupTechEval(req, res) {
   try {
     const arcItemId = Number(req.params.itemId);
@@ -112,6 +159,8 @@ export async function setupTechEval(req, res) {
     if (weightSum !== 100) {
       return bad(res, 400, `Clause weightage must total exactly 100 (got ${weightSum}).`);
     }
+    const fileErr = validateClauseFiles(clauses);
+    if (fileErr) return bad(res, 400, fileErr);
 
     // Immutable once technical is approved; also blocked once commercial is
     // finalized (configuring clauses then would un-skip technical under a
@@ -132,7 +181,11 @@ export async function setupTechEval(req, res) {
       await arcEvalModel.clearClauses(te.id, t);
       const inserted = [];
       for (const c of clauses) {
-        inserted.push(await arcEvalModel.addClause(te.id, c, t));
+        const row = await arcEvalModel.addClause(te.id, c, t);
+        // Re-attached on every save by design: clearClauses above cascades to
+        // this table, so the urls have to arrive with the clause each time.
+        const files = await arcEvalModel.addClauseFiles(row.id, c.file_urls, t);
+        inserted.push({ ...row, reference_files: files.map((f) => ({ id: f.id, file_url: f.file_url })) });
       }
       return { tech_evaluation: te, clauses: inserted };
     });
@@ -222,7 +275,11 @@ export async function getTechEvalForItem(req, res) {
 
     // listClauses does SELECT * so is_mandatory comes along once the column
     // exists — no change needed there.
-    const clauses = await arcEvalModel.listClauses(te.id);
+    const clausesRaw = await arcEvalModel.listClauses(te.id);
+    // The buyer's own reference documents for each clause. A DISTINCT key from
+    // the vendor's `files` (their evidence): rendering the two in one list
+    // would offer a vendor a delete button on the buyer's drawing.
+    const clauses = await attachReferenceFiles(clausesRaw, arcEvalModel.listClauseFiles);
     // computeItemScores returns real vendor_id (server-internal) — remap to the
     // alias and DROP vendor_id before it reaches the browser. Gated to the
     // in-eval shortlist: on-hold vendors are never surfaced to the evaluator.
@@ -305,6 +362,45 @@ export async function getTechEvidenceFile(req, res) {
   }
 }
 
+// Buyer-side proxy for a clause's reference document. Same shape as the
+// evidence proxy above and for the same reason: the ARC module never hands out
+// a raw S3 URL. TECH_READ on the owning ARC gates the route.
+export async function getClauseReferenceFile(req, res) {
+  try {
+    const fileId = Number(req.params.fileId);
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getClauseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'Reference document not found', 2);
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="reference-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[evalController.getClauseReferenceFile]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export async function getUniversalClauseReferenceFile(req, res) {
+  try {
+    const fileId = Number(req.params.fileId);
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await arcEvalModel.getUniversalClauseFileWithScope(fileId);
+    if (!file) return bad(res, 404, 'Reference document not found', 2);
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="reference-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, '[evalController.getUniversalClauseReferenceFile]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
 // ============================================================
 // UNIVERSAL (ARC-wide) TECH EVAL endpoints
 //   A SECOND, separate technical-clause configurator that applies to the whole
@@ -350,6 +446,8 @@ export async function setupUniversalTechEval(req, res) {
     if (weightSum !== 100) {
       return bad(res, 400, `Clause weightage must total exactly 100 (got ${weightSum}).`);
     }
+    const fileErrU = validateClauseFiles(clauses);
+    if (fileErrU) return bad(res, 400, fileErrU);
 
     // Reload the ARC to verify tenant scope (never trust the client) + 404.
     // requireArcPermission(TECH_WRITE) already scoped the caller to :arcId.
@@ -367,7 +465,9 @@ export async function setupUniversalTechEval(req, res) {
       await arcEvalModel.clearUniversalClauses(te.id, t);
       const inserted = [];
       for (const c of clauses) {
-        inserted.push(await arcEvalModel.addUniversalClause(te.id, c, t));
+        const row = await arcEvalModel.addUniversalClause(te.id, c, t);
+        const files = await arcEvalModel.addUniversalClauseFiles(row.id, c.file_urls, t);
+        inserted.push({ ...row, reference_files: files.map((f) => ({ id: f.id, file_url: f.file_url })) });
       }
       return { tech_evaluation: te, clauses: inserted };
     });
@@ -399,7 +499,10 @@ export async function getUniversalTechEval(req, res) {
     const gateActive = shortlistRows.length > 0;
     const shortlistCounts = arcEvalModel.shortlistCounts(shortlistRows);
 
-    const clauses = await arcEvalModel.listUniversalClauses(te.id);
+    const clauses = await attachReferenceFiles(
+      await arcEvalModel.listUniversalClauses(te.id),
+      arcEvalModel.listUniversalClauseFiles
+    );
     const rawScores = await arcEvalModel.computeUniversalScores(arcId);
     const scores = rawScores
       .filter((s) => !gateActive || inEvalIds.has(Number(s.vendor_id)))
@@ -728,6 +831,20 @@ export async function decideTechEval(req, res) {
     }
     if (decision === 'reject' && !comment) {
       return bad(res, 400, 'A reason (comment) is required when rejecting');
+    }
+    // The mirror of the rule above. An approver who edits an evaluator's marks
+    // before approving is overriding someone else's judgement, and this same
+    // `comment` is what lands in tbl_arc_tech_eval_edit_history.comment — so
+    // without it the history row records the change and nothing about why.
+    // The synthesised "[Edited before approval] response 12 buyer_marks: 5 → 8"
+    // is a machine diff, not a reason.
+    //
+    // Keyed on "was a mark actually edited", not on the decision: a plain
+    // approve has nothing to justify and stays frictionless. Note an amend is
+    // only honoured on approve (see the branch below), so this cannot fire on
+    // a reject, which already demanded a comment.
+    if ((amendMarks.length > 0 || universalAmendMarks.length > 0) && !comment) {
+      return bad(res, 400, 'A reason (comment) is required when you amend a mark');
     }
 
     const instance = await db.oneOrNone(

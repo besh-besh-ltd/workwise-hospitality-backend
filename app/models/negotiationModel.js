@@ -135,6 +135,78 @@ export const getCoveredProductIds = (round) => {
   return round?.rfq_product_id != null ? [Number(round.rfq_product_id)] : [];
 };
 
+// ── Per-line approval verdicts ──────────────────────────────────────────────
+//
+// A round's approval instance is ONE yes/no for the whole round, but a round
+// covers many line items — in production 22 approvals each decided 2-18 lines
+// with a single verdict. The per-line verdict therefore lives INSIDE the
+// existing `products` jsonb, on the vendor_target it belongs to:
+//
+//   products[i].vendor_targets[j].approval = { status, remarks, acted_by, acted_at }
+//
+// deliberately mirroring the shape of vendor_approvals[]. No migration, and
+// getVendorFieldsForProduct / getRoundItemSlots already walk this structure.
+//
+// The ROUND's own status stays binary. "Approved" means at least one line was
+// approved, so activateNegotiationRoundInTx keeps its
+// `WHERE status = 'PENDING_APPROVAL'` idempotency claim untouched — the thing
+// that stopped 23 production rounds double-publishing.
+
+// Absence means approved: silence from the approver is not a rejection, and
+// every round created before this feature has no `approval` key at all.
+export const isLineRejected = (vendorTarget) =>
+  String(vendorTarget?.approval?.status || '').toUpperCase() === 'REJECTED';
+
+export const anyLineApproved = (products) =>
+  (Array.isArray(products) ? products : []).some(
+    (p) => (p?.vendor_targets || []).some((vt) => !isLineRejected(vt))
+  );
+
+/** Does this product entry match the id (or the single RFQ-level slot)? */
+const entryMatches = (entry, rfqProductId) =>
+  rfqProductId === 'RFQ_LEVEL' || rfqProductId === null
+    ? entry?.is_rfq_level === true
+    : Number(entry?.rfq_product_id) === Number(rfqProductId);
+
+/**
+ * Stamp per-line verdicts onto a copy of the round's products jsonb.
+ *
+ * Returns { products, error }. `error` is a human-readable string when a
+ * decision names a (product, vendor) pair the round does not carry — refused
+ * rather than ignored, because silently dropping a rejection would publish a
+ * line the approver refused.
+ */
+export const applyLineDecisions = (products, decisions, actorUserId) => {
+  const next = JSON.parse(JSON.stringify(Array.isArray(products) ? products : []));
+  const actedAt = new Date().toISOString();
+
+  for (const d of (Array.isArray(decisions) ? decisions : [])) {
+    const status = String(d?.decision || '').toUpperCase();
+    if (status !== 'APPROVED' && status !== 'REJECTED') {
+      return { products: null, error: `Each line decision must be APPROVED or REJECTED (got "${d?.decision}").` };
+    }
+    const pid = d?.is_rfq_level === true ? 'RFQ_LEVEL' : d?.rfq_product_id;
+    const entry = next.find((e) => entryMatches(e, pid));
+    if (!entry) {
+      return { products: null, error: `This round does not cover product ${pid}.` };
+    }
+    const vt = (entry.vendor_targets || []).find(
+      (v) => Number(v?.vendor_id) === Number(d?.vendor_id)
+    );
+    if (!vt) {
+      return { products: null, error: `This round has no target for vendor ${d?.vendor_id} on product ${pid}.` };
+    }
+    vt.approval = {
+      status,
+      remarks: d?.remarks ? String(d.remarks) : null,
+      acted_by: actorUserId != null ? Number(actorUserId) : null,
+      acted_at: actedAt,
+    };
+  }
+
+  return { products: next, error: null };
+};
+
 // Per-vendor negotiation fields for one product (or 'RFQ_LEVEL') of a round.
 export const getVendorFieldsForProduct = (round, vendorId, rfqProductId) => {
   if (Array.isArray(round?.products) && round.products.length > 0) {
@@ -4192,6 +4264,16 @@ const negotiationModel = {
    * Bulk update all vendor approval statuses in a round.
    * Used when the entire round is approved/rejected at the round level.
    */
+  /** Persist a round's products jsonb (per-line approval verdicts live here). */
+  saveRoundProducts: async (round_id, products, txContext = null) => {
+    return (txContext || db).none(
+      `UPDATE tbl_negotiation_rounds
+          SET products = $2::jsonb, updated_at = NOW()
+        WHERE id = $1`,
+      [round_id, JSON.stringify(products || [])]
+    );
+  },
+
   updateAllVendorsStatus: async (roundId, status, remarks, actedBy, txContext = null) => {
     return (txContext || db).one(
       `UPDATE tbl_negotiation_rounds

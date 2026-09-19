@@ -2275,6 +2275,29 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
     [poId]
   );
 
+  // There was NO status check here at all: the creator (or a legacy hierarchy
+  // member) could rewrite quantities and prices on a purchase order the VENDOR
+  // was already acting on, or on a closed one.
+  //
+  // Deliberately a deny-list of the states where the PO has left the building,
+  // not an allow-list of `draft`:
+  //   - `pending_approval` stays editable because that is real production
+  //     behaviour — PO 440 was edited in exactly that state, and
+  //     po.globalChargeRecompute.test.js pins the arithmetic for it. Tightening
+  //     THAT is a product decision about whether approvers may be shown one
+  //     thing and asked to approve another; it is not this change's to make.
+  //   - `rejected` is editable on purpose: it is the amend half of sending a
+  //     rejected PO back to its originator (client feedback item 7).
+  const PO_LOCKED_STATUSES = [
+    'approved', 'acceptance_pending', 'sent', 'dispatched',
+    'GRN', 'invoice_raised', 'completed', 'cancelled',
+  ];
+  if (PO_LOCKED_STATUSES.includes(String(po.status))) {
+    throw new Error(
+      `Edit failed! This purchase order is ${po.status} and can no longer be edited.`
+    );
+  }
+
   // Authorization: allow edit if user is the creator or is in the PO's approval hierarchy
   const isCreator = po.initiated_by === current_user.id;
 

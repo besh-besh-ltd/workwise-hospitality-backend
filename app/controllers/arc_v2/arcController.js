@@ -243,10 +243,22 @@ export async function createDraft(req, res) {
       // Seed items if any were provided up-front (multi-step wizard might add them later via PATCH).
       const items = Array.isArray(body.items) ? body.items : [];
       const createdItems = [];
+      // Sampling now lives per item, but `sample_required` on the body is the
+      // older contract-wide answer and still arrives from API clients and the
+      // manual-entry path. An item that says nothing inherits it — which is
+      // exactly what the flag used to mean — so no caller loses a requirement
+      // it had already stated. Same carry-down the migration performs for
+      // existing rows.
+      const arcWideSample = !!data.sample_required;
       for (const it of items) {
         if (!it.product_variant_id || it.indicative_qty == null) continue;
-        createdItems.push(await arcModel.addItem(arc.id, it, t));
+        createdItems.push(await arcModel.addItem(arc.id, {
+          ...it,
+          sample_required: it.sample_required === undefined ? arcWideSample : !!it.sample_required,
+        }, t));
       }
+      // ...and the contract-level flag is now the rollup of its items.
+      await arcModel.syncSampleRequiredRollup(arc.id, t);
       // Invitations (if invitation-only).
       if (data.eligibility_type === 'invitation' && Array.isArray(body.invited_vendor_ids)) {
         await arcModel.setInvitations(arc.id, body.invited_vendor_ids, t);
@@ -300,6 +312,11 @@ export async function updateDraft(req, res) {
       // (e.g. `{ type: 'service' }`) never touches — let alone wipes — it.
       let items = await arcModel.listItems(id, t);
       if (Array.isArray(body.items)) {
+        // Same inheritance as createDraft: fall back to the contract-wide
+        // answer this request carries, or to the one already stored.
+        const arcWideSample = body.sample_required !== undefined
+          ? !!body.sample_required
+          : !!existing.sample_required;
         const incoming = body.items.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
         const byVariant = new Map(items.map((it) => [Number(it.product_variant_id), it]));
         const keepVariantIds = new Set(incoming.map((it) => Number(it.product_variant_id)));
@@ -318,10 +335,22 @@ export async function updateDraft(req, res) {
                 spec_text: it.spec_text || '',
                 indicative_qty: it.indicative_qty,
                 uom: it.uom || null,
+                // Listed explicitly because this reconciler carries only what
+                // it names: an omitted column is silently reset to whatever it
+                // was, so turning a sampling requirement OFF would never stick.
+                sample_required: it.sample_required === undefined
+                  ? arcWideSample
+                  : !!it.sample_required,
               }, t)
-            : await arcModel.addItem(id, it, t));
+            : await arcModel.addItem(id, {
+                ...it,
+                sample_required: it.sample_required === undefined
+                  ? arcWideSample
+                  : !!it.sample_required,
+              }, t));
         }
         items = nextItems;
+        await arcModel.syncSampleRequiredRollup(id, t);
       }
 
       // Vendor invitations — same delete-and-replace `setInvitations` createDraft
