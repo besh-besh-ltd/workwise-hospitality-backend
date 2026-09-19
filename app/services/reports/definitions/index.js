@@ -26,7 +26,10 @@ import spendSummary from "./spendSummary.js";
 import spendByCategory from "./spendByCategory.js";
 import spendByProperty from "./spendByProperty.js";
 import spendByVendor from "./spendByVendor.js";
+import vendorConcentration from "./vendorConcentration.js";
+import vendorMaster from "./vendorMaster.js";
 import openPoRegister from "./openPoRegister.js";
+import approvalAuditTrail from "./approvalAuditTrail.js";
 import poAgingByApprover from "./poAgingByApprover.js";
 import poApprovalTat from "./poApprovalTat.js";
 
@@ -53,24 +56,8 @@ const DEFINITIONS = [
       missing: "Vendor documents are stored without issue or expiry dates, so nothing can be reported as expiring.",
     },
   }),
-  stub({
-    key: "vendor_concentration",
-    number: "2.2",
-    family: "Vendor Reports",
-    title: "Vendor Concentration Risk",
-    description: "Per-category supplier concentration, largest single-vendor exposures and single-source items.",
-    permission: "reports.vendor_concentration",
-    readiness: { state: "coming_soon" },
-  }),
-  stub({
-    key: "vendor_master",
-    number: "2.3",
-    family: "Vendor Reports",
-    title: "Vendor Master Activity",
-    description: "The vendor master with last transaction, period spend and vendors onboarded during the year.",
-    permission: "reports.vendor_master",
-    readiness: { state: "coming_soon" },
-  }),
+  vendorConcentration,
+  vendorMaster,
 
   // ── 3.3 Purchase Orders ──────────────────────────────────────────────────
   openPoRegister,
@@ -116,15 +103,7 @@ const DEFINITIONS = [
   }),
 
   // ── 3.5 Compliance & Audit ───────────────────────────────────────────────
-  stub({
-    key: "approval_audit_trail",
-    number: "5.1",
-    family: "Compliance & Audit",
-    title: "Approval Audit Trail",
-    description: "Every approval event with actor, timestamp and decision, plus flagged anomalies.",
-    permission: "reports.approval_audit_trail",
-    readiness: { state: "coming_soon" },
-  }),
+  approvalAuditTrail,
   stub({
     key: "policy_violations",
     number: "5.2",
