@@ -220,6 +220,201 @@ export async function spendByVendorRowEstimate(scope, { from, to }) {
   return row.n;
 }
 
+/**
+ * Report 1.1 sheet 1 — spend per calendar month across the window, with the
+ * same month of the prior year beside it.
+ *
+ * generate_series drives the rows rather than the data, so a month with no
+ * spend appears as a zero instead of silently vanishing and making a 12-month
+ * report render 9 rows.
+ */
+export async function spendByMonth(scope, { from, to, priorFrom, priorTo }) {
+  const values = [];
+  let i = 1;
+  const cur = spendBase(scope, { from, to }, values, i);
+  i = cur.nextIndex;
+  const prev = spendBase(scope, { from: priorFrom, to: priorTo }, values, i);
+  i = prev.nextIndex;
+
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+
+  const monthExpr = (alias) =>
+    `date_trunc('month', ${alias}.created_at AT TIME ZONE 'Asia/Kolkata')`;
+
+  return db.any(
+    `WITH months AS (
+       SELECT generate_series(
+                $${fromIdx}::date,
+                ($${toIdx}::date - INTERVAL '1 day'),
+                INTERVAL '1 month'
+              )::date AS month_start
+     ),
+     cur AS (
+       SELECT ${monthExpr("po")} AS m, SUM(pop.total_price) AS amount
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+        WHERE ${cur.where}
+        GROUP BY 1
+     ),
+     prev AS (
+       -- Shifted forward a year so it lines up with the current month on the
+       -- same row; the comparison is like-for-like month, not a running total.
+       SELECT (${monthExpr("po")} + INTERVAL '1 year') AS m,
+              SUM(pop.total_price) AS amount
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+        WHERE ${prev.where}
+        GROUP BY 1
+     )
+     SELECT m.month_start,
+            COALESCE(c.amount, 0)::float8 AS amount,
+            COALESCE(p.amount, 0)::float8 AS prior_amount
+       FROM months m
+       LEFT JOIN cur  c ON c.m = m.month_start
+       LEFT JOIN prev p ON p.m = m.month_start
+      ORDER BY m.month_start`,
+    values
+  );
+}
+
+/** Report 1.1 sheet 2 — spend per property, with the prior period beside it. */
+export async function spendByProperty(scope, { from, to, priorFrom, priorTo }) {
+  const values = [];
+  let i = 1;
+  const cur = spendBase(scope, { from, to }, values, i);
+  i = cur.nextIndex;
+  const prev = spendBase(scope, { from: priorFrom, to: priorTo }, values, i);
+  i = prev.nextIndex;
+
+  // A PO reaches its property through the RFQ, or through the MR for a
+  // call-off. COALESCE over both or the call-offs silently disappear.
+  const hotelExpr = `COALESCE(rfq.hotel_id, mr.hotel_id)`;
+  const joinMr = `LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id`;
+
+  return db.any(
+    `WITH cur AS (
+       SELECT ${hotelExpr} AS hotel_id,
+              SUM(pop.total_price) AS amount,
+              COUNT(DISTINCT po.id) AS po_count
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         ${joinMr}
+        WHERE ${cur.where}
+        GROUP BY 1
+     ),
+     prev AS (
+       SELECT ${hotelExpr} AS hotel_id, SUM(pop.total_price) AS amount
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         ${joinMr}
+        WHERE ${prev.where}
+        GROUP BY 1
+     )
+     SELECT c.hotel_id,
+            h.name  AS hotel_name,
+            h.city  AS city,
+            NULLIF(h.keys, 0) AS keys,
+            c.amount::float8       AS amount,
+            c.po_count::int        AS po_count,
+            p.amount::float8       AS prior_amount
+       FROM cur c
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = c.hotel_id
+       LEFT JOIN prev p ON p.hotel_id = c.hotel_id
+      WHERE c.amount IS NOT NULL AND c.amount <> 0
+      ORDER BY c.amount DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 1.1 sheet 3 / report 1.2 — spend per category.
+ *
+ * `level` picks the grain: "parent" rolls every leaf up to its top-level
+ * category, "leaf" reports the leaf itself. Either way each PO line is counted
+ * exactly once — see LEAF_CATEGORY_JOIN.
+ */
+export async function spendByCategory(scope, { from, to, priorFrom, priorTo }, { level = "parent" } = {}) {
+  const values = [];
+  let i = 1;
+  const cur = spendBase(scope, { from, to }, values, i);
+  i = cur.nextIndex;
+  const prev = spendBase(scope, { from: priorFrom, to: priorTo }, values, i);
+  i = prev.nextIndex;
+
+  // parent_id = 0 marks a top-level category in this schema — not NULL.
+  const groupExpr =
+    level === "parent"
+      ? `COALESCE(NULLIF(cat.parent_id, 0), cat.id)`
+      : `cat.id`;
+
+  const block = (whereClause) => `
+       SELECT ${groupExpr} AS category_id,
+              SUM(pop.total_price) AS amount,
+              COUNT(DISTINCT po.finalized_vendor_id) AS vendor_count,
+              COUNT(DISTINCT po.id) AS po_count
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+         ${LEAF_CATEGORY_JOIN}
+        WHERE ${whereClause}
+          AND cat.id IS NOT NULL
+        GROUP BY 1`;
+
+  return db.any(
+    `WITH cur AS (${block(cur.where)}),
+          prev AS (${block(prev.where)})
+     SELECT c.category_id,
+            cc.title               AS category,
+            pc.title               AS parent_category,
+            c.amount::float8       AS amount,
+            c.vendor_count::int    AS vendor_count,
+            c.po_count::int        AS po_count,
+            p.amount::float8       AS prior_amount
+       FROM cur c
+       LEFT JOIN tbl_category cc ON cc.id = c.category_id
+       LEFT JOIN tbl_category pc ON pc.id = NULLIF(cc.parent_id, 0)
+       LEFT JOIN prev p ON p.category_id = c.category_id
+      WHERE c.amount IS NOT NULL AND c.amount <> 0
+      ORDER BY c.amount DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/** Headline totals for the period and the one before it. */
+export async function spendTotals(scope, { from, to, priorFrom, priorTo }) {
+  const values = [];
+  let i = 1;
+  const cur = spendBase(scope, { from, to }, values, i);
+  i = cur.nextIndex;
+  const prev = spendBase(scope, { from: priorFrom, to: priorTo }, values, i);
+  i = prev.nextIndex;
+
+  return db.one(
+    `SELECT
+       (SELECT COALESCE(SUM(pop.total_price), 0)::float8
+          FROM tbl_rfq_purchase_order po
+          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         WHERE ${cur.where}) AS amount,
+       (SELECT COALESCE(SUM(pop.total_price), 0)::float8
+          FROM tbl_rfq_purchase_order po
+          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         WHERE ${prev.where}) AS prior_amount`,
+    values
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Entitlement
 // ---------------------------------------------------------------------------
@@ -310,6 +505,10 @@ export default {
   REPORT_ROW_CAP,
   spendByVendor,
   spendByVendorRowEstimate,
+  spendByMonth,
+  spendByProperty,
+  spendByCategory,
+  spendTotals,
   permittedReportActions,
   recordExport,
   listExports,
