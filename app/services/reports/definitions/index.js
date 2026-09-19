@@ -22,6 +22,7 @@
 //                     schema's.
 // ============================================================================
 
+import spendSummary from "./spendSummary.js";
 import spendByVendor from "./spendByVendor.js";
 
 /** A report that is declared but not yet runnable. */
@@ -29,15 +30,7 @@ const stub = (def) => ({ filters: [], ...def });
 
 const DEFINITIONS = [
   // ── 3.1 Spend Analytics ──────────────────────────────────────────────────
-  stub({
-    key: "spend_summary",
-    number: "1.1",
-    family: "Spend Analytics",
-    title: "Total Spend Summary",
-    description: "Monthly spend for the year with prior-year comparison, plus breakdowns by property and category.",
-    permission: "reports.spend_summary",
-    readiness: { state: "coming_soon" },
-  }),
+  spendSummary,
   stub({
     key: "spend_by_category",
     number: "1.2",
