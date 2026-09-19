@@ -793,6 +793,210 @@ export async function poApprovalTatByStage(scope, { from, to }) {
   );
 }
 
+/**
+ * Report 2.2 — supplier concentration per category.
+ *
+ * Returns one row per (category, vendor) so the definition wants to compute
+ * HHI, top-vendor share and top-3 share off ONE array rather than three
+ * queries that could disagree about the denominator.
+ */
+export async function categoryVendorSpend(scope, { from, to }) {
+  const values = [];
+  const base = spendBase(scope, { from, to }, values, 1);
+
+  return db.any(
+    `SELECT COALESCE(NULLIF(cat.parent_id, 0), cat.id) AS category_id,
+            cc.title                                   AS category,
+            po.finalized_vendor_id                     AS vendor_id,
+            ${VENDOR_NAME}                             AS vendor_name,
+            SUM(pop.total_price)::float8               AS amount
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LEAF_CATEGORY_JOIN}
+       LEFT JOIN tbl_category cc ON cc.id = COALESCE(NULLIF(cat.parent_id, 0), cat.id)
+       LEFT JOIN tbl_users v  ON v.id = po.finalized_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+      WHERE ${base.where}
+        AND cat.id IS NOT NULL
+      GROUP BY 1, 2, 3, 4
+      ORDER BY 2, 5 DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 2.2 sheet 3 — items with exactly one supplier in the window.
+ *
+ * "Single source" here means observed, not approved: it is what we actually
+ * bought from one vendor, because the platform has no approved-supplier list
+ * per item to check against. The sheet says so.
+ */
+export async function singleSourceItems(scope, { from, to }) {
+  const values = [];
+  const base = spendBase(scope, { from, to }, values, 1);
+
+  return db.any(
+    `WITH per_item AS (
+       SELECT pop.product_variant_id               AS variant_id,
+              COUNT(DISTINCT po.finalized_vendor_id) AS vendors,
+              MIN(po.finalized_vendor_id)          AS sole_vendor_id,
+              SUM(pop.total_price)                 AS amount,
+              SUM(pop.quantity)                    AS qty
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+        WHERE ${base.where}
+          AND pop.product_variant_id IS NOT NULL
+        GROUP BY 1
+       HAVING COUNT(DISTINCT po.finalized_vendor_id) = 1
+     )
+     SELECT i.variant_id,
+            COALESCE(NULLIF(TRIM(pv.name), ''), p.name, 'Item ' || i.variant_id) AS item_name,
+            i.sole_vendor_id                     AS vendor_id,
+            ${VENDOR_NAME}                       AS vendor_name,
+            i.amount::float8                     AS amount,
+            i.qty::float8                        AS qty
+       FROM per_item i
+       LEFT JOIN tbl_product_variant pv ON pv.id = i.variant_id
+       LEFT JOIN tbl_product p ON p.id = pv.product_id
+       LEFT JOIN tbl_users v ON v.id = i.sole_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+      ORDER BY i.amount DESC
+      LIMIT 500`,
+    values
+  );
+}
+
+/**
+ * Report 2.3 — the vendor master, with activity.
+ *
+ * Scoped by what the caller can see: a vendor appears because they transacted
+ * on an order in scope, not because they exist in tbl_users. A global vendor
+ * list would leak the supplier base of every other tenant.
+ */
+export async function vendorMasterActivity(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const cur = spendBase(scope, { from, to }, values, i);
+  i = cur.nextIndex;
+  // Lifetime needs its own status binding — spendBase's placeholders belong to
+  // the period CTE and reusing one by index is how these queries silently
+  // start filtering on a date.
+  const lifetimeStatusIdx = i++;
+  values.push(SPEND_STATUSES);
+  const lifetime = poBase(scope, values, i);
+
+  return db.any(
+    `WITH period AS (
+       SELECT po.finalized_vendor_id AS vendor_id,
+              SUM(pop.total_price)   AS amount,
+              COUNT(DISTINCT po.id)  AS po_count
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+        WHERE ${cur.where}
+        GROUP BY 1
+     ),
+     alltime AS (
+       SELECT po.finalized_vendor_id AS vendor_id,
+              SUM(pop.total_price)   AS amount,
+              MIN(po.created_at)     AS first_po_at,
+              MAX(po.created_at)     AS last_po_at
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+        WHERE po.status = ANY($${lifetimeStatusIdx}::po_status[])
+          AND ${lifetime.where}
+        GROUP BY 1
+     )
+     SELECT a.vendor_id,
+            ${VENDOR_NAME}                  AS vendor_name,
+            vc.gstin                        AS gstin,
+            v.created_at                    AS onboarded_at,
+            v.status                        AS user_status,
+            v.is_deleted                    AS is_deleted,
+            a.first_po_at,
+            a.last_po_at,
+            (EXTRACT(EPOCH FROM (NOW() - a.last_po_at)) / 86400.0)::int AS days_since_last_po,
+            COALESCE(p.amount, 0)::float8   AS period_amount,
+            COALESCE(p.po_count, 0)::int    AS period_po_count,
+            a.amount::float8                AS lifetime_amount,
+            EXISTS (
+              SELECT 1 FROM tbl_vendor_documents vd
+               WHERE vd.vendor_id = a.vendor_id AND vd.document_type = 'msme'
+            )                               AS is_msme
+       FROM alltime a
+       JOIN tbl_users v ON v.id = a.vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+       LEFT JOIN period p ON p.vendor_id = a.vendor_id
+      ORDER BY a.amount DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 5.1 — every approval decision on a purchase order, with its actor.
+ *
+ * Read from tbl_approval_actions, which is the append-only record of who
+ * decided what. The anomaly flags are computed here rather than in the
+ * definition because both need the PO's initiator, and fetching that
+ * separately would mean a second query that could disagree.
+ *
+ * SELF-APPROVAL is the actor also being the person who raised the order —
+ * a segregation-of-duties breach, and the one anomaly in this report that is
+ * unambiguous rather than a heuristic.
+ */
+export async function approvalAuditTrail(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `SELECT act.id                                 AS event_id,
+            act.created_at                         AS occurred_at,
+            act.action                             AS action,
+            act.comment                            AS comment,
+            act.approver_user_id                   AS actor_id,
+            au.name                                AS actor_name,
+            au.designation                         AS actor_designation,
+            s.step_order::int                      AS step_order,
+            po.id                                  AS po_id,
+            po.po_number                           AS po_number,
+            po.total_value::float8                 AS total_value,
+            po.initiated_by                        AS initiated_by,
+            h.name                                 AS hotel_name,
+            (act.approver_user_id = po.initiated_by) AS self_approved,
+            -- IST wall-clock hour, because "after hours" is a human claim
+            -- about the actor's day, not about UTC.
+            EXTRACT(HOUR FROM (act.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'))::int
+                                                   AS ist_hour
+       FROM tbl_approval_actions act
+       JOIN tbl_approval_instances ai ON ai.id = act.approval_instance_id
+       JOIN tbl_rfq_purchase_order po
+              ON po.id = ai.entity_id AND ai.entity_type = 'PO'
+       LEFT JOIN tbl_approval_instance_steps s ON s.id = act.approval_instance_step_id
+       LEFT JOIN tbl_users au ON au.id = act.approver_user_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_hospitality_company_hotels h
+              ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
+      WHERE act.created_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND act.created_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ${base.where}
+      ORDER BY act.created_at DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Entitlement
 // ---------------------------------------------------------------------------
@@ -895,6 +1099,10 @@ export default {
   poApprovalTat,
   poApprovalTatByApprover,
   poApprovalTatByStage,
+  categoryVendorSpend,
+  singleSourceItems,
+  vendorMasterActivity,
+  approvalAuditTrail,
   permittedReportActions,
   recordExport,
   listExports,
