@@ -390,6 +390,128 @@ export async function spendByCategory(scope, { from, to, priorFrom, priorTo }, {
   );
 }
 
+/**
+ * Report 1.2 sheet 3 — the category x property grid, returned long rather than
+ * pivoted. Pivoting in SQL would mean building the column list dynamically
+ * from data, which is how a report query becomes an injection surface; the
+ * definition reshapes it instead.
+ */
+export async function spendByCategoryProperty(scope, { from, to }, { level = "parent" } = {}) {
+  const values = [];
+  const base = spendBase(scope, { from, to }, values, 1);
+
+  const groupExpr =
+    level === "parent" ? `COALESCE(NULLIF(cat.parent_id, 0), cat.id)` : `cat.id`;
+
+  return db.any(
+    `SELECT ${groupExpr}                        AS category_id,
+            cc.title                            AS category,
+            COALESCE(rfq.hotel_id, mr.hotel_id) AS hotel_id,
+            h.name                              AS hotel_name,
+            SUM(pop.total_price)::float8        AS amount
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LEAF_CATEGORY_JOIN}
+       LEFT JOIN tbl_category cc ON cc.id = ${groupExpr}
+       LEFT JOIN tbl_hospitality_company_hotels h
+              ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
+      WHERE ${base.where}
+        AND cat.id IS NOT NULL
+      GROUP BY 1, 2, 3, 4
+      ORDER BY 2, 4
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * Report 1.3 sheet 3 — items bought at materially different rates across
+ * properties.
+ *
+ * The rate is derived as value / quantity per property rather than read off
+ * unit_price, because a line's unit_price does not carry the charges folded
+ * into its total, and the number a buyer can act on is what was actually paid
+ * per unit. Items bought at only one property are excluded — there is nothing
+ * to compare — as are zero quantities, which would divide by zero.
+ */
+export async function interPropertyRateVariance(
+  scope,
+  { from, to },
+  { minProperties = 2, minSpread = 0.1 } = {}
+) {
+  const values = [];
+  const base = spendBase(scope, { from, to }, values, 1);
+  const minPropsIdx = base.nextIndex;
+  values.push(minProperties);
+  const minSpreadIdx = minPropsIdx + 1;
+  values.push(minSpread);
+
+  return db.any(
+    `WITH per_property AS (
+       -- Keyed on the UNIT as well as the item. Without that, a variant bought
+       -- in boxes at one property and in pieces at another compares directly
+       -- and reports an 86x "rate variance" that is really a unit mismatch —
+       -- observed on staging before this was added.
+       SELECT pop.product_variant_id                AS variant_id,
+              LOWER(TRIM(pop.unit))                 AS unit,
+              COALESCE(rfq.hotel_id, mr.hotel_id)   AS hotel_id,
+              SUM(pop.total_price)                  AS value,
+              SUM(pop.quantity)                     AS qty
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+        WHERE ${base.where}
+          AND pop.product_variant_id IS NOT NULL
+        GROUP BY 1, 2, 3
+       HAVING SUM(pop.quantity) > 0
+     ),
+     rated AS (
+       SELECT variant_id, unit, hotel_id, value, qty, (value / qty) AS unit_rate
+         FROM per_property
+     ),
+     spread AS (
+       SELECT variant_id,
+              unit,
+              COUNT(DISTINCT hotel_id)      AS properties,
+              MIN(unit_rate)                AS min_rate,
+              MAX(unit_rate)                AS max_rate,
+              SUM(value)                    AS total_value,
+              SUM(qty)                      AS total_qty,
+              (SUM(value) / NULLIF(SUM(qty), 0)) AS wtd_avg_rate
+         FROM rated
+        GROUP BY 1, 2
+       HAVING COUNT(DISTINCT hotel_id) >= $${minPropsIdx}
+          AND MIN(unit_rate) > 0
+          -- Only report a gap worth acting on. The approved sample uses the
+          -- same 10% floor.
+          AND (MAX(unit_rate) - MIN(unit_rate)) / MIN(unit_rate) >= $${minSpreadIdx}
+     )
+     SELECT s.variant_id,
+            COALESCE(NULLIF(TRIM(pv.name), ''), p.name, 'Item ' || s.variant_id) AS item_name,
+            s.unit                    AS unit,
+            s.properties::int         AS properties,
+            s.min_rate::float8        AS min_rate,
+            s.max_rate::float8        AS max_rate,
+            s.wtd_avg_rate::float8    AS wtd_avg_rate,
+            s.total_value::float8     AS total_value,
+            s.total_qty::float8       AS total_qty,
+            -- What buying everything at the cheapest observed rate would have
+            -- cost less. An upper bound, not a promise: it assumes the low
+            -- rate was available everywhere.
+            (s.total_value - (s.min_rate * s.total_qty))::float8 AS save_potential
+       FROM spread s
+       LEFT JOIN tbl_product_variant pv ON pv.id = s.variant_id
+       LEFT JOIN tbl_product p ON p.id = pv.product_id
+      ORDER BY (s.total_value - (s.min_rate * s.total_qty)) DESC
+      LIMIT 200`,
+    values
+  );
+}
+
 /** Headline totals for the period and the one before it. */
 export async function spendTotals(scope, { from, to, priorFrom, priorTo }) {
   const values = [];
@@ -508,6 +630,8 @@ export default {
   spendByMonth,
   spendByProperty,
   spendByCategory,
+  spendByCategoryProperty,
+  interPropertyRateVariance,
   spendTotals,
   permittedReportActions,
   recordExport,
