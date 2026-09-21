@@ -863,6 +863,15 @@ const hospitalityModel = {
           WHEN vhcs.item_type = 'hotel' THEN hc.name
           ELSE NULL
         END AS hotel_company_name,
+        -- Whether the thing this row points at still exists. A subscription
+        -- row outlives a soft-deleted hotel or category, and callers that feed
+        -- the Edit drawer must not offer what the write path will reject. A
+        -- row whose target has vanished entirely counts as deleted.
+        CASE
+          WHEN vhcs.item_type IN ('category', 'subcategory') THEN COALESCE(c.is_deleted, 1)
+          WHEN vhcs.item_type = 'hotel' THEN COALESCE(h.is_deleted, 1)
+          ELSE 0
+        END AS item_is_deleted,
         vp.payment_status, vp.amount AS total_paid,
         vp.razorpay_payment_id, vp.razorpay_order_id
        FROM tbl_vendor_hotel_category_subscription vhcs
@@ -1751,6 +1760,18 @@ getVendorHotelCategoryMappings: async (vendorId) => {
            vp.payment_status IN ('paid', 'success')
            OR (s.payment_id IS NULL AND u.status = 1)
          )
+         -- A subscription row can outlive the thing it points at: hotel 33
+         -- "Demo Business Unit" was soft-deleted while 11 vendors still held an
+         -- active row for it. Listing a vanished item here made the Edit drawer
+         -- send it straight back to _computeModificationPreview, which rejects
+         -- anything with is_deleted <> 0 — locking those vendors out of their
+         -- own subscription. Never offer what the write path will not accept.
+         AND CASE s.item_type
+               WHEN 'category'    THEN c.id  IS NOT NULL AND c.is_deleted  = 0
+               WHEN 'subcategory' THEN sc.id IS NOT NULL AND sc.is_deleted = 0
+               WHEN 'hotel'       THEN h.id  IS NOT NULL AND h.is_deleted  = 0
+               ELSE TRUE
+             END
        ORDER BY s.item_type, item_name`,
       [vendorId]
     );
