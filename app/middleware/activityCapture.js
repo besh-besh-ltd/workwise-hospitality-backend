@@ -184,6 +184,11 @@ const captureEvent = async (req, res, responseBody) => {
     params: req.params || {},
     query: req.query || {},
     response: responseBody,
+    // What the handler knows that the route cannot say. A route names the
+    // endpoint; only the controller knows that a save moved somebody's approval
+    // role. Handlers put it on `res.locals.activityDetail` and the registry's
+    // summary reads it here — the sentence still lives in one place.
+    detail: res.locals?.activityDetail || null,
   };
 
   let summary;
@@ -223,6 +228,7 @@ const captureEvent = async (req, res, responseBody) => {
     metadata: {
       duration_ms: ctx?.startedAt ? Date.now() - ctx.startedAt : null,
       ...(definition ? {} : { uncatalogued: true }),
+      ...(res.locals?.activityDetail?.metadata || {}),
     },
     httpMethod: req.method,
     routePattern: pattern,

@@ -4528,6 +4528,82 @@ LIMIT 2;
    *  NEGOTIATION_ONGOING, COMMERCIAL_EVALUATION, TECHNICAL_REJECTED,
    *  TECHNICAL_APPROVING, TECHNICAL_EVALUATING, RFQ_APPROVAL
    */
+  /**
+   * PO rejections that still explain where an RFQ stands — one row per
+   * rejected (PO, product) whose product has not been awarded again since.
+   *
+   * - rejection_type 'vendor':   PO status 'rejected_by_vendor'; reason from
+   *   po.vendor_rejection_reason, rejected_by = the vendor.
+   * - rejection_type 'approver': PO status 'rejected'; reason and rejecter from
+   *   the REJECT row in tbl_approval_actions, via the PO's approval_instance_id.
+   *
+   * A rejection de-finalizes the product, and that is what sends the RFQ back
+   * to commercial evaluation. Once the product is awarded again the rejection
+   * no longer explains anything, so it drops out.
+   *
+   * Shared by the RFQ detail (re-award modal) and the RFQ listing card, so
+   * the two cannot disagree about what counts. RFQ 536263 is why the listing
+   * needs it: it went from "PO Approval" to "Commercial Evaluation" with no
+   * explanation on the card, and the client concluded their approval matrix
+   * had changed.
+   */
+  getLivePoRejectionsForRfqs: async (rfqIds, t = db) => {
+    const ids = (rfqIds || []).map(Number).filter(Number.isFinite);
+    if (ids.length === 0) return [];
+    return t.any(`
+      SELECT
+        po.rfq_id,
+        rp.product_variant_id,
+        rp.variant,
+        po.finalized_vendor_id AS vendor_id,
+        vu.name AS vendor_name,
+        vu.organization_name AS vendor_organization,
+        po.po_number,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
+          ELSE 'approver'
+        END AS rejection_type,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
+          ELSE aa.comment
+        END AS rejection_reason,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
+          ELSE aa.created_at
+        END AS rejected_at,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN vu.name
+          ELSE au.name
+        END AS rejected_by_name,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN NULL
+          ELSE au.email
+        END AS rejected_by_email
+      FROM tbl_rfq_purchase_order po
+      JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
+      JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+      JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+      LEFT JOIN LATERAL (
+        SELECT a.approver_user_id, a.comment, a.created_at
+        FROM tbl_approval_actions a
+        WHERE a.approval_instance_id = po.approval_instance_id
+          AND a.action = 'REJECT'
+        ORDER BY a.created_at DESC
+        LIMIT 1
+      ) aa ON TRUE
+      LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
+      WHERE po.rfq_id = ANY($1::int[])
+        AND po.status IN ('rejected_by_vendor', 'rejected')
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_quote_finalization qf
+          WHERE qf.rfq_id = po.rfq_id
+            AND qf.product_variant_id = rp.product_variant_id
+            AND qf.variant = rp.variant
+        )
+      ORDER BY rejected_at DESC NULLS LAST
+    `, [ids]);
+  },
+
   computeLifecycleStages: async (rfqIds) => {
     if (!rfqIds || rfqIds.length === 0) return {};
 
