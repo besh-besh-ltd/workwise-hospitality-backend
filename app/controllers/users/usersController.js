@@ -42,6 +42,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
+import { labelRoleScopes } from '../../services/activity/roleScopeLabels.js';
 import { isCompanyAdmin, requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
 import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
 import {
@@ -1089,6 +1090,19 @@ create_buyer_company_users: async (req, res, next) => {
 
       await validateRoleScopeProcesses(roleScopes);
       await rbacModel.assignUserRoleScopes(roleScopes);
+
+      // A new account can arrive already holding approval authority — Geetanand
+      // Shetty was created on 15 Sep straight into Final Awarding P2 for The
+      // Orchid Hotel Mumbai. The trail should say so, not just "created an account".
+      try {
+        const added = await labelRoleScopes(roleScopes);
+        res.locals.activityDetail = {
+          role_scopes: { added, removed: [] },
+          metadata: { role_scopes: { added, removed: [] } },
+        };
+      } catch (labelErr) {
+        logger.warn({ err: labelErr.message, userId: createdUser.id }, 'Could not label granted roles for the activity trail');
+      }
 
       /* ---- PROPAGATE: newly granted role scopes may match live approvals ----
          A freshly created user granted a role scope that resolveApprovers()
@@ -2600,6 +2614,28 @@ update_user_detail: async (req, res, next) => {
           await rbacModel.assignUserRoleScopes(roleScopes, t);
         }
       });
+
+      // Tell the activity trail what this save did to who approves. The diff
+      // was computed above to propagate pending approvals; without this the
+      // trail recorded only "updated a user account", which is how RFQ 536263's
+      // step-2 approver changed on 15 Sep with nothing readable left behind.
+      if (hasRoleUpdate && scopeRemoveContext &&
+          (scopeRemoveContext.addedScopes.length > 0 || scopeRemoveContext.removedScopes.length > 0)) {
+        try {
+          const [added, removed] = await Promise.all([
+            labelRoleScopes(scopeRemoveContext.addedScopes),
+            labelRoleScopes(scopeRemoveContext.removedScopes),
+          ]);
+          res.locals.activityDetail = {
+            role_scopes: { added, removed },
+            metadata: { role_scopes: { added, removed } },
+          };
+        } catch (labelErr) {
+          // The save has committed; an unlabelled trail line is better than a
+          // failed response for a change that already happened.
+          logger.warn({ err: labelErr.message, targetUserId }, 'Could not label role-scope changes for the activity trail');
+        }
+      }
     }
 
     /* ---- PROPAGATE APPROVAL MEMBERSHIP CHANGES ----
