@@ -53,6 +53,43 @@ const SCOPE = {
 
 const e = (def) => def;
 
+/**
+ * The verb for `POST /po/approve/:po_id`, mirroring what approvePO actually
+ * does with the body: `decision === 'approved'` approves, and any other value
+ * that passes its validation (`rejected`, but also `pending` and `cancelled`)
+ * is sent to the engine as REJECT. Anything else is refused with a 400, and a
+ * refused request must not be written up as a decision either way.
+ */
+const poDecisionVerb = (decision) => {
+  if (decision === 'approved') return 'approved';
+  if (['rejected', 'pending', 'cancelled'].includes(decision)) return 'rejected';
+  return 'tried to decide on';
+};
+
+/** "Final Awarding P2 at The Orchid Hotel Mumbai (Engineering)". */
+const scopePhrase = (s) => {
+  let phrase = s.role;
+  phrase += s.hotel ? ` at ${s.hotel}` : ' across the company';
+  if (s.department) phrase += ` (${s.department})`;
+  if (s.process) phrase += ` for ${s.process}`;
+  return phrase;
+};
+
+/**
+ * "removed Final Awarding P2 at X; added Final Awarding P1 at X", or null when
+ * the save did not touch approval roles. Removals first: when approval moves
+ * from one person to another, what somebody lost is the part that surprises.
+ */
+const roleScopeChangePhrase = (roleScopes) => {
+  const removed = roleScopes?.removed || [];
+  const added = roleScopes?.added || [];
+  if (removed.length === 0 && added.length === 0) return null;
+  const parts = [];
+  if (removed.length) parts.push(`removed ${removed.map(scopePhrase).join(', ')}`);
+  if (added.length) parts.push(`added ${added.map(scopePhrase).join(', ')}`);
+  return parts.join('; ');
+};
+
 /** "3 September 2026" — a feed sentence must never contain an ISO instant. */
 const onDate = (value) => {
   if (!value) return 'a set date';
@@ -207,11 +244,17 @@ export const EVENTS = [
     entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
     summary: (c) => `${c.actor} sent purchase order ${c.entityLabel} for approval`,
   }),
+  // One route, both decisions: `decision` in the body chooses. This entry used
+  // to be keyed `po_approved` with a fixed "approved" summary, so every PO
+  // rejection taken on the PO page went into the trail as an approval — RFQ
+  // 536263's two rejections on 11 Sep read "Vishal Kamat approved purchase
+  // order 138721". Neutral key and a body-read verb, like every other decision
+  // endpoint in this file.
   e({
-    method: 'POST', path: '/po/approve/:po_id', key: 'po_approved',
+    method: 'POST', path: '/po/approve/:po_id', key: 'po_approval_decided',
     category: CATEGORIES.APPROVALS, severity: 'critical',
     entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
-    summary: (c) => `${c.actor} approved purchase order ${c.entityLabel}`,
+    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision)} purchase order ${c.entityLabel}`,
   }),
   e({
     method: 'POST', path: '/po/accept/:po_id', key: 'po_accepted',
@@ -301,16 +344,36 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/users/create-buyer-company-user', key: 'user_created',
     category: CATEGORIES.PEOPLE, severity: 'critical',
-    entity: { type: 'USER', id: R() }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} created an account for ${c.body?.name || 'a new user'}`,
+    // Scoped by the NEW user's company, then the actor — see user_updated. The
+    // 15 Sep creation of RFQ 536263's new step-2 approver was dropped because
+    // the admin who created him had no company mapping of their own.
+    entity: { type: 'USER', id: R() }, scope: SCOPE.entity('USER'),
+    summary: (c) => {
+      const who = c.body?.name || c.entityLabel || 'a new user';
+      const granted = c.detail?.role_scopes?.added || [];
+      return granted.length
+        ? `${c.actor} created an account for ${who} with approval roles — ${granted.map(scopePhrase).join(', ')}`
+        : `${c.actor} created an account for ${who}`;
+    },
   }),
   e({
     method: 'PUT', path: '/users/update-user-detail', key: 'user_updated',
     category: CATEGORIES.PEOPLE, severity: 'notable',
-    entity: { type: 'USER', id: B('user_id') }, scope: SCOPE.actor(),
+    // Scoped by the EDITED user, then the actor. Scoping by the actor alone
+    // meant an administrator with no hospitality mapping of their own — the
+    // platform account that moved RFQ 536263's step-2 approver on 15 Sep —
+    // resolved to no company, and every one of their edits was dropped.
+    entity: { type: 'USER', id: B('user_id') }, scope: SCOPE.entity('USER'),
     // This endpoint multiplexes profile edits, role grants, department moves
-    // and activation. The middleware refines the sentence from what changed.
-    summary: (c) => `${c.actor} updated a user account`,
+    // and activation. When the save changed approval roles the controller
+    // hands over the exact diff, and the sentence says who gained and lost what.
+    summary: (c) => {
+      const whose = c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
+      const changes = roleScopeChangePhrase(c.detail?.role_scopes);
+      return changes
+        ? `${c.actor} changed ${whose} approval roles — ${changes}`
+        : `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
+    },
   }),
   e({
     method: 'POST', path: '/users/:user_id/send-password-reset', key: 'password_reset_sent',
