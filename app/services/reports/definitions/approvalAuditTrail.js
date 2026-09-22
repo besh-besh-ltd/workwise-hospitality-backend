@@ -101,8 +101,11 @@ export default {
         total_value: Number(e.total_value) || 0,
         hotel_name: e.hotel_name || "—",
         step_label: e.step_order ? `L${e.step_order}` : "—",
-        action: e.action,
-        action_label: ACTION_LABELS[e.action] || e.action,
+        // A cancellation logged as REJECT is a cancellation. Labelling it
+        // "Rejected" put every closed RFQ's pending PO approvals into the
+        // rejection count — 22 of prod's 69 "rejections".
+        action: e.is_cancellation ? "CANCELLED" : e.action,
+        action_label: e.is_cancellation ? ACTION_LABELS.CANCELLED : ACTION_LABELS[e.action] || e.action,
         actor_name: e.actor_name || `User ${e.actor_id}`,
         actor_designation: e.actor_designation || "—",
         comment: e.comment || "—",

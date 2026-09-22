@@ -6,9 +6,10 @@
 // permission gates a report, and whether it can be run at all.
 //
 // ── Why unbuildable reports are still listed ────────────────────────────────
-// Six of the sixteen have no backing data in this schema — there is no budget
-// table, no forecast table, no document expiry date anywhere, no PO
-// cancellation reason and no PO amendment trail. Hiding them would quietly
+// Five of the sixteen have no backing data in this schema — there is no budget
+// table, no forecast table, no document expiry date anywhere and no violation
+// rule set. (3.3 was the sixth until product swapped its amendment log, which
+// cannot be built, for the rejection log, which the approval engine records.) Hiding them would quietly
 // shrink a pack the client signed off on, and the first question in the review
 // would be "where did budget vs actual go?". They are listed with the state
 // `not_configured` and the specific thing that is missing, so the answer is on
@@ -32,6 +33,7 @@ import openPoRegister from "./openPoRegister.js";
 import approvalAuditTrail from "./approvalAuditTrail.js";
 import poAgingByApprover from "./poAgingByApprover.js";
 import poApprovalTat from "./poApprovalTat.js";
+import rejectedPoLog from "./rejectedPoLog.js";
 
 /** A report that is declared but not yet runnable. */
 const stub = (def) => ({ filters: [], ...def });
@@ -62,19 +64,7 @@ const DEFINITIONS = [
   // ── 3.3 Purchase Orders ──────────────────────────────────────────────────
   openPoRegister,
   poAgingByApprover,
-  stub({
-    key: "po_cancel_amend",
-    number: "3.3",
-    family: "Purchase Orders",
-    title: "Cancelled / Amended PO Log",
-    description: "Cancellations and amendments with their reason codes and value impact.",
-    permission: "reports.po_cancel_amend",
-    readiness: {
-      state: "not_configured",
-      missing:
-        "Cancelling a purchase order records no reason or actor, and amending one is not tracked as a revision at all.",
-    },
-  }),
+  rejectedPoLog,
 
   // ── 3.4 Budget & Cost Control ────────────────────────────────────────────
   stub({

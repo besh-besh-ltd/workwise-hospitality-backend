@@ -30,6 +30,7 @@
     "migrations/20260919121000_report_exports.sql",
     "migrations/20260919122000_approval_step_sla.sql",
     "migrations/20260920090000_reports_grant_report_download_role.sql",
+    "migrations/20260922100000_reports_rejected_po_log.sql",
     "migrations/20260922101000_po_cancelled_on_rfq_close_backfill.sql"
   ]
 }

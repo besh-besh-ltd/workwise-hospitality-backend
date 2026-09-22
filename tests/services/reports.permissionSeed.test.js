@@ -62,20 +62,34 @@ describe("who the migrations grant it to", () => {
     const held = await permissionsOf("Company Administrator");
     expect(held.size).toBe(16);
     expect(held.has("approval_audit_trail")).toBe(true);
+    expect(held.has("po_rejections")).toBe(true);
   });
 
-  it("gives the Report Download role everything EXCEPT the approval audit trail", async () => {
+  it("gives the Report Download role everything EXCEPT the two reports that name individuals", async () => {
     const held = await permissionsOf("Report Download");
 
     // The role exists in the seeded schema; if this ever comes back empty the
     // grant migration silently did nothing.
     expect(held.size).toBeGreaterThan(0);
-    expect(held.size).toBe(15);
+    expect(held.size).toBe(14);
 
-    // The negative assertion this file exists for.
+    // The negative assertions this file exists for. Both reports name the
+    // person who took a decision and quote what they wrote; neither belongs
+    // on a role 183 people hold.
     expect(held.has("approval_audit_trail")).toBe(false);
+    expect(held.has("po_rejections")).toBe(false);
+
     expect(held.has("spend_by_vendor")).toBe(true);
     expect(held.has("po_aging_by_approver")).toBe(true);
+  });
+
+  it("renamed the 3.3 key rather than leaving the amendment name behind", async () => {
+    const actions = await db.any(
+      `SELECT action::text AS action FROM tbl_permissions WHERE resource::text = 'reports'`
+    );
+    const keys = actions.map((a) => a.action);
+    expect(keys).toContain("po_rejections");
+    expect(keys).not.toContain("po_cancel_amend");
   });
 
   it("does not hand the catalogue to every role on the way past", async () => {

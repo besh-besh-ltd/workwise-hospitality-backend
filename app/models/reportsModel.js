@@ -942,7 +942,10 @@ export async function approvalAuditTrail(scope, { from, to }) {
     `SELECT act.id                                 AS event_id,
             act.created_at                         AS occurred_at,
             act.action                             AS action,
-            act.comment                            AS comment,
+            -- Cancellations were logged as REJECT with a '[CANCELLED] ' prefix
+            -- before the platform fix; read both shapes as what they were.
+            ${isCancellationAction("act")}          AS is_cancellation,
+            regexp_replace(COALESCE(act.comment, ''), '^\\[CANCELLED\\]\\s*', '') AS comment,
             act.approver_user_id                   AS actor_id,
             au.name                                AS actor_name,
             au.designation                         AS actor_designation,
@@ -952,7 +955,11 @@ export async function approvalAuditTrail(scope, { from, to }) {
             po.total_value::float8                 AS total_value,
             po.initiated_by                        AS initiated_by,
             h.name                                 AS hotel_name,
-            (act.approver_user_id = po.initiated_by) AS self_approved,
+            -- Self-approval is an APPROVAL by the person who raised the order.
+            -- Rejecting or cancelling your own order is not a segregation-of-
+            -- duties breach, and flagging it as one would put a false "High"
+            -- finding in front of an auditor.
+            (act.action = 'APPROVE' AND act.approver_user_id = po.initiated_by) AS self_approved,
             -- IST wall-clock hour, because "after hours" is a human claim
             -- about the actor's day, not about UTC.
             EXTRACT(HOUR FROM (act.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'))::int
@@ -971,6 +978,188 @@ export async function approvalAuditTrail(scope, { from, to }) {
         AND act.created_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       ORDER BY act.created_at DESC
+      LIMIT ${REPORT_ROW_CAP}`,
+    values
+  );
+}
+
+/**
+ * A cancellation, however it was written.
+ *
+ * Until the platform fix that ships with this report, cancelling an approval
+ * instance was recorded as action 'REJECT' with a '[CANCELLED] ' comment
+ * prefix — the code claimed the CHECK constraint only allowed APPROVE and
+ * REJECT, which stopped being true when 'CANCELLED' was added to it. New
+ * cancellations are written as 'CANCELLED'; history is not rewritten, so
+ * every reader has to accept both shapes. On prod that history is 22 rows,
+ * every one of them an RFQ closure, and counting them as rejections inflates
+ * the rejection count by almost half (69 against a true 47).
+ *
+ * Takes the action-row alias so it can be used anywhere that reads
+ * tbl_approval_actions.
+ */
+export const isCancellationAction = (a) =>
+  `(${a}.action = 'CANCELLED' OR (${a}.action = 'REJECT' AND ${a}.comment LIKE '[CANCELLED]%'))`;
+
+/**
+ * Report 3.3 — every purchase order that did not go through, in the window.
+ *
+ * Three kinds, each a different decision with a different owner:
+ *
+ *   REJECTED         an approver said no. The PO row stays at 'rejected'
+ *                    permanently; a reissue gets a NEW PO number, which is why
+ *                    "re-raised as" can be shown at all.
+ *   CANCELLED        the approval was cancelled, almost always because the RFQ
+ *                    was closed. Before the platform fix these POs were left at
+ *                    'pending_approval' with nothing pending behind them, so
+ *                    both that orphan shape and the fixed 'cancelled' status
+ *                    are read — the report is correct before and after the
+ *                    backfill runs.
+ *   VENDOR_REJECTED  the supplier refused the order after approval.
+ *
+ * Driven by the PO's own status, then decorated with the decision record,
+ * rather than the other way round: that matches how the RFQ card's "PO
+ * rejected" marker reads the same rows, and it keeps a PO whose trail is
+ * missing (staging's seeded demo rejections have none) on the report with the
+ * actor shown as not recorded, instead of silently dropping it.
+ */
+export async function rejectedPoLog(scope, { from, to }) {
+  const values = [];
+  let i = 1;
+  const fromIdx = i++;
+  values.push(from);
+  const toIdx = i++;
+  values.push(to);
+  const base = poBase(scope, values, i);
+
+  return db.any(
+    `WITH scoped AS (
+       SELECT po.id, po.po_number, po.status::text AS po_status,
+              po.created_at AS po_created_at, po.updated_at,
+              po.total_value, po.finalized_vendor_id, po.rfq_id,
+              po.rfq_product_id, po.initiated_by,
+              po.vendor_rejection_reason, po.vendor_action_at,
+              COALESCE(rfq.hotel_id, mr.hotel_id)           AS hotel_id,
+              COALESCE(rfq.department_id, mr.department_id) AS department_id,
+              rfq.rfq_no
+         FROM tbl_rfq_purchase_order po
+         LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+         LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+        WHERE ${base.where}
+          AND (
+            po.status IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            -- The pre-fix orphan: pending approval, nothing pending, and a
+            -- cancelled instance to explain why.
+            OR (po.status = 'pending_approval'
+                AND NOT EXISTS (SELECT 1 FROM tbl_approval_instances x
+                                 WHERE x.entity_type = 'PO' AND x.entity_id = po.id
+                                   AND x.status = 'PENDING')
+                AND EXISTS (SELECT 1 FROM tbl_approval_instances x
+                             WHERE x.entity_type = 'PO' AND x.entity_id = po.id
+                               AND x.status = 'CANCELLED'))
+          )
+     ),
+     events AS (
+       SELECT sc.*, 'REJECTED'::text AS kind,
+              r.actor_id, r.reason, r.event_at, r.step_order
+         FROM scoped sc
+         LEFT JOIN LATERAL (
+           SELECT a.approver_user_id AS actor_id, a.comment AS reason,
+                  (a.created_at AT TIME ZONE 'UTC') AS event_at,
+                  s.step_order
+             FROM tbl_approval_actions a
+             JOIN tbl_approval_instances ai ON ai.id = a.approval_instance_id
+             LEFT JOIN tbl_approval_instance_steps s ON s.id = a.approval_instance_step_id
+            WHERE ai.entity_type = 'PO' AND ai.entity_id = sc.id
+              AND a.action = 'REJECT'
+              AND NOT ${isCancellationAction("a")}
+            ORDER BY a.created_at DESC
+            LIMIT 1
+         ) r ON TRUE
+        WHERE sc.po_status = 'rejected'
+
+       UNION ALL
+
+       SELECT sc.*, 'CANCELLED'::text,
+              c.actor_id, c.reason, c.event_at, NULL::int
+         FROM scoped sc
+         LEFT JOIN LATERAL (
+           SELECT a.approver_user_id AS actor_id,
+                  NULLIF(regexp_replace(COALESCE(a.comment, ''), '^\\[CANCELLED\\]\\s*', ''), '') AS reason,
+                  (a.created_at AT TIME ZONE 'UTC') AS event_at
+             FROM tbl_approval_actions a
+             JOIN tbl_approval_instances ai ON ai.id = a.approval_instance_id
+            WHERE ai.entity_type = 'PO' AND ai.entity_id = sc.id
+              AND ai.status = 'CANCELLED'
+              AND ${isCancellationAction("a")}
+            ORDER BY a.created_at DESC
+            LIMIT 1
+         ) c ON TRUE
+        WHERE sc.po_status IN ('cancelled', 'pending_approval')
+
+       UNION ALL
+
+       SELECT sc.*, 'VENDOR_REJECTED'::text,
+              sc.finalized_vendor_id, sc.vendor_rejection_reason, sc.vendor_action_at, NULL::int
+         FROM scoped sc
+        WHERE sc.po_status = 'rejected_by_vendor'
+     )
+     SELECT e.id                                AS po_id,
+            e.po_number,
+            e.kind,
+            e.po_created_at,
+            COALESCE(e.event_at, e.updated_at)  AS event_at,
+            (e.event_at IS NULL)                AS trail_missing,
+            e.total_value::float8               AS total_value,
+            e.rfq_no,
+            e.step_order,
+            e.reason,
+            h.name                              AS hotel_name,
+            d.title                             AS department,
+            ${VENDOR_NAME}                      AS vendor_name,
+            CASE WHEN e.kind = 'VENDOR_REJECTED' THEN ${VENDOR_NAME}
+                 ELSE au.name END               AS actor_name,
+            CASE WHEN e.kind = 'VENDOR_REJECTED' THEN 'Vendor'
+                 ELSE au.designation END        AS actor_designation,
+            e.actor_id,
+            rr.po_number                        AS reraised_po_number,
+            rr.status                           AS reraised_status
+       FROM events e
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = e.hotel_id
+       LEFT JOIN tbl_department d ON d.id = e.department_id
+       LEFT JOIN tbl_users v  ON v.id = e.finalized_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = v.company_id
+       LEFT JOIN tbl_users au ON au.id = e.actor_id AND e.kind <> 'VENDOR_REJECTED'
+       -- What happened next: the first later PO on the same RFQ that orders any
+       -- of the same RFQ items and has not itself fallen over.
+       --
+       -- Matched on the ORDER LINES, and on nothing coarser. Two shortcuts both
+       -- look right and both are wrong on prod:
+       --   * same RFQ + same vendor reports 29 of 47 rejections as re-raised;
+       --     the truth is 5. One RFQ yields several POs to one vendor for
+       --     different items, so the match lands on unrelated orders.
+       --   * the header's rfq_product_id array is not the line list — PO 224's
+       --     header names one item while its lines cover eighteen.
+       LEFT JOIN LATERAL (
+         SELECT p2.po_number, p2.status::text AS status
+           FROM tbl_rfq_purchase_order p2
+          WHERE p2.rfq_id = e.rfq_id
+            AND p2.id <> e.id
+            AND p2.created_at > e.po_created_at
+            AND p2.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+            AND EXISTS (
+              SELECT 1
+                FROM tbl_purchase_order_product l2
+                JOIN tbl_purchase_order_product l1 ON l1.rfq_product_id = l2.rfq_product_id
+               WHERE l2.purchase_order_id = p2.id
+                 AND l1.purchase_order_id = e.id
+            )
+          ORDER BY p2.created_at ASC
+          LIMIT 1
+       ) rr ON TRUE
+      WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata')
+        AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata')
+      ORDER BY COALESCE(e.event_at, e.updated_at) DESC
       LIMIT ${REPORT_ROW_CAP}`,
     values
   );
@@ -1080,6 +1269,8 @@ export default {
   singleSourceItems,
   vendorMasterActivity,
   approvalAuditTrail,
+  isCancellationAction,
+  rejectedPoLog,
   permittedReportActions,
   recordExport,
   listExports,
