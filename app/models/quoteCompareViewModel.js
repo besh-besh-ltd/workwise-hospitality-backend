@@ -1270,7 +1270,9 @@ async function buildQuoteApprovalData(instanceIds) {
     const rejectByUserByInst = new Map();
     const firstRejectByInst = new Map();
     for (const a of actions) {
-      if (a.action !== "REJECT") continue;
+      // A cancellation logged as REJECT (history before the CANCELLED action
+      // was written) is not a rejection and must not become its reason.
+      if (a.action !== "REJECT" || String(a.comment || "").startsWith("[CANCELLED]")) continue;
       if (!firstRejectByInst.has(a.approval_instance_id) && a.comment) {
         firstRejectByInst.set(a.approval_instance_id, a.comment);
       }

@@ -1556,14 +1556,19 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
               a.approval_instance_step_id, u.name AS actor_name
        FROM tbl_approval_actions a
        JOIN tbl_users u ON u.id = a.approver_user_id
-       WHERE a.approval_instance_id = $1 AND a.action IN ('APPROVE', 'REJECT')
+       WHERE a.approval_instance_id = $1 AND a.action IN ('APPROVE', 'REJECT', 'CANCELLED')
        ORDER BY a.created_at ASC`,
       [po.approval_instance_id]
     );
+    // Cancellations used to be written as REJECT with a '[CANCELLED] ' prefix
+    // (now written as CANCELLED, history unchanged). Neither shape is a
+    // rejection, so neither may supply the "why was this rejected" reason.
+    const isCancellation = (a) =>
+      a.action === "CANCELLED" || String(a.comment || "").startsWith("[CANCELLED]");
     const rejectCommentByUser = new Map();
     let firstRejectComment = null;
     for (const a of actionRows) {
-      if (a.action === "REJECT") {
+      if (a.action === "REJECT" && !isCancellation(a)) {
         if (a.comment && firstRejectComment == null) firstRejectComment = a.comment;
         if (a.approver_user_id != null && a.comment) rejectCommentByUser.set(a.approver_user_id, a.comment);
       }
