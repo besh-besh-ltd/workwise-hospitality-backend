@@ -10906,9 +10906,24 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
                (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, id, `[CANCELLED] ${cancelReason}`]
           );
+
+          // A PO whose approval is cancelled has to say so itself. This loop
+          // used to cancel the instance and leave the PO at 'pending_approval'
+          // with nothing pending behind it — on prod, 22 of the 29 POs showing
+          // "pending approval" were orphans of exactly this, which nobody could
+          // ever act on. Guarded to pending_approval so it can never un-approve
+          // or overwrite an order that has already moved on.
+          if (instance.entity_type === 'PO') {
+            await t.none(
+              `UPDATE tbl_rfq_purchase_order
+                  SET status = 'cancelled', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending_approval'`,
+              [instance.entity_id]
+            );
+          }
 
           cancelledInstances.push({
             id: instance.id,
@@ -11063,7 +11078,7 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, user_id, '[CANCELLED] Publish request withdrawn by creator']
           );
         }
@@ -11157,7 +11172,7 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, user_id, '[CANCELLED] RFQ terminated by creator']
           );
         }
