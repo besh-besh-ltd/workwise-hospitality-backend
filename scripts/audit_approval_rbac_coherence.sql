@@ -36,7 +36,7 @@ WITH res AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','awarding'),
+    ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc')
@@ -93,7 +93,7 @@ SELECT 'B. UNSATISFIABLE RESOURCE' AS finding,
   FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','awarding'),
+    ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc')
@@ -123,7 +123,7 @@ WITH map AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','awarding'),
+    ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc')
@@ -206,7 +206,7 @@ WITH map AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','awarding'),
+    ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc')
@@ -237,3 +237,99 @@ SELECT 'E. USER APPROVER WITHOUT PERMISSION' AS finding,
      HAVING count(DISTINCT pm.action) = 2
    )
  ORDER BY p.entity_type, p.id, s.step_order;
+
+
+-- ---------------------------------------------------------------------------
+--  SECTION F — coverage gaps on the DEPARTMENT axis.
+--
+--  Section C asks "can this role ever approve this entity type?" — a question
+--  about PERMISSIONS. It never asks "is anybody actually holding that role for
+--  the department this entity belongs to?" — a question about COVERAGE. A
+--  policy can pass C and still resolve to nobody, and that is not theoretical:
+--
+--  RFQ 536602 (ORCHID PASSAROS GOA, 2026-09-21) could not be submitted. Policy
+--  83 looked healthy to Section C because its "Tender Approver" step passes the
+--  permission gate. But `resolveApprovers` narrows by the ENTITY's department,
+--  and nobody held that role for Housekeeping at that unit — the one person who
+--  did had lost her hotel-13 scope. Both steps dropped and the engine refused.
+--  The same policy was fine for 10 of the 16 departments, so nothing global was
+--  broken and nothing in the audit pointed at it.
+--
+--  Each row below is an (entity type, business unit, department) that CANNOT be
+--  submitted today. Fix by assigning somebody the step's role scoped to that
+--  department (or with department_id NULL, which is the all-departments
+--  wildcard), not by editing the policy.
+--
+--  Mirrors resolveApprovers exactly: role scope (hotel NULL = any hotel,
+--  department NULL = any department, process NULL = any process) AND a
+--  hospitality mapping that makes the unit reachable. USER- and
+--  DEPARTMENT-source steps are treated as surviving, as in Section C, because
+--  the engine does not gate them on permissions.
+-- ---------------------------------------------------------------------------
+
+WITH map AS (
+  SELECT * FROM (VALUES
+    ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
+    ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
+    ('PO','awarding'), ('MR','mr'),
+    ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
+    ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
+    ('ARC_AMENDMENT','arc')
+  ) AS v(entity_type, resource)
+),
+steps AS (
+  SELECT p.id AS policy_id, p.entity_type, p.hospitality_company_id AS co,
+         p.hotel_id, p.process_id, s.step_order,
+         s.approver_source_type AS src, s.approver_source_id AS src_id,
+         m.resource
+    FROM tbl_approval_policies p
+    JOIN tbl_approval_policy_steps s ON s.approval_policy_id = p.id
+    LEFT JOIN map m ON m.entity_type = p.entity_type
+   WHERE p.is_active
+),
+per_dept AS (
+  SELECT st.policy_id, st.entity_type, st.co, st.hotel_id, d.id AS department_id,
+         bool_or(
+           -- gate 1: the role can hold authority over this entity at all
+           (st.src <> 'ROLE' OR (
+              SELECT count(DISTINCT pm.action)
+                FROM tbl_role_permissions rp
+                JOIN tbl_permissions pm ON pm.id = rp.permission_id
+               WHERE rp.role_id = st.src_id
+                 AND pm.resource::text = st.resource
+                 AND pm.action IN ('read','approve')) = 2)
+           AND
+           -- gate 2: somebody actually holds it for THIS department and unit
+           (st.src <> 'ROLE' OR EXISTS (
+              SELECT 1
+                FROM tbl_user_role_scopes urs
+                JOIN tbl_users u ON u.id = urs.user_id AND u.status = 1
+                JOIN tbl_hospitality_user_mappings hum
+                     ON hum.user_id = u.id
+                    AND hum.hospitality_company_id = st.co
+                    AND (hum.hospitality_hotel_id = st.hotel_id
+                         OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL))
+               WHERE urs.role_id = st.src_id
+                 AND urs.company_id = st.co
+                 AND (urs.hotel_id IS NULL OR urs.hotel_id = st.hotel_id)
+                 AND (st.process_id IS NULL OR urs.process_id IS NULL
+                      OR urs.process_id = st.process_id)
+                 AND (urs.department_id IS NULL OR urs.department_id = d.id)))
+         ) AS any_step_usable
+    FROM steps st
+    CROSS JOIN tbl_department d
+   GROUP BY 1,2,3,4,5
+)
+SELECT 'F. NOBODY CAN APPROVE IN THIS DEPARTMENT' AS finding,
+       pd.policy_id, pd.entity_type, pd.co AS company, h.name AS business_unit,
+       d.title AS department,
+       -- Work already parked in a combination that cannot be submitted.
+       (SELECT count(*) FROM tbl_rfq r
+         WHERE pd.entity_type = 'RFQ'
+           AND r.hotel_id = pd.hotel_id
+           AND r.department_id = pd.department_id) AS rfqs_already_blocked
+  FROM per_dept pd
+  LEFT JOIN tbl_hospitality_company_hotels h ON h.id = pd.hotel_id
+  JOIN tbl_department d ON d.id = pd.department_id
+ WHERE pd.any_step_usable IS NOT TRUE
+ ORDER BY rfqs_already_blocked DESC, pd.entity_type, pd.policy_id, d.id;
