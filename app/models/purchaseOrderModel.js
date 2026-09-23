@@ -2618,7 +2618,7 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       );
       await t.none(
         `INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
-        VALUES ($1, $2, 'REJECT', $3)`,
+        VALUES ($1, $2, 'CANCELLED', $3)`,
         [existingInstance.id, current_user.id, '[CANCELLED] PO edited, re-initiating approval']
       );
       // Clear the old instance reference from PO

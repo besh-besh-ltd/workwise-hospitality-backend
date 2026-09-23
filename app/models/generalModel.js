@@ -3700,12 +3700,17 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       WHERE approval_instance_id = $1 AND status = 'PENDING'
     `, [instance_id]);
 
-    // Log the cancellation as a REJECT action (database constraint only allows APPROVE/REJECT)
-    // The actual cancellation reason is captured in the comment field
+    // Logged as CANCELLED. This used to be written as REJECT on the grounds
+    // that the CHECK constraint only allowed APPROVE/REJECT — no longer true,
+    // 'CANCELLED' has been a permitted value for some time — and every reader
+    // that counted REJECT counted these as rejections. The '[CANCELLED] '
+    // comment prefix stays so anything matching on it keeps working, and
+    // because history before this change still carries it on REJECT rows
+    // (see reportsModel.isCancellationAction).
     await t.none(`
       INSERT INTO tbl_approval_actions
       (approval_instance_id, approver_user_id, action, comment)
-      VALUES ($1, $2, 'REJECT', $3)
+      VALUES ($1, $2, 'CANCELLED', $3)
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
 
     // Collected inside the transaction, notified after it commits.
