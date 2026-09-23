@@ -10,9 +10,11 @@
 //   await request(app).post("/api/v1/rfq/create").send({...});
 
 import express from "express";
+import { once } from "node:events";
 import util from "../../app/util/index.js";
 
 let cachedApp = null;
+let cachedServer = null;
 
 export async function buildTestApp() {
   if (cachedApp) return cachedApp;
@@ -25,6 +27,30 @@ export async function buildTestApp() {
   return app;
 }
 
+/**
+ * ONE listening server per Jest process, shared by every supertest client.
+ *
+ * `request(app)` boots a fresh ephemeral listener for EVERY request and closes
+ * it again. A shard makes thousands of requests, so that churned thousands of
+ * ports through TIME_WAIT — and once in a long run a connection was reset
+ * before its response, surfacing as a bare "socket hang up" with no server-side
+ * error (listView.fyFilter, arc.manual.hardening). Binding once removes the
+ * churn; `unref()` keeps the open socket from holding the process open at exit.
+ */
+export async function testServer() {
+  if (cachedServer) return cachedServer;
+  const app = await buildTestApp();
+  const server = app.listen(0);
+  server.unref();
+  await once(server, "listening");
+  cachedServer = server;
+  return cachedServer;
+}
+
 export function resetTestApp() {
   cachedApp = null;
+  if (cachedServer) {
+    cachedServer.close();
+    cachedServer = null;
+  }
 }

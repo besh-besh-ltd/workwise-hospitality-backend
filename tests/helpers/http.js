@@ -11,7 +11,7 @@
 // Authorization + User-Agent headers from `loginAs()`.
 
 import request from "supertest";
-import { buildTestApp } from "../setup/app.js";
+import { buildTestApp, testServer } from "../setup/app.js";
 import { loginAs } from "./auth.js";
 
 /**
@@ -20,10 +20,12 @@ import { loginAs } from "./auth.js";
  */
 export async function httpClient(userId = null) {
   const app = await buildTestApp();
+  // One shared listener per process — see testServer() for why.
+  const server = await testServer();
   const headers = userId == null ? {} : (await loginAs(userId)).headers;
 
   const wrap = (method) => (path) => {
-    let req = request(app)[method](path);
+    let req = request(server)[method](path);
     for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
     return req;
   };
