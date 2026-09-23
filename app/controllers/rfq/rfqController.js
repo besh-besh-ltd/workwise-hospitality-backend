@@ -8555,57 +8555,9 @@ const rfqController = {
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
       try {
-        rfqData.vendor_rejections = await db.any(`
-          SELECT
-            rp.product_variant_id,
-            rp.variant,
-            po.finalized_vendor_id AS vendor_id,
-            vu.name AS vendor_name,
-            vu.organization_name AS vendor_organization,
-            po.po_number,
-            CASE
-              WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
-              ELSE 'approver'
-            END AS rejection_type,
-            CASE
-              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
-              ELSE aa.comment
-            END AS rejection_reason,
-            CASE
-              WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
-              ELSE aa.created_at
-            END AS rejected_at,
-            CASE
-              WHEN po.status = 'rejected_by_vendor' THEN vu.name
-              ELSE au.name
-            END AS rejected_by_name,
-            CASE
-              WHEN po.status = 'rejected_by_vendor' THEN NULL
-              ELSE au.email
-            END AS rejected_by_email
-          FROM tbl_rfq_purchase_order po
-          JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
-          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-          JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-          LEFT JOIN LATERAL (
-            SELECT a.approver_user_id, a.comment, a.created_at
-            FROM tbl_approval_actions a
-            WHERE a.approval_instance_id = po.approval_instance_id
-              AND a.action = 'REJECT'
-            ORDER BY a.created_at DESC
-            LIMIT 1
-          ) aa ON TRUE
-          LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
-          WHERE po.rfq_id = $1
-            AND po.status IN ('rejected_by_vendor', 'rejected')
-            AND NOT EXISTS (
-              SELECT 1 FROM tbl_quote_finalization qf
-              WHERE qf.rfq_id = po.rfq_id
-                AND qf.product_variant_id = rp.product_variant_id
-                AND qf.variant = rp.variant
-            )
-          ORDER BY rejected_at DESC NULLS LAST
-        `, [rfqData.id]);
+        // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
+        // so the re-award modal and the card cannot disagree about what counts.
+        rfqData.vendor_rejections = await rfqModel.getLivePoRejectionsForRfqs([rfqData.id]);
       } catch (err) {
         logError('Error fetching PO rejections for RFQ', err);
         rfqData.vendor_rejections = [];
@@ -9151,6 +9103,40 @@ const rfqController = {
       const start = (page - 1) * limit;
       const pageRows = filtered.slice(start, start + limit);
 
+      // 8b. Why an RFQ went backwards. A rejected PO de-finalizes its products
+      // and returns the RFQ to commercial evaluation; without this the card
+      // just shows an earlier stage with different people on it. RFQ 536263
+      // went PO Approval -> Commercial Evaluation that way and the client read
+      // it as their approval matrix changing. One batch for the page, latest
+      // live rejection per RFQ. Never fatal: a card without the marker still
+      // renders correctly.
+      const poRejectionMap = {};
+      try {
+        const rejections = await rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id));
+        for (const row of rejections) {
+          const key = Number(row.rfq_id);
+          const entry = poRejectionMap[key] || (poRejectionMap[key] = { latest: null, poNumbers: new Set() });
+          entry.poNumbers.add(row.po_number);
+          // Rows arrive newest first, so the first one seen is the latest.
+          if (!entry.latest) entry.latest = row;
+        }
+      } catch (rejErr) {
+        logError('getRfqListView: could not load PO rejections for the page', rejErr);
+      }
+      const poRejectionFor = (id) => {
+        const entry = poRejectionMap[Number(id)];
+        if (!entry?.latest) return null;
+        const r = entry.latest;
+        return {
+          po_number: r.po_number,
+          rejection_type: r.rejection_type,
+          rejected_by_name: r.rejected_by_name,
+          rejected_at: r.rejected_at,
+          rejection_reason: r.rejection_reason,
+          rejected_po_count: entry.poNumbers.size,
+        };
+      };
+
       // 9. trim to the display payload (action holders already computed above).
       const data = pageRows.map((r) => ({
         id: r.id, rfq_no: r.rfq_no, title: r.title, status: r.status, is_published: r.is_published,
@@ -9181,6 +9167,7 @@ const rfqController = {
         approval_instance_id: r._approvalInstanceId ?? null,
         approval_step_id: r._approvalStepId ?? null,
         approval_entity_type: r._approvalEntityType ?? null,
+        po_rejection: poRejectionFor(r.id),
       }));
 
       return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
@@ -10919,9 +10906,24 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
                (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, id, `[CANCELLED] ${cancelReason}`]
           );
+
+          // A PO whose approval is cancelled has to say so itself. This loop
+          // used to cancel the instance and leave the PO at 'pending_approval'
+          // with nothing pending behind it — on prod, 22 of the 29 POs showing
+          // "pending approval" were orphans of exactly this, which nobody could
+          // ever act on. Guarded to pending_approval so it can never un-approve
+          // or overwrite an order that has already moved on.
+          if (instance.entity_type === 'PO') {
+            await t.none(
+              `UPDATE tbl_rfq_purchase_order
+                  SET status = 'cancelled', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending_approval'`,
+              [instance.entity_id]
+            );
+          }
 
           cancelledInstances.push({
             id: instance.id,
@@ -11076,7 +11078,7 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, user_id, '[CANCELLED] Publish request withdrawn by creator']
           );
         }
@@ -11170,7 +11172,7 @@ const rfqController = {
           await t.none(
             `INSERT INTO tbl_approval_actions
              (approval_instance_id, approver_user_id, action, comment)
-             VALUES ($1, $2, 'REJECT', $3)`,
+             VALUES ($1, $2, 'CANCELLED', $3)`,
             [instance.id, user_id, '[CANCELLED] RFQ terminated by creator']
           );
         }

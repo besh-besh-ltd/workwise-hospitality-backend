@@ -144,11 +144,14 @@ const arcManualEntryModel = {
     return runner.one(
       `INSERT INTO tbl_arc_item
          (arc_id, product_variant_id, spec_text, target_price,
-          indicative_qty, uom, hsn, spec_attachment_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          indicative_qty, uom, hsn, spec_attachment_id, sample_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [arcId, data.product_variant_id, data.spec_text ?? null, data.target_price ?? null,
-       data.indicative_qty, data.uom ?? null, data.hsn ?? null, data.spec_attachment_id ?? null]
+       data.indicative_qty, data.uom ?? null, data.hsn ?? null, data.spec_attachment_id ?? null,
+       // Back-office backfill states sampling at the contract level; carry it
+       // down so a manually entered ARC is shaped like a wizard-created one.
+       data.sample_required === undefined ? false : !!data.sample_required]
     );
   },
 

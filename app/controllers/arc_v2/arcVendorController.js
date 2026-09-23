@@ -1050,6 +1050,20 @@ export async function getTechClausesForVendor(req, res) {
     const quote = await arcEvalModel.getQuote(arcId, vendorId);
     const { clauses, filesByResponse } = await arcEvalModel.getVendorTechEnvelope(arcId, vendorId);
 
+    // The BUYER's reference documents for each clause — the drawing or
+    // datasheet the vendor is being asked to comply with. Kept under a
+    // distinct key from `files` (the vendor's own evidence): rendering them in
+    // one list would offer the vendor a delete button on the buyer's document.
+    const refRows = await arcEvalModel.listClauseFiles(clauses.map((c) => Number(c.clause_id)));
+    const refByClause = {};
+    for (const f of refRows) {
+      const k = Number(f.clause_id);
+      (refByClause[k] = refByClause[k] || []).push({
+        file_id: Number(f.id),
+        url: `/arc-v2/vendor/tech-envelope/clause-file/${f.id}`,
+      });
+    }
+
     // Group clauses by item.
     const itemsMap = new Map();
     for (const c of clauses) {
@@ -1064,6 +1078,7 @@ export async function getTechClausesForVendor(req, res) {
         weightage: c.weightage,
         is_mandatory: !!c.is_mandatory,
         vendor_response: c.vendor_response ?? null,
+        reference_files: refByClause[Number(c.clause_id)] || [],
         files: (filesByResponse[Number(c.response_id)] || []).map((f) => ({
           file_id: Number(f.file_id),
           // Vendor-scoped, ownership-checked proxy URL — NOT the raw S3 url.
@@ -1078,6 +1093,17 @@ export async function getTechClausesForVendor(req, res) {
     // other vendors' rows (getVendorUniversalEnvelope is vendor-isolated).
     const { clauses: univClauses, filesByResponse: univFiles } =
       await arcEvalModel.getVendorUniversalEnvelope(arcId, vendorId);
+    const univRefRows = await arcEvalModel.listUniversalClauseFiles(
+      univClauses.map((c) => Number(c.clause_id))
+    );
+    const univRefByClause = {};
+    for (const f of univRefRows) {
+      const k = Number(f.clause_id);
+      (univRefByClause[k] = univRefByClause[k] || []).push({
+        file_id: Number(f.id),
+        url: `/arc-v2/vendor/universal-tech-envelope/clause-file/${f.id}`,
+      });
+    }
     let universal = null;
     if (univClauses.length > 0) {
       universal = {
@@ -1089,6 +1115,7 @@ export async function getTechClausesForVendor(req, res) {
           weightage: c.weightage,
           is_mandatory: !!c.is_mandatory,
           vendor_response: c.vendor_response ?? null,
+          reference_files: univRefByClause[Number(c.clause_id)] || [],
           files: (univFiles[Number(c.response_id)] || []).map((f) => ({
             file_id: Number(f.file_id),
             // Vendor-scoped, ownership-checked proxy URL — NOT the raw S3 url.
@@ -1256,6 +1283,45 @@ export async function getOwnTechEvidence(req, res) {
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
+
+// GET /vendor/tech-envelope/clause-file/:fileId
+// GET /vendor/universal-tech-envelope/clause-file/:fileId
+//
+// The BUYER's reference document for a clause — the drawing or datasheet the
+// vendor is being asked to comply with. Unlike the evidence proxies above the
+// vendor does not own this file, so ownership is the wrong question; the
+// authority is the same one the rest of this controller uses, an INVITATION to
+// the ARC that owns the clause. Never a raw S3 URL.
+async function streamClauseReference(req, res, lookup, label) {
+  try {
+    const vendorId = req.user?.id;
+    const fileId = Number(req.params.fileId);
+    if (!vendorId) return bad(res, 401, 'Unauthorized');
+    if (!fileId) return bad(res, 400, 'fileId is required');
+    const file = await lookup(fileId);
+    if (!file) return bad(res, 404, 'Reference document not found', 2);
+    if (!(await vendorInvitedToArc(Number(file.arc_id), vendorId))) {
+      // 404, not 403 — the existence of another tenant's document is not news
+      // a vendor is entitled to.
+      return bad(res, 404, 'Reference document not found', 2);
+    }
+    const resp = await axios.get(file.file_url, {
+      responseType: 'arraybuffer', timeout: 20000, maxContentLength: 25 * 1024 * 1024,
+    });
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="reference-${fileId}"`);
+    return res.status(200).send(Buffer.from(resp.data));
+  } catch (err) {
+    logger.error({ err }, `[vendorController.${label}]`);
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export const getClauseReference = (req, res) =>
+  streamClauseReference(req, res, arcEvalModel.getClauseFileWithScope, 'getClauseReference');
+
+export const getUniversalClauseReference = (req, res) =>
+  streamClauseReference(req, res, arcEvalModel.getUniversalClauseFileWithScope, 'getUniversalClauseReference');
 
 // POST /vendor/tech-envelope/submit  body: { arc_id }
 export async function submitTechEnvelope(req, res) {

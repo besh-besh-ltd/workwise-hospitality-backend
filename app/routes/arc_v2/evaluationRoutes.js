@@ -36,6 +36,10 @@ r.get( '/universal-tech-eval/evidence/:fileId', passportSignIn, acl([2, 8]), TEC
 // Evaluator-side evidence file proxy — ownership/permission-checked stream of
 // a vendor's uploaded evidence (no raw public S3 URL). TECH_READ gates it.
 r.get( '/tech-eval/evidence/:fileId',       passportSignIn, acl([2, 8]), TECH_READ,  evalController.getTechEvidenceFile);
+// Buyer-authored clause reference documents (the drawing/datasheet a clause
+// points at), as opposed to the vendor's evidence above. Same TECH_READ gate.
+r.get( '/tech-eval/clause-file/:fileId',           passportSignIn, acl([2, 8]), TECH_READ,  evalController.getClauseReferenceFile);
+r.get( '/universal-tech-eval/clause-file/:fileId', passportSignIn, acl([2, 8]), TECH_READ,  evalController.getUniversalClauseReferenceFile);
 
 // Tech-eval approval — chain view + approve/reject/amend through the
 // central engine (engine validates the caller is the current approver).

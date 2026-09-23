@@ -2649,11 +2649,100 @@ export async function createApprovalInstance({
         `all ${policySteps.length} step(s) of policy ${policy.id} were dropped. ` +
         `Skipped: ${JSON.stringify(skippedSteps)}`
       );
+      // ── WHY THIS MESSAGE IS BUILT FROM THE DIAGNOSTICS ────────────────────
+      //
+      // The old text said only "resolved to zero usable approval steps ... each
+      // step needs an approver who holds both read and approve". That names the
+      // wrong fix whenever the cause is coverage rather than permissions.
+      //
+      // RFQ 536602 (ORCHID PASSAROS GOA, 2026-09-21): policy 83's step 1 asked
+      // a role with no `rfq.approve` (dead since the policy was written) and
+      // step 2 asked a qualified role that simply had nobody assigned for
+      // Housekeeping at that unit. The policy was fine for 10 of the 16
+      // departments. An admin followed the message into Settings → Approvals,
+      // saw two sensible roles, and had nowhere to go.
+      //
+      // The two faults need different fixes — grant a permission vs. assign
+      // somebody — so they are reported separately, with the role, department
+      // and business unit named. Every lookup here happens only on the failure
+      // path, so the common case pays nothing.
+      const labelFor = async (sourceType, sourceId) => {
+        if (sourceType === 'ROLE') {
+          const row = await t.oneOrNone('SELECT title FROM tbl_roles WHERE id = $1', [sourceId]);
+          return row ? `role "${row.title}"` : `role #${sourceId}`;
+        }
+        if (sourceType === 'USER') {
+          const row = await t.oneOrNone('SELECT name, email FROM tbl_users WHERE id = $1', [sourceId]);
+          return row ? `user ${row.name} <${row.email}>` : `user #${sourceId}`;
+        }
+        const row = await t.oneOrNone('SELECT title FROM tbl_department WHERE id = $1', [sourceId]);
+        return row ? `department "${row.title}"` : `department #${sourceId}`;
+      };
+
+      const [hotelRow, deptRow] = await Promise.all([
+        hotel_id
+          ? t.oneOrNone('SELECT name FROM tbl_hospitality_company_hotels WHERE id = $1', [hotel_id])
+          : null,
+        resolveDeptId
+          ? t.oneOrNone('SELECT title FROM tbl_department WHERE id = $1', [resolveDeptId])
+          : null
+      ]);
+      const whereParts = [
+        hotelRow?.name ? `"${hotelRow.name}"` : null,
+        deptRow?.title ? `department "${deptRow.title}"` : null
+      ].filter(Boolean);
+      const whereText = whereParts.length ? ` at ${whereParts.join(', ')}` : '';
+
+      const lines = [];
+      for (const s of skippedSteps) {
+        const who = await labelFor(s.approver_source_type, s.approver_source_id);
+        if (s.reason === 'NO_APPROVERS_RESOLVED') {
+          // The distinction that matters: is the role simply unused here, or is
+          // it held at this unit but not for THIS department? The second is the
+          // common case and points straight at the missing scope.
+          let elsewhere = 0;
+          if (s.approver_source_type === 'ROLE' && resolveDeptId) {
+            const row = await t.oneOrNone(
+              `SELECT COUNT(DISTINCT urs.user_id)::int AS n
+                 FROM tbl_user_role_scopes urs
+                WHERE urs.role_id = $1 AND urs.company_id = $2
+                  AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)`,
+              [s.approver_source_id, hospitality_company_id, hotel_id]
+            );
+            elsewhere = row?.n || 0;
+          }
+          const hint = elsewhere > 0
+            ? ` — ${elsewhere} person(s) hold it at this business unit, but not for this department`
+            : '';
+          lines.push(`Step ${s.step_order}: ${who} has nobody assigned${whereText}${hint}.`);
+        } else if (s.reason === 'RESOURCE_CANNOT_SATISFY_GATE') {
+          lines.push(
+            `Step ${s.step_order}: ${who} cannot be gated — the permission catalogue is ` +
+            `missing ${(s.missing_permissions || []).join(' and ') || `${s.resource}.read/approve`}. ` +
+            `This needs a platform fix, not a policy change.`
+          );
+        } else if (s.reason === 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP' || s.reason === 'RESOURCE_NOT_IN_CATALOGUE') {
+          lines.push(
+            `Step ${s.step_order}: ${who} cannot be checked because ${entity_type} has no ` +
+            `permission resource configured. This needs a platform fix, not a policy change.`
+          );
+        } else {
+          // ROLE_LACKS_READ_AND_APPROVE / USER_LACKS_READ_AND_APPROVE
+          lines.push(
+            `Step ${s.step_order}: ${who} can never approve this ${entity_type} — ` +
+            `missing ${s.resource}.approve and/or ${s.resource}.read.`
+          );
+        }
+      }
+
       const err = new Error(
-        `Approval policy ${policy.id} for ${entity_type} resolved to zero usable approval steps, ` +
-        `so nobody would be asked to approve this. ` +
-        `Fix the policy (Settings → Approvals) — each step needs an approver who holds ` +
-        `both read and approve on this entity — then try again.`
+        `Nobody can approve this ${entity_type}${whereText}, so it cannot be submitted yet — ` +
+        `approval policy ${policy.id} resolved to zero usable approval steps. ` +
+        `All ${policySteps.length} step(s) were dropped:\n` +
+        lines.map(l => `  • ${l}`).join('\n') +
+        `\nFix this in Settings → Approvals: a step needs a role that holds both ` +
+        `${roleResource}.read and ${roleResource}.approve AND has someone assigned to this ` +
+        `business unit and department.`
       );
       err.code = 'APPROVAL_POLICY_RESOLVES_TO_NOBODY';
       err.httpStatus = 400;
@@ -3625,12 +3714,17 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       WHERE approval_instance_id = $1 AND status = 'PENDING'
     `, [instance_id]);
 
-    // Log the cancellation as a REJECT action (database constraint only allows APPROVE/REJECT)
-    // The actual cancellation reason is captured in the comment field
+    // Logged as CANCELLED. This used to be written as REJECT on the grounds
+    // that the CHECK constraint only allowed APPROVE/REJECT — no longer true,
+    // 'CANCELLED' has been a permitted value for some time — and every reader
+    // that counted REJECT counted these as rejections. The '[CANCELLED] '
+    // comment prefix stays so anything matching on it keeps working, and
+    // because history before this change still carries it on REJECT rows
+    // (see reportsModel.isCancellationAction).
     await t.none(`
       INSERT INTO tbl_approval_actions
       (approval_instance_id, approver_user_id, action, comment)
-      VALUES ($1, $2, 'REJECT', $3)
+      VALUES ($1, $2, 'CANCELLED', $3)
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
 
     // Collected inside the transaction, notified after it commits.

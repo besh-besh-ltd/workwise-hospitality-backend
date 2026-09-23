@@ -44,6 +44,9 @@ r.post('/tech-envelope/draft',                 passportSignIn, acl([3]), vendorC
 r.post('/tech-envelope/clause/:clauseId/file', passportSignIn, acl([3]), techEvidenceUpload.single('file'), vendorController.uploadTechEvidence);
 r.get( '/tech-envelope/file/:fileId',          passportSignIn, acl([3]), vendorController.getOwnTechEvidence);
 r.delete('/tech-envelope/file/:fileId',        passportSignIn, acl([3]), vendorController.deleteTechEvidence);
+// The BUYER's reference document for a clause — read-only, gated on this
+// vendor being invited to the owning ARC (not on owning the file).
+r.get( '/tech-envelope/clause-file/:fileId',   passportSignIn, acl([3]), vendorController.getClauseReference);
 r.post('/tech-envelope/submit',                passportSignIn, acl([3]), vendorController.submitTechEnvelope);
 
 // Universal (ARC-wide) technical envelope — the vendor's clause responses +
@@ -56,6 +59,7 @@ r.post('/universal-tech-envelope/draft',                 passportSignIn, acl([3]
 r.post('/universal-tech-envelope/clause/:clauseId/file', passportSignIn, acl([3]), techEvidenceUpload.single('file'), vendorController.uploadUniversalTechEvidence);
 r.get( '/universal-tech-envelope/file/:fileId',          passportSignIn, acl([3]), vendorController.getOwnUniversalTechEvidence);
 r.delete('/universal-tech-envelope/file/:fileId',        passportSignIn, acl([3]), vendorController.deleteUniversalTechEvidence);
+r.get( '/universal-tech-envelope/clause-file/:fileId',   passportSignIn, acl([3]), vendorController.getUniversalClauseReference);
 
 // Amendments — vendor's own requests across every contract (My Amendments).
 r.get( '/amendments',                     passportSignIn, acl([3]), amendmentController.listVendorAmendments);

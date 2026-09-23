@@ -16,6 +16,17 @@ import {
   vendorPoList
 } from "../../services/notificationLinks.js";
 
+/* "536631 — ORCHID PASSAROS GOA", or just the number when the RFQ has no
+   title. tbl_rfq.title is nullable and blank in practice, so the em-dash has
+   to disappear with it rather than dangle. Same shape the buyer-facing mails
+   in this file already use for their "RFQ:" line. */
+const rfqLabel = (rfqDetails) => {
+  const no = rfqDetails?.rfq_no;
+  if (!no) return '';
+  const title = String(rfqDetails?.title || '').trim();
+  return title ? `${no} \u2014 ${title}` : `${no}`;
+};
+
 // Root-relative on purpose: the in-app row resolves it against whichever origin
 // the reader is on. Email bodies wrap the same path with toAbsoluteUrl().
 const poActionUrl = (purchaseOrder, role = 'buyer') => {
@@ -251,7 +262,7 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
         <p>
           A <strong>Purchase Order</strong> has been raised for you for
-          RFQ <strong>#${rfqDetails?.rfq_no || ''}</strong>.
+          RFQ <strong>#${rfqLabel(rfqDetails)}</strong>.
           Your action is required to proceed.
         </p>
 
@@ -290,7 +301,7 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
     sendMail({
       from: config.webmasterMail,
       to: vendor.email,
-      subject: `Action Required: PO #${purchaseOrder.po_number} for RFQ #${rfqDetails?.rfq_no || ''} — Accept or Reject`,
+      subject: `Action Required: PO #${purchaseOrder.po_number} for RFQ #${rfqLabel(rfqDetails)} — Accept or Reject`,
       html: dynamicHTML
     });
 
@@ -299,7 +310,7 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
       category: 'po',
       type: 'po_acceptance_request',
       title: `Action required: PO #${purchaseOrder.po_number}`,
-      body: `Please accept or reject this Purchase Order.`,
+      body: `Please accept or reject this Purchase Order${rfqLabel(rfqDetails) ? ` for RFQ #${rfqLabel(rfqDetails)}` : ''}.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id },
       actionUrl: linkPath
     }).catch((err) => logError('dispatch po_acceptance_request failed', err));
@@ -419,7 +430,7 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
 /**
  * Send reminder email to vendor for a PO still in acceptance_pending status.
  * @param {Object} purchaseOrder - PO row
- * @param {Object} rfqDetails - { rfq_no }
+ * @param {Object} rfqDetails - { rfq_no, title }
  * @param {number} reminderNumber - 1, 2, or 3
  */
 export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails, reminderNumber) => {
@@ -478,7 +489,7 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
         <h4>Purchase Order Details</h4>
         <ul>
           <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
-          <li><strong>RFQ:</strong> #${rfqDetails?.rfq_no || ''}</li>
+          <li><strong>RFQ:</strong> #${rfqLabel(rfqDetails)}</li>
           <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
           <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
           <li><strong>Total Value:</strong> Rs. ${computedTotal.toLocaleString('en-IN')}</li>

@@ -809,7 +809,7 @@ export const startVendorAcceptanceReminderCron = () => {
     logger.info('[Vendor Acceptance Reminder] Running daily check...');
     try {
       const pendingPOs = await db.any(`
-        SELECT po.*, r.rfq_no
+        SELECT po.*, r.rfq_no, r.title AS rfq_title
         FROM tbl_rfq_purchase_order po
         JOIN tbl_rfq r ON r.id = po.rfq_id
         WHERE po.status = 'acceptance_pending'
@@ -837,7 +837,11 @@ export const startVendorAcceptanceReminderCron = () => {
 
         if (reminderToSend) {
           try {
-            await sendPOAcceptanceReminderToVendor(po, { rfq_no: po.rfq_no }, reminderToSend);
+            await sendPOAcceptanceReminderToVendor(
+              po,
+              { rfq_no: po.rfq_no, title: po.rfq_title },
+              reminderToSend
+            );
             await db.none(
               `UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = $2 WHERE id = $1`,
               [po.id, reminderToSend]

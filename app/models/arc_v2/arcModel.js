@@ -516,17 +516,44 @@ const arcModel = {
     return runner.one(
       `INSERT INTO tbl_arc_item
          (arc_id, product_variant_id, spec_text, target_price,
-          indicative_qty, uom, spec_attachment_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+          indicative_qty, uom, spec_attachment_id, sample_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
       [arcId, data.product_variant_id, data.spec_text || null, data.target_price ?? null,
-       data.indicative_qty, data.uom || null, data.spec_attachment_id ?? null]
+       data.indicative_qty, data.uom || null, data.spec_attachment_id ?? null,
+       !!data.sample_required]
+    );
+  },
+
+  /**
+   * Re-derive tbl_arc.sample_required from the items.
+   *
+   * The column is NOT NULL and has one live reader (the ARC detail key-value
+   * panel), so it stays — but it is now "does anything in this basket need a
+   * sample" rather than the buyer's only way to say so. Called after any write
+   * that can change the item set.
+   */
+  syncSampleRequiredRollup: async (arcId, txContext = null) => {
+    const runner = txContext || db;
+    return runner.none(
+      `UPDATE tbl_arc a
+          SET sample_required = COALESCE((
+                SELECT bool_or(i.sample_required)
+                  FROM tbl_arc_item i
+                 WHERE i.arc_id = a.id
+              ), FALSE),
+              updated_at = CURRENT_TIMESTAMP
+        WHERE a.id = $1`,
+      [arcId]
     );
   },
 
   updateItem: async (itemId, patch, txContext = null) => {
     const runner = txContext || db;
-    const allowed = ['spec_text','target_price','indicative_qty','uom','spec_attachment_id'];
+    // sample_required must be here or updateDraft's item reconciler silently
+    // wipes it on every resume-and-save: that path does delete/update/insert
+    // and an unlisted column is simply never carried across.
+    const allowed = ['spec_text','target_price','indicative_qty','uom','spec_attachment_id','sample_required'];
     const setParts = []; const values = []; let p = 1;
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(patch, key)) {
@@ -577,7 +604,17 @@ const arcModel = {
               c.clause_text,
               c.weightage,
               c.clause_type,
-              c.is_mandatory
+              c.is_mandatory,
+              -- Buyer-authored reference documents for the clause. Aggregated
+              -- here so resuming the wizard repaints the attachments; without
+              -- them the next Save-draft would re-insert the clause with an
+              -- empty file list and silently drop them (setupTechEval clears
+              -- and re-inserts the whole clause set on every save).
+              COALESCE((
+                SELECT json_agg(json_build_object('id', f.id, 'file_url', f.file_url) ORDER BY f.id)
+                  FROM tbl_arc_item_tech_evaluation_clauses_files f
+                 WHERE f.arc_item_tech_evaluation_clauses_id = c.id
+              ), '[]'::json) AS reference_files
          FROM tbl_arc_item_tech_evaluation te
          JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
          LEFT JOIN tbl_arc_item_tech_evaluation_clauses c
@@ -600,6 +637,7 @@ const arcModel = {
           weightage: r.weightage,
           clause_type: r.clause_type,
           is_mandatory: r.is_mandatory,
+          reference_files: r.reference_files || [],
         });
       }
     }

@@ -75,6 +75,74 @@ const arcEvalModel = {
     );
   },
 
+  /**
+   * Buyer-authored reference documents for a clause — the drawing, datasheet
+   * or standard the vendor is being asked to comply with.
+   *
+   * These are the BUYER's attachments, distinct from the vendor's evidence in
+   * ..._vendors_response_files. The tables have existed since the ARC core
+   * migration but nothing ever wrote to them; the wizard carried a dead
+   * "Attach reference document" placeholder.
+   *
+   * Written as part of the clause insert, never against a clause id held from
+   * an earlier save: setupTechEval clears and re-inserts every clause on each
+   * draft save, and this table cascades from the clause, so a file attached to
+   * a stale id is gone. That is why file urls travel INSIDE the clause object.
+   */
+  addClauseFiles: async (clauseId, urls = [], txContext = null) => {
+    const runner = txContext || db;
+    const clean = (Array.isArray(urls) ? urls : [])
+      .map((u) => (typeof u === 'string' ? u.trim() : ''))
+      .filter(Boolean);
+    if (clean.length === 0) return [];
+    return runner.any(
+      `INSERT INTO tbl_arc_item_tech_evaluation_clauses_files
+         (arc_item_tech_evaluation_clauses_id, file_url)
+       SELECT $1, u FROM UNNEST($2::text[]) AS u
+       RETURNING *`,
+      [clauseId, clean]
+    );
+  },
+
+  /**
+   * One reference file plus the ARC that owns it — the scope every proxy
+   * needs before it streams bytes. Mirrors getResponseFileWithScope.
+   */
+  getClauseFileWithScope: async (fileId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT f.id, f.file_url, ai.arc_id
+         FROM tbl_arc_item_tech_evaluation_clauses_files f
+         JOIN tbl_arc_item_tech_evaluation_clauses c ON c.id = f.arc_item_tech_evaluation_clauses_id
+         JOIN tbl_arc_item_tech_evaluation te ON te.id = c.arc_item_tech_evaluation_id
+         JOIN tbl_arc_item ai ON ai.id = te.arc_item_id
+        WHERE f.id = $1`,
+      [fileId]
+    );
+  },
+
+  getUniversalClauseFileWithScope: async (fileId, txContext = null) => {
+    return (txContext || db).oneOrNone(
+      `SELECT f.id, f.file_url, te.arc_id
+         FROM tbl_arc_universal_tech_evaluation_clauses_files f
+         JOIN tbl_arc_universal_tech_evaluation_clauses c ON c.id = f.arc_universal_tech_evaluation_clauses_id
+         JOIN tbl_arc_universal_tech_evaluation te ON te.id = c.arc_universal_tech_evaluation_id
+        WHERE f.id = $1`,
+      [fileId]
+    );
+  },
+
+  listClauseFiles: async (clauseIds = [], txContext = null) => {
+    const runner = txContext || db;
+    if (!Array.isArray(clauseIds) || clauseIds.length === 0) return [];
+    return runner.any(
+      `SELECT id, arc_item_tech_evaluation_clauses_id AS clause_id, file_url
+         FROM tbl_arc_item_tech_evaluation_clauses_files
+        WHERE arc_item_tech_evaluation_clauses_id = ANY($1::bigint[])
+        ORDER BY id`,
+      [clauseIds]
+    );
+  },
+
   removeClause: async (clauseId, txContext = null) => {
     return (txContext || db).none(`DELETE FROM tbl_arc_item_tech_evaluation_clauses WHERE id = $1`, [clauseId]);
   },
@@ -501,6 +569,35 @@ const arcEvalModel = {
        RETURNING *`,
       [univEvalId, clause.clause_text, clause.weightage, clause.clause_type || null,
        clause.is_mandatory === true]
+    );
+  },
+
+  // Copy of addClauseFiles, over universal clauses.
+  addUniversalClauseFiles: async (clauseId, urls = [], txContext = null) => {
+    const runner = txContext || db;
+    const clean = (Array.isArray(urls) ? urls : [])
+      .map((u) => (typeof u === 'string' ? u.trim() : ''))
+      .filter(Boolean);
+    if (clean.length === 0) return [];
+    return runner.any(
+      `INSERT INTO tbl_arc_universal_tech_evaluation_clauses_files
+         (arc_universal_tech_evaluation_clauses_id, file_url)
+       SELECT $1, u FROM UNNEST($2::text[]) AS u
+       RETURNING *`,
+      [clauseId, clean]
+    );
+  },
+
+  // Copy of listClauseFiles, over universal clauses.
+  listUniversalClauseFiles: async (clauseIds = [], txContext = null) => {
+    const runner = txContext || db;
+    if (!Array.isArray(clauseIds) || clauseIds.length === 0) return [];
+    return runner.any(
+      `SELECT id, arc_universal_tech_evaluation_clauses_id AS clause_id, file_url
+         FROM tbl_arc_universal_tech_evaluation_clauses_files
+        WHERE arc_universal_tech_evaluation_clauses_id = ANY($1::bigint[])
+        ORDER BY id`,
+      [clauseIds]
     );
   },
 

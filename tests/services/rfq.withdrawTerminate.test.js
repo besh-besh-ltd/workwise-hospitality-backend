@@ -155,7 +155,11 @@ describe("withdrawPublish — RFQ in PENDING_APPROVAL/READY_TO_PUBLISH state", (
       [IDS.users.a1_proc_buyer]
     );
     expect(action).not.toBeNull();
-    expect(action.action).toBe("REJECT");
+    // CANCELLED, not REJECT. This assertion used to pin REJECT, which was the
+    // defect: withdrawing is not a rejection, and every reader that counted
+    // REJECT counted withdrawals and closed RFQs as rejections (on prod, 69
+    // "rejections" where 47 were real). The action is now written as what it is.
+    expect(action.action).toBe("CANCELLED");
     expect(action.comment).toMatch(/withdrawn/i);
   });
 

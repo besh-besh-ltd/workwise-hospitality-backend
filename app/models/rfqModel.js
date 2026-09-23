@@ -2172,11 +2172,17 @@ WHERE NOT EXISTS (
             ) AS unseen_query_count,
             ARRAY(
                 SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_variant_id,
+                    -- tbl_product_categories.product_id is a tbl_product id.
+                    -- RFQ_P.id is the tbl_rfq_products ROW id -- a different key
+                    -- space entirely -- so matching them returned the categories
+                    -- of whichever product happened to share a number with this
+                    -- RFQ line. Reach the product through the variant.
                     'product_categories', (
                         SELECT json_agg(json_build_object('category_id',TPC.category_id,'category_name',TC.title))
-                        FROM tbl_product_categories TPC
+                        FROM tbl_product_variant PV_CAT
+                        JOIN tbl_product_categories TPC ON TPC.product_id = PV_CAT.product_id
                         LEFT JOIN tbl_category TC ON TC.id = TPC.category_id
-                        WHERE TPC.product_id = RFQ_P.id
+                        WHERE PV_CAT.id = RFQ_P.product_variant_id
                     ),
                     'product_specs', (
                         SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_variant_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
@@ -4033,10 +4039,24 @@ LIMIT 2;
           -- Facet fields for the management listing (Business Unit / Department / Category)
           (SELECT name FROM tbl_hospitality_company_hotels WHERE id = RFQ.hotel_id) AS hotel_name,
           (SELECT title FROM tbl_department WHERE id = RFQ.department_id) AS department_title,
+          -- Categories come from the RFQ's PRODUCTS, reached through the
+          -- variant: tbl_rfq_products -> tbl_product_variant.product_id ->
+          -- tbl_product_categories.product_id (a tbl_product id).
+          --
+          -- This used to join TPC.product_id = RP_CAT.id, matching a product
+          -- id against a tbl_rfq_products ROW id. Two unrelated key spaces, so
+          -- every RFQ was labelled with the categories of whatever product
+          -- happened to share a number with its line row -- and because that id
+          -- differs per RFQ, the same product produced a different wrong
+          -- category on every RFQ (reported on #536476, an IT/SOFTWARE product
+          -- shown as "PACKING MATERIAL, FNB PAPER PLASTIC PKGNG"). This feeds
+          -- the listing CATEGORY facet as well as the card label, so the
+          -- category filter matched nothing it claimed to.
           COALESCE((
             SELECT json_agg(DISTINCT jsonb_build_object('id', TC.id, 'title', TC.title))
             FROM tbl_rfq_products RP_CAT
-            JOIN tbl_product_categories TPC ON TPC.product_id = RP_CAT.id
+            JOIN tbl_product_variant PV_CAT ON PV_CAT.id = RP_CAT.product_variant_id
+            JOIN tbl_product_categories TPC ON TPC.product_id = PV_CAT.product_id
             JOIN tbl_category TC ON TC.id = TPC.category_id
             WHERE RP_CAT.rfq_id = RFQ.id
           ), '[]'::json) AS categories,
@@ -4508,6 +4528,82 @@ LIMIT 2;
    *  NEGOTIATION_ONGOING, COMMERCIAL_EVALUATION, TECHNICAL_REJECTED,
    *  TECHNICAL_APPROVING, TECHNICAL_EVALUATING, RFQ_APPROVAL
    */
+  /**
+   * PO rejections that still explain where an RFQ stands — one row per
+   * rejected (PO, product) whose product has not been awarded again since.
+   *
+   * - rejection_type 'vendor':   PO status 'rejected_by_vendor'; reason from
+   *   po.vendor_rejection_reason, rejected_by = the vendor.
+   * - rejection_type 'approver': PO status 'rejected'; reason and rejecter from
+   *   the REJECT row in tbl_approval_actions, via the PO's approval_instance_id.
+   *
+   * A rejection de-finalizes the product, and that is what sends the RFQ back
+   * to commercial evaluation. Once the product is awarded again the rejection
+   * no longer explains anything, so it drops out.
+   *
+   * Shared by the RFQ detail (re-award modal) and the RFQ listing card, so
+   * the two cannot disagree about what counts. RFQ 536263 is why the listing
+   * needs it: it went from "PO Approval" to "Commercial Evaluation" with no
+   * explanation on the card, and the client concluded their approval matrix
+   * had changed.
+   */
+  getLivePoRejectionsForRfqs: async (rfqIds, t = db) => {
+    const ids = (rfqIds || []).map(Number).filter(Number.isFinite);
+    if (ids.length === 0) return [];
+    return t.any(`
+      SELECT
+        po.rfq_id,
+        rp.product_variant_id,
+        rp.variant,
+        po.finalized_vendor_id AS vendor_id,
+        vu.name AS vendor_name,
+        vu.organization_name AS vendor_organization,
+        po.po_number,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
+          ELSE 'approver'
+        END AS rejection_type,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
+          ELSE aa.comment
+        END AS rejection_reason,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN po.vendor_action_at
+          ELSE aa.created_at
+        END AS rejected_at,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN vu.name
+          ELSE au.name
+        END AS rejected_by_name,
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN NULL
+          ELSE au.email
+        END AS rejected_by_email
+      FROM tbl_rfq_purchase_order po
+      JOIN tbl_users vu ON vu.id = po.finalized_vendor_id
+      JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+      JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+      LEFT JOIN LATERAL (
+        SELECT a.approver_user_id, a.comment, a.created_at
+        FROM tbl_approval_actions a
+        WHERE a.approval_instance_id = po.approval_instance_id
+          AND a.action = 'REJECT'
+        ORDER BY a.created_at DESC
+        LIMIT 1
+      ) aa ON TRUE
+      LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
+      WHERE po.rfq_id = ANY($1::int[])
+        AND po.status IN ('rejected_by_vendor', 'rejected')
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_quote_finalization qf
+          WHERE qf.rfq_id = po.rfq_id
+            AND qf.product_variant_id = rp.product_variant_id
+            AND qf.variant = rp.variant
+        )
+      ORDER BY rejected_at DESC NULLS LAST
+    `, [ids]);
+  },
+
   computeLifecycleStages: async (rfqIds) => {
     if (!rfqIds || rfqIds.length === 0) return {};
 

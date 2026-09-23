@@ -166,6 +166,12 @@ export const deriveActions = ({
     // this file: never render a button the API would refuse.
     can_approve: !!p.approve && preApproval && isPendingForMe,
     can_reject: !!p.approve && preApproval && isPendingForMe,
+    // Per-line verdicts ride the SAME request as the round approval
+    // (POST /rounds/:id/approve, body.lines), so they are gated identically —
+    // anything else would render a per-line control the API refuses, which is
+    // the one invariant this function exists to hold. Client feedback item 8.
+    can_approve_line: !!p.approve && preApproval && isPendingForMe,
+    can_reject_line: !!p.approve && preApproval && isPendingForMe,
     can_withdraw: preApproval && isCreator,
     // The three vendor-level gates are NOT given the same treatment, and that
     // is deliberate. POST /rounds/:id/approve-vendor is acl([2,8]) + read

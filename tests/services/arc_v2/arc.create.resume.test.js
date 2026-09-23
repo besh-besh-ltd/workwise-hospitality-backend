@@ -316,3 +316,133 @@ describe("ARC v2 — Track B: draft resume payload completeness", () => {
     expect(res.body.data.arc.type).toBe("product");
   });
 });
+
+// ── B5: per-item sampling ────────────────────────────────────────────────────
+// `tbl_arc.sample_required` was a single contract-wide Yes/No with exactly one
+// reader in the product. A rate contract routinely mixes items where a physical
+// sample is meaningful with items where it is not, so the buyer could only
+// answer the question for the whole basket. Client feedback item 3, ARC half.
+//
+// The round-trip case is the one that matters: updateDraft's item reconciler
+// does delete/update/insert against an explicit field whitelist, so a column it
+// does not list is silently wiped on every resume-and-save.
+describe("ARC v2 — per-item sampling requirement", () => {
+  let client;
+  const createdArcs = [];
+
+  beforeAll(async () => {
+    await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`, [BUYER]);
+    await db.none(
+      `INSERT INTO tbl_category_department (category_id, department_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`, [CATEGORY, DEPT]);
+    client = await httpClient(BUYER);
+  });
+
+  afterAll(async () => {
+    for (const arcId of createdArcs) await cleanupArc(arcId);
+  });
+
+  const create = async (items, extra = {}) => {
+    const res = await client.post(BASE).send({
+      title: "Per-item sampling",
+      category_id: CATEGORY,
+      hotel_id: HOTEL,
+      department_id: DEPT,
+      eligibility_type: "open",
+      items,
+      ...extra,
+    });
+    expect(res.status).toBe(200);
+    const arcId = Number(res.body.data.arc.id);
+    createdArcs.push(arcId);
+    return arcId;
+  };
+
+  const itemsOf = async (arcId) => {
+    const res = await client.get(`${BASE}/${arcId}`);
+    expect(res.status).toBe(200);
+    return res.body.data.items;
+  };
+
+  test("records the requirement per item, not for the whole contract", async () => {
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: true },
+      { product_variant_id: 2, indicative_qty: 50, uom: "nos", sample_required: false },
+    ]);
+
+    const items = await itemsOf(arcId);
+    const withSample = items.find((i) => Number(i.product_variant_id) === VARIANT_ID);
+    const without = items.find((i) => Number(i.product_variant_id) === 2);
+
+    expect(withSample.sample_required).toBe(true);
+    expect(without.sample_required).toBe(false);
+  });
+
+  test("survives a resume-and-save", async () => {
+    // The wizard PATCHes the whole items array back on every step change.
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: true },
+    ]);
+
+    const patch = await client.patch(`${BASE}/${arcId}`).send({
+      items: [
+        { product_variant_id: VARIANT_ID, indicative_qty: 120, uom: "litre", sample_required: true },
+      ],
+    });
+    expect(patch.status).toBe(200);
+
+    const items = await itemsOf(arcId);
+    expect(items).toHaveLength(1);
+    expect(Number(items[0].indicative_qty)).toBe(120);
+    expect(items[0].sample_required).toBe(true);
+  });
+
+  test("can be turned off on a resume", async () => {
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: true },
+    ]);
+
+    await client.patch(`${BASE}/${arcId}`).send({
+      items: [
+        { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: false },
+      ],
+    });
+
+    const items = await itemsOf(arcId);
+    expect(items[0].sample_required).toBe(false);
+  });
+
+  test("defaults to false when the wizard says nothing", async () => {
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre" },
+    ]);
+    const items = await itemsOf(arcId);
+    expect(items[0].sample_required).toBe(false);
+  });
+
+  test("the contract-level flag becomes a rollup of its items", async () => {
+    // tbl_arc.sample_required is NOT NULL and has one live reader (the ARC
+    // detail key-value panel), so it stays — as "does anything here need a
+    // sample" rather than as the buyer's only way to say so.
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: false },
+      { product_variant_id: 2, indicative_qty: 50, uom: "nos", sample_required: true },
+    ]);
+
+    const row = await db.one(`SELECT sample_required FROM tbl_arc WHERE id = $1`, [arcId]);
+    expect(row.sample_required).toBe(true);
+  });
+
+  test("the rollup goes false again when no item needs a sample", async () => {
+    const arcId = await create([
+      { product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: true },
+    ]);
+
+    await client.patch(`${BASE}/${arcId}`).send({
+      items: [{ product_variant_id: VARIANT_ID, indicative_qty: 100, uom: "litre", sample_required: false }],
+    });
+
+    const row = await db.one(`SELECT sample_required FROM tbl_arc WHERE id = $1`, [arcId]);
+    expect(row.sample_required).toBe(false);
+  });
+});

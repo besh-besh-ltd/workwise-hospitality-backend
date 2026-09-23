@@ -481,7 +481,15 @@ export async function saveSection(req, res) {
               row = await arcModel.updateItem(Number(it.id), it, t);
               if (it.hsn !== undefined) await t.none(`UPDATE tbl_arc_item SET hsn = $1 WHERE id = $2 AND arc_id = $3`, [it.hsn, Number(it.id), arcId]);
             } else {
-              row = await arcManualEntryModel.addItem(arcId, it, t);
+              // Manual entry states sampling once, for the contract; carry it
+              // down to each item so a backfilled ARC is shaped like a
+              // wizard-created one (see arcController.createDraft).
+              row = await arcManualEntryModel.addItem(arcId, {
+                ...it,
+                sample_required: it.sample_required === undefined
+                  ? !!body.sample_required
+                  : !!it.sample_required,
+              }, t);
             }
             if (Array.isArray(it.history) && it.history.length) {
               await arcModel.upsertHistorySnapshot(row.id, it.history, t);
@@ -496,6 +504,9 @@ export async function saveSection(req, res) {
               await t.none(`DELETE FROM tbl_arc_item WHERE arc_id = $1`, [arcId]);
             }
           }
+          // Sampling is stored per item; keep the contract-level flag as
+          // its rollup, exactly as the wizard path does.
+          await arcModel.syncSampleRequiredRollup(arcId, t);
           break;
         }
         case 'quotes': {

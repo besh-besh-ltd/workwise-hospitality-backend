@@ -107,21 +107,57 @@ const _autoMapProductsForCategories = async (vendorId, categoryIds) => {
 // ============================================================
 // WH-74: Remove product variant mappings when vendor unsubscribes from
 // categories. Finds all variants under the given category IDs and deletes
-// the vendor's mappings for them.
+// the vendor's mappings for them — EXCEPT the ones a category the vendor
+// kept still covers.
+//
+// A product can carry several categories, and a sub-category's products
+// always carry the parent category too. Deleting by removed-category alone
+// therefore stripped vendors of products they were still subscribed to:
+// prod incident 2026-09-17 (RFQ 536603), where a vendor removed the FREE
+// ELECTRICAL ITEMS sub-category and lost all 1,296 of its mappings while
+// the PAID parent ENGINEERING stayed active. They saw 2 of 11 products.
+//
+// The coverage check reads only subscription rows this modification did NOT
+// touch, so it behaves the same whether or not the cancellation is visible
+// to this connection yet (the paid path applies cancellations inside a
+// transaction this function cannot see).
 // ============================================================
 const _unmapProductsForCategories = async (vendorId, categoryIds) => {
   if (!categoryIds || !categoryIds.length) return;
 
+  const removedCategoryIds = [...new Set(
+    categoryIds.map(id => parseInt(id)).filter(Boolean)
+  )];
+  if (!removedCategoryIds.length) return;
+
   const variants = await rfqModel.getProductsByCategories(
-    categoryIds.map(id => ({ id }))
+    removedCategoryIds.map(id => ({ id }))
   );
   if (!variants || !variants.length) return;
 
   const variantIds = [...new Set(
     variants.map(v => parseInt(v.variant_id)).filter(Boolean)
   )];
-  if (variantIds.length) {
-    await productModel.removeVariantMappingsForVendor(vendorId, variantIds);
+  if (!variantIds.length) return;
+
+  const stillCovered = await db.any(
+    `SELECT DISTINCT pv.id AS variant_id
+       FROM tbl_product_variant pv
+       JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+       JOIN tbl_vendor_hotel_category_subscription s
+         ON s.vendor_id = $1
+        AND s.item_type IN ('category', 'subcategory')
+        AND s.item_id = pc.category_id
+        AND s.status = 'active'
+      WHERE pv.id = ANY($2::int[])
+        AND pc.category_id <> ALL($3::int[])`,
+    [vendorId, variantIds, removedCategoryIds]
+  );
+  const covered = new Set(stillCovered.map(r => Number(r.variant_id)));
+
+  const orphanedVariantIds = variantIds.filter(id => !covered.has(id));
+  if (orphanedVariantIds.length) {
+    await productModel.removeVariantMappingsForVendor(vendorId, orphanedVariantIds);
   }
 };
 
@@ -3431,9 +3467,18 @@ const HospitalityController = {
 
       const relevantSubs = statusKey === 'active' ? activeSubs : expiredSubs;
 
+      // A subscription row can outlive the thing it points at: hotel 33 "Demo
+      // Business Unit" was soft-deleted while 11 vendors still held an active
+      // row for it. Listing a vanished item here made the Edit drawer send it
+      // straight back to the preview endpoint, which rejects anything deleted —
+      // locking those vendors out of their own subscription. Never offer what
+      // the write path will not accept. Payment history is left untouched: it
+      // still shows what the vendor actually paid for.
+      const liveSubs = relevantSubs.filter(s => Number(s.item_is_deleted) === 0);
+
       // Group sub-cats under their parent category for the nested display.
       const categoryMap = new Map();
-      relevantSubs
+      liveSubs
         .filter(s => s.item_type === 'category')
         .forEach(s => {
           categoryMap.set(s.item_id, {
@@ -3448,7 +3493,7 @@ const HospitalityController = {
         });
 
       // Pull parent_id for each subcategory so we can group correctly
-      const subRows = relevantSubs.filter(s => s.item_type === 'subcategory');
+      const subRows = liveSubs.filter(s => s.item_type === 'subcategory');
       if (subRows.length > 0) {
         const subIds = subRows.map(s => s.item_id);
         const subMeta = await db.any(
@@ -3474,7 +3519,7 @@ const HospitalityController = {
       }
 
       const categories = Array.from(categoryMap.values());
-      const hotels = relevantSubs
+      const hotels = liveSubs
         .filter(s => s.item_type === 'hotel')
         .map(s => ({
           subscription_id: s.subscription_id,
@@ -3488,7 +3533,7 @@ const HospitalityController = {
 
       // Compute the "active since" anchor from the earliest start_date across
       // all currently-relevant rows (across potentially several payments).
-      const earliestStart = relevantSubs.reduce((min, s) => {
+      const earliestStart = liveSubs.reduce((min, s) => {
         if (!s.start_date) return min;
         if (!min || Moment(s.start_date).isBefore(Moment(min))) return s.start_date;
         return min;
@@ -3498,7 +3543,7 @@ const HospitalityController = {
       // Current active cost = sum of fee_amount from active subscription rows only.
       // This reflects what the vendor is currently paying, not historical totals.
       // Category rows carry the real fee; hotel/subcategory rows have fee_amount=0.
-      const activeCost = relevantSubs
+      const activeCost = liveSubs
         .filter(s => s.status === 'active')
         .reduce((sum, s) => sum + (parseFloat(s.fee_amount) || 0), 0);
 
@@ -3608,8 +3653,13 @@ const HospitalityController = {
       }
       const { diff, pricing, shared_end_date } = preview.data;
 
+      // Sub-categories count too. They are free, so dropping one costs nothing
+      // and used to sail past this gate unconfirmed — which is how a client
+      // that simply failed to load sub-category metadata could delete every one
+      // a vendor had without ever asking. Price is not a proxy for consent.
       const hasRemovals =
         diff.removed_categories.length > 0 ||
+        diff.removed_subcategories.length > 0 ||
         diff.removed_hotels.length > 0;
       if (hasRemovals && req.body.confirm_removals !== true) {
         return res.status(400).json({
@@ -4350,13 +4400,16 @@ const HospitalityController = {
 // Re-runs server-side on modify so clients can't inject a stale net_cost.
 // ============================================================
 const _computeModificationPreview = async (vendorId, body) => {
-  const targetCategoryIds = Array.isArray(body?.target_categories)
+  // Reassigned below: items the vendor no longer has are dropped from the
+  // target rather than rejected, so a deleted hotel or category can never
+  // brick a vendor's ability to edit the rest of their subscription.
+  let targetCategoryIds = Array.isArray(body?.target_categories)
     ? [...new Set(body.target_categories.map(Number).filter(n => !isNaN(n)))]
     : [];
-  const targetSubcategoryIds = Array.isArray(body?.target_subcategories)
+  let targetSubcategoryIds = Array.isArray(body?.target_subcategories)
     ? [...new Set(body.target_subcategories.map(Number).filter(n => !isNaN(n)))]
     : [];
-  const targetHotelIds = Array.isArray(body?.target_hotels)
+  let targetHotelIds = Array.isArray(body?.target_hotels)
     ? [...new Set(body.target_hotels.map(Number).filter(n => !isNaN(n)))]
     : [];
 
@@ -4372,25 +4425,6 @@ const _computeModificationPreview = async (vendorId, body) => {
     return { error: 'No active subscription found to modify.' };
   }
 
-  // Validate sub-cat parents must be present in target cats
-  if (targetSubcategoryIds.length > 0) {
-    const subMeta = await db.any(
-      `SELECT id, title, parent_id, fee_amount
-       FROM tbl_category
-       WHERE id = ANY($1::int[]) AND is_deleted = 0 AND parent_id IS NOT NULL`,
-      [targetSubcategoryIds]
-    );
-    if (subMeta.length !== targetSubcategoryIds.length) {
-      return { error: 'One or more selected sub-categories are no longer available.' };
-    }
-    const orphan = subMeta.find(sc => !targetCategoryIds.includes(sc.parent_id));
-    if (orphan) {
-      return {
-        error: `Sub-category "${orphan.title}" requires its parent category to be in the subscription.`
-      };
-    }
-  }
-
   // Fetch full metadata for target categories (names + fees)
   const catMeta = await db.any(
     `SELECT id, title AS name, COALESCE(fee_amount, 500) AS fee_amount
@@ -4398,8 +4432,26 @@ const _computeModificationPreview = async (vendorId, body) => {
      WHERE id = ANY($1::int[]) AND is_deleted = 0 AND (parent_id IS NULL OR parent_id = 0)`,
     [targetCategoryIds]
   );
-  if (catMeta.length !== targetCategoryIds.length) {
-    return { error: 'One or more selected categories are no longer available.' };
+  targetCategoryIds = targetCategoryIds.filter(id => catMeta.some(c => c.id === id));
+  if (targetCategoryIds.length === 0) {
+    return { error: 'At least one category is required.' };
+  }
+
+  // Sub-categories are resolved AFTER categories: a parent dropped just above
+  // must take its children with it, so the parent check has to run against the
+  // final category list. A sub-category cannot outlive its parent, and erroring
+  // on one would strand the vendor, so unusable ones are dropped instead.
+  if (targetSubcategoryIds.length > 0) {
+    const subMeta = await db.any(
+      `SELECT id, title, parent_id, fee_amount
+       FROM tbl_category
+       WHERE id = ANY($1::int[]) AND is_deleted = 0 AND parent_id IS NOT NULL`,
+      [targetSubcategoryIds]
+    );
+    const liveSubIds = new Set(
+      subMeta.filter(sc => targetCategoryIds.includes(sc.parent_id)).map(sc => sc.id)
+    );
+    targetSubcategoryIds = targetSubcategoryIds.filter(id => liveSubIds.has(id));
   }
 
   // Fetch full metadata for target hotels
@@ -4409,8 +4461,9 @@ const _computeModificationPreview = async (vendorId, body) => {
      WHERE id = ANY($1::int[]) AND is_deleted = 0`,
     [targetHotelIds]
   );
-  if (hotelMeta.length !== targetHotelIds.length) {
-    return { error: 'One or more selected business units are no longer available.' };
+  targetHotelIds = targetHotelIds.filter(id => hotelMeta.some(h => h.id === id));
+  if (targetHotelIds.length === 0) {
+    return { error: 'At least one business unit (hotel) is required.' };
   }
 
   // Sub-category metadata (names for diff labels)
@@ -4594,11 +4647,16 @@ const _applyModificationFromMetadata = async (payment, t) => {
     );
   }
 
-  // 2. Cascade-cancel children of removed parents
+  // 2. Cascade-cancel children of removed parents. Their ids feed step 5:
+  // a cascaded child is cancelled inside this transaction, so the unmap's
+  // coverage check (which runs outside it) would otherwise still read the
+  // child as active and treat the parent's products as covered.
+  let cascadedSubcategoryIds = [];
   if (Array.isArray(metadata.cascade_parent_category_ids) && metadata.cascade_parent_category_ids.length > 0) {
-    await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
+    const cascaded = await hospitalityModel.cancelSubcategoriesByParentCategoryIds(
       vendorId, metadata.cascade_parent_category_ids, { tx: t }
     );
+    cascadedSubcategoryIds = (cascaded || []).map(row => row.item_id).filter(Boolean);
   }
 
   // 3. Insert/upsert additions
@@ -4658,7 +4716,7 @@ const _applyModificationFromMetadata = async (payment, t) => {
       ? metadata.cascade_parent_category_ids.filter(Boolean)
       : [];
 
-    let cancelledCatIds = [...cascadeParentIds];
+    let cancelledCatIds = [...cascadeParentIds, ...cascadedSubcategoryIds];
 
     // Look up category IDs from the cancelled subscription row IDs
     if (cancelSubIds.length > 0) {
