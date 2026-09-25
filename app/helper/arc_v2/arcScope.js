@@ -82,6 +82,10 @@ function assertIdent(name, value) {
  * @param {string|null} [columns.hotel]
  * @param {string|null} [columns.department]
  * @param {string|null} [columns.process]
+ * @param {string|null} [columns.arcId]   — the row's tbl_arc.id; with columns.isGroup,
+ *   a GROUP rate contract also matches users scoped to any hotel it covers
+ *   (tbl_arc_hotel_mappings). Omit both for non-ARC rows (e.g. the hotel picker).
+ * @param {string|null} [columns.isGroup] — the row's tbl_arc.is_group
  * @param {number} [paramOffset] — next free $N in the parent query
  * @param {Object} [opts]
  * @param {string[]|null} [opts.permissions] — opt into permission-keyed mode
@@ -90,18 +94,24 @@ function assertIdent(name, value) {
 export function buildArcScopeClause(userId, columns, paramOffset = 1, opts = {}) {
   if (userId == null) return { clause: 'TRUE', params: [], paramsConsumed: 0 };
 
-  const { company, hotel = null, department = null, process = null } = columns || {};
+  const {
+    company, hotel = null, department = null, process = null, arcId = null, isGroup = null,
+  } = columns || {};
   assertIdent('company column', company);
   assertIdent('hotel column', hotel);
   assertIdent('department column', department);
   assertIdent('process column', process);
+  assertIdent('arcId column', arcId);
+  assertIdent('isGroup column', isGroup);
   if (!company) throw new Error('arcScope: a company column is required');
+  if (!!arcId !== !!isGroup) throw new Error('arcScope: arcId and isGroup columns go together');
 
   const permissions = Array.isArray(opts.permissions) ? opts.permissions : null;
 
   // Permission-keyed mode: delegate to the canonical platform helper, OR-ing
   // one clause per permission in the family. Requires the standard alias
-  // columns, so it is only available when every axis is present.
+  // columns, so it is only available when every axis is present. It matches
+  // the LEAD hotel only (no group coverage) — nothing in ARC uses it today.
   if (permissions && permissions.length > 0) {
     const alias = company.split('.')[0];
     let p = paramOffset;
@@ -121,7 +131,16 @@ export function buildArcScopeClause(userId, columns, paramOffset = 1, opts = {})
     `urs.user_id = $${p}`,
     `urs.company_id = ${company}`,
   ];
-  if (hotel) predicates.push(`(urs.hotel_id IS NULL OR urs.hotel_id = ${hotel})`);
+  if (hotel && arcId) {
+    // GROUP rate contracts: staff at every covered hotel are bound by its
+    // rates, so they may read it. Coverage counts ONLY when is_group is set —
+    // a stray mapping row on a single-hotel ARC never widens it.
+    predicates.push(`(urs.hotel_id IS NULL OR urs.hotel_id = ${hotel} OR (${isGroup} AND EXISTS (
+         SELECT 1 FROM tbl_arc_hotel_mappings ahm
+          WHERE ahm.arc_id = ${arcId} AND ahm.hotel_id = urs.hotel_id)))`);
+  } else if (hotel) {
+    predicates.push(`(urs.hotel_id IS NULL OR urs.hotel_id = ${hotel})`);
+  }
   if (department) {
     predicates.push(
       `(${department} IS NULL OR urs.department_id IS NULL OR urs.department_id = ${department})`
@@ -141,27 +160,31 @@ export function buildArcScopeClause(userId, columns, paramOffset = 1, opts = {})
  * scope tuple? Never throws on a scope miss — returns false.
  *
  * @param {number} userId
- * @param {Object} scope — { hospitality_company_id, hotel_id, department_id, process_id }
+ * @param {Object} scope — { hospitality_company_id, hotel_id, hotel_ids?, department_id, process_id }
+ *   hotel_ids (optional) matches a scope row at ANY of those hotels; used for
+ *   reading a group rate contract. Without it only hotel_id is matched.
  * @param {*} [dbContext]
  */
 export async function userHasArcScope(userId, scope, dbContext = db) {
   if (!userId || !scope) return false;
   const companyId = Number(scope.hospitality_company_id) || null;
-  const hotelId = scope.hotel_id != null ? Number(scope.hotel_id) : null;
   const deptId = scope.department_id != null ? Number(scope.department_id) : null;
   const processId = scope.process_id != null ? Number(scope.process_id) : null;
   if (!companyId) return false;
+  const hotelIds = Array.isArray(scope.hotel_ids) && scope.hotel_ids.length
+    ? scope.hotel_ids.map(Number).filter(Boolean)
+    : (scope.hotel_id != null ? [Number(scope.hotel_id)] : []);
 
   const row = await dbContext.oneOrNone(
     `SELECT 1
        FROM tbl_user_role_scopes urs
       WHERE urs.user_id = $1
         AND urs.company_id = $2
-        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+        AND (urs.hotel_id IS NULL OR urs.hotel_id = ANY($3::int[]))
         AND ($4::int IS NULL OR urs.department_id IS NULL OR urs.department_id = $4)
         AND (urs.process_id IS NULL OR urs.process_id = $5)
       LIMIT 1`,
-    [userId, companyId, hotelId, deptId, processId]
+    [userId, companyId, hotelIds, deptId, processId]
   );
   return !!row;
 }
@@ -209,6 +232,31 @@ export async function userCanAccessArc(req, arcOrHotelId, dbContext = db) {
 }
 
 /**
+ * May this caller READ this rate contract?
+ *
+ * A group rate contract binds every hotel it covers, so staff scoped to ANY
+ * covered hotel may read it. Everything that runs the contract — editing,
+ * publishing, evaluating, approving — stays with userCanAccessArc, which
+ * matches the lead hotel (tbl_arc.hotel_id) only. A single-hotel ARC reads
+ * exactly as before.
+ *
+ * Pass the ARC ROW (with id, is_group, hospitality_company_id, hotel_id,
+ * department_id, process_id).
+ */
+export async function userCanReadArc(req, arc, dbContext = db) {
+  if (Number(req?.user?.user_type) === 8) return true;
+  if (!arc || typeof arc !== 'object') return false;
+  if (!arc.is_group) return userCanAccessArc(req, arc, dbContext);
+  const userId = req?.user?.id;
+  if (!userId || !arc.id || !arc.hospitality_company_id) return false;
+  const covered = await dbContext.any(
+    `SELECT hotel_id FROM tbl_arc_hotel_mappings WHERE arc_id = $1`, [arc.id]
+  );
+  const hotel_ids = [...new Set([Number(arc.hotel_id), ...covered.map((c) => Number(c.hotel_id))])];
+  return userHasArcScope(userId, { ...arc, hotel_ids }, dbContext);
+}
+
+/**
  * rbacModel.getUserPermissionsForHotels SELECTs urs.process_id but never
  * filters on it, so its rows enforce only 3 of the 4 axes. Every ARC caller of
  * it runs its rows through this filter so the permission gate agrees with the
@@ -248,6 +296,7 @@ export default {
   buildArcScopeClause,
   userHasArcScope,
   userCanAccessArc,
+  userCanReadArc,
   filterRowsByProcessAxis,
   arcScopeUserId,
 };

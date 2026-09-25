@@ -9,7 +9,6 @@ import { logger } from '../../util/logger.js';
 import {
   createApprovalInstance,
   getApprovalInstancesByEntity,
-  findBestMatchingPolicyTx,
 } from '../../models/generalModel.js';
 import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import {
@@ -18,6 +17,7 @@ import {
 } from '../../helper/cronManager.js';
 import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { parseAsUTC } from '../../helper/dbTime.js';
+import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 
 /**
  * ARC Negotiation Controller
@@ -49,11 +49,6 @@ function fail(res, err, tag) {
   return bad(res, 500, err.message || 'Internal error', 3);
 }
 
-async function resolveArcPolicy(entityType, scope, t) {
-  let policy = await findBestMatchingPolicyTx({ entity_type: entityType, ...scope }, t);
-  if (!policy) policy = await findBestMatchingPolicyTx({ entity_type: 'ARC', ...scope }, t);
-  return policy;
-}
 
 // ============================================================
 // BUYER — create round
@@ -227,9 +222,10 @@ export async function createRound(req, res) {
       }
 
       // ── Policy resolution ──
-      const policy = await resolveArcPolicy('ARC_NEGOTIATION', scope, t);
+      const policy = await resolveArcPolicyFor(arc, 'ARC_NEGOTIATION', t);
       if (!policy) {
-        return deferBad(400, 'No approval policy configured for ARC negotiation in this scope.');
+        return deferBad(400, noArcPolicyError(arc,
+          'No approval policy configured for ARC negotiation in this scope.', 'negotiation').message);
       }
 
       // ── Persistence shape ──

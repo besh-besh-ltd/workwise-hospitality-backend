@@ -3,12 +3,16 @@ import arcModel from '../../models/arc_v2/arcModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
 import arcLifecycleModel from '../../models/arc_v2/arcLifecycleModel.js';
 import arcManualEntryModel from '../../models/arc_v2/arcManualEntryModel.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
-import { userCanAccessArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
+import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
+import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
+import { resolveGroupCoverage, normalizeGroupItems } from '../../helper/arc_v2/arcGroupDraft.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
@@ -16,7 +20,6 @@ import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/
 import { currentFinancialYearIst } from '../../helper/financialYear.js';
 import {
   createApprovalInstance,
-  findBestMatchingPolicyTx,
   cancelApprovalInstance,
   getApprovalInstanceDetails,
 } from '../../models/generalModel.js';
@@ -61,6 +64,19 @@ function bad(res, status, message, code = 0) {
 // Prefer passing the ARC ROW (not just its hotel id) — the row form also
 // enforces the department and process axes.
 const userCanAccessHotel = userCanAccessArc;
+
+const positiveIds = (ids) => [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+const sameIdSet = (a, b) => {
+  const x = positiveIds(a).sort((m, n) => m - n);
+  const y = positiveIds(b).sort((m, n) => m - n);
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+};
+
+// `hotel_ids=a,b,c` (group) or the legacy single `hotel_id` → distinct positive ids.
+function parseHotelIdsParam(query = {}) {
+  const raw = query.hotel_ids != null ? String(query.hotel_ids).split(',') : [query.hotel_id];
+  return [...new Set(raw.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+}
 
 // Notify every invited vendor that an ARC was floated (audit C2). Best-effort
 // and post-commit: a notification/email failure must NEVER roll back or block
@@ -107,6 +123,45 @@ export async function notifyVendorsOfFloat(arc, invitations, actorId) {
 }
 
 /**
+ * Who is invited to quote, and for which hotels.
+ *
+ *   open        → every eligible vendor (category AND hotel subscription) for
+ *                 at least one covered hotel
+ *   invitation  → the buyer's picks. For a GROUP ARC, picks that serve none of
+ *                 the covered hotels are reported (publish refuses them) and
+ *                 left out; a single-hotel ARC keeps the buyer's pick as before.
+ *
+ * Also returns the covered hotels no invited vendor serves, so the buyer knows
+ * before floating that a hotel may end up without a supplier.
+ *
+ * @returns {{ vendorIds: number[], hotelIdsByVendor: Map<number, number[]>,
+ *             uncoveredHotelIds: number[], picksServingNoHotel: Array<{id, name}> }}
+ */
+async function resolveArcVendorPanel(arc, runner = db) {
+  const hotelIds = await arcHotelModel.arcHotelIds(arc, runner);
+  const coverage = await resolveArcVendorCoverage({ category_id: arc.category_id, hotel_ids: hotelIds }, runner);
+  const hotelIdsByVendor = new Map(coverage.map((v) => [Number(v.id), v.hotel_ids]));
+  let vendorIds;
+  let picksServingNoHotel = [];
+  if (arc.eligibility_type === 'open') {
+    vendorIds = [...hotelIdsByVendor.keys()];
+  } else {
+    const picked = await arcModel.listInvitations(arc.id, runner);
+    if (arc.is_group) {
+      vendorIds = picked.map((i) => Number(i.vendor_id)).filter((id) => hotelIdsByVendor.has(id));
+      picksServingNoHotel = picked
+        .filter((i) => !hotelIdsByVendor.has(Number(i.vendor_id)))
+        .map((i) => ({ id: Number(i.vendor_id), name: i.vendor_name || null }));
+    } else {
+      vendorIds = picked.map((i) => Number(i.vendor_id));
+    }
+  }
+  const served = new Set(vendorIds.flatMap((id) => hotelIdsByVendor.get(id) || []));
+  const uncoveredHotelIds = arc.is_group ? hotelIds.filter((h) => !served.has(h)) : [];
+  return { vendorIds, hotelIdsByVendor, uncoveredHotelIds, picksServingNoHotel };
+}
+
+/**
  * Float an ARC live: resolve + persist the vendor panel, flip to 'floated',
  * and return the data needed to notify vendors. This is the reusable extraction
  * of today's publish side-effects, called by the post-approval hook (and never
@@ -128,25 +183,19 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   const arc = await arcModel.getById(arcId, runner);
   if (!arc) return { floated: false, reason: 'arc_not_found' };
 
-  // Resolve the vendor panel (same logic as today's publish): "open" resolves
-  // eligible vendors for (category, hotel); "invitation" uses the rows set at
-  // createDraft.
-  let vendorIds;
-  if (arc.eligibility_type === 'open') {
-    const eligible = await arcModel.getEligibleVendorsForCategory(
-      { category_id: arc.category_id, hotel_id: arc.hotel_id }, runner);
-    vendorIds = eligible.map((v) => Number(v.id));
-  } else {
-    const inv = await arcModel.listInvitations(arcId, runner);
-    vendorIds = inv.map((i) => Number(i.vendor_id));
-  }
+  // Resolve the vendor panel (same logic as publish — resolveArcVendorPanel),
+  // re-checked now because subscriptions can lapse while publish awaits approval.
+  const panel = await resolveArcVendorPanel(arc, runner);
+  const vendorIds = panel.vendorIds;
   if (vendorIds.length === 0) return { floated: false, reason: 'no_vendors' };
 
   const items = await arcModel.listItems(arcId, runner);
 
   const doFloat = async (t) => {
     const updated = await arcModel.setStatus(arcId, 'floated', {}, t);
-    if (arc.eligibility_type === 'open') await arcModel.setInvitations(arcId, vendorIds, t);
+    // A group ARC also drops hand-picked vendors that no longer serve any hotel.
+    if (arc.eligibility_type === 'open' || arc.is_group) await arcModel.setInvitations(arcId, vendorIds, t);
+    if (arc.is_group) await arcHotelModel.setInvitationHotels(arcId, panel.hotelIdsByVendor, t);
     const invitations = await arcModel.listInvitations(arcId, t);
     await logArcEvent({
       arcId, eventType: ARC_EVENT_TYPES.PUBLISHED, actorId,
@@ -200,6 +249,23 @@ export async function createDraft(req, res) {
     if (!(await userCanAccessHotel(req, hotelId))) {
       return bad(res, 403, 'You do not have access to this hotel');
     }
+    // GROUP rate contract: hotel_id is the lead hotel, hotel_ids every covered
+    // hotel, and each item carries its per-hotel split (hotel_qtys). Coverage
+    // and quantities are validated and re-derived server-side.
+    const isGroup = body.is_group === true;
+    let coverage = null;
+    let incomingItems = Array.isArray(body.items) ? body.items : [];
+    if (isGroup) {
+      try {
+        coverage = await resolveGroupCoverage(req, {
+          hotel_id: hotelId, hotel_ids: body.hotel_ids, department_id: body.department_id,
+        });
+        incomingItems = normalizeGroupItems(incomingItems, coverage.hotelIds);
+      } catch (e) {
+        if (e.httpStatus) return bad(res, e.httpStatus, e.message);
+        throw e;
+      }
+    }
     const data = {
       // arc_number is minted below, INSIDE the tx (FY-scoped atomic upsert) —
       // never trust a client-supplied arc_number (L1).
@@ -227,6 +293,7 @@ export async function createDraft(req, res) {
       // product vs service — collected by the wizard's Basics step (defaults to
       // 'product' so resume can rehydrate it). Stored on tbl_arc.type.
       type: body.type || 'product',
+      is_group: isGroup,
       created_by: userId,
     };
     // Respond-AFTER-commit: build the payload inside the tx, send it only once
@@ -240,8 +307,8 @@ export async function createDraft(req, res) {
       // (skipped serial on rollback is fine; a duplicate would not be).
       const arcNumber = await arcModel.nextArcNumber(currentFinancialYearIst(), t);
       const arc = await arcModel.createDraft({ ...data, arc_number: arcNumber }, t);
+      if (isGroup) await arcHotelModel.reconcileArcHotels(arc.id, coverage.hotelIds, userId, t);
       // Seed items if any were provided up-front (multi-step wizard might add them later via PATCH).
-      const items = Array.isArray(body.items) ? body.items : [];
       const createdItems = [];
       // Sampling now lives per item, but `sample_required` on the body is the
       // older contract-wide answer and still arrives from API clients and the
@@ -250,12 +317,17 @@ export async function createDraft(req, res) {
       // it had already stated. Same carry-down the migration performs for
       // existing rows.
       const arcWideSample = !!data.sample_required;
-      for (const it of items) {
+      for (const it of incomingItems) {
         if (!it.product_variant_id || it.indicative_qty == null) continue;
-        createdItems.push(await arcModel.addItem(arc.id, {
+        const item = await arcModel.addItem(arc.id, {
           ...it,
           sample_required: it.sample_required === undefined ? arcWideSample : !!it.sample_required,
-        }, t));
+        }, t);
+        if (isGroup) {
+          await arcHotelModel.setItemHotelQtys(item.id, it.hotel_qtys, t);
+          item.hotel_qtys = it.hotel_qtys;
+        }
+        createdItems.push(item);
       }
       // ...and the contract-level flag is now the rollup of its items.
       await arcModel.syncSampleRequiredRollup(arc.id, t);
@@ -298,26 +370,69 @@ export async function updateDraft(req, res) {
     }
     if (await rejectIfManualEntry(res, id, 'edit')) return;
 
+    // GROUP rate contract shape. A draft is (or becomes) a group when is_group
+    // is sent true, or it already is one and is_group is not sent false.
+    // Coverage — lead hotel, covered hotels, department — is re-validated only
+    // when it actually changes, so the lead hotel's buyer can edit terms
+    // without needing access to every covered hotel, but nobody can move the
+    // contract onto hotels they cannot act at.
+    const sent = (key) => Object.prototype.hasOwnProperty.call(body, key);
+    const wantsGroup = body.is_group === true || (existing.is_group && body.is_group !== false);
+    let group = null; // { leadHotelId, hotelIds, changed }
+    let incomingItems = Array.isArray(body.items) ? body.items : null;
+    if (wantsGroup) {
+      try {
+        const currentIds = await arcHotelModel.arcHotelIds(existing);
+        const nextLead = sent('hotel_id') ? Number(body.hotel_id) : Number(existing.hotel_id);
+        const nextIds = sent('hotel_ids') ? positiveIds(body.hotel_ids) : currentIds;
+        const nextDept = sent('department_id') ? Number(body.department_id) : Number(existing.department_id);
+        const unchanged = existing.is_group
+          && nextLead === Number(existing.hotel_id)
+          && sameIdSet(nextIds, currentIds)
+          && nextDept === Number(existing.department_id);
+        if (unchanged) {
+          group = { leadHotelId: nextLead, hotelIds: currentIds, changed: false };
+        } else {
+          const cov = await resolveGroupCoverage(req, {
+            hotel_id: nextLead, hotel_ids: nextIds, department_id: nextDept,
+            expectedCompanyId: existing.hospitality_company_id,
+          });
+          group = { leadHotelId: cov.leadHotelId, hotelIds: cov.hotelIds, changed: true };
+        }
+        if (incomingItems) incomingItems = normalizeGroupItems(incomingItems, group.hotelIds);
+      } catch (e) {
+        if (e.httpStatus) return bad(res, e.httpStatus, e.message);
+        throw e;
+      }
+    }
+
     // GROUP D (Sr 17/20 fix): updateDraft previously only whitelisted scalar
     // columns (see arcModel.updateDraft), so re-saving a RESUMED draft silently
     // dropped item / vendor-invitation edits — a data-loss trap for the new
     // "Save draft & exit" round-trip. Reconcile the item set and invitation
     // list here too, mirroring how createDraft seeds them, all inside one tx.
     const result = await db.tx(async (t) => {
-      const updated = await arcModel.updateDraft(id, body, t);
+      let updated = await arcModel.updateDraft(id, body, t);
+      if (group?.changed) {
+        updated = await arcModel.setGroupShape(id, { is_group: true, hotel_id: group.leadHotelId }, t);
+        await arcHotelModel.reconcileArcHotels(id, group.hotelIds, req.user.id, t);
+      } else if (existing.is_group && body.is_group === false) {
+        await arcHotelModel.clearGroupRows(id, t);
+        updated = await arcModel.setGroupShape(id, { is_group: false, hotel_id: existing.hotel_id }, t);
+      }
 
       // Item set — delete/update/insert so add, edit (spec/qty/uom), and
       // remove of items on a resumed draft all persist. Only reconciled when
       // the caller actually sent an `items` array, so a scalar-only PATCH
       // (e.g. `{ type: 'service' }`) never touches — let alone wipes — it.
       let items = await arcModel.listItems(id, t);
-      if (Array.isArray(body.items)) {
+      if (Array.isArray(incomingItems)) {
         // Same inheritance as createDraft: fall back to the contract-wide
         // answer this request carries, or to the one already stored.
         const arcWideSample = body.sample_required !== undefined
           ? !!body.sample_required
           : !!existing.sample_required;
-        const incoming = body.items.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
+        const incoming = incomingItems.filter((it) => it && it.product_variant_id && it.indicative_qty != null);
         const byVariant = new Map(items.map((it) => [Number(it.product_variant_id), it]));
         const keepVariantIds = new Set(incoming.map((it) => Number(it.product_variant_id)));
         // Drop items the wizard no longer has selected. tbl_arc_item_tech_evaluation
@@ -349,8 +464,18 @@ export async function updateDraft(req, res) {
                   : !!it.sample_required,
               }, t));
         }
+        if (group) {
+          for (let i = 0; i < incoming.length; i++) {
+            await arcHotelModel.setItemHotelQtys(nextItems[i].id, incoming[i].hotel_qtys, t);
+            nextItems[i].hotel_qtys = incoming[i].hotel_qtys;
+          }
+        }
         items = nextItems;
         await arcModel.syncSampleRequiredRollup(id, t);
+      } else if (group?.changed) {
+        // Coverage narrowed without the items being resent.
+        await arcHotelModel.pruneItemHotelQtys(id, group.hotelIds, t);
+        items = await arcModel.listItems(id, t);
       }
 
       // Vendor invitations — same delete-and-replace `setInvitations` createDraft
@@ -431,39 +556,30 @@ export async function publish(req, res) {
     if (missing.length > 0) return bad(res, 400, `Missing or invalid: ${missing.join(', ')}`);
 
     // Resolve the vendor panel BEFORE flipping so we can refuse to float to
-    // nobody (audit M2). "open" resolves eligible vendors for (category, hotel);
-    // "invitation" uses the rows set at createDraft.
-    let vendorIds;
-    if (arc.eligibility_type === 'open') {
-      const eligible = await arcModel.getEligibleVendorsForCategory(
-        { category_id: arc.category_id, hotel_id: arc.hotel_id }
-      );
-      vendorIds = eligible.map((v) => Number(v.id));
-    } else {
-      const inv = await arcModel.listInvitations(id);
-      vendorIds = inv.map((i) => Number(i.vendor_id));
+    // nobody (audit M2) — see resolveArcVendorPanel.
+    const panel = await resolveArcVendorPanel(arc);
+    if (panel.picksServingNoHotel.length > 0) {
+      const names = panel.picksServingNoHotel.map((v) => (v.name ? `${v.name} (#${v.id})` : `#${v.id}`)).join(', ');
+      return bad(res, 400,
+        `These invited vendors cannot serve any of this rate contract's hotels — remove them or pick vendors subscribed to these hotels: ${names}`);
     }
+    const vendorIds = panel.vendorIds;
     if (vendorIds.length === 0) {
       return bad(res, 400, 'No eligible vendors to invite — cannot float this rate contract to nobody');
     }
 
     // Publish no longer floats directly. It resolves the ARC's approval policy
-    // (matched as entity_type 'ARC'), creates an ARC_PUBLISH approval instance,
+    // (entity_type 'ARC', or 'ARC_GROUP' for a group rate contract — see
+    // helper/arc_v2/arcPolicy.js), creates an ARC_PUBLISH approval instance,
     // and parks the ARC in pending_publish_approval. The ARC goes live ONLY when
     // the instance reaches APPROVED — the registered hook (handleArcPublishApproval)
     // calls floatArc. No policy → hard 400; the ARC stays draft/publish_rejected.
     const result = await db.tx(async (t) => {
-      const policy = await findBestMatchingPolicyTx({
-        entity_type:            'ARC',
-        hospitality_company_id: arc.hospitality_company_id,
-        hotel_id:               arc.hotel_id,
-        department_id:          arc.department_id,
-        process_id:             arc.process_id,
-      }, t);
+      const policy = await resolveArcPolicyFor(arc, 'ARC', t);
       if (!policy) {
-        const err = new Error('No approval policy configured to publish a rate contract in this scope. Configure an ARC approval policy (Settings → Approvals) for this company/hotel/department, then publish again.');
-        err.httpStatus = 400;
-        throw err;
+        throw noArcPolicyError(arc,
+          'No approval policy configured to publish a rate contract in this scope. Configure an ARC approval policy (Settings → Approvals) for this company/hotel/department, then publish again.',
+          'publish');
       }
       const engineResult = await createApprovalInstance({
         entity_type:            'ARC_PUBLISH',
@@ -505,6 +621,7 @@ export async function publish(req, res) {
         approval_instance_id: result.approval_instance_id,
         floated: didFloat,
         vendor_count: floatedInvites.length,
+        uncovered_hotel_ids: panel.uncoveredHotelIds,
       }, didFloat ? 'ARC floated' : 'ARC publish auto-approved but could not float');
     }
 
@@ -512,6 +629,7 @@ export async function publish(req, res) {
       arc: { ...arc, status: 'pending_publish_approval' },
       approval_instance_id: result.approval_instance_id,
       floated: false,
+      uncovered_hotel_ids: panel.uncoveredHotelIds,
     }, 'Submitted for publish approval');
   } catch (err) {
     // A no-policy (or any pre-mapped) failure surfaces its actionable message
@@ -684,7 +802,7 @@ export async function getPublishApproval(req, res) {
     // requireArcPermission, so existence is not leaked differently here).
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
-    if (!(await userCanAccessHotel(req, arc))) {
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const instance = await db.oneOrNone(
@@ -977,6 +1095,13 @@ export async function getArcListView(req, res) {
     const pairs = (ids, names) => { const a = parseArr(ids); const b = parseArr(names); const out = []; a.forEach((id, i) => { if (id != null) out.push({ id: String(id), label: b[i] != null ? String(b[i]) : `#${id}` }); }); return out; };
     const prodPairs = (r) => pairs(r.product_variant_ids, r.item_names);
     const vendPairs = (r) => pairs(r.awarded_vendor_ids, r.awarded_vendor_names);
+    // Every hotel a row covers (a group rate contract counts under each).
+    const hotelPairs = (r) => {
+      const ids = Array.isArray(r.hotel_ids) && r.hotel_ids.length ? r.hotel_ids : [r.hotel_id];
+      const names = Array.isArray(r.hotel_names) ? r.hotel_names : [r.hotel_name];
+      return ids.filter((id) => id != null)
+        .map((id, idx) => ({ id: String(id), label: names[idx] || `Hotel ${id}` }));
+    };
 
     // 3. tab counts.
     const tab_counts = { all: rows.length, pending: 0, drafts: 0, ongoing: 0, approved: 0, active: 0, ended: 0 };
@@ -996,7 +1121,7 @@ export async function getArcListView(req, res) {
     const BUCKET_LABEL = { draft: 'Draft', floated: 'Floated', eval: 'In Evaluation', committee: 'Committee Review', awaiting: 'Awaiting Vendor', active: 'Active', expiring: 'Expiring Soon', expired: 'Ended' };
     for (const r of tabRows) {
       bump(fm.status, r._bucket, BUCKET_LABEL[r._bucket] || r._bucket);
-      if (r.hotel_id != null) bump(fm.buId, String(r.hotel_id), r.hotel_name || `Hotel ${r.hotel_id}`);
+      for (const hp of hotelPairs(r)) bump(fm.buId, hp.id, hp.label);
       if (r.category_id != null) bump(fm.categoryId, String(r.category_id), r.category_title || `Category ${r.category_id}`);
       if (r.department_id != null) bump(fm.departmentId, String(r.department_id), r.department_title || `Dept ${r.department_id}`);
       for (const p of prodPairs(r)) bump(fm.productId, p.id, p.label);
@@ -1015,13 +1140,13 @@ export async function getArcListView(req, res) {
     // 6. facet + search filtering.
     const filtered = tabRows.filter((r) => {
       if (filters.status.length && !filters.status.includes(r._bucket)) return false;
-      if (filters.buId.length && !filters.buId.includes(String(r.hotel_id))) return false;
+      if (filters.buId.length && !hotelPairs(r).some((hp) => filters.buId.includes(hp.id))) return false;
       if (filters.categoryId.length && !filters.categoryId.includes(String(r.category_id))) return false;
       if (filters.departmentId.length && !filters.departmentId.includes(String(r.department_id))) return false;
       if (filters.productId.length && !prodPairs(r).some((p) => filters.productId.includes(p.id))) return false;
       if (filters.vendorId.length && !vendPairs(r).some((v) => filters.vendorId.includes(v.id))) return false;
       if (search) {
-        const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${r.hotel_name || ''}`.toLowerCase();
+        const hay = `${r.title || ''} ${r.arc_number || ''} ${r.category_title || ''} ${hotelPairs(r).map((hp) => hp.label).join(' ')}`.toLowerCase();
         if (!hay.includes(search)) return false;
       }
       // FY / custom creation-date window (server-authoritative; AND with other facets).
@@ -1149,7 +1274,8 @@ export async function getById(req, res) {
     // Mirror createDraft/publish — derive access from req.user (super-admin
     // bypass), never trust the id alone. A valid policy approver is always
     // hotel/company-mapped, so they retain read access.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // Read access: staff at any hotel a group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const [items, invitations, techEvalByItem, manual] = await Promise.all([
@@ -1169,6 +1295,13 @@ export async function getById(req, res) {
     // Additive: items[].tech_eval is null when no config exists for that item.
     for (const it of items) {
       it.tech_eval = techEvalByItem[String(it.id)] || null;
+    }
+    // Covered hotels (lead first) for every ARC; a group ARC also returns each
+    // item's per-hotel split so the wizard can resume it.
+    arc.hotels = await arcHotelModel.listArcHotels(arc);
+    if (arc.is_group) {
+      const split = await arcHotelModel.listItemHotelQtys(id);
+      for (const it of items) it.hotel_qtys = split[String(it.id)] || [];
     }
     return ok(res, { arc, items, invitations });
   } catch (err) {
@@ -1200,7 +1333,10 @@ export async function getLifecycle(req, res) {
     if (!lifecycle) return bad(res, 404, 'ARC not found', 2);
     // Tenant guard — the lifecycle now carries approver/evaluator PII (names,
     // emails, mobiles), so it must not be cross-tenant readable. Mirror getById.
-    if (!(await userCanAccessHotel(req, lifecycle.arc))) {
+    // Read access (covered hotels of a group ARC included). The permissions
+    // below still resolve at the LEAD hotel — reading does not make a covered
+    // hotel's staff evaluators of a centrally-run contract.
+    if (!(await userCanReadArc(req, lifecycle.arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
@@ -1229,6 +1365,8 @@ export async function getLifecycle(req, res) {
     const manual = await arcManualEntryModel.getByArc(id);
     lifecycle.arc.is_manual = !!manual?.is_manual;
     lifecycle.arc.manual_target_stage = manual?.target_stage ?? null;
+    // A group rate contract names the hotels it covers (lead first).
+    lifecycle.arc.hotels = lifecycle.arc.is_group ? await arcHotelModel.listArcHotels(lifecycle.arc) : [];
 
     return ok(res, { ...lifecycle, permissions });
   } catch (err) {
@@ -1287,18 +1425,39 @@ export async function getDepartmentsForCategory(req, res) {
 
 // Departments the current user is mapped to in a given hotel (drives the ARC
 // create department picker — independent of the category→department mapping).
+// A group rate contract has ONE department, so `hotel_ids=a,b,c` returns the
+// departments the user holds at EVERY listed hotel.
 export async function getDepartmentsForHotel(req, res) {
   try {
-    const hotelId = Number(req.query.hotel_id);
     const userId  = req.user?.id;
-    if (!hotelId || !userId) return bad(res, 400, 'hotel_id is required', 2);
+    const isGroupQuery = req.query.hotel_ids != null;
+    const hotelIds = parseHotelIdsParam(req.query);
+    if (hotelIds.length === 0 || !userId) return bad(res, 400, 'hotel_id is required', 2);
+    // A group query names hotels the client chose; each must be in scope
+    // before we answer anything about it.
+    if (isGroupQuery) {
+      for (const hotelId of hotelIds) {
+        if (!(await userCanAccessHotel(req, hotelId))) {
+          return bad(res, 403, 'You do not have access to this hotel', 3);
+        }
+      }
+    }
     // Super admins have no role-scope rows to derive from → every department.
     if (Number(req.user?.user_type) === 8) {
       const all = await db.any('SELECT id, title FROM tbl_department ORDER BY title');
       return ok(res, { departments: all });
     }
-    const departments = await arcModel.getDepartmentsForUserInHotel({ user_id: userId, hotel_id: hotelId });
-    return ok(res, { departments });
+    let departments = null;
+    for (const hotelId of hotelIds) {
+      const atHotel = await arcModel.getDepartmentsForUserInHotel({ user_id: userId, hotel_id: hotelId });
+      if (departments === null) {
+        departments = atHotel;
+      } else {
+        const held = new Set(atHotel.map((d) => Number(d.id)));
+        departments = departments.filter((d) => held.has(Number(d.id)));
+      }
+    }
+    return ok(res, { departments: departments || [] });
   } catch (err) {
     logger.error({ err }, '[arcController.getDepartmentsForHotel]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -1354,7 +1513,8 @@ export async function listAccessibleHotels(req, res) {
       hotel: 'h.id',
     }, 2);
     const rows = await db.any(
-      `SELECT h.id, h.hospitality_company_id, h.name, h.city, h.keys
+      `SELECT h.id, h.hospitality_company_id, h.name, h.city, h.state, h.keys,
+              COALESCE(h.is_head_office, false) AS is_head_office
          FROM tbl_hospitality_company_hotels h
         WHERE ($1::int[] IS NULL OR h.hospitality_company_id = ANY($1::int[]))
           AND COALESCE(h.is_deleted, 0) = 0
@@ -1432,37 +1592,32 @@ export async function searchProductVariants(req, res) {
   }
 }
 
-// Returns vendors eligible for the (category, hotel) pair via the existing
-// vendor_hotel_category_subscription table.
+// Vendors eligible for a category across one hotel (`hotel_id`) or the hotels
+// of a group rate contract (`hotel_ids=a,b,c`). Each vendor carries the hotels
+// it covers and the ones needing renewal — see helper/arc_v2/arcEligibility.js.
 export async function listEligibleVendors(req, res) {
   try {
     const categoryId = Number(req.query.category_id);
-    const hotelId    = Number(req.query.hotel_id);
-    if (!categoryId || !hotelId) return bad(res, 400, 'category_id and hotel_id are required');
-    // hotel_id arrives from the client and the response carries vendor PII
-    // (name, email, mobile), so the hotel must be validated against the
-    // caller's own scope — otherwise any buyer could enumerate every tenant's
-    // vendor panel by walking hotel ids.
-    if (!(await userCanAccessHotel(req, hotelId))) {
-      return bad(res, 403, 'You do not have access to this hotel', 3);
+    const hotelIds = parseHotelIdsParam(req.query);
+    if (!categoryId || hotelIds.length === 0) {
+      return bad(res, 400, 'category_id and hotel_id (or hotel_ids) are required');
     }
-    const rows = await db.any(
-      `SELECT DISTINCT u.id, u.name, u.email, u.mobile
-         FROM tbl_users u
-         JOIN tbl_vendor_hotel_category_subscription vhcs
-           ON vhcs.vendor_id = u.id
-        WHERE u.user_type = 3
-          AND u.status = 1
-          AND vhcs.status IN ('active', 'expired')
-          AND (
-            (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
-            OR
-            (vhcs.item_type = 'category' AND vhcs.item_id = $1)
-          )
-        ORDER BY u.name`,
-      [categoryId, hotelId]
-    );
-    return ok(res, { vendors: rows });
+    // The hotels arrive from the client and the response carries vendor PII
+    // (name, email, mobile), so EVERY hotel must be validated against the
+    // caller's own scope — otherwise any buyer could enumerate another
+    // tenant's vendor panel by slipping one foreign hotel into the list.
+    for (const hotelId of hotelIds) {
+      if (!(await userCanAccessHotel(req, hotelId))) {
+        return bad(res, 403, 'You do not have access to this hotel', 3);
+      }
+    }
+    const mappings = await rbacModel.getHotelCompanyMappings(hotelIds);
+    if (mappings.length !== hotelIds.length) return bad(res, 400, 'invalid hotel_ids');
+    if (new Set(mappings.map((m) => Number(m.hospitality_company_id))).size > 1) {
+      return bad(res, 400, 'All hotels must belong to the same company');
+    }
+    const vendors = await resolveArcVendorCoverage({ category_id: categoryId, hotel_ids: hotelIds });
+    return ok(res, { vendors });
   } catch (err) {
     logger.error({ err }, '[arcController.listEligibleVendors]');
     return bad(res, 500, err.message || 'Internal error', 3);

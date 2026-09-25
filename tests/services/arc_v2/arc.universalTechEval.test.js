@@ -34,6 +34,7 @@ import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
 import { ensureArcApprovable } from "../../helpers/arcApproverPerms.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const HC      = IDS.hospitality.A;
 const HOTEL   = IDS.hotels.A1;
@@ -220,7 +221,10 @@ describe("ARC v2 — universal (ARC-wide) technical-evaluation clauses", () => {
   // clauses) driven through the REAL lifecycle (no pre-seeded verdicts/status).
   let uoArc, uoItem, uoUnivClause, uoRespP, uoRespF, uoLineP, uoLineF;
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`, [BUYER]);
     await db.none(`UPDATE tbl_users SET status = 1 WHERE id = ANY($1::int[])`, [[CROSS, FINANCE]]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = ANY($1::int[])`, [[P, F, M]]);
@@ -404,6 +408,7 @@ describe("ARC v2 — universal (ARC-wide) technical-evaluation clauses", () => {
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     // Negotiation rounds are polymorphic (source_type='ARC') — not cascaded.
     const roundIds = (await db.any(
       `SELECT id FROM tbl_negotiation_rounds WHERE source_type='ARC' AND source_id = ANY($1::bigint[])`,

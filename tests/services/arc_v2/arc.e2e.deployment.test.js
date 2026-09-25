@@ -20,6 +20,7 @@ import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
 import { ensureArcApprovable, ensureApprovable } from "../../helpers/arcApproverPerms.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const HC       = IDS.hospitality.A;
 const HOTEL    = IDS.hotels.A1;
@@ -40,7 +41,10 @@ describe("ARC v2 — DEPLOYMENT E2E: create → contract_active → MR → call-
   let buyerClient, vendorAClient;
   let arcId, itemId, clauseId, quoteLineId, contractId, mrId, poId;
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(
       `INSERT INTO tbl_category_department (category_id, department_id)
          VALUES ($1, $2) ON CONFLICT DO NOTHING`, [CATEGORY, DEPT]);
@@ -87,6 +91,7 @@ describe("ARC v2 — DEPLOYMENT E2E: create → contract_active → MR → call-
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     if (arcId) {
       const insts = (await db.any(
         `SELECT id FROM tbl_approval_instances WHERE entity_id = $1 OR entity_id = $2`, [arcId, mrId || 0]

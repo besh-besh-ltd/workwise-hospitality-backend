@@ -16,6 +16,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 describe("ARC v2 — vendor lifecycle endpoint security + correctness", () => {
   const BUYER     = IDS.users.a1_proc_buyer;
@@ -53,7 +54,10 @@ describe("ARC v2 — vendor lifecycle endpoint security + correctness", () => {
     return { id, itemId: iId };
   }
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     // Ensure dept-category mapping and correct user types.
     await db.none(
       `INSERT INTO tbl_category_department (category_id, department_id)
@@ -80,6 +84,7 @@ describe("ARC v2 — vendor lifecycle endpoint security + correctness", () => {
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: createdArcIds });
     if (createdArcIds.length) {
       await db.none(

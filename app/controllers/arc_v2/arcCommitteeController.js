@@ -2,13 +2,14 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import arcEvalModel from '../../models/arc_v2/arcEvaluationModel.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { generateContractsForArc, generateContractPdfsForArc } from './arcContractController.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 
 /**
  * ARC v2 — Committee approval controller.
@@ -40,8 +41,9 @@ export async function getCommitteeView(req, res) {
     // Tenant isolation: the committee view exposes winning-vendor identities,
     // allocated quantities, and full negotiated price/term snapshots — must not
     // be cross-tenant readable via id enumeration. Derive access from the ARC's
-    // own hotel_id (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // own hotel_id (super-admin bypass), never trust the id alone. Staff at
+    // any hotel a group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
     const comm = await arcEvalModel.getCommEval(arcId);
@@ -77,11 +79,24 @@ export async function getCommitteeView(req, res) {
           '[committeeController.getCommitteeView] instance detail load failed');
       }
     }
+    // GROUP rate contract: the committee approves the award hotel by hotel, so
+    // it needs the hotels, each item's per-hotel quantity and each award's split.
+    let group = {};
+    if (arc.is_group) {
+      const [hotels, item_hotel_qtys, awardHotels] = await Promise.all([
+        arcHotelModel.listArcHotels(arc),
+        arcHotelModel.listItemHotelQtys(arcId),
+        comm ? arcHotelModel.listAwardHotels(comm.id) : {},
+      ]);
+      for (const a of awards) a.hotels = awardHotels[String(a.id)] || [];
+      group = { hotels, item_hotel_qtys };
+    }
     return ok(res, {
       arc: { ...arc, ...(ctx || {}) },
       comm_evaluation: comm, awards, items,
       approval_instance: instance,
       approval,
+      ...group,
     });
   } catch (err) {
     logger.error({ err }, '[committeeController.getCommitteeView]');

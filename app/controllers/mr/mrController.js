@@ -2,6 +2,7 @@ import db from '../../config/dbConn.js';
 import mrModel from '../../models/mr/mrModel.js';
 import { releaseForMr } from '../../services/callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import {
@@ -93,7 +94,14 @@ function validateMrItemAgainstLine(item, line, mr) {
   if (!['active', 'expiring_soon'].includes(line.contract_status)) {
     return 'the contract is not active';
   }
-  if (Number(line.hotel_id) !== Number(mr.hotel_id) ||
+  if (line.is_group) {
+    // A group rate contract serves every hotel it awarded on this line, not
+    // just its lead hotel. `line` must be loaded for the requisition's hotel.
+    if (!line.hotel_line_id || Number(line.department_id) !== Number(mr.department_id)) {
+      return "the contract is not in this requisition's hotel/department";
+    }
+    if (line.hotel_is_suspended) return 'ordering against this contract is paused for this hotel';
+  } else if (Number(line.hotel_id) !== Number(mr.hotel_id) ||
       Number(line.department_id) !== Number(mr.department_id)) {
     return "the contract is not in this requisition's hotel/department";
   }
@@ -299,7 +307,7 @@ export async function createDraft(req, res) {
       if (Number(it.quantity) <= 0) {
         return bad(res, 400, `Item ${i + 1}: quantity must be greater than zero`);
       }
-      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id);
+      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id, hotelId);
       const err = validateMrItemAgainstLine(it, line, mrScope);
       if (err) return bad(res, 400, `Item ${i + 1}: ${err}`);
       validatedItems.push({
@@ -363,13 +371,26 @@ export async function submit(req, res) {
     // Defence-in-depth re-validation (audit CO2) + hard over-consumption guard
     // (audit CO4): every item must still reference an in-scope, active contract
     // line, and its quantity must fit the line's remaining quantity.
+    // Group rate contract: the group's remaining quantity is the hard cap
+    // (above); a hotel's own share is soft — ordering past it is allowed and
+    // reported back as a warning (HO is told when the call-off is released).
+    const warnings = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id);
+      const line = await mrModel.getContractLineDetail(it.arc_contract_line_id, mr.hotel_id);
       const err = validateMrItemAgainstLine(it, line, mr);
       if (err) return bad(res, 400, `Item ${i + 1}: ${err}`);
       if (Number(it.quantity) > Number(line.remaining_qty)) {
         return bad(res, 400, `Item ${i + 1}: requested quantity (${it.quantity}) exceeds the contract's remaining quantity (${line.remaining_qty})`);
+      }
+      if (line.is_group && Number(it.quantity) > Number(line.hotel_remaining_qty)) {
+        warnings.push({
+          arc_contract_line_id: Number(line.line_id),
+          hotel_id: Number(mr.hotel_id),
+          quantity: Number(it.quantity),
+          hotel_remaining_qty: Number(line.hotel_remaining_qty),
+          message: `Item ${i + 1}: ${it.quantity} is more than this hotel's remaining share (${Number(line.hotel_remaining_qty)}). The group total has room, so the order can go ahead; head office will be told.`,
+        });
       }
     }
     const result = await db.tx(async (t) => {
@@ -405,7 +426,7 @@ export async function submit(req, res) {
         approval_instance_id: instanceRow.id,
       }, t);
       return {
-        __data: { mr: updated, items, approval_instance_id: instanceRow.id },
+        __data: { mr: updated, items, approval_instance_id: instanceRow.id, warnings },
         __autoApproved: engineResult.autoApproved === true,
       };
     });
@@ -777,6 +798,15 @@ export async function handleMrPostApproval(approvalInstanceId, approverUserId, o
     // (audit CO10) — both best-effort, never undo the release.
     if (released && released.length) {
       await notifyCallOffReleased(mr, released);
+      // Group rate contract: tell head office when a hotel ordered past its share.
+      for (const { group, overShare } of released) {
+        for (const entry of overShare || []) {
+          await notifyArcEvent({
+            arcId: group.arc_id, eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE,
+            actorId: mr.raised_by, payload: entry,
+          });
+        }
+      }
       for (const { po } of released) {
         await generateCallOffPoPdf(po.id).catch((err) =>
           logger.error({ err, poId: po.id }, '[mrController.handleMrPostApproval] call-off PDF failed'));

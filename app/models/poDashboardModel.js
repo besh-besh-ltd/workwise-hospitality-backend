@@ -773,12 +773,12 @@ export async function getPODetailFull(po_id, scope) {
     if (Array.isArray(scope.hospitalityCompanyIds)) {
       const dRfq = scopedExistsFor(scope.userId, "rfq", values, i);
       i = dRfq.nextIndex;
-      const dArc = scopedExistsFor(scope.userId, "arc", values, i);
+      const dArc = scopedExistsFor(scope.userId, "arc_scope", values, i);
       i = dArc.nextIndex;
       conds.push(`(${dRfq.clause} OR ${dArc.clause})`);
     }
     if (scope.hotelIds && scope.hotelIds.length > 0) {
-      conds.push(`COALESCE(rfq.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`);
+      conds.push(`COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) = ANY($${i++}::int[])`);
       values.push(scope.hotelIds);
     }
     if (scope.departmentId) {
@@ -791,7 +791,7 @@ export async function getPODetailFull(po_id, scope) {
     `SELECT po.*,
             rfq.rfq_no, rfq.title AS rfq_title, rfq.created_by AS rfq_created_by,
             COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) AS hospitality_company_id,
-            COALESCE(rfq.hotel_id, arc.hotel_id) AS hotel_id,
+            COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) AS hotel_id,
             COALESCE(rfq.department_id, arc.department_id) AS department_id,
             COALESCE(THC.name, ATHC.name, TC.company_name) AS company_name,
             COALESCE(THCH.name, ATHCH.name) AS business_unit,
@@ -819,9 +819,14 @@ export async function getPODetailFull(po_id, scope) {
      LEFT JOIN tbl_arc_contract acon ON acon.id = po.arc_contract_id
      LEFT JOIN tbl_arc arc ON arc.id = acon.arc_id
      LEFT JOIN tbl_hospitality_companies ATHC ON ATHC.id = arc.hospitality_company_id
-     LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = arc.hotel_id
-     LEFT JOIN tbl_department ADEPT ON ADEPT.id = arc.department_id
      LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+     -- Call-off POs: the ordering hotel (see buildScopeClause).
+     LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = COALESCE(mr.hotel_id, arc.hotel_id)
+     LEFT JOIN tbl_department ADEPT ON ADEPT.id = arc.department_id
+     LEFT JOIN LATERAL (
+       SELECT arc.hospitality_company_id, COALESCE(mr.hotel_id, arc.hotel_id) AS hotel_id,
+              arc.department_id, arc.process_id
+     ) arc_scope ON TRUE
      LEFT JOIN tbl_users INI ON INI.id = po.initiated_by
      LEFT JOIN tbl_approval_instances tai ON tai.id = po.approval_instance_id
      WHERE po.id = $1 AND ${scopeClause}`,

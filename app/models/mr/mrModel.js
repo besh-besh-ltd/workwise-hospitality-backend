@@ -132,7 +132,11 @@ const mrModel = {
   // Resolve a contract line with its contract + parent ARC scope, for
   // server-side validation of MR items (audit CO2/CO4). Returns null if the
   // line id doesn't exist.
-  getContractLineDetail: async (lineId, txContext = null) => {
+  //
+  // GROUP rate contract: pass the requisition's hotel to also get that hotel's
+  // ledger row (hotel_line_id is NULL when the hotel is not on this line —
+  // not covered, or not awarded to this vendor).
+  getContractLineDetail: async (lineId, hotelId = null, txContext = null) => {
     return (txContext || db).oneOrNone(
       `SELECT cl.id              AS line_id,
               cl.arc_contract_id,
@@ -146,13 +150,21 @@ const mrModel = {
               c.arc_id,
               a.hotel_id,
               a.department_id,
+              a.is_group,
+              clh.id             AS hotel_line_id,
+              clh.committed_qty  AS hotel_committed_qty,
+              clh.consumed_qty   AS hotel_consumed_qty,
+              GREATEST(clh.committed_qty - clh.consumed_qty, 0) AS hotel_remaining_qty,
+              COALESCE(clh.is_suspended, false) AS hotel_is_suspended,
               ai.product_variant_id
          FROM tbl_arc_contract_line cl
          JOIN tbl_arc_contract c ON c.id = cl.arc_contract_id
          JOIN tbl_arc a          ON a.id = c.arc_id
          JOIN tbl_arc_item ai    ON ai.id = cl.arc_item_id
+         LEFT JOIN tbl_arc_contract_line_hotel clh
+                ON clh.arc_contract_line_id = cl.id AND clh.hotel_id = $2
         WHERE cl.id = $1`,
-      [lineId]
+      [lineId, hotelId]
     );
   },
 
@@ -567,6 +579,11 @@ const mrModel = {
    *
    * Multiple active contracts on the same (product × hotel × department) are
    * returned as separate rows — the picker forces the user to choose one.
+   *
+   * GROUP rate contract: a line appears for a hotel the contract covers and
+   * awarded this vendor at that hotel, unless HO paused the hotel. remaining_qty
+   * is the GROUP's remaining (the hard cap); hotel_* is the hotel's own share
+   * (soft), and current_rate honours a per-hotel rate override.
    */
   searchContractedItems: async ({ hotel_id, department_id, query = null, limit = 25 }, txContext = null) => {
     const runner = txContext || db;
@@ -581,10 +598,14 @@ const mrModel = {
     args.push(limit);
     return runner.any(
       `SELECT cl.id            AS arc_contract_line_id,
-              cl.unit_rate     AS current_rate,
+              COALESCE(clh.unit_rate_override, cl.unit_rate) AS current_rate,
               cl.committed_qty,
               cl.consumed_qty,
               (cl.committed_qty - cl.consumed_qty) AS remaining_qty,
+              a.is_group,
+              clh.committed_qty AS hotel_committed_qty,
+              clh.consumed_qty  AS hotel_consumed_qty,
+              GREATEST(clh.committed_qty - clh.consumed_qty, 0) AS hotel_remaining_qty,
               c.id             AS arc_contract_id,
               c.vendor_id,
               a.id             AS arc_id,
@@ -598,11 +619,18 @@ const mrModel = {
               uvend.name       AS vendor_name
          FROM tbl_arc_contract_line cl
          JOIN tbl_arc_contract c    ON c.id = cl.arc_contract_id AND c.status IN ('active','expiring_soon')
-         JOIN tbl_arc a             ON a.id = c.arc_id AND a.hotel_id = $1 AND a.department_id = $2
+         JOIN tbl_arc a             ON a.id = c.arc_id AND a.department_id = $2
+                                   AND (a.hotel_id = $1 OR a.is_group)
          JOIN tbl_arc_item ai       ON ai.id = cl.arc_item_id
          JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
          LEFT JOIN tbl_users uvend  ON uvend.id = c.vendor_id
+         LEFT JOIN tbl_arc_contract_line_hotel clh
+                ON clh.arc_contract_line_id = cl.id AND clh.hotel_id = $1
         WHERE (cl.committed_qty - cl.consumed_qty) > 0
+          AND (
+            (NOT a.is_group AND a.hotel_id = $1)
+            OR (a.is_group AND clh.id IS NOT NULL AND NOT clh.is_suspended)
+          )
           ${qFilter}
         ORDER BY pv.name, c.vendor_id
         LIMIT $${p}`,

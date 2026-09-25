@@ -47,6 +47,7 @@ const arcModel = {
       delivery_expected = null,
       penalty_clause = null,
       type = 'product',
+      is_group = false,
       created_by,
     } = data;
     return runner.one(
@@ -57,7 +58,7 @@ const arcModel = {
           submission_start_at, submission_end_at, contract_start_at, contract_end_at,
           technical_response_required, sample_required, eligibility_type,
           escalation_clause_json, payment_terms_expected, delivery_expected, penalty_clause,
-          type, created_by)
+          type, created_by, is_group)
        VALUES
          ($1, $2, $3, $4, $5::jsonb,
           $6, $7, $8, $9,
@@ -65,7 +66,7 @@ const arcModel = {
           $10, $11, $12, $13,
           $14, $15, $16,
           $17::jsonb, $18, $19, $20,
-          $21, $22)
+          $21, $22, $23)
        RETURNING *`,
       [
         arc_number, title, description, category_id, JSON.stringify(sub_category_ids),
@@ -73,8 +74,23 @@ const arcModel = {
         submission_start_at, submission_end_at, contract_start_at, contract_end_at,
         technical_response_required, sample_required, eligibility_type,
         JSON.stringify(escalation_clause_json || {}), payment_terms_expected, delivery_expected, penalty_clause,
-        type ?? 'product', created_by,
+        type ?? 'product', created_by, !!is_group,
       ]
+    );
+  },
+
+  /**
+   * Set whether a DRAFT is a group rate contract and which hotel leads it.
+   * hotel_id is otherwise not patchable (updateDraft); a group draft's lead
+   * may move only among hotels its coverage check already validated.
+   */
+  setGroupShape: async (id, { is_group, hotel_id }, txContext = null) => {
+    return (txContext || db).one(
+      `UPDATE tbl_arc
+          SET is_group = $2, hotel_id = $3, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status IN ('draft','publish_rejected')
+       RETURNING *`,
+      [id, !!is_group, hotel_id]
     );
   },
 
@@ -235,6 +251,8 @@ const arcModel = {
       hotel: 'a.hotel_id',
       department: 'a.department_id',
       process: 'a.process_id',
+      arcId: 'a.id',
+      isGroup: 'a.is_group',
     }, p);
     if (scope.paramsConsumed > 0) {
       conditions.push(scope.clause);
@@ -242,7 +260,11 @@ const arcModel = {
       p += scope.paramsConsumed;
     }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
+      // A group rate contract matches the facet through any hotel it covers.
+      conditions.push(`(a.hotel_id = ANY($${p}::int[]) OR (a.is_group AND EXISTS (
+        SELECT 1 FROM tbl_arc_hotel_mappings ahm
+         WHERE ahm.arc_id = a.id AND ahm.hotel_id = ANY($${p}::int[]))))`);
+      p++;
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {
@@ -265,6 +287,11 @@ const arcModel = {
                 a.created_by, u.name AS created_by_name,
                 cat.title AS category_title,
                 h.name AS hotel_name, h.city AS hotel_city,
+                a.is_group,
+                -- Every hotel the ARC covers, the lead hotel first. A single-hotel
+                -- ARC covers just its hotel.
+                CASE WHEN a.is_group AND cov.hotel_ids IS NOT NULL THEN cov.hotel_ids ELSE ARRAY[a.hotel_id] END AS hotel_ids,
+                CASE WHEN a.is_group AND cov.hotel_names IS NOT NULL THEN cov.hotel_names ELSE ARRAY[h.name] END AS hotel_names,
                 d.title AS department_title,
                 COALESCE(item_agg.item_count, 0)::int AS item_count,
                 COALESCE(item_agg.item_names, '[]'::json) AS item_names,
@@ -298,6 +325,13 @@ const arcModel = {
            LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
            LEFT JOIN tbl_department d ON d.id = a.department_id
            LEFT JOIN tbl_arc_manual_entry me ON me.arc_id = a.id
+           LEFT JOIN LATERAL (
+             SELECT array_agg(m.hotel_id ORDER BY (m.hotel_id = a.hotel_id) DESC, mh.name, m.hotel_id) AS hotel_ids,
+                    array_agg(mh.name    ORDER BY (m.hotel_id = a.hotel_id) DESC, mh.name, m.hotel_id) AS hotel_names
+               FROM tbl_arc_hotel_mappings m
+               JOIN tbl_hospitality_company_hotels mh ON mh.id = m.hotel_id
+              WHERE m.arc_id = a.id
+           ) cov ON TRUE
            LEFT JOIN LATERAL (
              SELECT COUNT(*) AS item_count,
                     json_agg(pv.name ORDER BY ai.id) FILTER (WHERE pv.name IS NOT NULL) AS item_names,
@@ -437,6 +471,8 @@ const arcModel = {
       hotel: 'a.hotel_id',
       department: 'a.department_id',
       process: 'a.process_id',
+      arcId: 'a.id',
+      isGroup: 'a.is_group',
     }, p);
     if (scope.paramsConsumed > 0) {
       conditions.push(scope.clause);
@@ -444,7 +480,11 @@ const arcModel = {
       p += scope.paramsConsumed;
     }
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
-      conditions.push(`a.hotel_id = ANY($${p++}::int[])`);
+      // A group rate contract matches the facet through any hotel it covers.
+      conditions.push(`(a.hotel_id = ANY($${p}::int[]) OR (a.is_group AND EXISTS (
+        SELECT 1 FROM tbl_arc_hotel_mappings ahm
+         WHERE ahm.arc_id = a.id AND ahm.hotel_id = ANY($${p}::int[]))))`);
+      p++;
       args.push(hotel_ids);
     }
     if (Array.isArray(department_ids) && department_ids.length > 0) {
@@ -746,29 +786,9 @@ const arcModel = {
     );
   },
 
-  // ============================================================
-  // Vendor eligibility for ARC (category-based — mirrors RFQ's variant-based
-  // helper but joins through tbl_product_categories at category granularity).
-  // ============================================================
-
-  getEligibleVendorsForCategory: async ({ category_id, hotel_id }, txContext = null) => {
-    return (txContext || db).any(
-      `SELECT DISTINCT u.id, u.name, u.email
-         FROM tbl_users u
-         JOIN tbl_vendor_hotel_category_subscription vhcs
-           ON vhcs.vendor_id = u.id
-        WHERE u.user_type = 3
-          AND u.status = 1
-          AND vhcs.status IN ('active','expired')
-          AND (
-            (vhcs.item_type = 'hotel'    AND vhcs.item_id = $2)
-            OR
-            (vhcs.item_type = 'category' AND vhcs.item_id = $1)
-          )
-        ORDER BY u.name`,
-      [category_id, hotel_id]
-    );
-  },
+  // Vendor eligibility lives in helper/arc_v2/arcEligibility.js
+  // (resolveArcVendorCoverage) — one resolver for the wizard picker, publish
+  // and float, using the RFQ rule (category AND hotel subscription).
 };
 
 const STATUS_GROUPS = {

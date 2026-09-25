@@ -14,7 +14,8 @@ import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import puppeteer from 'puppeteer';
-import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
+import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
+import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -117,7 +118,11 @@ function lineEngineOut(l) {
  * the supplier signature between the OTP-sealed copy and the awaiting draft.
  * The HTML is never persisted — only the rendered PDF is stored in S3.
  */
-function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signedAt = null } = {}) {
+export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signedAt = null, annexures = [] } = {}) {
+  // GROUP rate contract: one instrument, with an annexure per participating
+  // hotel carrying that hotel's legal identity and quantities (the standard
+  // master-agreement-with-participating-units pattern).
+  const isGroupDoc = Array.isArray(annexures) && annexures.length > 0;
   const buyerCity = [ctx.hotel_city, ctx.hotel_state].filter(Boolean).join(', ');
   const buyerOrg = ctx.company_name || 'Workwise Hospitality';
   const buyerPoc = ctx.buyer_name || 'Procurement Lead';
@@ -247,7 +252,9 @@ function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signed
   </div>
 
   <h2 class="sec">1. Scope &amp; Contract Period</h2>
-  <div class="clause"><span class="cn">1.1</span> The Supplier shall supply the goods listed in the Schedule of Rates (Clause 2) to the Purchaser at the Business Unit <strong>${esc(ctx.hotel_name || 'specified')}</strong>, against call-off purchase orders raised from time to time during the contract period.</div>
+  <div class="clause"><span class="cn">1.1</span> ${isGroupDoc
+    ? `The Supplier shall supply the goods listed in the Schedule of Rates (Clause 2) to each Business Unit of the Purchaser listed in <strong>Annexure A</strong>, against call-off purchase orders raised by that Business Unit from time to time during the contract period. Each Business Unit orders and is invoiced under its own GST registration and delivery address.`
+    : `The Supplier shall supply the goods listed in the Schedule of Rates (Clause 2) to the Purchaser at the Business Unit <strong>${esc(ctx.hotel_name || 'specified')}</strong>, against call-off purchase orders raised from time to time during the contract period.`}</div>
   <div class="clause"><span class="cn">1.2</span> This Contract is valid from <strong>${dFmt(ctx.contract_start_at)}</strong> to <strong>${dFmt(ctx.contract_end_at)}</strong> (both days inclusive) and is <strong>non-auto-renewing</strong>. The Purchaser retains a 10% emergency-procurement carve-out outside this Contract.</div>
   <div class="clause"><span class="cn">1.3</span> The quantities stated are indicative annual estimates; the Purchaser undertakes no minimum off-take and shall be liable only for goods actually called off.</div>
 
@@ -303,6 +310,17 @@ function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signed
     </div>
   </div>
 
+  ${isGroupDoc ? `<h2 class="sec">Annexure A — Participating Business Units</h2>
+  <div class="clause">The rates in the Schedule apply to every Business Unit below. Quantities are each unit&rsquo;s indicative share of the committed quantity.</div>
+  ${annexures.map((a, i) => `<div class="party" style="margin:12px 0;">
+    <div class="role">A.${i + 1}${a.is_lead ? ' &middot; Lead unit' : ''}</div>
+    <div class="nm">${esc(a.name)}</div>
+    <div class="meta">GSTIN: ${esc(a.gst || 'N/A')} &middot; PAN: ${esc(a.pan || 'N/A')}${a.full_address ? '<br/>' + esc(a.full_address) : ''}${a.delivery_address ? '<br/>Delivery: ' + esc(a.delivery_address) : ''}</div>
+    <table class="sch"><thead><tr><th>Item</th><th class="c">UOM</th><th class="r">Indic. Qty</th></tr></thead><tbody>
+      ${a.lines.map((l) => `<tr><td>${esc(l.variant_name || ('Item #' + l.arc_item_id))}</td><td class="c">${esc(l.uom || '—')}</td><td class="r">${Number(l.committed_qty).toLocaleString('en-IN')}</td></tr>`).join('')}
+    </tbody></table>
+  </div>`).join('')}` : ''}
+
   <div class="integrity">Document integrity — SHA-256 of this PDF is sealed onto the contract record as the authoritative signature artefact. Contract Ref ${esc(ctx.arc_number)} · ${esc(vendor.name)} · ${signed ? 'Signed copy' : 'Draft pending signature'}.</div>
   <div class="foot">This is a system-generated rate contract document. ${esc(buyerOrg)} · generated electronically.</div>
 
@@ -317,9 +335,10 @@ function renderContractDocumentHtml(ctx, vendor, lines, { signed = false, signed
  * back to a content hash if PDF/S3 is unavailable).
  */
 export async function generateContractPdf(ctx, vendor, lines, contractId, { signed = false, signedAt = null, htmlOverride = null } = {}) {
+  const annexures = ctx?.is_group && !htmlOverride ? await loadContractAnnexures(ctx.arc_id, contractId) : [];
   // htmlOverride lets the addendum flow reuse this Puppeteer→S3→hash pipeline
   // with its own delta template instead of the rate-contract template.
-  const html = htmlOverride || renderContractDocumentHtml(ctx, vendor, lines, { signed, signedAt });
+  const html = htmlOverride || renderContractDocumentHtml(ctx, vendor, lines, { signed, signedAt, annexures });
   const tmpPath = path.join(os.tmpdir(), `arc-contract-${contractId}-${signed ? 'signed' : 'draft'}-${Date.now()}.pdf`);
   let browser = null;
   try {
@@ -347,7 +366,7 @@ export async function generateContractPdf(ctx, vendor, lines, contractId, { sign
 // Fetch the ARC + buyer scope a contract document needs (one query per ARC).
 export async function loadContractDocContext(arcId, runner = db) {
   return runner.oneOrNone(
-    `SELECT a.id AS arc_id, a.arc_number, a.title, a.created_at AS arc_created_at,
+    `SELECT a.id AS arc_id, a.arc_number, a.title, a.created_at AS arc_created_at, a.is_group,
             a.contract_start_at, a.contract_end_at, a.eligibility_type,
             a.payment_terms_expected, a.delivery_expected, a.penalty_clause, a.escalation_clause_json,
             cat.title AS category_title,
@@ -365,6 +384,46 @@ export async function loadContractDocContext(arcId, runner = db) {
 }
 
 /**
+ * GROUP rate contract: one annexure per hotel this contract covers — the
+ * hotel's legal identity (name, GSTIN, PAN, addresses) and its committed
+ * quantity per item. The lead hotel comes first. Hotels committed nothing
+ * (e.g. dropped by a re-award after consuming) are left out.
+ */
+export async function loadContractAnnexures(arcId, contractId, runner = db) {
+  const rows = await runner.any(
+    `SELECT h.id AS hotel_id, h.name, h.gst, h.pan, h.full_address, h.delivery_address,
+            (h.id = a.hotel_id) AS is_lead,
+            l.arc_item_id, pv.name AS variant_name, ai.uom, clh.committed_qty
+       FROM tbl_arc_contract_line l
+       JOIN tbl_arc_contract c ON c.id = l.arc_contract_id
+       JOIN tbl_arc a ON a.id = c.arc_id
+       JOIN tbl_arc_contract_line_hotel clh ON clh.arc_contract_line_id = l.id
+       JOIN tbl_hospitality_company_hotels h ON h.id = clh.hotel_id
+       JOIN tbl_arc_item ai ON ai.id = l.arc_item_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+      WHERE l.arc_contract_id = $1 AND a.id = $2 AND clh.committed_qty > 0
+      ORDER BY (h.id = a.hotel_id) DESC, h.name, h.id, l.arc_item_id`,
+    [contractId, arcId]
+  );
+  const byHotel = new Map();
+  for (const r of rows) {
+    const hotelId = Number(r.hotel_id);
+    if (!byHotel.has(hotelId)) {
+      byHotel.set(hotelId, {
+        hotel_id: hotelId, name: r.name, gst: r.gst, pan: r.pan,
+        full_address: r.full_address, delivery_address: r.delivery_address,
+        is_lead: r.is_lead, lines: [],
+      });
+    }
+    byHotel.get(hotelId).lines.push({
+      arc_item_id: Number(r.arc_item_id), variant_name: r.variant_name, uom: r.uom,
+      committed_qty: Number(r.committed_qty),
+    });
+  }
+  return [...byHotel.values()];
+}
+
+/**
  * Internal helper called by the committee post-approval hook. Returns the
  * generated contract rows.
  */
@@ -373,6 +432,10 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
   const comm = await arcEvalModel.getCommEval(arcId, t);
   if (!comm) throw new Error(`Cannot generate contracts: no comm eval for ARC ${arcId}`);
   const awards = await arcEvalModel.listAwards(comm.id, t);
+  // GROUP rate contract: each award's per-hotel split becomes the contract
+  // line's per-hotel ledger.
+  const arcRow = await arcModel.getById(arcId, t);
+  const awardHotels = arcRow?.is_group ? await arcHotelModel.listAwardHotels(comm.id, t) : null;
 
   // Group by awarded_vendor_id.
   const groups = new Map();
@@ -412,7 +475,7 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
       const snapshot = typeof award.awarded_quote_snapshot === 'string'
         ? JSON.parse(award.awarded_quote_snapshot)
         : (award.awarded_quote_snapshot || {});
-      await arcContractModel.addLine(contract.id, {
+      const line = await arcContractModel.addLine(contract.id, {
         arc_item_id:            award.arc_item_id,
         unit_rate:              snapshot.rate ?? 0,
         gst_pct:                snapshot.gst_pct ?? null,
@@ -422,6 +485,9 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
         committed_qty:          award.allocated_qty,
         awarded_quote_snapshot: snapshot,
       }, t);
+      if (awardHotels) {
+        await arcHotelModel.syncContractLineHotels(line.id, awardHotels[String(award.id)] || [], t);
+      }
     }
     contracts.push(contract);
   }
@@ -502,7 +568,7 @@ export async function getContractDetail(req, res) {
       // ARC context the detail page's hero/doc sections need: term, category,
       // BU, escalation, eligibility, and the buyer contact (creator).
       db.oneOrNone(
-        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status,
+        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
                 a.contract_start_at, a.contract_end_at,
                 a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
                 a.escalation_clause_json, a.eligibility_type,
@@ -572,10 +638,19 @@ export async function getContractDetail(req, res) {
         if (/relation .* does not exist/i.test(err.message)) return [];
         throw err;
       });
+    // GROUP rate contract: the hotels this vendor supplies and each line's
+    // per-hotel quantity. Hotels the vendor did not win are not disclosed.
+    let hotels = [];
+    if (arcInfo?.is_group) {
+      const ledger = await arcHotelModel.listContractHotels(id);
+      hotels = ledger.hotels;
+      for (const line of lines) line.hotels = ledger.byLine[String(line.id)] || [];
+    }
     return ok(res, {
       contract, lines, arc: arcInfo, callOffs,
       amendments: amendments.map(arcAmendmentModel.vendorView),
       clarifications,
+      hotels,
     });
   } catch (err) {
     logger.error({ err }, '[contractController.getContractDetail]');
@@ -759,12 +834,17 @@ export async function requestClarification(req, res) {
     // current value of the disputed field (so the dispute records a baseline).
     const lines = await arcContractModel.listLines(id);
     const lineById = new Map(lines.map((l) => [Number(l.id), l]));
+    const contractArc = await arcModel.getById(contract.arc_id);
     const prepared = [];
     for (const it of items) {
       const line = lineById.get(Number(it.arc_contract_line_id));
       if (!line) return bad(res, 400, `Line ${it.arc_contract_line_id} is not on this contract`);
       const field = String(it.field || '');
       if (!CLARIFY_FIELD_COL[field]) return bad(res, 400, `Unknown disputed field '${field}'`);
+      if (field === 'committed_qty' && contractArc?.is_group) {
+        return bad(res, 400,
+          'Per-hotel quantities on a group rate contract are set by the buyer — raise a price or terms clarification instead');
+      }
       const comment = String(it.comment || '').trim();
       if (!comment) return bad(res, 400, 'Each disputed line needs a comment explaining the concern');
       prepared.push({
@@ -835,7 +915,7 @@ export async function getVendorDocumentsBundle(req, res) {
     // (PAN/GST/MSME/FSSAI/cancelled-cheque). Gate on the contract's ARC hotel —
     // never trust the contractId alone (sequential ids → trivially enumerable).
     const contractArc = await arcModel.getById(contract.arc_id);
-    if (!contractArc || !(await userCanAccessHotel(req, contractArc))) {
+    if (!contractArc || !(await userCanReadArc(req, contractArc))) {
       return bad(res, 403, 'You do not have access to this contract', 3);
     }
     const vendorId = contract.vendor_id;
@@ -888,8 +968,9 @@ export async function getActiveSummary(req, res) {
     if (!arc) return bad(res, 404, 'ARC not found', 2);
     // Tenant isolation: active-summary exposes contracts, call-off PO prices,
     // amendment price changes, and buyer PII — gate on the ARC's own hotel_id
-    // (super-admin bypass), never trust the id alone.
-    if (!(await userCanAccessHotel(req, arc))) {
+    // (super-admin bypass), never trust the id alone. Staff at any hotel a
+    // group rate contract covers may read it.
+    if (!(await userCanReadArc(req, arc))) {
       return bad(res, 403, 'You do not have access to this rate contract', 3);
     }
 
@@ -947,7 +1028,9 @@ export async function getActiveSummary(req, res) {
                 cl.arc_item_id,
                 ai.product_variant_id,
                 pv.name          AS variant_name,
-                ai.uom
+                ai.uom,
+                mr.hotel_id,
+                mh.name          AS hotel_name
            FROM tbl_arc_callof_po cp
            JOIN tbl_arc_contract       c  ON c.id  = cp.arc_contract_id
            JOIN tbl_arc_contract_line  cl ON cl.id = cp.arc_contract_line_id
@@ -955,6 +1038,7 @@ export async function getActiveSummary(req, res) {
            LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
            LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
            LEFT JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+           LEFT JOIN tbl_hospitality_company_hotels mh ON mh.id = mr.hotel_id
            LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
           WHERE c.arc_id = $1
           ORDER BY cp.released_at DESC`,
@@ -1019,7 +1103,11 @@ export async function getActiveSummary(req, res) {
       contract:    c,
       consumption: await arcContractModel.consumptionForContract(c.id),
     })));
-    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums });
+    // GROUP rate contract: how each covered hotel is using it (PRD §8 step 8).
+    const group = arc.is_group
+      ? { hotels: await arcHotelModel.listArcHotels(arc), ...(await arcHotelModel.hotelUsageForArc(arc)) }
+      : {};
+    return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums, ...group });
   } catch (err) {
     logger.error({ err }, '[contractController.getActiveSummary]');
     return bad(res, 500, err.message || 'Internal error', 3);

@@ -39,7 +39,11 @@ WITH res AS (
     ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
-    ('ARC_AMENDMENT','arc')
+    ('ARC_AMENDMENT','arc'),
+    -- Group rate contracts: their own POLICY types, same approve resources.
+    ('ARC_GROUP','arc'), ('ARC_GROUP_TECH','arc-tech'),
+    ('ARC_GROUP_NEGOTIATION','arc-comm'), ('ARC_GROUP_COMMITTEE','arc-committee'),
+    ('ARC_GROUP_AMENDMENT','arc')
   ) AS v(entity_type, resource)
 ),
 pending_slots AS (
@@ -96,7 +100,11 @@ SELECT 'B. UNSATISFIABLE RESOURCE' AS finding,
     ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
-    ('ARC_AMENDMENT','arc')
+    ('ARC_AMENDMENT','arc'),
+    -- Group rate contracts: their own POLICY types, same approve resources.
+    ('ARC_GROUP','arc'), ('ARC_GROUP_TECH','arc-tech'),
+    ('ARC_GROUP_NEGOTIATION','arc-comm'), ('ARC_GROUP_COMMITTEE','arc-committee'),
+    ('ARC_GROUP_AMENDMENT','arc')
   ) AS v(entity_type, resource)
  WHERE NOT (
    EXISTS(SELECT 1 FROM tbl_permissions p WHERE p.resource::text=v.resource AND p.action='read')
@@ -126,7 +134,11 @@ WITH map AS (
     ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
-    ('ARC_AMENDMENT','arc')
+    ('ARC_AMENDMENT','arc'),
+    -- Group rate contracts: their own POLICY types, same approve resources.
+    ('ARC_GROUP','arc'), ('ARC_GROUP_TECH','arc-tech'),
+    ('ARC_GROUP_NEGOTIATION','arc-comm'), ('ARC_GROUP_COMMITTEE','arc-committee'),
+    ('ARC_GROUP_AMENDMENT','arc')
   ) AS v(entity_type, resource)
 ),
 step_survives AS (
@@ -209,7 +221,11 @@ WITH map AS (
     ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
-    ('ARC_AMENDMENT','arc')
+    ('ARC_AMENDMENT','arc'),
+    -- Group rate contracts: their own POLICY types, same approve resources.
+    ('ARC_GROUP','arc'), ('ARC_GROUP_TECH','arc-tech'),
+    ('ARC_GROUP_NEGOTIATION','arc-comm'), ('ARC_GROUP_COMMITTEE','arc-committee'),
+    ('ARC_GROUP_AMENDMENT','arc')
   ) AS v(entity_type, resource)
 )
 SELECT 'E. USER APPROVER WITHOUT PERMISSION' AS finding,
@@ -274,7 +290,11 @@ WITH map AS (
     ('PO','awarding'), ('MR','mr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
-    ('ARC_AMENDMENT','arc')
+    ('ARC_AMENDMENT','arc'),
+    -- Group rate contracts: their own POLICY types, same approve resources.
+    ('ARC_GROUP','arc'), ('ARC_GROUP_TECH','arc-tech'),
+    ('ARC_GROUP_NEGOTIATION','arc-comm'), ('ARC_GROUP_COMMITTEE','arc-committee'),
+    ('ARC_GROUP_AMENDMENT','arc')
   ) AS v(entity_type, resource)
 ),
 steps AS (

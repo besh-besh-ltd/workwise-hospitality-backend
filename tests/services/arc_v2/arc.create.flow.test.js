@@ -10,6 +10,7 @@ import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 describe("ARC v2 — create → publish → detail flow", () => {
   const BUYER = IDS.users.a1_proc_buyer;
@@ -23,7 +24,10 @@ describe("ARC v2 — create → publish → detail flow", () => {
   let client;
   let publishedArcId; // the ARC that goes through the publish gate (for cleanup)
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     // Seed the category → department mapping so the wizard's department
     // resolution picker has something to return for our test category.
     await db.none(
@@ -53,6 +57,7 @@ describe("ARC v2 — create → publish → detail flow", () => {
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     // Remove the publish-approval instance (FK to the policy) before the policy + arcs.
     await cleanupArcPublishPolicy({ policyId: PUBLISH_POLICY_ID, arcIds: [publishedArcId] });
     await db.none(`DELETE FROM tbl_arc_event_log WHERE 1=1`);
