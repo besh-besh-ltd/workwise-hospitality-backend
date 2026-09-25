@@ -436,12 +436,17 @@ describe("ARC list-view — FY date filter (§4.1)", () => {
   test("§4.1-9 malformed input ignored — acts as no-filter", async () => {
     await seedArc(`${D_LOWER_BOUND}T10:00:00`);
 
-    const [resGarbage, res13, resNumber, resNoFilter] = await Promise.all([
-      client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: "garbage" } }),
-      client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: "2026-13-40" } }),
-      client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: 20260401 } }),
-      client.post("/api/v1/arc-v2/list-view").send({}),
-    ]);
+    // Sequential on purpose. What this pins is "a malformed dateFrom behaves
+    // as no filter" — the four calls were never meant to race. Firing them at
+    // once stands up four ephemeral supertest listeners at the same moment
+    // (`request(app)` binds a fresh port per request), and in a long shard run
+    // one of them once came back as a bare "socket hang up" with no
+    // server-side error. Removing the concurrency removes that trigger without
+    // weakening the assertion.
+    const resGarbage = await client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: "garbage" } });
+    const res13 = await client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: "2026-13-40" } });
+    const resNumber = await client.post("/api/v1/arc-v2/list-view").send({ filters: { dateFrom: 20260401 } });
+    const resNoFilter = await client.post("/api/v1/arc-v2/list-view").send({});
     expect(resGarbage.status).toBe(200);
     expect(res13.status).toBe(200);
     expect(resNumber.status).toBe(200);

@@ -27,8 +27,12 @@ import db from '../config/dbConn.js';
  *   }
  *
  * The function is read-only — it never mutates contract or amendment rows.
+ *
+ * GROUP rate contract: pass { hotelId } — a per-hotel rate/charges override on
+ * tbl_arc_contract_line_hotel applies to that hotel's call-offs. An amendment
+ * price overlay still wins: it is the later agreement and binds every hotel.
  */
-export async function resolveCurrentPrice(arcContractLineId, asOfDate = null, txContext = null) {
+export async function resolveCurrentPrice(arcContractLineId, asOfDate = null, txContext = null, { hotelId = null } = {}) {
   if (!arcContractLineId) {
     throw new Error('resolveCurrentPrice: arcContractLineId is required');
   }
@@ -77,10 +81,19 @@ export async function resolveCurrentPrice(arcContractLineId, asOfDate = null, tx
     ? Number(overlay.payload.new_qty)
     : null;
 
+  const hotelOverride = hotelId
+    ? await runner.oneOrNone(
+      `SELECT unit_rate_override, charges_override
+         FROM tbl_arc_contract_line_hotel
+        WHERE arc_contract_line_id = $1 AND hotel_id = $2`,
+      [line.id, hotelId]
+    )
+    : null;
+
   return {
-    unit_rate:           amendedRate ?? line.unit_rate,
+    unit_rate:           amendedRate ?? hotelOverride?.unit_rate_override ?? line.unit_rate,
     gst_pct:             line.gst_pct,
-    charges:             line.charges,
+    charges:             hotelOverride?.charges_override ?? line.charges,
     payment_terms:       line.payment_terms,
     delivery_terms:      line.delivery_terms,
     // Effective committed quantity — qty amendments overlay the cap during

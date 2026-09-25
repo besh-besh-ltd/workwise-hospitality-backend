@@ -30,6 +30,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 
 const IST = "Asia/Kolkata";
 const nowIst = () => moment.tz(IST);
@@ -110,13 +111,17 @@ async function retryUntil(fn, predicate, { tries = 20, delayMs = 25 } = {}) {
 describe("ARC v2 — GROUP I: vendor quote-page fixes (Sr 36 / 52 / 53)", () => {
   let alphaClient;
 
+  // ARC now needs a hotel AND a category subscription — see helpers/arcGroupSeed.js.
+  let hotelSubIds = [];
   beforeAll(async () => {
+    hotelSubIds = await grantFixtureVendorHotelSubs([HOTEL]);
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = $1`, [BUYER]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
     alphaClient = await httpClient(VENDOR_A);
   });
 
   afterAll(async () => {
+    await revokeVendorSubs(hotelSubIds);
     if (createdArcIds.length) {
       await db.none(
         `DELETE FROM tbl_notifications WHERE additional_data->>'arc_id' = ANY($1::text[])`,

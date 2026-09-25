@@ -117,6 +117,10 @@ export function buildScopeClause(scope, values, startIndex) {
   const rfqConds = [rfqScoped.clause];
   narrowFor("rfq", rfqConds);
 
+  // A call-off PO is scoped as its ARC, but at the hotel that raised the
+  // requisition: for a group rate contract that is the ordering hotel, so each
+  // hotel sees its own call-offs (and not the others'); for a single-hotel ARC
+  // it is the ARC's own hotel, exactly as before.
   const arcScoped = scopedExistsFor(scope.userId, "aa", values, i);
   i = arcScoped.nextIndex;
   const arcConds = [arcScoped.clause];
@@ -125,8 +129,16 @@ export function buildScopeClause(scope, values, startIndex) {
   parts.push(`(
     (${rfqConds.join(" AND ")})
     OR (po.is_call_off = TRUE AND EXISTS (
-      SELECT 1 FROM tbl_arc_contract cc
-        JOIN tbl_arc aa ON aa.id = cc.arc_id
+      SELECT 1
+        FROM tbl_arc_contract cc
+        JOIN tbl_arc arc_row ON arc_row.id = cc.arc_id
+        LEFT JOIN tbl_material_requisition mr_row ON mr_row.id = po.source_mr_id
+        CROSS JOIN LATERAL (
+          SELECT arc_row.hospitality_company_id,
+                 COALESCE(mr_row.hotel_id, arc_row.hotel_id) AS hotel_id,
+                 arc_row.department_id,
+                 arc_row.process_id
+        ) aa
        WHERE cc.id = po.arc_contract_id AND ${arcConds.join(" AND ")}
     ))
   )`);

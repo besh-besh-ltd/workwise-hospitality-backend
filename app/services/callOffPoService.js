@@ -76,24 +76,6 @@ function computeAllInUnitPrice(pricingResult) {
  */
 async function buildCallOffBuckets(mrId, txContext) {
   const runner = txContext || db;
-  const items = await runner.any(
-    `SELECT mi.id          AS mr_item_id,
-            mi.product_variant_id,
-            mi.quantity,
-            mi.uom,
-            mi.arc_contract_id,
-            mi.arc_contract_line_id,
-            c.vendor_id,
-            c.arc_id
-       FROM tbl_material_requisition_item mi
-       JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
-      WHERE mi.mr_id = $1`,
-    [mrId]
-  );
-  if (items.length === 0) {
-    return [];
-  }
-
   const mr = await runner.oneOrNone(
     `SELECT m.id, m.hospitality_company_id, m.hotel_id, m.department_id, m.raised_by,
             hc.buyer_company_id
@@ -102,10 +84,34 @@ async function buildCallOffBuckets(mrId, txContext) {
       WHERE m.id = $1`,
     [mrId]
   );
+  // GROUP rate contract: each line's ledger row for the requisition's hotel.
+  // The supplier is that row's fulfilling vendor when one is set (vendor
+  // distributor networks), else the contract vendor — always the contract
+  // vendor today, so one PO per contract as before.
+  const items = await runner.any(
+    `SELECT mi.id          AS mr_item_id,
+            mi.product_variant_id,
+            mi.quantity,
+            mi.uom,
+            mi.arc_contract_id,
+            mi.arc_contract_line_id,
+            COALESCE(clh.fulfilling_vendor_id, c.vendor_id) AS vendor_id,
+            c.arc_id,
+            clh.id         AS hotel_line_id
+       FROM tbl_material_requisition_item mi
+       JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
+       LEFT JOIN tbl_arc_contract_line_hotel clh
+              ON clh.arc_contract_line_id = mi.arc_contract_line_id AND clh.hotel_id = $2
+      WHERE mi.mr_id = $1`,
+    [mrId, mr?.hotel_id ?? null]
+  );
+  if (items.length === 0) {
+    return [];
+  }
 
   const today = new Date();
   const itemsWithPricing = await Promise.all(items.map(async (it) => {
-    const pricing = await resolveCurrentPrice(it.arc_contract_line_id, today, txContext);
+    const pricing = await resolveCurrentPrice(it.arc_contract_line_id, today, txContext, { hotelId: mr?.hotel_id });
     // Price floor (audit CO13): never mint a ₹0/negative-rate call-off — that
     // signals a misconfigured contract line. Abort the release loudly instead.
     if (!(Number(pricing.unit_rate) > 0)) {
@@ -122,10 +128,10 @@ async function buildCallOffBuckets(mrId, txContext) {
     return { ...it, pricing, lineValue, allInUnitPrice };
   }));
 
-  // Group by arc_contract_id (one PO per vendor contract within this MR).
+  // Group by (contract, supplier) — one PO per vendor contract within this MR.
   const groups = new Map();
   for (const it of itemsWithPricing) {
-    const key = it.arc_contract_id;
+    const key = `${it.arc_contract_id}:${it.vendor_id}`;
     if (!groups.has(key)) {
       groups.set(key, {
         arc_contract_id:        it.arc_contract_id,
@@ -253,9 +259,14 @@ async function writeCallOffPoLines(po, group, txContext) {
 /**
  * Write tbl_arc_callof_po link rows for each (PO, contract line) pairing in
  * the group and atomically increment consumed_qty on the contract line.
+ *
+ * GROUP rate contract: also record the ordering hotel's usage. The line total
+ * stays the hard cap; a hotel past its own share is allowed and returned in
+ * `overShare` (and event-logged) so head office can be told after commit.
  */
 async function recordCallOffAndUpdateConsumption(po, group, txContext) {
   const runner = txContext || db;
+  const overShare = [];
   for (const it of group.items) {
     await runner.none(
       `INSERT INTO tbl_arc_callof_po
@@ -293,7 +304,37 @@ async function recordCallOffAndUpdateConsumption(po, group, txContext) {
       e.code = 'OVER_CONSUMPTION';
       throw e;
     }
+    if (it.hotel_line_id) {
+      const hotelRow = await runner.one(
+        `UPDATE tbl_arc_contract_line_hotel
+            SET consumed_qty = consumed_qty + $1, updated_at = NOW()
+          WHERE id = $2
+         RETURNING hotel_id, committed_qty, consumed_qty`,
+        [it.quantity, it.hotel_line_id]
+      );
+      if (Number(hotelRow.consumed_qty) > Number(hotelRow.committed_qty)) {
+        const hotel = await runner.oneOrNone(`SELECT name FROM tbl_hospitality_company_hotels WHERE id = $1`, [hotelRow.hotel_id]);
+        const entry = {
+          arc_contract_line_id: Number(it.arc_contract_line_id),
+          hotel_id: Number(hotelRow.hotel_id),
+          hotel_name: hotel?.name || null,
+          committed_qty: Number(hotelRow.committed_qty),
+          consumed_qty: Number(hotelRow.consumed_qty),
+          mr_id: Number(po.source_mr_id),
+          po_id: Number(po.id),
+        };
+        overShare.push(entry);
+        await logArcEvent({
+          arcId: group.arc_id,
+          eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE,
+          actorId: null,
+          payload: entry,
+          txContext: runner,
+        });
+      }
+    }
   }
+  return overShare;
 }
 
 /**
@@ -315,8 +356,8 @@ export async function releaseForMr(mrId, txContext = null) {
   for (const group of buckets) {
     const po = await insertCallOffPoHeader(group, mrId, runner);
     await writeCallOffPoLines(po, group, runner);
-    await recordCallOffAndUpdateConsumption(po, group, runner);
-    released.push({ po, group });
+    const overShare = await recordCallOffAndUpdateConsumption(po, group, runner);
+    released.push({ po, group, overShare });
 
     // TODO Phase A finish: render the call-off PDF via callOffPoRenderer,
     // upload to S3, set po.po_pdf_url, dispatch vendor notification + email
@@ -365,6 +406,7 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
     [poId]
   ))?.arc_id;
 
+  const mrHotel = (await runner.oneOrNone(`SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]))?.hotel_id;
   for (const link of links) {
     await runner.none(
       `UPDATE tbl_arc_contract_line
@@ -372,6 +414,14 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
              updated_at   = NOW()
        WHERE id = $2`,
       [link.quantity, link.arc_contract_line_id]
+    );
+    // Group rate contract: give the ordering hotel its usage back too.
+    await runner.none(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET consumed_qty = GREATEST(consumed_qty - $1, 0),
+              updated_at   = NOW()
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3`,
+      [link.quantity, link.arc_contract_line_id, mrHotel ?? null]
     );
   }
   await runner.none(

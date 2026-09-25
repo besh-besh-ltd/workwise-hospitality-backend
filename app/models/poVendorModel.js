@@ -78,7 +78,8 @@ export async function vendorDashboard(vendorId) {
        LEFT JOIN tbl_arc_contract acon ON acon.id = po.arc_contract_id
        LEFT JOIN tbl_arc arc ON arc.id = acon.arc_id
        LEFT JOIN tbl_hospitality_companies ATHC ON ATHC.id = arc.hospitality_company_id
-       LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = arc.hotel_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_hospitality_company_hotels ATHCH ON ATHCH.id = COALESCE(mr.hotel_id, arc.hotel_id)
       WHERE po.finalized_vendor_id = $1
         AND po.status::text = ANY ($2::text[])
       ORDER BY po.created_at DESC`,
@@ -233,7 +234,8 @@ function buildVendorListQuery(vendorId, { tab = "all", search = "", filters = {}
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
        LEFT JOIN tbl_arc_contract cc ON cc.id = po.arc_contract_id
        LEFT JOIN tbl_arc a ON a.id = cc.arc_id
-       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = COALESCE(rfq.hotel_id, a.hotel_id)
+       LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id, a.hotel_id)
        LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id`;
 
   return { whereSql: where.join("\n        AND "), fromSql, params };
