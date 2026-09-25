@@ -134,17 +134,28 @@ async function main() {
          FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order`, [source.id]);
     log(`\nGroup ARC workflow: copying ${steps.length} level(s) from the company's ARC workflow (policy ${source.id})`);
     if (!DRY) {
-      // company_id is the legacy buyer-company id. Staging carries a CHECK
-      // (chk_arc_policy_global_scope) that requires it; production does not.
-      // Fill it the way the rest of the app resolves it, so this runs on both.
-      const { company_id: buyerCompanyId } = await db.one(
-        `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`, [COMPANY]);
-      const policy = await db.one(
-        `INSERT INTO tbl_approval_policies
-           (entity_type, hospitality_company_id, company_id, hotel_id, department_id, is_active, created_by,
-            process_id, is_master, is_department_scoped, version)
-         VALUES ('ARC_GROUP', $1, $3, NULL, NULL, true, $2, NULL, true, false, 1) RETURNING id`,
-        [COMPANY, CREATOR, buyerCompanyId]);
+      // The two environments disagree about this table: staging carries extra
+      // legacy columns (company_id, is_department_scoped) and a CHECK that
+      // requires company_id; production has none of them. Insert exactly the
+      // columns createApprovalPolicy() uses — those exist everywhere — and add
+      // company_id only where the column is really present.
+      const hasCompanyId = await db.oneOrNone(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'tbl_approval_policies' AND column_name = 'company_id'`);
+      const policy = hasCompanyId
+        ? await db.one(
+            `INSERT INTO tbl_approval_policies
+               (entity_type, hospitality_company_id, company_id, hotel_id, department_id, process_id,
+                created_by, is_active, is_master)
+             VALUES ('ARC_GROUP', $1, (SELECT buyer_company_id FROM tbl_hospitality_companies WHERE id = $1),
+                     NULL, NULL, NULL, $2, true, true) RETURNING id`,
+            [COMPANY, CREATOR])
+        : await db.one(
+            `INSERT INTO tbl_approval_policies
+               (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+                created_by, is_active, is_master)
+             VALUES ('ARC_GROUP', $1, NULL, NULL, NULL, $2, true, true) RETURNING id`,
+            [COMPANY, CREATOR]);
       for (const s of steps) {
         await db.none(
           `INSERT INTO tbl_approval_policy_steps
