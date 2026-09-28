@@ -24,7 +24,6 @@ import {
   makeRfqVisibleToDashboard,
   cleanupRfqs,
   cleanupApprovalInstances,
-  makeApprovalInstanceWithApprover,
   makePO,
   cleanupPurchaseOrders,
 } from "../helpers/dashboardSeed.js";
