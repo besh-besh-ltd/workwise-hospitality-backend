@@ -8886,6 +8886,9 @@ const rfqController = {
         departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
         dateFrom: asISODate(f.dateFrom),
         dateTo: asISODate(f.dateTo),
+        // "Created by me" — the dashboard's My-drafts / My-active View-all.
+        // The creator is always the JWT user, never a client-supplied id.
+        mine: f.mine === true || f.mine === 'true' || f.mine === 1 || f.mine === '1',
       };
       const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
 
@@ -8893,7 +8896,10 @@ const rfqController = {
       //    complete; search is pushed to SQL.
       const FETCH_CAP = 1000;
       const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true);
-      const rows = Array.isArray(all) ? all : [];
+      // `mine` narrows BEFORE tab counts and facets so every number on the
+      // page describes the same set the dashboard card counted.
+      const rows = (Array.isArray(all) ? all : [])
+        .filter((r) => !filters.mine || Number(r.created_by) === Number(user_id));
 
       // 2. Lifecycle stage → bucket + normalized status key.
       let lifecycleMap = {};
