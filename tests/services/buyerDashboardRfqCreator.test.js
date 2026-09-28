@@ -110,6 +110,31 @@ beforeAll(async () => {
       title: "Draft RFQ Charlie",
     });
 
+    // Prod-shaped draft: a saved RFQ is the (status 1, is_published 0) pair
+    // (rfqModel.saveMagicSearchInDraft). status 0 above is legacy-only.
+    const draftD = await makeRfqVisibleToDashboard(t, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      status: 1,
+      is_published: 0,
+      title: "Draft RFQ Delta",
+    });
+
+    // More drafts than the widget lists (20): the count must stay true.
+    const engDrafts = [];
+    for (let n = 0; n < 24; n++) {
+      const d = await makeRfqVisibleToDashboard(t, {
+        createdBy: IDS.users.a1_eng_buyer,
+        hospitality: IDS.hospitality.A,
+        hotel: IDS.hotels.A1,
+        status: 1,
+        is_published: 0,
+        title: `Eng Draft ${n}`,
+      });
+      engDrafts.push(d.rfq_id);
+    }
+
     // Withdrawn RFQ — should NOT count as a draft (status=5).
     const withdrawn = await makeRfqVisibleToDashboard(t, {
       createdBy: IDS.users.a1_proc_buyer,
@@ -176,17 +201,19 @@ beforeAll(async () => {
     });
     await t.none(
       `INSERT INTO tbl_negotiation_rounds (rfq_id, round_number, status, created_by, end_date)
-       VALUES ($1, 1, 'PUBLISHED', $2, NOW() + INTERVAL '3 days')`,
+       VALUES ($1, 1, 'ACTIVE', $2, (now() AT TIME ZONE 'UTC') + INTERVAL '3 days')`,
       [liveNeg.rfq_id, IDS.users.a1_proc_buyer]
     );
 
-    // 4. awaiting_approval — has PENDING approval instance
+    // 4. awaiting publish approval — prod shape: startApprovalForRFQ parks
+    //    the RFQ at status 4 (unpublished) with a PENDING RFQ approval. It is
+    //    NOT a draft.
     const liveAppr = await makeRfqVisibleToDashboard(t, {
       createdBy: IDS.users.a1_proc_buyer,
       hospitality: IDS.hospitality.A,
       hotel: IDS.hotels.A1,
-      status: 1,
-      is_published: 1,
+      status: 4,
+      is_published: 0,
       title: "Awaiting Approval",
     });
     await t.none(
@@ -311,8 +338,52 @@ beforeAll(async () => {
       bid_end_date: futureDate,
     });
 
+    // Only a regret came in → nobody offered a price → SHOULD appear.
+    const bidClosedRegret = await makeRfqVisibleToDashboard(t, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+      status: 1, is_published: 1,
+      title: "Bid closed — regret only",
+      bid_end_date: istDate(-2),
+    });
+    const regretQuote = await insertVendorQuote(t, {
+      rfq_id: bidClosedRegret.rfq_id,
+      vendor_user_id: IDS.users.vendor_beta,
+    });
+    await t.none(`UPDATE tbl_quotes SET is_regret = 1 WHERE id = $1`, [regretQuote]);
+
+    // Closed (status 2) with no quotes — already dealt with → must NOT appear
+    // anywhere in the creator widgets.
+    const closedNoQuote = await makeRfqVisibleToDashboard(t, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+      status: 2, is_published: 1,
+      title: "Closed — no quotes",
+      bid_end_date: pastDate,
+    });
+
+    // Open bid, the only invited vendor REGRETTED — a regret is a response,
+    // so this RFQ has no silent vendor.
+    const noRespRegret = await makeRfqVisibleToDashboard(t, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+      status: 1, is_published: 1,
+      title: "No Response - Regretted",
+      bid_end_date: futureDate,
+    });
+    await inviteVendors(t, { rfq_id: noRespRegret.rfq_id, vendor_ids: [IDS.users.vendor_gamma] });
+    const regretQuote2 = await insertVendorQuote(t, {
+      rfq_id: noRespRegret.rfq_id,
+      vendor_user_id: IDS.users.vendor_gamma,
+    });
+    await t.none(`UPDATE tbl_quotes SET is_regret = 1 WHERE id = $1`, [regretQuote2]);
+
     // Stash IDs for assertions + teardown.
-    seeded.drafts = [draftA.rfq_id, draftB.rfq_id, draftC.rfq_id];
+    seeded.drafts = [draftA.rfq_id, draftB.rfq_id, draftC.rfq_id, draftD.rfq_id];
+    seeded.engDrafts = engDrafts;
+    seeded.bidClosedRegret = bidClosedRegret.rfq_id;
+    seeded.closedNoQuote = closedNoQuote.rfq_id;
+    seeded.noRespRegret = noRespRegret.rfq_id;
     seeded.bidClosed = bidClosed.rfq_id;
     seeded.bidClosedWithQuote = bidClosedWithQuote.rfq_id;
     seeded.futureNoQuotes = futureNoQuotes.rfq_id;
@@ -344,6 +415,10 @@ beforeAll(async () => {
       seeded.bidClosed,
       seeded.bidClosedWithQuote,
       seeded.futureNoQuotes,
+      seeded.bidClosedRegret,
+      seeded.closedNoQuote,
+      seeded.noRespRegret,
+      ...seeded.engDrafts,
     ];
   });
 });
@@ -367,7 +442,7 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
   /* ─────────────────────── /my-drafts ─────────────────────── */
 
   describe("GET /dashboard-v2/my-drafts", () => {
-    it("returns exactly the 3 drafts created by the user in the selected hotel", async () => {
+    it("returns exactly the 4 drafts created by the user in the selected hotel", async () => {
       const client = await httpClient(IDS.users.a1_proc_buyer);
       const res = await client
         .get("/api/v1/dashboard-v2/my-drafts")
@@ -375,8 +450,8 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe(1);
-      expect(res.body.data.count).toBe(3);
-      expect(res.body.data.items).toHaveLength(3);
+      expect(res.body.data.count).toBe(4);
+      expect(res.body.data.items).toHaveLength(4);
 
       const returnedIds = res.body.data.items.map((i) => i.id).sort();
       expect(returnedIds).toEqual([...seeded.drafts].sort());
@@ -385,6 +460,9 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
       expect(returnedIds).not.toContain(seeded.draftWithdrawn);
       expect(returnedIds).not.toContain(seeded.draftOther);
       expect(returnedIds).not.toContain(seeded.draftA2);
+      // Awaiting publish approval (status 4) is somebody's to-do, not a draft.
+      expect(returnedIds).not.toContain(seeded.activeAppr);
+      expect(res.body.data.oldest_created_at).toBeTruthy();
 
       // Each item carries title + product_count fields (FE depends on them).
       for (const item of res.body.data.items) {
@@ -401,16 +479,27 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
         .query({ hotel_ids: `${IDS.hotels.A1},${IDS.hotels.A2}` });
 
       // a1_proc_buyer's user scope only covers A1, so A2 is filtered out
-      // by resolveUserScope. Count stays 3.
+      // by resolveUserScope. Count stays 4.
       expect(res.status).toBe(200);
-      expect(res.body.data.count).toBe(3);
+      expect(res.body.data.count).toBe(4);
+    });
+
+    it("reports the TRUE count when there are more drafts than the list shows", async () => {
+      const client = await httpClient(IDS.users.a1_eng_buyer);
+      const res = await client
+        .get("/api/v1/dashboard-v2/my-drafts")
+        .query({ hotel_ids: String(IDS.hotels.A1) });
+      expect(res.status).toBe(200);
+      // 24 seeded + the "Eng Buyer Draft" = 25; the list is capped at 20.
+      expect(res.body.data.count).toBe(25);
+      expect(res.body.data.items).toHaveLength(20);
     });
   });
 
   /* ─────────────────────── /my-active-rfqs ────────────────────── */
 
   describe("GET /dashboard-v2/my-active-rfqs", () => {
-    it("groups live RFQs by stage with exact counts", async () => {
+    it("stages my active RFQs with the SAME lifecycle keys as the RFQ listing", async () => {
       const client = await httpClient(IDS.users.a1_proc_buyer);
       const res = await client
         .get("/api/v1/dashboard-v2/my-active-rfqs")
@@ -419,27 +508,30 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe(1);
 
-      // Seeded state for this user in A1 includes 10 live RFQs across stages:
-      //   awaiting_vendor_quotes (no quotes, no neg, no PO):
-      //     - liveAwaiting, noRespAll, bidClosed, futureNoQuotes  (4)
-      //   quote_compare (has quotes, no neg, no PO):
-      //     - liveQc, noRespPartial, noRespNone, bidClosedWithQuote  (4)
-      //   negotiation: liveNeg  (1)
-      //   awaiting_approval: liveAppr  (1)
-      expect(res.body.data.total).toBe(10);
-
+      // rfqModel.computeLifecycleStages, for this user's non-draft,
+      // non-closed RFQs in A1:
+      //   AWAITING_QUOTES        bid open: liveAwaiting, liveQc (its quote is
+      //                          still sealed), noRespAll, noRespPartial,
+      //                          noRespNone, futureNoQuotes, noRespRegret  (7)
+      //   NEGOTIATION_ONGOING    liveNeg (ACTIVE round, window open)       (1)
+      //   RFQ_APPROVAL           liveAppr (status 4, publish approval)     (1)
+      //   RFQ_STUCK_COMMERCIAL   bidClosed, bidClosedRegret (no real quote)(2)
+      //   COMMERCIAL_EVALUATION  bidClosedWithQuote                        (1)
+      // closedNoQuote (status 2) and every draft are not active.
       const byStage = {};
-      for (const s of res.body.data.stages) byStage[s.stage] = s.count;
+      for (const st of res.body.data.stages) byStage[st.stage] = st;
 
-      expect(byStage.awaiting_vendor_quotes).toBe(4);
-      expect(byStage.quote_compare).toBe(4);
-      expect(byStage.negotiation).toBe(1);
-      expect(byStage.awaiting_approval).toBe(1);
+      expect(byStage.AWAITING_QUOTES.count).toBe(7);
+      expect(byStage.NEGOTIATION_ONGOING.count).toBe(1);
+      expect(byStage.RFQ_APPROVAL.count).toBe(1);
+      expect(byStage.RFQ_STUCK_COMMERCIAL.count).toBe(2);
+      expect(byStage.COMMERCIAL_EVALUATION.count).toBe(1);
+      expect(res.body.data.total).toBe(12);
+      expect(byStage.NEGOTIATION_ONGOING.label).toBe("Negotiation");
 
-      // Each stage entry exposes oldest_age_days (number, ≥0).
-      for (const s of res.body.data.stages) {
-        expect(typeof s.oldest_age_days).toBe("number");
-        expect(s.oldest_age_days).toBeGreaterThanOrEqual(0);
+      for (const st of res.body.data.stages) {
+        expect(typeof st.oldest_age_days).toBe("number");
+        expect(st.oldest_age_days).toBeGreaterThanOrEqual(0);
       }
     });
 
@@ -451,7 +543,22 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
 
       // liveOther was created by a1_eng_buyer. Its rfq_id should not
       // contribute to a1_proc_buyer's count.
-      expect(res.body.data.total).toBe(10);
+      expect(res.body.data.total).toBe(12);
+    });
+
+    it("an ENDED negotiation round does not keep an RFQ 'in negotiation'", async () => {
+      await db.none(`UPDATE tbl_negotiation_rounds SET status = 'ENDED' WHERE rfq_id = $1`, [seeded.activeNeg]);
+      try {
+        const client = await httpClient(IDS.users.a1_proc_buyer);
+        const res = await client
+          .get("/api/v1/dashboard-v2/my-active-rfqs")
+          .query({ hotel_ids: String(IDS.hotels.A1) });
+        const stages = res.body.data.stages.map((st) => st.stage);
+        expect(stages).not.toContain("NEGOTIATION_ONGOING");
+        expect(res.body.data.total).toBe(12);
+      } finally {
+        await db.none(`UPDATE tbl_negotiation_rounds SET status = 'ACTIVE' WHERE rfq_id = $1`, [seeded.activeNeg]);
+      }
     });
   });
 
@@ -489,7 +596,16 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
       expect(byId[seeded.bidClosedWithQuote]).toBeUndefined();
     });
 
-    it("orders by silent_vendor_count DESC then bid_end_date ASC", async () => {
+    it("a vendor that regretted has responded — the RFQ is not listed", async () => {
+      const client = await httpClient(IDS.users.a1_proc_buyer);
+      const res = await client
+        .get("/api/v1/dashboard-v2/my-no-response-rfqs")
+        .query({ hotel_ids: String(IDS.hotels.A1) });
+      const ids = res.body.data.items.map((i) => i.id);
+      expect(ids).not.toContain(seeded.noRespRegret);
+    });
+
+    it("orders by silent_vendor_count DESC when bid dates tie", async () => {
       const client = await httpClient(IDS.users.a1_proc_buyer);
       const res = await client
         .get("/api/v1/dashboard-v2/my-no-response-rfqs")
@@ -510,7 +626,7 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
   /* ───────── /my-rfqs-bid-closed-no-quotes ───────── */
 
   describe("GET /dashboard-v2/my-rfqs-bid-closed-no-quotes", () => {
-    it("returns exactly the RFQ whose bid is closed and no vendor responded", async () => {
+    it("returns the open RFQs whose bid closed without a single real quote", async () => {
       const client = await httpClient(IDS.users.a1_proc_buyer);
       const res = await client
         .get("/api/v1/dashboard-v2/my-rfqs-bid-closed-no-quotes")
@@ -518,17 +634,22 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe(1);
-      expect(res.body.data.count).toBe(1);
+      // bidClosed (nothing came in) + bidClosedRegret (only a regret).
+      expect(res.body.data.count).toBe(2);
 
-      const item = res.body.data.items[0];
-      expect(item.id).toBe(seeded.bidClosed);
-      expect(item.days_overdue).toBe(3);
+      const [first, second] = res.body.data.items;
+      expect(first.id).toBe(seeded.bidClosed); // oldest deadline first
+      expect(first.days_overdue).toBe(3);
+      expect(second.id).toBe(seeded.bidClosedRegret);
+      expect(second.regret_count).toBe(1);
 
       // bidClosedWithQuote (has quote) and futureNoQuotes (future date) must
       // not appear.
       const ids = res.body.data.items.map((i) => i.id);
       expect(ids).not.toContain(seeded.bidClosedWithQuote);
       expect(ids).not.toContain(seeded.futureNoQuotes);
+      // A closed RFQ (status 2) was already dealt with.
+      expect(ids).not.toContain(seeded.closedNoQuote);
     });
   });
 

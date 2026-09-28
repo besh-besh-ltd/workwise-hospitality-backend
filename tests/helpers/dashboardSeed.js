@@ -161,6 +161,11 @@ export async function cleanupTechEvals(db, rfq_ids) {
  *   created_ago_hours — sets the instance/step created_at to N hours ago
  *                      (default 0 = unset = "just now")
  *   initiated_by     — defaults to approver_user_id
+ *   metadata         — instance metadata (object). Use the PRODUCTION shape
+ *                      for the entity type (SPEC rule 6): TECHNICAL carries
+ *                      { rfq_id, rfq_product_id, product_name }, NEGOTIATION_QUOTE
+ *                      { rfq_id, rfq_product_id, vendor_id, po_payload:{ total_value } },
+ *                      PO { po_id, rfq_id }.
  */
 export async function makeApprovalInstanceWithApprover(t, opts) {
   const status = opts.instance_status ?? "PENDING";
@@ -179,9 +184,9 @@ export async function makeApprovalInstanceWithApprover(t, opts) {
   const inst = await t.one(
     `INSERT INTO tbl_approval_instances
        (entity_type, entity_id, approval_policy_id, status, current_step,
-        initiated_by, hospitality_company_id, hotel_id, created_at, completed_at)
+        initiated_by, hospitality_company_id, hotel_id, created_at, completed_at, metadata)
      VALUES ($1, $2, $3, $4, 1, $5, $6, $7,
-             ${createdExpr}, ${completedExpr})
+             ${createdExpr}, ${completedExpr}, $8)
      RETURNING id`,
     [
       opts.entity_type,
@@ -190,7 +195,8 @@ export async function makeApprovalInstanceWithApprover(t, opts) {
       status,
       opts.initiated_by ?? opts.approver_user_id,
       opts.hospitality,
-      opts.hotel,
+      opts.hotel === undefined ? null : opts.hotel,
+      opts.metadata ?? null,
     ]
   );
   const step = await t.one(
@@ -325,4 +331,73 @@ export async function insertVendorQuote(t, { rfq_id, vendor_user_id, status = 1 
     [rfq_id, parent.rfq_no, vendor_user_id, status]
   );
   return row.id;
+}
+
+/**
+ * Seed an approval instance with an explicit multi-step chain, in the shape
+ * the approval engine writes: every step row is inserted with the instance,
+ * a step's `completed_at` is when it was decided, and the instance's
+ * `current_step` points at the step now waiting.
+ *
+ * opts:
+ *   entity_type, entity_id, policy_id, hospitality, hotel (null = company-level)
+ *   metadata           production-shaped (see makeApprovalInstanceWithApprover)
+ *   status             instance status, default 'PENDING'
+ *   current_step       default = first PENDING step (or last step)
+ *   created_ago_hours  instance + step creation time
+ *   initiated_by
+ *   steps: [{ approver, status = 'PENDING', acted_ago_hours, completed_ago_hours,
+ *             removed = false }]
+ *
+ * Returns { instance_id }. Clean up with cleanupApprovalInstanceIds.
+ */
+export async function makeApprovalChain(t, opts) {
+  const ago = (h) => (Number.isFinite(Number(h)) ? `now() - INTERVAL '${Number(h)} hours'` : "NULL");
+  const created = Number.isFinite(Number(opts.created_ago_hours)) ? ago(opts.created_ago_hours) : "now()";
+  const steps = opts.steps || [];
+  const firstPending = steps.findIndex((s) => (s.status ?? "PENDING") === "PENDING");
+  const currentStep = opts.current_step ?? (firstPending >= 0 ? firstPending + 1 : steps.length);
+  const status = opts.status ?? "PENDING";
+  const decidedAt = status === "PENDING" ? "NULL" : ago(Math.min(...steps.map((s) => s.acted_ago_hours ?? 0)));
+  const inst = await t.one(
+    `INSERT INTO tbl_approval_instances
+       (entity_type, entity_id, approval_policy_id, status, current_step,
+        initiated_by, hospitality_company_id, hotel_id, created_at, completed_at, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${created}, ${decidedAt}, $9)
+     RETURNING id`,
+    [opts.entity_type, opts.entity_id, opts.policy_id, status, currentStep,
+      opts.initiated_by ?? IDS.users.a1_proc_buyer, opts.hospitality, opts.hotel ?? null, opts.metadata ?? null]
+  );
+  for (const [idx, s] of steps.entries()) {
+    const stepStatus = s.status ?? "PENDING";
+    const completed = stepStatus === "PENDING" ? "NULL" : ago(s.completed_ago_hours ?? s.acted_ago_hours);
+    const step = await t.one(
+      `INSERT INTO tbl_approval_instance_steps
+         (approval_instance_id, step_order, status, decision_rule, created_at, completed_at)
+       VALUES ($1, $2, $3, 'ANY', ${created}, ${completed})
+       RETURNING id`,
+      [inst.id, idx + 1, stepStatus]
+    );
+    const acted = stepStatus === "PENDING" ? "NULL" : ago(s.acted_ago_hours);
+    await t.none(
+      `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, acted_at, removed_at)
+       VALUES ($1, $2, $3, ${acted}, ${s.removed ? "now()" : "NULL"})`,
+      [step.id, s.approver, stepStatus]
+    );
+  }
+  return { instance_id: inst.id };
+}
+
+/** Delete approval instances (and their steps / approvers / actions) by id. */
+export async function cleanupApprovalInstanceIds(db, instanceIds) {
+  if (!instanceIds || instanceIds.length === 0) return;
+  await db.none(
+    `DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id IN (
+       SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1))`,
+    [instanceIds]
+  );
+  await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1)`, [instanceIds]);
+  await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1)`, [instanceIds]).catch(() => {});
+  await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1)`, [instanceIds]);
 }
