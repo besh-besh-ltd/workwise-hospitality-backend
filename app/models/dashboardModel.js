@@ -1055,7 +1055,9 @@ async function getAbcAnalysisData(buyer_company_id, user_id, hotel_ids = [], sta
 //   po_approval           PO approval, APPROVED only (RFQ via the PO)
 //   vendor_action         PO raised → vendor accepted/rejected
 //
-// Cancelled and rejected approvals are excluded — they are not a turnaround.
+// Cancelled and rejected approvals are excluded — they are not a turnaround,
+// and approvals decided within a minute are reported as instant_count rather
+// than averaged in.
 // Every duration is computed between instants (naive-IST and session-naive
 // columns are lifted first) and negative durations are dropped as bad data.
 // ─────────────────────────────────────────────────────────────────────
@@ -1139,15 +1141,27 @@ async function getWorkflowEfficiencyData(buyer_company_id, user_id, hotel_ids = 
          JOIN scoped_rfqs sr ON sr.id = po.rfq_id
         WHERE po.vendor_action_at IS NOT NULL
      )
+     , classified AS (
+       -- An approval decided within a minute of being raised was not waited
+       -- on (the raiser approving their own step, or an instant sign-off):
+       -- 110 of 390 RFQ and 174 of 333 TECHNICAL approvals on prod. Left in,
+       -- they pull the stage median to 0h, so they are reported separately.
+       SELECT d.*,
+              (d.stage IN ('rfq_approval', 'tech_approval', 'commercial_approval', 'po_approval')
+               AND d.hours < 1.0 / 60) AS instant
+         FROM durations d
+        WHERE d.hours IS NOT NULL AND d.hours >= 0
+     )
      SELECT stage,
-            COUNT(DISTINCT rfq_id)::int AS rfq_count,
-            COUNT(*)::int AS samples,
-            (percentile_cont(0.5) WITHIN GROUP (ORDER BY hours))::float8 AS median_hours,
-            (percentile_cont(0.9) WITHIN GROUP (ORDER BY hours))::float8 AS p90_hours,
-            AVG(hours)::float8 AS avg_hours
-       FROM durations
-      WHERE hours IS NOT NULL AND hours >= 0
-      GROUP BY stage`,
+            COUNT(DISTINCT rfq_id) FILTER (WHERE NOT instant)::int AS rfq_count,
+            COUNT(*) FILTER (WHERE NOT instant)::int AS samples,
+            COUNT(*) FILTER (WHERE instant)::int AS instant_count,
+            (percentile_cont(0.5) WITHIN GROUP (ORDER BY hours) FILTER (WHERE NOT instant))::float8 AS median_hours,
+            (percentile_cont(0.9) WITHIN GROUP (ORDER BY hours) FILTER (WHERE NOT instant))::float8 AS p90_hours,
+            (AVG(hours) FILTER (WHERE NOT instant))::float8 AS avg_hours
+       FROM classified
+      GROUP BY stage
+     HAVING COUNT(*) FILTER (WHERE NOT instant) > 0`,
     params
   );
 
@@ -1162,6 +1176,7 @@ async function getWorkflowEfficiencyData(buyer_company_id, user_id, hotel_ids = 
       stage_name: s.stage,
       rfq_count: s.rfq_count,
       samples: s.samples,
+      instant_count: s.instant_count,
       median_hours: round1(s.median_hours),
       p90_hours: round1(s.p90_hours),
       // Mean, kept for compatibility. Show the median.

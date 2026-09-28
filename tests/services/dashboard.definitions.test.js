@@ -217,11 +217,25 @@ describe("stage turnaround (workflow-efficiency)", () => {
     await db.none(`UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = now() WHERE id = $1`, [inst.instance_id]);
     seeded.approvals.push(["PO", cancelled]);
 
+    // An approval decided within a minute was not waited on: instant_count,
+    // not a sample.
+    const { po_id: instantPo } = await makePO(db, {
+      rfq_id: id, rfq_product_id, vendor_user_id: IDS.users.vendor_alpha, company_id: IDS.companies.A, status: "approved",
+    });
+    seeded.poIds.push(instantPo);
+    const instant = await makeApprovalInstanceWithApprover(db, {
+      entity_type: "PO", entity_id: instantPo, approver_user_id: approver, policy_id: IDS.policies.A1_P1_PO,
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, instance_status: "APPROVED", approver_status: "APPROVED",
+    });
+    await db.none(`UPDATE tbl_approval_instances SET completed_at = created_at + interval '20 seconds' WHERE id = $1`, [instant.instance_id]);
+    seeded.approvals.push(["PO", instantPo]);
+
     const a = await get("workflow-efficiency");
     const sb = stageOf(b);
     const sa = stageOf(a);
     expect(sa.rfq_count - sb.rfq_count).toBe(1);
     expect(sa.samples - sb.samples).toBe(3);
+    expect(sa.instant_count - (sb.instant_count || 0)).toBe(1);
     if (sb.samples === 0) {
       expect(sa.median_hours).toBeCloseTo(4, 0);
       expect(sa.p90_hours).toBeLessThanOrEqual(30);
