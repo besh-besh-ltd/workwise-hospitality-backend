@@ -121,6 +121,19 @@ beforeAll(async () => {
       title: "Draft RFQ Delta",
     });
 
+    // An early draft saved before a company context existed: prod carries
+    // hospitality_company_id NULL on such rows. It is still MY draft at MY
+    // hotel and must be listed.
+    const draftNoCompany = await makeRfqVisibleToDashboard(t, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      status: 1,
+      is_published: 0,
+      title: "Draft RFQ Echo (no company yet)",
+    });
+    await t.none(`UPDATE tbl_rfq SET hospitality_company_id = NULL WHERE id = $1`, [draftNoCompany.rfq_id]);
+
     // More drafts than the widget lists (20): the count must stay true.
     const engDrafts = [];
     for (let n = 0; n < 24; n++) {
@@ -379,7 +392,7 @@ beforeAll(async () => {
     await t.none(`UPDATE tbl_quotes SET is_regret = 1 WHERE id = $1`, [regretQuote2]);
 
     // Stash IDs for assertions + teardown.
-    seeded.drafts = [draftA.rfq_id, draftB.rfq_id, draftC.rfq_id, draftD.rfq_id];
+    seeded.drafts = [draftA.rfq_id, draftB.rfq_id, draftC.rfq_id, draftD.rfq_id, draftNoCompany.rfq_id];
     seeded.engDrafts = engDrafts;
     seeded.bidClosedRegret = bidClosedRegret.rfq_id;
     seeded.closedNoQuote = closedNoQuote.rfq_id;
@@ -442,7 +455,7 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
   /* ─────────────────────── /my-drafts ─────────────────────── */
 
   describe("GET /dashboard-v2/my-drafts", () => {
-    it("returns exactly the 4 drafts created by the user in the selected hotel", async () => {
+    it("returns exactly the 5 drafts created by the user in the selected hotel", async () => {
       const client = await httpClient(IDS.users.a1_proc_buyer);
       const res = await client
         .get("/api/v1/dashboard-v2/my-drafts")
@@ -450,8 +463,8 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe(1);
-      expect(res.body.data.count).toBe(4);
-      expect(res.body.data.items).toHaveLength(4);
+      expect(res.body.data.count).toBe(5);
+      expect(res.body.data.items).toHaveLength(5);
 
       const returnedIds = res.body.data.items.map((i) => i.id).sort();
       expect(returnedIds).toEqual([...seeded.drafts].sort());
@@ -479,9 +492,9 @@ describe("Buyer Dashboard — RFQ Creator widgets (real data)", () => {
         .query({ hotel_ids: `${IDS.hotels.A1},${IDS.hotels.A2}` });
 
       // a1_proc_buyer's user scope only covers A1, so A2 is filtered out
-      // by resolveUserScope. Count stays 4.
+      // by resolveUserScope. Count stays 5.
       expect(res.status).toBe(200);
-      expect(res.body.data.count).toBe(4);
+      expect(res.body.data.count).toBe(5);
     });
 
     it("reports the TRUE count when there are more drafts than the list shows", async () => {

@@ -1539,6 +1539,15 @@ async function getRejectedPOsDetail(buyer_company_id, user_id, hotel_ids = []) {
 
 const PERSONA_LIST_LIMIT = 20;
 
+/**
+ * Company bound for the caller's OWN RFQs (created_by = me). Early drafts can
+ * carry hospitality_company_id NULL (prod: 4 of user 322/392's 12 drafts), and
+ * companyScope() alone hid them from their own creator. Every caller pairs this
+ * with created_by = me AND a mapping to one of the caller's allowed hotels, so
+ * the tenant stays bounded by the hotel.
+ */
+const ownRfqCompany = (alias = 'r') => `(${companyScope(alias)} OR ${alias}.hospitality_company_id IS NULL)`;
+
 /** The RFQ is mapped to one of the effective hotels ($idx). */
 const rfqMapped = (alias, idx) =>
   `EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = ${alias}.id AND rhm.hotel_id = ANY($${idx}))`;
@@ -1628,7 +1637,7 @@ async function getMyDraftsData(buyer_company_id, user_id, hotel_ids) {
             COUNT(*) OVER ()::int AS total_count,
             MIN(r."timestamp") OVER () AS oldest_created_at
        FROM tbl_rfq r
-      WHERE ${companyScope()}
+      WHERE ${ownRfqCompany()}
         AND ${isDraft('r')}
         AND r.created_by = $2
         AND ${rfqMapped('r', 3)}
@@ -1659,7 +1668,7 @@ async function getMyActiveRfqsData(buyer_company_id, user_id, hotel_ids) {
   const rows = await db.any(
     `SELECT r.id, r.status, r."timestamp" AS created_at
        FROM tbl_rfq r
-      WHERE ${companyScope()}
+      WHERE ${ownRfqCompany()}
         AND r.created_by = $2
         AND r.status NOT IN (2, 5)
         AND NOT ${isDraft('r')}
@@ -1694,7 +1703,7 @@ async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids) {
     `WITH my_live AS (
        SELECT r.id, r.rfq_no, r.title, r.bid_end_date
          FROM tbl_rfq r
-        WHERE ${companyScope()}
+        WHERE ${ownRfqCompany()}
           AND r.is_published = 1
           AND r.status = 1
           AND r.created_by = $2
@@ -1753,7 +1762,7 @@ async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_i
               WHERE q.rfq_id = r.id AND q.is_regret = 1) AS regret_count,
             COUNT(*) OVER ()::int AS total_count
        FROM tbl_rfq r
-      WHERE ${companyScope()}
+      WHERE ${ownRfqCompany()}
         AND r.is_published = 1
         AND r.status = 1
         AND r.created_by = $2
