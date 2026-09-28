@@ -47,6 +47,9 @@ function offsetString(offsetMs) {
   return moment.tz("Asia/Kolkata").add(offsetMs, "ms").format("YYYY-MM-DD HH:mm:ss");
 }
 
+// The IST calendar day the FE's date picker sends as `end_date`.
+const istToday = () => moment.tz("Asia/Kolkata").format("YYYY-MM-DD");
+
 // Track everything we seed for cleanup. Scoped per describe block; reset in
 // beforeEach so each test starts from a known-clean state.
 const inserted = { rfqIds: [], poIds: [], approvalEntityIds: [] };
@@ -227,11 +230,12 @@ describe("GET /dashboard-v2/buyer-status-banner — mode escalates with state", 
   });
 });
 
-describe("GET /dashboard-v2/buyer-status-banner — respects selected date range", () => {
-  it("excludes a closed-no-quotes RFQ whose bid_end falls outside the range", async () => {
-    // RFQ open without quotes, bid ended ~3 days ago (i.e. in 2026).
-    // Item 2d: banner requires status=1; use status=1 so the wide-range assertion
-    // still validates the date-window scoping logic (unchanged).
+describe("GET /dashboard-v2/buyer-status-banner — queues ignore the date range (SPEC rule 2)", () => {
+  it("still counts a closed-no-quotes RFQ when the selected range is entirely in the past", async () => {
+    // The old banner windowed this alarm by bid_end_date, so an RFQ that closed
+    // a few days ago vanished whenever the range didn't reach it — and with the
+    // FE's `end_date=<today>` it vanished on the very day it closed. An RFQ
+    // stuck open with no offers needs action whatever range is selected.
     const { rfq_id } = await makeRfqVisibleToDashboard(db, {
       createdBy: IDS.users.a1_proc_buyer,
       hospitality: IDS.hospitality.A,
@@ -239,30 +243,52 @@ describe("GET /dashboard-v2/buyer-status-banner — respects selected date range
       is_published: 1,
       status: 1,
       bid_end_date: offsetString(-3 * 86400_000),
-      title: "Out-of-range closed-no-quotes",
+      title: "Queue ignores range",
     });
     inserted.rfqIds.push(rfq_id);
 
     const client = await httpClient(IDS.users.a1_proc_buyer);
-
-    // A range entirely in the past (calendar year 2020) must NOT include the
-    // RFQ that closed a few days ago.
     const past = await client.get(ENDPOINT).query({
       hotel_ids: String(IDS.hotels.A1),
       start_date: "2020-01-01",
       end_date: "2020-12-31",
     });
-    expect(past.status).toBe(200);
-    expect(past.body.data.counts.closed_no_quotes).toBe(0);
-
-    // A wide range that includes today DOES count it.
     const wide = await client.get(ENDPOINT).query({
       hotel_ids: String(IDS.hotels.A1),
       start_date: "2020-01-01",
       end_date: "2999-01-01",
     });
+    expect(past.status).toBe(200);
     expect(wide.status).toBe(200);
-    expect(wide.body.data.counts.closed_no_quotes).toBeGreaterThanOrEqual(1);
+    expect(past.body.data.counts.closed_no_quotes).toBeGreaterThanOrEqual(1);
+    expect(past.body.data.counts).toEqual(wide.body.data.counts);
+  });
+
+  it("windows only the period stats, and includes today when end_date is today", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const today = istToday();
+    const before = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), start_date: today, end_date: today,
+    });
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      title: "Published today",
+    });
+    inserted.rfqIds.push(rfq_id);
+    const after = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), start_date: today, end_date: today,
+    });
+    expect(after.body.data.period.rfqs_published - before.body.data.period.rfqs_published).toBe(1);
+    expect(after.body.data.weekly.rfqs_published).toBe(after.body.data.period.rfqs_published);
+
+    const past = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), start_date: "2020-01-01", end_date: "2020-12-31",
+    });
+    expect(past.body.data.period.rfqs_published).toBe(0);
   });
 });
 

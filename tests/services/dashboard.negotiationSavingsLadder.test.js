@@ -157,7 +157,10 @@ async function readWidget() {
   const res = await client.get(ENDPOINT).query({ hotel_ids: String(IDS.hotels.A1), ...WIDE });
   expect(res.status).toBe(200);
   expect(res.body?.status).toBe(1);
-  const d = res.body.data;
+  // The ladder is about the pricing rule, which is identical for both bases;
+  // it is exercised on the ALL-VENDOR figure (these fixtures award nobody).
+  // The headline is the awarded basis — see dashboard.negotiationSavings.
+  const d = res.body.data.all_vendors;
   return {
     baseline: Number(d.market_baseline) || 0,
     negotiated: Number(d.negotiated_total) || 0,

@@ -1,7 +1,9 @@
 // Integration tests for GET /api/v1/dashboard-v2/negotiation-savings.
 //
-// Savings = round-1 quoted price − final-round quoted price, per vendor+product
-// across RFQs that had negotiation rounds in the window. Client feedback Sr 240
+// Savings = baseline − final-round quoted price, per vendor+product across RFQs
+// that had negotiation rounds in the window. D2: the HEADLINE is the AWARDED
+// (realised) saving — only the vendor whose NEGOTIATION_QUOTE was approved;
+// the all-vendor figure is returned as `all_vendors`. Client feedback Sr 240
 // requires Terminated/Rejected RFQs to be EXCLUDED from the calculation. We
 // treat WITHDRAWN (status=5) as the terminated/rejected-by-us state.
 //
@@ -16,6 +18,8 @@ import {
   makeRfqVisibleToDashboard,
   cleanupRfqs,
   addProductToRfq,
+  makeApprovalInstanceWithApprover,
+  cleanupApprovalInstances,
 } from "../helpers/dashboardSeed.js";
 
 afterAll(async () => {
@@ -72,6 +76,8 @@ async function fetchSavings() {
   return res.body.data;
 }
 
+const allVendors = (d) => d.all_vendors;
+
 describe("GET /dashboard-v2/negotiation-savings — counts a live RFQ's negotiation", () => {
   it("includes round1 vs final-round delta for an OPEN RFQ", async () => {
     const before = await fetchSavings();
@@ -93,9 +99,9 @@ describe("GET /dashboard-v2/negotiation-savings — counts a live RFQ's negotiat
     });
 
     const after = await fetchSavings();
-    expect(after.market_baseline - before.market_baseline).toBeCloseTo(1000, 1);
-    expect(after.negotiated_total - before.negotiated_total).toBeCloseTo(900, 1);
-    expect(after.total_savings - before.total_savings).toBeCloseTo(100, 1);
+    expect(allVendors(after).market_baseline - allVendors(before).market_baseline).toBeCloseTo(1000, 1);
+    expect(allVendors(after).negotiated_total - allVendors(before).negotiated_total).toBeCloseTo(900, 1);
+    expect(allVendors(after).total_savings - allVendors(before).total_savings).toBeCloseTo(100, 1);
   });
 });
 
@@ -120,8 +126,62 @@ describe("GET /dashboard-v2/negotiation-savings — excludes terminated/rejected
     });
 
     const after = await fetchSavings();
-    expect(after.market_baseline - before.market_baseline).toBeCloseTo(0, 1);
-    expect(after.negotiated_total - before.negotiated_total).toBeCloseTo(0, 1);
-    expect(after.total_savings - before.total_savings).toBeCloseTo(0, 1);
+    expect(allVendors(after).market_baseline - allVendors(before).market_baseline).toBeCloseTo(0, 1);
+    expect(allVendors(after).negotiated_total - allVendors(before).negotiated_total).toBeCloseTo(0, 1);
+    expect(allVendors(after).total_savings - allVendors(before).total_savings).toBeCloseTo(0, 1);
+  });
+});
+
+describe("GET /dashboard-v2/negotiation-savings — headline is the AWARDED saving (D2)", () => {
+  const approvals = [];
+  afterEach(async () => {
+    if (approvals.length) {
+      await cleanupApprovalInstances(db, "NEGOTIATION_QUOTE", approvals.splice(0));
+    }
+  });
+
+  it("counts only the approved vendor's cut in the headline; all_vendors keeps both", async () => {
+    const before = await fetchSavings();
+
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      title: "Awarded savings RFQ",
+    });
+    inserted.rfqIds.push(rfq_id);
+    const { rfq_product_id } = await addProductToRfq(db, rfq_id);
+
+    // Winner cut 1000 -> 900; loser cut 1000 -> 700 (bigger cut, but lost).
+    await seedNegotiation(rfq_id, rfq_product_id, { r1Price: 1000, r2Price: 900, vendor_id: IDS.users.vendor_alpha });
+    await seedNegotiation(rfq_id, rfq_product_id, { r1Price: 1000, r2Price: 700, vendor_id: IDS.users.vendor_beta });
+
+    // Prod shape (SPEC rule 6): NEGOTIATION_QUOTE.entity_id = tbl_rfq_products.id.
+    await db.tx(async (t) => {
+      const inst = await makeApprovalInstanceWithApprover(t, {
+        entity_type: "NEGOTIATION_QUOTE",
+        entity_id: rfq_product_id,
+        approver_user_id: IDS.users.a1_proc_commApp,
+        policy_id: IDS.policies.A1_P1_NEGOTIATION_QUOTE,
+        hospitality: IDS.hospitality.A,
+        hotel: IDS.hotels.A1,
+        instance_status: "APPROVED",
+        approver_status: "APPROVED",
+        acted_ago_hours: 1,
+      });
+      await t.none(
+        `UPDATE tbl_approval_instances SET metadata = $2::jsonb WHERE id = $1`,
+        [inst.instance_id, JSON.stringify({ rfq_id, vendor_id: IDS.users.vendor_alpha })]
+      );
+    });
+    approvals.push(rfq_product_id);
+
+    const after = await fetchSavings();
+    expect(after.basis).toBe("awarded");
+    expect(after.total_savings - before.total_savings).toBeCloseTo(100, 1);
+    expect(after.awarded.total_savings - before.awarded.total_savings).toBeCloseTo(100, 1);
+    expect(allVendors(after).total_savings - allVendors(before).total_savings).toBeCloseTo(400, 1);
   });
 });

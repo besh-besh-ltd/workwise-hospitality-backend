@@ -1,4 +1,5 @@
 import dashboardModel from '../../models/dashboardModel.js';
+import { normalizeDate } from '../../models/dashboard/dashboardMetrics.js';
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import db from '../../config/dbConn.js';
@@ -39,7 +40,13 @@ const resolveScope = async (req, res) => {
     res.status(403).json({ status: 0, message: 'No hospitality access found for this user' }).end();
     return null;
   }
-  return scope;
+  // The window is an IST calendar-day range. Anything that is not a real
+  // YYYY-MM-DD becomes "no bound" rather than a 500; an inverted pair is
+  // swapped. Models never read req.query dates directly.
+  let start_date = normalizeDate(req.query.start_date);
+  let end_date = normalizeDate(req.query.end_date);
+  if (start_date && end_date && start_date > end_date) [start_date, end_date] = [end_date, start_date];
+  return { ...scope, start_date, end_date };
 };
 
 const dashboardController = {
@@ -47,8 +54,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getActionCenterData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getActionCenterData(scope.buyer_company_id, req.user.id, scope.hotel_ids);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -67,7 +73,7 @@ const dashboardController = {
         `SELECT name FROM tbl_users WHERE id = $1`,
         [req.user.id]
       );
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getBuyerStatusBannerData(
         scope.buyer_company_id,
         req.user.id,
@@ -91,7 +97,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getProcurementSnapshotData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
@@ -104,7 +110,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getNegotiationSavingsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
@@ -117,7 +123,8 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date, product_variant_id, duration_type } = req.query;
+      const { start_date, end_date } = scope;
+      const { product_variant_id, duration_type } = req.query;
       const pvId = product_variant_id ? parseInt(product_variant_id, 10) : null;
       const data = await dashboardModel.getCostIntelligenceData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, pvId, duration_type);
       res.status(200).json({ status: 1, data }).end();
@@ -131,7 +138,8 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date, dimension } = req.query;
+      const { start_date, end_date } = scope;
+      const { dimension } = req.query;
       const data = await dashboardModel.getCategoryInsightsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, dimension);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
@@ -145,8 +153,8 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date, metric } = req.query;
-      const data = await dashboardModel.getAbcAnalysisData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date, metric);
+      const { start_date, end_date } = scope;
+      const data = await dashboardModel.getAbcAnalysisData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -158,7 +166,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getWorkflowEfficiencyData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
@@ -171,7 +179,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getSmartInsightsData(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
@@ -198,8 +206,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getNoResponseDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date, end_date);
+      const data = await dashboardModel.getNoResponseDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -211,8 +218,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
-      const data = await dashboardModel.getPendingApprovalsDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids, start_date || '2025-01-01', end_date || new Date().toISOString().split('T')[0]);
+      const data = await dashboardModel.getPendingApprovalsDetail(scope.buyer_company_id, req.user.id, scope.hotel_ids);
       res.status(200).json({ status: 1, data }).end();
     } catch (error) {
       logError(error);
@@ -240,7 +246,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getMyDraftsData(
         scope.buyer_company_id,
         req.user.id,
@@ -255,7 +261,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getMyActiveRfqsData(
         scope.buyer_company_id,
         req.user.id,
@@ -270,7 +276,7 @@ const dashboardController = {
     try {
       const scope = await resolveScope(req, res);
       if (!scope) return;
-      const { start_date, end_date } = req.query;
+      const { start_date, end_date } = scope;
       const data = await dashboardModel.getMyNoResponseRfqsData(
         scope.buyer_company_id,
         req.user.id,

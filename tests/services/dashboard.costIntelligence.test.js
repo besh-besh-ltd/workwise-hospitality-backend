@@ -108,8 +108,60 @@ describe("GET /dashboard-v2/cost-intelligence — price benchmark (Sr 299/301)",
     const avgPoints = (d.price_trend.avg || []).filter((v) => v > 0);
     expect(avgPoints.length).toBeGreaterThan(0);
     avgPoints.forEach((v) => expect(v).toBeCloseTo(50, 0));
-    // "Latest avg" in the benchmark banner is per-unit too — comparable to the
-    // per-unit benchmark, never an order-of-magnitude apart.
-    expect(d.benchmark.current_price).toBeCloseTo(50, 0);
+    // Paid-vs-paid: "current" is the latest PAID unit price (the 80 PO, the
+    // last of 100/60/80), compared with the best paid (60) — never an average
+    // of vendor QUOTES against a paid price.
+    expect(d.benchmark.basis).toBe("paid_vs_paid");
+    expect(d.benchmark.current_price).toBeCloseTo(80, 0);
+    expect(d.benchmark.vs_benchmark_pct).toBeCloseTo(33.3, 1);
+  });
+
+  it("a REJECTED PO never becomes the benchmark (committed spend only)", async () => {
+    const [{ rfq_id }] = [{ rfq_id: seeded.rfqIds[0] }];
+    const rp = await db.one(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`, [rfq_id, seeded.variantId]);
+    const { po_id } = await makePO(db, {
+      rfq_id, rfq_product_id: rp.id, vendor_user_id: IDS.users.vendor_alpha,
+      company_id: IDS.companies.A, status: "rejected", unit_price: 10, quantity: 1, total_value: 10,
+    });
+    seeded.poIds.push(po_id);
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), product_variant_id: seeded.variantId, ...WIDE,
+    });
+    expect(res.body.data.benchmark.benchmark_price).toBeCloseTo(60, 1);
+  });
+
+  it("a ₹0 regret line is excluded from the trend and the vendor ranking", async () => {
+    const rfq_id = seeded.rfqIds[0];
+    const rfqRow = await db.one(`SELECT rfq_no FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
+       VALUES ($1, $2, $3, $3, 1, now()) RETURNING id`,
+      [rfq_id, rfqRow.rfq_no, IDS.users.vendor_beta]
+    );
+    await db.none(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, comment, delivery_period, quantity)
+       VALUES ($1, $2, $3, $4, 0, 0, '', '', '100')`,
+      [rfq_id, rfqRow.rfq_no, quote.id, seeded.variantId]
+    );
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), product_variant_id: seeded.variantId, ...WIDE,
+    });
+    const d = res.body.data;
+    (d.price_trend.min || []).filter((v) => v != null).forEach((v) => expect(v).toBeGreaterThan(0));
+    expect(d.vendor_comparison.map((v) => v.vendor_id)).not.toContain(IDS.users.vendor_beta);
+  });
+
+  it("periods with no quotes are null, never ₹0", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(ENDPOINT).query({
+      hotel_ids: String(IDS.hotels.A1), product_variant_id: seeded.variantId, ...WIDE,
+    });
+    const { avg, labels } = res.body.data.price_trend;
+    expect(labels.length).toBe(avg.length);
+    expect(avg.some((v) => v === null)).toBe(true);
+    expect(avg.every((v) => v === null || v > 0)).toBe(true);
   });
 });

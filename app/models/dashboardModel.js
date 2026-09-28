@@ -3,7 +3,6 @@ import {
   scopeTuplesFilter,
   windowSql,
   FRAME,
-  normalizeDate,
   bidOpen,
   bidClosed,
   hasBidEnd,
@@ -107,19 +106,16 @@ const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
  * naive `timestamp`, putting both sides of the comparison in the same frame
  * under any session timezone.
  *
- * Deliberately NOT applied to `r.timestamp`, `i.created_at`, `po.created_at` or
- * `nr.created_at`. Those are real `timestamp` columns defaulted from
- * `CURRENT_TIMESTAMP`, i.e. written under the same session timezone they are
- * later read under, so plain `NOW()` is already frame-consistent for them and
- * shifting them to IST would *introduce* the skew this removes.
+ * Deliberately NOT applied to `r.timestamp`, `i.created_at` or
+ * `nr.created_at`: those are session-naive columns defaulted from
+ * CURRENT_TIMESTAMP, so plain `NOW()` is already frame-consistent for them.
  *
- * Also deliberately NOT applied to the `$4`/`$5` date-range parameters. Those
- * arrive from the FE as bare `YYYY-MM-DD` strings built with local-time
- * `moment().format(...)` (frontend/components/dashboard/buyer/index.js
- * getDateRange), never `toISOString()`, and Postgres resolves an untyped
- * parameter in `<timestamp> BETWEEN $4 AND $5` to `timestamp without time
- * zone` — so that branch is already naive-IST vs naive-IST and carries no
- * session-timezone dependence at all. Wrapping it would break it.
+ * The `start_date`/`end_date` range is NOT compared with BETWEEN any more. The
+ * old claim here — that a bare 'YYYY-MM-DD' against a session-naive column is
+ * "naive-IST vs naive-IST" — was false twice over: those columns hold UTC wall
+ * clock on prod, and `BETWEEN … AND '<today>'` stops at 00:00, so everything
+ * created today was excluded. Every window now goes through
+ * dashboardMetrics.windowSql, which is half-open and knows each column's frame.
  */
 const IST_NOW = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')`;
 
@@ -269,115 +265,183 @@ async function resolveUserScope(user_id, selectedHotelIds = []) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 1. Action Center
+// Shared SQL for the cross-role cards
 // ─────────────────────────────────────────────────────────────────────
-async function getActionCenterData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hasDates = start_date && end_date;
-  const hf = hotelFilter();
-  const params = [buyer_company_id, start_date, end_date, hotel_ids];
 
-  const dateFilterRfq = hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : '';
-  const dateFilterPo = hasDates ? 'AND po.created_at BETWEEN $2 AND $3' : '';
+/**
+ * The RFQ is visible to this caller: company + hotel mapping + RBAC 4-axis.
+ * Assumes $1 = buyer_company_id and $4 = hotel_ids. MUTATES params.
+ */
+function rfqVisible(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS) {
+  return `${companyScope(alias)} ${hotelFilter(alias)} ${scopeFilter(user_id, alias, params, permissions)}`;
+}
 
-  // Pending approvals: user-specific queue scoped to their companies
-  // Uses the same logic as the counts API (getPendingApprovalCountsByEntityType)
+/**
+ * Committed-spend PO lines visible to the caller, in the selected window.
+ *
+ * D1 — the same population as Reports 1.1: SPEND_STATUSES, IST half-open
+ * window on po.created_at (timestamptz), line totals. RFQ-backed POs are
+ * scoped through their RFQ (company, hotel mapping, RBAC); ARC call-off POs
+ * (rfq_id NULL) through their rate contract, at the hotel that raised the
+ * requisition — the same rule poScope.buildScopeClause applies.
+ *
+ * Assumes $1 = buyer_company_id, $2/$3 = window, $4 = hotel_ids. MUTATES
+ * params. Returns the body of a CTE exposing: po_id, rfq_id, created_at,
+ * total_price, unit_price, quantity, charges_meta, product_variant_id,
+ * rfq_product_id, finalized_vendor_id.
+ */
+function committedLinesSql(user_id, params, { dated = true } = {}) {
+  const status = spendStatusSql(params);
+  const rfqScope = scopeFilter(user_id, 'r', params, RFQ_SCOPE_PERMISSIONS);
+  const arcScope = scopeFilter(user_id, 'aa', params, RFQ_SCOPE_PERMISSIONS);
+  return `
+    SELECT po.id AS po_id, po.rfq_id, po.created_at, po.finalized_vendor_id,
+           pop.total_price, pop.unit_price, pop.quantity, pop.charges_meta,
+           pop.rfq_product_id,
+           ${lineVariant('pop', 'rp')} AS product_variant_id
+      FROM tbl_rfq_purchase_order po
+      JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+      LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+      LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+     WHERE ${status}
+       ${dated ? `AND ${windowSql('po.created_at', FRAME.TZ, 2, 3)}` : ''}
+       AND (
+         (r.id IS NOT NULL AND ${companyScope('r')} ${hotelFilter('r')} ${rfqScope})
+         OR (po.rfq_id IS NULL AND po.is_call_off = TRUE AND EXISTS (
+           SELECT 1
+             FROM tbl_arc_contract cc
+             JOIN tbl_arc arc_row ON arc_row.id = cc.arc_id
+             LEFT JOIN tbl_material_requisition mr_row ON mr_row.id = po.source_mr_id
+             CROSS JOIN LATERAL (
+               SELECT arc_row.hospitality_company_id,
+                      COALESCE(mr_row.hotel_id, arc_row.hotel_id) AS hotel_id,
+                      arc_row.department_id,
+                      arc_row.process_id
+             ) aa
+            WHERE cc.id = po.arc_contract_id
+              AND ${companyScope('aa')}
+              AND aa.hotel_id = ANY($4)
+              ${arcScope}
+         ))
+       )`;
+}
+
+/**
+ * A PO that was rejected (by the vendor, or internally in approval) and for
+ * which at least one of its lines has no live replacement PO yet — i.e. it
+ * still needs someone to re-award. Returns a WHERE fragment on alias `po`.
+ */
+const rejectedAwaitingReplacement = (statusSql) => `
+  ${statusSql}
+  AND EXISTS (
+    SELECT 1 FROM tbl_purchase_order_product pop_r
+     WHERE pop_r.purchase_order_id = po.id
+       AND NOT EXISTS (
+         SELECT 1 FROM tbl_rfq_purchase_order po2
+           JOIN tbl_purchase_order_product pop2 ON pop2.purchase_order_id = po2.id
+          WHERE po2.rfq_id = po.rfq_id
+            AND pop2.rfq_product_id = pop_r.rfq_product_id
+            AND po2.id <> po.id
+            AND po2.status NOT IN ('rejected_by_vendor', 'rejected', 'cancelled')
+       )
+  )`;
+
+/** Vendor display name — organization_name is dead; company leads. */
+const vendorName = (u, c) =>
+  `COALESCE(NULLIF(TRIM(${c}.company_name), ''), NULLIF(TRIM(${u}.name), ''), 'Vendor')`;
+
+// ─────────────────────────────────────────────────────────────────────
+// 1. Action Center
+//
+// Every tile is a QUEUE (SPEC rule 2): none of them is windowed by the date
+// range. start_date/end_date are accepted for signature compatibility only.
+// ─────────────────────────────────────────────────────────────────────
+async function getActionCenterData(buyer_company_id, user_id, hotel_ids = []) {
+  const params = [buyer_company_id, null, null, hotel_ids];
+
+  // Pending approvals: distinct actionable items (SPEC rule 3). Several
+  // approval instances can sit on one decision — prod has an approver with 50
+  // PENDING instances across 3 RFQs.
   const pendingApprovalsQuery = db.one(
-    `SELECT COUNT(*)::INTEGER as count
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     WHERE i.status = 'PENDING'
-     AND sa.approver_user_id = $5
-     AND sa.status = 'PENDING'
-     AND s.step_order = i.current_step
-     AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-     AND NOT (
-       i.entity_type IN ('RFQ', 'TENDER')
-       AND EXISTS (SELECT 1 FROM tbl_rfq r WHERE r.id = i.entity_id AND r.is_published = 1)
-     )
-     AND i.created_at BETWEEN $2 AND $3
-     AND i.hotel_id = ANY($4)`,
-    [...params, user_id]
+    `SELECT COUNT(DISTINCT ${approvalItemKey('i')})::int AS items,
+            COUNT(DISTINCT i.id)::int AS instances
+     ${myPendingApprovalsFrom(2, 1, 3)}`,
+    [buyer_company_id, user_id, hotel_ids]
   );
 
-  // The four RFQ-rooted counts all get the canonical 4-axis RBAC predicate.
-  // Each builds its own param array because scopeFilter appends bind values.
+  // "No responses": published, still-open RFQs with no real (non-regret)
+  // quote — the same base set the drill-down lists (active + expired).
   const awaitingParams = [...params];
   const rfqsAwaitingQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
-     AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-     ${dateFilterRfq} ${hf} ${scopeFilter(user_id, 'r', awaitingParams)}`,
+    `SELECT COUNT(*)::int AS count FROM tbl_rfq r
+     WHERE r.is_published = 1 AND r.status = 1
+       AND NOT ${hasRealQuote('r')}
+       AND ${rfqVisible(user_id, 'r', awaitingParams)}`,
     awaitingParams
   );
 
-  // RFQs ending soon: any RFQ (tender or not) whose bid_end_date is within 3 days
+  // Ending soon: bid window still OPEN and closing within 72h (exact IST
+  // time). The old DATE() comparison also counted bids that had already
+  // closed earlier today.
   const endingSoonParams = [...params];
   const rfqsEndingSoonQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
-     AND r.bid_end_date != '' AND DATE(r.bid_end_date) BETWEEN ${IST_TODAY} AND ${IST_TODAY} + INTERVAL '3 days'
-     ${hf} ${scopeFilter(user_id, 'r', endingSoonParams)}`,
+    `SELECT COUNT(*)::int AS count FROM tbl_rfq r
+     WHERE r.is_published = 1 AND r.status = 1
+       AND ${hasBidEnd('r')}
+       AND r.bid_end_date::timestamp > ${IST_NOW}
+       AND r.bid_end_date::timestamp <= ${IST_NOW} + INTERVAL '72 hours'
+       AND ${rfqVisible(user_id, 'r', endingSoonParams)}`,
     endingSoonParams
   );
 
   const posAwaitingParams = [...params];
   const posAwaitingQuery = db.one(
-    `SELECT COUNT(*) as count
+    `SELECT COUNT(*)::int AS count
      FROM tbl_rfq_purchase_order po
      JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND po.status = 'acceptance_pending'
-     ${dateFilterPo} ${hf} ${scopeFilter(user_id, 'r', posAwaitingParams)}`,
+     WHERE po.status = 'acceptance_pending'
+       AND ${rfqVisible(user_id, 'r', posAwaitingParams)}`,
     posAwaitingParams
   );
 
-  // Only count rejected POs where no replacement PO exists for the same product
+  // Rejected POs still needing a re-award. Counts POs, not product lines.
   const rejectedParams = [...params];
-  const rejectedVendorsQuery = db.one(
-    `SELECT COUNT(*) as count
+  const rejectedQuery = db.one(
+    `SELECT COUNT(*) FILTER (WHERE po.status = 'rejected_by_vendor')::int AS by_vendor,
+            COUNT(*) FILTER (WHERE po.status = 'rejected')::int AS in_approval
      FROM tbl_rfq_purchase_order po
-     JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
      JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND po.status = 'rejected_by_vendor'
-     AND NOT EXISTS (
-       SELECT 1 FROM tbl_rfq_purchase_order po2
-       JOIN tbl_purchase_order_product pop2 ON pop2.purchase_order_id = po2.id
-       WHERE po2.rfq_id = po.rfq_id
-       AND pop2.rfq_product_id = pop.rfq_product_id
-       AND po2.id != po.id
-       AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
-     )
-     ${dateFilterPo} ${hf} ${scopeFilter(user_id, 'r', rejectedParams)}`,
+     WHERE ${rejectedAwaitingReplacement(`po.status IN ('rejected_by_vendor', 'rejected')`)}
+       AND ${rfqVisible(user_id, 'r', rejectedParams)}`,
     rejectedParams
   );
 
-  const [pa, ra, es, poa, rv] = await Promise.all([
-    pendingApprovalsQuery, rfqsAwaitingQuery, rfqsEndingSoonQuery, posAwaitingQuery, rejectedVendorsQuery,
+  const [pa, ra, es, poa, rj] = await Promise.all([
+    pendingApprovalsQuery, rfqsAwaitingQuery, rfqsEndingSoonQuery, posAwaitingQuery, rejectedQuery,
   ]);
 
   return {
-    pending_approvals: parseInt(pa.count, 10),
-    rfqs_awaiting: parseInt(ra.count, 10),
-    rfqs_ending_soon: parseInt(es.count, 10),
-    pos_awaiting: parseInt(poa.count, 10),
-    rejected_vendors: parseInt(rv.count, 10),
+    pending_approvals: pa.items,
+    pending_approval_instances: pa.instances,
+    rfqs_awaiting: ra.count,
+    rfqs_ending_soon: es.count,
+    pos_awaiting: poa.count,
+    rejected_vendors: rj.by_vendor,
+    rejected_in_approval: rj.in_approval,
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 1b. No-response detail (drill-down behind the "No responses" card)
-//     Same base set as the Action Centre rfqs_awaiting count (published,
-//     OPEN, zero quotes), segregated by bid window (Sr 228):
-//       active  — bid_end_date still in the future (or unset)
-//       expired — bid_end_date already passed
+// 1b. No-response detail (drill-down behind the "No responses" tile)
+//     Same base set as Action Centre `rfqs_awaiting`: published, OPEN, no
+//     real quote. Split by the bid window at exact IST time:
+//       active  — bid window still open (or no deadline)
+//       expired — bid window has passed
+//     Undated, like the tile (a queue). A regret is a response but not an
+//     offer, so regret-only RFQs stay here and carry regret_count.
 // ─────────────────────────────────────────────────────────────────────
-async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hf = hotelFilter();
-  const hasDates = start_date && end_date;
-  const dateFilter = hasDates ? 'AND r.timestamp BETWEEN $2 AND $3' : '';
-  const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
-
+async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = []) {
+  const params = [buyer_company_id, null, null, hotel_ids];
   const rows = await db.any(
     `SELECT
        r.id,
@@ -388,18 +452,16 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], st
           FROM tbl_rfq_hotel_mappings rhm0
           JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm0.hotel_id
           WHERE rhm0.rfq_id = r.id AND rhm0.hotel_id = ANY($4)
-          LIMIT 1) as hotel_name,
-       (SELECT COUNT(*) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id) as invited_vendor_count,
-       CASE
-         WHEN r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-              AND DATE(r.bid_end_date) < ${IST_TODAY}
-         THEN true ELSE false
-       END as is_expired
+          ORDER BY rhm0.hotel_id
+          LIMIT 1) AS hotel_name,
+       (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id)::int AS invited_vendor_count,
+       (SELECT COUNT(*) FROM tbl_quotes qr WHERE qr.rfq_id = r.id AND qr.is_regret = 1)::int AS regret_count,
+       ${bidClosed('r')} AS is_expired
      FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1
-     AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-     ${dateFilter} ${hf} ${sc}
-     ORDER BY r.bid_end_date ASC NULLS LAST`,
+     WHERE r.is_published = 1 AND r.status = 1
+       AND NOT ${hasRealQuote('r')}
+       AND ${rfqVisible(user_id, 'r', params)}
+     ORDER BY (CASE WHEN ${hasBidEnd('r')} THEN r.bid_end_date::timestamp END) ASC NULLS LAST, r.id`,
     params
   );
 
@@ -409,7 +471,8 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], st
     title: r.title,
     bid_end_date: r.bid_end_date,
     hotel_name: r.hotel_name,
-    invited_vendor_count: parseInt(r.invited_vendor_count, 10),
+    invited_vendor_count: r.invited_vendor_count,
+    regret_count: r.regret_count,
   });
 
   return {
@@ -421,110 +484,97 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = [], st
 // ─────────────────────────────────────────────────────────────────────
 // 2. Procurement Snapshot
 // ─────────────────────────────────────────────────────────────────────
-async function getProcurementSnapshotData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hf = hotelFilter();
+async function getProcurementSnapshotData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  // One shared fragment: every query below binds the identical param array, so
-  // the RBAC values can be appended once and reused across all seven.
-  const sc = scopeFilter(user_id, 'r', params);
+  const rfqWin = windowSql('r.timestamp', FRAME.SESSION, 2, 3);
 
-  const totalRfqsQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}`,
-    params
-  );
-
-  const activeTendersQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_tender = 1 AND r.is_published = 1 AND r.status = 1 ${hf} ${sc}`,
-    params
-  );
-
-  // Active RFQs: currently live (published, OPEN). Reflects current state, so
-  // intentionally NOT date-filtered (matches active_tenders semantics).
-  const activeRfqsQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.is_published = 1 AND r.status = 1 ${hf} ${sc}`,
-    params
-  );
-
-  // Closed RFQs: in CLOSED state (status=2), scoped to the selected period
-  // via the RFQ creation timestamp.
-  const closedRfqsQuery = db.one(
-    `SELECT COUNT(*) as count FROM tbl_rfq r
-     WHERE ${companyScope()} AND r.status = 2 AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}`,
-    params
-  );
-
-  // Item 5 (D): exclude draft and cancelled POs to match total_spend's basis
-  // (total_spend already filters po.status NOT IN ('draft','cancelled')).
-  // This ensures pos_issued and the SpendBreakupModal's "across N purchase
-  // orders" subtitle are drawn from the same PO population.
-  const posIssuedQuery = db.one(
-    `SELECT COUNT(*) as count
-     FROM tbl_rfq_purchase_order po
-     JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}`,
-    params
-  );
-
-  // Total Spend with a Base / GST / Total breakup (Sr 235). total_price is the
-  // authoritative all-in line value; GST is derived per line from charges_meta
-  // (percentage-of-basic unless tax_mode='absolute'), matching the PO-detail
-  // pricing roll-up in poDashboardModel.js. Base = Total − GST so the three
-  // figures always reconcile.
-  const totalSpendQuery = db.one(
+  // RFQ state counts in ONE scan. Current-state counts (open / in progress)
+  // are not windowed; created-in-period counts are.
+  const rfqParams = [...params];
+  const rfqCountsQuery = db.one(
     `SELECT
-       COALESCE(SUM(pop.total_price), 0) as total_incl_gst,
-       COALESCE(SUM(
-         CASE
-           WHEN (pop.charges_meta->>'tax') IS NULL THEN 0
-           WHEN pop.charges_meta->>'tax_mode' = 'absolute'
-             THEN (pop.charges_meta->>'tax')::numeric
-           ELSE (pop.unit_price * pop.quantity) * (pop.charges_meta->>'tax')::numeric / 100
-         END
-       ), 0) as total_gst
-     FROM tbl_rfq_purchase_order po
-     JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-     JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}`,
-    params
+       COUNT(*) FILTER (WHERE ${rfqWin})::int AS total_rfqs,
+       COUNT(*) FILTER (WHERE r.is_published = 1 AND r.status = 1 AND ${bidOpen('r')})::int AS active_rfqs,
+       COUNT(*) FILTER (WHERE r.is_published = 1 AND r.status = 1 AND ${bidClosed('r')})::int AS in_progress_rfqs,
+       COUNT(*) FILTER (WHERE r.status = 2 AND ${rfqWin})::int AS closed_rfqs,
+       COUNT(*) FILTER (WHERE r.is_tender = 1 AND r.is_published = 1 AND r.status = 1)::int AS active_tenders
+     FROM tbl_rfq r
+     WHERE ${rfqVisible(user_id, 'r', rfqParams)}`,
+    rfqParams
   );
 
-  // Avg turnaround: RFQ publish → finalization
-  const avgTurnaroundQuery = db.one(
-    `SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (qf.timestamp - r.tender_publish_date)) / 86400), 0) as avg_turnaround
-     FROM tbl_quote_finalization qf
-     JOIN tbl_rfq r ON r.id = qf.rfq_id
-     WHERE ${companyScope()} AND qf.timestamp BETWEEN $2 AND $3
-     AND r.tender_publish_date IS NOT NULL ${hf} ${sc}`,
-    params
+  // Committed spend (D1) with its Base / GST / Total breakup (Sr 235). GST is
+  // derived per line from charges_meta exactly as the PO-detail roll-up does
+  // (the PO header carries no tax total); Base = Total − GST so the three
+  // figures always reconcile.
+  const spendParams = [...params];
+  const spendQuery = db.one(
+    `WITH lines AS (${committedLinesSql(user_id, spendParams)})
+     SELECT COUNT(DISTINCT po_id)::int AS pos_issued,
+            COALESCE(SUM(total_price), 0)::float8 AS total_incl_gst,
+            COALESCE(SUM(
+              CASE
+                WHEN (charges_meta->>'tax') IS NULL OR (charges_meta->>'tax') !~ '^-?[0-9]+(\\.[0-9]+)?$' THEN 0
+                WHEN charges_meta->>'tax_mode' = 'absolute' THEN (charges_meta->>'tax')::numeric
+                ELSE (unit_price * quantity) * (charges_meta->>'tax')::numeric / 100
+              END
+            ), 0)::float8 AS total_gst
+       FROM lines`,
+    spendParams
   );
 
-  const [tr, ar, cr, at, pi, ts, avt] = await Promise.all([
-    totalRfqsQuery, activeRfqsQuery, closedRfqsQuery, activeTendersQuery, posIssuedQuery, totalSpendQuery, avgTurnaroundQuery,
-  ]);
+  // Turnaround: per RFQ, publish → FIRST vendor finalisation, for RFQs first
+  // finalised in the window. The old figure averaged per finalisation ROW
+  // (2,233 rows over 392 RFQs on prod), weighting multi-product RFQs.
+  // tender_publish_date is naive IST; qf.timestamp is session-naive — both are
+  // lifted to instants before subtracting.
+  const tatParams = [...params];
+  const turnaroundQuery = db.one(
+    `WITH per_rfq AS (
+       SELECT r.id,
+              EXTRACT(EPOCH FROM (MIN(qf.timestamp)::timestamptz
+                                  - (r.tender_publish_date AT TIME ZONE 'Asia/Kolkata'))) / 86400 AS days,
+              MIN(qf.timestamp) AS first_final
+         FROM tbl_quote_finalization qf
+         JOIN tbl_rfq r ON r.id = qf.rfq_id
+        WHERE r.tender_publish_date IS NOT NULL
+          AND ${rfqVisible(user_id, 'r', tatParams)}
+        GROUP BY r.id, r.tender_publish_date
+     )
+     SELECT COUNT(*)::int AS n,
+            AVG(days)::float8 AS mean,
+            (percentile_cont(0.5) WITHIN GROUP (ORDER BY days))::float8 AS median,
+            (percentile_cont(0.9) WITHIN GROUP (ORDER BY days))::float8 AS p90
+       FROM per_rfq
+      WHERE days >= 0 AND ${windowSql('first_final', FRAME.SESSION, 2, 3)}`,
+    tatParams
+  );
 
-  const totalInclGst = parseFloat(ts.total_incl_gst);
-  const totalGst = parseFloat(ts.total_gst);
-  const round2 = (n) => Math.round(n * 100) / 100;
+  const [rc, sp, tat] = await Promise.all([rfqCountsQuery, spendQuery, turnaroundQuery]);
+
+  const totalInclGst = Number(sp.total_incl_gst) || 0;
+  const totalGst = Number(sp.total_gst) || 0;
 
   return {
-    total_rfqs: parseInt(tr.count, 10),
-    active_rfqs: parseInt(ar.count, 10),
-    closed_rfqs: parseInt(cr.count, 10),
-    active_tenders: parseInt(at.count, 10),
-    pos_issued: parseInt(pi.count, 10),
-    // total_spend kept as the all-in figure for backward compatibility.
-    total_spend: totalInclGst,
+    total_rfqs: rc.total_rfqs,
+    active_rfqs: rc.active_rfqs,
+    in_progress_rfqs: rc.in_progress_rfqs,
+    closed_rfqs: rc.closed_rfqs,
+    active_tenders: rc.active_tenders,
+    pos_issued: sp.pos_issued,
+    total_spend: round2(totalInclGst),
     spend_breakup: {
       base_excl_gst: round2(totalInclGst - totalGst),
       total_gst: round2(totalGst),
       total_incl_gst: round2(totalInclGst),
     },
-    avg_turnaround: parseFloat(parseFloat(avt.avg_turnaround).toFixed(1)),
+    // Mean per RFQ, kept for compatibility; the card should show the median.
+    avg_turnaround: tat.n > 0 ? round1(tat.mean) : 0,
+    turnaround_days: {
+      median: tat.n > 0 ? round1(tat.median) : null,
+      p90: tat.n > 0 ? round1(tat.p90) : null,
+      n: tat.n,
+    },
   };
 }
 
@@ -538,46 +588,17 @@ async function getProcurementSnapshotData(buyer_company_id, user_id, hotel_ids =
 // negotiationModel.getNegotiationParentSavings — the same function that prices
 // the negotiation listing's parent cards and agrees with the round-detail
 // page's `cumulative` tile. The dashboard does NOT carry its own copy of the
-// maths, so the two surfaces cannot drift apart again.
+// maths, so the two surfaces cannot drift apart. See that function for the
+// baseline ladder, the unit-vs-line normalisation and why values are signed.
 //
-// WHAT IT REPLACED, AND WHY (all measured against production 2026-08-01):
+// D2: the HEADLINE is the AWARDED (realised) saving — only the vendor whose
+// quote was approved. On prod FYTD the all-vendor figure (₹1.81 Cr) overstated
+// the realised one (₹1.27 Cr) by counting price cuts from vendors who lost.
+// The all-vendor figure is still returned, as `all_vendors`.
 //
-//   The widget used to join `tbl_negotiation_rounds nr ON ... AND
-//   nr.round_number = 1` for the baseline and take the last round as achieved.
-//   That was wrong three times over and under-reported by ~23×:
-//
-//   1. It only saw 274 of 441 quote pairs. 167 pairs sit on RFQs with no round
-//      numbered 1 — legacy numbering is PER PRODUCT and the current allocator
-//      is RFQ-wide, so "round 1" is not a thing every RFQ has — and those
-//      contributed NOTHING.
-//   2. 243 of the 274 it did see (89%) compared a round against ITSELF. On a
-//      single-round negotiation round 1 IS the last round, so the delta is
-//      exactly ₹0. The real baseline for a first round is the vendor's
-//      ORIGINAL RFQ quote, in tbl_quote_item_history, which it never read.
-//   3. What survived was then inflated by a clamp: suppressing genuine price
-//      RISES instead of subtracting them turned a real ₹3,15,379 into
-//      ₹4,26,825.
-//
-//   Over the whole production dataset, all-time, all hotels:
-//     OLD  274 pairs · baseline ₹4,07,77,896 · saved ₹3,15,379
-//          (₹4,26,825 once the rises are clamped away)
-//     NEW  427 pairs · baseline ₹8,03,94,568 · saved ₹98,45,639
-//   The negotiation module reports ₹98,45,639 on ₹8,04,14,568 over 428 pairs —
-//   the same saved figure to the rupee. The one-pair, ₹20,000 baseline gap is
-//   RFQ 344, which the Sr-240 exclusion below drops (its only PO was rejected)
-//   and which saved ₹0 anyway.
-//
-// THE RULE, in full: per (vendor, rfq_product) pair, over the parent's
-// NON-CANCELLED rounds, BASELINE from the EARLIEST round via the ladder
-// previous_price → quote_history → prior_round → current_quote, ACHIEVED from
-// the LATEST round. SIGNED and NEVER clamped — 7 production RFQs genuinely
-// ended higher than they started, and hiding that is what caused this.
-//
-// ⚠️ SECURITY: getNegotiationParentSavings reads tbl_quotes / tbl_quote_items /
-// tbl_quote_item_history and carries NO scope predicate of its own. Every
-// caller below feeds it ONLY rfq ids that already survived a scoped query
-// (companyScope + hotelFilter + the RBAC scopeFilter, or created_by = the
-// caller). Never hand it ids from a request body, a facet or a filter.
+// ⚠️ SECURITY: getNegotiationParentSavings carries NO scope predicate of its
+// own. Every caller below feeds it ONLY rfq ids that already survived a scoped
+// query. Never hand it ids from a request body, a facet or a filter.
 const EMPTY_SAVINGS = Object.freeze({
   baseline: 0, achieved: 0, saved: 0, pairs: 0, parents: 0,
   baseline_awarded: 0, achieved_awarded: 0, saved_awarded: 0, pairs_awarded: 0,
@@ -607,404 +628,387 @@ async function priceNegotiations(rfqIds) {
   };
 }
 
-async function getNegotiationSavingsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hf = hotelFilter();
+async function getNegotiationSavingsData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
 
   const scopedRfqs = await db.any(
     `SELECT DISTINCT nr.rfq_id
        FROM tbl_negotiation_rounds nr
        JOIN tbl_rfq r ON r.id = nr.rfq_id
-      WHERE ${companyScope()} AND nr.created_at BETWEEN $2 AND $3 ${hf} ${sc}
+      WHERE ${windowSql('nr.created_at', FRAME.SESSION, 2, 3)}
+        AND ${rfqVisible(user_id, 'r', params)}
         -- Sr 240: exclude Terminated/Rejected RFQs. WITHDRAWN (status=5) is the
         -- terminated/rejected-by-us state; also drop RFQs whose only PO was
-        -- rejected by the vendor (no surviving non-rejected/cancelled PO).
+        -- rejected (no surviving live PO).
         AND r.status <> 5
         AND NOT (
           EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
           AND NOT EXISTS (
             SELECT 1 FROM tbl_rfq_purchase_order po2
             WHERE po2.rfq_id = r.id
-            AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
+            AND po2.status NOT IN ('rejected_by_vendor', 'rejected', 'cancelled')
           )
         )`,
     params
   );
 
   const totals = await priceNegotiations(scopedRfqs.map((r) => r.rfq_id));
+  const awarded = {
+    total_savings: round2(totals.saved_awarded),
+    market_baseline: round2(totals.baseline_awarded),
+    negotiated_total: round2(totals.achieved_awarded),
+    negotiation_count: totals.pairs_awarded,
+  };
 
   return {
-    // SIGNED. A negative total means the negotiations in this window ended
-    // above their baseline — that is a real outcome, not a rendering problem.
-    total_savings: totals.saved,
-    market_baseline: totals.baseline,
-    negotiated_total: totals.achieved,
-    negotiation_count: totals.pairs,
-    // The realised benefit: the same maths restricted to the vendor whose quote
-    // was actually APPROVED. Additive — the headline above stays all-vendor, on
-    // the same basis as the negotiation listing's primary figure — so the FE can
-    // surface both without either number changing meaning.
-    awarded: {
-      total_savings: totals.saved_awarded,
-      market_baseline: totals.baseline_awarded,
-      negotiated_total: totals.achieved_awarded,
-      negotiation_count: totals.pairs_awarded,
+    basis: 'awarded',
+    // Headline = realised (awarded) savings. SIGNED: negative means the
+    // awarded negotiations in this window ended above their baseline.
+    ...awarded,
+    savings_pct: totals.baseline_awarded > 0
+      ? round1(((totals.baseline_awarded - totals.achieved_awarded) / totals.baseline_awarded) * 100)
+      : null,
+    rfq_count: totals.parents,
+    all_vendors: {
+      total_savings: round2(totals.saved),
+      market_baseline: round2(totals.baseline),
+      negotiated_total: round2(totals.achieved),
+      negotiation_count: totals.pairs,
     },
-    top_category_saving: { name: null, percentage: 0 },
-    cost_avoidance: totals.saved,
+    // Kept for existing consumers; identical to the headline.
+    awarded,
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 4. Cost Intelligence
+// 4. Cost Intelligence (Price benchmarking)
+//
+// Paid-vs-paid. The old card compared the AVERAGE OF ALL VENDORS' QUOTES with
+// the MINIMUM PRICE EVER PAID, over rejected POs too, and flagged SMART TV
+// (variant 2247) ~38% "above benchmark" when both prices were really paid —
+// for a 43" and a 55" set bought under the same catalogue variant.
+//
+//   benchmark_price — lowest unit price PAID on a committed PO (all time)
+//   current_price   — unit price on the most recent committed PO in window
+//   price_trend     — priced (non-regret) quote unit prices per period;
+//                     periods with no quotes are null, never ₹0
+//   spec_variation  — true when this item was bought/quoted under more than
+//                     one distinct spec text in scope. Specs are free text on
+//                     tbl_rfq_products_specs (the per-RFQ `variant` index is not
+//                     a stable spec id), so a like-for-like key cannot be
+//                     derived; the card shows the comparison as indicative and
+//                     Smart Insights raises no benchmark alarm for it.
 // ─────────────────────────────────────────────────────────────────────
-async function getCostIntelligenceData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, product_variant_id = null, duration_type = 'past7days') {
-  const hf = hotelFilter();
-  const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
 
-  // Item selector — ordered by purchase VALUE so the highest-spend (A-class)
-  // items lead the dropdown (Sr 301), not an arbitrary first item (Sr 302).
-  let topProducts = await db.any(
-    `WITH item_value AS (
-       SELECT rp.product_variant_id,
-         SUM(pop.total_price) as value,
-         COUNT(DISTINCT po.id) as order_count
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-       GROUP BY rp.product_variant_id
+/** Spec text signature of an RFQ product line, quantity excluded. */
+const specSignatureSql = (rfqIdExpr, variantIdExpr, specVariantExpr) => `(
+  SELECT string_agg(lower(regexp_replace(trim(s.title), '\\s+', ' ', 'g')) || '=' ||
+                    lower(regexp_replace(trim(s.value), '\\s+', ' ', 'g')), ';'
+                    ORDER BY lower(trim(s.title)), lower(trim(s.value)))
+    FROM tbl_rfq_products_specs s
+   WHERE s.rfq_id = ${rfqIdExpr}
+     AND s.product_variant_id = ${variantIdExpr}
+     AND s.variant = ${specVariantExpr}
+     AND lower(trim(s.title)) <> 'quantity'
+)`;
+
+async function getCostIntelligenceData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null, product_variant_id = null) {
+  const params = [buyer_company_id, start_date, end_date, hotel_ids];
+
+  // Item selector: highest committed spend in the window, restricted to items
+  // that also have at least one priced quote in the window — otherwise the
+  // card opens on an item whose trend is empty (LGSF STEEL, the #2 item on
+  // prod, had all its quotes before 1 April).
+  const topParams = [...params];
+  const topLines = committedLinesSql(user_id, topParams);
+  const qScope = scopeFilter(user_id, 'rq', topParams);
+  const topProducts = await db.any(
+    `WITH lines AS (${topLines}),
+     item_value AS (
+       SELECT product_variant_id, SUM(total_price) AS value, COUNT(DISTINCT po_id) AS order_count
+         FROM lines WHERE product_variant_id IS NOT NULL
+        GROUP BY product_variant_id
+     ),
+     quoted AS (
+       SELECT DISTINCT qi.product_variant_id
+         FROM tbl_quote_items qi
+         JOIN tbl_quotes q ON q.id = qi.quote_id
+         JOIN tbl_rfq rq ON rq.id = q.rfq_id
+        WHERE ${pricedItem('qi')} AND ${realQuote('q')}
+          AND ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)}
+          AND ${companyScope('rq')} ${hotelFilter('rq')} ${qScope}
      )
-     SELECT iv.product_variant_id, pv.name as product_name, iv.order_count, iv.value
-     FROM item_value iv
-     JOIN tbl_product_variant pv ON pv.id = iv.product_variant_id
-     ORDER BY iv.value DESC NULLS LAST
-     LIMIT 8`,
-    params
+     SELECT iv.product_variant_id, pv.name AS product_name, iv.order_count, iv.value
+       FROM item_value iv
+       JOIN quoted qd ON qd.product_variant_id = iv.product_variant_id
+       JOIN tbl_product_variant pv ON pv.id = iv.product_variant_id
+      ORDER BY iv.value DESC NULLS LAST, iv.product_variant_id
+      LIMIT 8`,
+    topParams
   );
 
-  // Fallback: items with RFQ activity but no PO spend yet, so the widget still
-  // shows something when nothing has been purchased in the period.
-  if (topProducts.length === 0) {
-    topProducts = await db.any(
-      `SELECT rp.product_variant_id, pv.name as product_name, COUNT(*) as order_count, 0 as value
-       FROM tbl_rfq_products rp
-       JOIN tbl_rfq r ON r.id = rp.rfq_id AND ${companyScope()}
-       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-       WHERE r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
-       GROUP BY rp.product_variant_id, pv.name
-       ORDER BY order_count DESC
-       LIMIT 8`,
-      params
-    );
-  }
-
-  if (topProducts.length === 0) {
-    return { top_products: [], price_trend: { labels: [], avg: [], max: [], min: [] }, vendor_comparison: [], benchmark: null };
-  }
+  const empty = {
+    top_products: [],
+    selected_product_variant_id: null,
+    granularity: null,
+    benchmark: null,
+    price_trend: { labels: [], avg: [], max: [], min: [] },
+    vendor_comparison: [],
+  };
+  if (topProducts.length === 0 && !product_variant_id) return empty;
 
   const pid = product_variant_id || topProducts[0].product_variant_id;
 
-  // Time granularity: day for short ranges, month for long ones (Sr 301
-  // "month-wise"). Falls back to span-based detection for custom/FY ranges.
-  const truncMap = {
-    past7days: 'day',
-    past15days: 'day',
-    currentMonth: 'day',
-    past6months: 'month',
-  };
-  let trunc = truncMap[duration_type];
-  if (!trunc) {
-    const spanDays = (new Date(end_date) - new Date(start_date)) / 86400000;
-    trunc = Number.isFinite(spanDays) && spanDays > 62 ? 'month' : 'day';
-  }
+  // Granularity: month for long ranges, day for short. "All" (no start) is
+  // monthly and starts at the first priced quote, not at a hardcoded date.
+  const spanDays = start_date && end_date
+    ? (new Date(end_date) - new Date(start_date)) / 86400000
+    : Infinity;
+  const trunc = spanDays > 62 ? 'month' : 'day';
 
-  // The three per-item panels bind $5 = the selected variant, so they need
-  // their own param array: `params` already carries the RBAC values appended
-  // above and pushing pid onto it would land at $11, not $5.
-  //
-  // `product_variant_id` arrives from the query string. It is NOT validated
-  // against a whitelist — it does not need to be, because the same 4-axis
-  // scope filter is applied to every panel below. Asking for an item outside
-  // your scope returns an empty trend, an empty vendor list and a null
-  // benchmark rather than another business unit's price history.
+  // The per-item panels bind $5 = the selected variant. The same 4-axis scope
+  // applies to every panel, so asking for an out-of-scope item returns empty
+  // panels, never another business unit's prices.
   const pidParams = [buyer_company_id, start_date, end_date, hotel_ids, pid];
   const pidSc = scopeFilter(user_id, 'r', pidParams);
 
-  // Generate complete time series with gaps filled as nulls
-  // Then LEFT JOIN actual price data onto it
   const priceTrendQuery = db.any(
-    `WITH series AS (
-       SELECT generate_series(
-         DATE_TRUNC('${trunc}', $2::timestamp),
-         DATE_TRUNC('${trunc}', $3::timestamp),
-         '1 ${trunc}'::interval
-       ) as period
+    `WITH prices AS (
+       -- Bucket on the IST calendar, not the session's (UTC on prod).
+       SELECT DATE_TRUNC('${trunc}', q.timestamp::timestamptz AT TIME ZONE 'Asia/Kolkata') AS period,
+              AVG(qi.unit_price) AS avg_price,
+              MAX(qi.unit_price) AS max_price,
+              MIN(qi.unit_price) AS min_price
+         FROM tbl_quote_items qi
+         JOIN tbl_quotes q ON q.id = qi.quote_id
+         JOIN tbl_rfq r ON r.id = q.rfq_id
+        WHERE qi.product_variant_id = $5
+          AND ${pricedItem('qi')} AND ${realQuote('q')}
+          AND ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)}
+          AND ${companyScope('r')} ${hotelFilter('r')} ${pidSc}
+        GROUP BY 1
      ),
-     prices AS (
-       -- Per-UNIT prices so the trend is comparable across orders and against
-       -- the per-unit benchmark (best price paid). Line totals (qi.total_price)
-       -- scale with quantity and are NOT a valid price-benchmark basis.
-       SELECT DATE_TRUNC('${trunc}', q.timestamp) as period,
-         AVG(qi.unit_price) as avg_price,
-         MAX(qi.unit_price) as max_price,
-         MIN(qi.unit_price) as min_price
-       FROM tbl_quote_items qi
-       JOIN tbl_quotes q ON q.id = qi.quote_id
-       JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
-       WHERE qi.product_variant_id = $5
-       AND q.timestamp BETWEEN $2 AND $3 ${hf} ${pidSc}
-       GROUP BY DATE_TRUNC('${trunc}', q.timestamp)
+     bounds AS (
+       SELECT COALESCE(DATE_TRUNC('${trunc}', ($2::date)::timestamp), MIN(period)) AS lo,
+              -- Never plot the future: an open-ended or far-future end stops today (IST).
+              LEAST(COALESCE(DATE_TRUNC('${trunc}', ($3::date)::timestamp), MAX(period)),
+                    DATE_TRUNC('${trunc}', ${IST_NOW})) AS hi
+         FROM prices
+     ),
+     series AS (
+       SELECT generate_series(b.lo, b.hi, '1 ${trunc}'::interval) AS period
+         FROM bounds b WHERE b.lo IS NOT NULL AND b.hi IS NOT NULL
      )
      SELECT s.period, p.avg_price, p.max_price, p.min_price
-     FROM series s
-     LEFT JOIN prices p ON p.period = s.period
-     ORDER BY s.period`,
+       FROM series s
+       LEFT JOIN prices p ON p.period = s.period
+      ORDER BY s.period`,
     pidParams
   );
 
-  // Vendor comparison using per-UNIT price (consistent with the trend + benchmark).
+  // Vendor comparison: average priced (non-regret) unit quote per vendor.
+  const vendorParams = [buyer_company_id, start_date, end_date, hotel_ids, pid];
+  const vendorSc = scopeFilter(user_id, 'r', vendorParams);
   const vendorComparisonQuery = db.any(
-    `SELECT u.name as vendor_name, COALESCE(c.company_name, u.organization_name) as company_name,
-       AVG(qi.unit_price) as avg_price
-     FROM tbl_quote_items qi
-     JOIN tbl_quotes q ON q.id = qi.quote_id
-     JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
-     JOIN tbl_users u ON u.id = q.created_by
-     LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE qi.product_variant_id = $5
-     AND q.timestamp BETWEEN $2 AND $3 ${hf} ${pidSc}
-     GROUP BY u.id, u.name, c.company_name, u.organization_name
-     ORDER BY avg_price ASC LIMIT 5`,
-    pidParams
+    `SELECT u.id AS vendor_id, u.name AS vendor_name, ${vendorName('u', 'c')} AS company_name,
+            AVG(qi.unit_price) AS avg_price, COUNT(*)::int AS quote_count
+       FROM tbl_quote_items qi
+       JOIN tbl_quotes q ON q.id = qi.quote_id
+       JOIN tbl_rfq r ON r.id = q.rfq_id
+       JOIN tbl_users u ON u.id = q.created_by
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+      WHERE qi.product_variant_id = $5
+        AND ${pricedItem('qi')} AND ${realQuote('q')}
+        AND ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)}
+        AND ${companyScope('r')} ${hotelFilter('r')} ${vendorSc}
+      GROUP BY u.id, u.name, c.company_name
+      ORDER BY avg_price ASC, u.id
+      LIMIT 5`,
+    vendorParams
   );
 
-  // Benchmark = best (lowest) unit price ever PAID for this item (all-time,
-  // value-based) — the reference the client wants purchases compared against
-  // (Sr 299/300/301). No date filter: "previously paid" spans history.
-  const benchmarkQuery = db.oneOrNone(
-    `SELECT MIN(pop.unit_price) as benchmark_price, MAX(po.created_at) as last_purchased_at
-     FROM tbl_purchase_order_product pop
-     JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
-     JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-     JOIN tbl_rfq r ON r.id = po.rfq_id
-     WHERE ${companyScope()} AND rp.product_variant_id = $5
-     AND po.status NOT IN ('draft', 'cancelled') ${hf} ${pidSc}`,
-    pidParams
+  // Benchmark (all-time best PAID) + current (latest PAID in window) + spec
+  // variation, all over committed lines for this variant.
+  const benchParams = [buyer_company_id, start_date, end_date, hotel_ids];
+  const allLines = committedLinesSql(user_id, benchParams, { dated: false });
+  benchParams.push(pid);
+  const pIdx = benchParams.length;
+  const benchmarkQuery = db.one(
+    `WITH lines AS (${allLines}),
+     item AS (
+       SELECT l.*, ${specSignatureSql('l.rfq_id', 'l.product_variant_id', 'rp_s.variant')} AS sig
+         FROM lines l
+         LEFT JOIN tbl_rfq_products rp_s ON rp_s.id = l.rfq_product_id
+        WHERE l.product_variant_id = $${pIdx} AND l.unit_price > 0
+     )
+     SELECT
+       (SELECT MIN(unit_price) FROM item)::float8 AS benchmark_price,
+       (SELECT MAX(created_at) FROM item) AS last_purchased_at,
+       (SELECT unit_price FROM item
+         WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}
+         ORDER BY created_at DESC, po_id DESC LIMIT 1)::float8 AS current_price,
+       (SELECT COUNT(DISTINCT COALESCE(sig, '')) FROM item)::int AS spec_signatures`,
+    benchParams
   );
 
-  const [priceTrend, vendorComparison, benchmarkRow] = await Promise.all([
+  const [priceTrend, vendorComparison, bench] = await Promise.all([
     priceTrendQuery, vendorComparisonQuery, benchmarkQuery,
   ]);
-  const bestPrice = vendorComparison.length > 0 ? parseFloat(vendorComparison[0].avg_price) : null;
 
-  // Latest non-zero average in the trend = the "current" price level.
-  const avgSeries = priceTrend
-    .map((pt) => (pt.avg_price ? parseFloat(pt.avg_price) : null))
-    .filter((v) => v != null && v > 0);
-  const currentPrice = avgSeries.length ? avgSeries[avgSeries.length - 1] : null;
-  const benchmarkPrice = benchmarkRow && benchmarkRow.benchmark_price != null
-    ? parseFloat(benchmarkRow.benchmark_price) : null;
-  const vsBenchmarkPct = benchmarkPrice && currentPrice
-    ? parseFloat((((currentPrice - benchmarkPrice) / benchmarkPrice) * 100).toFixed(1))
+  const bestPrice = vendorComparison.length ? Number(vendorComparison[0].avg_price) : null;
+  const benchmarkPrice = bench.benchmark_price != null ? Number(bench.benchmark_price) : null;
+  const currentPrice = bench.current_price != null ? Number(bench.current_price) : null;
+  const vsBenchmarkPct = benchmarkPrice && currentPrice != null
+    ? round1(((currentPrice - benchmarkPrice) / benchmarkPrice) * 100)
     : null;
+  const num = (v) => (v == null ? null : round2(Number(v)));
 
   return {
     top_products: topProducts.map((p) => ({
       product_variant_id: p.product_variant_id,
       product_name: p.product_name,
       order_count: parseInt(p.order_count, 10),
-      value: p.value != null ? parseFloat(parseFloat(p.value).toFixed(2)) : 0,
+      value: round2(Number(p.value) || 0),
     })),
     selected_product_variant_id: pid,
     granularity: trunc,
     benchmark: {
       product_variant_id: pid,
-      benchmark_price: benchmarkPrice != null ? parseFloat(benchmarkPrice.toFixed(2)) : null,
-      current_price: currentPrice != null ? parseFloat(currentPrice.toFixed(2)) : null,
+      benchmark_price: num(benchmarkPrice),
+      current_price: num(currentPrice),
       vs_benchmark_pct: vsBenchmarkPct,
-      last_purchased_at: benchmarkRow ? benchmarkRow.last_purchased_at : null,
+      last_purchased_at: bench.last_purchased_at || null,
+      spec_variation: bench.spec_signatures > 1,
+      basis: 'paid_vs_paid',
     },
+    // Gaps are null (not 0) so the chart breaks the line instead of diving to ₹0.
     price_trend: {
       labels: priceTrend.map((pt) => pt.period),
-      avg: priceTrend.map((pt) => pt.avg_price ? parseFloat(parseFloat(pt.avg_price).toFixed(2)) : 0),
-      max: priceTrend.map((pt) => pt.max_price ? parseFloat(parseFloat(pt.max_price).toFixed(2)) : 0),
-      min: priceTrend.map((pt) => pt.min_price ? parseFloat(parseFloat(pt.min_price).toFixed(2)) : 0),
+      avg: priceTrend.map((pt) => num(pt.avg_price)),
+      max: priceTrend.map((pt) => num(pt.max_price)),
+      min: priceTrend.map((pt) => num(pt.min_price)),
     },
     vendor_comparison: vendorComparison.map((vc) => ({
+      vendor_id: vc.vendor_id,
       vendor_name: vc.vendor_name,
       company_name: vc.company_name,
-      avg_price: parseFloat(parseFloat(vc.avg_price).toFixed(2)),
-      is_best: parseFloat(vc.avg_price) === bestPrice,
+      avg_price: round2(Number(vc.avg_price)),
+      quote_count: vc.quote_count,
+      is_best: Number(vc.avg_price) === bestPrice,
     })),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 5. Category Insights
-//    Aggregates spend FIRST, then resolves a bucket label per product variant
-//    to avoid row multiplication. The `dimension` param (Sr 296) selects the
-//    grouping label:
-//      category    — top-level category (rolls a sub-category up to its parent)
-//      subcategory — the category the product is mapped to (the leaf)
-//      item        — the product variant itself
-//    Top 12 buckets are returned; the remainder collapse into an "Others" row.
+// 5. Category Insights (Spend by category)
+//    Committed spend (D1), each PO line placed in exactly ONE category via
+//    Reports' LEAF_CATEGORY_JOIN. tbl_product_categories maps a product to
+//    both its parent and its leaf; the old DISTINCT ON … ORDER BY title picked
+//    between them alphabetically and filed 36% of prod spend under a
+//    top-level name. `dimension`:
+//      category    — the leaf's top-level parent
+//      subcategory — the leaf itself
+//      item        — the product variant
+//    Top 12 buckets; the rest collapse into "Others". rfq_count counts
+//    DISTINCT RFQs per bucket (it summed per-variant counts before).
 // ─────────────────────────────────────────────────────────────────────
-function categoryLabelCte(dimension) {
-  if (dimension === 'item') {
-    return `product_bucket AS (
-       SELECT pv.id as product_variant_id,
-         COALESCE(NULLIF(pv.name, ''), 'Unknown item') as bucket_name
-       FROM tbl_product_variant pv
-     )`;
-  }
-  if (dimension === 'subcategory') {
-    return `product_bucket AS (
-       SELECT DISTINCT ON (pv.id)
-         pv.id as product_variant_id,
-         COALESCE(cat.title, 'Uncategorized') as bucket_name
-       FROM tbl_product_variant pv
-       LEFT JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
-       LEFT JOIN tbl_category cat ON cat.id = pc.category_id
-       ORDER BY pv.id, cat.title
-     )`;
-  }
-  // default: top-level category (parent of the mapped category when nested).
-  return `product_bucket AS (
-       SELECT DISTINCT ON (pv.id)
-         pv.id as product_variant_id,
-         COALESCE(parent.title, cat.title, 'Uncategorized') as bucket_name
-       FROM tbl_product_variant pv
-       LEFT JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
-       LEFT JOIN tbl_category cat ON cat.id = pc.category_id
-       LEFT JOIN tbl_category parent ON parent.id = cat.parent_id
-       ORDER BY pv.id, COALESCE(parent.title, cat.title)
-     )`;
-}
-
-async function getCategoryInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, dimension = 'category') {
+async function getCategoryInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null, dimension = 'category') {
   const dim = ['category', 'subcategory', 'item'].includes(dimension) ? dimension : 'category';
-  const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
+  const lines = committedLinesSql(user_id, params);
+
+  const bucketExpr = {
+    category: `COALESCE(parent_cat.title, cat.title, 'Uncategorized')`,
+    subcategory: `COALESCE(cat.title, 'Uncategorized')`,
+    item: `COALESCE(NULLIF(pv.name, ''), 'Unknown item')`,
+  }[dim];
 
   const rows = await db.any(
-    `WITH product_spend AS (
-       SELECT
-         rp.product_variant_id,
-         SUM(pop.total_price) as spend_amount,
-         COUNT(DISTINCT r.id) as rfq_count
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-       GROUP BY rp.product_variant_id
-     ),
-     ${categoryLabelCte(dim)}
-     SELECT
-       COALESCE(pb.bucket_name, 'Uncategorized') as category_name,
-       SUM(ps.spend_amount) as spend_amount,
-       SUM(ps.rfq_count) as rfq_count
-     FROM product_spend ps
-     LEFT JOIN product_bucket pb ON pb.product_variant_id = ps.product_variant_id
-     GROUP BY pb.bucket_name
-     ORDER BY spend_amount DESC`,
+    `WITH lines AS (${lines})
+     SELECT ${bucketExpr} AS category_name,
+            SUM(l.total_price)::float8 AS spend_amount,
+            COUNT(DISTINCT l.rfq_id)::int AS rfq_count,
+            COUNT(DISTINCT l.po_id)::int AS po_count
+       FROM lines l
+       LEFT JOIN tbl_product_variant pv ON pv.id = l.product_variant_id
+       ${LEAF_CATEGORY_JOIN}
+       LEFT JOIN tbl_category parent_cat ON parent_cat.id = NULLIF(cat.parent_id, 0)
+      GROUP BY 1
+      ORDER BY spend_amount DESC, 1`,
     params
   );
 
-  const totalSpend = rows.reduce((sum, c) => sum + parseFloat(c.spend_amount), 0);
+  const totalSpend = rows.reduce((sum, c) => sum + (Number(c.spend_amount) || 0), 0);
 
-  // Keep the top 12 buckets readable; collapse the long tail into "Others".
   const TOP_N = 12;
   const top = rows.slice(0, TOP_N);
   const rest = rows.slice(TOP_N);
   const buckets = top.map((c) => ({
     category_name: c.category_name,
-    spend_amount: parseFloat(c.spend_amount),
-    rfq_count: parseInt(c.rfq_count, 10),
+    spend_amount: round2(Number(c.spend_amount)),
+    rfq_count: c.rfq_count,
+    po_count: c.po_count,
   }));
   if (rest.length > 0) {
     buckets.push({
       category_name: 'Others',
-      spend_amount: rest.reduce((s, c) => s + parseFloat(c.spend_amount), 0),
-      rfq_count: rest.reduce((s, c) => s + parseInt(c.rfq_count, 10), 0),
+      spend_amount: round2(rest.reduce((s, c) => s + Number(c.spend_amount), 0)),
+      // Distinct across buckets is not additive; "Others" reports bucket count.
+      rfq_count: null,
+      po_count: null,
+      bucket_count: rest.length,
     });
   }
 
   return {
     dimension: dim,
+    total_spend: round2(totalSpend),
     categories: buckets.map((c) => ({
       ...c,
-      percentage: totalSpend > 0
-        ? parseFloat(((c.spend_amount / totalSpend) * 100).toFixed(1))
-        : 0,
+      percentage: totalSpend > 0 ? round1((c.spend_amount / totalSpend) * 100) : 0,
     })),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 5b. ABC Analysis (Pareto) — classify procured items into A/B/C tiers by
-//     cumulative contribution to the chosen metric (value=spend or
-//     volume=quantity), respecting the selected period (Sr 297/298/303).
-//       A: items making up the first ~70% of the metric
+// 5b. ABC Analysis (Pareto) — procured items classified by committed spend
+//     VALUE (Sr 297/298/303). "By volume" was removed: it summed quantities
+//     across mixed units (nos, kg, box), which is not a quantity of anything.
+//       A: items making up the first ~70% of value
 //       B: the next ~20% (70–90%)
 //       C: the bottom ~10% (90–100%)
 //     An item is assigned by the cumulative % BEFORE it, so the largest item
 //     is always A and the boundary item is included in the higher tier.
 // ─────────────────────────────────────────────────────────────────────
-async function getAbcAnalysisData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date, metric = 'value') {
-  const m = metric === 'volume' ? 'volume' : 'value';
-  const hf = hotelFilter();
+async function getAbcAnalysisData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
-  const round2 = (n) => Math.round(n * 100) / 100;
+  const lines = committedLinesSql(user_id, params);
 
   const rows = await db.any(
-    `WITH item_spend AS (
-       SELECT
-         rp.product_variant_id,
-         SUM(pop.total_price) as value,
-         SUM(pop.quantity) as volume
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-       GROUP BY rp.product_variant_id
-     )
-     SELECT
-       it.product_variant_id,
-       COALESCE(NULLIF(pv.name, ''), 'Unknown item') as name,
-       COALESCE(it.value, 0) as value,
-       COALESCE(it.volume, 0) as volume
-     FROM item_spend it
-     LEFT JOIN tbl_product_variant pv ON pv.id = it.product_variant_id
-     ORDER BY (CASE WHEN '${m}' = 'volume' THEN it.volume ELSE it.value END) DESC NULLS LAST`,
+    `WITH lines AS (${lines})
+     SELECT l.product_variant_id,
+            COALESCE(NULLIF(pv.name, ''), 'Unknown item') AS name,
+            SUM(l.total_price)::float8 AS value
+       FROM lines l
+       LEFT JOIN tbl_product_variant pv ON pv.id = l.product_variant_id
+      GROUP BY l.product_variant_id, pv.name
+      ORDER BY value DESC NULLS LAST, l.product_variant_id`,
     params
   );
 
-  const metricOf = (r) => parseFloat(m === 'volume' ? r.volume : r.value) || 0;
-  const total = rows.reduce((s, r) => s + metricOf(r), 0);
+  const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
 
   let cumulative = 0;
   const classified = rows.map((r, i) => {
     const prevPct = total > 0 ? (cumulative / total) * 100 : 0;
-    cumulative += metricOf(r);
+    cumulative += Number(r.value) || 0;
     let cls = 'C';
     if (prevPct < 70) cls = 'A';
     else if (prevPct < 90) cls = 'B';
     return {
       product_variant_id: r.product_variant_id,
       name: r.name,
-      value: round2(parseFloat(r.value) || 0),
-      volume: round2(parseFloat(r.volume) || 0),
+      value: round2(Number(r.value) || 0),
       class: cls,
       rank: i + 1,
     };
@@ -1012,332 +1016,328 @@ async function getAbcAnalysisData(buyer_company_id, user_id, hotel_ids = [], sta
 
   const classes = ['A', 'B', 'C'].map((c) => {
     const items = classified.filter((x) => x.class === c);
-    const classMetric = items.reduce((s, x) => s + (m === 'volume' ? x.volume : x.value), 0);
+    const classValue = items.reduce((s, x) => s + x.value, 0);
     return {
       class: c,
       item_count: items.length,
-      value: round2(items.reduce((s, x) => s + x.value, 0)),
-      volume: round2(items.reduce((s, x) => s + x.volume, 0)),
-      metric_pct: total > 0 ? parseFloat(((classMetric / total) * 100).toFixed(1)) : 0,
-      item_pct: classified.length > 0 ? parseFloat(((items.length / classified.length) * 100).toFixed(1)) : 0,
+      value: round2(classValue),
+      metric_pct: total > 0 ? round1((classValue / total) * 100) : 0,
+      item_pct: classified.length > 0 ? round1((items.length / classified.length) * 100) : 0,
     };
   });
 
   return {
-    metric: m,
+    metric: 'value',
     total_items: classified.length,
-    total_value: round2(classified.reduce((s, x) => s + x.value, 0)),
-    total_volume: round2(classified.reduce((s, x) => s + x.volume, 0)),
+    total_value: round2(total),
     classes,
     items: classified.slice(0, 50), // top 50 for display; classification uses all
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 6. Workflow Efficiency — derived from actual table timestamps
-//    Each stage duration computed from real columns, not lifecycle table.
+// 6. Workflow Efficiency (Stage turnaround)
+//
+// For RFQs CREATED in the window (a cohort), how long each stage took. Each
+// stage reports n (distinct RFQs), median, P90 and mean hours. Means alone
+// were dominated by outliers; n was an instance count (176 "RFQs" in
+// commercial approval against 51 RFQs created, for one prod user).
+//
+//   rfq_approval          RFQ/TENDER approval, created → completed, APPROVED only
+//   quote_wait            publish → first real (non-regret) quote
+//   tech_evaluation       bid close (exact IST) → last vendor cleared
+//   tech_approval         TECHNICAL approval, APPROVED only (RFQ from metadata;
+//                         entity_id is the round id, never the RFQ)
+//   negotiation           round published/created → closed, ENDED/COMPLETED rounds
+//   commercial_evaluation bid close → first vendor finalisation
+//   commercial_approval   NEGOTIATION_QUOTE approval, APPROVED only (RFQ via
+//                         the rfq_product the instance is keyed on)
+//   po_approval           PO approval, APPROVED only (RFQ via the PO)
+//   vendor_action         PO raised → vendor accepted/rejected
+//
+// Cancelled and rejected approvals are excluded — they are not a turnaround.
+// Every duration is computed between instants (naive-IST and session-naive
+// columns are lifted first) and negative durations are dropped as bad data.
 // ─────────────────────────────────────────────────────────────────────
-async function getWorkflowEfficiencyData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hf = hotelFilter();
+async function getWorkflowEfficiencyData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
+  const vis = rfqVisible(user_id, 'r', params);
+  const bidEndTs = `(CASE WHEN ${hasBidEnd('r')} THEN r.bid_end_date::timestamp AT TIME ZONE 'Asia/Kolkata' END)`;
 
   const stages = await db.any(
     `WITH scoped_rfqs AS (
-       SELECT r.id, r.timestamp as created_at, r.tender_publish_date
-       FROM tbl_rfq r
-       WHERE ${companyScope()} AND r.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
+       SELECT r.id, r.tender_publish_date, ${bidEndTs} AS bid_end_at
+         FROM tbl_rfq r
+        WHERE ${windowSql('r.timestamp', FRAME.SESSION, 2, 3)} AND ${vis}
      ),
-
-     -- 1. Draft → RFQ Approval submitted
-     rfq_approval AS (
-       SELECT 'rfq_approval' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600) as avg_hours
-       FROM tbl_approval_instances ai
-       JOIN scoped_rfqs sr ON sr.id = ai.entity_id
-       WHERE ai.entity_type IN ('RFQ', 'TENDER') AND ai.completed_at IS NOT NULL
-     ),
-
-     -- 2. Published → First quote received
-     quote_wait AS (
-       SELECT 'quote_wait' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (first_quote - sr.tender_publish_date)) / 3600) as avg_hours
-       FROM scoped_rfqs sr
-       JOIN LATERAL (
-         SELECT MIN(q.timestamp) as first_quote
-         FROM tbl_quotes q WHERE q.rfq_id = sr.id
-       ) fq ON fq.first_quote IS NOT NULL
-       WHERE sr.tender_publish_date IS NOT NULL
-     ),
-
-     -- 3. Technical Evaluation: time from bid_end_date to tech eval completion
-     tech_evaluation AS (
-       SELECT 'tech_evaluation' as stage,
-         COUNT(DISTINCT te.rfq_id) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (last_eval.evaluated_at - DATE(r.bid_end_date))) / 3600) as avg_hours
-       FROM tbl_rfq_product_tech_evaluation te
-       JOIN scoped_rfqs sr ON sr.id = te.rfq_id
-       JOIN tbl_rfq r ON r.id = te.rfq_id AND r.bid_end_date != ''
-       JOIN LATERAL (
-         SELECT MAX(cv.timestamp) as evaluated_at
-         FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
-         WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
-       ) last_eval ON last_eval.evaluated_at IS NOT NULL
-     ),
-
-     -- 4. Technical Approval
-     tech_approval AS (
-       SELECT 'tech_approval' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600) as avg_hours
-       FROM tbl_approval_instances ai
-       JOIN scoped_rfqs sr ON sr.id = COALESCE((ai.metadata->>'rfq_id')::int, ai.entity_id)
-       WHERE ai.entity_type = 'TECHNICAL' AND ai.completed_at IS NOT NULL
-     ),
-
-     -- 5. Negotiation duration
-     negotiation AS (
-       SELECT 'negotiation' as stage,
-         COUNT(DISTINCT nr.rfq_id) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (COALESCE(nr.closed_at, nr.approved_at) - nr.created_at)) / 3600) as avg_hours
-       FROM tbl_negotiation_rounds nr
-       JOIN scoped_rfqs sr ON sr.id = nr.rfq_id
-       WHERE nr.closed_at IS NOT NULL OR nr.approved_at IS NOT NULL
-     ),
-
-     -- 6. Commercial Evaluation: time from quotes received to vendor finalization
-     commercial_evaluation AS (
-       SELECT 'commercial_evaluation' as stage,
-         COUNT(DISTINCT qf.rfq_id) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (qf.timestamp - fq.first_quote)) / 3600) as avg_hours
-       FROM tbl_quote_finalization qf
-       JOIN scoped_rfqs sr ON sr.id = qf.rfq_id
-       JOIN LATERAL (
-         SELECT MIN(q.timestamp) as first_quote FROM tbl_quotes q WHERE q.rfq_id = qf.rfq_id
-       ) fq ON fq.first_quote IS NOT NULL
-     ),
-
-     -- 7. Commercial approval (negotiation quote approval)
-     commercial_approval AS (
-       SELECT 'commercial_approval' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600) as avg_hours
-       FROM tbl_approval_instances ai
-       JOIN scoped_rfqs sr ON sr.id = (ai.metadata->>'rfq_id')::int
-       WHERE ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.completed_at IS NOT NULL
-       AND ai.metadata->>'rfq_id' IS NOT NULL
-     ),
-
-     -- 5. PO approval
-     po_approval AS (
-       SELECT 'po_approval' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600) as avg_hours
-       FROM tbl_approval_instances ai
-       JOIN scoped_rfqs sr ON sr.id = (ai.metadata->>'rfq_id')::int
-       WHERE ai.entity_type = 'PO' AND ai.completed_at IS NOT NULL
-       AND ai.metadata->>'rfq_id' IS NOT NULL
-     ),
-
-     -- 6. Vendor action on PO
-     vendor_action AS (
-       SELECT 'vendor_action' as stage,
-         COUNT(*) as rfq_count,
-         AVG(EXTRACT(EPOCH FROM (po.vendor_action_at - po.created_at)) / 3600) as avg_hours
-       FROM tbl_rfq_purchase_order po
-       JOIN scoped_rfqs sr ON sr.id = po.rfq_id
-       WHERE po.vendor_action_at IS NOT NULL
+     durations AS (
+       SELECT 'rfq_approval' AS stage, sr.id AS rfq_id,
+              EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600 AS hours
+         FROM tbl_approval_instances ai
+         JOIN scoped_rfqs sr ON sr.id = ai.entity_id
+        WHERE ai.entity_type IN ('RFQ', 'TENDER') AND ai.status = 'APPROVED' AND ai.completed_at IS NOT NULL
+       UNION ALL
+       SELECT 'quote_wait', sr.id,
+              EXTRACT(EPOCH FROM (fq.first_quote::timestamptz - (sr.tender_publish_date AT TIME ZONE 'Asia/Kolkata'))) / 3600
+         FROM scoped_rfqs sr
+         JOIN LATERAL (
+           SELECT MIN(q.timestamp) AS first_quote FROM tbl_quotes q
+            WHERE q.rfq_id = sr.id AND ${realQuote('q')}
+         ) fq ON fq.first_quote IS NOT NULL
+        WHERE sr.tender_publish_date IS NOT NULL
+       UNION ALL
+       SELECT 'tech_evaluation', sr.id,
+              EXTRACT(EPOCH FROM (le.evaluated_at::timestamptz - sr.bid_end_at)) / 3600
+         FROM scoped_rfqs sr
+         JOIN LATERAL (
+           SELECT MAX(cv.timestamp) AS evaluated_at
+             FROM tbl_rfq_product_tech_evaluation te
+             JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
+               ON cv.tbl_rfq_product_tech_evaluation_id = te.id
+            WHERE te.rfq_id = sr.id
+         ) le ON le.evaluated_at IS NOT NULL
+        WHERE sr.bid_end_at IS NOT NULL
+       UNION ALL
+       SELECT 'tech_approval', sr.id,
+              EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600
+         FROM tbl_approval_instances ai
+         JOIN scoped_rfqs sr ON sr.id = CASE WHEN (ai.metadata->>'rfq_id') ~ '^[0-9]+$'
+                                             THEN (ai.metadata->>'rfq_id')::int END
+        WHERE ai.entity_type = 'TECHNICAL' AND ai.status = 'APPROVED' AND ai.completed_at IS NOT NULL
+       UNION ALL
+       SELECT 'negotiation', sr.id,
+              EXTRACT(EPOCH FROM (nr.closed_at - COALESCE(nr.published_at, nr.created_at))) / 3600
+         FROM tbl_negotiation_rounds nr
+         JOIN scoped_rfqs sr ON sr.id = nr.rfq_id
+        WHERE nr.status IN ('ENDED', 'COMPLETED') AND nr.closed_at IS NOT NULL
+       UNION ALL
+       SELECT 'commercial_evaluation', sr.id,
+              EXTRACT(EPOCH FROM (ff.first_final::timestamptz - sr.bid_end_at)) / 3600
+         FROM scoped_rfqs sr
+         JOIN LATERAL (
+           SELECT MIN(qf.timestamp) AS first_final FROM tbl_quote_finalization qf WHERE qf.rfq_id = sr.id
+         ) ff ON ff.first_final IS NOT NULL
+        WHERE sr.bid_end_at IS NOT NULL
+       UNION ALL
+       SELECT 'commercial_approval', sr.id,
+              EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600
+         FROM tbl_approval_instances ai
+         JOIN tbl_rfq_products rp_ca ON rp_ca.id = ai.entity_id
+         JOIN scoped_rfqs sr ON sr.id = rp_ca.rfq_id
+        WHERE ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.status = 'APPROVED' AND ai.completed_at IS NOT NULL
+       UNION ALL
+       SELECT 'po_approval', sr.id,
+              EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600
+         FROM tbl_approval_instances ai
+         JOIN tbl_rfq_purchase_order po_a ON po_a.id = ai.entity_id
+         JOIN scoped_rfqs sr ON sr.id = po_a.rfq_id
+        WHERE ai.entity_type = 'PO' AND ai.status = 'APPROVED' AND ai.completed_at IS NOT NULL
+       UNION ALL
+       SELECT 'vendor_action', sr.id,
+              EXTRACT(EPOCH FROM (po.vendor_action_at::timestamptz - po.created_at)) / 3600
+         FROM tbl_rfq_purchase_order po
+         JOIN scoped_rfqs sr ON sr.id = po.rfq_id
+        WHERE po.vendor_action_at IS NOT NULL
      )
-
-     SELECT * FROM rfq_approval WHERE rfq_count > 0
-     UNION ALL SELECT * FROM quote_wait WHERE rfq_count > 0
-     UNION ALL SELECT * FROM tech_evaluation WHERE rfq_count > 0
-     UNION ALL SELECT * FROM tech_approval WHERE rfq_count > 0
-     UNION ALL SELECT * FROM negotiation WHERE rfq_count > 0
-     UNION ALL SELECT * FROM commercial_evaluation WHERE rfq_count > 0
-     UNION ALL SELECT * FROM commercial_approval WHERE rfq_count > 0
-     UNION ALL SELECT * FROM po_approval WHERE rfq_count > 0
-     UNION ALL SELECT * FROM vendor_action WHERE rfq_count > 0`,
+     SELECT stage,
+            COUNT(DISTINCT rfq_id)::int AS rfq_count,
+            COUNT(*)::int AS samples,
+            (percentile_cont(0.5) WITHIN GROUP (ORDER BY hours))::float8 AS median_hours,
+            (percentile_cont(0.9) WITHIN GROUP (ORDER BY hours))::float8 AS p90_hours,
+            AVG(hours)::float8 AS avg_hours
+       FROM durations
+      WHERE hours IS NOT NULL AND hours >= 0
+      GROUP BY stage`,
     params
   );
 
-  if (stages.length === 0) return { stages: [] };
+  const ORDER = [
+    'rfq_approval', 'quote_wait', 'tech_evaluation', 'tech_approval', 'negotiation',
+    'commercial_evaluation', 'commercial_approval', 'po_approval', 'vendor_action',
+  ];
+  stages.sort((a, b) => ORDER.indexOf(a.stage) - ORDER.indexOf(b.stage));
 
   return {
     stages: stages.map((s) => ({
       stage_name: s.stage,
-      rfq_count: parseInt(s.rfq_count, 10),
-      avg_dwell_time_hours: parseFloat(parseFloat(s.avg_hours || 0).toFixed(1)),
+      rfq_count: s.rfq_count,
+      samples: s.samples,
+      median_hours: round1(s.median_hours),
+      p90_hours: round1(s.p90_hours),
+      // Mean, kept for compatibility. Show the median.
+      avg_dwell_time_hours: round1(s.avg_hours),
     })),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 7. Smart Insights
+// 7. Smart Insights (rule-based)
+//
+// Emits NO URLs (SPEC "Link contract" §4): each insight carries
+//   action: { type, params }
+// naming a frontend dashboardLinks builder, which resolves it to a real route.
+// Descriptions are plain text; figures go in `details`.
 // ─────────────────────────────────────────────────────────────────────
-async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  const hf = hotelFilter();
-  const params = [buyer_company_id, start_date, end_date, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
-  // Second alias for the benchmark LATERAL below, correlated on r2.
-  const sc2 = scopeFilter(user_id, 'r2', params);
-
-  // CROSS-TENANT LEAK (P0, fixed here).
-  //
-  // The `market` LATERAL used to read tbl_quote_items with NO predicate other
-  // than the product variant:
-  //     SELECT AVG(qi2.unit_price) FROM tbl_quote_items qi2
-  //      WHERE qi2.product_variant_id = qi.product_variant_id
-  // — every quote from every buyer on the platform. That average was then
-  // rendered verbatim into the insight copy at the bottom of this function
-  // ("Market: ₹…"), so one tenant's negotiated unit prices reached another
-  // tenant's screen. Verified on production: 3 product variants are quoted by
-  // both buyer_company 13 and 90, and for OVAL TABLE (variant 13038) the
-  // HAVING below is satisfied — company 13's own average of ₹6,800 (₹11,000 +
-  // ₹2,600 over two quotes) is compared against a "market" of ₹4,533.33, a
-  // figure only reachable by averaging in company 90's ₹0.00 row. A number
-  // arithmetically impossible from company 13's own data was being rendered
-  // to company 13 as their market benchmark.
-  //
-  // The LATERAL now walks quote → rfq → the same company/hotel/RBAC scope as
-  // the outer query. The comparison it expresses becomes "this period's price
-  // vs YOUR OWN all-time average for this item" (the LATERAL stays deliberately
-  // date-unbounded, which is what made it a useful baseline in the first place).
-  const priceDeviationsQuery = db.any(
-    `SELECT pv.name as product_name,
-       AVG(qi.unit_price) as user_avg_price,
-       market.avg_price as market_avg_price,
-       ROUND(((AVG(qi.unit_price) - market.avg_price) / market.avg_price * 100)::numeric, 1) as deviation_pct
-     FROM tbl_quote_items qi
-     JOIN tbl_quotes q ON q.id = qi.quote_id
-     JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
-     JOIN tbl_product_variant pv ON pv.id = qi.product_variant_id
-     CROSS JOIN LATERAL (
-       SELECT AVG(qi2.unit_price) as avg_price
-       FROM tbl_quote_items qi2
-       JOIN tbl_quotes q2 ON q2.id = qi2.quote_id
-       JOIN tbl_rfq r2 ON r2.id = q2.rfq_id AND ${companyScope('r2')}
-       WHERE qi2.product_variant_id = qi.product_variant_id
-       ${hotelFilter('r2')} ${sc2}
-     ) market
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc} AND market.avg_price > 0
-     GROUP BY pv.name, market.avg_price
-     HAVING AVG(qi.unit_price) > market.avg_price * 1.15
-     LIMIT 3`,
-    params
-  );
-
-  const bestVendorQuery = db.oneOrNone(
-    `SELECT u.name as vendor_name, COALESCE(c.company_name, u.organization_name) as company_name,
-       COUNT(*) as best_price_count
-     FROM tbl_quote_items qi
-     JOIN tbl_quotes q ON q.id = qi.quote_id
-     JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
-     JOIN tbl_users u ON u.id = q.created_by
-     LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
-     -- The MIN() subquery is correlated on qi.rfq_id, so it can only ever read
-     -- quotes belonging to the same RFQ (and therefore the same tenant).
-     AND qi.unit_price = (
-       SELECT MIN(qi2.unit_price) FROM tbl_quote_items qi2
-       WHERE qi2.rfq_id = qi.rfq_id AND qi2.product_variant_id = qi.product_variant_id
-     )
-     GROUP BY u.id, u.name, c.company_name, u.organization_name
-     ORDER BY best_price_count DESC LIMIT 1`,
-    params
-  );
-
-  const periodDuration = `($3::timestamp - $2::timestamp)`;
-  const spendTrendQuery = db.oneOrNone(
-    `WITH current_spend AS (
-       SELECT COALESCE(SUM(pop.total_price), 0) as total
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-     ),
-     previous_spend AS (
-       SELECT COALESCE(SUM(pop.total_price), 0) as total
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()}
-       AND po.created_at BETWEEN ($2::timestamp - ${periodDuration}) AND $2
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-     )
-     SELECT cs.total as current_spend, ps.total as previous_spend,
-       CASE WHEN ps.total > 0
-         THEN ROUND(((cs.total - ps.total) / ps.total * 100)::numeric, 1)
-         ELSE 0
-       END as change_pct
-     FROM current_spend cs, previous_spend ps`,
-    params
-  );
-
-  // Sr 299: items paid in-period ABOVE the best price previously paid for them
-  // (value-based benchmark, same as the Price benchmarking widget). Ordered by
-  // in-period spend so the highest-impact (A-class) items surface first.
+async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
+  // 1. Benchmark alerts — the latest committed PO price for an item is >10%
+  //    above the best price previously paid for it. Items bought under more
+  //    than one spec text are skipped (see Cost Intelligence: not comparable).
+  const bParams = [buyer_company_id, start_date, end_date, hotel_ids];
+  const bLines = committedLinesSql(user_id, bParams, { dated: false });
   const benchmarkDeviationsQuery = db.any(
-    `WITH item_po AS (
-       SELECT rp.product_variant_id,
-         SUM(pop.total_price) as period_value,
-         (ARRAY_AGG(pop.unit_price ORDER BY po.created_at DESC))[1] as latest_price
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-       GROUP BY rp.product_variant_id
+    `WITH lines AS (${bLines}),
+     item AS (
+       SELECT l.*, ${specSignatureSql('l.rfq_id', 'l.product_variant_id', 'rp_s.variant')} AS sig
+         FROM lines l
+         LEFT JOIN tbl_rfq_products rp_s ON rp_s.id = l.rfq_product_id
+        WHERE l.product_variant_id IS NOT NULL AND l.unit_price > 0
      ),
-     benchmark AS (
-       SELECT rp.product_variant_id, MIN(pop.unit_price) as best_price
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
-       GROUP BY rp.product_variant_id
+     per_item AS (
+       SELECT product_variant_id,
+              MIN(unit_price) AS best_price,
+              COUNT(DISTINCT COALESCE(sig, '')) AS sigs,
+              SUM(total_price) FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}) AS period_value,
+              (ARRAY_AGG(unit_price ORDER BY created_at DESC, po_id DESC)
+                 FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}))[1] AS latest_price
+         FROM item
+        GROUP BY product_variant_id
      )
-     SELECT pv.name as product_name, ip.latest_price, b.best_price, ip.period_value,
-       ROUND(((ip.latest_price - b.best_price) / b.best_price * 100)::numeric, 1) as above_pct
-     FROM item_po ip
-     JOIN benchmark b ON b.product_variant_id = ip.product_variant_id
-     JOIN tbl_product_variant pv ON pv.id = ip.product_variant_id
-     WHERE b.best_price > 0 AND ip.latest_price > b.best_price * 1.1
-     ORDER BY ip.period_value DESC
-     LIMIT 3`,
-    params
+     SELECT pv.name AS product_name, pi.product_variant_id, pi.latest_price::float8, pi.best_price::float8,
+            pi.period_value::float8,
+            ROUND(((pi.latest_price - pi.best_price) / pi.best_price * 100)::numeric, 1)::float8 AS above_pct
+       FROM per_item pi
+       JOIN tbl_product_variant pv ON pv.id = pi.product_variant_id
+      WHERE pi.sigs = 1 AND pi.best_price > 0 AND pi.latest_price > pi.best_price * 1.1
+      ORDER BY pi.period_value DESC NULLS LAST, pi.product_variant_id
+      LIMIT 3`,
+    bParams
   );
 
-  const [priceDeviations, bestVendor, spendTrend, benchmarkDeviations] = await Promise.all([
-    priceDeviationsQuery, bestVendorQuery, spendTrendQuery, benchmarkDeviationsQuery,
+  // 2. Price alerts — items quoted in the window at >15% above the caller's
+  //    OWN all-time average quote for them (priced, non-regret quotes only).
+  //    Aggregated once per item instead of a per-row LATERAL.
+  const pParams = [buyer_company_id, start_date, end_date, hotel_ids];
+  const pSc = scopeFilter(user_id, 'r', pParams);
+  const priceDeviationsQuery = db.any(
+    `WITH q_items AS (
+       SELECT qi.product_variant_id, qi.unit_price,
+              ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)} AS in_window
+         FROM tbl_quote_items qi
+         JOIN tbl_quotes q ON q.id = qi.quote_id
+         JOIN tbl_rfq r ON r.id = q.rfq_id
+        WHERE ${pricedItem('qi')} AND ${realQuote('q')}
+          AND ${companyScope('r')} ${hotelFilter('r')} ${pSc}
+     ),
+     agg AS (
+       SELECT product_variant_id,
+              AVG(unit_price) AS own_avg,
+              AVG(unit_price) FILTER (WHERE in_window) AS period_avg,
+              COUNT(*) FILTER (WHERE in_window) AS period_n,
+              COUNT(*) AS n
+         FROM q_items GROUP BY product_variant_id
+     )
+     SELECT pv.name AS product_name, a.product_variant_id,
+            a.period_avg::float8 AS user_avg_price, a.own_avg::float8 AS market_avg_price,
+            ROUND(((a.period_avg - a.own_avg) / a.own_avg * 100)::numeric, 1)::float8 AS deviation_pct
+       FROM agg a
+       JOIN tbl_product_variant pv ON pv.id = a.product_variant_id
+      WHERE a.period_n > 0 AND a.n > a.period_n AND a.own_avg > 0
+        AND a.period_avg > a.own_avg * 1.15
+      ORDER BY deviation_pct DESC, a.product_variant_id
+      LIMIT 3`,
+    pParams
+  );
+
+  // 3. Vendor with the most best-price lines in the window. Only priced,
+  //    non-regret quotes compete — a ₹0 regret line is not a best price (one
+  //    prod vendor had 188 "wins", all at ₹0).
+  const vParams = [buyer_company_id, start_date, end_date, hotel_ids];
+  const vSc = scopeFilter(user_id, 'r', vParams);
+  const bestVendorQuery = db.oneOrNone(
+    `WITH priced AS (
+       SELECT qi.rfq_id, qi.product_variant_id, qi.variant, qi.unit_price, q.created_by AS vendor_id
+         FROM tbl_quote_items qi
+         JOIN tbl_quotes q ON q.id = qi.quote_id
+         JOIN tbl_rfq r ON r.id = q.rfq_id
+        WHERE ${pricedItem('qi')} AND ${realQuote('q')}
+          AND ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)}
+          AND ${companyScope('r')} ${hotelFilter('r')} ${vSc}
+     ),
+     grp AS (
+       SELECT rfq_id, product_variant_id, variant,
+              MIN(unit_price) AS best, COUNT(DISTINCT vendor_id) AS vendors
+         FROM priced GROUP BY rfq_id, product_variant_id, variant
+     ),
+     wins AS (
+       -- A "win" needs competition: lines quoted by a single vendor don't count.
+       SELECT DISTINCT p.vendor_id, p.rfq_id, p.product_variant_id, p.variant
+         FROM priced p
+         JOIN grp g ON g.rfq_id = p.rfq_id AND g.product_variant_id = p.product_variant_id
+                   AND g.variant IS NOT DISTINCT FROM p.variant
+        WHERE g.vendors > 1 AND p.unit_price = g.best
+     )
+     SELECT u.id AS vendor_id, u.name AS vendor_name, ${vendorName('u', 'c')} AS company_name,
+            COUNT(*)::int AS best_price_count
+       FROM wins w
+       JOIN tbl_users u ON u.id = w.vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+      GROUP BY u.id, u.name, c.company_name
+      ORDER BY best_price_count DESC, u.id
+      LIMIT 1`,
+    vParams
+  );
+
+  // 4. Committed spend vs the immediately preceding period of equal length.
+  //    Only when the window is bounded on both sides.
+  let spendTrendQuery = Promise.resolve(null);
+  if (start_date && end_date) {
+    const days = Math.round((new Date(end_date) - new Date(start_date)) / 86400000) + 1;
+    const prevEnd = new Date(new Date(`${start_date}T00:00:00Z`).getTime() - 86400000).toISOString().slice(0, 10);
+    const prevStart = new Date(new Date(`${prevEnd}T00:00:00Z`).getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
+    const curParams = [buyer_company_id, start_date, end_date, hotel_ids];
+    const curLines = committedLinesSql(user_id, curParams);
+    const prevParams = [buyer_company_id, prevStart, prevEnd, hotel_ids];
+    const prevLines = committedLinesSql(user_id, prevParams);
+    spendTrendQuery = Promise.all([
+      db.one(`WITH lines AS (${curLines}) SELECT COALESCE(SUM(total_price), 0)::float8 AS total FROM lines`, curParams),
+      db.one(`WITH lines AS (${prevLines}) SELECT COALESCE(SUM(total_price), 0)::float8 AS total FROM lines`, prevParams),
+    ]).then(([c, p]) => ({ current: c.total, previous: p.total }));
+  }
+
+  const [benchmarkDeviations, priceDeviations, bestVendor, spendTrend] = await Promise.all([
+    benchmarkDeviationsQuery, priceDeviationsQuery, bestVendorQuery, spendTrendQuery,
   ]);
 
+  const inr = (n) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
   const insights = [];
 
   benchmarkDeviations.forEach((bd) => {
     insights.push({
       type: 'benchmark_alert',
-      severity: parseFloat(bd.above_pct) > 25 ? 'high' : 'medium',
+      severity: bd.above_pct > 25 ? 'high' : 'medium',
       title: `${bd.product_name} above price benchmark`,
-      description: `Latest purchase is ${bd.above_pct}% above the best price paid.<br/>Benchmark: ₹${parseFloat(bd.best_price).toFixed(2)}, Latest: ₹${parseFloat(bd.latest_price).toFixed(2)}.`,
-      action_label: 'View benchmarking',
-      action_url: '/dashboard/buyer',
+      description: `Latest purchase is ${bd.above_pct}% above the best price paid.`,
+      details: [
+        { label: 'Best paid', value: inr(bd.best_price) },
+        { label: 'Latest', value: inr(bd.latest_price) },
+      ],
+      action_label: 'Find RFQs for this item',
+      action: { type: 'rfqList', params: { search: bd.product_name } },
     });
   });
 
   priceDeviations.forEach((pd) => {
     insights.push({
       type: 'price_alert',
-      severity: parseFloat(pd.deviation_pct) > 25 ? 'high' : 'medium',
-      title: `${pd.product_name} priced above market`,
-      description: `Paying ${pd.deviation_pct}% above market average.<br/>Market: ₹${parseFloat(pd.market_avg_price).toFixed(2)}, Yours: ₹${parseFloat(pd.user_avg_price).toFixed(2)}.`,
-      action_label: 'Review Quotes',
-      action_url: '/rfq?product=' + encodeURIComponent(pd.product_name),
+      severity: pd.deviation_pct > 25 ? 'high' : 'medium',
+      title: `${pd.product_name} quoted above your usual price`,
+      description: `Quotes this period average ${pd.deviation_pct}% above your own history for this item.`,
+      details: [
+        { label: 'Your usual', value: inr(pd.market_avg_price) },
+        { label: 'This period', value: inr(pd.user_avg_price) },
+      ],
+      action_label: 'Review quotes',
+      action: { type: 'rfqList', params: { search: pd.product_name } },
     });
   });
 
@@ -1345,23 +1345,28 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
     insights.push({
       type: 'vendor_optimization',
       severity: 'low',
-      title: `${bestVendor.company_name || bestVendor.vendor_name} offers best pricing`,
-      description: `Lowest price on ${bestVendor.best_price_count} product(s) this period. Consider consolidating orders.`,
-      action_label: 'View Vendor',
-      action_url: '/vendors',
+      title: `${bestVendor.company_name} offers best pricing`,
+      description: `Lowest price on ${bestVendor.best_price_count} competitive quote line(s) this period. Consider consolidating orders.`,
+      details: [],
+      action_label: 'View their POs',
+      action: { type: 'poList', params: { search: bestVendor.company_name } },
     });
   }
 
-  if (spendTrend && parseFloat(spendTrend.previous_spend) > 0) {
-    const pct = parseFloat(spendTrend.change_pct);
+  if (spendTrend && spendTrend.previous > 0) {
+    const pct = round1(((spendTrend.current - spendTrend.previous) / spendTrend.previous) * 100);
     const dir = pct > 0 ? 'increased' : 'decreased';
     insights.push({
       type: 'spend_trend',
       severity: Math.abs(pct) > 20 ? 'high' : Math.abs(pct) > 10 ? 'medium' : 'low',
       title: `Spend ${dir} by ${Math.abs(pct)}%`,
-      description: `Procurement spend has ${dir} by ${Math.abs(pct)}% compared to the previous period.`,
-      action_label: 'View Spend Report',
-      action_url: '/dashboard/spend',
+      description: `Committed spend has ${dir} by ${Math.abs(pct)}% compared with the previous period of the same length.`,
+      details: [
+        { label: 'This period', value: inr(spendTrend.current) },
+        { label: 'Previous', value: inr(spendTrend.previous) },
+      ],
+      action_label: 'Open spend reports',
+      action: { type: 'reports', params: {} },
     });
   }
 
@@ -1369,134 +1374,138 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 8. Pending Approvals (detailed list for modal)
+// 8. Pending Approvals (drill-down behind the Action Centre badge)
+//
+// ONE ROW PER ACTIONABLE ITEM, from the same predicate as the badge
+// (dashboardMetrics.myPendingApprovalsFrom), so the count on the tile always
+// equals the rows in the modal. Undated (a queue). `instance_count` says how
+// many approval instances collapsed into the row.
+//
+// Entity ids resolve per SPEC rule 6 — never guessed from entity_id:
+//   RFQ/TENDER         entity_id is the RFQ
+//   TECHNICAL          RFQ in metadata->>'rfq_id' (entity_id is the round)
+//   NEGOTIATION_QUOTE  entity_id is tbl_rfq_products.id → its RFQ
+//   NEGOTIATION        entity_id / metadata round_id is the round → its RFQ
+//   PO                 entity_id is the PO → its RFQ
+//   ARC_*              arc id (amendments hop through their contract)
 // ─────────────────────────────────────────────────────────────────────
-// Hotel scope: this list is the drill-down behind the Action Centre's
-// `pending_approvals` badge, and its count sibling in getActionCenterData
-// already filters `i.hotel_id = ANY(...)`. This query did not, so the badge and
-// the list it opens disagreed — and the list leaked approvals filed at business
-// units outside the caller's scope, including RFQ titles, ARC numbers and the
-// hotel name. The approver-is-me predicate bounded the damage but not the axis.
-async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
+async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = []) {
   return db.any(
-    `SELECT
-       i.id as approval_id,
-       i.entity_type,
-       i.entity_id,
-       i.metadata,
-       i.current_step,
-       s.step_order,
-       i.created_at,
-       ROUND(EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 3600) as waiting_hours,
-       -- Resolve the owning RFQ id for all RFQ-family types.
-       -- RFQ/TENDER: entity_id IS the rfq id.
-       -- TECHNICAL/NEGOTIATION/NEGOTIATION_QUOTE/PO: rfq_id is stored in
-       -- metadata->>'rfq_id'; fall back to entity_id if missing/non-numeric.
+    `WITH mine AS (
+       SELECT i.*, ${approvalItemKey('i')} AS item_key, s.step_order
+       ${myPendingApprovalsFrom(2, 1, 3)}
+     ),
+     resolved AS (
+       SELECT m.*,
+              CASE
+                WHEN m.entity_type IN ('RFQ', 'TENDER') THEN m.entity_id
+                WHEN m.entity_type = 'TECHNICAL' AND (m.metadata->>'rfq_id') ~ '^[0-9]+$'
+                  THEN (m.metadata->>'rfq_id')::int
+                WHEN m.entity_type = 'NEGOTIATION_QUOTE' THEN rp_nq.rfq_id
+                WHEN m.entity_type = 'NEGOTIATION' THEN nr_n.rfq_id
+                WHEN m.entity_type = 'PO' THEN po_p.rfq_id
+                ELSE NULL
+              END AS rfq_id,
+              CASE WHEN m.entity_type = 'PO' THEN m.entity_id END AS po_id,
+              po_p.po_number
+         FROM mine m
+         LEFT JOIN tbl_rfq_products rp_nq
+           ON m.entity_type = 'NEGOTIATION_QUOTE' AND rp_nq.id = m.entity_id
+         LEFT JOIN tbl_negotiation_rounds nr_n
+           ON m.entity_type = 'NEGOTIATION' AND nr_n.id = COALESCE(
+                CASE WHEN (m.metadata->>'round_id') ~ '^[0-9]+$' THEN (m.metadata->>'round_id')::int END,
+                m.entity_id)
+         LEFT JOIN tbl_rfq_purchase_order po_p
+           ON m.entity_type = 'PO' AND po_p.id = m.entity_id
+     ),
+     items AS (
+       SELECT DISTINCT ON (item_key) item_key, id, entity_type, entity_id, metadata, current_step,
+              step_order, created_at, hotel_id, approval_policy_id, rfq_id, po_id, po_number,
+              COUNT(*) OVER (PARTITION BY item_key)::int AS instance_count
+         FROM resolved
+        ORDER BY item_key, created_at ASC, id ASC
+     )
+     SELECT
+       it.id AS approval_id,
+       it.item_key,
+       it.instance_count,
+       it.entity_type,
+       it.entity_id,
+       it.metadata,
+       it.current_step,
+       it.step_order,
+       it.created_at,
+       ROUND(EXTRACT(EPOCH FROM (NOW() - it.created_at)) / 3600) AS waiting_hours,
+       it.rfq_id,
+       it.rfq_id AS rfq_ref_id,
+       it.po_id,
+       it.po_number,
+       r.title AS entity_title,
+       r.rfq_no AS entity_rfq_no,
        CASE
-         WHEN i.entity_type IN ('RFQ','TENDER') THEN i.entity_id
-         WHEN i.entity_type IN ('TECHNICAL','NEGOTIATION','NEGOTIATION_QUOTE','PO')
-           THEN COALESCE(NULLIF(i.metadata->>'rfq_id','')::int, i.entity_id)
+         WHEN it.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') THEN it.entity_id
+         WHEN it.entity_type = 'ARC_AMENDMENT' THEN amdc.arc_id
          ELSE NULL
-       END as rfq_ref_id,
-       -- entity_title and entity_rfq_no are now populated for ALL RFQ-family
-       -- types via the LEFT JOIN on rfq_ref_id below.
-       r.title as entity_title,
-       r.rfq_no as entity_rfq_no,
-       -- ARC enrichment: resolve the parent rate-contract id + number for the
-       -- ARC_* entity types so the Action Centre can deep-link to the right
-       -- stage tab. ARC_TECH/ARC_COMMITTEE/ARC_PUBLISH.entity_id IS the arc id;
-       -- an amendment's entity_id is the amendment id → hop through its contract.
-       CASE
-         WHEN i.entity_type IN ('ARC_TECH','ARC_COMMITTEE','ARC_PUBLISH') THEN i.entity_id
-         WHEN i.entity_type = 'ARC_AMENDMENT' THEN amdc.arc_id
-         ELSE NULL
-       END as arc_id,
-       ac.arc_number as arc_number,
-       ac.title as arc_title,
-       hch.name as hotel_name,
+       END AS arc_id,
+       ac.arc_number,
+       ac.title AS arc_title,
+       hch.name AS hotel_name,
        (SELECT COUNT(*) FROM tbl_approval_policy_steps ps
-        WHERE ps.approval_policy_id = i.approval_policy_id) as total_steps
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     -- Join tbl_rfq on the resolved rfq_ref_id (covers RFQ/TENDER/TECHNICAL/
-     -- NEGOTIATION/NEGOTIATION_QUOTE/PO in one shot; non-RFQ rows get NULL).
-     LEFT JOIN tbl_rfq r ON r.id = (
-       CASE
-         WHEN i.entity_type IN ('RFQ','TENDER') THEN i.entity_id
-         WHEN i.entity_type IN ('TECHNICAL','NEGOTIATION','NEGOTIATION_QUOTE','PO')
-           THEN COALESCE(NULLIF(i.metadata->>'rfq_id','')::int, i.entity_id)
-         ELSE NULL
-       END
-     )
-     LEFT JOIN tbl_arc_amendment amd  ON i.entity_type = 'ARC_AMENDMENT' AND amd.id = i.entity_id
-     LEFT JOIN tbl_arc_contract amdc  ON amdc.id = amd.arc_contract_id
+         WHERE ps.approval_policy_id = it.approval_policy_id)::int AS total_steps
+     FROM items it
+     LEFT JOIN tbl_rfq r ON r.id = it.rfq_id
+     LEFT JOIN tbl_arc_amendment amd ON it.entity_type = 'ARC_AMENDMENT' AND amd.id = it.entity_id
+     LEFT JOIN tbl_arc_contract amdc ON amdc.id = amd.arc_contract_id
      LEFT JOIN tbl_arc ac ON
-       (i.entity_type IN ('ARC_TECH','ARC_COMMITTEE','ARC_PUBLISH') AND ac.id = i.entity_id)
-       OR (i.entity_type = 'ARC_AMENDMENT' AND ac.id = amdc.arc_id)
-     LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = i.hotel_id
-     WHERE i.status = 'PENDING'
-     AND sa.approver_user_id = $2
-     AND sa.status = 'PENDING'
-     AND s.step_order = i.current_step
-     AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-     AND NOT (
-       i.entity_type IN ('RFQ', 'TENDER')
-       AND EXISTS (SELECT 1 FROM tbl_rfq r2 WHERE r2.id = i.entity_id AND r2.is_published = 1)
-     )
-     AND i.created_at BETWEEN $3 AND $4
-     AND i.hotel_id = ANY($5)
-     ORDER BY i.created_at ASC`,
-    [buyer_company_id, user_id, start_date, end_date, hotel_ids]
+       (it.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') AND ac.id = it.entity_id)
+       OR (it.entity_type = 'ARC_AMENDMENT' AND ac.id = amdc.arc_id)
+     LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = it.hotel_id
+     ORDER BY it.created_at ASC, it.id ASC`,
+    [buyer_company_id, user_id, hotel_ids]
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 9. Rejected POs (detail list for modal)
+// 9. Rejected POs (drill-down behind the Action Centre "rejected" tiles)
+//    Same predicate as the tiles (rejected, a line still without a live
+//    replacement PO), undated like them. One row per PO; the value is summed
+//    in a sub-select so a multi-hotel RFQ can never multiply it.
+//    rejection_source: 'vendor' (rejected_by_vendor) | 'approval' (rejected).
 // ─────────────────────────────────────────────────────────────────────
 async function getRejectedPOsDetail(buyer_company_id, user_id, hotel_ids = []) {
-  const params = [buyer_company_id, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
+  const params = [buyer_company_id, null, null, hotel_ids];
   return db.any(
     `SELECT
-       po.id as po_id,
+       po.id AS po_id,
+       po.po_number,
        po.rfq_id,
        po.status,
+       CASE WHEN po.status = 'rejected_by_vendor' THEN 'vendor' ELSE 'approval' END AS rejection_source,
        po.created_at,
-       po.vendor_action_at as rejected_at,
-       r.title as rfq_title,
+       COALESCE(po.vendor_action_at::timestamptz, po.updated_at) AS rejected_at,
+       po.vendor_rejection_reason AS rejection_reason,
+       r.title AS rfq_title,
        r.rfq_no,
-       u_vendor.name as vendor_name,
-       COALESCE(c_vendor.company_name, u_vendor.organization_name) as vendor_company,
-       hch.name as hotel_name,
+       u_vendor.name AS vendor_name,
+       ${vendorName('u_vendor', 'c_vendor')} AS vendor_company,
+       (SELECT hch.name FROM tbl_rfq_hotel_mappings rhm
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+         WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($4)
+         ORDER BY rhm.hotel_id LIMIT 1) AS hotel_name,
        (SELECT STRING_AGG(COALESCE(pv.name, 'Product'), ', ' ORDER BY pop2.id)
-        FROM tbl_purchase_order_product pop2
-        LEFT JOIN tbl_rfq_products rp ON rp.id = pop2.rfq_product_id
-        LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-        WHERE pop2.purchase_order_id = po.id
-       ) as product_names,
-       COALESCE(SUM(pop.total_price), 0) as po_value
+          FROM tbl_purchase_order_product pop2
+          LEFT JOIN tbl_rfq_products rp ON rp.id = pop2.rfq_product_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE pop2.purchase_order_id = po.id) AS product_names,
+       (SELECT COALESCE(SUM(pop3.total_price), 0) FROM tbl_purchase_order_product pop3
+         WHERE pop3.purchase_order_id = po.id)::float8 AS po_value
      FROM tbl_rfq_purchase_order po
-     JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
      JOIN tbl_rfq r ON r.id = po.rfq_id
      LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.finalized_vendor_id
      LEFT JOIN tbl_company c_vendor ON c_vendor.id = u_vendor.company_id
-     LEFT JOIN tbl_rfq_hotel_mappings rhm ON rhm.rfq_id = r.id
-     LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
-     WHERE ${companyScope()} AND po.status = 'rejected_by_vendor'
-     AND NOT EXISTS (
-       SELECT 1 FROM tbl_rfq_purchase_order po2
-       JOIN tbl_purchase_order_product pop2 ON pop2.purchase_order_id = po2.id
-       WHERE po2.rfq_id = po.rfq_id
-       AND pop2.rfq_product_id = pop.rfq_product_id
-       AND po2.id != po.id
-       AND po2.status NOT IN ('rejected_by_vendor', 'cancelled')
-     )
-     AND rhm.hotel_id = ANY($2)
-     ${sc}
-     GROUP BY po.id, po.rfq_id, po.status, po.created_at, po.vendor_action_at,
-       r.title, r.rfq_no, u_vendor.name, c_vendor.company_name, u_vendor.organization_name, hch.name
-     ORDER BY po.vendor_action_at DESC NULLS LAST`,
+     WHERE ${rejectedAwaitingReplacement(`po.status IN ('rejected_by_vendor', 'rejected')`)}
+       AND ${rfqVisible(user_id, 'r', params)}
+     ORDER BY COALESCE(po.vendor_action_at::timestamptz, po.updated_at) DESC NULLS LAST, po.id DESC`,
     params
   );
 }
@@ -1517,10 +1526,10 @@ async function getMyDraftsData(buyer_company_id, user_id, hotel_ids, start_date,
   }
   // Drafts: is_published=0 AND status NOT IN (5 withdrawn, 2 closed).
   // Date filter applies on r.timestamp (creation/touch time).
-  const dateClause = start_date && end_date
-    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+  const dateClause = start_date || end_date
+    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
     : "";
-  const params = start_date && end_date
+  const params = start_date || end_date
     ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
     : [buyer_company_id, user_id, hotel_ids];
   const rows = await db.any(
@@ -1557,10 +1566,10 @@ async function getMyActiveRfqsData(buyer_company_id, user_id, hotel_ids, start_d
   if (!hotel_ids || hotel_ids.length === 0) {
     return { total: 0, stages: [] };
   }
-  const dateClause = start_date && end_date
-    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+  const dateClause = start_date || end_date
+    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
     : "";
-  const params = start_date && end_date
+  const params = start_date || end_date
     ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
     : [buyer_company_id, user_id, hotel_ids];
   // "Live" = is_published=1 AND status=1 (Open).
@@ -1633,10 +1642,10 @@ async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids, sta
   // RFQs whose bid window has already closed move to the urgent-attention
   // widget (getMyRfqsBidClosedNoQuotesData) — not surfaced here so
   // creators can focus on RFQs they can still salvage.
-  const dateClause = start_date && end_date
-    ? `AND r."timestamp" BETWEEN $4::timestamp AND $5::timestamp`
+  const dateClause = start_date || end_date
+    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
     : "";
-  const params = start_date && end_date
+  const params = start_date || end_date
     ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
     : [buyer_company_id, user_id, hotel_ids];
   const rows = await db.any(
@@ -2589,185 +2598,102 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
 //  The FE derives mode (clear / steady / action_needed / critical) from the
 //  numbers — we do the same here so two clients can't disagree on tone.
 // ─────────────────────────────────────────────────────────────────────
-async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [], start_date, end_date) {
-  // When a date range is supplied (the dashboard always sends one), the
-  // period-based counts are bounded to it so the banner reflects the selected
-  // range (Sr feedback). Forward-looking signals (closing-soon) stay live.
-  const hasDates = !!(start_date && end_date);
+async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [], start_date = null, end_date = null) {
+  // Every count below is a QUEUE about the caller's own work and is NOT
+  // windowed by the date range (SPEC rule 2) — only the `period` stats are.
+  // Definitions come from dashboardMetrics so the banner agrees with the
+  // Action Centre and the drill-downs it opens.
   const params = [buyer_company_id, user_id, hotel_ids, start_date, end_date];
+  const mine = `r.created_by = $2
+        AND r.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+        AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))`;
 
-  // 1. Approvals where I'm the current-step approver, still pending.
+  // 1. Approvals waiting on me — distinct actionable items, same predicate as
+  //    the Action Centre badge and the pending-approvals list.
   const pendingApprovalsP = db.one(
-    `SELECT COUNT(*)::INTEGER AS count
-       FROM tbl_approval_instances i
-       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-      WHERE i.status = 'PENDING'
-        AND sa.approver_user_id = $2
-        AND sa.status = 'PENDING'
-        AND s.step_order = i.current_step
-        AND i.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND NOT (
-          i.entity_type IN ('RFQ', 'TENDER')
-          AND EXISTS (SELECT 1 FROM tbl_rfq r WHERE r.id = i.entity_id AND r.is_published = 1)
-        )
-        AND i.hotel_id = ANY($3)
-        ${hasDates ? 'AND i.created_at BETWEEN $4 AND $5' : ''}`,
+    `SELECT COUNT(DISTINCT ${approvalItemKey('i')})::int AS count
+     ${myPendingApprovalsFrom(2, 1, 3)}`,
     params
   );
 
-  // 2. Closing soon — *my* published RFQs whose bid window ends in <24h
-  //    and still has not received any quotes (the most urgent variant).
+  // 2. My published RFQs whose bid window closes in the next 24h (exact IST).
   //    Also returns the soonest one for the subline copy.
-  const closingSoonP = db.oneOrNone(
-    `SELECT COUNT(*)::INTEGER AS count,
-            MIN(r.bid_end_date::timestamp) AS soonest_bid_end,
-            (SELECT json_build_object('id', _r.id, 'title', _r.title, 'rfq_no', _r.rfq_no)
-               FROM tbl_rfq _r
-              WHERE _r.created_by = $2
-                AND _r.is_published = 1
-                AND _r.status = 1
-                AND _r.bid_end_date IS NOT NULL AND _r.bid_end_date != ''
-                AND _r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
-                AND _r.hospitality_company_id IN (
-                  SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-                )
-                AND EXISTS (
-                  SELECT 1 FROM tbl_rfq_hotel_mappings _rhm
-                   WHERE _rhm.rfq_id = _r.id AND _rhm.hotel_id = ANY($3)
-                )
-              ORDER BY _r.bid_end_date::timestamp ASC
-              LIMIT 1) AS soonest
-       FROM tbl_rfq r
-      WHERE r.created_by = $2
-        AND r.is_published = 1
-        AND r.status = 1
-        AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-        AND r.bid_end_date::timestamp BETWEEN ${IST_NOW} AND ${IST_NOW} + INTERVAL '24 hours'
-        AND r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )`,
+  const closingSoonP = db.one(
+    `WITH c AS (
+       SELECT r.id, r.title, r.rfq_no, r.bid_end_date::timestamp AS bid_end
+         FROM tbl_rfq r
+        WHERE ${mine}
+          AND r.is_published = 1 AND r.status = 1
+          AND ${hasBidEnd('r')}
+          AND r.bid_end_date::timestamp > ${IST_NOW}
+          AND r.bid_end_date::timestamp <= ${IST_NOW} + INTERVAL '24 hours'
+     )
+     SELECT COUNT(*)::int AS count,
+            MIN(bid_end) AS soonest_bid_end,
+            (SELECT json_build_object('id', c2.id, 'title', c2.title, 'rfq_no', c2.rfq_no)
+               FROM c c2 ORDER BY c2.bid_end ASC, c2.id LIMIT 1) AS soonest
+       FROM c`,
     params
   );
 
-  // 3. Bid passed, zero real quotes — *the* signal that vendors aren't biting.
-  //    Drives critical mode; surfaced even when only 1 hits.
-  //    NOTE: status = 1 (open) only, matching RFQ_STUCK_COMMERCIAL in the list-view
-  //    so the banner count and the "Ended · No Quotes" filtered list agree.
-  //    The banner is scoped to r.created_by = me whereas the list-view is scoped to
-  //    all RFQs visible to the buyer, so the banner count is a subset of the list —
-  //    this is intentional (banner = "your" RFQs; list = "all you can see").
+  // 3. Bid passed with no real offer — *the* signal that vendors aren't biting,
+  //    and alone drives critical mode. Same definition as the no-response
+  //    drill-down's `expired` group (published, OPEN, bid closed at exact IST
+  //    time, no non-regret quote), restricted to the caller's own RFQs.
   const closedNoQuotesP = db.one(
-    `SELECT COUNT(*)::INTEGER AS count
+    `SELECT COUNT(*)::int AS count
        FROM tbl_rfq r
-      WHERE r.created_by = $2
-        AND r.is_published = 1
-        AND r.status = 1
-        AND r.bid_end_date IS NOT NULL AND r.bid_end_date != ''
-        AND r.bid_end_date::timestamp < ${IST_NOW}
-        ${hasDates
-          // $4/$5 stay bare on purpose — see IST_NOW's comment. They are naive
-          // `YYYY-MM-DD` strings from the FE's local-time date picker and
-          // Postgres types them as `timestamp without time zone`, so this
-          // branch is already IST-vs-IST. `AT TIME ZONE` here would shift the
-          // user's selected calendar window by 5h30m.
-          ? 'AND r.bid_end_date::timestamp BETWEEN $4 AND $5'
-          : `AND r.bid_end_date::timestamp > ${IST_NOW} - INTERVAL '14 days'`}
-        AND r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id AND (q.is_regret IS NULL OR q.is_regret != 1)
-        )`,
+      WHERE ${mine}
+        AND r.is_published = 1 AND r.status = 1
+        AND ${bidClosed('r')}
+        AND NOT ${hasRealQuote('r')}`,
     params
   );
 
-  // 4. My RFQs sitting in quote-compare gate (quotes in, no live negotiation,
-  //    no PO yet). Buyer's window to act on vendor selection.
+  // 4. My RFQs ready for quote comparison: bid closed (quotes are sealed until
+  //    then), at least one real quote, no round in flight, no PO yet.
   const quoteCompareReadyP = db.one(
-    `SELECT COUNT(*)::INTEGER AS count
+    `SELECT COUNT(*)::int AS count
        FROM tbl_rfq r
-      WHERE r.created_by = $2
-        AND r.is_published = 1
-        AND r.status = 1
-        AND r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id
-            AND (q.is_regret IS NULL OR q.is_regret != 1)
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM tbl_negotiation_rounds nr
-           WHERE nr.rfq_id = r.id AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
-        )
-        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
-        ${hasDates ? 'AND r.timestamp BETWEEN $4 AND $5' : ''}`,
+      WHERE ${mine}
+        AND r.is_published = 1 AND r.status = 1
+        AND ${bidClosed('r')}
+        AND ${hasRealQuote('r')}
+        AND NOT ${liveRoundExists('r')}
+        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)`,
     params
   );
 
-  // 5. POs in acceptance_pending — vendor hasn't acknowledged yet. Surfaced
-  //    so the buyer knows they may need to nudge.
+  // 5. My POs the vendor hasn't acknowledged yet.
   const poAcceptancePendingP = db.one(
-    `SELECT COUNT(*)::INTEGER AS count
+    `SELECT COUNT(*)::int AS count
        FROM tbl_rfq_purchase_order po
        JOIN tbl_rfq r ON r.id = po.rfq_id
-      WHERE po.status = 'acceptance_pending'
-        AND r.created_by = $2
-        AND r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )
-        ${hasDates ? 'AND po.created_at BETWEEN $4 AND $5' : ''}`,
+      WHERE po.status = 'acceptance_pending' AND ${mine}`,
     params
   );
 
-  // 6. Weekly wins — RFQs the user published in the last 7 days (used for
-  //    appreciation copy). Bounded to 7 calendar days regardless of NOW().
-  const weeklyPublishedP = db.one(
-    `SELECT COUNT(*)::INTEGER AS count
-       FROM tbl_rfq r
-      WHERE r.created_by = $2
-        AND r.is_published = 1
-        ${hasDates ? 'AND r.timestamp BETWEEN $4 AND $5' : "AND r.timestamp >= NOW() - INTERVAL '7 days'"}
-        AND r.hospitality_company_id IN (
-          SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-        )
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )`,
+  // 6. Period stats (the only windowed part): RFQs I published, and the
+  //    realised (awarded, D2) savings % on my RFQs negotiated in the window.
+  //    Without a window, the last 7 days.
+  const hasWindow = !!(start_date || end_date);
+  const rfqWin = hasWindow
+    ? windowSql('r.timestamp', FRAME.SESSION, 4, 5)
+    : `r.timestamp >= (NOW() - INTERVAL '7 days')::timestamp`;
+  const nrWin = hasWindow
+    ? windowSql('nr.created_at', FRAME.SESSION, 4, 5)
+    : `nr.created_at >= (NOW() - INTERVAL '7 days')::timestamp`;
+
+  const periodPublishedP = db.one(
+    `SELECT COUNT(*)::int AS count FROM tbl_rfq r
+      WHERE ${mine} AND r.is_published = 1 AND ${rfqWin}`,
     params
   );
-
-  // 7. Weekly savings — the user's own RFQs whose rounds *started* this week,
-  //    priced by the shared ladder (see getNegotiationSavingsData). The ids are
-  //    scoped here; the pricing itself carries no scope of its own.
-  const weeklySavingsRfqsP = db.any(
+  const periodSavingsRfqsP = db.any(
     `SELECT DISTINCT nr.rfq_id
        FROM tbl_negotiation_rounds nr
        JOIN tbl_rfq r ON r.id = nr.rfq_id
-      WHERE r.hospitality_company_id IN (
-        SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1
-      )
-        AND r.created_by = $2
-        ${hasDates ? 'AND nr.created_at BETWEEN $4 AND $5' : "AND nr.created_at >= NOW() - INTERVAL '7 days'"}
-        AND EXISTS (
-          SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-           WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3)
-        )`,
+      WHERE ${mine} AND ${nrWin}`,
     params
   );
 
@@ -2777,27 +2703,27 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
     closedNoQuotes,
     quoteCompareReady,
     poAcceptancePending,
-    weeklyPublished,
-    weeklySavingsRfqs,
+    periodPublished,
+    periodSavingsRfqs,
   ] = await Promise.all([
     pendingApprovalsP,
     closingSoonP,
     closedNoQuotesP,
     quoteCompareReadyP,
     poAcceptancePendingP,
-    weeklyPublishedP,
-    weeklySavingsRfqsP,
+    periodPublishedP,
+    periodSavingsRfqsP,
   ]);
 
-  const weeklySavings = await priceNegotiations(weeklySavingsRfqs.map((r) => r.rfq_id));
-  const baseline = weeklySavings.baseline;
-  const negotiated = weeklySavings.achieved;
-  const savings_pct = baseline > 0 ? Math.round(((baseline - negotiated) / baseline) * 1000) / 10 : 0;
+  const savings = await priceNegotiations(periodSavingsRfqs.map((r) => r.rfq_id));
+  const savings_pct = savings.baseline_awarded > 0
+    ? round1(((savings.baseline_awarded - savings.achieved_awarded) / savings.baseline_awarded) * 100)
+    : 0;
 
   // Mode is derived here so server and client agree on tone.
   const counts = {
     pending_approvals: pendingApprovals.count,
-    closing_soon: closingSoon?.count || 0,
+    closing_soon: closingSoon.count,
     closed_no_quotes: closedNoQuotes.count,
     quote_compare_ready: quoteCompareReady.count,
     po_acceptance_pending: poAcceptancePending.count,
@@ -2817,14 +2743,20 @@ async function getBuyerStatusBannerData(buyer_company_id, user_id, hotel_ids = [
     mode = 'steady';
   }
 
+  const period = {
+    rfqs_published: periodPublished.count,
+    savings_pct,
+    savings_basis: 'awarded',
+    windowed: hasWindow,
+  };
+
   return {
     mode,
     counts,
-    soonest_closing: closingSoon?.soonest || null,
-    weekly: {
-      rfqs_published: weeklyPublished.count,
-      savings_pct,
-    },
+    soonest_closing: closingSoon.soonest || null,
+    period,
+    // Deprecated alias of `period` — it was never weekly when a range is set.
+    weekly: { rfqs_published: period.rfqs_published, savings_pct },
   };
 }
 

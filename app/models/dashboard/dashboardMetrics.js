@@ -178,7 +178,8 @@ export const approvalItemKey = (i = 'i') =>
  * FROM + WHERE for "approval steps sitting on me right now".
  *
  * Mirrors generalModel.getPendingApprovalCountsByEntityType (the nav badge):
- *   · I am a PENDING approver on the instance's CURRENT, PENDING step;
+ *   · I am a PENDING, not-removed approver on the instance's CURRENT, PENDING
+ *     step (a REMOVED approver keeps a tombstone row — see getPendingNegotiationParentIds);
  *   · NULL-hotel instances are included (company-level approvals);
  *   · a publish approval on an already-published RFQ is not actionable;
  *   · a NEGOTIATION round whose vendor window has closed is not actionable.
@@ -199,6 +200,7 @@ export function myPendingApprovalsFrom(userIdx, buyerIdx, hotelsIdx) {
      AND s.step_order = i.current_step
      AND sa.approver_user_id = $${userIdx}
      AND sa.status = 'PENDING'
+     AND sa.removed_at IS NULL
      AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $${buyerIdx})
      AND (i.hotel_id IS NULL OR i.hotel_id = ANY($${hotelsIdx}))
      AND NOT (
