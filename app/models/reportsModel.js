@@ -53,7 +53,7 @@ export const REPORT_ROW_CAP = 50000;
  * Requires `pv` (tbl_product_variant) in scope. See the double-count note at
  * the top of this file — do not reach a category any other way.
  */
-const LEAF_CATEGORY_JOIN = `
+export const LEAF_CATEGORY_JOIN = `
   LEFT JOIN LATERAL (
     SELECT c.id, c.title, c.parent_id
       FROM tbl_product_categories pc
@@ -97,10 +97,14 @@ function spendBase(scope, { from, to }, values, startIndex) {
   // The FY window is Indian wall-clock; created_at is an absolute instant.
   // Comparing the two without AT TIME ZONE moves every boundary by 5h30m and
   // silently files the first evening of April into the previous year.
+  // The ::timestamp hop matters: `<date> AT TIME ZONE` resolves the date via
+  // the SESSION zone first (timestamptz wins the implicit cast), so on prod's
+  // UTC session the bound landed at 11:00 IST instead of midnight. Casting to
+  // a naive timestamp first makes AT TIME ZONE read the wall clock as IST.
   const where = `
       po.status = ANY($${statusIdx}::po_status[])
-      AND po.created_at >= ($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata')
-      AND po.created_at <  ($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata')
+      AND po.created_at >= ($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+      AND po.created_at <  ($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata')
       AND ${scoped.clause}`;
 
   return { where, nextIndex: i };
@@ -675,8 +679,8 @@ export async function poApprovalTat(scope, { from, to }) {
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE ai.completed_at IS NOT NULL
-        AND ai.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND ai.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ai.completed_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ai.completed_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       ORDER BY ai.completed_at DESC
       LIMIT ${REPORT_ROW_CAP}`,
@@ -723,8 +727,8 @@ export async function poApprovalTatByApprover(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE a.acted_at IS NOT NULL
         AND a.status IN ('APPROVED', 'REJECTED')
-        AND a.acted_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND a.acted_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND a.acted_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND a.acted_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       GROUP BY 1, 2, 3, 4
       ORDER BY decisions DESC, avg_hours DESC
@@ -763,8 +767,8 @@ export async function poApprovalTatByStage(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE s.completed_at IS NOT NULL
         AND s.status = 'APPROVED'
-        AND s.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND s.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND s.completed_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND s.completed_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       GROUP BY 1
       ORDER BY 1`,
@@ -974,8 +978,8 @@ export async function approvalAuditTrail(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
        LEFT JOIN tbl_hospitality_company_hotels h
               ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
-      WHERE act.created_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND act.created_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+      WHERE act.created_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND act.created_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       ORDER BY act.created_at DESC
       LIMIT ${REPORT_ROW_CAP}`,
@@ -1157,8 +1161,8 @@ export async function rejectedPoLog(scope, { from, to }) {
           ORDER BY p2.created_at ASC
           LIMIT 1
        ) rr ON TRUE
-      WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata')
-        AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata')
+      WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+        AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata')
       ORDER BY COALESCE(e.event_at, e.updated_at) DESC
       LIMIT ${REPORT_ROW_CAP}`,
     values

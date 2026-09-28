@@ -1,5 +1,24 @@
 import db from '../config/dbConn.js';
-import { buildScopeExistsClause } from '../services/authorizationService.js';
+import {
+  scopeTuplesFilter,
+  windowSql,
+  FRAME,
+  normalizeDate,
+  bidOpen,
+  bidClosed,
+  hasBidEnd,
+  realQuote,
+  pricedItem,
+  hasRealQuote,
+  liveRoundExists,
+  spendStatusSql,
+  lineVariant,
+  approvalItemKey,
+  myPendingApprovalsFrom,
+  LEAF_CATEGORY_JOIN,
+  round1,
+  round2,
+} from './dashboard/dashboardMetrics.js';
 import negotiationModel from './negotiationModel.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 
@@ -147,15 +166,11 @@ const COMMERCIAL_SCOPE_PERMISSIONS = ['quote-compare.read', 'negotiation.read', 
  * @param {string[]} permissions
  */
 function scopeFilter(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS) {
-  let i = params.length + 1;
-  const clauses = [];
-  for (const perm of permissions) {
-    const built = buildScopeExistsClause(user_id, perm, alias, i);
-    clauses.push(built.clause);
-    params.push(...built.params);
-    i += built.paramsConsumed;
-  }
-  return `AND (${clauses.join(' OR ')})`;
+  // Same predicate as buildScopeExistsClause OR-composed over `permissions`,
+  // but with the caller's scope tuples materialised once per query (an
+  // InitPlan) instead of a correlated role/permission join per row — see
+  // dashboardMetrics.scopeTuplesFilter.
+  return scopeTuplesFilter(user_id, alias, params, permissions);
 }
 
 /**
