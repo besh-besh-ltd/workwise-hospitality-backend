@@ -151,6 +151,84 @@ The FE should stop sending `_refresh` and `duration_type` (ignored).
 Cause fixed: the RBAC scope clause is now an InitPlan over the caller's scope tuples
 (`dashboardMetrics.scopeTuplesFilter`) instead of a correlated role→permission join per row.
 
+### Persona widgets (BE-PERSONA, backend `feat/dashboard-v3-persona`)
+
+Routes (all `GET /api/v1/dashboard-v2/…`, query `hotel_ids`, `start_date`, `end_date`).
+**Queues ignore the date range; period widgets (marked ⏱) honour it.** Every list
+returns a TRUE `count` next to `items` capped at 20.
+
+Removed routes (catalogue v1 cuts): `tech-eval-throughput`, `tech-approval-oldest-pending`,
+`tech-approval-throughput`, `deals-with-price-anomalies`, `commercial-approval-throughput`.
+
+| Route | Response `data` |
+|---|---|
+| `my-drafts` | `{count, oldest_created_at, items:[{id, rfq_no, title, product_count, created_at}]}` — draft = `is_published=0 AND status NOT IN (2,3,4,5)`, i.e. status 3/4 (awaiting publish approval) is NOT a draft. `oldest_updated_at`/`updated_at` renamed (it was the creation time). |
+| `my-active-rfqs` | `{total, stages:[{stage, label, count, oldest_age_days}]}` — `stage` is the **lifecycle key** from `rfqModel.computeLifecycleStages` (`RFQ_APPROVAL`, `AWAITING_QUOTES`, `TECHNICAL_AWAITING_QUOTES`, `TECHNICAL_EVALUATING`, `TECHNICAL_APPROVING`, `TECHNICAL_REJECTED`, `RFQ_STUCK_TECHNICAL`, `RFQ_STUCK_COMMERCIAL`, `COMMERCIAL_EVALUATION`, `NEGOTIATION_ONGOING`, `QUOTATION_APPROVAL`, `AWAITING_PO`, `PO_APPROVAL`, `PO_VENDOR_REJECTED`), label = the listing's STATUS_META label, ordered by lifecycle. Completed RFQs excluded. |
+| `my-no-response-rfqs` | `{count, silent_vendor_count, items:[{id, rfq_no, title, bid_end_date, silent_vendor_count, total_vendor_count}]}` — bid still open (exact IST); a regret IS a response. Ordered closing-soonest first. |
+| `my-rfqs-bid-closed-no-quotes` | `{count, items:[{id, rfq_no, title, bid_end_date, days_overdue, regret_count}]}` — status 1 only; no REAL quote (regret-only included). |
+| `my-tech-evals-pending` | `{count, oldest_waiting_since, items:[{id, rfq_id, rfq_product_id, rfq_no, rfq_title, product_name, opened_at, waiting_since}]}` — actionable only: published + open, bid closed, a real quote, no live PO on the product, no PENDING TECHNICAL approval for it. `waiting_since` = bid close (IST text). `product_id` removed → `rfq_product_id`. Shared queue (title must not say "My"). |
+| `tech-evals-with-disagreements` | `{count, total_disagreement_clauses, items:[{id, rfq_id, rfq_product_id, rfq_no, rfq_title, product_name, disagreeing_vendor_count, disagreeing_clause_count}]}` — matches `I Dont Agree` / `I do not agree` / `disagree` (normalised), open RFQs only. |
+| `my-tech-approvals-pending` | approval queue, `TECHNICAL` (see shape below). Absorbs "oldest pending". |
+| `my-rfq-approvals-pending` (new) | approval queue, `RFQ` + `TENDER`. |
+| `my-commercial-approvals-pending` | approval queue **with `total_value`**, `NEGOTIATION_QUOTE` ("Negotiated quotes awaiting me"). `top_by_value` removed. |
+| `my-award-approvals-pending` | approval queue **with `total_value`**, `PO` ("POs awaiting my approval"). |
+| `approval-turnaround` ⏱ (new) | `{window:{start_date,end_date}, tabs:[{key, label, n, median_hours, p90_hours, instant_count}]}`, keys in order `tech_eval`, `tech_approval`, `quote_approval`, `po_approval`, `rfq_approval` (always all five; empty → `n:0`, nulls). Approvals: my APPROVED/REJECTED decisions, from the step reaching me to my action. `tech_eval`: my first TECHNICAL submission per product, measured from bid close. `instant_count` = decided within a minute. |
+| `my-quote-compares` | `{count, items:[{id, rfq_no, title, vendor_count, bid_closed_at}]}` — exactly the RFQs whose lifecycle stage is `COMMERCIAL_EVALUATION` (the listing's "Commercial Evaluation" facet). `vendor_count` = real (non-regret) quoting vendors. `entered_qc_at` → `bid_closed_at`. |
+| `my-active-negotiations` | `{count, awaiting_approval_count, total_silent_vendors, items:[{id, rfq_id, rfq_no, rfq_title, round_number, round_status, round_end_date, invited_vendor_count, silent_vendor_count}]}` — my rounds that are `ACTIVE` with the window open, or `PENDING_APPROVAL` (`silent_vendor_count: null`). ACTIVE first. |
+| `savings-pipeline` ⏱ | `{basis:'awarded', total_savings, prior_period_savings, negotiation_count, avg_savings_pct, all_vendors_savings, window, prior_window}` — negotiations I led (earliest non-cancelled round is mine) that CONCLUDED in the window (no live round; concluded = last round's close). Prior window = the same length immediately before; "All" (no start) → `prior_period_savings: null`, `prior_window: null`. |
+| `recent-awards` ⏱ | `{count, total_value, window, items:[{po_id, po_number, rfq_id, rfq_no, rfq_title, vendor_name, value, status, approved_at, approved_by_me}]}` — POs in my scope whose PO approval completed in the window (default last 30 days). |
+| `award-value-pipeline` ⏱ | `{committed_value, committed_po_count, pending_value, pending_po_count, stages:[{key, label, value, po_count}]}` — POs raised in the window; `stages` keys `in_approval`, `awaiting_acceptance`, `approved`, `in_fulfilment` (sent/dispatched/GRN/invoice_raised), `completed`, `rejected`; drafts + cancelled excluded. `completed_value`/`ongoing_value` removed. |
+
+**Approval queue shape** (the four approval routes):
+`{count, [total_value], oldest_waiting_since, oldest_age_days, items:[{approval_id, item_key, entity_type, instance_count, rfq_id, rfq_no, rfq_title, rfq_product_ids:[], product_names:[], po_id, po_number, vendor_names:[], value, submitted_at, waiting_since, age_days, submitted_by_name, hotel_name}]}`.
+Same predicate + item key as `pending-approvals` / the Action Centre badge ⇒ each queue's
+`count` equals its entity types' rows in `pending-approvals` (tested). One item per
+actionable decision (TECHNICAL / NEGOTIATION_QUOTE collapse to the RFQ). `value` = PO
+`total_value` or the NEGOTIATION_QUOTE `po_payload.total_value`, latest instance per
+product/PO (never summed across re-submissions). `waiting_since` = when the current step
+reached me. Oldest first. Link with `approvalHref(entity_type, {rfqId: rfq_id, poId: po_id})`.
+
+`POST /rfq/list-view` **+`filters.mine`** (`true`/`'true'`): only RFQs created by the JWT
+user; tab counts and facets computed over that set. Use it for My-drafts / My-active
+"View all". `POST /negotiation/list-view` already had `filters.rfqId` — no change needed.
+
+### Deviations / notes (BE-PERSONA)
+
+- **Queues vs periods.** Drafts, active RFQs, no-response, closed-without-quotes, tech evals,
+  disagreements, quote compares, live negotiations and all approval queues are undated
+  (SPEC rule 2); only the four ⏱ widgets take the header range.
+- **Own RFQs with a NULL company.** Early drafts carry `hospitality_company_id` NULL (4 of
+  users 322/392's 12 drafts on prod). The four creator widgets accept that for the caller's
+  own RFQs; the hotel-mapping predicate still bounds the tenant.
+- **Recent awards / PO value by stage are business-unit views** (RBAC-scoped), not "mine";
+  `approved_by_me` flags my own approvals. ARC call-off POs (`rfq_id` NULL) are not included
+  here (0 on prod); the spend cards include them.
+- **Prod data finding — RFQ approvals.** 288 of 290 PENDING RFQ approvals sit on RFQs that are
+  already published, so the shared predicate (and the approve page) treat them as not
+  actionable: user 177 has 80 PENDING rows and an empty "RFQs awaiting my approval". These
+  are stale instances for the approval-shape clean-up, not a widget bug.
+
+### Prod verification (read-only, 2026-09-28) — widget vs independent SQL
+
+Independent SQL = hand-written counts without the shared helpers (script
+`/tmp/dashperf/persona.mjs`).
+
+| User | Widget | Widget | Independent / drill-down |
+|---|---|---|---|
+| 157 (heavy NQ approver, 50 instances) | Negotiated quotes awaiting me | 3 items, ₹1,20,547.88 (RFQ 536435 = 26 instances, ₹94,379) | 3 / 3 drill-down rows; old widget: 50 blank ₹0 rows |
+| 157 | Tech evals pending / quote compares | 1 / 5 | — |
+| 177 (80 PENDING RFQ approvals) | RFQs awaiting my approval | 0 | 0 (all 80 on published RFQs) |
+| 177 | Tech evals pending / disagreements / quote compares | 12 / 3 / 11 | old: 212-row queue, disagreements always 0 |
+| 177 | Recently approved POs (30 d) | 17, ₹2.19 Cr | — |
+| 322 (narrow scope) | Drafts / closed without quotes / active | 3 / 5 / 20 | 3 / 5 / — |
+| 322 | Active stages | RFQ_APPROVAL 2 · AWAITING_QUOTES 1 · RFQ_STUCK_COMMERCIAL 5 · COMMERCIAL_EVALUATION 11 · AWAITING_PO 1 | — |
+| 392 | Drafts (incl. one created today) / closed without quotes | 9 / 2 | 9 / 2 |
+
+Every approval item resolved to an RFQ (0 blank rows across the four queues for all four users).
+
+Timing (prod, user 180, 24 hotels, laptop incl. ~26 ms RTT): every persona function 26–68 ms;
+all 16 in parallel 427 ms.
+
 ## Link contract
 
 Frontend module `components/dashboard/shared/dashboardLinks.js` (frontend branch
@@ -193,13 +271,12 @@ page reads. There is no `/dashboard/buyer/approval` page — never emit it.
    is one of the builder names above (e.g. `{type:"rfqList", params:{search:"<product>"}}`,
    `{type:"reports"}`), and the FE resolves it through dashboardLinks.
 
-### Backend gaps discovered (not blocking; "View all" is scope-wide until added)
+### Backend gaps discovered (status)
 
-- RFQ list-view has no "created by me" filter, so "My drafts / My active RFQs" View-all
-  shows every RFQ in the caller's scope for that tab/status. Add `filters.mine=true`
-  (`created_by = req.user.id`) to `POST /rfq/list-view` and a `mine` param to the builder.
+- ~~RFQ list-view has no "created by me" filter~~ — DONE: `filters.mine` (BE-PERSONA).
+  The FE builder still needs a `mine` param that the list page forwards.
 - `sort=deadline` sorts ascending on `bid_end_date` without excluding past deadlines; fine
   while `AWAITING_QUOTES` implies an open bid window — confirm in `computeLifecycleStages`,
   otherwise add a `bid_open` filter for the closing-soon view.
-- Negotiation list-view has no per-RFQ filter (only free-text search on title/number);
-  per-RFQ links therefore go to the level-2 page `negotiation/<rfqId>` instead.
+- Negotiation list-view: `filters.rfqId` already exists server-side; per-RFQ links going to the
+  level-2 page `negotiation/<rfqId>` is fine and needs no change.
