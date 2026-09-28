@@ -1,9 +1,19 @@
 import { Router } from 'express';
 import passport from '../../middleware/passport.js';
 import dashboardController from '../../controllers/dashboard/dashboardController.js';
+import dashboardWidgetGuard from '../../middleware/dashboardWidgetGuard.js';
 
-const passportSignIn = passport.authenticate('jwtUsr', { session: false });
+// Every /dashboard-v2 route is signed-in AND widget-guarded: once a buyer
+// company runs the role-aware dashboard, each endpoint requires its
+// dashboard.<code> grant (route → code map in dashboardWidgetGuard.js, which
+// also lists the few routes every buyer may call). Folding the guard into the
+// shared middleware means a newly added route cannot forget it — an unmapped
+// route is refused while the company switch is on.
+const passportSignIn = [passport.authenticate('jwtUsr', { session: false }), dashboardWidgetGuard];
 const DashboardRoutes = Router();
+
+// Which dashboard layout this buyer company runs, and who to contact for access.
+DashboardRoutes.get('/config', passportSignIn, dashboardController.getConfig);
 
 DashboardRoutes.get('/action-center', passportSignIn, dashboardController.getActionCenter);
 // Single-call status banner shown at the top of /dashboard/buyer. Returns

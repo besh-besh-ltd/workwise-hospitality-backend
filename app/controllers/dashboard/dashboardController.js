@@ -1,4 +1,5 @@
 import dashboardModel from '../../models/dashboardModel.js';
+import dashboardConfigModel from '../../models/dashboard/dashboardConfigModel.js';
 import { normalizeDate } from '../../models/dashboard/dashboardMetrics.js';
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
@@ -35,7 +36,12 @@ const resolveScope = async (req, res) => {
     return null;
   }
 
-  const scope = await dashboardModel.resolveUserScope(user_id, selectedHotelIds);
+  // The widget guard has usually resolved this already (same user, same
+  // hotel_ids); reuse it rather than re-running the mapping queries.
+  const cached = req.dashboardScope;
+  const scope = cached && cached.key === selectedHotelIds.join(',')
+    ? cached.scope
+    : await dashboardModel.resolveUserScope(user_id, selectedHotelIds);
   if (!scope) {
     res.status(403).json({ status: 0, message: 'No hospitality access found for this user' }).end();
     return null;
@@ -50,6 +56,29 @@ const resolveScope = async (req, res) => {
 };
 
 const dashboardController = {
+  // Which dashboard layout the caller's buyer company runs (SPEC D5), read at
+  // request time so a company can be switched on — or back off — without a
+  // deploy. A buyer with no hospitality access gets the legacy layout, whose
+  // own widgets then explain the missing access.
+  getConfig: async (req, res) => {
+    try {
+      if (Number(req.user.user_type) === VENDOR_USER_TYPE) {
+        return res.status(403).json({ status: 0, message: 'Insufficient permissions' }).end();
+      }
+      const scope = await dashboardModel.resolveUserScope(req.user.id, []);
+      const v3_enabled = scope ? await dashboardConfigModel.isV3Enabled(scope.buyer_company_id) : false;
+      const data = { v3_enabled };
+      if (v3_enabled) {
+        const email = await dashboardConfigModel.getAdminContactEmail(scope.buyer_company_id);
+        if (email) data.admin_contact_email = email;
+      }
+      res.status(200).json({ status: 1, data }).end();
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
   getActionCenter: async (req, res) => {
     try {
       const scope = await resolveScope(req, res);
