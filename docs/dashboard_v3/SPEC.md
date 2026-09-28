@@ -79,20 +79,81 @@ Cut in v1 (registry entries + permission rows removed; enum values stay):
 
 ## Access & rollout
 
-- Seed migration grants widgets by **capability**, not role id (ids differ stage vs prod):
-  a role gets a widget when it holds the capability permission(s) listed in the migration.
-  Verification query: every user with a PENDING approval step of type T holds the matching
-  approval widget after the seed.
-- Server guard `requireDashboardWidget(code)` on every widget route: when the caller's
-  buyer company has `buyer_dashboard_v3 = false` → pass (legacy); else require the grant in
-  the caller's role scopes. Banner + `/config` are unguarded; modals map to `action_center`.
-- `GET /dashboard-v2/config` → `{ status:1, data:{ v3_enabled:boolean } }`.
-- Enable: `UPDATE tbl_company SET buyer_dashboard_v3 = true WHERE id = <buyer company>`.
-  Kill: set false. Pilot company 90, then 13.
+Implemented (BE-ROLLOUT, backend `feat/dashboard-v3`):
+
+- **Catalogue** — migration `20260928100000_dashboard_v3_widget_catalogue`: registers the 24
+  v1 codes (adds `my_rfq_approvals_pending`, `approval_turnaround`), removes the 5 cut codes'
+  grants + permission rows (grants backed up in `tbl_dashboard_v3_cut_grants` for the down
+  migration), orders the codes persona by persona. `GET /rbac/permissions` lists a
+  resource's actions in `ordering` order, so the role editor receives them grouped.
+- **Switch** — migration `20260928101000_company_buyer_dashboard_v3_flag`:
+  `tbl_company.buyer_dashboard_v3 boolean NOT NULL DEFAULT false`. The app treats a missing
+  column as off, so the code may deploy before the migration.
+- **Default grants** — migration `20260928102000_dashboard_v3_seed_grants`, by capability
+  (never role id), recorded in `tbl_dashboard_seed_grants` so the down migration removes
+  exactly them:
+
+  | Widgets | Granted to roles holding |
+  |---|---|
+  | 8 cross-role cards | any procurement permission (rfq, tender, te, quote-compare, po, commercial, negotiation, awarding, boq, arc, arc-tech, arc-comm, arc-committee, mr) — D3 parity |
+  | my_drafts, my_active_rfqs, my_no_response_rfqs, my_rfqs_bid_closed_no_quotes | `rfq.create` |
+  | my_tech_evals_pending, tech_evals_with_vendor_disagreements | `te.create` / `te.update` |
+  | my_tech_approvals_pending | `te.approve` |
+  | my_quote_compares, my_active_negotiations, savings_pipeline | `quote-compare.create` / `negotiation.create` |
+  | my_commercial_approvals_pending (NEGOTIATION_QUOTE) | `negotiation.approve` / `quote-compare.approve` |
+  | my_award_approvals_pending (PO) | `awarding.approve` |
+  | recent_awards, award_value_pipeline | `awarding.approve` / `awarding.create` |
+  | my_rfq_approvals_pending | `rfq.approve` / `tender.approve` / `boq.approve` |
+  | approval_turnaround | any of the approve capabilities above |
+  | everything | `company.admin` |
+
+  Predicted on prod (read-only dry run 2026-09-28, 234 active mapped buyers):
+
+  | Widget | Roles | Active users |
+  |---|---|---|
+  | 8 cross-role cards | 31 | 232 |
+  | RFQ-creator widgets (4) | 4 | 38 |
+  | tech-eval widgets (2) | 4 | 166 |
+  | my_tech_approvals_pending | 4 | 69 |
+  | my_quote_compares / my_active_negotiations / savings_pipeline | 4 | 46 |
+  | my_commercial_approvals_pending | 5 | 69 |
+  | my_award_approvals_pending | 8 | 11 |
+  | recent_awards / award_value_pipeline | 10 | 39 |
+  | my_rfq_approvals_pending | 5 | 135 |
+  | approval_turnaround | 13 | 164 |
+
+  Approver coverage (users with a PENDING step, or who acted in the last 120 days):
+  PO 9/9, TECHNICAL 21/21, NEGOTIATION_QUOTE 69/69, **RFQ 55/59** — users 157, 206, 503,
+  504 are named on USER-source RFQ policy steps without holding `rfq/tender/boq.approve`;
+  their RFQ approvals still show in the Action Centre and banner. Fix by giving them the
+  Tender Approver role if product wants the widget. **Zero widgets: users 384 and 261**
+  (active buyers holding no role at all — they see nothing anywhere today either).
+- **Guard** — `app/middleware/dashboardWidgetGuard.js`, folded into the routes file's shared
+  signed-in middleware: company switch off → pass; on → the route's code (map
+  `WIDGET_ROUTE_CODES`) must be granted in the caller's role scopes for the BUs in view
+  (`resolveUserScope` hotel set, `getUserPermissionsForHotels` union). Unmapped routes are
+  refused while the switch is on. `/config` and `/buyer-status-banner` are open to every
+  buyer; drill-downs (`/pending-approvals`, `/rejected-pos`, `/no-response`) follow
+  `action_center`. Vendors → controller 403; super admin (user_type 8) passes. Legacy
+  admins (user_type 7) with no role scopes see nothing under V3 — give them Company
+  Administrator.
+- **Config** — `GET /dashboard-v2/config` → `{ status:1, data:{ v3_enabled, admin_contact_email? } }`.
+  Email only when V3 is on: an active `company.admin` holder of the company, else a legacy
+  user_type-7 admin of the company, else omitted. Vendors 403; buyers without hospitality
+  access get `v3_enabled:false`.
 
 ## API contract changes
 
 (Append per endpoint as implemented: field added/renamed/removed, and FE consumer.)
+
+### Rollout endpoints and guard (BE-ROLLOUT, backend `feat/dashboard-v3`)
+
+| Endpoint | Change | FE consumer |
+|---|---|---|
+| `GET /dashboard-v2/config` (new) | `{ status:1, data:{ v3_enabled:boolean, admin_contact_email?:string } }`; vendors 403 | `index.js` layout switch, `EmptyDashboard` contact link |
+| every widget route | `403 { status:0, message }` when the company switch is on and the widget is not granted for the BUs in view | widget error state (should not happen: FE only renders granted widgets) |
+| `GET /rbac/permissions` | `dashboard` actions ordered by catalogue `ordering` (persona order); v1 codes only | admin role editor |
+| `POST /rbac/me/permissions/bulk {key:'dashboard'}` | returns `my_rfq_approvals_pending`, `approval_turnaround`; never the 5 cut codes | `useDashboardWidgets` |
 
 ### Cross-role cards + banner + drill-downs (BE-FOUNDATION, backend `feat/dashboard-v3`)
 
@@ -203,3 +264,51 @@ page reads. There is no `/dashboard/buyer/approval` page — never emit it.
   otherwise add a `bid_open` filter for the closing-soon view.
 - Negotiation list-view has no per-RFQ filter (only free-text search on title/number);
   per-RFQ links therefore go to the level-2 page `negotiation/<rfqId>` instead.
+
+## RUNBOOK — release, pilot, rollback
+
+Order is **DB first**: every migration is idempotent and the application tolerates the
+switch column being absent, so migrations can run before or after the deploy — but grants
+must exist before any company is switched on.
+
+1. **Backup** (prod): `caffeinate -i pg_dump -Fc … hospitality_main > ~/workwise-db-backups/hospitality_main-preDashboardV3-<ts>.dump`, verify the TOC.
+2. **Apply, in order** (stage first, then prod), each with `psql -v ON_ERROR_STOP=1 -f`:
+   1. `migrations/20260928100000_dashboard_v3_widget_catalogue.sql`
+   2. `migrations/20260928101000_company_buyer_dashboard_v3_flag.sql`
+   3. `migrations/20260928102000_dashboard_v3_seed_grants.sql`
+
+   Record each in the ledger: `INSERT INTO pgmigrations (name, run_on) VALUES ('<file name without .sql>', now());`
+3. **Verify** (read-only):
+   ```sql
+   -- catalogue: 24 rows, none of the cut codes
+   SELECT count(*) FROM tbl_permissions WHERE resource::text = 'dashboard';
+   SELECT action FROM tbl_permissions WHERE resource::text = 'dashboard'
+    AND action::text IN ('tech_approval_oldest_pending','deals_with_price_anomalies',
+      'tech_eval_throughput','tech_approval_throughput','commercial_approval_throughput'); -- 0 rows
+   -- switch exists and is off everywhere
+   SELECT id, company_name, buyer_dashboard_v3 FROM tbl_company WHERE buyer_dashboard_v3;  -- 0 rows
+   -- seeded grants (prod dry run: 31 roles hold the cross-role cards)
+   SELECT p.action, count(*) roles FROM tbl_role_permissions rp
+     JOIN tbl_permissions p ON p.id = rp.permission_id
+    WHERE p.resource::text = 'dashboard' GROUP BY 1 ORDER BY 1;
+   SELECT count(*) FROM tbl_dashboard_seed_grants;
+   -- active buyers with no widget at all (prod dry run: 384, 261)
+   SELECT u.id FROM tbl_users u WHERE u.user_type = 2 AND u.status = 1
+     AND EXISTS (SELECT 1 FROM tbl_hospitality_user_mappings m WHERE m.user_id = u.id)
+     AND NOT EXISTS (SELECT 1 FROM tbl_user_role_scopes s JOIN tbl_role_permissions rp ON rp.role_id = s.role_id
+                     JOIN tbl_permissions p ON p.id = rp.permission_id
+                     WHERE s.user_id = u.id AND p.resource::text = 'dashboard');
+   ```
+4. **Deploy** backend then frontend. Nothing changes for users yet — every company is off.
+5. **Pilot**: `UPDATE tbl_company SET buyer_dashboard_v3 = true WHERE id = 90;` (9 users).
+   Smoke: log in as one user per persona, check `GET /dashboard-v2/config` → `v3_enabled:true`,
+   expected widgets render, a widget not granted returns 403. Watch logs for
+   `[dashboardWidgetGuard]` errors. After the pilot week: `… WHERE id = 13;` (253 users).
+6. **Kill switch** (instant, no deploy): `UPDATE tbl_company SET buyer_dashboard_v3 = false WHERE id = <id>;`
+   Users get the legacy layout on their next page load; grants are inert while off.
+7. **Full rollback** (only if the grants/catalogue themselves are wrong), in reverse:
+   `20260928102000_…seed_grants.down.sql`, `20260928101000_…flag.down.sql`,
+   `20260928100000_…widget_catalogue.down.sql`, and delete their `pgmigrations` rows. The
+   seed down removes exactly the rows it inserted; the catalogue down restores the five cut
+   widgets with any grants they had.
+
