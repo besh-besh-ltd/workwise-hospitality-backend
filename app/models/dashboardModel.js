@@ -19,6 +19,7 @@ import {
   round2,
 } from './dashboard/dashboardMetrics.js';
 import negotiationModel from './negotiationModel.js';
+import rfqModel from './rfqModel.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 
 /**
@@ -56,32 +57,17 @@ function hotelFilter(alias = 'r', paramIdx = 4) {
 }
 
 /**
- * "Today" for bid-window purposes, as a DATE.
+ * "Now" for bid-window purposes, as a TIMESTAMP.
  *
  * `tbl_rfq.bid_end_date` is `text NOT NULL` holding a NAIVE IST wall-clock
  * string (see app/helper/quoteVisibility.js — QUOTE_VISIBILITY_TIMEZONE). It
- * carries no offset, so any comparison against `CURRENT_DATE` / `DATE(NOW())`
- * silently resolves through the Postgres SESSION timezone. That is wrong on
- * every deployment whose session timezone is not Asia/Kolkata — notably RDS,
- * which defaults to UTC. Between 18:30 and 24:00 UTC (00:00–05:30 IST) the UTC
- * calendar day still lags the IST one, so a bid that closed at the end of the
- * IST day is not yet reported as closed and every day-count is short by one.
+ * carries no offset, so comparing it with `NOW()` / `CURRENT_DATE` resolves
+ * through the Postgres SESSION timezone — UTC on RDS. Every bid-window test
+ * here compares at wall-clock precision against this IST "now" (the old
+ * `DATE(bid_end_date) < IST_TODAY` calendar-day twin is gone: day-granular
+ * expiry counted RFQs that closed earlier today as still open).
  *
- * `CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'` pins the boundary to IST
- * regardless of session timezone — the same idiom already used for
- * `bid_end_date` in rfqModel.js (:4247, :13236) and hospitalityModel.js (:2005),
- * and the SQL-side twin of arcTime.js / quoteVisibility.js.
- */
-const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
-
-/**
- * "Now" for bid-window purposes, as a TIMESTAMP.
- *
- * The timestamp-granularity twin of IST_TODAY. It exists for the predicates
- * that compare `bid_end_date` at wall-clock precision rather than by calendar
- * day — "closes within the next 24h", "bid window already passed".
- *
- * Same root cause, strictly worse blast radius. `bid_end_date::timestamp` is
+ * Why the IST pin matters: `bid_end_date::timestamp` is
  * naive; `NOW()` is `timestamptz`; Postgres resolves the mixed comparison by
  * promoting the naive side to `timestamptz` **through the session timezone**.
  * So `bid_end_date::timestamp < NOW()` really asks "is this IST wall-clock
@@ -1534,1069 +1520,959 @@ async function getRejectedPOsDetail(buyer_company_id, user_id, hotel_ids = []) {
 // (always req.user.id — backend never trusts client-supplied user id).
 // ═══════════════════════════════════════════════════════════════════
 
-// ── RFQ Creator: my_drafts ─────────────────────────────────────────
-async function getMyDraftsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, oldest_updated_at: null, items: [] };
+// ═════════════════════════════════════════════════════════════════════
+//  Persona widgets — SPEC "Widget catalogue v1" (docs/dashboard_v3/SPEC.md)
+//
+//  Conventions shared by every function below:
+//    · QUEUES are undated (SPEC rule 2): drafts, active RFQs, no-response,
+//      closed-without-quotes, evaluations pending, disagreements, quote
+//      compares, live negotiations and every "awaiting me" approval list.
+//      Only period metrics (savings pipeline, recently approved POs, PO value
+//      by stage, approval turnaround) honour start_date / end_date.
+//    · Lists return a TRUE `count` (window function before LIMIT) next to a
+//      capped `items` list (SPEC rule 4) — the old `count = rows.length`
+//      after `LIMIT 50` silently stopped at 50.
+//    · Every query is bounded by the buyer account ($1), the effective hotel
+//      set, and either `created_by = me`, the caller's RBAC scope tuples, or
+//      the caller being a pending approver — never by a client-supplied id.
+// ═════════════════════════════════════════════════════════════════════
+
+const PERSONA_LIST_LIMIT = 20;
+
+/**
+ * Company bound for the caller's OWN RFQs (created_by = me). Early drafts can
+ * carry hospitality_company_id NULL (prod: 4 of user 322/392's 12 drafts), and
+ * companyScope() alone hid them from their own creator. Every caller pairs this
+ * with created_by = me AND a mapping to one of the caller's allowed hotels, so
+ * the tenant stays bounded by the hotel.
+ */
+const ownRfqCompany = (alias = 'r') => `(${companyScope(alias)} OR ${alias}.hospitality_company_id IS NULL)`;
+
+/** The RFQ is mapped to one of the effective hotels ($idx). */
+const rfqMapped = (alias, idx) =>
+  `EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = ${alias}.id AND rhm.hotel_id = ANY($${idx}))`;
+
+/**
+ * A saved draft: the (status = 1, is_published = 0) pair a new RFQ is
+ * inserted with. Status 3/4 (awaiting publish approval) is NOT a draft — it
+ * is somebody's approval to-do — and 2/5 are closed / withdrawn. Same rule
+ * as the RFQ listing's 'drafts' bucket (rfqController.getRfqListView).
+ */
+const isDraft = (a = 'r') => `(${a}.is_published = 0 AND ${a}.status NOT IN (2, 3, 4, 5))`;
+
+/** A PO line on this RFQ product that is still live (not rejected / cancelled). */
+const livePoForProduct = (rfqIdExpr, rfqProductIdExpr) => `EXISTS (
+  SELECT 1 FROM tbl_rfq_purchase_order po_l
+    JOIN tbl_purchase_order_product pop_l ON pop_l.purchase_order_id = po_l.id
+   WHERE po_l.rfq_id = ${rfqIdExpr}
+     AND pop_l.rfq_product_id = ${rfqProductIdExpr}
+     AND po_l.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled', 'draft'))`;
+
+/**
+ * When the step an approver sits on actually started: step 1 starts with the
+ * instance; step n starts when the last earlier step completed. Every step
+ * row is inserted with its instance (prod: 11 of 3,868 later steps were
+ * created later), so `s.created_at` would measure from submission and
+ * inflate the turnaround of every later step (67% of PO approvals happen at
+ * step ≥ 2: 52h from creation vs 19h from step start).
+ */
+const stepStartedAt = (i = 'i', s = 's') => `GREATEST(${i}.created_at, COALESCE((
+    SELECT MAX(p_prev.completed_at) FROM tbl_approval_instance_steps p_prev
+     WHERE p_prev.approval_instance_id = ${i}.id AND p_prev.step_order < ${s}.step_order
+  ), ${i}.created_at))`;
+
+/** Lifecycle keys → labels, identical to the RFQ listing's STATUS_META. */
+const LIFECYCLE_LABELS = Object.freeze({
+  RFQ_APPROVAL: 'RFQ Approval',
+  AWAITING_QUOTES: 'Awaiting Quotes',
+  TECHNICAL_AWAITING_QUOTES: 'Awaiting Quotes',
+  TECHNICAL_EVALUATING: 'Technical Evaluation',
+  TECHNICAL_APPROVING: 'Technical Approval',
+  TECHNICAL_REJECTED: 'Technical Rejected',
+  RFQ_STUCK_TECHNICAL: 'Stuck · Technical',
+  RFQ_STUCK_COMMERCIAL: 'Ended · No Quotes',
+  COMMERCIAL_EVALUATION: 'Commercial Evaluation',
+  NEGOTIATION_ONGOING: 'Negotiation',
+  QUOTATION_APPROVAL: 'Quote Approval',
+  AWAITING_PO: 'Awaiting PO',
+  PO_APPROVAL: 'PO Approval',
+  PO_VENDOR_REJECTED: 'PO Vendor Rejected',
+  APPROVED_COMPLETED: 'Completed',
+});
+const LIFECYCLE_ORDER = Object.keys(LIFECYCLE_LABELS);
+
+/**
+ * Lifecycle stage per RFQ — the SAME computation the RFQ listing and detail
+ * page use (rfqModel.computeLifecycleStages), with the listing's fallback for
+ * RFQs the CASE leaves unclassified. Never re-derived here: the old ad-hoc
+ * CASE treated every ENDED negotiation round as live and put 23 RFQs "under
+ * negotiation" when one was.
+ */
+async function lifecycleStagesFor(rows) {
+  if (!rows.length) return new Map();
+  const map = await rfqModel.computeLifecycleStages(rows.map((r) => Number(r.id)));
+  const out = new Map();
+  for (const r of rows) {
+    const s = Number(r.status);
+    const stage = map[Number(r.id)] || (s === 3 || s === 4 ? 'RFQ_APPROVAL' : 'AWAITING_QUOTES');
+    out.set(Number(r.id), stage);
   }
-  // Drafts: is_published=0 AND status NOT IN (5 withdrawn, 2 closed).
-  // Date filter applies on r.timestamp (creation/touch time).
-  const dateClause = start_date || end_date
-    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
-    : "";
-  const params = start_date || end_date
-    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
-    : [buyer_company_id, user_id, hotel_ids];
-  const rows = await db.any(
-    `SELECT r.id, r.rfq_no, r.title,
-            r."timestamp" AS updated_at,
-            (SELECT COUNT(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id) AS product_count
-     FROM tbl_rfq r
-     WHERE ${companyScope()}
-       AND r.is_published = 0
-       AND r.status NOT IN (5, 2)
-       AND r.created_by = $2
-       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-       ${dateClause}
-     ORDER BY updated_at DESC NULLS LAST
-     LIMIT 50`,
-    params
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_no: r.rfq_no,
-    title: r.title,
-    product_count: r.product_count,
-    updated_at: r.updated_at,
-  }));
-  const count = items.length;
-  // Oldest is the LAST item after DESC sort.
-  const oldest = items.length ? items[items.length - 1].updated_at : null;
-  return { count, oldest_updated_at: oldest, items };
+  return out;
 }
 
-// ── RFQ Creator: my_active_rfqs ────────────────────────────────────
-async function getMyActiveRfqsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
+const ageDays = (ts) => {
+  if (!ts) return null;
+  const ms = Date.now() - new Date(ts).getTime();
+  return Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 86400000)) : null;
+};
+
+// ── RFQ Creator: my_drafts (queue) ───────────────────────────────────
+async function getMyDraftsData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
-    return { total: 0, stages: [] };
+    return { count: 0, oldest_created_at: null, items: [] };
   }
-  const dateClause = start_date || end_date
-    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
-    : "";
-  const params = start_date || end_date
-    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
-    : [buyer_company_id, user_id, hotel_ids];
-  // "Live" = is_published=1 AND status=1 (Open).
-  // Derive stage from joined sub-state:
-  //   awaiting_vendor_quotes — no quotes yet
-  //   quote_compare          — has quotes, no live negotiation round
-  //   negotiation            — has live negotiation round (status != CLOSED)
-  //   awaiting_approval      — has PENDING approval instance for the RFQ
-  //   awarded                — has at least one PO
   const rows = await db.any(
-    `WITH live_rfqs AS (
-       SELECT r.id, r."timestamp" AS created_ts
+    `SELECT r.id, r.rfq_no, r.title, r."timestamp" AS created_at,
+            (SELECT COUNT(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id) AS product_count,
+            COUNT(*) OVER ()::int AS total_count,
+            MIN(r."timestamp") OVER () AS oldest_created_at
        FROM tbl_rfq r
-       WHERE ${companyScope()}
-         AND r.is_published = 1
-         AND r.status = 1
-         AND r.created_by = $2
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-         ${dateClause}
-     ),
-     stage_assignment AS (
-       SELECT
-         lr.id AS rfq_id,
-         lr.created_ts,
-         CASE
-           WHEN EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = lr.id)
-             THEN 'awarded'
-           WHEN EXISTS (
-             SELECT 1 FROM tbl_approval_instances i
-             WHERE i.entity_id = lr.id
-               AND i.entity_type IN ('RFQ', 'TENDER')
-               AND i.status = 'PENDING'
-           )
-             THEN 'awaiting_approval'
-           WHEN EXISTS (
-             SELECT 1 FROM tbl_negotiation_rounds nr
-             WHERE nr.rfq_id = lr.id
-               AND nr.status NOT IN ('CLOSED')
-           )
-             THEN 'negotiation'
-           WHEN EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = lr.id)
-             THEN 'quote_compare'
-           ELSE 'awaiting_vendor_quotes'
-         END AS stage
-       FROM live_rfqs lr
-     )
-     SELECT stage,
-            COUNT(*)::int AS count,
-            EXTRACT(EPOCH FROM (NOW() - MIN(created_ts)))::int AS oldest_age_seconds
-     FROM stage_assignment
-     GROUP BY stage`,
-    params
+      WHERE ${ownRfqCompany()}
+        AND ${isDraft('r')}
+        AND r.created_by = $2
+        AND ${rfqMapped('r', 3)}
+      ORDER BY r."timestamp" DESC NULLS LAST, r.id DESC
+      LIMIT $4`,
+    [buyer_company_id, user_id, hotel_ids, PERSONA_LIST_LIMIT]
   );
-  const stages = rows.map((r) => ({
-    stage: r.stage,
-    count: r.count,
-    oldest_age_days: Math.floor((r.oldest_age_seconds || 0) / 86400),
-  }));
-  const total = stages.reduce((s, r) => s + r.count, 0);
-  return { total, stages };
+  return {
+    count: rows[0]?.total_count || 0,
+    oldest_created_at: rows[0]?.oldest_created_at || null,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_no: r.rfq_no,
+      title: r.title,
+      product_count: r.product_count,
+      created_at: r.created_at,
+    })),
+  };
 }
 
-// ── RFQ Creator: my_no_response_rfqs ───────────────────────────────
-async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids, start_date, end_date) {
+// ── RFQ Creator: my_active_rfqs (queue) ──────────────────────────────
+// Every RFQ I created that is past draft and not finished: awaiting publish
+// approval, live, or somewhere in evaluation / award. Staged by the shared
+// lifecycle computation; completed RFQs (all products on an approved PO) are
+// not "active" and are left out.
+async function getMyActiveRfqsData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { total: 0, stages: [] };
+  const rows = await db.any(
+    `SELECT r.id, r.status, r."timestamp" AS created_at
+       FROM tbl_rfq r
+      WHERE ${ownRfqCompany()}
+        AND r.created_by = $2
+        AND r.status NOT IN (2, 5)
+        AND NOT ${isDraft('r')}
+        AND ${rfqMapped('r', 3)}`,
+    [buyer_company_id, user_id, hotel_ids]
+  );
+  const stageOf = await lifecycleStagesFor(rows);
+  const groups = new Map();
+  for (const r of rows) {
+    const stage = stageOf.get(Number(r.id));
+    if (stage === 'APPROVED_COMPLETED') continue;
+    const g = groups.get(stage) || { stage, label: LIFECYCLE_LABELS[stage] || stage, count: 0, oldest: null };
+    g.count += 1;
+    if (!g.oldest || new Date(r.created_at) < new Date(g.oldest)) g.oldest = r.created_at;
+    groups.set(stage, g);
+  }
+  const stages = [...groups.values()]
+    .sort((a, b) => LIFECYCLE_ORDER.indexOf(a.stage) - LIFECYCLE_ORDER.indexOf(b.stage))
+    .map((g) => ({ stage: g.stage, label: g.label, count: g.count, oldest_age_days: ageDays(g.oldest) }));
+  return { total: stages.reduce((s, g) => s + g.count, 0), stages };
+}
+
+// ── RFQ Creator: my_no_response_rfqs (queue) ─────────────────────────
+// My live RFQs whose bid window is still open (exact IST time) and where at
+// least one invited vendor has not responded at all. A regret IS a response
+// — the vendor answered — so it does not make a vendor "silent".
+async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
     return { count: 0, silent_vendor_count: 0, items: [] };
   }
-  // Live RFQs of this user whose bid_end_date is still in the future.
-  // RFQs whose bid window has already closed move to the urgent-attention
-  // widget (getMyRfqsBidClosedNoQuotesData) — not surfaced here so
-  // creators can focus on RFQs they can still salvage.
-  const dateClause = start_date || end_date
-    ? `AND ${windowSql('r."timestamp"', FRAME.SESSION, 4, 5)}`
-    : "";
-  const params = start_date || end_date
-    ? [buyer_company_id, user_id, hotel_ids, start_date, end_date]
-    : [buyer_company_id, user_id, hotel_ids];
   const rows = await db.any(
-    `WITH my_live_rfqs AS (
+    `WITH my_live AS (
        SELECT r.id, r.rfq_no, r.title, r.bid_end_date
-       FROM tbl_rfq r
-       WHERE ${companyScope()}
-         AND r.is_published = 1
-         AND r.status = 1
-         AND r.created_by = $2
-         AND r.bid_end_date IS NOT NULL
-         AND r.bid_end_date != ''
-         AND DATE(r.bid_end_date) >= ${IST_TODAY}
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-         ${dateClause}
+         FROM tbl_rfq r
+        WHERE ${ownRfqCompany()}
+          AND r.is_published = 1
+          AND r.status = 1
+          AND r.created_by = $2
+          AND ${bidOpen('r')}
+          AND ${rfqMapped('r', 3)}
      ),
-     vendor_status AS (
-       SELECT
-         rpv.rfq_id,
-         rpv.user_id AS vendor_id,
-         EXISTS (
-           SELECT 1 FROM tbl_quotes q
-           WHERE q.rfq_id = rpv.rfq_id AND q.created_by = rpv.user_id
-         ) AS has_responded
-       FROM tbl_rfq_product_vendors rpv
-       WHERE rpv.rfq_id IN (SELECT id FROM my_live_rfqs)
-       GROUP BY rpv.rfq_id, rpv.user_id
+     invited AS (
+       SELECT DISTINCT rpv.rfq_id, rpv.user_id AS vendor_id
+         FROM tbl_rfq_product_vendors rpv
+        WHERE rpv.rfq_id IN (SELECT id FROM my_live)
      ),
-     rfq_silent_counts AS (
-       SELECT
-         vs.rfq_id,
-         COUNT(*) FILTER (WHERE has_responded = false)::int AS silent_count,
-         COUNT(*)::int AS total_count
-       FROM vendor_status vs
-       GROUP BY vs.rfq_id
+     per_rfq AS (
+       SELECT iv.rfq_id,
+              COUNT(*)::int AS total_vendor_count,
+              COUNT(*) FILTER (WHERE NOT EXISTS (
+                SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = iv.rfq_id AND q.created_by = iv.vendor_id
+              ))::int AS silent_vendor_count
+         FROM invited iv
+        GROUP BY iv.rfq_id
      )
-     SELECT mlr.id, mlr.rfq_no, mlr.title, mlr.bid_end_date,
-            rsc.silent_count AS silent_vendor_count,
-            rsc.total_count AS total_vendor_count
-     FROM my_live_rfqs mlr
-     JOIN rfq_silent_counts rsc ON rsc.rfq_id = mlr.id
-     WHERE rsc.silent_count > 0
-     ORDER BY rsc.silent_count DESC, mlr.bid_end_date ASC
-     LIMIT 50`,
-    params
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_no: r.rfq_no,
-    title: r.title,
-    bid_end_date: r.bid_end_date,
-    silent_vendor_count: r.silent_vendor_count,
-    total_vendor_count: r.total_vendor_count,
-  }));
-  const silent_vendor_count = items.reduce(
-    (s, r) => s + r.silent_vendor_count,
-    0
-  );
-  return { count: items.length, silent_vendor_count, items };
-}
-
-// ── RFQ Creator: my_rfqs_bid_closed_no_quotes ─────────────────────
-// RFQs whose bid_end_date has passed but no vendor responded.
-// High-urgency: the creator may need to re-publish, extend the bid
-// window, or escalate to procurement.
-async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, items: [] };
-  }
-  const rows = await db.any(
-    `SELECT r.id, r.rfq_no, r.title, r.bid_end_date,
-            (${IST_TODAY} - DATE(r.bid_end_date))::int AS days_overdue
-     FROM tbl_rfq r
-     WHERE ${companyScope()}
-       AND r.is_published = 1
-       AND r.created_by = $2
-       AND r.bid_end_date IS NOT NULL
-       AND r.bid_end_date != ''
-       AND DATE(r.bid_end_date) < ${IST_TODAY}
-       AND r.status IN (1, 2)
-       AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-     ORDER BY r.bid_end_date ASC
-     LIMIT 50`,
-    [buyer_company_id, user_id, hotel_ids]
+     SELECT ml.id, ml.rfq_no, ml.title, ml.bid_end_date,
+            pr.silent_vendor_count, pr.total_vendor_count,
+            COUNT(*) OVER ()::int AS total_count,
+            SUM(pr.silent_vendor_count) OVER ()::int AS total_silent
+       FROM my_live ml
+       JOIN per_rfq pr ON pr.rfq_id = ml.id
+      WHERE pr.silent_vendor_count > 0
+      ORDER BY NULLIF(ml.bid_end_date, '') ASC NULLS LAST, pr.silent_vendor_count DESC, ml.id
+      LIMIT $4`,
+    [buyer_company_id, user_id, hotel_ids, PERSONA_LIST_LIMIT]
   );
   return {
-    count: rows.length,
+    count: rows[0]?.total_count || 0,
+    silent_vendor_count: rows[0]?.total_silent || 0,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_no: r.rfq_no,
+      title: r.title,
+      bid_end_date: r.bid_end_date,
+      silent_vendor_count: r.silent_vendor_count,
+      total_vendor_count: r.total_vendor_count,
+    })),
+  };
+}
+
+// ── RFQ Creator: my_rfqs_bid_closed_no_quotes (queue) ────────────────
+// My open (status 1) published RFQs whose bid window has passed (exact IST
+// time) without a single REAL quote. Regret-only RFQs belong here — nobody
+// offered a price. Closed RFQs (status 2) were already dealt with.
+async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_ids) {
+  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
+  const rows = await db.any(
+    `SELECT r.id, r.rfq_no, r.title, r.bid_end_date,
+            FLOOR(EXTRACT(EPOCH FROM (${IST_NOW} - r.bid_end_date::timestamp)) / 86400)::int AS days_overdue,
+            (SELECT COUNT(DISTINCT q.created_by)::int FROM tbl_quotes q
+              WHERE q.rfq_id = r.id AND q.is_regret = 1) AS regret_count,
+            COUNT(*) OVER ()::int AS total_count
+       FROM tbl_rfq r
+      WHERE ${ownRfqCompany()}
+        AND r.is_published = 1
+        AND r.status = 1
+        AND r.created_by = $2
+        AND ${bidClosed('r')}
+        AND NOT ${hasRealQuote('r')}
+        AND ${rfqMapped('r', 3)}
+      ORDER BY r.bid_end_date::timestamp ASC, r.id
+      LIMIT $4`,
+    [buyer_company_id, user_id, hotel_ids, PERSONA_LIST_LIMIT]
+  );
+  return {
+    count: rows[0]?.total_count || 0,
     items: rows.map((r) => ({
       id: r.id,
       rfq_no: r.rfq_no,
       title: r.title,
       bid_end_date: r.bid_end_date,
       days_overdue: r.days_overdue,
+      regret_count: r.regret_count,
     })),
   };
 }
 
-// ── Tech Evaluator: my_tech_evals_pending ─────────────────────────
+// ── Tech Evaluator: tech evaluations pending (queue) ─────────────────
+// tbl_rfq_product_tech_evaluation has no per-user assignment, so this is the
+// SHARED queue inside the caller's RBAC scope (title: "Technical evaluations
+// pending", not "My"). Only evaluations someone can act on now:
+//   · RFQ published and open (status 1) — not closed, not unpublished;
+//   · bid window closed — before that the quotes are sealed;
+//   · at least one real quote — otherwise there is nothing to evaluate;
+//   · no live PO on the product — it was already awarded;
+//   · not already submitted — no PENDING TECHNICAL approval for the product.
+// On prod this cut 212 open rows to the ≤78 that are actually actionable.
 async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, oldest_opened_at: null, items: [] };
+    return { count: 0, oldest_waiting_since: null, items: [] };
   }
-  // Tech evals share a queue — tbl_rfq_product_tech_evaluation has no
-  // per-user assignment column (verified against the production schema), so
-  // "my" cannot mean "assigned to me".
-  //
-  // The previous comment here claimed "the dashboard permission gate has
-  // already filtered out users who shouldn't see this widget". THAT GATE DOES
-  // NOT EXIST — no /dashboard-v2 route carries acl() or any permission check,
-  // and this model had no RBAC join at all. The widget was therefore
-  // buyer-ACCOUNT-wide: every incomplete tech-eval across all eight legal
-  // entities under one buyer_company_id.
-  //
-  // "My" now means the tightest binding the schema supports: evaluations whose
-  // RFQ falls inside THIS caller's own role-scope tuple (company × hotel ×
-  // department × process) and for which they hold a technical read permission.
-  // A Procurement-scoped evaluator no longer sees Engineering's queue.
-  const params = [buyer_company_id, hotel_ids];
+  const params = [buyer_company_id, hotel_ids, PERSONA_LIST_LIMIT];
   const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
   const rows = await db.any(
-    `SELECT te.id,
-            te.rfq_id,
-            te.tbl_rfq_product_id AS product_id,
+    `SELECT te.id, te.rfq_id, te.tbl_rfq_product_id AS rfq_product_id,
             te."timestamp" AS opened_at,
-            r.rfq_no,
-            pv.name AS product_name
-     FROM tbl_rfq_product_tech_evaluation te
-     JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
-     JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
-     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-     WHERE te.is_complete = false
-       AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-       ${sc}
-     ORDER BY te."timestamp" ASC
-     LIMIT 50`,
+            r.bid_end_date AS waiting_since,
+            r.rfq_no, r.title AS rfq_title,
+            pv.name AS product_name,
+            COUNT(*) OVER ()::int AS total_count
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+       JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+      WHERE te.is_complete = false
+        AND r.is_published = 1
+        AND r.status = 1
+        AND ${bidClosed('r')}
+        AND ${hasRealQuote('r')}
+        AND NOT ${livePoForProduct('te.rfq_id', 'te.tbl_rfq_product_id')}
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_approval_instances ti
+           WHERE ti.entity_type = 'TECHNICAL'
+             AND ti.status = 'PENDING'
+             AND (ti.metadata->>'rfq_product_id') = te.tbl_rfq_product_id::text
+        )
+        AND ${rfqMapped('r', 2)}
+        ${sc}
+      ORDER BY r.bid_end_date::timestamp ASC, te.id
+      LIMIT $3`,
     params
   );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_id: r.rfq_id,
-    product_id: r.product_id,
-    rfq_no: r.rfq_no,
-    product_name: r.product_name,
-    opened_at: r.opened_at,
-  }));
   return {
-    count: items.length,
-    oldest_opened_at: items.length ? items[0].opened_at : null,
-    items,
+    count: rows[0]?.total_count || 0,
+    oldest_waiting_since: rows[0]?.waiting_since || null,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_id: r.rfq_id,
+      rfq_product_id: r.rfq_product_id,
+      rfq_no: r.rfq_no,
+      rfq_title: r.rfq_title,
+      product_name: r.product_name,
+      opened_at: r.opened_at,
+      waiting_since: r.waiting_since,
+    })),
   };
 }
 
-// ── Tech Evaluator: tech_evals_with_vendor_disagreements ──────────
+// ── Tech Evaluator: vendor disagreements (queue) ─────────────────────
+// Vendors answer each clause with a free-text response; prod stores the
+// negative as 'I Dont Agree' (122 rows) and never 'disagree', which is why
+// the old equality check returned 0 forever. Match the normalised forms.
+const DISAGREE_SQL = (col) =>
+  `regexp_replace(lower(COALESCE(${col}, '')), '[^a-z]', '', 'g') IN ('idontagree', 'idonotagree', 'disagree', 'idisagree', 'dontagree', 'notagree')`;
+
 async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
     return { count: 0, total_disagreement_clauses: 0, items: [] };
   }
-  // Same treatment as getMyTechEvalsPendingData: this rollup exposed vendor
-  // disagreement counts and product names for every business unit under the
-  // billing account.
-  const params = [buyer_company_id, hotel_ids];
+  const params = [buyer_company_id, hotel_ids, PERSONA_LIST_LIMIT];
   const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
   const rows = await db.any(
     `WITH disagreements AS (
-       SELECT te.id            AS tech_eval_id,
-              te.rfq_id        AS rfq_id,
-              te.tbl_rfq_product_id AS rfq_product_id,
-              c.id             AS clause_id,
-              vr.vendor_id     AS vendor_id
-       FROM tbl_rfq_product_tech_evaluation te
-       JOIN tbl_rfq_product_tech_evaluation_clauses c
-         ON c.tbl_rfq_product_tech_evaluation_id = te.id
-       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
-         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
-       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
-       WHERE te.is_complete = false
-         AND LOWER(TRIM(vr.vendor_response)) = 'disagree'
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-         ${sc}
+       SELECT te.id AS tech_eval_id, te.rfq_id, te.tbl_rfq_product_id AS rfq_product_id,
+              c.id AS clause_id, vr.vendor_id
+         FROM tbl_rfq_product_tech_evaluation te
+         JOIN tbl_rfq_product_tech_evaluation_clauses c
+           ON c.tbl_rfq_product_tech_evaluation_id = te.id
+         JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+           ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+         JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
+        WHERE te.is_complete = false
+          AND r.status = 1
+          AND ${DISAGREE_SQL('vr.vendor_response')}
+          AND ${rfqMapped('r', 2)}
+          ${sc}
      ),
      per_eval AS (
-       SELECT
-         tech_eval_id,
-         rfq_id,
-         rfq_product_id,
-         COUNT(DISTINCT vendor_id)::int AS disagreeing_vendor_count,
-         COUNT(DISTINCT clause_id)::int AS disagreeing_clause_count
-       FROM disagreements
-       GROUP BY tech_eval_id, rfq_id, rfq_product_id
+       SELECT tech_eval_id, rfq_id, rfq_product_id,
+              COUNT(DISTINCT vendor_id)::int AS disagreeing_vendor_count,
+              COUNT(DISTINCT clause_id)::int AS disagreeing_clause_count
+         FROM disagreements
+        GROUP BY tech_eval_id, rfq_id, rfq_product_id
      )
-     SELECT pe.tech_eval_id AS id,
-            pe.rfq_id,
-            pe.rfq_product_id AS product_id,
-            pe.disagreeing_vendor_count,
-            pe.disagreeing_clause_count,
-            r.rfq_no,
-            pv.name AS product_name
-     FROM per_eval pe
-     JOIN tbl_rfq r ON r.id = pe.rfq_id
-     JOIN tbl_rfq_products rp ON rp.id = pe.rfq_product_id
-     JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-     ORDER BY pe.disagreeing_vendor_count DESC, pe.disagreeing_clause_count DESC
-     LIMIT 50`,
+     SELECT pe.tech_eval_id AS id, pe.rfq_id, pe.rfq_product_id,
+            pe.disagreeing_vendor_count, pe.disagreeing_clause_count,
+            r.rfq_no, r.title AS rfq_title, pv.name AS product_name,
+            COUNT(*) OVER ()::int AS total_count,
+            SUM(pe.disagreeing_clause_count) OVER ()::int AS total_clauses
+       FROM per_eval pe
+       JOIN tbl_rfq r ON r.id = pe.rfq_id
+       JOIN tbl_rfq_products rp ON rp.id = pe.rfq_product_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+      ORDER BY pe.disagreeing_vendor_count DESC, pe.disagreeing_clause_count DESC, pe.tech_eval_id
+      LIMIT $3`,
     params
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_id: r.rfq_id,
-    product_id: r.product_id,
-    rfq_no: r.rfq_no,
-    product_name: r.product_name,
-    disagreeing_vendor_count: r.disagreeing_vendor_count,
-    disagreeing_clause_count: r.disagreeing_clause_count,
-  }));
-  const total_disagreement_clauses = items.reduce(
-    (s, r) => s + r.disagreeing_clause_count,
-    0
-  );
-  return { count: items.length, total_disagreement_clauses, items };
-}
-
-// ── Tech Evaluator: tech_eval_throughput ──────────────────────────
-async function getTechEvalThroughputData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return {
-      current_period_avg_hours: null,
-      prior_period_avg_hours: null,
-      delta_pct: null,
-      unit: "hrs",
-      sparkline: [],
-    };
-  }
-  // Throughput = avg(completed_at - opened_at). We approximate
-  // "completed_at" as the latest vendor-response score_timestamp on any
-  // clause under a complete tech-eval — that's when scoring closed.
-  // Current vs prior period: last 30 days vs previous 30 days.
-  //
-  // A rollup rather than a list, but it was still averaging over every
-  // business unit in the billing account, so a hotel-scoped evaluator was
-  // benchmarked against other legal entities' turnaround.
-  const params = [buyer_company_id, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params, TECH_SCOPE_PERMISSIONS);
-  const row = await db.oneOrNone(
-    `WITH completed_evals AS (
-       SELECT te.id,
-              te."timestamp" AS opened_at,
-              MAX(vr.score_timestamp) AS completed_at
-       FROM tbl_rfq_product_tech_evaluation te
-       JOIN tbl_rfq_product_tech_evaluation_clauses c
-         ON c.tbl_rfq_product_tech_evaluation_id = te.id
-       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
-         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
-       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
-       WHERE te.is_complete = true
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-         ${sc}
-       GROUP BY te.id, te."timestamp"
-     )
-     SELECT
-       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0)
-         FILTER (WHERE completed_at >= NOW() - INTERVAL '30 days') AS current_avg,
-       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0)
-         FILTER (WHERE completed_at >= NOW() - INTERVAL '60 days'
-                  AND completed_at <  NOW() - INTERVAL '30 days') AS prior_avg
-     FROM completed_evals`,
-    params
-  );
-  const sparkRows = await db.any(
-    `WITH completed_evals AS (
-       SELECT te."timestamp" AS opened_at,
-              MAX(vr.score_timestamp) AS completed_at
-       FROM tbl_rfq_product_tech_evaluation te
-       JOIN tbl_rfq_product_tech_evaluation_clauses c
-         ON c.tbl_rfq_product_tech_evaluation_id = te.id
-       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
-         ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
-       JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
-       WHERE te.is_complete = true
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-         ${sc}
-       GROUP BY te.id, te."timestamp"
-     )
-     SELECT
-       FLOOR(EXTRACT(EPOCH FROM (NOW() - completed_at)) / (86400 * 7))::int AS weeks_ago,
-       AVG(EXTRACT(EPOCH FROM (completed_at - opened_at)) / 3600.0) AS avg_hours
-     FROM completed_evals
-     WHERE completed_at >= NOW() - INTERVAL '28 days'
-     GROUP BY weeks_ago
-     ORDER BY weeks_ago DESC`,
-    params
-  );
-  const rawSparkline = [0, 0, 0, 0];
-  for (const r of sparkRows) {
-    const idx = 3 - r.weeks_ago;
-    if (idx >= 0 && idx <= 3) rawSparkline[idx] = Number(r.avg_hours) || 0;
-  }
-  const curHours = row?.current_avg != null ? Number(row.current_avg) : null;
-  const priorHours = row?.prior_avg != null ? Number(row.prior_avg) : null;
-  let delta_pct = null;
-  if (curHours != null && priorHours != null && priorHours > 0) {
-    delta_pct = ((curHours - priorHours) / priorHours) * 100;
-  }
-  return scaleThroughput(curHours, priorHours, delta_pct, rawSparkline);
-}
-
-/** Helper: pick the most readable unit (hrs vs days) based on the current
- *  period's magnitude. When current_avg is >= 48h we switch to days so the
- *  number is human-friendly (e.g. 234h → 9.8 days). */
-function scaleThroughput(currentHours, priorHours, deltaPct, sparklineHours) {
-  const useDays = currentHours != null && currentHours >= 48;
-  if (!useDays) {
-    return {
-      current_period_avg_hours: currentHours,
-      prior_period_avg_hours: priorHours,
-      // Mirror FE expectation: also expose current_period_avg (unit-agnostic).
-      current_period_avg: currentHours,
-      prior_period_avg: priorHours,
-      delta_pct: deltaPct,
-      unit: "hrs",
-      sparkline: sparklineHours,
-    };
-  }
-  const div = 24;
-  return {
-    current_period_avg_hours: currentHours,
-    prior_period_avg_hours: priorHours,
-    current_period_avg: currentHours / div,
-    prior_period_avg: priorHours != null ? priorHours / div : null,
-    delta_pct: deltaPct,
-    unit: "days",
-    sparkline: sparklineHours.map((h) => (h ? h / div : 0)),
-  };
-}
-
-// ── Tech Approver: my_tech_approvals_pending ──────────────────────
-async function getMyTechApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
-  const rows = await db.any(
-    `SELECT i.id,
-            i.entity_id AS rfq_id,
-            i.created_at AS submitted_at
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     WHERE i.status = 'PENDING'
-       AND i.entity_type = 'TECHNICAL'
-       AND sa.approver_user_id = $2
-       AND sa.status = 'PENDING'
-       AND s.step_order = i.current_step
-       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-       AND i.hotel_id = ANY($3)
-     ORDER BY i.created_at DESC
-     LIMIT 50`,
-    [buyer_company_id, user_id, hotel_ids]
   );
   return {
-    count: rows.length,
+    count: rows[0]?.total_count || 0,
+    total_disagreement_clauses: rows[0]?.total_clauses || 0,
     items: rows.map((r) => ({
       id: r.id,
       rfq_id: r.rfq_id,
+      rfq_product_id: r.rfq_product_id,
+      rfq_no: r.rfq_no,
+      rfq_title: r.rfq_title,
+      product_name: r.product_name,
+      disagreeing_vendor_count: r.disagreeing_vendor_count,
+      disagreeing_clause_count: r.disagreeing_clause_count,
+    })),
+  };
+}
+
+// ── Approvals awaiting me (shared by the four approval widgets) ──────
+//
+// The SAME predicate (dashboardMetrics.myPendingApprovalsFrom) and the SAME
+// item key (approvalItemKey) as the Action Centre badge and its drill-down,
+// so each widget's count is exactly its entity types' share of the badge.
+// Entity ids resolve per SPEC rule 6 and are never guessed from entity_id:
+//   TECHNICAL          RFQ + rfq_product in metadata (entity_id is the round)
+//   NEGOTIATION_QUOTE  entity_id is tbl_rfq_products.id; value + vendor from
+//                      the po_payload the approval will turn into a PO
+//   PO                 entity_id is the PO
+//   RFQ / TENDER       entity_id is the RFQ
+// Several instances can sit on one item (prod: 50 NEGOTIATION_QUOTE
+// instances across 3 RFQs for one approver); values are taken once per
+// underlying product / PO (the latest instance), never summed per instance.
+async function myPendingApprovalItems(buyer_company_id, user_id, hotel_ids, entityTypes, limit = PERSONA_LIST_LIMIT) {
+  if (!hotel_ids || hotel_ids.length === 0) {
+    return { count: 0, total_value: 0, oldest_waiting_since: null, items: [] };
+  }
+  const rows = await db.any(
+    `WITH mine AS (
+       SELECT i.id, i.entity_type, i.entity_id, i.metadata, i.created_at, i.initiated_by, i.hotel_id,
+              ${approvalItemKey('i')} AS item_key,
+              ${stepStartedAt('i', 's')} AS step_started_at
+       ${myPendingApprovalsFrom(2, 1, 3)}
+         AND i.entity_type = ANY($4::text[])
+     ),
+     resolved AS (
+       SELECT m.*,
+              CASE
+                WHEN m.entity_type IN ('RFQ', 'TENDER') THEN m.entity_id
+                WHEN m.entity_type = 'TECHNICAL' AND (m.metadata->>'rfq_id') ~ '^[0-9]+$'
+                  THEN (m.metadata->>'rfq_id')::int
+                WHEN m.entity_type = 'NEGOTIATION_QUOTE' THEN rp_nq.rfq_id
+                WHEN m.entity_type = 'PO' THEN po_p.rfq_id
+              END AS rfq_id,
+              CASE
+                WHEN m.entity_type = 'NEGOTIATION_QUOTE' THEN m.entity_id
+                WHEN m.entity_type = 'TECHNICAL' AND (m.metadata->>'rfq_product_id') ~ '^[0-9]+$'
+                  THEN (m.metadata->>'rfq_product_id')::int
+              END AS rfq_product_id,
+              CASE WHEN m.entity_type = 'PO' THEN m.entity_id END AS po_id,
+              po_p.po_number,
+              CASE
+                WHEN m.entity_type = 'PO' THEN po_p.total_value
+                WHEN m.entity_type = 'NEGOTIATION_QUOTE'
+                     AND (m.metadata #>> '{po_payload,total_value}') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  THEN (m.metadata #>> '{po_payload,total_value}')::numeric
+              END AS value,
+              CASE
+                WHEN m.entity_type = 'PO' THEN po_p.finalized_vendor_id
+                WHEN m.entity_type = 'NEGOTIATION_QUOTE' AND (m.metadata->>'vendor_id') ~ '^[0-9]+$'
+                  THEN (m.metadata->>'vendor_id')::int
+              END AS vendor_id
+         FROM mine m
+         LEFT JOIN tbl_rfq_products rp_nq
+           ON m.entity_type = 'NEGOTIATION_QUOTE' AND rp_nq.id = m.entity_id
+         LEFT JOIN tbl_rfq_purchase_order po_p
+           ON m.entity_type = 'PO' AND po_p.id = m.entity_id
+     ),
+     named AS (
+       SELECT rs.*, COALESCE(pv.name, NULLIF(rs.metadata->>'product_name', '')) AS product_name
+         FROM resolved rs
+         LEFT JOIN tbl_rfq_products rp ON rp.id = rs.rfq_product_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+     ),
+     latest_value AS (
+       SELECT DISTINCT ON (item_key, COALESCE(po_id, rfq_product_id, id)) item_key, value
+         FROM named
+        ORDER BY item_key, COALESCE(po_id, rfq_product_id, id), created_at DESC, id DESC
+     ),
+     item_value AS (
+       SELECT item_key, SUM(value) AS value FROM latest_value GROUP BY item_key
+     ),
+     items AS (
+       SELECT n.item_key,
+              MIN(n.entity_type) AS entity_type,
+              (ARRAY_AGG(n.id ORDER BY n.created_at, n.id))[1] AS approval_id,
+              COUNT(*)::int AS instance_count,
+              MIN(n.rfq_id) AS rfq_id,
+              MIN(n.po_id) AS po_id,
+              MIN(n.po_number) AS po_number,
+              ARRAY_REMOVE(ARRAY_AGG(DISTINCT n.rfq_product_id), NULL) AS rfq_product_ids,
+              ARRAY_REMOVE(ARRAY_AGG(DISTINCT n.product_name), NULL) AS product_names,
+              ARRAY_REMOVE(ARRAY_AGG(DISTINCT n.vendor_id), NULL) AS vendor_ids,
+              MIN(n.created_at) AS submitted_at,
+              MIN(n.step_started_at) AS waiting_since,
+              (ARRAY_AGG(n.initiated_by ORDER BY n.created_at, n.id))[1] AS initiated_by,
+              (ARRAY_AGG(n.hotel_id ORDER BY n.created_at, n.id))[1] AS hotel_id
+         FROM named n
+        GROUP BY n.item_key
+     )
+     SELECT it.*, iv.value,
+            r.rfq_no, r.title AS rfq_title,
+            ub.name AS submitted_by_name,
+            hch.name AS hotel_name,
+            (SELECT ARRAY_AGG(DISTINCT ${vendorName('vu', 'vc')})
+               FROM tbl_users vu LEFT JOIN tbl_company vc ON vc.id = vu.company_id
+              WHERE vu.id = ANY(it.vendor_ids)) AS vendor_names,
+            COUNT(*) OVER ()::int AS total_count,
+            SUM(iv.value) OVER () AS total_value,
+            MIN(it.waiting_since) OVER () AS oldest_waiting_since
+       FROM items it
+       LEFT JOIN item_value iv ON iv.item_key = it.item_key
+       LEFT JOIN tbl_rfq r ON r.id = it.rfq_id
+       LEFT JOIN tbl_users ub ON ub.id = it.initiated_by
+       LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = it.hotel_id
+      ORDER BY it.waiting_since ASC, it.approval_id ASC
+      LIMIT $5`,
+    [buyer_company_id, user_id, hotel_ids, entityTypes, limit]
+  );
+  return {
+    count: rows[0]?.total_count || 0,
+    total_value: rows[0]?.total_value != null ? round2(rows[0].total_value) : 0,
+    oldest_waiting_since: rows[0]?.oldest_waiting_since || null,
+    items: rows.map((r) => ({
+      approval_id: r.approval_id,
+      item_key: r.item_key,
+      entity_type: r.entity_type,
+      instance_count: r.instance_count,
+      rfq_id: r.rfq_id,
+      rfq_no: r.rfq_no,
+      rfq_title: r.rfq_title,
+      rfq_product_ids: r.rfq_product_ids || [],
+      product_names: r.product_names || [],
+      po_id: r.po_id,
+      po_number: r.po_number,
+      vendor_names: r.vendor_names || [],
+      value: r.value != null ? round2(r.value) : null,
       submitted_at: r.submitted_at,
-    })),
-  };
-}
-
-// ── Tech Approver: tech_approval_oldest_pending ───────────────────
-async function getTechApprovalOldestPendingData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) return { items: [] };
-  const rows = await db.any(
-    `SELECT i.id,
-            i.entity_id AS rfq_id,
-            i.initiated_by,
-            u.name AS submitted_by_name,
-            FLOOR(EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 86400)::int AS age_days
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     LEFT JOIN tbl_users u ON u.id = i.initiated_by
-     WHERE i.status = 'PENDING'
-       AND i.entity_type = 'TECHNICAL'
-       AND sa.approver_user_id = $2
-       AND sa.status = 'PENDING'
-       AND s.step_order = i.current_step
-       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-       AND i.hotel_id = ANY($3)
-     ORDER BY i.created_at ASC
-     LIMIT 5`,
-    [buyer_company_id, user_id, hotel_ids]
-  );
-  return {
-    items: rows.map((r) => ({
-      id: r.id,
-      rfq_id: r.rfq_id,
+      waiting_since: r.waiting_since,
+      age_days: ageDays(r.waiting_since),
       submitted_by_name: r.submitted_by_name,
-      age_days: r.age_days,
+      hotel_name: r.hotel_name,
     })),
   };
 }
 
-// Shared helper: approval throughput for a given entity_type and user.
-// Computes current-30d avg, prior-30d avg, delta %, and a 4-week sparkline.
-async function approvalThroughput(buyer_company_id, user_id, hotel_ids, entity_type) {
-  const row = await db.oneOrNone(
-    `WITH my_acted AS (
-       SELECT i.id,
-              i.created_at,
-              sa.acted_at
-       FROM tbl_approval_instances i
-       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-       WHERE sa.approver_user_id = $2
-         AND sa.status = 'APPROVED'
-         AND sa.acted_at IS NOT NULL
-         AND i.entity_type = $4
-         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-         AND i.hotel_id = ANY($3)
-     )
-     SELECT
-       AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0)
-         FILTER (WHERE acted_at >= NOW() - INTERVAL '30 days') AS current_avg,
-       AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0)
-         FILTER (WHERE acted_at >= NOW() - INTERVAL '60 days'
-                  AND acted_at <  NOW() - INTERVAL '30 days') AS prior_avg
-     FROM my_acted`,
-    [buyer_company_id, user_id, hotel_ids, entity_type]
-  );
-  const sparkRows = await db.any(
-    `WITH my_acted AS (
-       SELECT i.created_at, sa.acted_at
-       FROM tbl_approval_instances i
-       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-       WHERE sa.approver_user_id = $2
-         AND sa.status = 'APPROVED'
-         AND sa.acted_at IS NOT NULL
-         AND i.entity_type = $4
-         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-         AND i.hotel_id = ANY($3)
-     )
-     SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - acted_at)) / (86400 * 7))::int AS weeks_ago,
-            AVG(EXTRACT(EPOCH FROM (acted_at - created_at)) / 3600.0) AS avg_hours
-     FROM my_acted
-     WHERE acted_at >= NOW() - INTERVAL '28 days'
-     GROUP BY weeks_ago
-     ORDER BY weeks_ago DESC`,
-    [buyer_company_id, user_id, hotel_ids, entity_type]
-  );
-  const rawSparkline = [0, 0, 0, 0];
-  for (const r of sparkRows) {
-    const idx = 3 - r.weeks_ago;
-    if (idx >= 0 && idx <= 3) rawSparkline[idx] = Number(r.avg_hours) || 0;
-  }
-  const curHours = row?.current_avg != null ? Number(row.current_avg) : null;
-  const priorHours = row?.prior_avg != null ? Number(row.prior_avg) : null;
-  let delta_pct = null;
-  if (curHours != null && priorHours != null && priorHours > 0) {
-    delta_pct = ((curHours - priorHours) / priorHours) * 100;
-  }
-  return scaleThroughput(curHours, priorHours, delta_pct, rawSparkline);
+const approvalQueueShape = ({ count, total_value, oldest_waiting_since, items }, withValue) => ({
+  count,
+  ...(withValue ? { total_value } : {}),
+  oldest_waiting_since,
+  oldest_age_days: ageDays(oldest_waiting_since),
+  items,
+});
+
+// ── Tech Approver: technical approvals awaiting me (absorbs the old
+//    "oldest pending" card: items are oldest-first) ───────────────────
+async function getMyTechApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  return approvalQueueShape(
+    await myPendingApprovalItems(buyer_company_id, user_id, hotel_ids, ['TECHNICAL']), false);
 }
 
-async function getTechApprovalThroughputData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return {
-      current_period_avg_hours: null,
-      prior_period_avg_hours: null,
-      delta_pct: null,
-      unit: "hrs",
-      sparkline: [],
-    };
-  }
-  return approvalThroughput(buyer_company_id, user_id, hotel_ids, "TECHNICAL");
+// ── RFQ approver: RFQs awaiting my (publish) approval ────────────────
+async function getMyRfqApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  return approvalQueueShape(
+    await myPendingApprovalItems(buyer_company_id, user_id, hotel_ids, ['RFQ', 'TENDER']), false);
 }
 
-// ── Commercial Evaluator: my_quote_compares ───────────────────────
+// ── Commercial Approver: negotiated quotes awaiting me ───────────────
+// NEGOTIATION_QUOTE is the quote-approval step (N1 / Commercial Approver on
+// prod), not PO approval — the old widget pair had the two swapped.
+async function getMyCommercialApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  return approvalQueueShape(
+    await myPendingApprovalItems(buyer_company_id, user_id, hotel_ids, ['NEGOTIATION_QUOTE']), true);
+}
+
+// ── Awarding: POs awaiting my approval ───────────────────────────────
+async function getMyAwardApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
+  return approvalQueueShape(
+    await myPendingApprovalItems(buyer_company_id, user_id, hotel_ids, ['PO']), true);
+}
+
+// ── Commercial Evaluator: ready for quote comparison (queue) ─────────
+// The RFQs the lifecycle computation puts in COMMERCIAL_EVALUATION — the same
+// stage the RFQ listing's "Commercial Evaluation" facet and "View all" link
+// filter on. Bid closed, real quotes in, no live round, nothing awarded yet.
+// Shared queue inside the caller's commercial RBAC scope (no assignment).
 async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
-  // Quote-compare stage = live RFQ with quotes, no negotiation round, no PO.
-  // No per-user assignment column exists, and the "dashboard permission gate"
-  // this comment used to appeal to was never implemented — so the widget was
-  // billing-account-wide. "My" now means the caller's own role-scope tuple
-  // plus a commercial read permission.
   const params = [buyer_company_id, hotel_ids];
   const sc = scopeFilter(user_id, 'r', params, COMMERCIAL_SCOPE_PERMISSIONS);
-  const rows = await db.any(
-    `WITH qc_rfqs AS (
-       SELECT r.id, r.rfq_no, r.title, r."timestamp" AS entered_qc_at,
-              (SELECT COUNT(DISTINCT q.created_by) FROM tbl_quotes q WHERE q.rfq_id = r.id) AS vendor_count
+  const candidates = await db.any(
+    `SELECT r.id, r.status, r.rfq_no, r.title, r.bid_end_date,
+            (SELECT COUNT(DISTINCT q.created_by)::int FROM tbl_quotes q
+              WHERE q.rfq_id = r.id AND ${realQuote('q')}) AS vendor_count
        FROM tbl_rfq r
-       WHERE ${companyScope()}
-         AND r.is_published = 1 AND r.status = 1
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-         AND EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.id)
-         AND NOT EXISTS (
-           SELECT 1 FROM tbl_negotiation_rounds nr
-           WHERE nr.rfq_id = r.id
-             AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
-         )
-         AND NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id)
-         ${sc}
-     )
-     SELECT * FROM qc_rfqs
-     ORDER BY entered_qc_at ASC
-     LIMIT 50`,
+      WHERE ${companyScope()}
+        AND r.is_published = 1
+        AND r.status = 1
+        AND ${bidClosed('r')}
+        AND ${hasRealQuote('r')}
+        AND ${rfqMapped('r', 2)}
+        ${sc}`,
     params
   );
+  const stageOf = await lifecycleStagesFor(candidates);
+  const ready = candidates
+    .filter((r) => stageOf.get(Number(r.id)) === 'COMMERCIAL_EVALUATION')
+    .sort((a, b) => String(a.bid_end_date).localeCompare(String(b.bid_end_date)) || a.id - b.id);
   return {
-    count: rows.length,
-    items: rows.map((r) => ({
+    count: ready.length,
+    items: ready.slice(0, PERSONA_LIST_LIMIT).map((r) => ({
       id: r.id,
       rfq_no: r.rfq_no,
       title: r.title,
-      vendor_count: Number(r.vendor_count) || 0,
-      entered_qc_at: r.entered_qc_at,
+      vendor_count: r.vendor_count,
+      bid_closed_at: r.bid_end_date,
     })),
   };
 }
 
-// ── Commercial Evaluator: my_active_negotiations ──────────────────
+// ── Commercial Evaluator: my live negotiation rounds (queue) ─────────
+// Rounds I created that are still in flight: ACTIVE with the vendor window
+// open, or PENDING_APPROVAL (waiting to go out — shown with its status so it
+// is not mistaken for a round vendors can see). end_date is naive UTC.
 async function getMyActiveNegotiationsData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, total_silent_vendors: 0, items: [] };
+    return { count: 0, awaiting_approval_count: 0, total_silent_vendors: 0, items: [] };
   }
-  // Active rounds led by user. Silent vendors = invited (vendor_ids[])
-  // minus those with quote rows for this round.
   const rows = await db.any(
     `WITH my_rounds AS (
-       SELECT nr.id, nr.rfq_id, nr.round_number, nr.end_date, nr.vendor_ids,
+       SELECT nr.id, nr.rfq_id, nr.round_number, nr.end_date, nr.vendor_ids, nr.status,
               r.rfq_no, r.title AS rfq_title
-       FROM tbl_negotiation_rounds nr
-       JOIN tbl_rfq r ON r.id = nr.rfq_id AND ${companyScope()}
-       WHERE nr.created_by = $2
-         AND nr.status NOT IN ('CLOSED', 'COMPLETED', 'EXPIRED')
-         AND nr.end_date IS NOT NULL
-         AND nr.end_date > NOW()
-         AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                     WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_rfq r ON r.id = nr.rfq_id AND ${companyScope()}
+        WHERE nr.created_by = $2
+          AND (
+            (nr.status = 'ACTIVE' AND nr.end_date IS NOT NULL AND nr.end_date > (now() AT TIME ZONE 'UTC'))
+            OR nr.status = 'PENDING_APPROVAL'
+          )
+          AND ${rfqMapped('r', 3)}
      ),
      responded AS (
-       SELECT mr.id AS round_id,
-              COUNT(DISTINCT nrq.vendor_id)::int AS responded_count
-       FROM my_rounds mr
-       LEFT JOIN tbl_negotiation_round_quotes nrq
-         ON nrq.negotiation_round_id = mr.id
-       GROUP BY mr.id
+       SELECT mr.id AS round_id, COUNT(DISTINCT nrq.vendor_id)::int AS responded_count
+         FROM my_rounds mr
+         LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = mr.id
+        GROUP BY mr.id
+     ),
+     shaped AS (
+       SELECT mr.*, COALESCE(array_length(mr.vendor_ids, 1), 0)::int AS invited_count,
+              COALESCE(rs.responded_count, 0) AS responded_count
+         FROM my_rounds mr LEFT JOIN responded rs ON rs.round_id = mr.id
      )
-     SELECT mr.id, mr.rfq_id, mr.round_number, mr.end_date,
-            mr.rfq_no, mr.rfq_title,
-            COALESCE(array_length(mr.vendor_ids, 1), 0)::int AS invited_count,
-            COALESCE(r.responded_count, 0) AS responded_count,
-            GREATEST(
-              COALESCE(array_length(mr.vendor_ids, 1), 0) - COALESCE(r.responded_count, 0),
-              0
-            )::int AS silent_vendor_count
-     FROM my_rounds mr
-     LEFT JOIN responded r ON r.round_id = mr.id
-     ORDER BY mr.end_date ASC NULLS LAST`,
-    [buyer_company_id, user_id, hotel_ids]
+     SELECT s.*,
+            GREATEST(s.invited_count - s.responded_count, 0)::int AS silent_vendor_count,
+            COUNT(*) OVER ()::int AS total_count,
+            COUNT(*) FILTER (WHERE s.status = 'PENDING_APPROVAL') OVER ()::int AS awaiting_count,
+            SUM(CASE WHEN s.status = 'ACTIVE' THEN GREATEST(s.invited_count - s.responded_count, 0) ELSE 0 END)
+              OVER ()::int AS total_silent
+       FROM shaped s
+      ORDER BY (s.status = 'ACTIVE') DESC, s.end_date ASC NULLS LAST, s.id
+      LIMIT $4`,
+    [buyer_company_id, user_id, hotel_ids, PERSONA_LIST_LIMIT]
   );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_id: r.rfq_id,
-    rfq_no: r.rfq_no,
-    rfq_title: r.rfq_title,
-    round_number: r.round_number,
-    round_end_date: r.end_date,
-    silent_vendor_count: r.silent_vendor_count,
-  }));
-  const total_silent_vendors = items.reduce(
-    (s, r) => s + r.silent_vendor_count,
-    0
-  );
-  return { count: items.length, total_silent_vendors, items };
+  return {
+    count: rows[0]?.total_count || 0,
+    awaiting_approval_count: rows[0]?.awaiting_count || 0,
+    total_silent_vendors: rows[0]?.total_silent || 0,
+    items: rows.map((r) => ({
+      id: r.id,
+      rfq_id: r.rfq_id,
+      rfq_no: r.rfq_no,
+      rfq_title: r.rfq_title,
+      round_number: r.round_number,
+      round_status: r.status,
+      round_end_date: r.end_date,
+      invited_vendor_count: r.invited_count,
+      silent_vendor_count: r.status === 'ACTIVE' ? Math.max(r.invited_count - r.responded_count, 0) : null,
+    })),
+  };
 }
 
-// ── Commercial Evaluator: savings_pipeline ────────────────────────
-async function getSavingsPipelineData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return {
-      total_savings: 0,
-      prior_period_savings: 0,
-      negotiation_count: 0,
-      avg_savings_pct: 0,
-    };
-  }
-  // Negotiations LED BY this user, priced by the shared ladder (see
-  // getNegotiationSavingsData). Two windows: current 30d vs prior 30d, keyed on
-  // when the negotiation closed.
-  //
-  // "Led by" used to mean `round_number = 1 AND created_by = $2`. That read the
-  // stored column, which under legacy per-product numbering carried one row per
-  // PRODUCT — so a 3-product RFQ produced three my_rfqs rows with three
-  // different closed_at values and multiplied its own quote rows threefold —
-  // and under RFQ-wide numbering carries at most one row per RFQ, which would
-  // have dropped every negotiation the user opened on a later product. It is
-  // now the RFQ's EARLIEST non-cancelled round: numbering-invariant, exactly
-  // one row per RFQ, and the honest reading of who opened the negotiation.
-  const computePeriod = async (intervalStart, intervalEnd) => {
+// ── Commercial Evaluator: savings pipeline (period) ──────────────────
+/** Shift a YYYY-MM-DD by n days (UTC arithmetic on a calendar date). */
+const addDays = (ymd, n) => {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const istToday = () => new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+
+/**
+ * The window the header selected, and the equally long window right before
+ * it. "All" (no start_date) has no prior window.
+ */
+function currentAndPriorWindow(start_date, end_date) {
+  const end = end_date || istToday();
+  if (!start_date) return { current: { start_date: null, end_date: end }, prior: null };
+  const days = Math.round((new Date(`${end}T00:00:00Z`) - new Date(`${start_date}T00:00:00Z`)) / 86400000) + 1;
+  return {
+    current: { start_date, end_date: end },
+    prior: { start_date: addDays(start_date, -days), end_date: addDays(start_date, -1) },
+  };
+}
+
+// Negotiations I led — the RFQ's EARLIEST non-cancelled round is mine — that
+// have CONCLUDED (no live round left) inside the window. Concluded-at is the
+// last non-cancelled round's close (end_date when closed_at was never
+// stamped), so a multi-round negotiation lands in the period it finished in,
+// not the one its first round closed in. Priced by the shared ladder on the
+// awarded basis (D2), with the all-vendor figure alongside.
+async function getSavingsPipelineData(buyer_company_id, user_id, hotel_ids, start_date = null, end_date = null) {
+  const { current, prior } = currentAndPriorWindow(start_date, end_date);
+  const empty = {
+    basis: 'awarded', total_savings: 0, prior_period_savings: null, negotiation_count: 0,
+    avg_savings_pct: null, all_vendors_savings: 0, window: current, prior_window: prior,
+  };
+  if (!hotel_ids || hotel_ids.length === 0) return empty;
+
+  const concludedRfqs = async (win) => {
     const rows = await db.any(
       `SELECT r.id AS rfq_id
          FROM tbl_rfq r
          JOIN LATERAL (
-           SELECT nr.created_by, nr.closed_at
-             FROM tbl_negotiation_rounds nr
-            WHERE nr.rfq_id = r.id
-              AND nr.status <> 'CANCELLED'
-            ORDER BY nr.created_at, nr.id
-            LIMIT 1
+           SELECT nr.created_by FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = r.id AND nr.status <> 'CANCELLED'
+            ORDER BY nr.created_at, nr.id LIMIT 1
          ) first_round ON TRUE
+         JOIN LATERAL (
+           SELECT MAX(COALESCE(nr.closed_at, nr.end_date)) AS concluded_at
+             FROM tbl_negotiation_rounds nr
+            WHERE nr.rfq_id = r.id AND nr.status <> 'CANCELLED'
+         ) done ON TRUE
         WHERE ${companyScope()}
           AND first_round.created_by = $2
-          AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                      WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($3))
-          AND ${intervalStart === null
-            ? 'TRUE'
-            : `(first_round.closed_at IS NULL OR (first_round.closed_at >= NOW() - INTERVAL '${intervalEnd}' AND first_round.closed_at < NOW() - INTERVAL '${intervalStart}'))`}`,
-      [buyer_company_id, user_id, hotel_ids]
+          AND NOT ${liveRoundExists('r')}
+          AND done.concluded_at IS NOT NULL
+          AND ${windowSql('done.concluded_at', FRAME.SESSION, 4, 5)}
+          AND ${rfqMapped('r', 3)}`,
+      [buyer_company_id, user_id, hotel_ids, win.start_date, win.end_date]
     );
-    const totals = await priceNegotiations(rows.map((r) => r.rfq_id));
-    return {
-      // Signed value: positive = saved, negative = lost (negotiated above
-      // baseline). FE renders losses in red.
-      savings: totals.saved,
-      baseline: totals.baseline,
-      final: totals.achieved,
-      negotiation_count: totals.parents,
-    };
+    return priceNegotiations(rows.map((r) => r.rfq_id));
   };
 
-  const current = await computePeriod("0 days", "30 days");
-  const prior = await computePeriod("30 days", "60 days");
-  const avg_savings_pct = current.baseline > 0
-    ? (current.savings / current.baseline) * 100
-    : 0;
+  const cur = await concludedRfqs(current);
+  const pri = prior ? await concludedRfqs(prior) : null;
   return {
-    total_savings: current.savings,
-    prior_period_savings: prior.savings,
-    negotiation_count: current.negotiation_count,
-    avg_savings_pct,
+    basis: 'awarded',
+    total_savings: round2(cur.saved_awarded),
+    prior_period_savings: pri ? round2(pri.saved_awarded) : null,
+    negotiation_count: cur.parents,
+    avg_savings_pct: cur.baseline_awarded > 0
+      ? round1((cur.saved_awarded / cur.baseline_awarded) * 100)
+      : null,
+    all_vendors_savings: round2(cur.saved),
+    window: current,
+    prior_window: prior,
   };
 }
 
-// ── Commercial Approver: my_commercial_approvals_pending ─────────
-async function getMyCommercialApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, total_value: 0, top_by_value: [] };
-  }
-  const rows = await db.any(
-    `SELECT i.id,
-            i.entity_id AS po_id,
-            i.created_at,
-            po.po_number,
-            po.total_value,
-            po.rfq_id,
-            r.rfq_no,
-            r.title,
-            u.name AS vendor_name,
-            c.company_name AS vendor_company
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     JOIN tbl_rfq_purchase_order po ON po.id = i.entity_id
-     JOIN tbl_rfq r ON r.id = po.rfq_id
-     LEFT JOIN tbl_users u ON u.id = po.finalized_vendor_id
-     LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE i.status = 'PENDING'
-       AND i.entity_type = 'PO'
-       AND sa.approver_user_id = $2
-       AND sa.status = 'PENDING'
-       AND s.step_order = i.current_step
-       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-       AND i.hotel_id = ANY($3)
-     ORDER BY po.total_value DESC NULLS LAST, i.created_at DESC`,
-    [buyer_company_id, user_id, hotel_ids]
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    po_id: r.po_id,
-    rfq_id: r.rfq_id,
-    rfq_no: r.rfq_no,
-    title: r.title,
-    vendor_name: r.vendor_company || r.vendor_name,
-    value: Number(r.total_value) || 0,
-  }));
-  const total_value = items.reduce((s, r) => s + r.value, 0);
-  return {
-    count: items.length,
-    total_value,
-    top_by_value: items.slice(0, 3),
-  };
-}
+// ── Approvers: approval turnaround (period) ──────────────────────────
+// Replaces the three "throughput" cards. For each kind of decision, how long
+// did it take once it was actually in front of the caller:
+//   tech_eval       my technical evaluations: bid close → my submission
+//                   (the TECHNICAL approval instance I initiated; first
+//                   submission per product)
+//   tech_approval / quote_approval / po_approval / rfq_approval
+//                   my decisions: the step reaching me (stepStartedAt) → my
+//                   APPROVED/REJECTED action
+// Median + P90 + n (means are dominated by a few stale items); decisions
+// within a minute are reported as `instant_count` (auto-approvals / same
+// person on consecutive steps). Window = decision time, IST calendar days.
+const TURNAROUND_TABS = Object.freeze([
+  { key: 'tech_eval', label: 'Technical evaluation' },
+  { key: 'tech_approval', label: 'Technical approval' },
+  { key: 'quote_approval', label: 'Quote approval' },
+  { key: 'po_approval', label: 'PO approval' },
+  { key: 'rfq_approval', label: 'RFQ approval' },
+]);
 
-// ── Commercial Approver: deals_with_price_anomalies ──────────────
-async function getDealsWithPriceAnomaliesData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
-  // For each pending PO approval on this user, compare unit_price on the
-  // line item against the most recent COMPLETED PO for the same product
-  // variant. If the awarded price is materially higher (≥10%), flag it.
-  //
-  // The `last_paid` CTE below applied companyScope() but NOT hotelFilter(),
-  // so the "last paid" figure — and the product name attached to it — could be
-  // sourced from any of the eight legal entities sharing the billing account.
-  // An approver at one hotel was shown another company's unit price as their
-  // own baseline, and the response body carried it as `last_paid_unit_price`.
-  const params = [buyer_company_id, user_id, hotel_ids];
-  const sc = scopeFilter(user_id, 'r', params);
+async function getApprovalTurnaroundData(buyer_company_id, user_id, hotel_ids, start_date = null, end_date = null) {
+  const tabs = new Map(TURNAROUND_TABS.map((t) => [t.key, {
+    ...t, n: 0, median_hours: null, p90_hours: null, instant_count: 0,
+  }]));
+  const shape = () => ({ window: { start_date, end_date }, tabs: [...tabs.values()] });
+  if (!hotel_ids || hotel_ids.length === 0) return shape();
+
   const rows = await db.any(
-    `WITH my_pending AS (
-       SELECT i.id AS instance_id, po.id AS po_id, po.rfq_id, pop.id AS pop_id,
-              pop.rfq_product_id, rp.product_variant_id,
-              pop.unit_price AS awarded_unit_price,
-              po.total_value
-       FROM tbl_approval_instances i
-       JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-       JOIN tbl_rfq_purchase_order po ON po.id = i.entity_id
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       WHERE i.status = 'PENDING'
-         AND i.entity_type = 'PO'
-         AND sa.approver_user_id = $2
-         AND sa.status = 'PENDING'
-         AND s.step_order = i.current_step
-         AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-         AND i.hotel_id = ANY($3)
+    `WITH decisions AS (
+       SELECT CASE i.entity_type
+                WHEN 'TECHNICAL' THEN 'tech_approval'
+                WHEN 'NEGOTIATION_QUOTE' THEN 'quote_approval'
+                WHEN 'PO' THEN 'po_approval'
+                ELSE 'rfq_approval'
+              END AS tab,
+              GREATEST(EXTRACT(EPOCH FROM (sa.acted_at - ${stepStartedAt('i', 's')})) / 3600.0, 0) AS hours
+         FROM tbl_approval_step_approvers sa
+         JOIN tbl_approval_instance_steps s ON s.id = sa.approval_instance_step_id
+         JOIN tbl_approval_instances i ON i.id = s.approval_instance_id
+        WHERE sa.approver_user_id = $2
+          AND sa.status IN ('APPROVED', 'REJECTED')
+          AND sa.acted_at IS NOT NULL
+          AND sa.removed_at IS NULL
+          AND i.entity_type IN ('TECHNICAL', 'NEGOTIATION_QUOTE', 'PO', 'RFQ', 'TENDER')
+          AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+          AND (i.hotel_id IS NULL OR i.hotel_id = ANY($3))
+          AND ${windowSql('sa.acted_at', FRAME.SESSION, 4, 5)}
      ),
-     last_paid AS (
-       -- Most recent completed PO unit_price per product_variant, restricted
-       -- to the caller's own hotels AND role scope — not merely to the
-       -- billing account.
-       SELECT DISTINCT ON (rp.product_variant_id)
-         rp.product_variant_id,
-         pop.unit_price AS last_paid_unit_price,
-         po.created_at
-       FROM tbl_rfq_purchase_order po
-       JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
-       WHERE po.status = 'completed'
-       ${hotelFilter('r', 3)} ${sc}
-       ORDER BY rp.product_variant_id, po.created_at DESC
+     evaluations AS (
+       SELECT DISTINCT ON (i.metadata->>'rfq_product_id')
+              'tech_eval' AS tab,
+              GREATEST(EXTRACT(EPOCH FROM (
+                i.created_at - (r.bid_end_date::timestamp AT TIME ZONE 'Asia/Kolkata')::timestamp
+              )) / 3600.0, 0) AS hours
+         FROM tbl_approval_instances i
+         JOIN tbl_rfq r ON (i.metadata->>'rfq_id') ~ '^[0-9]+$' AND r.id = (i.metadata->>'rfq_id')::int
+        WHERE i.entity_type = 'TECHNICAL'
+          AND i.initiated_by = $2
+          AND ${hasBidEnd('r')}
+          AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
+          AND ${rfqMapped('r', 3)}
+          AND ${windowSql('i.created_at', FRAME.SESSION, 4, 5)}
+        ORDER BY i.metadata->>'rfq_product_id', i.created_at, i.id
+     ),
+     unioned AS (
+       SELECT tab, hours FROM decisions
+       UNION ALL
+       SELECT tab, hours FROM evaluations
      )
-     SELECT mp.po_id, mp.rfq_id, mp.product_variant_id,
-            mp.awarded_unit_price,
-            lp.last_paid_unit_price,
-            ((mp.awarded_unit_price - lp.last_paid_unit_price) / lp.last_paid_unit_price * 100) AS drift_pct,
-            pv.name AS product_name
-     FROM my_pending mp
-     JOIN last_paid lp ON lp.product_variant_id = mp.product_variant_id
-     JOIN tbl_product_variant pv ON pv.id = mp.product_variant_id
-     WHERE lp.last_paid_unit_price > 0
-       AND mp.awarded_unit_price > lp.last_paid_unit_price
-       AND ((mp.awarded_unit_price - lp.last_paid_unit_price) / lp.last_paid_unit_price * 100) >= 10
-     ORDER BY drift_pct DESC
-     LIMIT 50`,
+     SELECT tab,
+            COUNT(*)::int AS n,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY hours) AS median_hours,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY hours) AS p90_hours,
+            COUNT(*) FILTER (WHERE hours < 1.0 / 60)::int AS instant_count
+       FROM unioned
+      GROUP BY tab`,
+    [buyer_company_id, user_id, hotel_ids, start_date, end_date]
+  );
+  for (const r of rows) {
+    const t = tabs.get(r.tab);
+    if (!t) continue;
+    t.n = r.n;
+    t.median_hours = round1(r.median_hours);
+    t.p90_hours = round1(r.p90_hours);
+    t.instant_count = r.instant_count;
+  }
+  return shape();
+}
+
+// ── Awarding: recently approved POs (period) ─────────────────────────
+// POs in the caller's scope whose internal approval completed inside the
+// window (last 30 days when no range is selected), newest first. The award
+// is the PO — NEGOTIATION_QUOTE ids are rfq_product ids, which is why the
+// old version, joining them to round quotes, showed other RFQs' numbers.
+async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids, start_date = null, end_date = null) {
+  const win = start_date || end_date
+    ? { start_date, end_date }
+    : { start_date: addDays(istToday(), -29), end_date: istToday() };
+  if (!hotel_ids || hotel_ids.length === 0) return { count: 0, total_value: 0, window: win, items: [] };
+  const params = [buyer_company_id, win.start_date, win.end_date, hotel_ids, user_id, PERSONA_LIST_LIMIT];
+  const sc = scopeFilter(user_id, 'r', params, RFQ_SCOPE_PERMISSIONS);
+  const rows = await db.any(
+    `WITH approved AS (
+       SELECT DISTINCT ON (po.id)
+              po.id AS po_id, po.po_number, po.total_value, po.status, po.rfq_id,
+              po.finalized_vendor_id, i.id AS instance_id, i.completed_at AS approved_at
+         FROM tbl_rfq_purchase_order po
+         JOIN tbl_approval_instances i
+           ON i.entity_type = 'PO' AND i.entity_id = po.id AND i.status = 'APPROVED'
+         JOIN tbl_rfq r ON r.id = po.rfq_id
+        WHERE ${companyScope()}
+          AND ${rfqMapped('r', 4)}
+          AND po.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled', 'draft', 'pending_approval')
+          AND i.completed_at IS NOT NULL
+          AND ${windowSql('i.completed_at', FRAME.SESSION, 2, 3)}
+          ${sc}
+        ORDER BY po.id, i.completed_at DESC
+     )
+     SELECT a.*, r.rfq_no, r.title AS rfq_title,
+            ${vendorName('vu', 'vc')} AS vendor_name,
+            EXISTS (
+              SELECT 1 FROM tbl_approval_instance_steps s2
+                JOIN tbl_approval_step_approvers sa2 ON sa2.approval_instance_step_id = s2.id
+               WHERE s2.approval_instance_id = a.instance_id
+                 AND sa2.approver_user_id = $5 AND sa2.status = 'APPROVED'
+            ) AS approved_by_me,
+            COUNT(*) OVER ()::int AS total_count,
+            SUM(a.total_value) OVER () AS total_value_all
+       FROM approved a
+       JOIN tbl_rfq r ON r.id = a.rfq_id
+       LEFT JOIN tbl_users vu ON vu.id = a.finalized_vendor_id
+       LEFT JOIN tbl_company vc ON vc.id = vu.company_id
+      ORDER BY a.approved_at DESC, a.po_id DESC
+      LIMIT $6`,
     params
   );
-  const items = rows.map((r) => ({
-    id: r.po_id,
-    rfq_id: r.rfq_id,
-    product_name: r.product_name,
-    awarded_unit_price: Number(r.awarded_unit_price) || 0,
-    last_paid_unit_price: Number(r.last_paid_unit_price) || 0,
-    drift_pct: Number(r.drift_pct) || 0,
-  }));
-  return { count: items.length, items };
-}
-
-async function getCommercialApprovalThroughputData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return {
-      current_period_avg_hours: null,
-      prior_period_avg_hours: null,
-      delta_pct: null,
-      unit: "hrs",
-      sparkline: [],
-    };
-  }
-  return approvalThroughput(buyer_company_id, user_id, hotel_ids, "PO");
-}
-
-// ── Awarding P1/P2: my_award_approvals_pending ───────────────────
-async function getMyAwardApprovalsPendingData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return { count: 0, total_value: 0, items: [] };
-  }
-  // Award approvals = NEGOTIATION_QUOTE entity_type (per backend convention).
-  // Value derives from the underlying PO created/linked to the negotiation
-  // quote (or 0 if no PO yet). We surface RFQ + vendor for context.
-  const rows = await db.any(
-    `SELECT i.id,
-            i.entity_id AS negotiation_quote_id,
-            i.created_at AS submitted_at,
-            nrq.rfq_product_id,
-            nrq.vendor_id,
-            COALESCE(nrq.quoted_price, 0) AS quoted_price,
-            r.id AS rfq_id,
-            r.rfq_no,
-            r.title,
-            u.name AS vendor_name,
-            c.company_name AS vendor_company
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.id = i.entity_id
-     LEFT JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
-     LEFT JOIN tbl_rfq r ON r.id = nr.rfq_id
-     LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
-     LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE i.status = 'PENDING'
-       AND i.entity_type = 'NEGOTIATION_QUOTE'
-       AND sa.approver_user_id = $2
-       AND sa.status = 'PENDING'
-       AND s.step_order = i.current_step
-       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-       AND i.hotel_id = ANY($3)
-     ORDER BY i.created_at DESC
-     LIMIT 50`,
-    [buyer_company_id, user_id, hotel_ids]
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_id: r.rfq_id,
-    rfq_no: r.rfq_no,
-    title: r.title,
-    vendor_name: r.vendor_company || r.vendor_name,
-    value: Number(r.quoted_price) || 0,
-    submitted_at: r.submitted_at,
-  }));
-  const total_value = items.reduce((s, r) => s + r.value, 0);
-  return { count: items.length, total_value, items };
-}
-
-// ── Awarding P1/P2: recent_awards ─────────────────────────────────
-async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return { items: [], total_value: 0 };
-  }
-  // Recently cleared award approvals by this user, joined to any
-  // resulting PO so the FE can link out.
-  const rows = await db.any(
-    `SELECT i.id,
-            sa.acted_at AS awarded_at,
-            nrq.quoted_price AS value,
-            r.id AS rfq_id,
-            r.rfq_no,
-            r.title,
-            u.name AS vendor_name,
-            c.company_name AS vendor_company,
-            (SELECT po.id FROM tbl_rfq_purchase_order po WHERE po.rfq_id = r.id
-              ORDER BY po.created_at DESC LIMIT 1) AS po_id
-     FROM tbl_approval_instances i
-     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
-     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
-     LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.id = i.entity_id
-     LEFT JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
-     LEFT JOIN tbl_rfq r ON r.id = nr.rfq_id
-     LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
-     LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE sa.approver_user_id = $2
-       AND sa.status = 'APPROVED'
-       AND sa.acted_at IS NOT NULL
-       AND i.entity_type = 'NEGOTIATION_QUOTE'
-       AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $1)
-       AND i.hotel_id = ANY($3)
-       AND sa.acted_at >= NOW() - INTERVAL '30 days'
-     ORDER BY sa.acted_at DESC
-     LIMIT 10`,
-    [buyer_company_id, user_id, hotel_ids]
-  );
-  const items = rows.map((r) => ({
-    id: r.id,
-    rfq_id: r.rfq_id,
-    rfq_no: r.rfq_no,
-    title: r.title,
-    vendor_name: r.vendor_company || r.vendor_name,
-    value: Number(r.value) || 0,
-    awarded_at: r.awarded_at,
-    po_id: r.po_id,
-  }));
-  const total_value = items.reduce((s, r) => s + r.value, 0);
-  return { items, total_value };
-}
-
-// ── Awarding P1/P2: award_value_pipeline ──────────────────────────
-async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids) {
-  if (!hotel_ids || hotel_ids.length === 0) {
-    return {
-      completed_value: 0,
-      completed_po_count: 0,
-      ongoing_value: 0,
-      ongoing_po_count: 0,
-    };
-  }
-  // BU-level rollup of PO ₹ across the user's hotels.
-  //   Completed = PO approved or further downstream (vendor accepted /
-  //               sent / GRN / completed).
-  //   Ongoing   = pending_approval OR acceptance_pending.
-  //
-  // This one is a value rollup, not a "my" list, so it is deliberately NOT
-  // bound to the caller's user id — binding award ₹ to one approver would
-  // misreport the pipeline. It is bound to the caller's SCOPE instead, which
-  // is what was missing: the department and process axes were unenforced and
-  // the figure summed every business unit in the billing account.
-  const pipelineParams = [buyer_company_id, hotel_ids];
-  const pipelineScope = scopeFilter(user_id, 'r', pipelineParams);
-  const row = await db.one(
-    `SELECT
-        COALESCE(SUM(CASE WHEN po.status IN ('approved','sent','GRN','completed','invoice_raised','dispatched')
-                          THEN po.total_value ELSE 0 END), 0) AS completed_value,
-        COUNT(*) FILTER (WHERE po.status IN ('approved','sent','GRN','completed','invoice_raised','dispatched'))::int AS completed_po_count,
-        COALESCE(SUM(CASE WHEN po.status IN ('pending_approval','acceptance_pending')
-                          THEN po.total_value ELSE 0 END), 0) AS ongoing_value,
-        COUNT(*) FILTER (WHERE po.status IN ('pending_approval','acceptance_pending'))::int AS ongoing_po_count
-     FROM tbl_rfq_purchase_order po
-     JOIN tbl_rfq r ON r.id = po.rfq_id AND ${companyScope()}
-     WHERE EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm
-                   WHERE rhm.rfq_id = r.id AND rhm.hotel_id = ANY($2))
-     ${pipelineScope}`,
-    pipelineParams
-  );
   return {
-    completed_value: Number(row.completed_value) || 0,
-    completed_po_count: row.completed_po_count,
-    ongoing_value: Number(row.ongoing_value) || 0,
-    ongoing_po_count: row.ongoing_po_count,
+    count: rows[0]?.total_count || 0,
+    total_value: rows[0] ? round2(rows[0].total_value_all) : 0,
+    window: win,
+    items: rows.map((r) => ({
+      po_id: r.po_id,
+      po_number: r.po_number,
+      rfq_id: r.rfq_id,
+      rfq_no: r.rfq_no,
+      rfq_title: r.rfq_title,
+      vendor_name: r.vendor_name,
+      value: round2(r.total_value),
+      status: r.status,
+      approved_at: r.approved_at,
+      approved_by_me: r.approved_by_me,
+    })),
   };
 }
+
+// ── Awarding: PO value by stage (period) ─────────────────────────────
+// Every PO in the caller's scope raised inside the window, bucketed by where
+// it stands. Header total_value (the figure Reports sums). Drafts and
+// cancelled POs never happened and are left out; rejected POs are shown so
+// the rejection rate is visible, but are not part of `committed_value`.
+const PO_STAGE_BUCKETS = Object.freeze([
+  { key: 'in_approval', label: 'In approval', statuses: ['pending_approval'] },
+  { key: 'awaiting_acceptance', label: 'Awaiting vendor acceptance', statuses: ['acceptance_pending'] },
+  { key: 'approved', label: 'Approved', statuses: ['approved'] },
+  { key: 'in_fulfilment', label: 'In fulfilment', statuses: ['sent', 'dispatched', 'GRN', 'invoice_raised'] },
+  { key: 'completed', label: 'Completed', statuses: ['completed'] },
+  { key: 'rejected', label: 'Rejected', statuses: ['rejected', 'rejected_by_vendor'] },
+]);
+
+async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids, start_date = null, end_date = null) {
+  const stages = PO_STAGE_BUCKETS.map(({ key, label }) => ({ key, label, value: 0, po_count: 0 }));
+  const empty = { committed_value: 0, committed_po_count: 0, pending_value: 0, pending_po_count: 0, stages };
+  if (!hotel_ids || hotel_ids.length === 0) return empty;
+  const params = [buyer_company_id, start_date, end_date, hotel_ids];
+  const sc = scopeFilter(user_id, 'r', params, RFQ_SCOPE_PERMISSIONS);
+  const rows = await db.any(
+    `SELECT po.status::text AS status,
+            COUNT(*)::int AS po_count,
+            COALESCE(SUM(po.total_value), 0) AS value
+       FROM tbl_rfq_purchase_order po
+       JOIN tbl_rfq r ON r.id = po.rfq_id
+      WHERE ${companyScope()}
+        AND ${rfqMapped('r', 4)}
+        AND po.status NOT IN ('draft', 'cancelled')
+        AND ${windowSql('po.created_at', FRAME.TZ, 2, 3)}
+        ${sc}
+      GROUP BY po.status`,
+    params
+  );
+  const byStatus = new Map(rows.map((r) => [r.status, r]));
+  for (const [idx, bucket] of PO_STAGE_BUCKETS.entries()) {
+    for (const st of bucket.statuses) {
+      const r = byStatus.get(st);
+      if (!r) continue;
+      stages[idx].value += Number(r.value) || 0;
+      stages[idx].po_count += r.po_count;
+    }
+    stages[idx].value = round2(stages[idx].value);
+  }
+  const sumOf = (keys) => stages.filter((s) => keys.includes(s.key));
+  const committed = sumOf(['approved', 'in_fulfilment', 'completed']);
+  const pending = sumOf(['in_approval', 'awaiting_acceptance']);
+  return {
+    committed_value: round2(committed.reduce((s, x) => s + x.value, 0)),
+    committed_po_count: committed.reduce((s, x) => s + x.po_count, 0),
+    pending_value: round2(pending.reduce((s, x) => s + x.value, 0)),
+    pending_po_count: pending.reduce((s, x) => s + x.po_count, 0),
+    stages,
+  };
+}
+
 
 // ─────────────────────────────────────────────────────────────────────
 //  Status Banner — single BFF aggregator that powers the dashboard hero.
@@ -2798,27 +2674,20 @@ export default {
   // Role-aware widgets — Technical Evaluator
   getMyTechEvalsPendingData,
   getTechEvalsWithDisagreementsData,
-  getTechEvalThroughputData,
 
-  // Role-aware widgets — Technical Approver
+  // Role-aware widgets — approval queues (one shared predicate)
   getMyTechApprovalsPendingData,
-  getTechApprovalOldestPendingData,
-  getTechApprovalThroughputData,
-  // Shared approval-throughput helper (Commercial Approver reuses)
-  approvalThroughput,
+  getMyRfqApprovalsPendingData,
+  getMyCommercialApprovalsPendingData,
+  getMyAwardApprovalsPendingData,
+  getApprovalTurnaroundData,
 
   // Role-aware widgets — Commercial Evaluator / N1
   getMyQuoteComparesData,
   getMyActiveNegotiationsData,
-  getSavingsPipelineData: getSavingsPipelineData,
+  getSavingsPipelineData,
 
-  // Role-aware widgets — Commercial Approver
-  getMyCommercialApprovalsPendingData,
-  getDealsWithPriceAnomaliesData,
-  getCommercialApprovalThroughputData,
-
-  // Role-aware widgets — Awarding P1/P2
-  getMyAwardApprovalsPendingData,
+  // Role-aware widgets — Awarding
   getRecentAwardsData,
   getAwardValuePipelineData,
 
