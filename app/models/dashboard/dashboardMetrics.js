@@ -268,3 +268,29 @@ export function scopeTuplesFilter(userId, alias, params, permissions) {
 
 export const round1 = (n) => (n == null || !Number.isFinite(Number(n)) ? null : Math.round(Number(n) * 10) / 10);
 export const round2 = (n) => (n == null || !Number.isFinite(Number(n)) ? null : Math.round(Number(n) * 100) / 100);
+
+// ── Vendor disagreement ──────────────────────────────────────────────────
+
+/**
+ * A technical-evaluation vendor response that disagrees with its clause.
+ * Vendors answer in free text; prod stores the negative as 'I Dont Agree'
+ * (never 'disagree', which is why an equality check returned 0 forever), so
+ * match the normalised forms. Shared by the Vendor disagreements card and the
+ * RFQ list's `filters.vendor_disagreement`, so the two cannot drift.
+ */
+export const DISAGREE_SQL = (col) =>
+  `regexp_replace(lower(COALESCE(${col}, '')), '[^a-z]', '', 'g') IN ('idontagree', 'idonotagree', 'disagree', 'idisagree', 'dontagree', 'notagree')`;
+
+/**
+ * The RFQ (alias) has an incomplete technical evaluation with at least one
+ * disagreeing vendor response — the card's population, per RFQ.
+ */
+export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
+  SELECT 1
+    FROM tbl_rfq_product_tech_evaluation te_d
+    JOIN tbl_rfq_product_tech_evaluation_clauses c_d ON c_d.tbl_rfq_product_tech_evaluation_id = te_d.id
+    JOIN tbl_rfq_product_tech_evaluation_vendors_response vr_d
+      ON vr_d.tbl_rfq_product_tech_evaluation_clauses_id = c_d.id
+   WHERE te_d.rfq_id = ${alias}.id
+     AND te_d.is_complete = false
+     AND ${DISAGREE_SQL('vr_d.vendor_response')})`;

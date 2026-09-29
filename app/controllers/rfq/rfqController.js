@@ -8889,6 +8889,10 @@ const rfqController = {
         // "Created by me" — the dashboard's My-drafts / My-active View-all.
         // The creator is always the JWT user, never a client-supplied id.
         mine: f.mine === true || f.mine === 'true' || f.mine === 1 || f.mine === '1',
+        // The Vendor disagreements card's View-all: RFQs with an open technical
+        // evaluation a vendor disagreed with (the card's own predicate).
+        vendor_disagreement: f.vendor_disagreement === true || f.vendor_disagreement === 'true'
+          || f.vendor_disagreement === 1 || f.vendor_disagreement === '1',
       };
       const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
 
@@ -8899,7 +8903,7 @@ const rfqController = {
       // newest 1,000 in JS would drop a creator's older RFQs once their scope
       // passes the cap) and before tab counts and facets, so every number on
       // the page describes the same set the dashboard card counted.
-      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true, filters.mine);
+      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true, filters.mine, filters.vendor_disagreement);
       const rows = Array.isArray(all) ? all : [];
 
       // 2. Lifecycle stage → bucket + normalized status key.

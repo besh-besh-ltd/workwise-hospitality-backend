@@ -14,6 +14,7 @@ import {
   lineVariant,
   approvalItemKey,
   myPendingApprovalsFrom,
+  DISAGREE_SQL,
   LEAF_CATEGORY_JOIN,
   round1,
   round2,
@@ -1875,11 +1876,8 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
 }
 
 // ── Tech Evaluator: vendor disagreements (queue) ─────────────────────
-// Vendors answer each clause with a free-text response; prod stores the
-// negative as 'I Dont Agree' (122 rows) and never 'disagree', which is why
-// the old equality check returned 0 forever. Match the normalised forms.
-const DISAGREE_SQL = (col) =>
-  `regexp_replace(lower(COALESCE(${col}, '')), '[^a-z]', '', 'g') IN ('idontagree', 'idonotagree', 'disagree', 'idisagree', 'dontagree', 'notagree')`;
+// DISAGREE_SQL (dashboardMetrics) matches prod's stored 'I Dont Agree'; the
+// RFQ list's `filters.vendor_disagreement` uses the same predicate.
 
 async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {

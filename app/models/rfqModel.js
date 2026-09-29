@@ -7,6 +7,7 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 
 /**
@@ -4030,7 +4031,8 @@ LIMIT 2;
     completed_status,
     hotel_ids,
     include_drafts = false, // management listing: also surface saved drafts (unpublished status-1)
-    created_by_only = false // "Created by me": narrowed in SQL, BEFORE the LIMIT, never after it
+    created_by_only = false, // "Created by me": narrowed in SQL, BEFORE the LIMIT, never after it
+    vendor_disagreement_only = false // Vendor disagreements card's View-all — same predicate, same place
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -4524,6 +4526,7 @@ LIMIT 2;
       )` : ''}
       ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       ${created_by_only ? `AND RFQ.created_by = ${Number(user_id)}` : ''}
+      ${vendor_disagreement_only ? `AND RFQ.status = 1 AND ${hasOpenVendorDisagreement('RFQ')}` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
