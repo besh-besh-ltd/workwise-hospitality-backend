@@ -35,6 +35,7 @@
     "migrations/20260922101000_po_cancelled_on_rfq_close_backfill.sql",
     "migrations/20260928100000_dashboard_v3_widget_catalogue.sql",
     "migrations/20260928101000_company_buyer_dashboard_v3_flag.sql",
-    "migrations/20260928102000_dashboard_v3_seed_grants.sql"
+    "migrations/20260928102000_dashboard_v3_seed_grants.sql",
+    "migrations/20260929100000_po_line_variant_backfill.sql"
   ]
 }
