@@ -84,12 +84,19 @@ beforeAll(async () => {
       approval: { status: "APPROVED", createdAgo: 24, actedAgo: 20, approver: IDS.users.a1_proc_commApp },
     });
 
+    // Internally approved yesterday but the vendor hasn't accepted: not
+    // committed spend, so not a "recently approved PO" either.
+    const p10 = await po(t, "PO approved, awaiting vendor acceptance", {
+      value: 700, status: "acceptance_pending", createdAgoDays: 1,
+      approval: { status: "APPROVED", createdAgo: 24, actedAgo: 12 },
+    });
+
     // ── Only in the value pipeline ────────────────────────────────────
     const p6 = await po(t, "PO rejected", { value: 1000, status: "rejected" });
     const p7 = await po(t, "PO cancelled", { value: 500, status: "cancelled" });
     const p8 = await po(t, "PO draft", { value: 250, status: "draft" });
 
-    Object.assign(seeded, { p1, p2, pA2, pElse, p3, p4, p5, p6, p7, p8, p9 });
+    Object.assign(seeded, { p1, p2, pA2, pElse, p3, p4, p5, p6, p7, p8, p9, p10 });
   });
 });
 
@@ -149,6 +156,26 @@ describe("Recently approved POs", () => {
     expect(window.end_date).toBe(istDate(0));
   });
 
+  it("is committed spend only: a PO awaiting vendor acceptance is not listed", async () => {
+    const res = await get(poApp, "recent-awards", { start_date: istDate(-59), end_date: istDate(0) });
+    expect(res.body.data.items.map((i) => i.po_id)).not.toContain(seeded.p10.po_id);
+  });
+
+  it("over a window covering every PO it equals the committed spend (D1)", async () => {
+    const range = { start_date: istDate(-400), end_date: istDate(0) };
+    const [recent, pipe, snap] = await Promise.all([
+      get(poApp, "recent-awards", range),
+      get(poApp, "award-value-pipeline", range),
+      get(poApp, "procurement-snapshot", range),
+    ]);
+    // Every committed PO in this fixture went through an approval, so the
+    // two populations coincide exactly; on real data recently-approved is a
+    // subset (POs committed without an approval instance are not listed).
+    expect(recent.body.data.count).toBe(pipe.body.data.committed_po_count);
+    expect(recent.body.data.total_value).toBe(pipe.body.data.committed_value);
+    expect(recent.body.data.total_value).toBe(snap.body.data.total_spend);
+  });
+
   it("honours an explicit window", async () => {
     const res = await get(poApp, "recent-awards", { start_date: istDate(-59), end_date: istDate(0) });
     expect(res.body.data.items.map((i) => i.po_id)).toEqual([seeded.p9.po_id, seeded.p3.po_id, seeded.p5.po_id, seeded.p4.po_id]);
@@ -166,16 +193,16 @@ describe("PO value by stage", () => {
     // Mine (12,000 + 3,000) and the one awaiting someone else (800): the
     // pipeline is the business unit's, not my queue.
     expect(s.in_approval).toMatchObject({ value: 15800, po_count: 3 });
-    expect(s.awaiting_acceptance).toMatchObject({ value: 0, po_count: 0 });
+    expect(s.awaiting_acceptance).toMatchObject({ value: 700, po_count: 1 });
     expect(s.approved).toMatchObject({ value: 13800, po_count: 2 });
     expect(s.in_fulfilment).toMatchObject({ value: 6000, po_count: 1 });
     expect(s.rejected).toMatchObject({ value: 1000, po_count: 1 });
     expect(res.body.data.committed_value).toBe(19800);
     expect(res.body.data.committed_po_count).toBe(3);
-    expect(res.body.data.pending_value).toBe(15800);
+    expect(res.body.data.pending_value).toBe(16500);
     // The A2 PO is outside the selected hotel.
     const total = res.body.data.stages.reduce((sum, x) => sum + x.value, 0);
-    expect(total).toBe(36600);
+    expect(total).toBe(37300);
   });
 
   it("committed value reconciles with the procurement snapshot's spend (D1)", async () => {

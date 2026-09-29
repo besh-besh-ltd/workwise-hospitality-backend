@@ -1557,11 +1557,19 @@ const ownRfqCompany = (alias = 'r') => `(${companyScope(alias)} OR ${alias}.hosp
 
 /**
  * A PO's value as the sum of its line totals — the D1 spend basis
- * (committedLinesSql, Reports 1.1). A scalar subquery, so it never multiplies
- * the rows of the query it sits in.
+ * (committedLinesSql, Reports 1.1). Joined as one pre-aggregated row per PO,
+ * so it never multiplies the rows of the query it sits in, and an INNER join
+ * keeps only POs that have lines (the snapshot's `pos_issued` population).
+ *
+ * Aggregated once rather than as a per-PO scalar subquery:
+ * tbl_purchase_order_product has no index on purchase_order_id, so the scalar
+ * form sequentially scanned the table once per PO (~100 ms for 515 POs on
+ * prod); one grouped scan is ~2 ms.
  */
-const poLinesTotal = (po = 'po') =>
-  `(SELECT COALESCE(SUM(pl.total_price), 0) FROM tbl_purchase_order_product pl WHERE pl.purchase_order_id = ${po}.id)`;
+const poLinesJoin = (po = 'po', alias = 'plt') =>
+  `JOIN (SELECT purchase_order_id, COALESCE(SUM(total_price), 0) AS lines_total
+           FROM tbl_purchase_order_product
+          GROUP BY purchase_order_id) ${alias} ON ${alias}.purchase_order_id = ${po}.id`;
 
 /** The RFQ is mapped to one of the effective hotels ($idx). */
 const rfqMapped = (alias, idx) =>
@@ -2367,29 +2375,36 @@ async function getApprovalTurnaroundData(buyer_company_id, user_id, hotel_ids, s
 }
 
 // ── Awarding: recently approved POs (period) ─────────────────────────
-// POs in the caller's scope whose internal approval completed inside the
-// window (last 30 days when no range is selected), newest first. The award
-// is the PO — NEGOTIATION_QUOTE ids are rfq_product ids, which is why the
-// old version, joining them to round quotes, showed other RFQs' numbers.
+// Committed POs (D1: SPEND_STATUSES, with lines — the snapshot's population)
+// in the caller's scope whose internal approval completed inside the window
+// (last 30 days when no range is selected), newest first. A PO approved
+// internally but still awaiting vendor acceptance, or later rejected by the
+// vendor, is not committed spend and is not listed. The population is a
+// subset of committed spend: a PO committed without an approval instance has
+// no approval date and never appears. The award is the PO — NEGOTIATION_QUOTE
+// ids are rfq_product ids, which is why the old version, joining them to
+// round quotes, showed other RFQs' numbers.
 async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids, start_date = null, end_date = null) {
   const win = start_date || end_date
     ? { start_date, end_date }
     : { start_date: addDays(istToday(), -29), end_date: istToday() };
   if (!hotel_ids || hotel_ids.length === 0) return { count: 0, total_value: 0, window: win, items: [] };
   const params = [buyer_company_id, win.start_date, win.end_date, hotel_ids, user_id, PERSONA_LIST_LIMIT];
+  const committed = spendStatusSql(params, 'po');
   const sc = scopeFilter(user_id, 'r', params, RFQ_SCOPE_PERMISSIONS);
   const rows = await db.any(
     `WITH approved AS (
        SELECT DISTINCT ON (po.id)
-              po.id AS po_id, po.po_number, ${poLinesTotal('po')} AS total_value, po.status, po.rfq_id,
+              po.id AS po_id, po.po_number, plt.lines_total AS total_value, po.status, po.rfq_id,
               po.finalized_vendor_id, i.id AS instance_id, i.completed_at AS approved_at
          FROM tbl_rfq_purchase_order po
+         ${poLinesJoin('po')}
          JOIN tbl_approval_instances i
            ON i.entity_type = 'PO' AND i.entity_id = po.id AND i.status = 'APPROVED'
          JOIN tbl_rfq r ON r.id = po.rfq_id
         WHERE ${companyScope()}
           AND ${rfqMapped('r', 4)}
-          AND po.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled', 'draft', 'pending_approval')
+          AND ${committed}
           AND i.completed_at IS NOT NULL
           AND ${windowSql('i.completed_at', FRAME.SESSION, 2, 3)}
           ${sc}
@@ -2458,11 +2473,11 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids, s
   const rows = await db.any(
     `SELECT po.status::text AS status,
             COUNT(*)::int AS po_count,
-            COALESCE(SUM(${poLinesTotal('po')}), 0) AS value
+            COALESCE(SUM(plt.lines_total), 0) AS value
        FROM tbl_rfq_purchase_order po
+       ${poLinesJoin('po')}
        JOIN tbl_rfq r ON r.id = po.rfq_id
       WHERE ${companyScope()}
-        AND EXISTS (SELECT 1 FROM tbl_purchase_order_product pl WHERE pl.purchase_order_id = po.id)
         AND ${rfqMapped('r', 4)}
         AND po.status NOT IN ('draft', 'cancelled')
         AND ${windowSql('po.created_at', FRAME.TZ, 2, 3)}
