@@ -9,8 +9,11 @@ import Config from '../config/app.config.js';
 import adminModel from '../models/adminModel.js';
 import userModel from '../models/userModel.js';
 import { logger } from '../util/logger.js';
+import { createDecryptMemo } from '../helper/decryptMemo.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
+// Claim decryption only (never the auth decision) — see app/helper/decryptMemo.js.
+const decryptClaim = createDecryptMemo((ciphertext) => cryptr.decrypt(ciphertext));
 
 // import models from '../models/productModel.js';
 // const userModel = models.user;
@@ -200,13 +203,13 @@ passport.use(
         }
 
         let user = await userModel.user_detail_check(
-          cryptr.decrypt(payload.sub)
+          decryptClaim(payload.sub)
         );
 
         let user_details = Object.assign({}, ...user);
         if (
           user.length > 0 &&
-          cryptr.decrypt(payload.ag) == user_details.user_agent
+          decryptClaim(payload.ag) == user_details.user_agent
         ) {
           return done(null, Object.assign({}, ...user));
         } else {
