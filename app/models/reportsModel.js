@@ -65,6 +65,26 @@ export const LEAF_CATEGORY_JOIN = `
   ) cat ON TRUE`;
 
 /**
+ * The catalogue variant of a PO line — the only sanctioned way to get from a
+ * line to its item (and from there, through LEAF_CATEGORY_JOIN, to a category).
+ *
+ * tbl_purchase_order_product.product_variant_id is written by the ARC call-off
+ * path only. RFQ PO lines left it NULL until 2026-09 — every one of the 2,387
+ * RFQ lines on prod — so joining the variant through that column alone made
+ * every category, rate-variance and single-source sheet come back empty. An
+ * RFQ line reaches its variant through its rfq_product instead; a call-off line
+ * has no rfq_product and keeps its own.
+ *
+ * LINE_VARIANT_JOIN must sit after the `pop` join; lineVariant() then names the
+ * resolved id. The dashboard re-exports both so the two surfaces cannot drift.
+ */
+export const LINE_VARIANT_JOIN = `
+  LEFT JOIN tbl_rfq_products line_rp ON line_rp.id = pop.rfq_product_id`;
+
+export const lineVariant = (pop = "pop", rp = "line_rp") =>
+  `COALESCE(${pop}.product_variant_id, ${rp}.product_variant_id)`;
+
+/**
  * A vendor's display name.
  *
  * organization_name is dead in practice (7 of 91 vendors in staging carry it)
@@ -166,7 +186,8 @@ export async function spendByVendor(scope, { from, to, priorFrom, priorTo }) {
             FROM tbl_rfq_purchase_order po
             JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
             LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-            LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+            ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
             ${LEAF_CATEGORY_JOIN}
            WHERE ${cur.where}
              AND cat.title IS NOT NULL
@@ -346,7 +367,8 @@ export async function spendByCategory(scope, { from, to, priorFrom, priorTo }, {
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-         LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+         ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
          ${LEAF_CATEGORY_JOIN}
         WHERE ${whereClause}
           AND cat.id IS NOT NULL
@@ -396,7 +418,8 @@ export async function spendByCategoryProperty(scope, { from, to }, { level = "pa
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
        ${LEAF_CATEGORY_JOIN}
        LEFT JOIN tbl_category cc ON cc.id = ${groupExpr}
        LEFT JOIN tbl_hospitality_company_hotels h
@@ -438,17 +461,18 @@ export async function interPropertyRateVariance(
        -- in boxes at one property and in pieces at another compares directly
        -- and reports an 86x "rate variance" that is really a unit mismatch —
        -- observed on staging before this was added.
-       SELECT pop.product_variant_id                AS variant_id,
+       SELECT ${lineVariant()}                     AS variant_id,
               LOWER(TRIM(pop.unit))                 AS unit,
               COALESCE(rfq.hotel_id, mr.hotel_id)   AS hotel_id,
               SUM(pop.total_price)                  AS value,
               SUM(pop.quantity)                     AS qty
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         ${LINE_VARIANT_JOIN}
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
          LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
         WHERE ${base.where}
-          AND pop.product_variant_id IS NOT NULL
+          AND ${lineVariant()} IS NOT NULL
         GROUP BY 1, 2, 3
        HAVING SUM(pop.quantity) > 0
      ),
@@ -796,7 +820,8 @@ export async function categoryVendorSpend(scope, { from, to }) {
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
        ${LEAF_CATEGORY_JOIN}
        LEFT JOIN tbl_category cc ON cc.id = COALESCE(NULLIF(cat.parent_id, 0), cat.id)
        LEFT JOIN tbl_users v  ON v.id = po.finalized_vendor_id
@@ -823,16 +848,17 @@ export async function singleSourceItems(scope, { from, to }) {
 
   return db.any(
     `WITH per_item AS (
-       SELECT pop.product_variant_id               AS variant_id,
+       SELECT ${lineVariant()}                    AS variant_id,
               COUNT(DISTINCT po.finalized_vendor_id) AS vendors,
               MIN(po.finalized_vendor_id)          AS sole_vendor_id,
               SUM(pop.total_price)                 AS amount,
               SUM(pop.quantity)                    AS qty
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         ${LINE_VARIANT_JOIN}
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
         WHERE ${base.where}
-          AND pop.product_variant_id IS NOT NULL
+          AND ${lineVariant()} IS NOT NULL
         GROUP BY 1
        HAVING COUNT(DISTINCT po.finalized_vendor_id) = 1
      )

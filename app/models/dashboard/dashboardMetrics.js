@@ -15,7 +15,7 @@
 // array and says so), so they drop into the existing $N-numbered queries.
 // ============================================================================
 
-import { SPEND_STATUSES, LEAF_CATEGORY_JOIN } from '../reportsModel.js';
+import { SPEND_STATUSES, LEAF_CATEGORY_JOIN, lineVariant as reportsLineVariant } from '../reportsModel.js';
 
 export { SPEND_STATUSES, LEAF_CATEGORY_JOIN };
 
@@ -150,12 +150,11 @@ export function spendStatusSql(params, po = 'po') {
 }
 
 /**
- * Variant of a PO line. tbl_purchase_order_product.product_variant_id is
- * populated for call-off lines only (0 of 2,460 RFQ lines on prod carry it),
- * so RFQ lines resolve through their rfq_product.
+ * Variant of a PO line — Reports' definition (reportsModel.lineVariant), so the
+ * dashboard and Reports resolve a line to the same item. Callers here join the
+ * rfq_product as `rp`, hence the different default alias.
  */
-export const lineVariant = (pop = 'pop', rp = 'rp') =>
-  `COALESCE(${pop}.product_variant_id, ${rp}.product_variant_id)`;
+export const lineVariant = (pop = 'pop', rp = 'rp') => reportsLineVariant(pop, rp);
 
 // ── Approvals ────────────────────────────────────────────────────────────
 
