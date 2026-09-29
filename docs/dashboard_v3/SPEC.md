@@ -290,6 +290,44 @@ Every approval item resolved to an RFQ (0 blank rows across the four queues for 
 Timing (prod, user 180, 24 hotels, laptop incl. ~26 ms RTT): every persona function 26–68 ms;
 all 16 in parallel 427 ms.
 
+### Test-round fixes (FIX-BE-2, 2026-09-29)
+
+- **Recently approved POs = committed spend.** Committed-status POs (D1
+  `SPEND_STATUSES`) with lines, whose internal approval completed in the window.
+  A PO approved internally but awaiting vendor acceptance, or later rejected by
+  the vendor, is not listed. It is a subset of committed spend (a PO committed
+  without an approval instance has no approval date); on prod every committed PO
+  has one, so for user 125 FYTD it equals the pipeline's committed value exactly
+  (427 POs, ₹30,28,65,918.79). Pinned by a reconciliation test.
+- **Ready for quote comparison excludes tenders** (`is_tender = 1`): tenders are
+  compared in ARC and the RFQ list its View-all opens excludes them.
+- **Spend-trend insight** is suppressed unless the previous period of equal
+  length holds at least 10% of the current period's committed spend (no more
+  "+926.8%" against months before the client used the platform).
+- **Benchmark insight wording**: "best price ever paid" / `Best paid (all time)`.
+  The Price benchmarking card's own labels are frontend strings.
+- **New list filter** `POST /rfq/list-view` `filters.vendor_disagreement` (boolean;
+  `true`/`'true'`/`1`/`'1'`): RFQs with an incomplete technical evaluation that
+  has at least one disagreeing vendor response — `dashboardMetrics.hasOpenVendorDisagreement`,
+  the same predicate as the Vendor disagreements card. Applied in SQL before the
+  1,000-row cap, under the list's normal scope. The FE links the card's View-all
+  to `rfq-management?disagreements=1`, which RfqListPage forwards as this filter.
+
+| Change | Prod before | Prod after | Results |
+|---|---|---|---|
+| Leaf-category join (dashboard + Reports), user 125 FYTD spend-by-category | 581 ms | 40 ms | identical (md5); 0 of 12,499 products pick a different category |
+| PO value by stage | 111 ms | 8 ms | identical |
+| Recently approved POs | 97 ms | 14 ms | identical rows |
+| jwtUsr claim decrypt | ~55 ms blocked per authenticated request | once per token | auth decisions unchanged |
+
+**Data note (not changed): RFQ hotel vs hotel mapping.** 10 prod RFQs carry
+`tbl_rfq.hotel_id = 30` but are mapped (`tbl_rfq_hotel_mappings`) only to hotel 4.
+The dashboard scopes by the mapping and the RFQ list scopes by `hotel_id`, so for
+these RFQs a card and its View-all can differ by one business unit. Ids (rfq_no):
+144 (535700), 145 (535701), 147 (535703), 148 (535704), 150 (535706),
+155 (535711), 163 (535719), 167 (535723), 169 (535725), 175 (535731).
+For a later data fix once product confirms which hotel is right.
+
 ## Link contract
 
 Frontend module `components/dashboard/shared/dashboardLinks.js` (frontend branch
