@@ -53,16 +53,19 @@ export const REPORT_ROW_CAP = 50000;
  * Requires `pv` (tbl_product_variant) in scope. See the double-count note at
  * the top of this file — do not reach a category any other way.
  */
+// Set-based rather than a per-line LATERAL: on prod the lateral re-ran for every
+// PO line and the planner probed all categories each time (≈380k index probes,
+// 609 ms for spend-by-category). Picking one category per product once and
+// hash-joining it returns the identical row per line in ~42 ms.
 export const LEAF_CATEGORY_JOIN = `
-  LEFT JOIN LATERAL (
-    SELECT c.id, c.title, c.parent_id
+  LEFT JOIN (
+    SELECT DISTINCT ON (pc.product_id)
+           pc.product_id, c.id, c.title, c.parent_id
       FROM tbl_product_categories pc
       JOIN tbl_category c ON c.id = pc.category_id
-     WHERE pc.product_id = pv.product_id
-       AND COALESCE(c.is_deleted, 0) = 0
-     ORDER BY (COALESCE(c.parent_id, 0) <> 0) DESC, c.id
-     LIMIT 1
-  ) cat ON TRUE`;
+     WHERE COALESCE(c.is_deleted, 0) = 0
+     ORDER BY pc.product_id, (COALESCE(c.parent_id, 0) <> 0) DESC, c.id
+  ) cat ON cat.product_id = pv.product_id`;
 
 /**
  * The catalogue variant of a PO line — the only sanctioned way to get from a
