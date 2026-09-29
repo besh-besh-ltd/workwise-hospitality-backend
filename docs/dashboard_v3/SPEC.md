@@ -454,9 +454,14 @@ all previously 0.
 Verify after applying:
 ```sql
 SELECT count(*) FILTER (WHERE product_variant_id IS NULL) AS still_null, count(*) AS lines
-  FROM tbl_purchase_order_product;                        -- still_null = 0 on prod
+  FROM tbl_purchase_order_product pop
+ WHERE EXISTS (SELECT 1 FROM tbl_rfq_purchase_order po
+                WHERE po.id = pop.purchase_order_id);    -- still_null = 0 on prod
 SELECT count(*) FROM tbl_po_line_variant_backfill;         -- 2,387 (+ any lines drafted before deploy)
 ```
+Prod has 2,470 PO lines: 2,387 belong to live POs and are backfilled; **83 are orphans**
+whose `purchase_order_id` points at a PO that no longer exists. The backfill skips them by
+design and no report or dashboard reads them. Cleaning them up is a separate data task.
 Rollback: `20260929100000_po_line_variant_backfill.down.sql` (the read fix keeps
 Reports correct either way).
 
