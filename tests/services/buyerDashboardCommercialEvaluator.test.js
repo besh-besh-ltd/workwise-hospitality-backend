@@ -104,6 +104,11 @@ beforeAll(async () => {
     await t.none(`UPDATE tbl_quotes SET is_regret = 1 WHERE id = $1`, [regretId]);
     const qcA2 = await rfq(t, "QC at A2", { hotel: IDS.hotels.A2 });
     await insertVendorQuote(t, { rfq_id: qcA2, vendor_user_id: IDS.users.vendor_alpha });
+    // A tender otherwise ready for comparison: tenders are compared in ARC,
+    // and the RFQ list the "View all" link opens excludes them.
+    const qcTender = await rfq(t, "Tender ready to compare", { bidDays: -4 });
+    await insertVendorQuote(t, { rfq_id: qcTender, vendor_user_id: IDS.users.vendor_alpha });
+    await t.none(`UPDATE tbl_rfq SET is_tender = 1 WHERE id = $1`, [qcTender]);
 
     // ── Live rounds led by commEval ───────────────────────────────────
     const negRfq1 = await rfq(t, "Active Negotiation 1", { bidDays: -5 });
@@ -137,7 +142,7 @@ beforeAll(async () => {
     const savPrior = await awardedNegotiation(t, "Savings prior", { first: 500, last: 450, concludedDaysAgo: 45 });
 
     Object.assign(seeded, {
-      qc1, qc2, qcEnded, qcLiveRound, qcBidOpen, qcRegret, qcA2,
+      qc1, qc2, qcEnded, qcLiveRound, qcBidOpen, qcRegret, qcA2, qcTender,
       activeRound1, activeRound2, pendingRound, endedRound, expiredActive, otherRound, a2Round,
       savRecent, savPrior,
     });
@@ -163,7 +168,7 @@ describe("Buyer Dashboard — Commercial Evaluator / N1 widgets (real data)", ()
     expect(ids).toEqual([seeded.qc1, seeded.qc2, seeded.qcEnded]);
     expect(res.body.data.count).toBe(3);
 
-    for (const excluded of [seeded.qcLiveRound, seeded.qcBidOpen, seeded.qcRegret, seeded.qcA2]) {
+    for (const excluded of [seeded.qcLiveRound, seeded.qcBidOpen, seeded.qcRegret, seeded.qcA2, seeded.qcTender]) {
       expect(ids).not.toContain(excluded);
     }
     const qc2 = res.body.data.items.find((i) => i.id === seeded.qc2);

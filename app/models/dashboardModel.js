@@ -2112,6 +2112,9 @@ async function getMyAwardApprovalsPendingData(buyer_company_id, user_id, hotel_i
 // stage the RFQ listing's "Commercial Evaluation" facet and "View all" link
 // filter on. Bid closed, real quotes in, no live round, nothing awarded yet.
 // Shared queue inside the caller's commercial RBAC scope (no assignment).
+// Tenders are left out: they are compared in ARC, and the RFQ list this
+// widget's "View all" opens excludes them (rfqController passes is_tender = 0),
+// so counting them made the card disagree with its own list.
 async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) return { count: 0, items: [] };
   const params = [buyer_company_id, hotel_ids];
@@ -2124,6 +2127,7 @@ async function getMyQuoteComparesData(buyer_company_id, user_id, hotel_ids) {
       WHERE ${companyScope()}
         AND r.is_published = 1
         AND r.status = 1
+        AND COALESCE(r.is_tender, 0) = 0
         AND ${bidClosed('r')}
         AND ${hasRealQuote('r')}
         AND ${rfqMapped('r', 2)}
