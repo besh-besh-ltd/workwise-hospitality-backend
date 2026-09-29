@@ -8,14 +8,17 @@ import { describe, it, expect, afterAll, beforeAll } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
+import moment from "moment-timezone";
 import { makeRfqVisibleToDashboard, cleanupRfqs, makePO, cleanupPurchaseOrders } from "../helpers/dashboardSeed.js";
 
 const ENDPOINT = "/api/v1/dashboard-v2/smart-insights";
 const WIDE = { start_date: "2020-01-01", end_date: "2999-01-01" };
 const TOKEN = "SI" + String(Date.now()).slice(-6);
 const ITEM = `${TOKEN} Benchmark Item`;
+const QITEM = `${TOKEN} Quoted Item`;
+const istDate = (d) => moment.tz("Asia/Kolkata").add(d, "days").format("YYYY-MM-DD");
 
-const seeded = { rfqIds: [], poIds: [], productId: null, variantId: null };
+const seeded = { rfqIds: [], poIds: [], productId: null, variantId: null, qVariantId: null, quoteIds: [] };
 
 beforeAll(async () => {
   const u = IDS.users.a1_proc_buyer;
@@ -50,10 +53,51 @@ beforeAll(async () => {
     company_id: IDS.companies.A, status: "approved", unit_price: 2000000, quantity: 1, total_value: 2000000,
   });
   seeded.poIds.push(b.po_id);
+  seeded.latestPoId = b.po_id;
+
+  // Price alert: the caller's own history for QITEM is ₹1,000 (two quotes 60
+  // days ago, on an older RFQ); this week a vendor quoted ₹1,500 on a newer
+  // RFQ. "Review quotes" must open THAT RFQ's comparison — the old action
+  // searched the RFQ list by product name, which only matches titles.
+  const qv = await db.one(
+    `INSERT INTO tbl_product_variant (name, slug, added_by, product_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+    [QITEM, `${TOKEN}-qv`, u, product.id]
+  );
+  seeded.qVariantId = qv.id;
+  const quoteOn = async (rfqId, vendor, price, agoDays) => {
+    const r = await db.one(`SELECT rfq_no FROM tbl_rfq WHERE id = $1`, [rfqId]);
+    const q = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, status, created_by, updated_by, "timestamp", is_regret)
+       VALUES ($1, $2, 1, $3, $3, now() - ($4 || ' days')::interval, 0) RETURNING id`,
+      [rfqId, r.rfq_no, vendor, String(agoDays)]
+    );
+    seeded.quoteIds.push(q.id);
+    await db.none(
+      `INSERT INTO tbl_quote_items (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, comment, delivery_period, quantity, variant)
+       VALUES ($1, $2, $3, $4, $5, $5, '', '', '1', 1)`,
+      [rfqId, r.rfq_no, q.id, qv.id, price]
+    );
+  };
+  const older = await makeRfqVisibleToDashboard(db, {
+    createdBy: u, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, is_published: 1, status: 1, title: `${TOKEN} old RFQ`,
+  });
+  const newer = await makeRfqVisibleToDashboard(db, {
+    createdBy: u, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, is_published: 1, status: 1, title: `${TOKEN} new RFQ`,
+  });
+  seeded.rfqIds.push(older.rfq_id, newer.rfq_id);
+  seeded.alertRfqId = newer.rfq_id;
+  await quoteOn(older.rfq_id, IDS.users.vendor_alpha, 1000, 60);
+  await quoteOn(older.rfq_id, IDS.users.vendor_beta, 1000, 60);
+  await quoteOn(newer.rfq_id, IDS.users.vendor_alpha, 1500, 1);
 });
 
 afterAll(async () => {
   await cleanupPurchaseOrders(db, seeded.poIds);
+  if (seeded.quoteIds.length) {
+    await db.none(`DELETE FROM tbl_quote_items WHERE quote_id = ANY($1::int[])`, [seeded.quoteIds]);
+    await db.none(`DELETE FROM tbl_quotes WHERE id = ANY($1::int[])`, [seeded.quoteIds]);
+  }
+  if (seeded.qVariantId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.qVariantId]);
   if (seeded.variantId) await db.none(`DELETE FROM tbl_rfq_products WHERE product_variant_id = $1`, [seeded.variantId]);
   await cleanupRfqs(db, seeded.rfqIds);
   if (seeded.variantId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.variantId]);
@@ -71,5 +115,17 @@ describe("GET /dashboard-v2/smart-insights — price benchmark insight (Sr 299)"
     const hit = insights.find((i) => i.type === "benchmark_alert" && i.title.includes(ITEM));
     expect(hit).toBeDefined();
     expect(hit.severity).toBe("high"); // 100% above benchmark
+    // Opens the purchase that tripped the alert, not a product-name search.
+    expect(hit.action).toEqual({ type: "poDetail", params: { poId: seeded.latestPoId } });
+  });
+
+  it("'Review quotes' on a price alert opens the RFQ that carried the high quote", async () => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(ENDPOINT).query({ hotel_ids: String(IDS.hotels.A1), start_date: istDate(-6), end_date: istDate(0) });
+    expect(res.status).toBe(200);
+    const hit = (res.body.data.insights || []).find((i) => i.type === "price_alert" && i.title.includes(QITEM));
+    expect(hit).toBeDefined();
+    expect(hit.action_label).toBe("Review quotes");
+    expect(hit.action).toEqual({ type: "quoteCompare", params: { rfqId: seeded.alertRfqId } });
   });
 });

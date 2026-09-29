@@ -248,7 +248,7 @@ describe("stage turnaround (workflow-efficiency)", () => {
 });
 
 describe("Smart Insights link contract", () => {
-  const ACTION_TYPES = ["rfqList", "poList", "reports", "rfqDetail", "poDetail"];
+  const ACTION_TYPES = ["poList", "reports", "poDetail", "quoteCompare"];
 
   it("emits action {type, params} from the allow-list and never a URL", async () => {
     const d = await get("smart-insights");

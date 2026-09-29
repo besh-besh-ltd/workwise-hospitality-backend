@@ -1199,11 +1199,14 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
               COUNT(DISTINCT COALESCE(sig, '')) AS sigs,
               SUM(total_price) FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}) AS period_value,
               (ARRAY_AGG(unit_price ORDER BY created_at DESC, po_id DESC)
-                 FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}))[1] AS latest_price
+                 FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}))[1] AS latest_price,
+              (ARRAY_AGG(po_id ORDER BY created_at DESC, po_id DESC)
+                 FILTER (WHERE ${windowSql('created_at', FRAME.TZ, 2, 3)}))[1] AS latest_po_id
          FROM item
         GROUP BY product_variant_id
      )
-     SELECT pv.name AS product_name, pi.product_variant_id, pi.latest_price::float8, pi.best_price::float8,
+     SELECT pv.name AS product_name, pi.product_variant_id, pi.latest_po_id,
+            pi.latest_price::float8, pi.best_price::float8,
             pi.period_value::float8,
             ROUND(((pi.latest_price - pi.best_price) / pi.best_price * 100)::numeric, 1)::float8 AS above_pct
        FROM per_item pi
@@ -1221,7 +1224,7 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
   const pSc = scopeFilter(user_id, 'r', pParams);
   const priceDeviationsQuery = db.any(
     `WITH q_items AS (
-       SELECT qi.product_variant_id, qi.unit_price,
+       SELECT qi.product_variant_id, qi.unit_price, q.rfq_id, q.timestamp AS quoted_at, q.id AS quote_id,
               ${windowSql('q.timestamp', FRAME.SESSION, 2, 3)} AS in_window
          FROM tbl_quote_items qi
          JOIN tbl_quotes q ON q.id = qi.quote_id
@@ -1234,10 +1237,14 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
               AVG(unit_price) AS own_avg,
               AVG(unit_price) FILTER (WHERE in_window) AS period_avg,
               COUNT(*) FILTER (WHERE in_window) AS period_n,
-              COUNT(*) AS n
+              COUNT(*) AS n,
+              -- The RFQ carrying the item's most recent in-window quote: what
+              -- "Review quotes" opens (a product-name list search only matches
+              -- RFQ titles, so it landed on an empty list).
+              (ARRAY_AGG(rfq_id ORDER BY quoted_at DESC, quote_id DESC) FILTER (WHERE in_window))[1] AS latest_rfq_id
          FROM q_items GROUP BY product_variant_id
      )
-     SELECT pv.name AS product_name, a.product_variant_id,
+     SELECT pv.name AS product_name, a.product_variant_id, a.latest_rfq_id,
             a.period_avg::float8 AS user_avg_price, a.own_avg::float8 AS market_avg_price,
             ROUND(((a.period_avg - a.own_avg) / a.own_avg * 100)::numeric, 1)::float8 AS deviation_pct
        FROM agg a
@@ -1322,8 +1329,8 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
         { label: 'Best paid', value: inr(bd.best_price) },
         { label: 'Latest', value: inr(bd.latest_price) },
       ],
-      action_label: 'Find RFQs for this item',
-      action: { type: 'rfqList', params: { search: bd.product_name } },
+      action_label: 'Open latest PO',
+      action: { type: 'poDetail', params: { poId: bd.latest_po_id } },
     });
   });
 
@@ -1338,7 +1345,7 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
         { label: 'This period', value: inr(pd.user_avg_price) },
       ],
       action_label: 'Review quotes',
-      action: { type: 'rfqList', params: { search: pd.product_name } },
+      action: { type: 'quoteCompare', params: { rfqId: pd.latest_rfq_id } },
     });
   });
 
@@ -1547,6 +1554,14 @@ const PERSONA_LIST_LIMIT = 20;
  * the tenant stays bounded by the hotel.
  */
 const ownRfqCompany = (alias = 'r') => `(${companyScope(alias)} OR ${alias}.hospitality_company_id IS NULL)`;
+
+/**
+ * A PO's value as the sum of its line totals — the D1 spend basis
+ * (committedLinesSql, Reports 1.1). A scalar subquery, so it never multiplies
+ * the rows of the query it sits in.
+ */
+const poLinesTotal = (po = 'po') =>
+  `(SELECT COALESCE(SUM(pl.total_price), 0) FROM tbl_purchase_order_product pl WHERE pl.purchase_order_id = ${po}.id)`;
 
 /** The RFQ is mapped to one of the effective hotels ($idx). */
 const rfqMapped = (alias, idx) =>
@@ -2366,7 +2381,7 @@ async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids, start_d
   const rows = await db.any(
     `WITH approved AS (
        SELECT DISTINCT ON (po.id)
-              po.id AS po_id, po.po_number, po.total_value, po.status, po.rfq_id,
+              po.id AS po_id, po.po_number, ${poLinesTotal('po')} AS total_value, po.status, po.rfq_id,
               po.finalized_vendor_id, i.id AS instance_id, i.completed_at AS approved_at
          FROM tbl_rfq_purchase_order po
          JOIN tbl_approval_instances i
@@ -2419,7 +2434,10 @@ async function getRecentAwardsData(buyer_company_id, user_id, hotel_ids, start_d
 
 // ── Awarding: PO value by stage (period) ─────────────────────────────
 // Every PO in the caller's scope raised inside the window, bucketed by where
-// it stands. Header total_value (the figure Reports sums). Drafts and
+// it stands. Valued at the sum of its line totals — the figure Reports 1.1 and
+// the snapshot's spend sum (committedLinesSql); the header total_value can
+// carry charges the lines don't, which made the committed buckets disagree
+// with spend by ₹21.5 L on prod. Drafts and
 // cancelled POs never happened and are left out; rejected POs are shown so
 // the rejection rate is visible, but are not part of `committed_value`.
 const PO_STAGE_BUCKETS = Object.freeze([
@@ -2440,10 +2458,11 @@ async function getAwardValuePipelineData(buyer_company_id, user_id, hotel_ids, s
   const rows = await db.any(
     `SELECT po.status::text AS status,
             COUNT(*)::int AS po_count,
-            COALESCE(SUM(po.total_value), 0) AS value
+            COALESCE(SUM(${poLinesTotal('po')}), 0) AS value
        FROM tbl_rfq_purchase_order po
        JOIN tbl_rfq r ON r.id = po.rfq_id
       WHERE ${companyScope()}
+        AND EXISTS (SELECT 1 FROM tbl_purchase_order_product pl WHERE pl.purchase_order_id = po.id)
         AND ${rfqMapped('r', 4)}
         AND po.status NOT IN ('draft', 'cancelled')
         AND ${windowSql('po.created_at', FRAME.TZ, 2, 3)}

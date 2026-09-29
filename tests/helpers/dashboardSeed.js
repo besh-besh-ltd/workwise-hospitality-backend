@@ -301,7 +301,7 @@ export async function makePO(t, opts) {
        (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, total_price)
      VALUES ($1, $2, 0, $3, 'units', $4, $5)
      RETURNING id`,
-    [po.id, opts.rfq_product_id, qty, unit, total]
+    [po.id, opts.rfq_product_id, qty, unit, Number(opts.line_total ?? total)]
   );
   return { po_id: po.id, pop_id: pop.id };
 }

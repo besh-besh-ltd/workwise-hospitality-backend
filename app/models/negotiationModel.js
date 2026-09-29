@@ -2941,22 +2941,28 @@ const negotiationModel = {
          -- rate — e.g. RFQ 808, qty 600, Rs 385 -> Rs 362 — which understated
          -- those pairs' savings by the quantity. A price is treated as a unit
          -- rate, and scaled by the quote line's quantity, only when the line
-         -- quantity is > 1 and the price sits closer to the line's unit price
-         -- than to its line total. Each price is judged independently, so a
+         -- quantity is > 1, the price sits closer to the line's unit price
+         -- than to its line total, AND it is at most 1.2 x that unit price. The
+         -- last test stops a deep line-total discount at a small quantity (qty 2,
+         -- Rs 1,400 on a Rs 2,000 line) being read as a rate and doubled; a real
+         -- unit rate is never far above the unit price. Each price is judged independently, so a
          -- line-total baseline paired with a unit-rate counter still compares
          -- like with like.
          SELECT f.*,
                 CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
                       AND f.previous_price IS NOT NULL
                       AND abs(f.previous_price - f.cur_unit) < abs(f.previous_price - f.cur_total)
+                      AND f.previous_price <= 1.2 * f.cur_unit
                      THEN f.previous_price * f.cur_qty ELSE f.previous_price END AS previous_price_n,
                 CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
                       AND f.first_quoted IS NOT NULL
                       AND abs(f.first_quoted - f.cur_unit) < abs(f.first_quoted - f.cur_total)
+                      AND f.first_quoted <= 1.2 * f.cur_unit
                      THEN f.first_quoted * f.cur_qty ELSE f.first_quoted END AS first_quoted_n,
                 CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
                       AND f.achieved IS NOT NULL
                       AND abs(f.achieved - f.cur_unit) < abs(f.achieved - f.cur_total)
+                      AND f.achieved <= 1.2 * f.cur_unit
                      THEN f.achieved * f.cur_qty ELSE f.achieved END AS achieved_n
            FROM facts f
        ), scored AS (

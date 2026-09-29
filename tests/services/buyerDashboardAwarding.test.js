@@ -26,7 +26,7 @@ const poApp = IDS.users.a1_proc_poApp;
 const istDate = (d) => moment.tz("Asia/Kolkata").add(d, "days").format("YYYY-MM-DD");
 
 /** An RFQ + product + PO; optionally a PO approval chain. */
-async function po(t, title, { value, status, createdAgoDays = 0, hotel = IDS.hotels.A1, approval }) {
+async function po(t, title, { value, lineTotal, status, createdAgoDays = 0, hotel = IDS.hotels.A1, approval }) {
   const r = await makeRfqVisibleToDashboard(t, {
     createdBy: IDS.users.a1_proc_buyer, hospitality: IDS.hospitality.A, hotel,
     status: 1, is_published: 1, title,
@@ -36,7 +36,7 @@ async function po(t, title, { value, status, createdAgoDays = 0, hotel = IDS.hot
   const p = await makePO(t, {
     rfq_id: r.rfq_id, rfq_product_id: rp.rfq_product_id, vendor_user_id: IDS.users.vendor_alpha,
     company_id: IDS.companies.A, status, unit_price: value, quantity: 1, total_value: value,
-    created_ago_days: createdAgoDays,
+    created_ago_days: createdAgoDays, line_total: lineTotal,
   });
   inserted.poIds.push(p.po_id);
   if (approval) {
@@ -77,12 +77,19 @@ beforeAll(async () => {
       approval: { status: "APPROVED", createdAgo: 960, actedAgo: 936, approver: IDS.users.a1_proc_commApp },
     });
 
+    // Header total_value carries freight the lines don't (5,000 vs 4,800).
+    // Spend everywhere is the line total, so every PO widget must show 4,800.
+    const p9 = await po(t, "PO approved yesterday, header ≠ lines", {
+      value: 5000, lineTotal: 4800, status: "approved", createdAgoDays: 1,
+      approval: { status: "APPROVED", createdAgo: 24, actedAgo: 20, approver: IDS.users.a1_proc_commApp },
+    });
+
     // ── Only in the value pipeline ────────────────────────────────────
     const p6 = await po(t, "PO rejected", { value: 1000, status: "rejected" });
     const p7 = await po(t, "PO cancelled", { value: 500, status: "cancelled" });
     const p8 = await po(t, "PO draft", { value: 250, status: "draft" });
 
-    Object.assign(seeded, { p1, p2, pA2, pElse, p3, p4, p5, p6, p7, p8 });
+    Object.assign(seeded, { p1, p2, pA2, pElse, p3, p4, p5, p6, p7, p8, p9 });
   });
 });
 
@@ -131,19 +138,21 @@ describe("Recently approved POs", () => {
     const res = await get(poApp, "recent-awards");
     expect(res.status).toBe(200);
     const { count, total_value, items, window } = res.body.data;
-    expect(items.map((i) => i.po_id)).toEqual([seeded.p3.po_id, seeded.p5.po_id]);
-    expect(count).toBe(2);
-    expect(total_value).toBe(15000);
-    expect(items[0].approved_by_me).toBe(true);
-    expect(items[1].approved_by_me).toBe(false);
-    expect(items[0].rfq_id).toBe(seeded.p3.rfq_id);
+    expect(items.map((i) => i.po_id)).toEqual([seeded.p9.po_id, seeded.p3.po_id, seeded.p5.po_id]);
+    expect(count).toBe(3);
+    // Line totals, not the header: p9 counts 4,800, not 5,000.
+    expect(total_value).toBe(19800);
+    expect(items[0].value).toBe(4800);
+    expect(items[1].approved_by_me).toBe(true);
+    expect(items[2].approved_by_me).toBe(false);
+    expect(items[1].rfq_id).toBe(seeded.p3.rfq_id);
     expect(window.end_date).toBe(istDate(0));
   });
 
   it("honours an explicit window", async () => {
     const res = await get(poApp, "recent-awards", { start_date: istDate(-59), end_date: istDate(0) });
-    expect(res.body.data.items.map((i) => i.po_id)).toEqual([seeded.p3.po_id, seeded.p5.po_id, seeded.p4.po_id]);
-    expect(res.body.data.total_value).toBe(19000);
+    expect(res.body.data.items.map((i) => i.po_id)).toEqual([seeded.p9.po_id, seeded.p3.po_id, seeded.p5.po_id, seeded.p4.po_id]);
+    expect(res.body.data.total_value).toBe(23800);
   });
 });
 
@@ -158,21 +167,33 @@ describe("PO value by stage", () => {
     // pipeline is the business unit's, not my queue.
     expect(s.in_approval).toMatchObject({ value: 15800, po_count: 3 });
     expect(s.awaiting_acceptance).toMatchObject({ value: 0, po_count: 0 });
-    expect(s.approved).toMatchObject({ value: 9000, po_count: 1 });
+    expect(s.approved).toMatchObject({ value: 13800, po_count: 2 });
     expect(s.in_fulfilment).toMatchObject({ value: 6000, po_count: 1 });
     expect(s.rejected).toMatchObject({ value: 1000, po_count: 1 });
-    expect(res.body.data.committed_value).toBe(15000);
-    expect(res.body.data.committed_po_count).toBe(2);
+    expect(res.body.data.committed_value).toBe(19800);
+    expect(res.body.data.committed_po_count).toBe(3);
     expect(res.body.data.pending_value).toBe(15800);
     // The A2 PO is outside the selected hotel.
     const total = res.body.data.stages.reduce((sum, x) => sum + x.value, 0);
-    expect(total).toBe(31800);
+    expect(total).toBe(36600);
+  });
+
+  it("committed value reconciles with the procurement snapshot's spend (D1)", async () => {
+    for (const range of [{ start_date: istDate(-29), end_date: istDate(0) }, {}]) {
+      const [pipe, snap] = await Promise.all([
+        get(poApp, "award-value-pipeline", range),
+        get(poApp, "procurement-snapshot", range),
+      ]);
+      expect(snap.status).toBe(200);
+      expect(pipe.body.data.committed_value).toBe(snap.body.data.total_spend);
+      expect(pipe.body.data.committed_po_count).toBe(snap.body.data.pos_issued);
+    }
   });
 
   it("with no range covers every PO, including the 40-day-old one", async () => {
     const res = await get(poApp, "award-value-pipeline");
-    expect(stageMap(res.body.data).approved).toMatchObject({ value: 13000, po_count: 2 });
-    expect(res.body.data.committed_value).toBe(19000);
+    expect(stageMap(res.body.data).approved).toMatchObject({ value: 17800, po_count: 3 });
+    expect(res.body.data.committed_value).toBe(23800);
   });
 
   it("Hotel B user sees nothing", async () => {
