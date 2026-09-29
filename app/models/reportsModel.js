@@ -249,10 +249,15 @@ export async function spendByMonth(scope, { from, to, priorFrom, priorTo }) {
     `date_trunc('month', ${alias}.created_at AT TIME ZONE 'Asia/Kolkata')`;
 
   return db.any(
+    // The series runs from the 1st of the month `from` falls in to the month of
+    // the window's last day (`to` is exclusive). Stepping from the raw `from`
+    // date gave rows keyed to e.g. the 31st, which never matched the
+    // date_trunc'd spend below: a 31 Aug – 30 Sep window came back as a single
+    // ₹0 "Aug" row with no September at all.
     `WITH months AS (
        SELECT generate_series(
-                $${fromIdx}::date,
-                ($${toIdx}::date - INTERVAL '1 day'),
+                date_trunc('month', $${fromIdx}::date),
+                date_trunc('month', $${toIdx}::date - INTERVAL '1 day'),
                 INTERVAL '1 month'
               )::date AS month_start
      ),
