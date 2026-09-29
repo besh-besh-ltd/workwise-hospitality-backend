@@ -102,6 +102,22 @@ beforeAll(async () => {
     company_id: IDS.companies.A, status: "approved", unit_price: 50000, quantity: 1, total_value: 50000, created_ago_days: 35,
   });
   seeded.poIds.push(c.po_id);
+  // ₹4L 50 days ago: a previous period that is small but not negligible
+  // (user 255 on prod saw "+726%" against ~12% of the current spend).
+  const early = await makeRfqVisibleToDashboard(db, {
+    createdBy: u, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, is_published: 1, status: 1, title: `${TOKEN} early RFQ`,
+  });
+  seeded.rfqIds.push(early.rfq_id);
+  const earlyRp = await db.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant)
+     VALUES ($1, '', '0', '', '', $2, 1) RETURNING id`,
+    [early.rfq_id, qv.id]
+  );
+  const e = await makePO(db, {
+    rfq_id: early.rfq_id, rfq_product_id: earlyRp.id, vendor_user_id: IDS.users.vendor_alpha,
+    company_id: IDS.companies.A, status: "approved", unit_price: 400000, quantity: 1, total_value: 400000, created_ago_days: 50,
+  });
+  seeded.poIds.push(e.po_id);
 
   await quoteOn(older.rfq_id, IDS.users.vendor_alpha, 1000, 60);
   await quoteOn(older.rfq_id, IDS.users.vendor_beta, 1000, 60);
@@ -167,9 +183,15 @@ describe("GET /dashboard-v2/smart-insights — spend trend", () => {
     expect(await trendFor({ start_date: istDate(-6), end_date: istDate(0) })).toBeUndefined();
   });
 
-  it("stays silent when the previous period is under 10% of the current one", async () => {
-    // Current −29..0 = ₹30L; previous −59..−30 = ₹50,000 (1.7%): a "+5,900%"
-    // headline would only say the platform was new, not that spend jumped.
+  it("stays silent when spend grew more than 300% (the baseline was not comparable)", async () => {
+    // Current −29..0 = ₹30L; previous −59..−30 = ₹4.5L: "+567%" would only say
+    // the platform was new, not that spending jumped.
     expect(await trendFor({ start_date: istDate(-29), end_date: istDate(0) })).toBeUndefined();
+  });
+
+  it("user-255 shape: a previous period ~13% of the current one no longer yields a +600% headline", async () => {
+    // Current −39..0 = ₹30.5L; previous −79..−40 = ₹4L (13%) → +662%. The old
+    // 10% floor let this through.
+    expect(await trendFor({ start_date: istDate(-39), end_date: istDate(0) })).toBeUndefined();
   });
 });

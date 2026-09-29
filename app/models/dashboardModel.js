@@ -1362,11 +1362,16 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
     });
   }
 
-  // A previous period with little or no committed spend (typically before the
-  // client was on the platform) turns into "+900%" headlines that describe
-  // adoption, not spending. Only compare against a meaningful baseline.
-  const SPEND_TREND_MIN_BASELINE = 0.1;
-  if (spendTrend && spendTrend.previous > 0 && spendTrend.previous >= spendTrend.current * SPEND_TREND_MIN_BASELINE) {
+  // A previous period with little committed spend (typically before the client
+  // was on the platform) turns into "+700%" headlines that describe adoption,
+  // not spending. One rule: compare only when the previous period had spend and
+  // the change is at most +300% (current ≤ 4× previous). Decreases are always
+  // comparable (they cannot exceed −100%).
+  const SPEND_TREND_MAX_INCREASE_PCT = 300;
+  const trendPct = spendTrend && spendTrend.previous > 0
+    ? ((spendTrend.current - spendTrend.previous) / spendTrend.previous) * 100
+    : null;
+  if (trendPct !== null && trendPct <= SPEND_TREND_MAX_INCREASE_PCT) {
     const pct = round1(((spendTrend.current - spendTrend.previous) / spendTrend.previous) * 100);
     const dir = pct > 0 ? 'increased' : 'decreased';
     insights.push({

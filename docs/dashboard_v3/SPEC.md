@@ -301,9 +301,11 @@ all 16 in parallel 427 ms.
   (427 POs, ₹30,28,65,918.79). Pinned by a reconciliation test.
 - **Ready for quote comparison excludes tenders** (`is_tender = 1`): tenders are
   compared in ARC and the RFQ list its View-all opens excludes them.
-- **Spend-trend insight** is suppressed unless the previous period of equal
-  length holds at least 10% of the current period's committed spend (no more
-  "+926.8%" against months before the client used the platform).
+- **Spend-trend insight** is shown only when the previous period of equal length
+  had committed spend **and the change is at most +300%** (current ≤ 4× previous).
+  Decreases always qualify (they cannot pass −100%). This replaces an earlier
+  "previous ≥ 10% of current" floor, which still let "+726%" through on prod
+  (user 255); such headlines describe adoption of the platform, not spending.
 - **Benchmark insight wording**: "best price ever paid" / `Best paid (all time)`.
   The Price benchmarking card's own labels are frontend strings.
 - **New list filter** `POST /rfq/list-view` `filters.vendor_disagreement` (boolean;
