@@ -8895,11 +8895,12 @@ const rfqController = {
       // 1. Fetch the buyer's scoped RFQs (RFQ-only). Big cap so faceting is
       //    complete; search is pushed to SQL.
       const FETCH_CAP = 1000;
-      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true);
-      // `mine` narrows BEFORE tab counts and facets so every number on the
-      // page describes the same set the dashboard card counted.
-      const rows = (Array.isArray(all) ? all : [])
-        .filter((r) => !filters.mine || Number(r.created_by) === Number(user_id));
+      // `mine` is pushed into the SQL so it narrows BEFORE the cap (filtering the
+      // newest 1,000 in JS would drop a creator's older RFQs once their scope
+      // passes the cap) and before tab counts and facets, so every number on
+      // the page describes the same set the dashboard card counted.
+      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true, filters.mine);
+      const rows = Array.isArray(all) ? all : [];
 
       // 2. Lifecycle stage → bucket + normalized status key.
       let lifecycleMap = {};

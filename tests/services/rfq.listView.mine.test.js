@@ -19,6 +19,8 @@ import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 
+const { default: rfqModel } = await import("../../app/models/rfqModel.js");
+
 const CALLER = IDS.users.a1_proc_buyer;
 const OTHER = IDS.users.a1_proc_finance;
 const TAG = `MINE-${Date.now()}`;
@@ -45,9 +47,23 @@ beforeAll(async () => {
   seeded.mine1 = await rfq(CALLER, "mine one");
   seeded.mine2 = await rfq(CALLER, "mine two");
   seeded.theirs = await rfq(OTHER, "someone else's");
+  // An early draft saved before a company context existed (prod: RFQ 1128) —
+  // hospitality_company_id NULL, still mapped to the creator's hotel. The
+  // "My drafts" widget counts it, so its View-all must list it.
+  seeded.nullCompanyDraft = await rfq(CALLER, "early draft, no company");
+  await db.none(
+    `UPDATE tbl_rfq SET hospitality_company_id = NULL, hotel_id = NULL, is_published = 0, status = 1 WHERE id = $1`,
+    [seeded.nullCompanyDraft]
+  );
+  // Prod 1128's shape: no company, no hotel column, one hotel mapping.
+  await db.none(
+    `INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`,
+    [seeded.nullCompanyDraft, IDS.hotels.A1, CALLER]
+  );
 });
 
 afterAll(async () => {
+  await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [inserted]);
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted]);
   await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted]);
   await closeDb();
@@ -71,9 +87,39 @@ describe("POST /rfq/list-view filters.mine", () => {
   it("filters.mine keeps only RFQs the caller created, and counts over that set", async () => {
     const data = await list({ filters: { mine: true } });
     const ids = data.rows.map((r) => Number(r.id));
-    expect(ids.sort()).toEqual([seeded.mine1, seeded.mine2].sort());
-    expect(data.total).toBe(2);
-    expect(data.tab_counts.all).toBe(2);
+    expect(ids.sort()).toEqual([seeded.mine1, seeded.mine2, seeded.nullCompanyDraft].sort());
+    expect(data.total).toBe(3);
+    expect(data.tab_counts.all).toBe(3);
+  });
+
+  it("the drafts tab lists the caller's own company-less draft, as the My-drafts widget counts it", async () => {
+    const data = await list({ tab: "drafts", filters: { mine: true } });
+    expect(data.rows.map((r) => Number(r.id))).toEqual([seeded.nullCompanyDraft]);
+    expect(data.tab_counts.drafts).toBe(1);
+  });
+
+  it("another user never sees that company-less draft", async () => {
+    const client = await httpClient(OTHER);
+    const res = await client.post("/api/v1/rfq/list-view").send({ tab: "all", search: TAG, limit: 100 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.rows.map((r) => Number(r.id))).not.toContain(seeded.nullCompanyDraft);
+  });
+
+  it("the creator filter is applied in SQL, before the fetch cap", async () => {
+    // Cap of 1: the newest RFQ in the caller's scope matching the tag is
+    // someone else's. Filtering after the cap would return nothing of mine.
+    const newest = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true);
+    expect(newest.map((r) => Number(r.id))).toEqual([seeded.nullCompanyDraft]);
+    await db.none(`UPDATE tbl_rfq SET "timestamp" = NOW() + INTERVAL '1 minute' WHERE id = $1`, [seeded.theirs]);
+    try {
+      const all = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true);
+      expect(all.map((r) => Number(r.id))).toEqual([seeded.theirs]);
+      const mine = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true, true);
+      expect(mine).toHaveLength(1);
+      expect(Number(mine[0].created_by)).toBe(CALLER);
+    } finally {
+      await db.none(`UPDATE tbl_rfq SET "timestamp" = NOW() WHERE id = $1`, [seeded.theirs]);
+    }
   });
 
   it("accepts the string form a query-string round trip produces", async () => {
