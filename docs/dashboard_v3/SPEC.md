@@ -353,6 +353,9 @@ must exist before any company is switched on.
    1. `migrations/20260928100000_dashboard_v3_widget_catalogue.sql`
    2. `migrations/20260928101000_company_buyer_dashboard_v3_flag.sql`
    3. `migrations/20260928102000_dashboard_v3_seed_grants.sql`
+   4. `migrations/20260929100000_po_line_variant_backfill.sql` — Reports fix (see below).
+      Independent of 1–3; deploy the code first or together — the fixed reads work
+      with or without it, the backfill only makes the stored column complete.
 
    Record each in the ledger: `INSERT INTO pgmigrations (name, run_on) VALUES ('<file name without .sql>', now());`
 3. **Verify** (read-only):
@@ -388,4 +391,34 @@ must exist before any company is switched on.
    `20260928100000_…widget_catalogue.down.sql`, and delete their `pgmigrations` rows. The
    seed down removes exactly the rows it inserted; the catalogue down restores the five cut
    widgets with any grants they had.
+
+## Reports category fix (fix/reports-category-variant)
+
+`tbl_purchase_order_product.product_variant_id` was written only by the ARC
+call-off path, so all 2,387 RFQ PO lines on prod carried NULL and every Reports
+sheet that reached an item through the line was empty (1.1 category sheet, 1.2,
+1.3 rate variance, 1.4 primary category, 2.2). Fixed three ways:
+
+- **Reads** — `reportsModel.lineVariant()` + `LINE_VARIANT_JOIN` resolve a line
+  through its rfq_product (call-off lines keep their own); the dashboard
+  re-exports the same definition.
+- **Writes** — `draftPurchaseOrder` stores the variant from the rfq_product on
+  both inserts (new PO, merge onto a draft).
+- **Backfill** — `20260929100000_po_line_variant_backfill.sql`, ledgered in
+  `tbl_po_line_variant_backfill`; down clears exactly those rows.
+
+Prod dry run (read-only, 2026-09-29): 2,387 lines would be set, 575 POs,
+1,171 variants, 0 ambiguous. User 125 FYTD after the fix: spend ₹30,28,65,918.79
+= category (10 parents / 68 leaves) = category×vendor (215 rows); rate variance
+57 rows; single-source 500 (capped); primary category on 158/158 vendors —
+all previously 0.
+
+Verify after applying:
+```sql
+SELECT count(*) FILTER (WHERE product_variant_id IS NULL) AS still_null, count(*) AS lines
+  FROM tbl_purchase_order_product;                        -- still_null = 0 on prod
+SELECT count(*) FROM tbl_po_line_variant_backfill;         -- 2,387 (+ any lines drafted before deploy)
+```
+Rollback: `20260929100000_po_line_variant_backfill.down.sql` (the read fix keeps
+Reports correct either way).
 
