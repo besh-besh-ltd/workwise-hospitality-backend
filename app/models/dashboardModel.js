@@ -1324,9 +1324,9 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
       type: 'benchmark_alert',
       severity: bd.above_pct > 25 ? 'high' : 'medium',
       title: `${bd.product_name} above price benchmark`,
-      description: `Latest purchase is ${bd.above_pct}% above the best price paid.`,
+      description: `Latest purchase is ${bd.above_pct}% above the best price ever paid for it.`,
       details: [
-        { label: 'Best paid', value: inr(bd.best_price) },
+        { label: 'Best paid (all time)', value: inr(bd.best_price) },
         { label: 'Latest', value: inr(bd.latest_price) },
       ],
       action_label: 'Open latest PO',
