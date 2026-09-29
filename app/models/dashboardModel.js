@@ -1361,7 +1361,11 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
     });
   }
 
-  if (spendTrend && spendTrend.previous > 0) {
+  // A previous period with little or no committed spend (typically before the
+  // client was on the platform) turns into "+900%" headlines that describe
+  // adoption, not spending. Only compare against a meaningful baseline.
+  const SPEND_TREND_MIN_BASELINE = 0.1;
+  if (spendTrend && spendTrend.previous > 0 && spendTrend.previous >= spendTrend.current * SPEND_TREND_MIN_BASELINE) {
     const pct = round1(((spendTrend.current - spendTrend.previous) / spendTrend.previous) * 100);
     const dir = pct > 0 ? 'increased' : 'decreased';
     insights.push({

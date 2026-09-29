@@ -86,6 +86,23 @@ beforeAll(async () => {
   });
   seeded.rfqIds.push(older.rfq_id, newer.rfq_id);
   seeded.alertRfqId = newer.rfq_id;
+  // A small purchase 35 days ago (₹50,000) on a separate item, so the spend
+  // trend has a near-empty previous period to compare against.
+  const small = await makeRfqVisibleToDashboard(db, {
+    createdBy: u, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, is_published: 1, status: 1, title: `${TOKEN} small RFQ`,
+  });
+  seeded.rfqIds.push(small.rfq_id);
+  const smallRp = await db.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant)
+     VALUES ($1, '', '0', '', '', $2, 1) RETURNING id`,
+    [small.rfq_id, qv.id]
+  );
+  const c = await makePO(db, {
+    rfq_id: small.rfq_id, rfq_product_id: smallRp.id, vendor_user_id: IDS.users.vendor_alpha,
+    company_id: IDS.companies.A, status: "approved", unit_price: 50000, quantity: 1, total_value: 50000, created_ago_days: 35,
+  });
+  seeded.poIds.push(c.po_id);
+
   await quoteOn(older.rfq_id, IDS.users.vendor_alpha, 1000, 60);
   await quoteOn(older.rfq_id, IDS.users.vendor_beta, 1000, 60);
   await quoteOn(newer.rfq_id, IDS.users.vendor_alpha, 1500, 1);
@@ -98,7 +115,7 @@ afterAll(async () => {
     await db.none(`DELETE FROM tbl_quotes WHERE id = ANY($1::int[])`, [seeded.quoteIds]);
   }
   if (seeded.qVariantId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.qVariantId]);
-  if (seeded.variantId) await db.none(`DELETE FROM tbl_rfq_products WHERE product_variant_id = $1`, [seeded.variantId]);
+  if (seeded.variantId) await db.none(`DELETE FROM tbl_rfq_products WHERE product_variant_id = ANY($1::int[])`, [[seeded.variantId, seeded.qVariantId].filter(Boolean)]);
   await cleanupRfqs(db, seeded.rfqIds);
   if (seeded.variantId) await db.none(`DELETE FROM tbl_product_variant WHERE id = $1`, [seeded.variantId]);
   if (seeded.productId) await db.none(`DELETE FROM tbl_product WHERE id = $1`, [seeded.productId]);
@@ -127,5 +144,32 @@ describe("GET /dashboard-v2/smart-insights — price benchmark insight (Sr 299)"
     expect(hit).toBeDefined();
     expect(hit.action_label).toBe("Review quotes");
     expect(hit.action).toEqual({ type: "quoteCompare", params: { rfqId: seeded.alertRfqId } });
+  });
+});
+
+describe("GET /dashboard-v2/smart-insights — spend trend", () => {
+  const trendFor = async (range) => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(ENDPOINT).query({ hotel_ids: String(IDS.hotels.A1), ...range });
+    expect(res.status).toBe(200);
+    return (res.body.data.insights || []).find((i) => i.type === "spend_trend");
+  };
+
+  it("compares against a previous period that has comparable spend", async () => {
+    // Current −14..0 = ₹20L; previous −29..−15 = ₹10L → +100%.
+    const hit = await trendFor({ start_date: istDate(-14), end_date: istDate(0) });
+    expect(hit).toBeDefined();
+    expect(hit.title).toBe("Spend increased by 100%");
+  });
+
+  it("stays silent when the previous period had no spend", async () => {
+    // Previous −13..−7 has no committed PO.
+    expect(await trendFor({ start_date: istDate(-6), end_date: istDate(0) })).toBeUndefined();
+  });
+
+  it("stays silent when the previous period is under 10% of the current one", async () => {
+    // Current −29..0 = ₹30L; previous −59..−30 = ₹50,000 (1.7%): a "+5,900%"
+    // headline would only say the platform was new, not that spend jumped.
+    expect(await trendFor({ start_date: istDate(-29), end_date: istDate(0) })).toBeUndefined();
   });
 });
