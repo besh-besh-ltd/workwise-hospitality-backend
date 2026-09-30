@@ -16,7 +16,9 @@ permissions:
 
 concurrency:
   group: deploy-backend-qa
-  cancel-in-progress: true
+  # Never cancel a run that may be mid-migration: a cancelled deploy can leave
+  # migrations half-applied, or the container half-swapped. Queue instead.
+  cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -63,14 +65,77 @@ jobs:
 
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    name: Deploy to staging EC2
+  migrate:
+    name: Apply database migrations (staging)
     runs-on: ubuntu-latest
     needs: build-and-push
     timeout-minutes: 15
     steps:
+      # The deploy job writes this too, but migrate now runs first and needs the
+      # database credentials. Writing it twice is idempotent and keeps the two
+      # jobs independently re-runnable.
       - name: Write env file
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          ENV_CONTENT: ${{ secrets.ENV_STAGING }}
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.WORKWISE_SSH_USER }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
+          port: 22
+          envs: ENV_CONTENT
+          script: printf '%s\n' "$ENV_CONTENT" > "$HOME/.env.backend-staging"
+
+      # Runs inside the image that is about to be deployed. migrations/ is in the
+      # image (Dockerfile's COPY . ., not excluded by .dockerignore), so the
+      # migration files are byte-identical to the code they accompany — no
+      # version skew, no new secret, no new route to the database.
+      - name: Apply migrations
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ env.DEPLOY_SHA }}
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.WORKWISE_SSH_USER }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
+          port: 22
+          # No script_stop: it is not an input at appleboy/ssh-action@v1.2.5 and
+          # only produces an "Unexpected input(s)" warning. Every script below
+          # begins with `set -euo pipefail`, which is what v1.2.5's README
+          # recommends in its place. Do not re-add it.
+          command_timeout: 10m
+          envs: IMAGE_URI
+          script: |
+            set -euo pipefail
+
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+            docker pull "${IMAGE_URI}"
+
+            docker run --rm --env-file "$HOME/.env.backend-staging" "${IMAGE_URI}" \
+              npm run migrate:status --silent
+
+            # --yes is required because the target is a remote database. up/down
+            # refuse a non-local target without it, so a developer running
+            # `npm run migrate:up` from a terminal cannot silently write to a shared
+            # environment — backend/.env resolves to hospitality_stage on RDS.
+            # Here the intent IS to migrate the remote database, stated explicitly.
+            docker run --rm --env-file "$HOME/.env.backend-staging" "${IMAGE_URI}" \
+              npm run migrate:up --silent -- --yes
+
+            docker run --rm --env-file "$HOME/.env.backend-staging" "${IMAGE_URI}" \
+              npm run migrate:verify --silent
+
+  deploy:
+    name: Deploy to staging EC2
+    runs-on: ubuntu-latest
+    needs: [build-and-push, migrate]
+    timeout-minutes: 15
+    steps:
+      - name: Write env file
+        uses: appleboy/ssh-action@v1.2.5
         env:
           ENV_CONTENT: ${{ secrets.ENV_STAGING }}
         with:
@@ -82,7 +147,7 @@ jobs:
           script: printf '%s\n' "$ENV_CONTENT" > "$HOME/.env.backend-staging"
 
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         env:
           IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ env.DEPLOY_SHA }}
         with:
@@ -90,7 +155,10 @@ jobs:
           username: ${{ secrets.WORKWISE_SSH_USER }}
           key: ${{ secrets.WORKWISE_SSH_KEY }}
           port: 22
-          script_stop: true
+          # No script_stop: it is not an input at appleboy/ssh-action@v1.2.5 and
+          # only produces an "Unexpected input(s)" warning. Every script below
+          # begins with `set -euo pipefail`, which is what v1.2.5's README
+          # recommends in its place. Do not re-add it.
           command_timeout: 10m
           envs: IMAGE_URI
           script: |

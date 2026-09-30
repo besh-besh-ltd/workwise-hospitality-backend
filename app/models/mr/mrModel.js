@@ -33,7 +33,7 @@ const STATUS_GROUPS_MR = {
  * to a boq/rfq `read` permission via tbl_role_permissions/tbl_permissions.
  *
  * WHY NO PERMISSION JOIN HERE (measured, not assumed):
- *   `mr.read` DOES exist — migrations/20260608100800_permissions_seed.sql seeds
+ *   `mr.read` DOES exist — migrations/20260608100800_permissions_seed.up.sql seeds
  *   it (production tbl_permissions.id = 65), granted to the two system roles
  *   'MR Approver' (26) and 'MR Raiser' (30). But as of 2026-07-30 production
  *   holds **0 of 254** scoped users on either role (0 of 2307 tbl_user_role_scopes
