@@ -1,7 +1,7 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
-import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
+import { sendApprovalStepNotification, approvalStepEmailContext } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificationLinks.js';
 
 // Maps entity_type to the permission resource used in tbl_permissions
@@ -2913,12 +2913,11 @@ export async function createApprovalInstance({
         sendApprovalStepNotification({
           entityType: entity_type,
           entityId: entity_id,
-          entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entity_id}`,
+          ...approvalStepEmailContext(entity_type, entity_id, metadata),
           stepOrder: firstPendingStep.step_order,
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
-          approvers: pendingApprovers,
-          extraContext: { rfq_id: metadata?.rfq_id || entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' }
+          approvers: pendingApprovers
         });
       }
     } catch (emailError) {
@@ -3668,12 +3667,11 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
     sendApprovalStepNotification({
       entityType: instance.entity_type,
       entityId: instance.entity_id,
-      entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${instance.entity_id}`,
+      ...approvalStepEmailContext(instance.entity_type, instance.entity_id, metadata),
       stepOrder: result.next_step,
       totalSteps: parseInt(totalSteps.count),
       initiatorName: initiator?.name || 'Unknown',
-      approvers,
-      extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' }
+      approvers
     });
   } catch (emailError) {
     logError('Error sending next step approval notification', emailError);
