@@ -1,6 +1,6 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
-import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -62,14 +62,8 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${rfqUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
-              View RFQ Details
-            </a>
-            <a href="${compareUrl}"
-               style="background-color:#10B981; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              Compare Quotes
-            </a>
+            ${emailButton(rfqUrl, 'View RFQ Details', { inline: true })}
+            ${emailButton(compareUrl, 'Compare Quotes', { bg: '#10B981', inline: true })}
           </div>
 
           <p style="text-align:center; margin-top: 30px;">
@@ -151,10 +145,7 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View Details
-            </a>
+            ${emailButton(viewUrl, 'View Details')}
           </div>
 
           <p style="text-align:center; margin-top:30px;">

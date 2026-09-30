@@ -1,6 +1,6 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
-import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -88,10 +88,7 @@ export const sendRfqCreationNotification = async ({
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -133,6 +130,25 @@ export const sendRfqCreationNotification = async ({
     logError("Error sending RFQ creation notification emails:", err);
     return false;
   }
+};
+
+/**
+ * Build the identifier + link context for an approval-step email from an
+ * approval instance's metadata.
+ *
+ * PO instances are special: their metadata also carries the RFQ fields, and
+ * reading it RFQ-first sent PO approvers to the RFQ workspace (no po_id, so
+ * buyerPoApproval fell back) under a subject naming the RFQ number. For a PO
+ * the identifier is the PO number and the link carries the PO id — the
+ * instance's entity_id IS the PO id, so it backs up a missing metadata.po_id.
+ */
+export const approvalStepEmailContext = (entityType, entityId, metadata) => {
+  const isPo = entityType === 'PO';
+  const entityIdentifier = (isPo && metadata?.po_number)
+    || metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entityId}`;
+  const extraContext = { rfq_id: metadata?.rfq_id || entityId, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' };
+  if (isPo) extraContext.po_id = metadata?.po_id || entityId;
+  return { entityIdentifier, extraContext };
 };
 
 /**
@@ -265,10 +281,7 @@ export const sendApprovalStepNotification = async ({
           ${committeeNudgeHtml}
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${emailUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              ${ctaLabel}
-            </a>
+            ${emailButton(emailUrl, ctaLabel)}
           </div>
 
           ${approvalGuideHtml}
@@ -353,10 +366,7 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -445,10 +455,7 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -549,14 +556,8 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
           ` : ''}
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${sendQuoteUrl}"
-               style="background-color:#059669; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
-              Submit Your Quote
-            </a>
-            <a href="${viewUrl}"
-               style="background-color:#6B7280; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View Details
-            </a>
+            ${emailButton(sendQuoteUrl, 'Submit Your Quote', { bg: '#059669', inline: true })}
+            ${emailButton(viewUrl, 'View Details', { bg: '#6B7280', inline: true })}
           </div>
 
           <p style="margin-top:20px;">
