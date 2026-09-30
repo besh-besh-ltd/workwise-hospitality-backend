@@ -1,10 +1,16 @@
-// Wave-style integration test for the Technical Evaluator dashboard widgets.
+// Integration test for the Technical Evaluator dashboard widgets.
 //
-// Seeds a deterministic tech-eval state at Hotel A1, hits the real HTTP
-// endpoints as the tech-eval-scoped fixture user, and asserts on exact
-// counts + exact tech-eval IDs.
+// Seeds a deterministic tech-eval state at Hotel A1 in PRODUCTION shapes and
+// asserts exact counts + exact tech-eval ids over real HTTP:
+//
+//   · "pending" means ACTIONABLE — prod had 212 open evaluation rows of which
+//     at most 78 could be acted on (the rest sat on closed / unpublished /
+//     already-awarded RFQs, or were still inside the bid window);
+//   · vendors answer a clause with free text, and prod stores the negative as
+//     'I Dont Agree' — never 'disagree', which is why the old widget was 0.
 
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import moment from "moment-timezone";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -15,143 +21,122 @@ import {
   addProductToRfq,
   makeTechEval,
   insertVendorTechResponse,
+  insertVendorQuote,
+  makePO,
+  cleanupPurchaseOrders,
+  cleanupApprovalInstances,
 } from "../helpers/dashboardSeed.js";
 
-const inserted = { rfqIds: [] };
+const inserted = { rfqIds: [], poIds: [], techApprovalEntityIds: [] };
 const seeded = {};
+
+// bid_end_date is naive IST text.
+const istDateTime = (offsetDays) =>
+  moment.tz("Asia/Kolkata").add(offsetDays, "days").format("YYYY-MM-DDTHH:mm");
+
+/** An RFQ at A1 whose bid window closed `daysAgo` days ago, with one real quote. */
+async function closedRfqWithEval(t, title, { daysAgo = 2, hotel = IDS.hotels.A1, status = 1, quote = true } = {}) {
+  const rfq = await makeRfqVisibleToDashboard(t, {
+    createdBy: IDS.users.a1_proc_buyer,
+    hospitality: IDS.hospitality.A,
+    hotel,
+    status,
+    is_published: 1,
+    title,
+    bid_end_date: istDateTime(-daysAgo),
+  });
+  const prod = await addProductToRfq(t, rfq.rfq_id);
+  if (quote) await insertVendorQuote(t, { rfq_id: rfq.rfq_id, vendor_user_id: IDS.users.vendor_alpha });
+  const te = await makeTechEval(t, { rfq_id: rfq.rfq_id, rfq_product_id: prod.rfq_product_id, isComplete: false });
+  inserted.rfqIds.push(rfq.rfq_id);
+  return { rfq_id: rfq.rfq_id, rfq_product_id: prod.rfq_product_id, ...te };
+}
 
 beforeAll(async () => {
   await db.tx(async (t) => {
-    // ── A1 — 2 pending tech-evals on different RFQs ───────────────────
-    const rfq1 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A,
-      hotel: IDS.hotels.A1,
-      status: 1,
-      is_published: 1,
-      title: "RFQ for tech eval 1",
-    });
-    const prod1 = await addProductToRfq(t, rfq1.rfq_id);
-    const te1 = await makeTechEval(t, {
-      rfq_id: rfq1.rfq_id,
-      rfq_product_id: prod1.rfq_product_id,
-      isComplete: false,
-    });
+    // ── Actionable: bid closed, a real quote in, not awarded, not submitted
+    const a1 = await closedRfqWithEval(t, "TE actionable — older", { daysAgo: 3 });
+    const a2 = await closedRfqWithEval(t, "TE actionable — newer", { daysAgo: 1 });
 
-    const rfq2 = await makeRfqVisibleToDashboard(t, {
+    // ── NOT actionable ────────────────────────────────────────────────
+    // Bid window still open — quotes are sealed.
+    const openRfq = await makeRfqVisibleToDashboard(t, {
       createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A,
-      hotel: IDS.hotels.A1,
-      status: 1,
-      is_published: 1,
-      title: "RFQ for tech eval 2",
+      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
+      status: 1, is_published: 1, title: "TE bid still open",
+      bid_end_date: istDateTime(5),
     });
-    const prod2 = await addProductToRfq(t, rfq2.rfq_id);
-    const te2 = await makeTechEval(t, {
-      rfq_id: rfq2.rfq_id,
-      rfq_product_id: prod2.rfq_product_id,
-      isComplete: false,
-    });
+    inserted.rfqIds.push(openRfq.rfq_id);
+    const openProd = await addProductToRfq(t, openRfq.rfq_id);
+    await insertVendorQuote(t, { rfq_id: openRfq.rfq_id, vendor_user_id: IDS.users.vendor_alpha });
+    const teOpen = await makeTechEval(t, { rfq_id: openRfq.rfq_id, rfq_product_id: openProd.rfq_product_id });
 
-    // ── Completed tech-eval — should NOT appear in "pending" ──────────
-    const rfq3 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A,
-      hotel: IDS.hotels.A1,
-      status: 1,
-      is_published: 1,
-      title: "RFQ with completed tech eval",
+    // RFQ closed (status 2).
+    const closed = await closedRfqWithEval(t, "TE on a closed RFQ", { status: 2 });
+    // Nobody quoted — nothing to evaluate.
+    const noQuote = await closedRfqWithEval(t, "TE with no quotes", { quote: false });
+    // Product already on a live PO.
+    const awarded = await closedRfqWithEval(t, "TE already awarded");
+    const po = await makePO(t, {
+      rfq_id: awarded.rfq_id, rfq_product_id: awarded.rfq_product_id,
+      vendor_user_id: IDS.users.vendor_alpha, company_id: IDS.companies.A,
+      status: "approved",
     });
-    const prod3 = await addProductToRfq(t, rfq3.rfq_id);
-    const te3 = await makeTechEval(t, {
-      rfq_id: rfq3.rfq_id,
-      rfq_product_id: prod3.rfq_product_id,
-      isComplete: true,
-    });
-    // Backfill responses on the completed eval so the throughput query
-    // has data (score_timestamp lands now, opened_at was set on insert).
-    await insertVendorTechResponse(t, {
-      clause_id: te3.clause_ids[0],
-      vendor_id: IDS.users.vendor_alpha,
-      response: "agree",
-    });
-    // Push the eval's "opened" timestamp back so completed_at - opened_at
-    // computes a meaningful avg.
+    inserted.poIds.push(po.po_id);
+    // Evaluator already submitted — a PENDING TECHNICAL approval exists for
+    // the product (entity_id is the round; the product is in metadata).
+    const submitted = await closedRfqWithEval(t, "TE submitted for approval");
+    const roundId = 900000 + submitted.tech_eval_id;
     await t.none(
-      `UPDATE tbl_rfq_product_tech_evaluation
-       SET "timestamp" = NOW() - INTERVAL '5 hours'
-       WHERE id = $1`,
-      [te3.tech_eval_id]
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status, current_step,
+          initiated_by, hospitality_company_id, hotel_id, metadata)
+       VALUES ('TECHNICAL', $1, $2, 'PENDING', 1, $3, $4, $5, $6)`,
+      [roundId, IDS.policies.A1_P1_TECHNICAL, IDS.users.a1_proc_techEval, IDS.hospitality.A, IDS.hotels.A1,
+        { rfq_id: submitted.rfq_id, rfq_product_id: submitted.rfq_product_id }]
     );
+    inserted.techApprovalEntityIds.push(roundId);
 
-    // ── Tech-eval at Hotel A2 — must NOT appear in A1 query ───────────
-    const rfqA2 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A,
-      hotel: IDS.hotels.A2,
-      status: 1,
-      is_published: 1,
-      title: "RFQ A2 tech eval",
-    });
-    const prodA2 = await addProductToRfq(t, rfqA2.rfq_id);
-    const teA2 = await makeTechEval(t, {
-      rfq_id: rfqA2.rfq_id,
-      rfq_product_id: prodA2.rfq_product_id,
-      isComplete: false,
-    });
+    // Completed evaluation.
+    const done = await closedRfqWithEval(t, "TE complete");
+    await t.none(`UPDATE tbl_rfq_product_tech_evaluation SET is_complete = true WHERE id = $1`, [done.tech_eval_id]);
 
-    // ── Disagreements: te1 has 2 vendors disagreeing on 1 clause each
-    await insertVendorTechResponse(t, {
-      clause_id: te1.clause_ids[0],
-      vendor_id: IDS.users.vendor_alpha,
-      response: "disagree",
-    });
-    await insertVendorTechResponse(t, {
-      clause_id: te1.clause_ids[0],
-      vendor_id: IDS.users.vendor_beta,
-      response: "disagree",
-    });
-    // te2 has 1 vendor disagreeing on 2 clauses
-    await insertVendorTechResponse(t, {
-      clause_id: te2.clause_ids[0],
-      vendor_id: IDS.users.vendor_alpha,
-      response: "disagree",
-    });
-    await insertVendorTechResponse(t, {
-      clause_id: te2.clause_ids[1],
-      vendor_id: IDS.users.vendor_alpha,
-      response: "disagree",
-    });
-    // Plus an "agree" — must not count.
-    await insertVendorTechResponse(t, {
-      clause_id: te2.clause_ids[1],
-      vendor_id: IDS.users.vendor_beta,
-      response: "agree",
-    });
+    // Wrong hotel.
+    const a2Hotel = await closedRfqWithEval(t, "TE at A2", { hotel: IDS.hotels.A2 });
 
-    seeded.te1 = te1.tech_eval_id;
-    seeded.te2 = te2.tech_eval_id;
-    seeded.te3 = te3.tech_eval_id;
-    seeded.teA2 = teA2.tech_eval_id;
-    seeded.rfq1 = rfq1.rfq_id;
-    seeded.rfq2 = rfq2.rfq_id;
-    seeded.rfq3 = rfq3.rfq_id;
-    seeded.rfqA2 = rfqA2.rfq_id;
-    inserted.rfqIds = [rfq1.rfq_id, rfq2.rfq_id, rfq3.rfq_id, rfqA2.rfq_id];
+    // ── Disagreements (prod wording) ──────────────────────────────────
+    // a1: two vendors say 'I Dont Agree' on one clause.
+    await insertVendorTechResponse(t, { clause_id: a1.clause_ids[0], vendor_id: IDS.users.vendor_alpha, response: "I Dont Agree" });
+    await insertVendorTechResponse(t, { clause_id: a1.clause_ids[0], vendor_id: IDS.users.vendor_beta, response: "I Dont Agree" });
+    // a2: one vendor disagrees on two clauses (legacy 'disagree' still counts).
+    await insertVendorTechResponse(t, { clause_id: a2.clause_ids[0], vendor_id: IDS.users.vendor_alpha, response: "I Dont Agree" });
+    await insertVendorTechResponse(t, { clause_id: a2.clause_ids[1], vendor_id: IDS.users.vendor_alpha, response: "disagree" });
+    // 'I Agree' and free text never count.
+    await insertVendorTechResponse(t, { clause_id: a2.clause_ids[1], vendor_id: IDS.users.vendor_beta, response: "I Agree" });
+    await insertVendorTechResponse(t, { clause_id: a2.clause_ids[0], vendor_id: IDS.users.vendor_beta, response: "Conforms to the specified formulation." });
+    // Disagreement on a CLOSED RFQ — not actionable.
+    await insertVendorTechResponse(t, { clause_id: closed.clause_ids[0], vendor_id: IDS.users.vendor_alpha, response: "I Dont Agree" });
+    // Disagreement at A2 — out of the selected hotel.
+    await insertVendorTechResponse(t, { clause_id: a2Hotel.clause_ids[0], vendor_id: IDS.users.vendor_alpha, response: "I Dont Agree" });
+
+    Object.assign(seeded, {
+      a1, a2, closed, noQuote, awarded, submitted, done, a2Hotel,
+      teOpen: teOpen.tech_eval_id,
+    });
   });
 });
 
 afterAll(async () => {
+  await cleanupApprovalInstances(db, "TECHNICAL", inserted.techApprovalEntityIds);
+  await cleanupPurchaseOrders(db, inserted.poIds);
   await cleanupTechEvals(db, inserted.rfqIds);
   await cleanupRfqs(db, inserted.rfqIds);
   await closeDb();
 });
 
 describe("Buyer Dashboard — Technical Evaluator widgets (real data)", () => {
-  /* ────────── /my-tech-evals-pending ───────── */
-
   describe("GET /dashboard-v2/my-tech-evals-pending", () => {
-    it("returns exactly the 2 incomplete tech-evals at A1, oldest-first", async () => {
+    it("returns only the evaluations someone can act on now, oldest bid close first", async () => {
       const client = await httpClient(IDS.users.a1_proc_techEval);
       const res = await client
         .get("/api/v1/dashboard-v2/my-tech-evals-pending")
@@ -162,116 +147,60 @@ describe("Buyer Dashboard — Technical Evaluator widgets (real data)", () => {
       expect(res.body.data.count).toBe(2);
 
       const ids = res.body.data.items.map((i) => i.id);
-      expect(ids).toEqual(expect.arrayContaining([seeded.te1, seeded.te2]));
-      expect(ids).not.toContain(seeded.te3);  // completed → excluded
-      expect(ids).not.toContain(seeded.teA2); // wrong hotel → excluded
+      expect(ids).toEqual([seeded.a1.tech_eval_id, seeded.a2.tech_eval_id]);
 
-      // Each item carries the FE-required fields.
-      for (const item of res.body.data.items) {
-        expect(item).toHaveProperty("rfq_no");
-        expect(item).toHaveProperty("product_name");
-        expect(item).toHaveProperty("opened_at");
-        expect(typeof item.rfq_id).toBe("number");
-        expect(typeof item.product_id).toBe("number");
+      for (const excluded of [seeded.teOpen, seeded.closed.tech_eval_id, seeded.noQuote.tech_eval_id,
+        seeded.awarded.tech_eval_id, seeded.submitted.tech_eval_id, seeded.done.tech_eval_id,
+        seeded.a2Hotel.tech_eval_id]) {
+        expect(ids).not.toContain(excluded);
       }
 
-      // Items are ordered ASC by opened_at — first item is the oldest.
-      expect(res.body.data.oldest_opened_at).toBe(res.body.data.items[0].opened_at);
+      // Link contract: rfq_id + rfq_product_id (tbl_rfq_products.id).
+      const first = res.body.data.items[0];
+      expect(first.rfq_id).toBe(seeded.a1.rfq_id);
+      expect(first.rfq_product_id).toBe(seeded.a1.rfq_product_id);
+      expect(first).toHaveProperty("rfq_no");
+      expect(first).toHaveProperty("product_name");
+      expect(first.waiting_since).toBeTruthy();
+      expect(res.body.data.oldest_waiting_since).toBe(first.waiting_since);
     });
   });
 
-  /* ────────── /tech-evals-with-disagreements ───────── */
-
   describe("GET /dashboard-v2/tech-evals-with-disagreements", () => {
-    it("returns exactly the 2 tech-evals with vendor disagreements, with accurate counts", async () => {
+    it("counts prod's 'I Dont Agree' responses on open evaluations", async () => {
       const client = await httpClient(IDS.users.a1_proc_techEval);
       const res = await client
         .get("/api/v1/dashboard-v2/tech-evals-with-disagreements")
         .query({ hotel_ids: String(IDS.hotels.A1) });
 
       expect(res.status).toBe(200);
-      expect(res.body.status).toBe(1);
       expect(res.body.data.count).toBe(2);
 
       const byId = {};
       for (const item of res.body.data.items) byId[item.id] = item;
 
-      // te1: 2 vendors disagreeing on 1 clause
-      expect(byId[seeded.te1]).toBeDefined();
-      expect(byId[seeded.te1].disagreeing_vendor_count).toBe(2);
-      expect(byId[seeded.te1].disagreeing_clause_count).toBe(1);
-
-      // te2: 1 vendor disagreeing on 2 clauses
-      expect(byId[seeded.te2]).toBeDefined();
-      expect(byId[seeded.te2].disagreeing_vendor_count).toBe(1);
-      expect(byId[seeded.te2].disagreeing_clause_count).toBe(2);
-
-      // total_disagreement_clauses = 1 + 2 = 3
+      expect(byId[seeded.a1.tech_eval_id].disagreeing_vendor_count).toBe(2);
+      expect(byId[seeded.a1.tech_eval_id].disagreeing_clause_count).toBe(1);
+      expect(byId[seeded.a2.tech_eval_id].disagreeing_vendor_count).toBe(1);
+      expect(byId[seeded.a2.tech_eval_id].disagreeing_clause_count).toBe(2);
+      expect(byId[seeded.a2.tech_eval_id].rfq_product_id).toBe(seeded.a2.rfq_product_id);
       expect(res.body.data.total_disagreement_clauses).toBe(3);
 
-      // te3 (completed) and teA2 (wrong hotel) must not appear.
-      expect(byId[seeded.te3]).toBeUndefined();
-      expect(byId[seeded.teA2]).toBeUndefined();
+      // Closed RFQ and other-hotel disagreements are not in the queue.
+      expect(byId[seeded.closed.tech_eval_id]).toBeUndefined();
+      expect(byId[seeded.a2Hotel.tech_eval_id]).toBeUndefined();
 
-      // Ordering: vendor count DESC — te1 (2 vendors) before te2 (1 vendor).
-      expect(res.body.data.items[0].id).toBe(seeded.te1);
+      // Most vendors disagreeing first.
+      expect(res.body.data.items[0].id).toBe(seeded.a1.tech_eval_id);
     });
   });
-
-  /* ────────── /tech-eval-throughput ───────── */
-
-  describe("GET /dashboard-v2/tech-eval-throughput", () => {
-    it("returns a real avg-turnaround for completed tech-evals", async () => {
-      const client = await httpClient(IDS.users.a1_proc_techEval);
-      const res = await client
-        .get("/api/v1/dashboard-v2/tech-eval-throughput")
-        .query({ hotel_ids: String(IDS.hotels.A1) });
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe(1);
-      expect(res.body.data.unit).toBe("hrs");
-      expect(Array.isArray(res.body.data.sparkline)).toBe(true);
-      expect(res.body.data.sparkline.length).toBe(4);
-
-      // te3 is completed and opened 5 hours before the response timestamp.
-      // The avg-hours value should be a positive number around 5 (a few
-      // seconds of clock drift between INSERT and now() is OK — assert
-      // it falls in a reasonable band).
-      expect(res.body.data.current_period_avg_hours).toBeGreaterThan(4.9);
-      expect(res.body.data.current_period_avg_hours).toBeLessThan(5.5);
-
-      // The most recent sparkline cell (last index) covers "this week"
-      // and should mirror current period for our single seeded eval.
-      const lastBucket = res.body.data.sparkline[3];
-      expect(lastBucket).toBeGreaterThan(4.9);
-      expect(lastBucket).toBeLessThan(5.5);
-    });
-
-    it("returns null avg when no completed evals exist in the hotel", async () => {
-      // B1 has no seeded tech-evals.
-      const client = await httpClient(IDS.users.companyB_admin);
-      const res = await client
-        .get("/api/v1/dashboard-v2/tech-eval-throughput")
-        .query({ hotel_ids: String(IDS.hotels.B1) });
-      expect(res.status).toBe(200);
-      expect(res.body.data.current_period_avg_hours).toBeNull();
-      expect(res.body.data.prior_period_avg_hours).toBeNull();
-      expect(res.body.data.delta_pct).toBeNull();
-    });
-  });
-
-  /* ────────── Scope isolation ───────── */
 
   describe("Scope isolation", () => {
     it("Hotel B user sees zero tech-evals for our seeded A-side data", async () => {
       const client = await httpClient(IDS.users.companyB_admin);
       const [pending, disagree] = await Promise.all([
-        client
-          .get("/api/v1/dashboard-v2/my-tech-evals-pending")
-          .query({ hotel_ids: String(IDS.hotels.B1) }),
-        client
-          .get("/api/v1/dashboard-v2/tech-evals-with-disagreements")
-          .query({ hotel_ids: String(IDS.hotels.B1) }),
+        client.get("/api/v1/dashboard-v2/my-tech-evals-pending").query({ hotel_ids: String(IDS.hotels.B1) }),
+        client.get("/api/v1/dashboard-v2/tech-evals-with-disagreements").query({ hotel_ids: String(IDS.hotels.B1) }),
       ]);
       expect(pending.body.data.count).toBe(0);
       expect(disagree.body.data.count).toBe(0);

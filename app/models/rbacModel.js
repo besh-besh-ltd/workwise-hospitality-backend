@@ -515,10 +515,13 @@ const rbacModel = {
     return t ? run(t) : db.tx(run);
   },
   getAllPermissions: () => {
+    // `ordering` before `action`: within a resource it is the display order the
+    // catalogue migrations set (dashboard widgets persona by persona). Resources
+    // that never set it tie on ordering and fall back to the action order.
     return db.any(`
       SELECT id, resource, action
       FROM tbl_permissions
-      ORDER BY resource, action
+      ORDER BY resource, ordering, action
     `);
   },
 

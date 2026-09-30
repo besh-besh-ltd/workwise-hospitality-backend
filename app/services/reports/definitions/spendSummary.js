@@ -25,11 +25,23 @@ import {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** "Apr-26" from a Postgres date, read as UTC so the month cannot slip. */
-function monthLabel(value) {
-  const d = new Date(value);
+/**
+ * "Apr-26" from a Postgres DATE, independent of the server's timezone.
+ *
+ * node-pg materialises a DATE as LOCAL midnight, so it is read back with local
+ * getters; reading it as UTC (as this used to) slips every month back by one
+ * on any server east of UTC — "Mar-26" for April in IST. A string is parsed
+ * from its own digits and never goes through a timezone at all.
+ */
+export function monthLabel(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    const m = /^(\d{4})-(\d{2})/.exec(value);
+    return m ? `${MONTHS[Number(m[2]) - 1]}-${m[1].slice(2)}` : "";
+  }
+  const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-  return `${MONTHS[d.getUTCMonth()]}-${String(d.getUTCFullYear()).slice(2)}`;
+  return `${MONTHS[d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
 }
 
 /** (a - b) / b, or null when there is no base to compare against. */

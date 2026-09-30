@@ -7,6 +7,7 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 
 /**
@@ -4029,7 +4030,9 @@ LIMIT 2;
     is_tender,
     completed_status,
     hotel_ids,
-    include_drafts = false // management listing: also surface saved drafts (unpublished status-1)
+    include_drafts = false, // management listing: also surface saved drafts (unpublished status-1)
+    created_by_only = false, // "Created by me": narrowed in SQL, BEFORE the LIMIT, never after it
+    vendor_disagreement_only = false // Vendor disagreements card's View-all — same predicate, same place
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -4438,6 +4441,22 @@ LIMIT 2;
         -- (hotel x department x process) tuple. See
         -- authorizationService.buildApproverReadExemption for why.
         ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+        ${include_drafts ? `
+        -- The creator's own early draft, saved before a company context existed
+        -- (hospitality_company_id NULL — prod RFQ 1128). No role scope can match a
+        -- NULL company, yet the "My drafts" widget counts it; the tenant stays
+        -- bounded by a hotel mapping the creator actually holds.
+        OR (RFQ.is_published = 0 AND RFQ.status = 1
+            AND RFQ.created_by = ${Number(user_id)}
+            AND RFQ.hospitality_company_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_hotel_mappings _rhm_own
+              JOIN tbl_hospitality_company_hotels _hch_own ON _hch_own.id = _rhm_own.hotel_id
+              JOIN tbl_hospitality_user_mappings _hum_own ON _hum_own.user_id = ${Number(user_id)}
+                AND (_hum_own.hospitality_hotel_id = _hch_own.id
+                     OR (_hum_own.mapping_type = 0 AND _hum_own.hospitality_hotel_id IS NULL
+                         AND _hum_own.hospitality_company_id = _hch_own.hospitality_company_id))
+              WHERE _rhm_own.rfq_id = RFQ.id))` : ''}
         OR EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
@@ -4506,6 +4525,8 @@ LIMIT 2;
         END)
       )` : ''}
       ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
+      ${created_by_only ? `AND RFQ.created_by = ${Number(user_id)}` : ''}
+      ${vendor_disagreement_only ? `AND RFQ.status = 1 AND ${hasOpenVendorDisagreement('RFQ')}` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
