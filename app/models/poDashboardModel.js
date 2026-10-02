@@ -890,9 +890,23 @@ export async function getPODetailFull(po_id, scope) {
         [poId]
       );
 
+  // GST per line, read through the line's tax_mode. charges_meta.tax is a RATE
+  // only when tax_mode is 'percentage'; an 'absolute' entry is rupees, and
+  // handing it out as `gst` made the page render ₹49,500 GST as "49500%" and a
+  // ₹3.24L line as ₹13.6Cr. Call-off lines carry a plain rate in gst_pct.
+  const lineTax = (it) => {
+    const cm = it.charges_meta || {};
+    return pricingEngine.lineTaxBreakdown({
+      unit_price: it.unit_price,
+      quantity: it.quantity,
+      tax: it.gst_pct != null ? it.gst_pct : cm.tax,
+      tax_mode: it.gst_pct != null ? "percentage" : cm.tax_mode,
+    });
+  };
+
   const mappedItems = items.map((it) => {
     const cm = it.charges_meta || {};
-    const gst = it.gst_pct != null ? Number(it.gst_pct) : (cm.tax != null ? Number(cm.tax) : null);
+    const t = lineTax(it);
     return {
       name: it.name,
       size: it.product_size || null,
@@ -902,7 +916,12 @@ export async function getPODetailFull(po_id, scope) {
       quantity: Number(it.quantity) || 0,
       unit: it.unit || null,
       unit_price: Number(it.unit_price) || 0,
-      gst,
+      // `gst` is always a percentage (the effective rate for an absolute
+      // entry); `gst_amount` is the rupee figure; `tax_mode` says how the
+      // vendor entered it so a re-pricing caller can forward it unchanged.
+      gst: t.gst_pct,
+      gst_amount: t.gst_amount,
+      tax_mode: t.tax_mode,
       amount: Number(it.total_price) || 0,
       charges_meta: Object.keys(cm).length ? cm : null,
     };
@@ -916,12 +935,7 @@ export async function getPODetailFull(po_id, scope) {
   for (const it of items) {
     const basic = (Number(it.unit_price) || 0) * (Number(it.quantity) || 0);
     subtotal += basic;
-    const cm = it.charges_meta || {};
-    if (cm.tax != null) {
-      tax += cm.tax_mode === "absolute" ? Number(cm.tax) || 0 : (basic * (Number(cm.tax) || 0)) / 100;
-    } else if (it.gst_pct != null) {
-      tax += (basic * (Number(it.gst_pct) || 0)) / 100;
-    }
+    tax += lineTax(it).gst_amount || 0;
   }
   const pricing = {
     subtotal: Math.round(subtotal * 100) / 100,

@@ -7,6 +7,7 @@
 import { describe, it, expect } from "@jest/globals";
 import {
   applyChargeMode,
+  lineTaxBreakdown,
   proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
@@ -46,6 +47,64 @@ describe("pricingEngine.applyChargeMode", () => {
     expect(applyChargeMode("", "percentage", 1000)).toBe(0);
     expect(applyChargeMode(undefined, "percentage", 1000)).toBe(0);
     expect(applyChargeMode("not-a-number", "absolute", 1000)).toBe(0);
+  });
+});
+
+// GST entered as a flat rupee amount must never surface as a rate. PO 645/646
+// (RFQ 536651/536645) stored tax=63900/49500 with tax_mode 'absolute'; the PO
+// page read that as 63900%/49500% and showed ₹22.7Cr/₹13.6Cr line amounts on
+// ₹4.19L/₹3.24L POs.
+describe("pricingEngine.lineTaxBreakdown", () => {
+  it("absolute GST: amount is the entered rupees, rate is the effective %", () => {
+    expect(lineTaxBreakdown({ unit_price: 275000, quantity: 1, tax: "49500.00", tax_mode: "absolute" }))
+      .toEqual({ tax_mode: "absolute", gst_pct: 18, gst_amount: 49500 });
+    expect(lineTaxBreakdown({ unit_price: "355000.00", quantity: 1, tax: "63900.00", tax_mode: "absolute" }))
+      .toEqual({ tax_mode: "absolute", gst_pct: 18, gst_amount: 63900 });
+  });
+
+  it("absolute GST is per LINE, not per unit — qty does not multiply it", () => {
+    expect(lineTaxBreakdown({ unit_price: 100, quantity: 10, tax: 180, tax_mode: "absolute" }))
+      .toEqual({ tax_mode: "absolute", gst_pct: 18, gst_amount: 180 });
+  });
+
+  it("percentage GST: rate passes through, amount is rate × basic", () => {
+    expect(lineTaxBreakdown({ unit_price: 50, quantity: 2, tax: 18, tax_mode: "percentage" }))
+      .toEqual({ tax_mode: "percentage", gst_pct: 18, gst_amount: 18 });
+  });
+
+  it("a missing tax_mode means percentage (the engine default)", () => {
+    expect(lineTaxBreakdown({ unit_price: 1000, quantity: 1, tax: 12 }))
+      .toEqual({ tax_mode: "percentage", gst_pct: 12, gst_amount: 120 });
+  });
+
+  it("an uneven absolute amount yields a 2dp effective rate", () => {
+    expect(lineTaxBreakdown({ unit_price: 300, quantity: 1, tax: 50, tax_mode: "absolute" }))
+      .toEqual({ tax_mode: "absolute", gst_pct: 16.67, gst_amount: 50 });
+  });
+
+  it("absolute GST on a zero basic has no rate to report", () => {
+    expect(lineTaxBreakdown({ unit_price: 0, quantity: 1, tax: 50, tax_mode: "absolute" }))
+      .toEqual({ tax_mode: "absolute", gst_pct: null, gst_amount: 50 });
+  });
+
+  it("no tax at all is all-null, but an explicit 0 is a real 0%", () => {
+    for (const tax of [null, undefined, ""]) {
+      expect(lineTaxBreakdown({ unit_price: 100, quantity: 1, tax, tax_mode: "absolute" }))
+        .toEqual({ tax_mode: null, gst_pct: null, gst_amount: null });
+    }
+    expect(lineTaxBreakdown({ unit_price: 100, quantity: 1, tax: 0, tax_mode: "percentage" }))
+      .toEqual({ tax_mode: "percentage", gst_pct: 0, gst_amount: 0 });
+  });
+
+  it("agrees with calculateLineTotal on base + tax for both modes", () => {
+    for (const line of [
+      { unit_price: 275000, quantity: 1, tax: 49500, tax_mode: "absolute" },
+      { unit_price: 999.99, quantity: 7, tax: 28, tax_mode: "percentage" },
+    ]) {
+      const t = lineTaxBreakdown(line);
+      const engine = calculateLineTotal(line);
+      expect(t.gst_amount).toBeCloseTo(engine.base_tax, 2);
+    }
   });
 });
 
