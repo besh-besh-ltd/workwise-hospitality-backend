@@ -47,6 +47,32 @@ export const applyChargeMode = (value, mode, base) => {
   return isPercentageMode(mode) ? (toNumber(base) * v) / 100 : v;
 };
 
+// One line's GST as BOTH a rate and a rupee amount, whichever way the vendor
+// entered it. A vendor may quote GST as a percentage (tax=18, mode
+// 'percentage') or as a flat per-line amount (tax=49500, mode 'absolute').
+// Callers that label `tax` as "GST %" without looking at the mode render a
+// ₹49,500 GST as 49500% and blow the line amount up ~500x (PO 645/646, RFQ
+// 536645/536651). This is the one place that turns either shape into the
+// display pair, so a reader never has to know the mode.
+//   gst_pct    — the rate; for an absolute entry the EFFECTIVE rate
+//                (amount ÷ basic), null when there is no basic to divide by
+//   gst_amount — the rupee GST on the line's basic (qty × unit price)
+// Returns all-null when the line carries no tax at all.
+export const lineTaxBreakdown = ({ unit_price, quantity, tax, tax_mode } = {}) => {
+  if (tax === null || tax === undefined || tax === "") {
+    return { tax_mode: null, gst_pct: null, gst_amount: null };
+  }
+  const mode = isPercentageMode(tax_mode) ? "percentage" : "absolute";
+  const basic = toNumber(unit_price) * toNumber(quantity);
+  const amount = applyChargeMode(tax, mode, basic);
+  const pct = mode === "percentage" ? toNumber(tax) : basic > 0 ? (amount / basic) * 100 : null;
+  return {
+    tax_mode: mode,
+    gst_pct: pct == null ? null : q2(pct),
+    gst_amount: q2(amount),
+  };
+};
+
 // Proportional share of a document-level absolute amount for one line.
 // Quote-compare uses this to split a vendor's absolute global charge across
 // the products in that vendor's quote, so each product carries its weighted
@@ -677,6 +703,7 @@ export const deriveMrpLine = ({ mrp, discount, discount_mode, gst_pct } = {}) =>
 
 export default {
   applyChargeMode,
+  lineTaxBreakdown,
   proportionalShare,
   calculateLineTotal,
   calculateDocumentTotals,
