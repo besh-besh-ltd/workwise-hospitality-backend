@@ -499,6 +499,46 @@ export async function seedPerfWorld(db, { seed = 20261003, rfqCount = 72 } = {})
         );
       }
     }
+
+    // Price shock: one recent A1 RFQ quoting six already-bought variants at
+    // several times their usual price, so the smart-insights price-deviation
+    // candidate set exceeds its LIMIT 3 and the pick order is exercised.
+    {
+      const created = new Date(base - 10 * 86400000);
+      const { rfq_id, rfq_no } = await makeRFQ(t, {
+        createdBy: WORLD_USERS.wide, hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1, department: null,
+        process: IDS.processes.A_P1, status: 1, is_published: 1, bid_end_date: naive(new Date(created.getTime() + 2 * 86400000)),
+        title: "Price shock", timestamp: created.toISOString(),
+      });
+      track.rfqs.push(rfq_id);
+      await t.none(`INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [rfq_id, IDS.hotels.A1, WORLD_USERS.wide]);
+      const bought = await t.any(
+        `SELECT DISTINCT qi.product_variant_id AS vid FROM tbl_quote_items qi
+           JOIN tbl_rfq r ON r.id = qi.rfq_id
+          WHERE r.id = ANY($1) AND r.hospitality_company_id = $2 AND qi.unit_price > 0
+          ORDER BY 1 LIMIT 6`,
+        [track.rfqs, IDS.hospitality.A]
+      );
+      const q = await t.one(
+        `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, is_regret, "timestamp") VALUES ($1, $2, $3, $3, 1, 0, $4) RETURNING id`,
+        [rfq_id, rfq_no, WORLD_VENDORS.v1, naive(new Date(created.getTime() + 3600000))]
+      );
+      track.quotes.push(q.id);
+      let k = 0;
+      for (const { vid } of bought) {
+        const rp = await t.one(
+          `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant) VALUES ($1, '', '0', '', '', $2, 1) RETURNING id`,
+          [rfq_id, vid]
+        );
+        await t.none(`INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, is_rfq_viewed) VALUES ($1, $2, 1, $3, 0)`, [rfq_id, vid, WORLD_VENDORS.v1]);
+        await t.none(
+          `INSERT INTO tbl_quote_items (rfq_id, rfq_no, quote_id, product_variant_id, variant, unit_price, total_price, comment, delivery_period, quantity)
+           VALUES ($1, $2, $3, $4, 1, $5, $5, '', '', '1')`,
+          [rfq_id, rfq_no, q.id, vid, 4000 + 500 * k++]
+        );
+        void rp;
+      }
+    }
   });
 
   return {
