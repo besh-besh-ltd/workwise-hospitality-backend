@@ -347,7 +347,11 @@ export function normalizeForSnapshot(value, { mask = [], idKeyed = {} } = {}) {
       }
       return out;
     }
-    if (typeof v === "string" && TS.test(v)) return tok("ts", v);
+    // Timestamps collapse to one token. Numbering them by distinct value (as ids
+    // are) made the snapshot depend on whether two fixture writes landed in the
+    // same millisecond — true on a fast laptop, false on a CI runner — which
+    // renumbered every later token without any change in behaviour.
+    if (typeof v === "string" && TS.test(v)) return "<ts>";
     if (key && ID_KEY.test(key) && (typeof v === "number" || (typeof v === "string" && /^\S+$/.test(v)))) {
       return tok(key === "id" ? `${owner || "root"}.id` : key, String(v));
     }

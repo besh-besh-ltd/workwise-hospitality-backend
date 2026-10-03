@@ -16,7 +16,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "you": true,
     },
   ],
-  "bid_end_date": "<ts#1>",
+  "bid_end_date": "<ts>",
   "categories": [
     {
       "id": "<categories.id#1>",
@@ -64,7 +64,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
             "role": null,
             "status": "done",
             "title": "Sent for approval",
-            "when": "<ts#4>",
+            "when": "<ts>",
           },
           {
             "approvers": [
@@ -107,7 +107,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "awaiting_me": false,
       "category": 215,
       "finalized_by": {
-        "at": "<ts#3>",
+        "at": "<ts>",
         "comment": null,
         "name": "A1 Proc Buyer",
       },
@@ -123,7 +123,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "name": "7 UP PEPSI 1.5 LTR",
       "negotiation": {
         "asks": [],
-        "ends_at": "<ts#2>",
+        "ends_at": "<ts>",
         "invited_count": 2,
         "responded_count": 1,
         "rfq_level_asks": [],
@@ -164,7 +164,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
           "negotiation": {
             "amount_basis": "line_total",
             "asks": [],
-            "quoted_at": "<ts#5>",
+            "quoted_at": "<ts>",
             "quoted_price": 94,
             "responded": true,
           },
@@ -182,7 +182,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "round": {
         "n": 1,
         "status": "CLOSED",
-        "when": "<ts#2>",
+        "when": "<ts>",
       },
       "state": "open",
       "target": 90,
@@ -212,12 +212,12 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
             "role": null,
             "status": "done",
             "title": "Sent for approval",
-            "when": "<ts#7>",
+            "when": "<ts>",
           },
           {
             "approvers": [
               {
-                "acted_at": "<ts#8>",
+                "acted_at": "<ts>",
                 "initials": "AA",
                 "name": "A1 Proc Commercial Approver",
                 "removal_reason": null,
@@ -245,7 +245,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
             "role": "Commercial Approver",
             "status": "done",
             "title": "L1 approval",
-            "when": "<ts#8>",
+            "when": "<ts>",
           },
           {
             "approvers": [
@@ -260,7 +260,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
                 "user_id": "<user_id#3>",
               },
               {
-                "acted_at": "<ts#9>",
+                "acted_at": "<ts>",
                 "initials": "AA",
                 "name": "A1 Proc Finance Approver",
                 "removal_reason": null,
@@ -274,7 +274,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
                 "initials": "MA",
                 "name": "Mid-Flight Approver",
                 "removal_reason": "user_deactivated",
-                "removed_at": "<ts#10>",
+                "removed_at": "<ts>",
                 "role": "Technical Approver",
                 "status": "REMOVED",
                 "user_id": "<user_id#5>",
@@ -320,7 +320,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "name": "7 UP PEPSI 330 ML",
       "negotiation": {
         "asks": [],
-        "ends_at": "<ts#6>",
+        "ends_at": "<ts>",
         "invited_count": 2,
         "responded_count": 1,
         "rfq_level_asks": [],
@@ -361,7 +361,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
           "negotiation": {
             "amount_basis": "line_total",
             "asks": [],
-            "quoted_at": "<ts#11>",
+            "quoted_at": "<ts>",
             "quoted_price": 93,
             "responded": true,
           },
@@ -379,7 +379,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "round": {
         "n": 2,
         "status": "ENDED",
-        "when": "<ts#6>",
+        "when": "<ts>",
       },
       "state": "open",
       "target": 90,
@@ -395,7 +395,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
   "rfq": {
     "company": "Hospitality A",
     "contact": "Test Contact",
-    "deadline": "<ts#1>",
+    "deadline": "<ts>",
     "delivery_location": "Test Location",
     "department": "Procurement",
     "email": "test@example.com",

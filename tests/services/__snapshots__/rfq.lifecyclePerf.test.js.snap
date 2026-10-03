@@ -25,7 +25,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
       "te": [],
     },
     "rfq": {
-      "bid_end_date": "<ts#19>",
+      "bid_end_date": "<ts>",
       "created_by": 80011,
       "department_id": "<department_id#1>",
       "hospitality_company_id": "<hospitality_company_id#1>",
@@ -50,8 +50,8 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
           "approval_instances": [
             {
               "can_user_approve": false,
-              "completed_at": "<ts#1>",
-              "created_at": "<ts#2>",
+              "completed_at": "<ts>",
+              "created_at": "<ts>",
               "current_step": 2,
               "entity_id": "<entity_id#1>",
               "entity_type": "RFQ",
@@ -72,7 +72,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                   "added_mid_flight": false,
                   "approvers": [
                     {
-                      "acted_at": "<ts#3>",
+                      "acted_at": "<ts>",
                       "added_mid_flight": false,
                       "comment": "ok",
                       "removal_reason": null,
@@ -89,7 +89,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "added_mid_flight": false,
                       "comment": null,
                       "removal_reason": "role_removed",
-                      "removed_at": "<ts#4>",
+                      "removed_at": "<ts>",
                       "status": "REMOVED",
                       "user_department": "Procurement",
                       "user_designation": null,
@@ -98,7 +98,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "user_name": "Mid-Flight Approver",
                     },
                   ],
-                  "completed_at": "<ts#3>",
+                  "completed_at": "<ts>",
                   "decision_rule": "ANY",
                   "removed_mid_flight": false,
                   "status": "APPROVED",
@@ -108,7 +108,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                   "added_mid_flight": false,
                   "approvers": [
                     {
-                      "acted_at": "<ts#5>",
+                      "acted_at": "<ts>",
                       "added_mid_flight": false,
                       "comment": null,
                       "removal_reason": null,
@@ -121,7 +121,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "user_name": "A1 Proc Finance Approver",
                     },
                     {
-                      "acted_at": "<ts#1>",
+                      "acted_at": "<ts>",
                       "added_mid_flight": true,
                       "comment": null,
                       "removal_reason": null,
@@ -134,7 +134,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "user_name": "A1 Proc Commercial Approver",
                     },
                   ],
-                  "completed_at": "<ts#1>",
+                  "completed_at": "<ts>",
                   "decision_rule": "ALL",
                   "removed_mid_flight": false,
                   "status": "APPROVED",
@@ -145,7 +145,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               "user_approval_step_id": null,
             },
           ],
-          "completed_at": "<ts#1>",
+          "completed_at": "<ts>",
           "is_cancelled": false,
           "key": "rfq_approval",
           "label": "RFQ Approval",
@@ -181,8 +181,8 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
           "approval_instances": [
             {
               "can_user_approve": false,
-              "completed_at": "<ts#14>",
-              "created_at": "<ts#13>",
+              "completed_at": "<ts>",
+              "created_at": "<ts>",
               "current_step": 1,
               "entity_id": "<entity_id#2>",
               "entity_type": "NEGOTIATION_QUOTE",
@@ -231,7 +231,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
             {
               "can_user_approve": true,
               "completed_at": null,
-              "created_at": "<ts#15>",
+              "created_at": "<ts>",
               "current_step": 2,
               "entity_id": "<entity_id#3>",
               "entity_type": "NEGOTIATION_QUOTE",
@@ -254,7 +254,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                   "added_mid_flight": false,
                   "approvers": [
                     {
-                      "acted_at": "<ts#16>",
+                      "acted_at": "<ts>",
                       "added_mid_flight": false,
                       "comment": null,
                       "removal_reason": null,
@@ -280,7 +280,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "user_name": "A1 Proc Tech Approver",
                     },
                   ],
-                  "completed_at": "<ts#16>",
+                  "completed_at": "<ts>",
                   "decision_rule": "ANY",
                   "removed_mid_flight": false,
                   "status": "APPROVED",
@@ -303,7 +303,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "user_name": "A1 Proc Buyer",
                     },
                     {
-                      "acted_at": "<ts#17>",
+                      "acted_at": "<ts>",
                       "added_mid_flight": false,
                       "comment": null,
                       "removal_reason": null,
@@ -320,7 +320,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
                       "added_mid_flight": false,
                       "comment": null,
                       "removal_reason": "user_deactivated",
-                      "removed_at": "<ts#18>",
+                      "removed_at": "<ts>",
                       "status": "REMOVED",
                       "user_department": "Procurement",
                       "user_designation": null,
@@ -347,7 +347,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
           "products": [
             {
               "finalization": {
-                "finalized_at": "<ts#6>",
+                "finalized_at": "<ts>",
                 "finalized_by": "A1 Proc Buyer",
                 "finalized_price": 100,
                 "total_price": 1000,
@@ -356,20 +356,20 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               },
               "negotiation_rounds": [
                 {
-                  "end_date": "<ts#7>",
+                  "end_date": "<ts>",
                   "round_number": 1,
                   "status": "CLOSED",
                   "target_price": 90,
                   "vendors": [
                     {
                       "quoted_price": 94,
-                      "submitted_at": "<ts#8>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Alpha Vendor Pvt Ltd",
                       "vendor_name": "Alpha Vendor Contact",
                     },
                     {
                       "quoted_price": 109,
-                      "submitted_at": "<ts#8>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Beta Vendor Pvt Ltd",
                       "vendor_name": "Beta Vendor Contact",
                     },
@@ -383,40 +383,40 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               "finalization": null,
               "negotiation_rounds": [
                 {
-                  "end_date": "<ts#9>",
+                  "end_date": "<ts>",
                   "round_number": 1,
                   "status": "CLOSED",
                   "target_price": 90,
                   "vendors": [
                     {
                       "quoted_price": 94,
-                      "submitted_at": "<ts#10>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Alpha Vendor Pvt Ltd",
                       "vendor_name": "Alpha Vendor Contact",
                     },
                     {
                       "quoted_price": 109,
-                      "submitted_at": "<ts#10>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Beta Vendor Pvt Ltd",
                       "vendor_name": "Beta Vendor Contact",
                     },
                   ],
                 },
                 {
-                  "end_date": "<ts#11>",
+                  "end_date": "<ts>",
                   "round_number": 2,
                   "status": "ACTIVE",
                   "target_price": 90,
                   "vendors": [
                     {
                       "quoted_price": 93,
-                      "submitted_at": "<ts#12>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Alpha Vendor Pvt Ltd",
                       "vendor_name": "Alpha Vendor Contact",
                     },
                     {
                       "quoted_price": 108,
-                      "submitted_at": "<ts#12>",
+                      "submitted_at": "<ts>",
                       "vendor_company": "Beta Vendor Pvt Ltd",
                       "vendor_name": "Beta Vendor Contact",
                     },
