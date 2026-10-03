@@ -21,10 +21,12 @@ const VENDOR_HISTORY = [
   "invited_rfqs", "is_new", "on_time_pct", "orders_done", "po_value",
   "pos_accepted", "quote_pct", "quoted_rfqs", "track_record",
 ];
-// Whole request, auth included. Before: 92 statements / 46 waves locally;
-// after parallelising: 92 / 26 (the lifecycle batching later trims the
-// statement count, since fetchStageActors runs the lifecycle summary).
-const BUDGET = { statements: 92, waves: 30 };
+// Whole request, auth included.
+//   before                     : 92 statements, 46 waves
+//   side lookups parallelised  : 92 statements, 26 waves
+//   + lifecycle summary batched: 62 statements, 16-18 waves, depth 21-22
+//     (fetchStageActors runs the lifecycle summary)
+const BUDGET = { statements: 62, waves: 20, depth: 24 };
 
 describe("GET /rfq/quote-comparison-view/:id — equivalence + query budget", () => {
   let made;
@@ -62,12 +64,14 @@ describe("GET /rfq/quote-comparison-view/:id — equivalence + query budget", ()
     for (const r of runs) expect(r.result.body.rfq).toBeDefined();
     const count = Math.max(...runs.map((r) => r.count));
     const waves = Math.min(...runs.map((r) => r.waves));
+    const depth = Math.min(...runs.map((r) => r.depth));
     if (process.env.PERF_DUMP) {
       // eslint-disable-next-line no-console
-      console.log(`[qc-view] statements=${count} waves=${waves}\n` +
+      console.log(`[qc-view] statements=${count} waves=${waves} depth=${runs.map((r) => r.depth)} allWaves=${runs.map((r) => r.waves)}\n` +
         runs[0].statements.map((s) => s.slice(0, 140)).join("\n"));
     }
     expect(count).toBeLessThanOrEqual(BUDGET.statements);
     expect(waves).toBeLessThanOrEqual(BUDGET.waves);
+    expect(depth).toBeLessThanOrEqual(BUDGET.depth);
   });
 });
