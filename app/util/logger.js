@@ -3,6 +3,7 @@ import pino from 'pino';
 import pinoHttp from 'pino-http';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { trace, context } from '@opentelemetry/api';
+import { isNoisyRoute } from './telemetryConfig.js';
 
 const isDev = ['development', 'uat'].includes(process.env.NODE_ENV);
 
@@ -91,7 +92,11 @@ const logger = pino({
 
 const httpLogger = pinoHttp({
   logger,
-  autoLogging: true,
+  // Health probes and the badge/count polling routes were most of the access
+  // log by volume and carry no signal; see telemetryConfig.js NOISY_ROUTES.
+  autoLogging: {
+    ignore: (req) => isNoisyRoute(req.originalUrl || req.url),
+  },
   customLogLevel: (req, res, err) => {
     if (res.statusCode >= 500 || err) return 'error';
     if (res.statusCode >= 400) return 'warn';

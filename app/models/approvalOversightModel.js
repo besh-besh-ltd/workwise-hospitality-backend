@@ -1,5 +1,6 @@
 import db from '../config/dbConn.js';
 import { ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
+import { notifyApprovalChanged } from '../services/approvalEvents.js';
 
 /**
  * What is stuck, and what an administrator can actually do about it.
@@ -281,6 +282,10 @@ export async function reassignApprover({ stepId, fromUserId, toUserId, reason })
           AND COALESCE(status, 'PENDING') <> 'REMOVED'`,
       [stepId, fromUserId, reason]
     );
+    // Both people's pending sets change (the outgoing row is tombstoned, not
+    // deleted, so both are still approvers on the instance): announce after
+    // commit.
+    notifyApprovalChanged({ stepIds: stepId }, t);
 
     // A previous tombstone for the incoming person is revived rather than
     // duplicated: the same person can be taken off a step and put back on it,

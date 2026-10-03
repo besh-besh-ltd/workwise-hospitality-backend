@@ -52,6 +52,7 @@ import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } 
 import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification, sendNegotiationRoundVendorNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 import {
   assertVendorsTechnicallyQualified,
   screenVendorsForTechnicalQualification,
@@ -1172,7 +1173,7 @@ const NegotiationController = {
         // Cancel stale PENDING approval instances from previous expired/
         // cancelled rounds covering any of this round's products.
         if (entryProductIds.length > 0) {
-          await t.none(
+          const staleCancelled = await t.any(
             `UPDATE tbl_approval_instances
              SET status = 'CANCELLED', completed_at = NOW()
              WHERE entity_type = 'NEGOTIATION'
@@ -1184,9 +1185,11 @@ const NegotiationController = {
                      SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
                      WHERE (p_->>'rfq_product_id')::int = ANY($1::int[])
                    ))
-               )`,
+               )
+             RETURNING id`,
             [entryProductIds]
           );
+          if (staleCancelled.length) notifyApprovalChanged({ instanceIds: staleCancelled.map(r => r.id) }, t);
         }
 
         // Create approval instance using the centralized approval engine
@@ -1421,26 +1424,27 @@ const NegotiationController = {
 
       const rounds = await negotiationModel.getRoundsByRfqId(rfq_id, rfq_product_id, vendorId);
 
-      // Enrich each round with assigned vendors
-      const enrichedRounds = await Promise.all(
-        rounds.map(async (round) => {
-          const vendors = await negotiationModel.getVendorsForRound(round.id);
-          return { ...round, assigned_vendors: vendors };
-        })
-      );
+      // Assigned vendors of every round, and every covered product's vendors
+      // with their active-round status (multi rounds cover several products —
+      // collect every covered id). One statement each, issued together — this
+      // used to be one query per round plus one per product.
+      const productIds = rfq_product_id
+        ? [rfq_product_id]
+        : [...new Set(rounds.flatMap(r => getCoveredProductIds(r)))];
+      const [vendorsByRound, vendorsByProductId] = await Promise.all([
+        negotiationModel.getVendorsForRounds(rounds.map(r => r.id)),
+        negotiationModel.getVendorsForProductsWithStatus(rfq_id, productIds),
+      ]);
 
-      // Get all vendors per product with their active round status (multi
-      // rounds cover several products — collect every covered id).
+      // Enrich each round with assigned vendors
+      const enrichedRounds = rounds.map((round) => ({
+        ...round,
+        assigned_vendors: vendorsByRound.get(Number(round.id)) || [],
+      }));
+
       const vendorsByProduct = {};
-      if (rfq_product_id) {
-        vendorsByProduct[rfq_product_id] = await negotiationModel.getVendorsForProductWithStatus(rfq_id, rfq_product_id);
-      } else {
-        const productIds = [...new Set(rounds.flatMap(r => getCoveredProductIds(r)))];
-        await Promise.all(
-          productIds.map(async (pid) => {
-            vendorsByProduct[pid] = await negotiationModel.getVendorsForProductWithStatus(rfq_id, pid);
-          })
-        );
+      for (const pid of productIds) {
+        vendorsByProduct[pid] = vendorsByProductId.get(Number(pid)) || [];
       }
 
       return res.status(200).json({
@@ -1516,6 +1520,26 @@ const NegotiationController = {
           status: 2,
           message: 'rfq_id is required'
         });
+      }
+
+      // SECURITY (IDOR): this route had NO tenant check for buyers — any
+      // authenticated buyer could read another company's live rounds (vendor
+      // ids, per-vendor targets, vendor approvals) by walking rfq ids. Same
+      // gate as its sibling getRounds: buyers must hold negotiation.read over
+      // the RFQ's (company × hotel × dept × process) scope. Vendors arrive
+      // legitimately via the no-login email token and are narrowed to their
+      // own rounds below, unchanged.
+      if (req.user.user_type != 3) {
+        const allowed = await negotiationModel.userCanReadRfqNegotiation(
+          readScopeUserId(req),
+          rfq_id
+        );
+        if (!allowed) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You do not have access to this RFQ'
+          });
+        }
       }
 
       let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id, true);
@@ -1998,6 +2022,7 @@ const NegotiationController = {
             WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
           [round_id]
         );
+        notifyApprovalChanged({ entityType: 'NEGOTIATION', entityId: round_id }, t);
         await t.none(
           `UPDATE tbl_approval_instance_steps
               SET status = 'CANCELLED', completed_at = NOW()

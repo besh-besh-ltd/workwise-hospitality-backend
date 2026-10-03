@@ -34,7 +34,7 @@ const resolveScope = async (req, res) => {
     return null;
   }
 
-  const scope = await dashboardModel.resolveUserScope(user_id, selectedHotelIds);
+  const scope = await dashboardModel.resolveUserScope(user_id, selectedHotelIds, req.user);
   if (!scope) {
     res.status(403).json({ status: 0, message: 'No hospitality access found for this user' }).end();
     return null;

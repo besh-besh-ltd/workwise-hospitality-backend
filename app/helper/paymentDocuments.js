@@ -1,5 +1,5 @@
 import fs from 'fs';
-import puppeteer from 'puppeteer';
+import { pdfRenderer, NO_MARGIN } from '../util/pdfRenderer.js';
 import Config from '../config/app.config.js';
 import { logger } from '../util/logger.js';
 import { logError } from './common.js';
@@ -143,23 +143,14 @@ async function generatePdf(html, fileName) {
     fs.mkdirSync(INVOICE_DIR, { recursive: true });
   }
   const outputPath = `${INVOICE_DIR}/${fileName}`;
-  let browser;
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await page.pdf({
-      path: outputPath,
-      format: 'A4',
-      printBackground: true
-    });
-    await browser.close();
+    // Shared, concurrency-capped Chromium (domcontentloaded). The old per-call
+    // launch + `networkidle0` hung for 30 s in prod, so every subscription
+    // confirmation email went out WITHOUT its invoice and receipt.
+    // NO_MARGIN keeps the previous output: the template pads itself (24px).
+    await pdfRenderer.renderToFile(html, outputPath, { margin: NO_MARGIN });
     return { filePath: outputPath, fileName };
   } catch (err) {
-    if (browser) await browser.close().catch(() => {});
     logError('paymentDocuments generatePdf error', err);
     return null;
   }

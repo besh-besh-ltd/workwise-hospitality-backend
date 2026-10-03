@@ -6,6 +6,7 @@ import { errors } from 'celebrate';
 
 import v1Router from '../routes/index.js';
 import origin from './origin.js';
+import { buildCorsOptions } from './corsOptions.js';
 import error from './error.js';
 import otelMiddleware from '../middleware/otelMiddleware.js';
 import bodyCapture from '../middleware/bodyCapture.js';
@@ -16,7 +17,8 @@ import { httpLogger } from './logger.js';
 const util = (app) => {
   app.use(helmet());
   origin(app);
-  app.use(cors());
+  // Origin policy + preflight caching: see corsOptions.js (CORS_ORIGINS env).
+  app.use(cors(buildCorsOptions(process.env)));
   app.use(compression());
   app.use(httpLogger);
   app.use(otelMiddleware);

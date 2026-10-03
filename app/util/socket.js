@@ -1,12 +1,11 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
-import Cryptr from 'cryptr';
 import Config from '../config/app.config.js';
+import { decryptClaim } from '../helper/claimCrypto.js';
 import { logger } from './logger.js';
 import db from '../config/dbConn.js';
 
 let ioInstance = null;
-const cryptr = new Cryptr(Config.cryptR.secret);
 
 /**
  * Pull the user id out of a login JWT, the same way passport's `jwtUsr`
@@ -26,7 +25,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 const resolveUserIdFromPayload = (payload) => {
   if (payload?.sub) {
     try {
-      const decrypted = Number(cryptr.decrypt(payload.sub));
+      const decrypted = Number(decryptClaim(payload.sub));
       if (Number.isInteger(decrypted) && decrypted > 0) return decrypted;
     } catch (_) {
       // Not an encrypted id — fall through to the numeric shapes below.
@@ -101,15 +100,18 @@ export const SocketConfig = (SERVER) => {
   io.on('connection', (socket) => {
 
    // audio call
+    //
+    // PRESENCE IS NOT BROADCAST. This used to `io.emit('userList', users)` — every
+    // connected socket's id and self-declared name, sent to EVERY socket on the
+    // server, across tenants. No client listens for it (frontend/admin-panel:
+    // zero references); the map is kept only for the server's own bookkeeping.
     socket.on('register', (username) => {
       users[socket.id] = username;
-      io.emit('userList', users); // Broadcast updated user list
     });
 
     socket.on('disconnect', () => {
       logger.debug({ socketId: socket.id }, 'Client disconnected');
       delete users[socket.id];
-      io.emit('userList', users); // Broadcast updated user list
     });
 
     // Handle signaling data
@@ -159,8 +161,13 @@ export const SocketConfig = (SERVER) => {
 
       socket.join(`user:${userId}`);
 
-      logger.debug({ online_users }, 'Online users updated');
-      io.emit('getOnlineUsers', online_users);
+      // SECURITY: no `io.emit('getOnlineUsers', online_users)` any more. That
+      // broadcast the id of every online user to EVERY connected socket —
+      // vendors and other tenants included — on each connect and disconnect.
+      // No client consumes it (frontend/admin-panel: zero references; the
+      // frontend only emits `addNewUser` to join its own room). online_users
+      // stays server-side for sendMessage / typing routing.
+      logger.debug({ onlineCount: online_users.length }, 'Online users updated');
     });
 
     // add new message
@@ -182,10 +189,9 @@ export const SocketConfig = (SERVER) => {
       }
     });
 
-    // Handle disconnect
+    // Handle disconnect (presence stays server-side — see addNewUser)
     socket.on('disconnect', () => {
       online_users = online_users.filter((user) => user.socketId != socket.id);
-      io.emit('getOnlineUsers', online_users);
     });
   });
 };

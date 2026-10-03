@@ -17,6 +17,7 @@ import {
 } from "../services/authorizationService.js";
 import fs from 'fs';
 import { writePoDocument } from "../services/poDocumentService.js";
+import { notifyApprovalChanged } from '../services/approvalEvents.js';
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -2615,6 +2616,7 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
         `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1`,
         [existingInstance.id]
       );
+      notifyApprovalChanged({ instanceIds: existingInstance.id }, t);
       await t.none(
         `UPDATE tbl_approval_instance_steps SET status = 'CANCELLED', completed_at = NOW()
         WHERE approval_instance_id = $1 AND status = 'PENDING'`,

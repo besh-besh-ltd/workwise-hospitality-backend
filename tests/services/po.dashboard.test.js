@@ -686,6 +686,73 @@ describe("GET /po/detail/:po_id", () => {
 });
 
 // ===========================================================================
+// 5a) GET /po/detail/:po_id — GST entered as a flat amount
+// ===========================================================================
+// A vendor can quote GST as a rupee amount (charges_meta.tax_mode 'absolute').
+// The endpoint used to hand that amount out as `gst` — a percentage — so PO 646
+// (RFQ 536645: ₹2,75,000 + ₹49,500 GST) rendered "49500%" and a ₹13,64,00,000
+// line on a ₹3,24,500 PO. The reply must carry the rate, the rupees and the
+// mode, so no client has to guess which one `tax` was.
+describe("GET /po/detail/:po_id — line GST by tax_mode", () => {
+  async function poWithLine(charges_meta, { unit_price = 275000, quantity = 1, total_price = 324500 } = {}) {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, status: "acceptance_pending", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    const r = await db.one(
+      `INSERT INTO tbl_purchase_order_product
+         (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, total_price, charges_meta)
+       VALUES ($1, $2, $3, $4, 'NOS', $5, $6, $7::jsonb) RETURNING id`,
+      [po_id, rfq_product_id, quote_id, quantity, unit_price, total_price, JSON.stringify(charges_meta)]
+    );
+    inserted.poProductIds.push(r.id);
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+    return res.body.data;
+  }
+
+  it("absolute GST (the RFQ 536645 shape): gst is the 18% rate, never 49500", async () => {
+    const d = await poWithLine({ tax: "49500.00", tax_mode: "absolute", other_charges: [] });
+    const [line] = d.items;
+    expect(line.gst).toBe(18);
+    expect(line.gst_amount).toBe(49500);
+    expect(line.tax_mode).toBe("absolute");
+    // The line still reconciles: basic + GST == the stored line total.
+    expect(line.quantity * line.unit_price + line.gst_amount).toBe(line.amount);
+    expect(d.pricing.tax).toBe(49500);
+    expect(d.pricing.subtotal + d.pricing.tax).toBe(324500);
+  });
+
+  it("absolute GST is per line — qty 4 does not quadruple it", async () => {
+    const d = await poWithLine(
+      { tax: "180.00", tax_mode: "absolute", other_charges: [] },
+      { unit_price: 250, quantity: 4, total_price: 1180 }
+    );
+    expect(d.items[0]).toMatchObject({ gst: 18, gst_amount: 180, tax_mode: "absolute" });
+    expect(d.pricing.tax).toBe(180);
+  });
+
+  it("percentage GST is unchanged: gst is the entered rate, gst_amount follows it", async () => {
+    const d = await poWithLine(
+      { tax: "18.00", tax_mode: "percentage", other_charges: [] },
+      { unit_price: 275000, quantity: 1, total_price: 324500 }
+    );
+    expect(d.items[0]).toMatchObject({ gst: 18, gst_amount: 49500, tax_mode: "percentage" });
+    expect(d.pricing.tax).toBe(49500);
+  });
+
+  it("a line with no charges_meta reports no GST rather than a made-up one", async () => {
+    const { rfq_id, rfq_product_id, quote_id } = await makeRfqWithProductAndVendor();
+    const po_id = await makePo({ rfq_id, status: "acceptance_pending", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id] });
+    await attachProductToPo(po_id, rfq_product_id, quote_id);
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(`/api/v1/po/detail/${po_id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.items[0]).toMatchObject({ gst: null, gst_amount: null, tax_mode: null });
+    expect(res.body.data.pricing.tax).toBe(0);
+  });
+});
+
+// ===========================================================================
 // 5b) GET /po/detail/:po_id — document_groups
 // ===========================================================================
 //
