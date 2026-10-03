@@ -24,9 +24,11 @@ const BUYER = IDS.users.a1_proc_buyer;
 const VENDOR = IDS.users.vendor_alpha;
 
 // Whole request, auth included.
+//   buyer : 13 statements / 12 waves  ->  11 / 6
+//   vendor: 15 statements / 14 waves  ->  14 / 8
 const BUDGET = {
-  buyer: { statements: 99, waves: 99 },
-  vendor: { statements: 99, waves: 99 },
+  buyer: { statements: 11, waves: 7 },
+  vendor: { statements: 14, waves: 9 },
 };
 
 const best = async (fn) => {
@@ -94,6 +96,8 @@ describe("GET /rfq/getRfqById/:id — equivalence + query budget", () => {
     expect(r.res.body.status).toBe(1);
     if (process.env.PERF_DUMP) console.log(`[getRfqById vendor] ${r.count} statements, waves ${r.waves}, depth ${r.depth}\n${r.statements.map((s) => s.slice(0, 120)).join("\n")}`);
     expect(r.count).toBeLessThanOrEqual(BUDGET.vendor.statements);
+    // user_type comes from req.user, not a second read of tbl_users.
+    expect(r.statements.filter((q) => /SELECT user_type, company_id FROM tbl_users/i.test(q))).toHaveLength(0);
     expect(r.waves).toBeLessThanOrEqual(BUDGET.vendor.waves);
   });
 

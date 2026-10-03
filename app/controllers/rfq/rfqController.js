@@ -8507,58 +8507,46 @@ const rfqController = {
         }
       }
 
-      let lifecycleMap = {};
-      if (rfqData?.id) {
-        lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
+      // Everything below reads only rfqData, and none of it reads another's
+      // result (action holders wait on the lifecycle stage inside their own
+      // chain). They used to be awaited one after another — up to 7 serial
+      // round trips; they are now issued together. Results are assigned onto
+      // rfqData in the original order so the payload's key order is unchanged,
+      // and each keeps its own error handling.
+      const lifecycleP = (async () => {
+        if (!rfqData?.id) return;
+        const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
-      }
 
-      // Enrich with action holders (who can act at current lifecycle stage)
-      if (rfqData?.id && rfqData.lifecycle_stage) {
-        try {
-          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
-          rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
-        } catch (err) {
-          logError('Error fetching action holders for RFQ detail', err);
-          rfqData.action_holders = null;
+        // Enrich with action holders (who can act at current lifecycle stage)
+        if (rfqData.lifecycle_stage) {
+          try {
+            const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
+            rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+          } catch (err) {
+            logError('Error fetching action holders for RFQ detail', err);
+            rfqData.action_holders = null;
+          }
         }
-      }
+      })();
 
-      if (rfqData?.hotel_id) {
-        const hotelIds = [parseInt(rfqData.hotel_id)];
-        const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
-        try {
-          // Technical evaluators: scoped to BU + Department
-          rfqData.technical_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'te', ['read', 'create'], deptId
-          );
-        } catch (evaluatorError) {
-          logError('Error fetching technical evaluators for RFQ detail', evaluatorError);
-          rfqData.technical_evaluators = [];
-        }
-        try {
-          // Commercial evaluators: scoped to BU only (no department)
-          rfqData.commercial_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'quote-compare', ['read', 'create'], null
-          );
-        } catch (err) {
-          logError('Error fetching commercial evaluators for RFQ detail', err);
-          rfqData.commercial_evaluators = [];
-        }
-        try {
-          // PO initiators: scoped to BU only (no department)
-          rfqData.po_initiators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'awarding', ['read', 'create'], null
-          );
-        } catch (err) {
-          logError('Error fetching PO initiators for RFQ detail', err);
-          rfqData.po_initiators = [];
-        }
-      } else {
-        rfqData.technical_evaluators = [];
-        rfqData.commercial_evaluators = [];
-        rfqData.po_initiators = [];
-      }
+      const evaluatorsP = rfqData?.hotel_id
+        ? (() => {
+          const hotelIds = [parseInt(rfqData.hotel_id)];
+          const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
+          return Promise.all([
+            // Technical evaluators: scoped to BU + Department
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'te', ['read', 'create'], deptId)
+              .catch((evaluatorError) => { logError('Error fetching technical evaluators for RFQ detail', evaluatorError); return []; }),
+            // Commercial evaluators: scoped to BU only (no department)
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'], null)
+              .catch((err) => { logError('Error fetching commercial evaluators for RFQ detail', err); return []; }),
+            // PO initiators: scoped to BU only (no department)
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'awarding', ['read', 'create'], null)
+              .catch((err) => { logError('Error fetching PO initiators for RFQ detail', err); return []; }),
+          ]);
+        })()
+        : Promise.resolve(null);
 
       // Fetch PO rejections (vendor-rejected AND approver-rejected) for this
       // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
@@ -8567,40 +8555,46 @@ const rfqController = {
       // - rejection_type='approver': PO row status='rejected'. Reason and
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
-      try {
-        // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
-        // so the re-award modal and the card cannot disagree about what counts.
-        rfqData.vendor_rejections = await rfqModel.getLivePoRejectionsForRfqs([rfqData.id]);
-      } catch (err) {
-        logError('Error fetching PO rejections for RFQ', err);
-        rfqData.vendor_rejections = [];
-      }
+      // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
+      // so the re-award modal and the card cannot disagree about what counts.
+      const rejectionsP = Promise.resolve()
+        .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
+        .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
 
       // Attach close reason when RFQ is closed
-      if (rfqData && String(rfqData.status) === '2') {
-        try {
-          const closeEvent = await db.oneOrNone(
-            `SELECT lh.remarks
-               FROM tbl_lifecycle_history lh
-              WHERE lh.entity_id = $1
-                AND lh.entity_type IN ('RFQ', 'TENDER')
-                AND lh.action = 'RFQ_CLOSED'
-              ORDER BY lh.id DESC
-              LIMIT 1`,
-            [rfqData.id]
-          );
+      const closeCommentP = (rfqData && String(rfqData.status) === '2')
+        ? db.oneOrNone(
+          `SELECT lh.remarks
+             FROM tbl_lifecycle_history lh
+            WHERE lh.entity_id = $1
+              AND lh.entity_type IN ('RFQ', 'TENDER')
+              AND lh.action = 'RFQ_CLOSED'
+            ORDER BY lh.id DESC
+            LIMIT 1`,
+          [rfqData.id]
+        ).then((closeEvent) => {
           let rawComment = closeEvent?.remarks || null;
           if (rawComment) {
             rawComment = rawComment.replace(/^(RFQ|TENDER) closed by creator:\s*/i, '');
-            rfqData.close_comment = `Reason: ${rawComment}`;
-          } else {
-            rfqData.close_comment = null;
+            return `Reason: ${rawComment}`;
           }
-        } catch (closeErr) {
-          logError('Error fetching close info for RFQ', closeErr);
-          rfqData.close_comment = null;
-        }
+          return null;
+        }).catch((closeErr) => { logError('Error fetching close info for RFQ', closeErr); return null; })
+        : null;
+
+      const [, evaluators, rejections, closeComment] = await Promise.all([
+        lifecycleP, evaluatorsP, rejectionsP, closeCommentP,
+      ]);
+
+      if (evaluators) {
+        [rfqData.technical_evaluators, rfqData.commercial_evaluators, rfqData.po_initiators] = evaluators;
+      } else {
+        rfqData.technical_evaluators = [];
+        rfqData.commercial_evaluators = [];
+        rfqData.po_initiators = [];
       }
+      rfqData.vendor_rejections = rejections;
+      if (closeCommentP) rfqData.close_comment = closeComment;
 
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {

@@ -137,13 +137,31 @@ const requireActiveSubscription = async (req, res, next) => {
     const userId = req.user.id;
 
     // Check if user is a vendor (user_type === 3). Buyers/admins pass through.
-    const userInfo = await userModel.userinfo(userId);
-    const userType = userInfo?.user_type || (Array.isArray(userInfo) ? userInfo[0]?.user_type : null);
+    //
+    // Every authenticator in front of this middleware (passport's JWT strategy,
+    // vendorTokenOrJwt's token path) has just loaded req.user from tbl_users in
+    // THIS request, user_type included — so read it there. userModel.userinfo
+    // re-read the same row (two serial statements) on every call, which made
+    // this gate the most common redundant round trip on getRfqById. It is kept
+    // only as the fallback for a req.user that does not carry user_type.
+    let userType = req.user.user_type;
+    if (userType === undefined) {
+      const userInfo = await userModel.userinfo(userId);
+      userType = userInfo?.user_type || (Array.isArray(userInfo) ? userInfo[0]?.user_type : null);
+    }
     if (userType !== 3 && userType !== '3') {
       return next(); // Not a vendor, no subscription check needed
     }
 
-    const companyDetails = await userModel.getCompanyDetail(userId);
+    // Independent reads: the subscription check is only CONSULTED for a
+    // hospitality vendor, but issuing both together saves a serial round trip
+    // on every vendor request (non-hospitality vendors are the legacy minority).
+    // A failure of the subscription read only matters if it is consulted, as
+    // before — so it is settled here and re-thrown below only when needed.
+    const [companyDetails, subscription] = await Promise.all([
+      userModel.getCompanyDetail(userId),
+      hospitalityModel.hasValidPaidSubscription(userId).then((ok) => ({ ok }), (err) => ({ err })),
+    ]);
     if (!companyDetails || companyDetails.length === 0) {
       return next();
     }
@@ -157,8 +175,8 @@ const requireActiveSubscription = async (req, res, next) => {
       return next();
     }
 
-    const hasValidSub = await hospitalityModel.hasValidPaidSubscription(userId);
-    if (hasValidSub) {
+    if (subscription.err) throw subscription.err;
+    if (subscription.ok) {
       return next();
     }
 
