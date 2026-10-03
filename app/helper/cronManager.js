@@ -16,6 +16,7 @@ import { logError } from './common.js';
 import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
 import { recordSystemEvent } from '../services/activity/systemEvents.js';
 import { CATEGORIES } from '../services/activity/eventRegistry.js';
+import { notifyApprovalChanged } from '../services/approvalEvents.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -495,6 +496,8 @@ export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler', { defe
             AND entity_id = $2
             AND status = 'PENDING'
         `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+        // Auto-approval empties these approvers' pending sets.
+        notifyApprovalChanged({ entityType: rfq.is_tender === 1 ? 'TENDER' : 'RFQ', entityId: rfqId }, t);
 
         await t.none(`
           UPDATE tbl_approval_instance_steps
@@ -1061,6 +1064,7 @@ const handleNegotiationRoundExpiration = async (roundId) => {
            WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
           [roundId]
         );
+        notifyApprovalChanged({ entityType: 'NEGOTIATION', entityId: roundId }, t);
 
         // Cancel pending approval steps
         await t.none(
@@ -1416,6 +1420,7 @@ const handleArcNegotiationRoundExpiration = async (roundId) => {
            WHERE entity_type = 'ARC_NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
           [roundId]
         );
+        notifyApprovalChanged({ entityType: 'ARC_NEGOTIATION', entityId: roundId }, t);
         // Cancel pending approval steps
         await t.none(
           `UPDATE tbl_approval_instance_steps SET status = 'CANCELLED', completed_at = NOW()

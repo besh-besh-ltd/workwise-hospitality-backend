@@ -52,6 +52,7 @@ import { scheduleNegotiationRoundExpiration, removeNegotiationRoundExpiration } 
 import { sendNegotiationRoundCreatedNotification, sendNegotiationRoundApprovedNotification, sendNegotiationRoundVendorNotification } from '../../helper/sendEmailFunctions/negotiationEmails.js';
 import rbacModel from '../../models/rbacModel.js';
 import userModel from '../../models/userModel.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 import {
   assertVendorsTechnicallyQualified,
   screenVendorsForTechnicalQualification,
@@ -1172,7 +1173,7 @@ const NegotiationController = {
         // Cancel stale PENDING approval instances from previous expired/
         // cancelled rounds covering any of this round's products.
         if (entryProductIds.length > 0) {
-          await t.none(
+          const staleCancelled = await t.any(
             `UPDATE tbl_approval_instances
              SET status = 'CANCELLED', completed_at = NOW()
              WHERE entity_type = 'NEGOTIATION'
@@ -1184,9 +1185,11 @@ const NegotiationController = {
                      SELECT 1 FROM jsonb_array_elements(COALESCE(nr.products,'[]'::jsonb)) p_
                      WHERE (p_->>'rfq_product_id')::int = ANY($1::int[])
                    ))
-               )`,
+               )
+             RETURNING id`,
             [entryProductIds]
           );
+          if (staleCancelled.length) notifyApprovalChanged({ instanceIds: staleCancelled.map(r => r.id) }, t);
         }
 
         // Create approval instance using the centralized approval engine
@@ -2019,6 +2022,7 @@ const NegotiationController = {
             WHERE entity_type = 'NEGOTIATION' AND entity_id = $1 AND status = 'PENDING'`,
           [round_id]
         );
+        notifyApprovalChanged({ entityType: 'NEGOTIATION', entityId: round_id }, t);
         await t.none(
           `UPDATE tbl_approval_instance_steps
               SET status = 'CANCELLED', completed_at = NOW()

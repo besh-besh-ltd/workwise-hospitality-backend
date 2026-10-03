@@ -23,6 +23,7 @@ import {
   recordLifecycleEvent
 } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
+import { notifyApprovalChanged } from './approvalEvents.js';
 import { logError } from '../helper/common.js';
 import {
   sendPolicyChangeNotification,
@@ -413,6 +414,9 @@ export async function advanceInstanceToNextStep(instanceId, t) {
     s => s.step_order > instance.current_step && s.status === 'PENDING'
   );
 
+  // Either branch moves the pending step: announce after commit.
+  notifyApprovalChanged({ instanceIds: instanceId }, t);
+
   if (nextStep) {
     await t.none(
       'UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2',
@@ -627,6 +631,7 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
       WHERE id = $1`,
     [step.id]
   );
+  notifyApprovalChanged({ instanceIds: instanceId }, t);
 
   const pendingApprovers = await t.any(
     `SELECT approver_user_id FROM tbl_approval_step_approvers
@@ -692,6 +697,9 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  *   `unresolvedSteps` in revalidateApproverMembership.
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t) {
+  // Steps / approvers of this live instance are about to change — announce
+  // after commit (de-duplicated per transaction, dropped on rollback).
+  notifyApprovalChanged({ instanceIds: instance.id }, t);
   const result = {
     approversAdded: [],
     approversRemoved: [],
@@ -1975,6 +1983,7 @@ export async function revalidateApproverMembership({
          WHERE approval_instance_step_id = $2 AND approver_user_id = $3 AND status = 'PENDING'`,
         [changeType, row.step_id, userId]
       );
+      notifyApprovalChanged({ instanceIds: row.instance_id }, t);
 
       await t.none(
         `INSERT INTO tbl_approval_actions
@@ -2106,6 +2115,7 @@ export async function revalidateApproverMembership({
       );
 
       if (resolvedIds.includes(userId)) {
+        notifyApprovalChanged({ instanceIds: row.instance_id }, t);
         const isInitiator = userId === row.initiated_by;
         const approverStatus = isInitiator ? 'APPROVED' : 'PENDING';
         const approverComment = null;

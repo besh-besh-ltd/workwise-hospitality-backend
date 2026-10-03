@@ -29,6 +29,7 @@ import db from '../../config/dbConn.js';
 import puppeteer from 'puppeteer';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -3816,6 +3817,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
        WHERE id = $1`,
       [instance.id]
     );
+    notifyApprovalChanged({ instanceIds: instance.id }, dbContext);
 
     // Update all pending steps to CANCELLED
     await dbContext.none(
@@ -10915,6 +10917,7 @@ const rfqController = {
               WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
                 SET status = 'CANCELLED', completed_at = NOW()
@@ -11087,6 +11090,7 @@ const rfqController = {
              WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
              SET status = 'CANCELLED', completed_at = NOW()
@@ -11181,6 +11185,7 @@ const rfqController = {
              WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
              SET status = 'CANCELLED', completed_at = NOW()
@@ -11767,6 +11772,7 @@ const rfqController = {
                         `UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1 AND status='PENDING'`,
                         [existingPending.id]
                       );
+                      notifyApprovalChanged({ instanceIds: existingPending.id }, t);
                       await t.none(
                         `UPDATE tbl_approval_instance_steps SET status='CANCELLED', completed_at=NOW() WHERE approval_instance_id=$1 AND status='PENDING'`,
                         [existingPending.id]

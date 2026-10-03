@@ -143,6 +143,7 @@ import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
 import { applyDelegations } from './approvalDelegationModel.js';
+import { notifyApprovalChanged } from '../services/approvalEvents.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -2810,6 +2811,9 @@ export async function createApprovalInstance({
       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
       VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
     `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(instanceMetadata)]);
+    // Push `approval:changed` to its approvers once the outermost transaction
+    // commits (fire-and-forget; nothing is emitted if this rolls back).
+    notifyApprovalChanged({ instanceIds: instance.id }, t);
 
     // 6. (The all-steps-dropped case is refused before the INSERT above — see
     //     APPROVAL_POLICY_RESOLVES_TO_NOBODY. It can no longer reach here, and
@@ -3654,6 +3658,9 @@ export async function submitApprovalAction({
       SET status = $1, acted_at = NOW(), comment = $2
       WHERE approval_instance_step_id = $3 AND approver_user_id = $4
     `, [normalizedAction === 'APPROVE' ? 'APPROVED' : 'REJECTED', comment, stepId, approver_user_id]);
+    // Every outcome below (step advance, instance approve/reject) changes some
+    // approver's pending set — announced after commit, never inside it.
+    notifyApprovalChanged({ instanceIds: approval_instance_id }, t);
 
     // 7. Handle REJECT - immediately reject the entire instance
     if (normalizedAction === 'REJECT') {
@@ -3878,6 +3885,7 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       SET status = 'CANCELLED', completed_at = NOW()
       WHERE id = $1
     `, [instance_id]);
+    notifyApprovalChanged({ instanceIds: instance_id }, t);
 
     // Update all pending steps
     await t.none(`

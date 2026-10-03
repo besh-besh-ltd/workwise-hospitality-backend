@@ -13,6 +13,7 @@
 
 import { createApprovalInstance } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 
 /**
  * Cancel active approvals for an RFQ and reissue.
@@ -57,6 +58,7 @@ export async function cancelAndReissueApproval(rfq, userId, editSessionId, t) {
       ]
     );
     cancelledIds.push(inst.id);
+    if (inst.status === 'PENDING') notifyApprovalChanged({ instanceIds: inst.id }, t);
   }
 
   // 2) Spawn a fresh approval instance using the standard engine.
