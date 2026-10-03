@@ -25,7 +25,8 @@ const VENDORS = [IDS.users.vendor_alpha, IDS.users.vendor_beta, IDS.users.vendor
 
 // Whole request, auth included, 3 variants (one repeated) x 3 vendors.
 //   before: 27 statements / 27 waves, 9 vendor INSERTs (one per vendor)
-const BUDGET = { statements: 27, waves: 27, vendorInserts: 9 };
+//   after : 21 statements / 20 waves, 3 vendor INSERTs (one per variant)
+const BUDGET = { statements: 21, waves: 20, vendorInserts: 3 };
 
 describe("POST /rfq/add-products-to-draft — equivalence + query budget", () => {
   let client;

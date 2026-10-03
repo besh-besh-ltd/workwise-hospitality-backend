@@ -7588,9 +7588,17 @@ const rfqController = {
       // Sync hotel mappings (works for both new and existing drafts)
       await hospitalityModel.reconcileRFQHotels(rfq_id, hotel_ids, user_id);
 
-      // Pre-resolve eligible vendors per unique variant once to avoid
-      // re-querying for the same variant when added multiple times.
+      // Pre-resolve eligible vendors once per unique variant — all of them
+      // together, up front, rather than one round trip per variant inside the
+      // loop. Each lookup is settled on its own, so a failing variant still
+      // fails alone (in the loop below, exactly where it used to).
       const variantVendorCache = new Map();
+      const uniqueVariantIds = [...new Set(variants.map((v) => v.variant_id).filter(Boolean))];
+      await Promise.all(uniqueVariantIds.map((variant_id) =>
+        hospitalityModel.getEligibleVendorsForVariant(variant_id, hotel_ids)
+          .then((list) => variantVendorCache.set(variant_id, { list: list || [] }))
+          .catch((err) => variantVendorCache.set(variant_id, { err }))
+      ));
 
       let added_count = 0;
       const failed = [];
@@ -7603,15 +7611,10 @@ const rfqController = {
         }
 
         try {
-          // Get eligible vendors (cached per variant_id)
-          let vendorList = variantVendorCache.get(variant_id);
-          if (!vendorList) {
-            vendorList = await hospitalityModel.getEligibleVendorsForVariant(
-              variant_id,
-              hotel_ids
-            ) || [];
-            variantVendorCache.set(variant_id, vendorList);
-          }
+          // Eligible vendors (resolved above, once per variant_id)
+          const cached = variantVendorCache.get(variant_id);
+          if (cached.err) throw cached.err;
+          const vendorList = cached.list;
 
           const variantNum = await rfqModel.getNextVariant(rfq_id, variant_id);
 
@@ -7628,14 +7631,22 @@ const rfqController = {
             sheet_id: null,
           });
 
-          for (const vendor of vendorList) {
-            await rfqModel.insert('tbl_rfq_product_vendors', {
-              rfq_id,
-              product_variant_id: variant_id,
-              user_id: vendor.id || vendor.vendor_id,
-              variant: variantNum,
-              sheet_id: null,
-            });
+          // One multi-row INSERT for every eligible vendor of this variant
+          // (was one INSERT — one serial round trip — per vendor). Same rows,
+          // same insertion order; all-or-nothing per variant instead of
+          // possibly leaving a partial vendor set behind on a mid-loop error.
+          if (vendorList.length > 0) {
+            await rfqModel.insertArray(
+              vendorList.map((vendor) => ({
+                rfq_id,
+                product_variant_id: variant_id,
+                user_id: vendor.id || vendor.vendor_id,
+                variant: variantNum,
+                sheet_id: null,
+              })),
+              ['rfq_id', 'product_variant_id', 'user_id', 'variant', 'sheet_id'],
+              'tbl_rfq_product_vendors'
+            );
           }
 
           added_count++;
