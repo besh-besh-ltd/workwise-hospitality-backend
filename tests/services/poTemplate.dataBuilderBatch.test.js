@@ -27,7 +27,9 @@ const U = IDS.users;
 
 // buildPOTemplateData(poId) on the plain pool.
 //   before: 19 statements in 18 serial waves (2 TECHNICAL + 3 commercial instances)
-const BUDGET = { statements: 19, waves: 18 };
+//   after : 14 statements in 3 waves; the approval history is 2 statements for
+//           ANY number of instances (it was 1 + 2 per instance).
+const BUDGET = { statements: 14, waves: 4 };
 
 describe("buildPOTemplateData — batched approval history", () => {
   let made;
