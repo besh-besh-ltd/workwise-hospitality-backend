@@ -26,7 +26,7 @@ import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
-import puppeteer from 'puppeteer';
+import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
@@ -8037,19 +8037,7 @@ const rfqController = {
 </body>
 </html>`;
 
-      browser = await puppeteer.launch({
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        headless: true,
-      });
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      const pdfBuffer = await page.pdf({
-        format: 'A4',
-        printBackground: true,
-        margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' },
-      });
-      await browser.close();
-      browser = null;
+      const pdfBuffer = await pdfRenderer.renderToBuffer(html);
 
       const safeRfqNo = String(rfq.rfq_no || rfq_id).replace(/[^A-Za-z0-9_-]/g, '_');
       res.setHeader('Content-Type', 'application/pdf');

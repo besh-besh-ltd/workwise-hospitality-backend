@@ -28,6 +28,16 @@ const DEFAULT_RENDER_TIMEOUT_MS = 20_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CONCURRENT = 2;
 
+/** page.pdf() defaults; callers override per document (e.g. `margin`). */
+export const DEFAULT_PDF_OPTIONS = Object.freeze({
+  format: 'A4',
+  printBackground: true,
+  margin: Object.freeze({ top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' }),
+});
+
+/** Zero margins: puppeteer's own default, for templates that pad themselves. */
+export const NO_MARGIN = Object.freeze({ top: '0', bottom: '0', left: '0', right: '0' });
+
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -116,7 +126,13 @@ export function createPdfRenderer({
     return launching;
   }
 
-  async function renderToFile(html, outputPath) {
+  /**
+   * Render `html` to a PDF. `pdfOptions` are puppeteer page.pdf() options laid
+   * over DEFAULT_PDF_OPTIONS (A4, backgrounds, 12 mm margins); pass `margin`
+   * to replace the margins wholesale. Returns the PDF bytes as a Buffer; when
+   * `pdfOptions.path` is set the file is written too.
+   */
+  async function render(html, pdfOptions = {}) {
     await acquire();
     try {
       const b = await getBrowser();
@@ -130,17 +146,12 @@ export function createPdfRenderer({
           renderTimeoutMs,
           'PDF setContent'
         );
-        await withTimeout(
-          page.pdf({
-            path: outputPath,
-            format: 'A4',
-            printBackground: true,
-            margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' },
-          }),
+        const bytes = await withTimeout(
+          page.pdf({ ...DEFAULT_PDF_OPTIONS, ...pdfOptions }),
           renderTimeoutMs,
           'PDF render'
         );
-        return outputPath;
+        return Buffer.from(bytes);
       } finally {
         // The leak that turned one failed PO into thirteen minutes of them.
         await page.close().catch(() => {});
@@ -148,6 +159,18 @@ export function createPdfRenderer({
     } finally {
       release();
     }
+  }
+
+  /** Render to `outputPath`; resolves to the path. */
+  async function renderToFile(html, outputPath, pdfOptions = {}) {
+    await render(html, { ...pdfOptions, path: outputPath });
+    return outputPath;
+  }
+
+  /** Render to an in-memory Buffer (no file). */
+  async function renderToBuffer(html, pdfOptions = {}) {
+    const { path: _ignored, ...rest } = pdfOptions;
+    return render(html, rest);
   }
 
   async function close() {
@@ -158,6 +181,7 @@ export function createPdfRenderer({
 
   return {
     renderToFile,
+    renderToBuffer,
     close,
     // Test seam: lets a suite reach the live browser to simulate Chromium dying.
     _currentBrowser: () => getBrowser(),

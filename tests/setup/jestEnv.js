@@ -132,3 +132,6 @@ pdfRenderer.renderToFile = async function stubbedRenderToFile(html, outputPath) 
   fs.writeFileSync(outputPath, `%PDF-1.4 test stub (${Buffer.byteLength(html)} bytes of HTML)\n`);
   return outputPath;
 };
+pdfRenderer.renderToBuffer = async function stubbedRenderToBuffer(html) {
+  return Buffer.from(`%PDF-1.4 test stub (${Buffer.byteLength(html)} bytes of HTML)\n`);
+};

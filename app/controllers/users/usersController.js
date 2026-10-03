@@ -25,7 +25,7 @@ import { logger } from '../../util/logger.js';
 import FormData from 'form-data';
 import Razorpay from 'razorpay';
 import Moment from 'moment';
-import puppeteer from 'puppeteer';
+import { pdfRenderer, NO_MARGIN } from '../../util/pdfRenderer.js';
 import fs from 'fs';
 import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
@@ -4211,18 +4211,8 @@ publish_profile_reviews: async (req, res, next) => {
       const fileName = `invoice-hospitality-${payment.id}-${Date.now()}.pdf`;
       const outputPath = `${invoiceDir}/${fileName}`;
 
-      const browser = await puppeteer.launch({
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-      });
-      const page = await browser.newPage();
-      await page.setContent(htmlPdf, { waitUntil: 'networkidle0' });
-      await page.pdf({
-        path: outputPath,
-        format: 'A4',
-        printBackground: true
-      });
-      await browser.close();
+      // Shared Chromium (pdfRenderer); NO_MARGIN = the previous page.pdf output.
+      await pdfRenderer.renderToFile(htmlPdf, outputPath, { margin: NO_MARGIN });
 
       // Ensure invoice_file column exists, then update payment record
       try {
