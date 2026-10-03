@@ -8890,9 +8890,11 @@ const rfqController = {
       const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
 
       // 1. Fetch the buyer's scoped RFQs (RFQ-only). Big cap so faceting is
-      //    complete; search is pushed to SQL.
+      //    complete; search is pushed to SQL. This is the SLIM set — only what
+      //    tabs, facets, counts, sorting and the pending passes read. The
+      //    heavy per-card columns are fetched for the visible page in step 8a.
       const FETCH_CAP = 1000;
-      const all = await rfqModel.getAllBuyerRfq(FETCH_CAP, 0, user_id, null, 'DESC', null, null, search, 0, undefined, hotel_ids, true);
+      const all = await rfqModel.getRfqListViewRows(FETCH_CAP, user_id, search, hotel_ids);
       const rows = Array.isArray(all) ? all : [];
 
       // 2. Lifecycle stage → bucket + normalized status key.
@@ -9103,6 +9105,17 @@ const rfqController = {
       const start = (page - 1) * limit;
       const pageRows = filtered.slice(start, start + limit);
 
+      // 8a. Heavy per-card columns (flags, counts, vendors json, can_edit),
+      //     for this page only, in the same round trip as the 8b rejections.
+      const [cardDetails, pageRejections] = await Promise.all([
+        rfqModel.getRfqListViewCardDetails(pageRows.map((r) => r.id), user_id),
+        rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
+          logError('getRfqListView: could not load PO rejections for the page', rejErr);
+          return [];
+        }),
+      ]);
+      for (const r of pageRows) Object.assign(r, cardDetails[Number(r.id)] || {});
+
       // 8b. Why an RFQ went backwards. A rejected PO de-finalizes its products
       // and returns the RFQ to commercial evaluation; without this the card
       // just shows an earlier stage with different people on it. RFQ 536263
@@ -9112,7 +9125,7 @@ const rfqController = {
       // renders correctly.
       const poRejectionMap = {};
       try {
-        const rejections = await rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id));
+        const rejections = pageRejections;
         for (const row of rejections) {
           const key = Number(row.rfq_id);
           const entry = poRejectionMap[key] || (poRejectionMap[key] = { latest: null, poNumbers: new Set() });

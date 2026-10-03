@@ -4520,6 +4520,397 @@ LIMIT 2;
     });
   },
   /**
+   * RFQ management listing (POST /rfq/list-view), stage 1 of 2: the SLIM
+   * scoped set.
+   *
+   * getRfqListView used to call getAllBuyerRfq(1000, ...), which computes ~50
+   * correlated subqueries for EVERY scoped RFQ and then threw all but one page
+   * (20 rows) away in JS — 32% of all prod DB time, 4.1 s for a wide-scope
+   * user. Tabs, buckets, facets, counts, sorting and the action-holder /
+   * personal-pending passes need only a handful of columns for the whole
+   * set; everything else is now fetched for the visible page alone by
+   * getRfqListViewCardDetails.
+   *
+   * Returns rows carrying exactly what that whole-set work reads: identity
+   * and scope columns, hotel_name / department_title / categories, the
+   * po_completed flag (bucketOf falls back to it), and `products` in the same
+   * shape the old query produced but holding only what productPairs /
+   * vendorPairs read (product id + variant name, vendor id + user name). The
+   * per-product and per-vendor arrays keep the OLD correlated shape, so their
+   * element order — which decides facet tie order — is unchanged; only the
+   * per-vendor tbl_users lookup (306k index probes for one wide-scope page)
+   * is replaced by one batched read.
+   *
+   * The WHERE is getAllBuyerRfq's, specialised to the arguments the listing
+   * always passed (project/rfq_type/reverse_auction NULL, is_tender 0,
+   * include_drafts true, no completed_status). Keep the two in step:
+   * tests/services/rfq.listViewParity.test.js compares this endpoint against
+   * the pre-split implementation running on the live getAllBuyerRfq and fails
+   * the moment they disagree.
+   *
+   * ORDER BY adds ctid DESC as the tie-break for equal timestamps (RFQs
+   * duplicated across hotels share one), which reproduces the order the old
+   * plan's backward scan of idx_rfq_timestamp returned them in.
+   */
+  getRfqListViewRows: async (cap, user_id, search, hotel_ids) => {
+    const uid = Number(user_id);
+    if (!Number.isFinite(uid)) return [];
+    const hotelList = Array.isArray(hotel_ids)
+      ? hotel_ids.map((id) => parseInt(id)).filter(Number.isFinite)
+      : [];
+    // getAllBuyerRfq rendered a non-empty but all-invalid hotel_ids as
+    // `IN ()`, a syntax error the listing reported as status 3. Keep failing
+    // rather than silently dropping the filter and widening the listing.
+    if (Array.isArray(hotel_ids) && hotel_ids.length > 0 && hotelList.length === 0) {
+      throw new Error('getRfqListViewRows: hotel_ids contained no valid ids');
+    }
+
+    const rows = await db.any(
+      `
+      SELECT
+        RFQ.id, RFQ.status, RFQ.is_published, RFQ.is_tender, RFQ.hotel_id,
+        RFQ.department_id, RFQ.process_id, RFQ.hospitality_company_id,
+        RFQ.created_by, RFQ."timestamp", RFQ.bid_end_date,
+        (SELECT name FROM tbl_hospitality_company_hotels WHERE id = RFQ.hotel_id) AS hotel_name,
+        (SELECT title FROM tbl_department WHERE id = RFQ.department_id) AS department_title,
+        COALESCE((
+          SELECT json_agg(DISTINCT jsonb_build_object('id', TC.id, 'title', TC.title))
+          FROM tbl_rfq_products RP_CAT
+          JOIN tbl_product_variant PV_CAT ON PV_CAT.id = RP_CAT.product_variant_id
+          JOIN tbl_product_categories TPC ON TPC.product_id = PV_CAT.product_id
+          JOIN tbl_category TC ON TC.id = TPC.category_id
+          WHERE RP_CAT.rfq_id = RFQ.id
+        ), '[]'::json) AS categories,
+        (
+          SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+            ELSE (
+              SELECT BOOL_AND(has_approved)
+              FROM (
+                SELECT EXISTS (
+                  SELECT 1 FROM tbl_rfq_purchase_order _po2
+                  JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+                  WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+                    AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
+                ) AS has_approved
+                FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
+              ) _chk
+            )
+          END
+        ) AS po_completed,
+        ARRAY(
+          SELECT json_build_object(
+            'id', RFQ_P.id,
+            'product_id', RFQ_P.product_variant_id,
+            'product_details', (
+              SELECT json_agg(json_build_object('id', T_P.id, 'name', T_P.name))
+              FROM tbl_product_variant T_P
+              WHERE RFQ_P.product_variant_id = T_P.id
+            ),
+            'vendor_details', (
+              SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id))
+              FROM tbl_rfq_product_vendors RFQ_P_V
+              WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id
+                AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+                AND RFQ_P.variant = RFQ_P_V.variant
+            )
+          )
+          FROM tbl_rfq_products RFQ_P
+          WHERE RFQ.id = RFQ_P.rfq_id
+        ) AS products
+      FROM tbl_rfq RFQ
+      WHERE (RFQ.created_by = $1 OR EXISTS (
+        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = $1
+        UNION ALL
+        SELECT 1 FROM tbl_hospitality_user_mappings HUM
+        WHERE HUM.user_id = $1
+          AND (
+            HUM.hospitality_hotel_id = RFQ.hotel_id
+            OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+          )
+      ))
+      AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4) OR (RFQ.is_published = 0 AND RFQ.created_by = $1))
+      AND (
+        ${RFQ_APPROVER_READ_EXEMPTION(uid)}
+        OR EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = $1
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs2.department_id = RFQ.department_id
+              OR _urs2.department_id IS NULL
+            )
+            AND (_urs2.process_id IS NULL OR _urs2.process_id = RFQ.process_id)
+        )
+      )
+      AND ($2::text IS NULL OR RFQ.rfq_no::text LIKE '%' || $2 || '%' OR RFQ.title ILIKE '%' || $2 || '%')
+      AND RFQ.is_tender = 0
+      ${hotelList.length > 0 ? 'AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id = ANY($4::int[]))' : ''}
+      ORDER BY RFQ."timestamp" DESC, RFQ.ctid DESC
+      LIMIT $3
+      `,
+      [uid, search ?? null, cap, hotelList]
+    );
+
+    // One read for every vendor name the facets need, instead of a tbl_users
+    // probe per (RFQ x product x vendor). Rebuilds the same user_details
+    // object the old subquery produced (NULL when the user row is missing).
+    const vendorIds = new Set();
+    for (const r of rows) {
+      for (const p of r.products || []) {
+        for (const v of p.vendor_details || []) if (v.user_id != null) vendorIds.add(Number(v.user_id));
+      }
+    }
+    if (vendorIds.size > 0) {
+      const users = await db.any(
+        `SELECT id, name, email FROM tbl_users WHERE id = ANY($1::int[])`,
+        [[...vendorIds]]
+      );
+      const byId = new Map(users.map((u) => [Number(u.id), { user_id: u.id, name: u.name, email: u.email }]));
+      for (const r of rows) {
+        for (const p of r.products || []) {
+          for (const v of p.vendor_details || []) v.user_details = byId.get(Number(v.user_id)) || null;
+        }
+      }
+    }
+    return rows;
+  },
+
+  /**
+   * RFQ management listing, stage 2 of 2: the heavy per-card columns, for the
+   * visible page only. Every expression is copied verbatim from
+   * getAllBuyerRfq so a card renders exactly what it did when these were
+   * computed for all ~1000 scoped RFQs. Returns { [rfq_id]: row }.
+   */
+  getRfqListViewCardDetails: async (rfqIds, user_id) => {
+    const ids = (rfqIds || []).map((id) => parseInt(id)).filter(Number.isFinite);
+    const uid = Number(user_id);
+    if (ids.length === 0 || !Number.isFinite(uid)) return {};
+    const rows = await db.any(
+      `
+      SELECT
+        RFQ.id, RFQ.rfq_no, RFQ.title, RFQ.rfq_type, RFQ.reverse_auction, RFQ.contact_name,
+        P.name AS project_name,
+        (SELECT COUNT(*)
+          FROM tbl_query_messages TQM
+          WHERE TQM.rfq_id = RFQ.id
+            AND TQM.sender_type = 3
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_query_message_reads TQMR
+              WHERE TQMR.message_id = TQM.id AND TQMR.user_id = $2
+            )
+        ) AS "unseen_query_count",
+        (
+          SELECT
+            CASE
+              WHEN COUNT(*) = 0 THEN false
+              ELSE
+                (
+                  SELECT COUNT(*)
+                    FROM tbl_rfq_products _rpv
+                    WHERE _rpv.rfq_id = RFQ.id
+                ) = (
+                  SELECT COUNT(*)
+                    FROM tbl_quote_finalization tqf2
+                    WHERE tqf2.rfq_id = RFQ.id
+                )
+            END
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+        ) AS is_finalized,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_quotes _tq_exists
+            WHERE _tq_exists.rfq_id = RFQ.id
+            LIMIT 1
+          )
+        ) AS is_quotes_present,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_products _rp_de
+            WHERE _rp_de.rfq_id = RFQ.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_finalization _qf_de
+                WHERE _qf_de.rfq_id = RFQ.id
+                  AND _qf_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qf_de.variant = _rp_de.variant
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_de
+                JOIN tbl_purchase_order_product _pop_de ON _pop_de.purchase_order_id = _po_de.id
+                WHERE _po_de.rfq_id = RFQ.id
+                  AND _pop_de.rfq_product_id = _rp_de.id
+                  AND _po_de.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_purchase_order _po_rej
+                JOIN tbl_purchase_order_product _pop_rej ON _pop_rej.purchase_order_id = _po_rej.id
+                WHERE _po_rej.rfq_id = RFQ.id
+                  AND _pop_rej.rfq_product_id = _rp_de.id
+                  AND _po_rej.status IN ('rejected', 'rejected_by_vendor')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_quote_items _qi_de
+                JOIN tbl_quotes _q_de ON _q_de.id = _qi_de.quote_id
+                WHERE _q_de.rfq_id = RFQ.id
+                  AND _qi_de.product_variant_id = _rp_de.product_variant_id
+                  AND _qi_de.variant = _rp_de.variant
+                  AND (_q_de.is_regret IS NULL OR _q_de.is_regret != 1)
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_chk
+                      WHERE _te_chk.tbl_rfq_product_id = _rp_de.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _tecv
+                      JOIN tbl_rfq_product_tech_evaluation _te
+                        ON _tecv.tbl_rfq_product_tech_evaluation_id = _te.id
+                      WHERE _te.tbl_rfq_product_id = _rp_de.id
+                        AND _tecv.vendor_id = _q_de.created_by
+                        AND _tecv.status = 1
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po_v
+                    JOIN tbl_purchase_order_product _pop_v ON _pop_v.purchase_order_id = _po_v.id
+                    WHERE _po_v.rfq_id = RFQ.id
+                      AND _pop_v.rfq_product_id = _rp_de.id
+                      AND _po_v.finalized_vendor_id = _q_de.created_by
+                      AND _po_v.status IN ('rejected', 'rejected_by_vendor')
+                  )
+              )
+          )
+        ) AS has_dead_end_product,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
+            WHERE _te_stuck.rfq_id = RFQ.id
+              AND _te_stuck.blocked_insufficient_vendors = TRUE
+              AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+          )
+        ) AS has_tech_stuck_product,
+        (
+          SELECT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
+            WHERE _te_unstart.rfq_id = RFQ.id
+              AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
+                  <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+              AND EXISTS (
+                SELECT 1
+                FROM tbl_quote_items _qi
+                JOIN tbl_quotes _q ON _q.id = _qi.quote_id
+                JOIN tbl_rfq_products _rp_u ON _rp_u.id = _te_unstart.tbl_rfq_product_id
+                WHERE _q.rfq_id = _te_unstart.rfq_id
+                  AND (_q.is_regret IS NULL OR _q.is_regret <> 1)
+                  AND _qi.product_variant_id = _rp_u.product_variant_id
+                  AND COALESCE(_qi.variant, 0) = COALESCE(_rp_u.variant, 0)
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses _c
+                WHERE _c.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c.clause_type <> 'sampling' OR _c.clause_type IS NULL)
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                WHERE _cv.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND _cv.status = 1
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM tbl_rfq_product_tech_evaluation_vendors_response _vr
+                JOIN tbl_rfq_product_tech_evaluation_clauses _c2
+                  ON _c2.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE _c2.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                  AND (_c2.clause_type <> 'sampling' OR _c2.clause_type IS NULL)
+                  AND COALESCE(TRIM(_vr.vendor_response), '') NOT IN ('', 'N/A')
+                GROUP BY _vr.vendor_id
+                HAVING COUNT(DISTINCT _c2.id) = (
+                  SELECT COUNT(*) FROM tbl_rfq_product_tech_evaluation_clauses _c3
+                  WHERE _c3.tbl_rfq_product_tech_evaluation_id = _te_unstart.id
+                    AND (_c3.clause_type <> 'sampling' OR _c3.clause_type IS NULL)
+                )
+              )
+          )
+        ) AS has_tech_unstartable_product,
+        ARRAY(
+          SELECT json_build_object(
+            'total_vendors', COUNT(DISTINCT TRPV.user_id),
+            'quote_received',
+            (
+              SELECT COUNT(*) FROM (
+                SELECT
+                  trpv.user_id
+                FROM
+                  tbl_rfq_product_vendors trpv
+                LEFT JOIN tbl_quotes tq
+                  ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                LEFT JOIN tbl_quote_items qi
+                  ON trpv.product_variant_id = qi.product_variant_id
+                  AND trpv.variant = qi.variant
+                  AND trpv.rfq_id = qi.rfq_id
+                  AND qi.quote_id = tq.id
+                  AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+                WHERE
+                  trpv.rfq_id = rfq.id
+                GROUP BY
+                  trpv.user_id
+                HAVING
+                  NOT BOOL_OR(COALESCE(tq.is_regret, 0) = 1)
+                  AND COUNT(DISTINCT qi.id) > 0
+              ) AS fully_quoted_vendors
+            ),
+            'quote_regretted',
+            (
+              SELECT COUNT(*) FROM (
+                SELECT trpv.user_id
+                FROM tbl_rfq_product_vendors trpv
+                LEFT JOIN tbl_quotes tq
+                  ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                WHERE trpv.rfq_id = rfq.id
+                GROUP BY trpv.user_id
+                HAVING BOOL_OR(tq.is_regret = 1)
+              ) AS regretted_vendors
+            )
+          )
+          FROM tbl_rfq_product_vendors trpv
+          WHERE trpv.rfq_id = rfq.id
+          GROUP BY trpv.rfq_id
+        ) AS "vendors",
+        EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs
+          JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+          JOIN tbl_permissions _p ON _p.id = _rp.permission_id
+          WHERE _urs.user_id = $2
+            AND _p.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p.action = 'update'
+            AND _urs.company_id = RFQ.hospitality_company_id
+            AND (_urs.hotel_id IS NULL OR _urs.hotel_id = RFQ.hotel_id)
+            AND (
+              RFQ.department_id IS NULL
+              OR _urs.department_id = RFQ.department_id
+              OR _urs.department_id IS NULL
+            )
+            AND (_urs.process_id IS NULL OR _urs.process_id = RFQ.process_id)
+        ) AS can_edit
+      FROM tbl_rfq RFQ
+      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+      WHERE RFQ.id = ANY($1::int[])
+      `,
+      [ids, uid]
+    );
+    const out = {};
+    for (const r of rows) out[Number(r.id)] = r;
+    return out;
+  },
+
+  /**
    * Compute lifecycle stage for a batch of RFQ IDs.
    * Returns an object mapping rfq_id → lifecycle_stage string.
    *

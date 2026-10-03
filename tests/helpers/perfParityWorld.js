@@ -309,6 +309,18 @@ export async function seedPerfWorld(db, { seed = 20261003, rfqCount = 72 } = {})
           );
         }
       }
+      // Same catalogue variant twice on one RFQ (variant 1 and 2) with
+      // different vendor sets: only the (product_variant_id, rfq_id, variant)
+      // join keeps their vendors, specs, quotes and POs apart.
+      if (products.length && r.chance(0.25)) {
+        const twin = products[0];
+        const row = await t.one(
+          `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant)
+           VALUES ($1, '', '0', '', '', $2, $3) RETURNING id`,
+          [rfq_id, twin.vid, twin.variant === 1 ? 2 : 1]
+        );
+        products.push({ id: row.id, vid: twin.vid, variant: twin.variant === 1 ? 2 : 1 });
+      }
 
       // invitations
       const invited = new Map(); // product.id -> [vendor]
