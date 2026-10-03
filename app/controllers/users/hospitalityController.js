@@ -428,6 +428,20 @@ const _sendSubscriptionConfirmationEmail = async ({
   }
 };
 
+/**
+ * Send the confirmation email AFTER the HTTP response, outside any
+ * transaction. It renders two PDFs and talks to SMTP; awaiting it made
+ * verify-payment run ~66 s (p95 30 s) while the vendor watched a spinner.
+ * Failures are logged, never surfaced: the payment is already recorded.
+ */
+const _sendSubscriptionConfirmationEmailInBackground = (args, failureLabel) =>
+  new Promise((resolve) => setImmediate(resolve))
+    .then(() => _sendSubscriptionConfirmationEmail(args))
+    .then(() => true)
+    .catch((err) => {
+      logError(failureLabel, err);
+      return false;
+    });
 
 /**
  * The company named in the URL, if it belongs to the caller's buyer company.
@@ -3227,9 +3241,10 @@ const HospitalityController = {
           ? Moment(applied.sharedEnd).format('MMMM DD, YYYY')
           : null;
 
-        // Send modification confirmation email (with invoice + payment PDFs).
-        try {
-          await _sendSubscriptionConfirmationEmail({
+        // Modification confirmation email (with invoice + payment PDFs),
+        // sent after the response: see _sendSubscriptionConfirmationEmailInBackground.
+        _sendSubscriptionConfirmationEmailInBackground(
+          {
             kind: 'modification',
             userId,
             totalAmount: parseFloat(payment.amount) || 0,
@@ -3242,10 +3257,9 @@ const HospitalityController = {
             removedCategories: applied?.removedCategoryNames || [],
             removedSubcategories: applied?.removedSubcategoryNames || [],
             removedHotels: applied?.removedHotelNames || []
-          });
-        } catch (emailErr) {
-          logError('Modification confirmation email failed:', emailErr);
-        }
+          },
+          'Modification confirmation email failed:'
+        );
 
         return res.status(200).json({
           status: 1,
@@ -3360,10 +3374,10 @@ const HospitalityController = {
       );
       const isRenewal = paymentCount && parseInt(paymentCount.cnt) > 1;
 
-      // Send confirmation email (registration / renewal — modification path
-      // is sent further below after _applyModificationFromMetadata).
-      try {
-        await _sendSubscriptionConfirmationEmail({
+      // Confirmation email (registration / renewal), sent after the response
+      // so the invoice + receipt render and SMTP no longer hold the request.
+      _sendSubscriptionConfirmationEmailInBackground(
+        {
           kind: isRenewal ? 'renewal' : 'registration',
           userId,
           totalAmount,
@@ -3373,10 +3387,9 @@ const HospitalityController = {
           addedCategories: categories,
           addedSubcategories: [],
           addedHotels: hotels
-        });
-      } catch (emailError) {
-        logError('Verify payment email error:', emailError);
-      }
+        },
+        'Verify payment email error:'
+      );
 
       return res.status(200).json({
         status: 1,

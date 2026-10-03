@@ -13,7 +13,7 @@ import { logger } from '../../util/logger.js';
 import pricingEngine from '../../services/pricingEngine.js';
 import axios from 'axios';
 import crypto from 'crypto';
-import puppeteer from 'puppeteer';
+import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import fs from 'fs';
@@ -340,17 +340,9 @@ export async function generateContractPdf(ctx, vendor, lines, contractId, { sign
   // with its own delta template instead of the rate-contract template.
   const html = htmlOverride || renderContractDocumentHtml(ctx, vendor, lines, { signed, signedAt, annexures });
   const tmpPath = path.join(os.tmpdir(), `arc-contract-${contractId}-${signed ? 'signed' : 'draft'}-${Date.now()}.pdf`);
-  let browser = null;
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await page.pdf({ path: tmpPath, format: 'A4', printBackground: true, margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' } });
-    await browser.close();
-    browser = null;
+    // Shared Chromium (A4, backgrounds, 12 mm margins are its defaults).
+    await pdfRenderer.renderToFile(html, tmpPath);
 
     const pdfBuffer = fs.readFileSync(tmpPath);
     const hash = crypto.createHash('sha256').update(pdfBuffer).digest('hex');
@@ -358,7 +350,6 @@ export async function generateContractPdf(ctx, vendor, lines, contractId, { sign
     const up = await uploadToS3(tmpPath, s3Key);
     return { url: up?.url || null, hash };
   } finally {
-    if (browser) { try { await browser.close(); } catch (_) { /* swallow */ } }
     try { fs.existsSync(tmpPath) && fs.unlinkSync(tmpPath); } catch (_) { /* swallow */ }
   }
 }

@@ -69,30 +69,67 @@ const initOptions = {
 };
 const pgp = pg(initOptions);
 
-const cn = {
-  user: process.env.DATABASE_USERNAME || null,
-  password: process.env.DATABASE_PASSWORD || null,
-  database: process.env.DATABASE_NAME || null,
-  host: process.env.HOST || null,
-  port: process.env.DATABASE_PORT || null,
-  dialect: process.env.DATABASE_DIALECT || null,
-  // RDS requires SSL; local Postgres (e.g. tests via TEST_DB_NO_SSL=1) does not.
-  ssl: process.env.TEST_DB_NO_SSL === '1' ? false : { rejectUnauthorized: false },
-
-  // node-pg defaults to 10 connections, and nothing here had ever raised it.
-  // That was already tight; it became a real ceiling once PO approvals started
-  // holding a connection across the document render, because the approval and
-  // its document now share one transaction on one connection. Rendering is
-  // capped at 2 concurrent pages (app/util/pdfRenderer.js), so the render is
-  // not what exhausts this — but the headroom needs to exist.
-  max: Number(process.env.DATABASE_POOL_MAX) || 25,
-
-  // Do not let a caller wait forever for a connection. A pool that is empty
-  // for 10 seconds is a pool in trouble, and a fast error is more actionable
-  // than a hung request.
-  connectionTimeoutMillis: Number(process.env.DATABASE_CONNECTION_TIMEOUT_MS) || 10_000,
-  idleTimeoutMillis: Number(process.env.DATABASE_IDLE_TIMEOUT_MS) || 30_000,
+/** Integer env value; `fallback` when unset/blank/invalid. An explicit 0 is kept. */
+const intFromEnv = (raw, fallback) => {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 };
+
+export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
+export const DEFAULT_IDLE_IN_TX_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Connection config for the app pool, from env. Exported so tests can build a
+ * pool with the exact production shape (and a deliberately tiny timeout).
+ */
+export function buildConnectionConfig(env = process.env) {
+  return {
+    user: env.DATABASE_USERNAME || null,
+    password: env.DATABASE_PASSWORD || null,
+    database: env.DATABASE_NAME || null,
+    host: env.HOST || null,
+    port: env.DATABASE_PORT || null,
+    dialect: env.DATABASE_DIALECT || null,
+    // RDS requires SSL; local Postgres (e.g. tests via TEST_DB_NO_SSL=1) does not.
+    ssl: env.TEST_DB_NO_SSL === '1' ? false : { rejectUnauthorized: false },
+
+    // node-pg defaults to 10 connections, and nothing here had ever raised it.
+    // That was already tight; it became a real ceiling once PO approvals started
+    // holding a connection across the document render, because the approval and
+    // its document now share one transaction on one connection. Rendering is
+    // capped at 2 concurrent pages (app/util/pdfRenderer.js), so the render is
+    // not what exhausts this — but the headroom needs to exist.
+    max: Number(env.DATABASE_POOL_MAX) || 25,
+
+    // Do not let a caller wait forever for a connection. A pool that is empty
+    // for 10 seconds is a pool in trouble, and a fast error is more actionable
+    // than a hung request.
+    connectionTimeoutMillis: Number(env.DATABASE_CONNECTION_TIMEOUT_MS) || 10_000,
+
+    // A new physical connection to RDS costs ~280 ms p50 (TLS + SCRAM). At 30 s
+    // the pool shed connections between bursts and prod opened ~4.7k a day.
+    // Ten minutes keeps a warm pool through normal gaps in traffic.
+    idleTimeoutMillis: intFromEnv(env.DATABASE_IDLE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS,
+
+    // Server-side guards, sent as startup parameters so they apply to every
+    // session on every connection (0 = do not send it, i.e. the server's own
+    // default applies, which is 'disabled' unless the role/DB sets one):
+    //  - statement_timeout: a runaway query (searchProduct has hit 226 s) is
+    //    cancelled instead of pinning a connection and a CPU on the DB.
+    //  - idle_in_transaction_session_timeout: a transaction left open by a
+    //    crashed code path stops holding locks. Must stay >= 5 min: vendor
+    //    regret submission awaits SMTP inside a db.tx.
+    statement_timeout: intFromEnv(env.DATABASE_STATEMENT_TIMEOUT_MS, DEFAULT_STATEMENT_TIMEOUT_MS),
+    idle_in_transaction_session_timeout: intFromEnv(
+      env.DATABASE_IDLE_IN_TX_TIMEOUT_MS,
+      DEFAULT_IDLE_IN_TX_TIMEOUT_MS
+    ),
+  };
+}
+
+const cn = buildConnectionConfig(process.env);
 
 // Return raw timestamp strings (no JS Date conversion) for type 1114 (timestamp).
 pgp.pg.types.setTypeParser(1114, (s) => s);
