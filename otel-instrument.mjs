@@ -16,6 +16,13 @@ import resourcesPkg from '@opentelemetry/resources';
 const { resourceFromAttributes } = resourcesPkg;
 import semConv from '@opentelemetry/semantic-conventions';
 const { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } = semConv;
+import { buildInstrumentationConfig, traceSamplerEnvDefaults } from './app/util/telemetryConfig.js';
+
+// Sample 25% of new traces (parent-based, so a sampled caller keeps its whole
+// trace) unless OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG are set. The SDK
+// reads those standard env vars itself, so they must be in place before
+// NodeSDK is constructed. Compare percentiles across this change, not counts.
+Object.assign(process.env, traceSamplerEnvDefaults(process.env));
 
 const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4317';
 
@@ -40,16 +47,9 @@ const sdk = new NodeSDK({
     ),
   ],
   instrumentations: [
-    getNodeAutoInstrumentations({
-      '@opentelemetry/instrumentation-pg': { enabled: true },
-      '@opentelemetry/instrumentation-express': { enabled: true },
-      '@opentelemetry/instrumentation-http': { enabled: true },
-      '@opentelemetry/instrumentation-pino': { enabled: false },
-      '@opentelemetry/instrumentation-winston': { enabled: false },
-      '@opentelemetry/instrumentation-fs': { enabled: false },
-      '@opentelemetry/instrumentation-dns': { enabled: false },
-      '@opentelemetry/instrumentation-net': { enabled: false },
-    }),
+    // Health/polling/OPTIONS ignored, express layer spans off, pg spans only
+    // inside a request: see app/util/telemetryConfig.js.
+    getNodeAutoInstrumentations(buildInstrumentationConfig()),
   ],
 });
 

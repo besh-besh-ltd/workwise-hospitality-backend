@@ -638,6 +638,89 @@ const rbacModel = {
       `,
       params
     );
+  },
+
+  /**
+   * Batched form of getUsersWithModuleActionsForHotels.
+   *
+   * The RFQ listing resolves "who can action this row" per unique
+   * hotel × department × process × resource combination. Even after
+   * de-duplication that was one round trip per combination — a 10-row page
+   * issued 10 identical-shaped queries, each re-planned from scratch (planning
+   * measured at ~2.5ms against ~1ms of execution). This collapses them into a
+   * single statement so the cost stops scaling with page size.
+   *
+   * `specs` is an array of { key, hotelIds, resource, actions, departmentId,
+   * processId }. Returns a Map of key → [{ id, name, email }], ordered by name
+   * exactly as the single-spec version does.
+   */
+  getUsersWithModuleActionsBatch: async (specs = []) => {
+    const usable = (specs || []).filter(
+      (s) => s && Array.isArray(s.hotelIds) && s.hotelIds.length > 0
+        && s.resource && Array.isArray(s.actions) && s.actions.length > 0
+    );
+    if (usable.length === 0) return new Map();
+
+    const payload = usable.map((s) => ({
+      key: String(s.key),
+      hotel_ids: s.hotelIds.map(Number).filter(Number.isFinite),
+      perm_keys: s.actions.map((a) => `${s.resource}.${a}`),
+      required: new Set(s.actions).size,
+      department_id: s.departmentId == null ? null : Number(s.departmentId),
+      process_id: s.processId == null ? null : Number(s.processId)
+    }));
+
+    const rows = await db.any(
+      `
+      WITH specs AS (
+        SELECT s->>'key' AS spec_key,
+               ARRAY(SELECT jsonb_array_elements_text(s->'hotel_ids'))::int[] AS hotel_ids,
+               ARRAY(SELECT jsonb_array_elements_text(s->'perm_keys'))::text[] AS perm_keys,
+               (s->>'required')::int AS required,
+               (s->>'department_id')::int AS department_id,
+               (s->>'process_id')::int AS process_id
+        FROM jsonb_array_elements($1::jsonb) s
+      ),
+      spec_companies AS (
+        SELECT DISTINCT sp.spec_key, h.hospitality_company_id
+        FROM specs sp
+        JOIN tbl_hospitality_company_hotels h
+          ON h.id = ANY(sp.hotel_ids)
+         AND h.is_deleted = 0
+      )
+      SELECT sp.spec_key, u.id, u.name, u.email
+      FROM specs sp
+      JOIN spec_companies sc ON sc.spec_key = sp.spec_key
+      JOIN tbl_user_role_scopes urs
+        ON urs.company_id = sc.hospitality_company_id
+       AND (urs.hotel_id IS NULL OR urs.hotel_id = ANY(sp.hotel_ids))
+       AND (sp.department_id IS NULL OR urs.department_id = sp.department_id OR urs.department_id IS NULL)
+       AND (sp.process_id IS NULL OR urs.process_id IS NULL OR urs.process_id = sp.process_id)
+      JOIN tbl_users u ON u.id = urs.user_id
+      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE u.is_deleted = 0
+        AND u.status = 1
+        -- Same NULL-safe vendor exclusion as the single-spec query above.
+        AND (u.user_type IS NULL OR u.user_type <> 3)
+      GROUP BY sp.spec_key, sp.required, u.id, u.name, u.email
+      HAVING COUNT(DISTINCT CASE
+        WHEN (p.resource || '.' || p.action) = ANY(sp.perm_keys)
+        THEN (p.resource || '.' || p.action)
+      END) = sp.required
+      -- u.id breaks name ties so the order is deterministic (the single-spec
+      -- query leaves equal names in arbitrary order).
+      ORDER BY sp.spec_key, u.name ASC, u.id ASC
+      `,
+      [JSON.stringify(payload)]
+    );
+
+    const out = new Map();
+    for (const r of rows) {
+      if (!out.has(r.spec_key)) out.set(r.spec_key, []);
+      out.get(r.spec_key).push({ id: r.id, name: r.name, email: r.email });
+    }
+    return out;
   }
 
 };

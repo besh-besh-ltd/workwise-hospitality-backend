@@ -171,14 +171,30 @@ function scopeFilter(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS
  *
  * If selectedHotelIds are provided, intersects with the allowed set.
  */
-async function resolveUserScope(user_id, selectedHotelIds = []) {
-  // Check user type
-  const userInfo = await db.oneOrNone(
-    // `id` is selected because the capability check below needs it: the
-    // capability lives on the user's granted role scopes, not on the row.
-    `SELECT id, user_type, company_id FROM tbl_users WHERE id = $1`,
-    [user_id]
-  );
+/**
+ * @param {object|null} knownUser - the already-loaded `req.user` row, when the
+ *   caller has one. The auth middleware SELECTs the whole tbl_users row before
+ *   any handler runs, so re-reading id/user_type/company_id here was a second
+ *   round trip for data already in hand — once per widget, ~30 per dashboard
+ *   load. The row is only trusted when its id matches `user_id`; anything else
+ *   falls back to the authoritative lookup, so a mismatched hand-off can never
+ *   widen scope. Scope stays derived from user_id, never from client input.
+ */
+async function resolveUserScope(user_id, selectedHotelIds = [], knownUser = null) {
+  const canUseKnownUser =
+    knownUser &&
+    Number(knownUser.id) === Number(user_id) &&
+    knownUser.user_type !== undefined &&
+    knownUser.company_id !== undefined;
+
+  const userInfo = canUseKnownUser
+    ? { id: knownUser.id, user_type: knownUser.user_type, company_id: knownUser.company_id }
+    : await db.oneOrNone(
+        // `id` is selected because the capability check below needs it: the
+        // capability lives on the user's granted role scopes, not on the row.
+        `SELECT id, user_type, company_id FROM tbl_users WHERE id = $1`,
+        [user_id]
+      );
 
   if (!userInfo) return null;
 
@@ -1166,63 +1182,75 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
   const hf = hotelFilter();
   const params = [buyer_company_id, start_date, end_date, hotel_ids];
   const sc = scopeFilter(user_id, 'r', params);
-  // Second alias for the benchmark LATERAL below, correlated on r2.
-  const sc2 = scopeFilter(user_id, 'r2', params);
 
-  // CROSS-TENANT LEAK (P0, fixed here).
+  // In-scope RFQ ids, resolved ONCE per statement.
   //
-  // The `market` LATERAL used to read tbl_quote_items with NO predicate other
-  // than the product variant:
-  //     SELECT AVG(qi2.unit_price) FROM tbl_quote_items qi2
-  //      WHERE qi2.product_variant_id = qi.product_variant_id
-  // — every quote from every buyer on the platform. That average was then
-  // rendered verbatim into the insight copy at the bottom of this function
-  // ("Market: ₹…"), so one tenant's negotiated unit prices reached another
-  // tenant's screen. Verified on production: 3 product variants are quoted by
-  // both buyer_company 13 and 90, and for OVAL TABLE (variant 13038) the
-  // HAVING below is satisfied — company 13's own average of ₹6,800 (₹11,000 +
-  // ₹2,600 over two quotes) is compared against a "market" of ₹4,533.33, a
-  // figure only reachable by averaging in company 90's ₹0.00 row. A number
-  // arithmetically impossible from company 13's own data was being rendered
-  // to company 13 as their market benchmark.
+  // Every query below used to join tbl_rfq and evaluate the company + hotel +
+  // 3-way RBAC EXISTS (rfq/boq/awarding.read) once per QUOTE-ITEM or PO-LINE
+  // row; the price-deviation query did it twice per row, the second time
+  // inside a per-row LATERAL. That one statement was 17% of all prod DB time
+  // (1.1 s mean, 7.2 s for a wide-scope user, ~1.25B seq-scanned rows of
+  // tbl_role_permissions). The predicate only depends on the RFQ, so it is
+  // evaluated here once per RFQ and the fact rows semi-join the result.
+  // MATERIALIZED stops the planner from inlining it back into the row loop.
+  // Same predicate, same rows: tbl_rfq.id is the PK, so the old 1:1 join and
+  // this semi-join select identical fact rows.
+  const scopedCte = `scoped AS MATERIALIZED (
+       SELECT r.id FROM tbl_rfq r
+       WHERE ${companyScope()} ${hf} ${sc}
+     )`;
+
+  // CROSS-TENANT LEAK (P0, fixed earlier; preserved here).
   //
-  // The LATERAL now walks quote → rfq → the same company/hotel/RBAC scope as
-  // the outer query. The comparison it expresses becomes "this period's price
-  // vs YOUR OWN all-time average for this item" (the LATERAL stays deliberately
-  // date-unbounded, which is what made it a useful baseline in the first place).
+  // The market average once read tbl_quote_items with NO predicate other than
+  // the product variant — every quote from every buyer on the platform — and
+  // rendered it into the insight copy ("Market: ₹…"). It is now "this
+  // period's price vs YOUR OWN all-time average for this item": `market`
+  // averages the same scoped item set the outer query reads, deliberately
+  // date-unbounded (that is what makes it a baseline). Computing it once per
+  // variant instead of once per quote line is the perf fix (prod 7.2 s ->
+  // 64 ms, identical rows).
+  //
+  // ORDER BY is new: the old LIMIT 3 had none, so WHICH three deviations
+  // surfaced was whatever the hash aggregate emitted first. Now the largest.
   const priceDeviationsQuery = db.any(
-    `SELECT pv.name as product_name,
-       AVG(qi.unit_price) as user_avg_price,
-       market.avg_price as market_avg_price,
-       ROUND(((AVG(qi.unit_price) - market.avg_price) / market.avg_price * 100)::numeric, 1) as deviation_pct
-     FROM tbl_quote_items qi
-     JOIN tbl_quotes q ON q.id = qi.quote_id
-     JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
-     JOIN tbl_product_variant pv ON pv.id = qi.product_variant_id
-     CROSS JOIN LATERAL (
-       SELECT AVG(qi2.unit_price) as avg_price
-       FROM tbl_quote_items qi2
-       JOIN tbl_quotes q2 ON q2.id = qi2.quote_id
-       JOIN tbl_rfq r2 ON r2.id = q2.rfq_id AND ${companyScope('r2')}
-       WHERE qi2.product_variant_id = qi.product_variant_id
-       ${hotelFilter('r2')} ${sc2}
-     ) market
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc} AND market.avg_price > 0
-     GROUP BY pv.name, market.avg_price
-     HAVING AVG(qi.unit_price) > market.avg_price * 1.15
+    `WITH ${scopedCte},
+     items AS MATERIALIZED (
+       SELECT qi.product_variant_id, qi.unit_price, q.timestamp
+       FROM tbl_quote_items qi
+       JOIN tbl_quotes q ON q.id = qi.quote_id
+       JOIN scoped s ON s.id = q.rfq_id
+     ),
+     market AS (
+       SELECT product_variant_id, AVG(unit_price) AS avg_price
+       FROM items
+       GROUP BY product_variant_id
+     )
+     SELECT pv.name as product_name,
+       AVG(i.unit_price) as user_avg_price,
+       m.avg_price as market_avg_price,
+       ROUND(((AVG(i.unit_price) - m.avg_price) / m.avg_price * 100)::numeric, 1) as deviation_pct
+     FROM items i
+     JOIN market m ON m.product_variant_id = i.product_variant_id
+     JOIN tbl_product_variant pv ON pv.id = i.product_variant_id
+     WHERE i.timestamp BETWEEN $2 AND $3 AND m.avg_price > 0
+     GROUP BY pv.name, m.avg_price
+     HAVING AVG(i.unit_price) > m.avg_price * 1.15
+     ORDER BY deviation_pct DESC, product_name ASC, market_avg_price ASC
      LIMIT 3`,
     params
   );
 
   const bestVendorQuery = db.oneOrNone(
-    `SELECT u.name as vendor_name, COALESCE(c.company_name, u.organization_name) as company_name,
+    `WITH ${scopedCte}
+     SELECT u.name as vendor_name, COALESCE(c.company_name, u.organization_name) as company_name,
        COUNT(*) as best_price_count
      FROM tbl_quote_items qi
      JOIN tbl_quotes q ON q.id = qi.quote_id
-     JOIN tbl_rfq r ON r.id = q.rfq_id AND ${companyScope()}
+     JOIN scoped s ON s.id = q.rfq_id
      JOIN tbl_users u ON u.id = q.created_by
      LEFT JOIN tbl_company c ON c.id = u.company_id
-     WHERE q.timestamp BETWEEN $2 AND $3 ${hf} ${sc}
+     WHERE q.timestamp BETWEEN $2 AND $3
      -- The MIN() subquery is correlated on qi.rfq_id, so it can only ever read
      -- quotes belonging to the same RFQ (and therefore the same tenant).
      AND qi.unit_price = (
@@ -1230,28 +1258,29 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
        WHERE qi2.rfq_id = qi.rfq_id AND qi2.product_variant_id = qi.product_variant_id
      )
      GROUP BY u.id, u.name, c.company_name, u.organization_name
-     ORDER BY best_price_count DESC LIMIT 1`,
+     -- u.id: a tie on the count used to pick an arbitrary vendor.
+     ORDER BY best_price_count DESC, u.id ASC LIMIT 1`,
     params
   );
 
   const periodDuration = `($3::timestamp - $2::timestamp)`;
   const spendTrendQuery = db.oneOrNone(
-    `WITH current_spend AS (
+    `WITH ${scopedCte},
+     current_spend AS (
        SELECT COALESCE(SUM(pop.total_price), 0) as total
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
+       JOIN scoped s ON s.id = po.rfq_id
+       WHERE po.created_at BETWEEN $2 AND $3
+       AND po.status NOT IN ('draft', 'cancelled')
      ),
      previous_spend AS (
        SELECT COALESCE(SUM(pop.total_price), 0) as total
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()}
-       AND po.created_at BETWEEN ($2::timestamp - ${periodDuration}) AND $2
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
+       JOIN scoped s ON s.id = po.rfq_id
+       WHERE po.created_at BETWEEN ($2::timestamp - ${periodDuration}) AND $2
+       AND po.status NOT IN ('draft', 'cancelled')
      )
      SELECT cs.total as current_spend, ps.total as previous_spend,
        CASE WHEN ps.total > 0
@@ -1266,16 +1295,17 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
   // (value-based benchmark, same as the Price benchmarking widget). Ordered by
   // in-period spend so the highest-impact (A-class) items surface first.
   const benchmarkDeviationsQuery = db.any(
-    `WITH item_po AS (
+    `WITH ${scopedCte},
+     item_po AS (
        SELECT rp.product_variant_id,
          SUM(pop.total_price) as period_value,
          (ARRAY_AGG(pop.unit_price ORDER BY po.created_at DESC))[1] as latest_price
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.created_at BETWEEN $2 AND $3
-       AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
+       JOIN scoped s ON s.id = po.rfq_id
+       WHERE po.created_at BETWEEN $2 AND $3
+       AND po.status NOT IN ('draft', 'cancelled')
        GROUP BY rp.product_variant_id
      ),
      benchmark AS (
@@ -1283,8 +1313,8 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       JOIN tbl_rfq r ON r.id = po.rfq_id
-       WHERE ${companyScope()} AND po.status NOT IN ('draft', 'cancelled') ${hf} ${sc}
+       JOIN scoped s ON s.id = po.rfq_id
+       WHERE po.status NOT IN ('draft', 'cancelled')
        GROUP BY rp.product_variant_id
      )
      SELECT pv.name as product_name, ip.latest_price, b.best_price, ip.period_value,
@@ -1293,7 +1323,7 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
      JOIN benchmark b ON b.product_variant_id = ip.product_variant_id
      JOIN tbl_product_variant pv ON pv.id = ip.product_variant_id
      WHERE b.best_price > 0 AND ip.latest_price > b.best_price * 1.1
-     ORDER BY ip.period_value DESC
+     ORDER BY ip.period_value DESC, ip.product_variant_id ASC
      LIMIT 3`,
     params
   );

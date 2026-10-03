@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import puppeteer from 'puppeteer';
+import { pdfRenderer } from '../../util/pdfRenderer.js';
 import db from '../../config/dbConn.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
@@ -170,6 +170,14 @@ export async function loadCallOffPoContext(poId, runner = db) {
 }
 
 /**
+ * Render a call-off PO document context to a PDF file through the shared
+ * Chromium (A4, backgrounds, 12 mm margins are pdfRenderer's defaults).
+ */
+export async function renderCallOffPoPdfFile(ctx, outputPath) {
+  return pdfRenderer.renderToFile(renderCallOffPoHtml(ctx), outputPath);
+}
+
+/**
  * Render the call-off PO PDF via Puppeteer, upload to S3, and persist
  * po_pdf_url. Best-effort + test-gated: never launches a browser / hits S3 in
  * the test harness, and any failure is swallowed (logged) so it can't undo the
@@ -178,20 +186,10 @@ export async function loadCallOffPoContext(poId, runner = db) {
 export async function generateCallOffPoPdf(poId) {
   if (process.env.NODE_ENV === 'test') return null;
   const tmpPath = path.join(os.tmpdir(), `calloff-po-${poId}-${Date.now()}.pdf`);
-  let browser = null;
   try {
     const ctx = await loadCallOffPoContext(poId);
     if (!ctx) return null;
-    const html = renderCallOffPoHtml(ctx);
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await page.pdf({ path: tmpPath, format: 'A4', printBackground: true, margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' } });
-    await browser.close();
-    browser = null;
+    await renderCallOffPoPdfFile(ctx, tmpPath);
 
     const pdfBuffer = fs.readFileSync(tmpPath);
     const hash = crypto.createHash('sha256').update(pdfBuffer).digest('hex');
@@ -206,7 +204,6 @@ export async function generateCallOffPoPdf(poId) {
     logger.error({ err, poId }, '[callOffPoRenderer.generateCallOffPoPdf] failed (non-fatal)');
     return null;
   } finally {
-    if (browser) { try { await browser.close(); } catch (_) { /* swallow */ } }
     try { fs.existsSync(tmpPath) && fs.unlinkSync(tmpPath); } catch (_) { /* swallow */ }
   }
 }
