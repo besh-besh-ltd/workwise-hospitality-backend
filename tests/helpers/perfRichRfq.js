@@ -317,7 +317,11 @@ const TS = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 // `mask` names keys whose values depend on data OUTSIDE the fixture (e.g. a
 // vendor's lifetime RFQ count, which other suites in the same shard can move);
 // they are replaced by their type so the snapshot stays deterministic.
-export function normalizeForSnapshot(value, { mask = [] } = {}) {
+//
+// `idKeyed` maps a key whose value is an object KEYED BY ids (e.g. the
+// negotiation `vendors` map, keyed by rfq_product_id) to the id namespace its
+// keys belong to; those keys are tokenised in that namespace.
+export function normalizeForSnapshot(value, { mask = [], idKeyed = {} } = {}) {
   const masked = new Set(mask);
   const tables = new Map();
   const tok = (ns, v) => {
@@ -328,6 +332,11 @@ export function normalizeForSnapshot(value, { mask = [] } = {}) {
   };
   const walk = (v, key) => {
     if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (v && typeof v === "object" && key && idKeyed[key]) {
+      const out = {};
+      for (const k of Object.keys(v)) out[tok(idKeyed[key], String(k))] = walk(v[k], null);
+      return out;
+    }
     if (v && typeof v === "object") {
       const out = {};
       for (const k of Object.keys(v)) {
