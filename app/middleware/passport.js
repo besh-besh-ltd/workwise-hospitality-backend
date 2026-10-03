@@ -3,17 +3,13 @@ import { Strategy as LocalStrategy } from 'passport-local';
 import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import { encode } from 'html-entities';
 import Moment from 'moment';
-import Cryptr from 'cryptr';
 import bcrypt from 'bcryptjs';
 import Config from '../config/app.config.js';
 import adminModel from '../models/adminModel.js';
 import userModel from '../models/userModel.js';
 import { logger } from '../util/logger.js';
-import { createDecryptMemo } from '../helper/decryptMemo.js';
-
-const cryptr = new Cryptr(Config.cryptR.secret);
-// Claim decryption only (never the auth decision) — see app/helper/decryptMemo.js.
-const decryptClaim = createDecryptMemo((ciphertext) => cryptr.decrypt(ciphertext));
+// Claim decryption only (never the auth decision) — see app/helper/claimCrypto.js.
+import { decryptClaim } from '../helper/claimCrypto.js';
 
 // import models from '../models/productModel.js';
 // const userModel = models.user;
@@ -154,7 +150,7 @@ passport.use(
           }
         }
 
-        const user = await adminModel.getUserById(cryptr.decrypt(payload.sub));
+        const user = await adminModel.getUserById(decryptClaim(payload.sub));
 
         if (user.length > 0) {
           // The token, not the account, is what makes this Workwise staff.

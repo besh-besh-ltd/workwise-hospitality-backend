@@ -1,12 +1,11 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
-import Cryptr from 'cryptr';
 import Config from '../config/app.config.js';
+import { decryptClaim } from '../helper/claimCrypto.js';
 import { logger } from './logger.js';
 import db from '../config/dbConn.js';
 
 let ioInstance = null;
-const cryptr = new Cryptr(Config.cryptR.secret);
 
 /**
  * Pull the user id out of a login JWT, the same way passport's `jwtUsr`
@@ -26,7 +25,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 const resolveUserIdFromPayload = (payload) => {
   if (payload?.sub) {
     try {
-      const decrypted = Number(cryptr.decrypt(payload.sub));
+      const decrypted = Number(decryptClaim(payload.sub));
       if (Number.isInteger(decrypted) && decrypted > 0) return decrypted;
     } catch (_) {
       // Not an encrypted id — fall through to the numeric shapes below.

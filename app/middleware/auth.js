@@ -3,8 +3,7 @@ import Config from '../config/app.config.js';
 import { logError } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import adminModel from '../models/adminModel.js';
-import Cryptr from 'cryptr';
-const cryptr = new Cryptr(Config.cryptR.secret);
+import { decryptClaim } from '../helper/claimCrypto.js';
 
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
@@ -183,7 +182,7 @@ const auth = {
                   error++;
                 }
               }
-              user = await adminModel.getUserById(cryptr.decrypt(payload.sub));
+              user = await adminModel.getUserById(decryptClaim(payload.sub));
             }
 
             if (user.length > 0 && error == 0) {
