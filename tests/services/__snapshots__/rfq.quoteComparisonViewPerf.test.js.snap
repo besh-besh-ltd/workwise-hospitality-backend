@@ -19,7 +19,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
   "bid_end_date": "<ts#1>",
   "categories": [
     {
-      "id": "<id#3>",
+      "id": "<categories.id#1>",
       "name": "BEVERAGES",
     },
   ],
@@ -112,7 +112,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
         "name": "A1 Proc Buyer",
       },
       "finalized_vendor": 80101,
-      "id": "<id#4>",
+      "id": "<products.id#1>",
       "lpr": {
         "date": null,
         "landed_unit": null,
@@ -309,7 +309,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "category": 215,
       "finalized_by": null,
       "finalized_vendor": null,
-      "id": "<id#5>",
+      "id": "<products.id#2>",
       "lpr": {
         "date": null,
         "landed_unit": null,
@@ -400,7 +400,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
     "department": "Procurement",
     "email": "test@example.com",
     "hotel": "Hotel A-1",
-    "id": "<id#1>",
+    "id": "<rfq.id#1>",
     "number": "<number#1>",
     "phone": "+91-9999999999",
     "project_id": null,
@@ -433,7 +433,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
   },
   "vendors": [
     {
-      "id": "<id#2>",
+      "id": "<vendors.id#1>",
       "invited_rfqs": "<masked:number>",
       "is_new": "<masked:boolean>",
       "name": "Alpha Vendor Pvt Ltd",

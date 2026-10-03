@@ -10,14 +10,14 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         {
           "company_name": "Alpha Vendor Pvt Ltd",
           "email": "alpha@vendor.test",
-          "id": "<id#2>",
+          "id": "<assigned_vendors.id#1>",
           "name": "Alpha Vendor Contact",
           "organization_name": null,
         },
         {
           "company_name": "Beta Vendor Pvt Ltd",
           "email": "beta@vendor.test",
-          "id": "<id#3>",
+          "id": "<assigned_vendors.id#2>",
           "name": "Beta Vendor Contact",
           "organization_name": null,
         },
@@ -28,7 +28,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
       "created_by_email": "a1.proc.buyer@test.local",
       "created_by_name": "A1 Proc Buyer",
       "end_date": "<ts#1>",
-      "id": "<id#1>",
+      "id": "<data.id#1>",
       "product_name": "7 UP PEPSI 1.5 LTR",
       "product_names": [
         {
@@ -60,14 +60,14 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         {
           "company_name": "Alpha Vendor Pvt Ltd",
           "email": "alpha@vendor.test",
-          "id": "<id#2>",
+          "id": "<assigned_vendors.id#1>",
           "name": "Alpha Vendor Contact",
           "organization_name": null,
         },
         {
           "company_name": "Beta Vendor Pvt Ltd",
           "email": "beta@vendor.test",
-          "id": "<id#3>",
+          "id": "<assigned_vendors.id#2>",
           "name": "Beta Vendor Contact",
           "organization_name": null,
         },
@@ -78,7 +78,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
       "created_by_email": "a1.proc.buyer@test.local",
       "created_by_name": "A1 Proc Buyer",
       "end_date": "<ts#3>",
-      "id": "<id#4>",
+      "id": "<data.id#2>",
       "product_name": "7 UP PEPSI 330 ML",
       "product_names": [
         {
@@ -110,14 +110,14 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         {
           "company_name": "Alpha Vendor Pvt Ltd",
           "email": "alpha@vendor.test",
-          "id": "<id#2>",
+          "id": "<assigned_vendors.id#1>",
           "name": "Alpha Vendor Contact",
           "organization_name": null,
         },
         {
           "company_name": "Beta Vendor Pvt Ltd",
           "email": "beta@vendor.test",
-          "id": "<id#3>",
+          "id": "<assigned_vendors.id#2>",
           "name": "Beta Vendor Contact",
           "organization_name": null,
         },
@@ -128,7 +128,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
       "created_by_email": "a1.proc.buyer@test.local",
       "created_by_name": "A1 Proc Buyer",
       "end_date": "<ts#5>",
-      "id": "<id#5>",
+      "id": "<data.id#3>",
       "product_name": "7 UP PEPSI 330 ML",
       "product_names": [
         {
@@ -163,7 +163,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": null,
         "company_name": "Alpha Vendor Pvt Ltd",
         "email": "alpha@vendor.test",
-        "id": "<id#2>",
+        "id": "<root.id#1>",
         "in_active_round": false,
         "name": "Alpha Vendor Contact",
         "organization_name": null,
@@ -174,7 +174,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": null,
         "company_name": "Beta Vendor Pvt Ltd",
         "email": "beta@vendor.test",
-        "id": "<id#3>",
+        "id": "<root.id#2>",
         "in_active_round": false,
         "name": "Beta Vendor Contact",
         "organization_name": null,
@@ -187,7 +187,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": "ACTIVE",
         "company_name": "Alpha Vendor Pvt Ltd",
         "email": "alpha@vendor.test",
-        "id": "<id#2>",
+        "id": "<root.id#1>",
         "in_active_round": true,
         "name": "Alpha Vendor Contact",
         "organization_name": null,
@@ -198,7 +198,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": "ACTIVE",
         "company_name": "Beta Vendor Pvt Ltd",
         "email": "beta@vendor.test",
-        "id": "<id#3>",
+        "id": "<root.id#2>",
         "in_active_round": true,
         "name": "Beta Vendor Contact",
         "organization_name": null,
@@ -218,14 +218,14 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         {
           "company_name": "Alpha Vendor Pvt Ltd",
           "email": "alpha@vendor.test",
-          "id": "<id#2>",
+          "id": "<assigned_vendors.id#1>",
           "name": "Alpha Vendor Contact",
           "organization_name": null,
         },
         {
           "company_name": "Beta Vendor Pvt Ltd",
           "email": "beta@vendor.test",
-          "id": "<id#3>",
+          "id": "<assigned_vendors.id#2>",
           "name": "Beta Vendor Contact",
           "organization_name": null,
         },
@@ -236,7 +236,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
       "created_by_email": "a1.proc.buyer@test.local",
       "created_by_name": "A1 Proc Buyer",
       "end_date": "<ts#1>",
-      "id": "<id#1>",
+      "id": "<data.id#1>",
       "product_name": "7 UP PEPSI 330 ML",
       "product_names": [
         {
@@ -268,14 +268,14 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         {
           "company_name": "Alpha Vendor Pvt Ltd",
           "email": "alpha@vendor.test",
-          "id": "<id#2>",
+          "id": "<assigned_vendors.id#1>",
           "name": "Alpha Vendor Contact",
           "organization_name": null,
         },
         {
           "company_name": "Beta Vendor Pvt Ltd",
           "email": "beta@vendor.test",
-          "id": "<id#3>",
+          "id": "<assigned_vendors.id#2>",
           "name": "Beta Vendor Contact",
           "organization_name": null,
         },
@@ -286,7 +286,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
       "created_by_email": "a1.proc.buyer@test.local",
       "created_by_name": "A1 Proc Buyer",
       "end_date": "<ts#3>",
-      "id": "<id#4>",
+      "id": "<data.id#2>",
       "product_name": "7 UP PEPSI 330 ML",
       "product_names": [
         {
@@ -321,7 +321,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": "ACTIVE",
         "company_name": "Alpha Vendor Pvt Ltd",
         "email": "alpha@vendor.test",
-        "id": "<id#2>",
+        "id": "<root.id#1>",
         "in_active_round": true,
         "name": "Alpha Vendor Contact",
         "organization_name": null,
@@ -332,7 +332,7 @@ exports[`negotiation rounds — batched vendor lookups + active-all tenant gate 
         "active_round_status": "ACTIVE",
         "company_name": "Beta Vendor Pvt Ltd",
         "email": "beta@vendor.test",
-        "id": "<id#3>",
+        "id": "<root.id#2>",
         "in_active_round": true,
         "name": "Beta Vendor Contact",
         "organization_name": null,

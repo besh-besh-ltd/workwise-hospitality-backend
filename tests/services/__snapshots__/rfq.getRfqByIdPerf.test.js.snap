@@ -15,7 +15,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
       "users": [
         {
           "email": "a1.proc.poapp@test.local",
-          "id": "<id#7>",
+          "id": "<users.id#1>",
           "name": "A1 Proc PO Approver",
         },
       ],
@@ -25,17 +25,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "commercial_evaluators": [
       {
         "email": "a1.proc.commeval@test.local",
-        "id": "<id#11>",
+        "id": "<commercial_evaluators.id#1>",
         "name": "A1 Proc Commercial Negotiator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#9>",
+        "id": "<commercial_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#10>",
+        "id": "<commercial_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -52,7 +52,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "hospitality_company_id": "<hospitality_company_id#1>",
     "hotel_id": "<hotel_id#1>",
     "hotel_name": "Hotel A-1",
-    "id": "<id#1>",
+    "id": "<data.id#1>",
     "is_published": 1,
     "is_quotes_present": true,
     "is_tender": 0,
@@ -61,17 +61,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "po_initiators": [
       {
         "email": "a1.proc.poapp@test.local",
-        "id": "<id#7>",
+        "id": "<po_initiators.id#1>",
         "name": "A1 Proc PO Approver",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#9>",
+        "id": "<po_initiators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#10>",
+        "id": "<po_initiators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -89,7 +89,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
           "vendor_name": "Alpha Vendor Pvt Ltd",
         },
         "has_approved_po": false,
-        "id": "<id#2>",
+        "id": "<products.id#1>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -101,7 +101,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#3>",
+            "id": "<product_details.id#1>",
             "name": "7 UP PEPSI 1.5 LTR",
           },
         ],
@@ -113,13 +113,13 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
           {
             "clause_text": "Clause 1",
             "clause_type": "clause",
-            "id": "<id#4>",
+            "id": "<tech_eval_clauses.id#1>",
             "weightage": 60,
           },
           {
             "clause_text": "Clause 2",
             "clause_type": "clause",
-            "id": "<id#5>",
+            "id": "<tech_eval_clauses.id#2>",
             "weightage": 40,
           },
         ],
@@ -143,7 +143,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
         "finalization_status": "No vendor finalized yet",
         "finalized_vendor": null,
         "has_approved_po": false,
-        "id": "<id#6>",
+        "id": "<products.id#2>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -155,7 +155,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#4>",
+            "id": "<product_details.id#2>",
             "name": "7 UP PEPSI 330 ML",
           },
         ],
@@ -193,17 +193,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "technical_evaluators": [
       {
         "email": "a1.proc.techeval@test.local",
-        "id": "<id#8>",
+        "id": "<technical_evaluators.id#1>",
         "name": "A1 Proc Tech Evaluator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#9>",
+        "id": "<technical_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#10>",
+        "id": "<technical_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -234,17 +234,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "commercial_evaluators": [
       {
         "email": "a1.proc.commeval@test.local",
-        "id": "<id#10>",
+        "id": "<commercial_evaluators.id#1>",
         "name": "A1 Proc Commercial Negotiator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#8>",
+        "id": "<commercial_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#9>",
+        "id": "<commercial_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -261,7 +261,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "hospitality_company_id": "<hospitality_company_id#1>",
     "hotel_id": "<hotel_id#1>",
     "hotel_name": "Hotel A-1",
-    "id": "<id#1>",
+    "id": "<data.id#1>",
     "is_published": 1,
     "is_quotes_present": true,
     "is_tender": 0,
@@ -270,17 +270,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "po_initiators": [
       {
         "email": "a1.proc.poapp@test.local",
-        "id": "<id#11>",
+        "id": "<po_initiators.id#1>",
         "name": "A1 Proc PO Approver",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#8>",
+        "id": "<po_initiators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#9>",
+        "id": "<po_initiators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -298,7 +298,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
           "vendor_name": "Alpha Vendor Pvt Ltd",
         },
         "has_approved_po": false,
-        "id": "<id#2>",
+        "id": "<products.id#1>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -310,7 +310,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#3>",
+            "id": "<product_details.id#1>",
             "name": "7 UP PEPSI 1.5 LTR",
           },
         ],
@@ -322,13 +322,13 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
           {
             "clause_text": "Clause 1",
             "clause_type": "clause",
-            "id": "<id#4>",
+            "id": "<tech_eval_clauses.id#1>",
             "weightage": 60,
           },
           {
             "clause_text": "Clause 2",
             "clause_type": "clause",
-            "id": "<id#5>",
+            "id": "<tech_eval_clauses.id#2>",
             "weightage": 40,
           },
         ],
@@ -352,7 +352,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
         "finalization_status": "No vendor finalized yet",
         "finalized_vendor": null,
         "has_approved_po": false,
-        "id": "<id#6>",
+        "id": "<products.id#2>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -364,7 +364,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#4>",
+            "id": "<product_details.id#2>",
             "name": "7 UP PEPSI 330 ML",
           },
         ],
@@ -402,17 +402,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "technical_evaluators": [
       {
         "email": "a1.proc.techeval@test.local",
-        "id": "<id#7>",
+        "id": "<technical_evaluators.id#1>",
         "name": "A1 Proc Tech Evaluator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#8>",
+        "id": "<technical_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#9>",
+        "id": "<technical_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -447,7 +447,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
       "users": [
         {
           "email": "a1.proc.poapp@test.local",
-          "id": "<id#8>",
+          "id": "<users.id#1>",
           "name": "A1 Proc PO Approver",
         },
       ],
@@ -457,17 +457,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
     "commercial_evaluators": [
       {
         "email": "a1.proc.commeval@test.local",
-        "id": "<id#12>",
+        "id": "<commercial_evaluators.id#1>",
         "name": "A1 Proc Commercial Negotiator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#10>",
+        "id": "<commercial_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#11>",
+        "id": "<commercial_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -484,7 +484,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
     "hospitality_company_id": "<hospitality_company_id#1>",
     "hotel_id": "<hotel_id#1>",
     "hotel_name": "Hotel A-1",
-    "id": "<id#1>",
+    "id": "<data.id#1>",
     "is_published": 1,
     "is_quotes_present": true,
     "is_tender": 0,
@@ -493,17 +493,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
     "po_initiators": [
       {
         "email": "a1.proc.poapp@test.local",
-        "id": "<id#8>",
+        "id": "<po_initiators.id#1>",
         "name": "A1 Proc PO Approver",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#10>",
+        "id": "<po_initiators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#11>",
+        "id": "<po_initiators.id#3>",
         "name": "Super Admin",
       },
     ],
@@ -521,7 +521,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
           "vendor_name": "Alpha Vendor Pvt Ltd",
         },
         "has_approved_po": false,
-        "id": "<id#3>",
+        "id": "<products.id#1>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -532,7 +532,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#4>",
+            "id": "<product_details.id#1>",
             "name": "7 UP PEPSI 1.5 LTR",
           },
         ],
@@ -545,13 +545,13 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
           {
             "clause_text": "Clause 1",
             "clause_type": "clause",
-            "id": "<id#5>",
+            "id": "<tech_eval_clauses.id#1>",
             "weightage": 60,
           },
           {
             "clause_text": "Clause 2",
             "clause_type": "clause",
-            "id": "<id#6>",
+            "id": "<tech_eval_clauses.id#2>",
             "weightage": 40,
           },
         ],
@@ -574,7 +574,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
         "finalization_status": "No vendor finalized yet",
         "finalized_vendor": null,
         "has_approved_po": false,
-        "id": "<id#7>",
+        "id": "<products.id#2>",
         "is_dead_end": false,
         "is_tech_stuck": false,
         "lowest_quotation": {
@@ -585,7 +585,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
         "product_details": [
           {
             "description": "Auto-created from hospitality import for product "7 UP PEPSI"",
-            "id": "<id#5>",
+            "id": "<product_details.id#2>",
             "name": "7 UP PEPSI 330 ML",
           },
         ],
@@ -614,7 +614,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
         "created_by": 80101,
         "global_charges": [],
         "global_comment": null,
-        "id": "<id#2>",
+        "id": "<quotations.id#1>",
         "is_regret": 0,
         "payment_terms": [],
         "pricing_method": "TRADITIONAL",
@@ -684,17 +684,17 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
     "technical_evaluators": [
       {
         "email": "a1.proc.techeval@test.local",
-        "id": "<id#9>",
+        "id": "<technical_evaluators.id#1>",
         "name": "A1 Proc Tech Evaluator",
       },
       {
         "email": "admin.a@test.local",
-        "id": "<id#10>",
+        "id": "<technical_evaluators.id#2>",
         "name": "Company A Admin",
       },
       {
         "email": "super.admin@test.local",
-        "id": "<id#11>",
+        "id": "<technical_evaluators.id#3>",
         "name": "Super Admin",
       },
     ],

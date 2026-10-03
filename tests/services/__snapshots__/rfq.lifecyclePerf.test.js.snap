@@ -30,7 +30,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
       "department_id": "<department_id#1>",
       "hospitality_company_id": "<hospitality_company_id#1>",
       "hotel_id": "<hotel_id#1>",
-      "id": "<id#4>",
+      "id": "<rfq.id#1>",
       "is_published": 1,
       "is_tender": 0,
       "ra_end_date": null,
@@ -55,7 +55,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               "current_step": 2,
               "entity_id": "<entity_id#1>",
               "entity_type": "RFQ",
-              "id": "<id#1>",
+              "id": "<approval_instances.id#1>",
               "initiated_by": {
                 "department": "Procurement",
                 "designation": null,
@@ -186,7 +186,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               "current_step": 1,
               "entity_id": "<entity_id#2>",
               "entity_type": "NEGOTIATION_QUOTE",
-              "id": "<id#2>",
+              "id": "<approval_instances.id#2>",
               "initiated_by": {
                 "department": "Procurement",
                 "designation": null,
@@ -235,7 +235,7 @@ exports[`GET /rfq/:rfqId/lifecycle — equivalence + query budget returns the sa
               "current_step": 2,
               "entity_id": "<entity_id#3>",
               "entity_type": "NEGOTIATION_QUOTE",
-              "id": "<id#3>",
+              "id": "<approval_instances.id#3>",
               "initiated_by": {
                 "department": "Procurement",
                 "designation": null,

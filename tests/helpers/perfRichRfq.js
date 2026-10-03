@@ -330,25 +330,28 @@ export function normalizeForSnapshot(value, { mask = [], idKeyed = {} } = {}) {
     if (!m.has(v)) m.set(v, m.size + 1);
     return `<${ns}#${m.get(v)}>`;
   };
-  const walk = (v, key) => {
-    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+  // A bare `id` is namespaced by the key that holds its object (users[].id,
+  // rfq.id, …): two DIFFERENT entities that merely share a sequence value in
+  // one run would otherwise collapse into one token there and not in another.
+  const walk = (v, key, owner) => {
+    if (Array.isArray(v)) return v.map((x) => walk(x, key, owner));
     if (v && typeof v === "object" && key && idKeyed[key]) {
       const out = {};
-      for (const k of Object.keys(v)) out[tok(idKeyed[key], String(k))] = walk(v[k], null);
+      for (const k of Object.keys(v)) out[tok(idKeyed[key], String(k))] = walk(v[k], null, key);
       return out;
     }
     if (v && typeof v === "object") {
       const out = {};
       for (const k of Object.keys(v)) {
-        out[k] = masked.has(k) ? `<masked:${v[k] === null ? "null" : typeof v[k]}>` : walk(v[k], k);
+        out[k] = masked.has(k) ? `<masked:${v[k] === null ? "null" : typeof v[k]}>` : walk(v[k], k, key);
       }
       return out;
     }
     if (typeof v === "string" && TS.test(v)) return tok("ts", v);
     if (key && ID_KEY.test(key) && (typeof v === "number" || (typeof v === "string" && /^\S+$/.test(v)))) {
-      return tok(key, String(v));
+      return tok(key === "id" ? `${owner || "root"}.id` : key, String(v));
     }
     return v;
   };
-  return walk(value, null);
+  return walk(value, null, null);
 }

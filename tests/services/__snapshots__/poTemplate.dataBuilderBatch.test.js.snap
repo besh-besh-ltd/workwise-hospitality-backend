@@ -50,7 +50,7 @@ exports[`buildPOTemplateData — batched approval history builds the same templa
       "gst_amount": "0.00",
       "gst_rate": "0.00",
       "hsn_code": null,
-      "id": "<id#1>",
+      "id": "<items.id#1>",
       "other_charges": [],
       "package_mode": null,
       "package_price": "0",
