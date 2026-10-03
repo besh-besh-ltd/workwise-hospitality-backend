@@ -29,6 +29,7 @@ import db from '../../config/dbConn.js';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
@@ -3816,6 +3817,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
        WHERE id = $1`,
       [instance.id]
     );
+    notifyApprovalChanged({ instanceIds: instance.id }, dbContext);
 
     // Update all pending steps to CANCELLED
     await dbContext.none(
@@ -7588,9 +7590,17 @@ const rfqController = {
       // Sync hotel mappings (works for both new and existing drafts)
       await hospitalityModel.reconcileRFQHotels(rfq_id, hotel_ids, user_id);
 
-      // Pre-resolve eligible vendors per unique variant once to avoid
-      // re-querying for the same variant when added multiple times.
+      // Pre-resolve eligible vendors once per unique variant — all of them
+      // together, up front, rather than one round trip per variant inside the
+      // loop. Each lookup is settled on its own, so a failing variant still
+      // fails alone (in the loop below, exactly where it used to).
       const variantVendorCache = new Map();
+      const uniqueVariantIds = [...new Set(variants.map((v) => v.variant_id).filter(Boolean))];
+      await Promise.all(uniqueVariantIds.map((variant_id) =>
+        hospitalityModel.getEligibleVendorsForVariant(variant_id, hotel_ids)
+          .then((list) => variantVendorCache.set(variant_id, { list: list || [] }))
+          .catch((err) => variantVendorCache.set(variant_id, { err }))
+      ));
 
       let added_count = 0;
       const failed = [];
@@ -7603,15 +7613,10 @@ const rfqController = {
         }
 
         try {
-          // Get eligible vendors (cached per variant_id)
-          let vendorList = variantVendorCache.get(variant_id);
-          if (!vendorList) {
-            vendorList = await hospitalityModel.getEligibleVendorsForVariant(
-              variant_id,
-              hotel_ids
-            ) || [];
-            variantVendorCache.set(variant_id, vendorList);
-          }
+          // Eligible vendors (resolved above, once per variant_id)
+          const cached = variantVendorCache.get(variant_id);
+          if (cached.err) throw cached.err;
+          const vendorList = cached.list;
 
           const variantNum = await rfqModel.getNextVariant(rfq_id, variant_id);
 
@@ -7628,14 +7633,22 @@ const rfqController = {
             sheet_id: null,
           });
 
-          for (const vendor of vendorList) {
-            await rfqModel.insert('tbl_rfq_product_vendors', {
-              rfq_id,
-              product_variant_id: variant_id,
-              user_id: vendor.id || vendor.vendor_id,
-              variant: variantNum,
-              sheet_id: null,
-            });
+          // One multi-row INSERT for every eligible vendor of this variant
+          // (was one INSERT — one serial round trip — per vendor). Same rows,
+          // same insertion order; all-or-nothing per variant instead of
+          // possibly leaving a partial vendor set behind on a mid-loop error.
+          if (vendorList.length > 0) {
+            await rfqModel.insertArray(
+              vendorList.map((vendor) => ({
+                rfq_id,
+                product_variant_id: variant_id,
+                user_id: vendor.id || vendor.vendor_id,
+                variant: variantNum,
+                sheet_id: null,
+              })),
+              ['rfq_id', 'product_variant_id', 'user_id', 'variant', 'sheet_id'],
+              'tbl_rfq_product_vendors'
+            );
           }
 
           added_count++;
@@ -8303,17 +8316,45 @@ const rfqController = {
       }
 
       // Basic row first — for tender guard + draft handling + permission scope.
-      const rfq = await db.oneOrNone(
+      // Read ONCE: the scope check and the lifecycle summary both take this
+      // row instead of re-reading tbl_rfq (it used to be read three times).
+      // process_id is for those two consumers only and is not emitted.
+      const rfqRow = await db.oneOrNone(
         `SELECT id, rfq_no, title, status, is_published, is_tender, hotel_id,
                 department_id, hospitality_company_id, created_by, bid_end_date,
-                ra_start_date, ra_end_date
+                ra_start_date, ra_end_date, process_id
            FROM tbl_rfq WHERE id = $1`,
         [rfqId]
       );
-      if (!rfq) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      if (!rfqRow) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      const { process_id: _processId, ...rfq } = rfqRow;
       if (Number(rfq.is_tender) === 1) {
         return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
       }
+
+      // The scope check and the caller's RFQ-scoped permissions are
+      // independent reads, so they are issued together. The lifecycle summary
+      // (the expensive part) starts only once the scope check has passed, so a
+      // denied caller costs two statements, not the whole build. The
+      // permission read cannot reject (it swallows its own errors), so an early
+      // 403 return leaves no unhandled rejection behind.
+      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
+      const permissionsP = (async () => {
+        if (Number(req.user?.user_type) === 8) {
+          return Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
+        }
+        const perms = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
+        if (rfq.hotel_id != null) {
+          const rows = await rbacModel
+            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
+            .catch(() => []);
+          for (const row of rows) {
+            const resource = String(row.resource);
+            if (perms[resource]) perms[resource].push(String(row.action));
+          }
+        }
+        return perms;
+      })();
 
       // Tenant guard — the same one the sibling /rfq/lifecycle-summary/:rfqId
       // already applies. This payload is not metadata: it carries the full
@@ -8323,36 +8364,21 @@ const rfqController = {
       // gated on the result, so any authenticated user — a vendor included —
       // could walk RFQ ids and read another tenant's approval chain.
       if (userId) {
-        try { await assertCanReadParentRfq(userId, rfqId); }
+        try { await assertCanReadParentRfq(userId, rfqId, db, { rfqRow }); }
         catch (e) {
           if (e instanceof AuthorizationError) return sendScopeError(res, e);
           throw e;
         }
       }
 
-      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
-      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
-      let permissions;
-      if (Number(req.user?.user_type) === 8) {
-        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
-      } else {
-        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
-        if (rfq.hotel_id != null) {
-          const rows = await rbacModel
-            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
-            .catch(() => []);
-          for (const row of rows) {
-            const resource = String(row.resource);
-            if (permissions[resource]) permissions[resource].push(String(row.action));
-          }
-        }
-      }
-
       // Draft (status 0 = not yet submitted) → redirectable shape so the shell
       // sends the buyer to the edit/create flow instead of the stage page.
-      const summary = (Number(rfq.status) === 0)
-        ? null
-        : await rfqModel.getLifecycleSummary(rfqId, userId);
+      const summaryP = (Number(rfq.status) === 0)
+        ? Promise.resolve(null)
+        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
+
+      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
+      const [permissions, summary] = await Promise.all([permissionsP, summaryP]);
       if (!summary || !summary.current_stage) {
         return res.status(200).json({
           status: 1,
@@ -8482,58 +8508,46 @@ const rfqController = {
         }
       }
 
-      let lifecycleMap = {};
-      if (rfqData?.id) {
-        lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
+      // Everything below reads only rfqData, and none of it reads another's
+      // result (action holders wait on the lifecycle stage inside their own
+      // chain). They used to be awaited one after another — up to 7 serial
+      // round trips; they are now issued together. Results are assigned onto
+      // rfqData in the original order so the payload's key order is unchanged,
+      // and each keeps its own error handling.
+      const lifecycleP = (async () => {
+        if (!rfqData?.id) return;
+        const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
-      }
 
-      // Enrich with action holders (who can act at current lifecycle stage)
-      if (rfqData?.id && rfqData.lifecycle_stage) {
-        try {
-          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
-          rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
-        } catch (err) {
-          logError('Error fetching action holders for RFQ detail', err);
-          rfqData.action_holders = null;
+        // Enrich with action holders (who can act at current lifecycle stage)
+        if (rfqData.lifecycle_stage) {
+          try {
+            const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
+            rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+          } catch (err) {
+            logError('Error fetching action holders for RFQ detail', err);
+            rfqData.action_holders = null;
+          }
         }
-      }
+      })();
 
-      if (rfqData?.hotel_id) {
-        const hotelIds = [parseInt(rfqData.hotel_id)];
-        const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
-        try {
-          // Technical evaluators: scoped to BU + Department
-          rfqData.technical_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'te', ['read', 'create'], deptId
-          );
-        } catch (evaluatorError) {
-          logError('Error fetching technical evaluators for RFQ detail', evaluatorError);
-          rfqData.technical_evaluators = [];
-        }
-        try {
-          // Commercial evaluators: scoped to BU only (no department)
-          rfqData.commercial_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'quote-compare', ['read', 'create'], null
-          );
-        } catch (err) {
-          logError('Error fetching commercial evaluators for RFQ detail', err);
-          rfqData.commercial_evaluators = [];
-        }
-        try {
-          // PO initiators: scoped to BU only (no department)
-          rfqData.po_initiators = await rbacModel.getUsersWithModuleActionsForHotels(
-            hotelIds, 'awarding', ['read', 'create'], null
-          );
-        } catch (err) {
-          logError('Error fetching PO initiators for RFQ detail', err);
-          rfqData.po_initiators = [];
-        }
-      } else {
-        rfqData.technical_evaluators = [];
-        rfqData.commercial_evaluators = [];
-        rfqData.po_initiators = [];
-      }
+      const evaluatorsP = rfqData?.hotel_id
+        ? (() => {
+          const hotelIds = [parseInt(rfqData.hotel_id)];
+          const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
+          return Promise.all([
+            // Technical evaluators: scoped to BU + Department
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'te', ['read', 'create'], deptId)
+              .catch((evaluatorError) => { logError('Error fetching technical evaluators for RFQ detail', evaluatorError); return []; }),
+            // Commercial evaluators: scoped to BU only (no department)
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'quote-compare', ['read', 'create'], null)
+              .catch((err) => { logError('Error fetching commercial evaluators for RFQ detail', err); return []; }),
+            // PO initiators: scoped to BU only (no department)
+            rbacModel.getUsersWithModuleActionsForHotels(hotelIds, 'awarding', ['read', 'create'], null)
+              .catch((err) => { logError('Error fetching PO initiators for RFQ detail', err); return []; }),
+          ]);
+        })()
+        : Promise.resolve(null);
 
       // Fetch PO rejections (vendor-rejected AND approver-rejected) for this
       // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
@@ -8542,40 +8556,46 @@ const rfqController = {
       // - rejection_type='approver': PO row status='rejected'. Reason and
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
-      try {
-        // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
-        // so the re-award modal and the card cannot disagree about what counts.
-        rfqData.vendor_rejections = await rfqModel.getLivePoRejectionsForRfqs([rfqData.id]);
-      } catch (err) {
-        logError('Error fetching PO rejections for RFQ', err);
-        rfqData.vendor_rejections = [];
-      }
+      // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
+      // so the re-award modal and the card cannot disagree about what counts.
+      const rejectionsP = Promise.resolve()
+        .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
+        .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
 
       // Attach close reason when RFQ is closed
-      if (rfqData && String(rfqData.status) === '2') {
-        try {
-          const closeEvent = await db.oneOrNone(
-            `SELECT lh.remarks
-               FROM tbl_lifecycle_history lh
-              WHERE lh.entity_id = $1
-                AND lh.entity_type IN ('RFQ', 'TENDER')
-                AND lh.action = 'RFQ_CLOSED'
-              ORDER BY lh.id DESC
-              LIMIT 1`,
-            [rfqData.id]
-          );
+      const closeCommentP = (rfqData && String(rfqData.status) === '2')
+        ? db.oneOrNone(
+          `SELECT lh.remarks
+             FROM tbl_lifecycle_history lh
+            WHERE lh.entity_id = $1
+              AND lh.entity_type IN ('RFQ', 'TENDER')
+              AND lh.action = 'RFQ_CLOSED'
+            ORDER BY lh.id DESC
+            LIMIT 1`,
+          [rfqData.id]
+        ).then((closeEvent) => {
           let rawComment = closeEvent?.remarks || null;
           if (rawComment) {
             rawComment = rawComment.replace(/^(RFQ|TENDER) closed by creator:\s*/i, '');
-            rfqData.close_comment = `Reason: ${rawComment}`;
-          } else {
-            rfqData.close_comment = null;
+            return `Reason: ${rawComment}`;
           }
-        } catch (closeErr) {
-          logError('Error fetching close info for RFQ', closeErr);
-          rfqData.close_comment = null;
-        }
+          return null;
+        }).catch((closeErr) => { logError('Error fetching close info for RFQ', closeErr); return null; })
+        : null;
+
+      const [, evaluators, rejections, closeComment] = await Promise.all([
+        lifecycleP, evaluatorsP, rejectionsP, closeCommentP,
+      ]);
+
+      if (evaluators) {
+        [rfqData.technical_evaluators, rfqData.commercial_evaluators, rfqData.po_initiators] = evaluators;
+      } else {
+        rfqData.technical_evaluators = [];
+        rfqData.commercial_evaluators = [];
+        rfqData.po_initiators = [];
       }
+      rfqData.vendor_rejections = rejections;
+      if (closeCommentP) rfqData.close_comment = closeComment;
 
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
@@ -10885,6 +10905,7 @@ const rfqController = {
               WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
                 SET status = 'CANCELLED', completed_at = NOW()
@@ -11057,6 +11078,7 @@ const rfqController = {
              WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
              SET status = 'CANCELLED', completed_at = NOW()
@@ -11151,6 +11173,7 @@ const rfqController = {
              WHERE id = $1`,
             [instance.id]
           );
+          notifyApprovalChanged({ instanceIds: instance.id }, t);
           await t.none(
             `UPDATE tbl_approval_instance_steps
              SET status = 'CANCELLED', completed_at = NOW()
@@ -11737,6 +11760,7 @@ const rfqController = {
                         `UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1 AND status='PENDING'`,
                         [existingPending.id]
                       );
+                      notifyApprovalChanged({ instanceIds: existingPending.id }, t);
                       await t.none(
                         `UPDATE tbl_approval_instance_steps SET status='CANCELLED', completed_at=NOW() WHERE approval_instance_id=$1 AND status='PENDING'`,
                         [existingPending.id]
@@ -18741,7 +18765,10 @@ getClauses: async (req, res) => {
       logger.debug('📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})');
 
       const { publishRfqById } = await import('../../helper/cronManager.js');
-      const result = await publishRfqById(rfqId, rfq_no, 'scheduler');
+      // The publish's DB writes commit inside publishRfqById's transaction;
+      // the notification work (emails, in-app rows + web-push, vendor RFQ
+      // tokens) comes back as result.notify and runs AFTER this response.
+      const result = await publishRfqById(rfqId, rfq_no, 'scheduler', { deferNotifications: true });
 
       const skippedMessages = {
         not_found: 'RFQ not found',
@@ -18756,12 +18783,23 @@ getClauses: async (req, res) => {
         message = skippedMessages[result.reason] || 'RFQ skipped';
       }
 
-      return res.status(200).json({
+      res.status(200).json({
         status: result.skipped ? 0 : 1,
         message,
         rfqId,
         ...result
       });
+      // Off the request path: the scheduler Lambda does not wait on SMTP or
+      // web-push fan-out any more. notify() never throws by contract; the catch
+      // is belt-and-braces so nothing can surface as an unhandled rejection.
+      if (typeof result.notify === 'function') {
+        setImmediate(() => {
+          Promise.resolve()
+            .then(() => result.notify())
+            .catch((err) => logError(`[RFQ Publisher] post-response notifications failed for RFQ ${rfqId}`, err));
+        });
+      }
+      return;
     } catch (error) {
       logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });

@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
-import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
+import generalModel, { getApprovalInstanceDetails, getApprovalInstanceDetailsBatch, assembleApprovalInstanceDetails, approvalInstanceDetailFrom, findBestMatchingPolicy, findBestMatchingPoliciesWithSteps, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { logger } from '../util/logger.js';
@@ -5182,7 +5182,10 @@ LIMIT 2;
    * @param {number} userId - Current user ID (for can_user_approve)
    * @returns {Object} { rfq_id, current_stage, phases: [...] }
    */
-  getLifecycleSummary: async (rfqId, userId) => {
+  // opts.rfqRow — the caller's own `SELECT … FROM tbl_rfq WHERE id = rfqId`
+  // row, when it already has one (GET /rfq/:id/lifecycle, the QC view). It must
+  // carry every LIFECYCLE_RFQ_COLUMNS column; it saves re-reading tbl_rfq.
+  getLifecycleSummary: async (rfqId, userId, { rfqRow = null } = {}) => {
     // Phase mapping from raw lifecycle stages
     const PHASE_MAP = {
       RFQ_APPROVAL: 'rfq_approval',
@@ -5205,36 +5208,84 @@ LIMIT 2;
     const PHASES_ORDERED = ['rfq_approval', 'technical', 'commercial', 'purchase_order'];
 
     try {
-      // 1. Get RFQ basic info + current lifecycle stage
-      const rfqBasic = await db.oneOrNone(`
+      // ── Round-trip shape ────────────────────────────────────────────────
+      // This used to cost ~60 statements in ~20 serial waves: tbl_rfq read
+      // again, lifecycle → action holders → data serially, every approval
+      // instance loaded per instance and per step, and the upcoming-actor
+      // resolver re-resolving policies / roles / user names per phase and per
+      // step. It is now:
+      //   wave A  lifecycle stage ‖ every data query ‖ ALL approval instance
+      //           rows of the RFQ in one statement ‖ the best policy + steps
+      //           for all four entity types in one statement
+      //   wave B  action holders ‖ steps/approvers/actions for all instances
+      //           (3 statements) ‖ product enrichment ‖ upcoming-actor
+      //           resolution (memoised per request)
+      //   then    one user-name lookup for every resolved approver.
+      // The output is unchanged (pinned by tests/services/rfq.lifecyclePerf).
+
+      // 1. RFQ basic info (reused from the caller when it already read it)
+      const LIFECYCLE_RFQ_COLUMNS = ['id', 'is_published', 'status', 'is_tender', 'hotel_id', 'department_id', 'hospitality_company_id', 'process_id', 'bid_end_date'];
+      const rfqBasic = rfqRow
+        ? Object.fromEntries(LIFECYCLE_RFQ_COLUMNS.map((c) => [c, rfqRow[c]]))
+        : await db.oneOrNone(`
         SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id, bid_end_date FROM tbl_rfq WHERE id = $1
       `, [rfqId]);
       if (!rfqBasic) return { rfq_id: rfqId, current_stage: null, phases: [] };
 
-      const lifecycleMap = await rfqModel.computeLifecycleStages([rfqId]);
-      const currentStage = lifecycleMap[rfqId] || null;
-      let currentPhase = currentStage ? PHASE_MAP[currentStage] : null;
-      let currentPhaseIndex = currentPhase ? PHASES_ORDERED.indexOf(currentPhase) : -1;
+      const companyId = parseInt(rfqBasic.hospitality_company_id);
+      const hotelId = rfqBasic.hotel_id ? parseInt(rfqBasic.hotel_id) : null;
+      const deptId = rfqBasic.department_id ? parseInt(rfqBasic.department_id) : null;
+      const processId = rfqBasic.process_id ? parseInt(rfqBasic.process_id) : null;
+      const hotelIds = hotelId ? [hotelId] : [];
 
-      // APPROVED_COMPLETED means all phases are done — no "current" phase
-      if (currentStage === 'APPROVED_COMPLETED') {
-        currentPhase = null;
-        currentPhaseIndex = PHASES_ORDERED.length; // Beyond all phases → all show as 'completed'
-      }
+      const UPCOMING_ENTITY_TYPE_MAP = {
+        rfq_approval: rfqBasic.is_tender === 1 ? 'TENDER' : 'RFQ',
+        technical: 'TECHNICAL',
+        commercial: 'NEGOTIATION_QUOTE',
+        purchase_order: 'PO',
+      };
 
-      // Resolve action holders for the current stage (who needs to act)
-      let currentActionHolders = null;
-      if (currentStage) {
-        const actionMap = await rfqModel.getActionHoldersForRFQs([rfqBasic], lifecycleMap);
-        currentActionHolders = actionMap[parseInt(rfqId)] || null;
-      }
+      // Every approval instance of this RFQ, all four kinds, in one statement,
+      // already joined for getApprovalInstanceDetails' shape. Same predicates
+      // as the four per-kind queries this replaces; if it fails, fall back to
+      // exactly those (each failing on its own, as before).
+      const INSTANCE_KIND = { RFQ: 'rfq', TENDER: 'rfq', TECHNICAL: 'tech', NEGOTIATION_QUOTE: 'quote', PO: 'po' };
+      const loadInstanceRows = async () => {
+        try {
+          return await db.any(`${approvalInstanceDetailFrom}
+            WHERE (i.entity_type IN ('RFQ','TENDER') AND i.entity_id = $1)
+               OR (i.entity_type IN ('TECHNICAL','NEGOTIATION_QUOTE','PO')
+                   AND i.metadata->>'rfq_id' IS NOT NULL AND (i.metadata->>'rfq_id')::int = $1)
+            ORDER BY i.created_at ASC, i.id ASC
+          `, [rfqId]);
+        } catch (e) {
+          logger.warn(e, `Lifecycle[${rfqId}]: combined approval instances query failed, using per-kind queries`);
+          const perKind = await Promise.all([
+            db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(e2 => { logger.warn(e2, `Lifecycle[${rfqId}]: RFQ approval instances query failed`); return []; }),
+            db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e2 => { logger.warn(e2, `Lifecycle[${rfqId}]: tech approval instances query failed`); return []; }),
+            db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e2 => { logger.warn(e2, `Lifecycle[${rfqId}]: quote approval instances query failed`); return []; }),
+            db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PO' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e2 => { logger.warn(e2, `Lifecycle[${rfqId}]: PO approval instances query failed`); return []; }),
+          ]);
+          const ids = perKind.flat().map(r => r.id);
+          const byId = await getApprovalInstanceDetailsBatch(ids, userId).catch(() => new Map());
+          return { prebuilt: perKind.map(rows => rows.map(r => byId.get(Number(r.id))).filter(Boolean)) };
+        }
+      };
+
+      // Speculative: the policy + steps for all four kinds in one statement,
+      // whether or not a phase ends up needing upcoming actors. Settled into a
+      // value so an unused rejection can never surface as unhandled.
+      const policiesP = Promise.resolve()
+        .then(() => findBestMatchingPoliciesWithSteps(
+          Object.values(UPCOMING_ENTITY_TYPE_MAP),
+          { hospitality_company_id: companyId, hotel_id: hotelId, process_id: processId }
+        ))
+        .then((map) => ({ map }), (err) => ({ err }));
 
       // 2. Fetch all data in parallel
       const [
-        rfqApprovalInstanceIds,
-        techApprovalInstanceIds,
-        quoteApprovalInstanceIds,
-        poApprovalInstanceIds,
+        lifecycleMap,
+        instanceRows,
         techEvalProducts,
         techEvalClauseData,
         techEvalClearedVendors,
@@ -5244,10 +5295,8 @@ LIMIT 2;
         awaitingQuoteStats,
         evaluators,
       ] = await Promise.all([
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: RFQ approval instances query failed`); return []; }),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: tech approval instances query failed`); return []; }),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: quote approval instances query failed`); return []; }),
-        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PO' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO approval instances query failed`); return []; }),
+        rfqModel.computeLifecycleStages([rfqId]),
+        loadInstanceRows(),
 
         // Tech eval: per-product summary
         db.any(`
@@ -5507,6 +5556,16 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: evaluators query failed`); return []; }),
       ]);
 
+      const currentStage = lifecycleMap[rfqId] || null;
+      let currentPhase = currentStage ? PHASE_MAP[currentStage] : null;
+      let currentPhaseIndex = currentPhase ? PHASES_ORDERED.indexOf(currentPhase) : -1;
+
+      // APPROVED_COMPLETED means all phases are done — no "current" phase
+      if (currentStage === 'APPROVED_COMPLETED') {
+        currentPhase = null;
+        currentPhaseIndex = PHASES_ORDERED.length; // Beyond all phases → all show as 'completed'
+      }
+
       // Override phase mapping: AWAITING_QUOTES defaults to 'commercial',
       // but when tech eval IS configured, the next step should be 'technical'.
       if (currentStage === 'AWAITING_QUOTES' && techEvalProducts.length > 0) {
@@ -5514,35 +5573,186 @@ LIMIT 2;
         currentPhaseIndex = PHASES_ORDERED.indexOf('technical');
       }
 
-      // 3. Fetch detailed approval instances (parallel)
-      const fetchDetails = async (rows) => {
-        if (!rows?.length) return [];
-        const results = await Promise.allSettled(
-          rows.map(row => getApprovalInstanceDetails(row.id, userId))
-        );
-        return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+      // 9. Determine phase statuses (hoisted: upcoming-actor resolution below
+      // starts as soon as the statuses are known, alongside the detail loads).
+      const getPhaseStatus = (phaseKey) => {
+        const phaseIndex = PHASES_ORDERED.indexOf(phaseKey);
+        if (phaseIndex < 0) return 'upcoming';
+        if (phaseKey === currentPhase) return 'current';
+        if (phaseIndex < currentPhaseIndex) return 'completed';
+        return 'upcoming';
       };
 
-      const [rfqApprovalDetails, techApprovalDetails, quoteApprovalDetails, poApprovalDetails] = await Promise.all([
-        fetchDetails(rfqApprovalInstanceIds),
-        fetchDetails(techApprovalInstanceIds),
-        fetchDetails(quoteApprovalInstanceIds),
-        fetchDetails(poApprovalInstanceIds),
-      ]);
+      // Split the instance rows by kind, preserving created_at order.
+      const rowsByKind = { rfq: [], tech: [], quote: [], po: [] };
+      if (Array.isArray(instanceRows)) {
+        for (const row of instanceRows) {
+          const kind = INSTANCE_KIND[row.entity_type];
+          if (kind) rowsByKind[kind].push(row);
+        }
+      }
+      const isPublished = rfqBasic.is_published === 1 || rfqBasic.status === 1;
+      // Phase 1's "expired" status needs only the latest RFQ instance's status,
+      // which the rows already carry.
+      const latestRfqRow = Array.isArray(instanceRows)
+        ? rowsByKind.rfq[rowsByKind.rfq.length - 1]
+        : instanceRows.prebuilt[0][instanceRows.prebuilt[0].length - 1];
+      const rfqApprovalExpired = isPublished && latestRfqRow?.status === 'PENDING';
+      // The phases that will be 'upcoming' or 'current' once built (only the
+      // rfq_approval phase can leave that set later, by expiring).
+      const actorPhaseKeys = PHASES_ORDERED.filter((key) => {
+        const st = getPhaseStatus(key);
+        if (st !== 'upcoming' && st !== 'current') return false;
+        return !(key === 'rfq_approval' && rfqApprovalExpired);
+      });
 
-      // 3b. Enrich NEGOTIATION_QUOTE instances with product info (entity_id = rfq_product_id)
-      if (quoteApprovalDetails.length > 0) {
-        // Collect product IDs from entity_id AND metadata.rfq_product_id
-        const productIds = [...new Set(
-          quoteApprovalDetails.flatMap(d => [d.entity_id, d.metadata?.rfq_product_id]).filter(Boolean).map(Number)
-        )];
-        if (productIds.length > 0) {
-          const productInfo = await db.any(`
+      // 11. Resolve upcoming actors (who will evaluate/approve in future
+      // phases). Per-request memo: a role's read+approve check and a policy
+      // step's resolved approver set are the same for every phase of this RFQ
+      // (same company/hotel/department), so each is asked once; user names are
+      // fetched once for everybody at the end.
+      const UPCOMING_PERMISSION_CONFIG = {
+        technical: { resource: 'te', actions: ['read', 'create'], useDepartment: true },
+        commercial: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false },
+        purchase_order: { resource: 'awarding', actions: ['read', 'create'], useDepartment: false },
+      };
+      const roleCheckMemo = new Map();
+      const memoRoleHasReadAndApprove = (roleId, resource) => {
+        const key = `${roleId}|${resource}`;
+        if (!roleCheckMemo.has(key)) roleCheckMemo.set(key, roleHasReadAndApprovePermission(roleId, resource, db));
+        return roleCheckMemo.get(key);
+      };
+      const approverMemo = new Map();
+      const memoResolveApprovers = (step) => {
+        // resolveApprovers reads only these two fields of the step; company,
+        // hotel and department are fixed for the request.
+        const key = `${step.approver_source_type}|${step.approver_source_id}`;
+        if (!approverMemo.has(key)) approverMemo.set(key, resolveApprovers(step, companyId, hotelId, deptId, db, null));
+        return approverMemo.get(key);
+      };
+      const resolvePhaseActors = async (phaseKey) => {
+        // Permission-based evaluators
+        const permConfig = UPCOMING_PERMISSION_CONFIG[phaseKey];
+        const evaluatorsP = (permConfig && hotelIds.length > 0)
+          // Pass the process too, so the detail page's "who will act next"
+          // agrees with the listing's action holders. `processId` is already
+          // derived above for findBestMatchingPolicy; omitting it here made the
+          // two surfaces disagree the moment process-scoped roles are used.
+          ? rbacModel.getUsersWithModuleActionsForHotels(hotelIds, permConfig.resource, permConfig.actions, permConfig.useDepartment ? deptId : null, processId).catch(() => [])
+          : Promise.resolve(null);
+
+        // Policy-based approvers (ids now, names after every phase is in)
+        const entityType = UPCOMING_ENTITY_TYPE_MAP[phaseKey];
+        const stepsP = (async () => {
+          if (!entityType) return null;
+          try {
+            const policies = await policiesP;
+            if (policies.err) throw policies.err;
+            const entry = policies.map.get(entityType);
+            if (!entry) return null;
+            const resourceForEntity = ENTITY_APPROVE_RESOURCE_MAP[entityType] || entityType.toLowerCase();
+            const stepResults = await Promise.allSettled(
+              entry.steps.map(async (step) => {
+                if (step.approver_source_type === 'ROLE') {
+                  const hasBoth = await memoRoleHasReadAndApprove(step.approver_source_id, resourceForEntity);
+                  if (!hasBoth) return null;
+                }
+                const ids = await memoResolveApprovers(step);
+                if (!ids?.length) return null;
+                return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', ids };
+              })
+            );
+            return stepResults.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+          } catch (e) { logError(`Policy resolution failed for ${entityType}`, e); return null; }
+        })();
+
+        const [users, steps] = await Promise.all([evaluatorsP, stepsP]);
+        return {
+          evaluators: users && users.length > 0 ? users.map(u => ({ id: u.id, name: u.name })) : null,
+          steps,
+        };
+      };
+      const actorsP = Promise.all(actorPhaseKeys.map(async (key) => [key, await resolvePhaseActors(key)]))
+        .then(async (pairs) => {
+          const allIds = [...new Set(pairs.flatMap(([, a]) => (a.steps || []).flatMap(st => st.ids)))];
+          let nameRows = [];
+          let namesFailed = false;
+          if (allIds.length) {
+            try {
+              nameRows = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [allIds]);
+            } catch (e) { namesFailed = true; }
+          }
+          const out = new Map();
+          for (const [key, a] of pairs) {
+            const actors = { evaluators: a.evaluators, approver_steps: null };
+            if (!namesFailed) {
+              const resolved = (a.steps || []).map(st => {
+                const want = new Set(st.ids.map(Number));
+                return {
+                  step_order: st.step_order, decision_rule: st.decision_rule,
+                  approvers: nameRows.filter(u => want.has(Number(u.id))).map(u => ({ id: u.id, name: u.name })),
+                };
+              });
+              if (resolved.length > 0) actors.approver_steps = resolved;
+            }
+            out.set(key, actors);
+          }
+          return out;
+        });
+
+      // 3. Approval instance details + action holders + enrichment (parallel)
+      const quoteRowsForProducts = Array.isArray(instanceRows) ? rowsByKind.quote : instanceRows.prebuilt[2];
+      const productIdsToEnrich = [...new Set(
+        quoteRowsForProducts.flatMap(d => [d.entity_id, d.metadata?.rfq_product_id]).filter(Boolean).map(Number)
+      )];
+      const poRowsForEnrich = Array.isArray(instanceRows) ? rowsByKind.po : instanceRows.prebuilt[3];
+      const poDataById = new Map(poData.map(po => [po.id, po]));
+      const poIdsToFetch = [...new Set(poRowsForEnrich.map(d => d.entity_id).filter(Boolean))]
+        .filter(id => !poDataById.has(id));
+
+      const [detailsById, actionMap, productInfo, extraPoInfo, phaseActors] = await Promise.all([
+        Array.isArray(instanceRows)
+          ? assembleApprovalInstanceDetails(instanceRows, userId).catch((e) => { logger.warn(e, `Lifecycle[${rfqId}]: approval details failed`); return new Map(); })
+          : Promise.resolve(null),
+        // Resolve action holders for the current stage (who needs to act)
+        currentStage ? rfqModel.getActionHoldersForRFQs([rfqBasic], lifecycleMap) : Promise.resolve(null),
+        productIdsToEnrich.length > 0
+          ? db.any(`
             SELECT rp.id, COALESCE(pv.name, 'Product ' || rp.id) AS product_name, rp.variant
             FROM tbl_rfq_products rp
             LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
             WHERE rp.id = ANY($1::int[])
-          `, [productIds]).catch(() => []);
+          `, [productIdsToEnrich]).catch(() => [])
+          : Promise.resolve([]),
+        // PO number + product names: the PO query above already carries them for
+        // this RFQ's POs (identical expressions); only an instance pointing at a
+        // PO outside that set needs a read.
+        poIdsToFetch.length > 0
+          ? db.any(`
+            SELECT po.id, po.po_number,
+              (SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
+               FROM tbl_purchase_order_product pop
+               LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+               LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+               WHERE pop.purchase_order_id = po.id) AS product_names
+            FROM tbl_rfq_purchase_order po WHERE po.id = ANY($1::int[])
+          `, [poIdsToFetch]).catch(() => [])
+          : Promise.resolve([]),
+        actorsP,
+      ]);
+      const currentActionHolders = actionMap ? (actionMap[parseInt(rfqId)] || null) : null;
+
+      const detailsFor = (kind, idx) => Array.isArray(instanceRows)
+        ? rowsByKind[kind].map(r => detailsById.get(Number(r.id))).filter(Boolean)
+        : instanceRows.prebuilt[idx];
+      const rfqApprovalDetails = detailsFor('rfq', 0);
+      const techApprovalDetails = detailsFor('tech', 1);
+      const quoteApprovalDetails = detailsFor('quote', 2);
+      const poApprovalDetails = detailsFor('po', 3);
+
+      // 3b. Enrich NEGOTIATION_QUOTE instances with product info (entity_id = rfq_product_id)
+      if (quoteApprovalDetails.length > 0) {
+        if (productIdsToEnrich.length > 0) {
           const prodMap = {};
           productInfo.forEach(p => { prodMap[parseInt(p.id)] = p; });
           for (const inst of quoteApprovalDetails) {
@@ -5561,17 +5771,9 @@ LIMIT 2;
       if (poApprovalDetails.length > 0) {
         const poIds = [...new Set(poApprovalDetails.map(d => d.entity_id).filter(Boolean))];
         if (poIds.length > 0) {
-          const poInfo = await db.any(`
-            SELECT po.id, po.po_number,
-              (SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
-               FROM tbl_purchase_order_product pop
-               LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-               LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-               WHERE pop.purchase_order_id = po.id) AS product_names
-            FROM tbl_rfq_purchase_order po WHERE po.id = ANY($1::int[])
-          `, [poIds]).catch(() => []);
           const poMap = {};
-          poInfo.forEach(p => { poMap[p.id] = p; });
+          poIds.forEach(id => { const p = poDataById.get(id); if (p) poMap[p.id] = p; });
+          extraPoInfo.forEach(p => { poMap[p.id] = p; });
           for (const inst of poApprovalDetails) {
             if (inst.entity_id && poMap[inst.entity_id]) {
               inst.metadata = inst.metadata || {};
@@ -5941,15 +6143,6 @@ LIMIT 2;
         return parts.join(' · ');
       };
 
-      // 9. Determine phase statuses
-      const getPhaseStatus = (phaseKey) => {
-        const phaseIndex = PHASES_ORDERED.indexOf(phaseKey);
-        if (phaseIndex < 0) return 'upcoming';
-        if (phaseKey === currentPhase) return 'current';
-        if (phaseIndex < currentPhaseIndex) return 'completed';
-        return 'upcoming';
-      };
-
       const hasPhaseData = (phaseKey) => {
         switch (phaseKey) {
           case 'rfq_approval': return rfqApprovalDetails.length > 0;
@@ -5961,7 +6154,6 @@ LIMIT 2;
       };
 
       // 10. Build phases
-      const isPublished = rfqBasic.is_published === 1 || rfqBasic.status === 1;
       const phases = [];
 
       // Phase 1: RFQ Approval
@@ -6160,76 +6352,12 @@ LIMIT 2;
         });
       }
 
-      // 11. Resolve upcoming actors (who will evaluate/approve in future phases)
-      const UPCOMING_PERMISSION_CONFIG = {
-        technical: { resource: 'te', actions: ['read', 'create'], useDepartment: true },
-        commercial: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false },
-        purchase_order: { resource: 'awarding', actions: ['read', 'create'], useDepartment: false },
-      };
-      const UPCOMING_ENTITY_TYPE_MAP = {
-        rfq_approval: rfqBasic.is_tender === 1 ? 'TENDER' : 'RFQ',
-        technical: 'TECHNICAL',
-        commercial: 'NEGOTIATION_QUOTE',
-        purchase_order: 'PO',
-      };
-
-      // Resolve actors for upcoming + current phases (in parallel)
-      const companyId = parseInt(rfqBasic.hospitality_company_id);
-      const hotelId = rfqBasic.hotel_id ? parseInt(rfqBasic.hotel_id) : null;
-      const deptId = rfqBasic.department_id ? parseInt(rfqBasic.department_id) : null;
-      const processId = rfqBasic.process_id ? parseInt(rfqBasic.process_id) : null;
-      const hotelIds = hotelId ? [hotelId] : [];
-
-      const resolvePhaseActors = async (phase) => {
-        const actors = { evaluators: null, approver_steps: null };
-
-        // Permission-based evaluators
-        const permConfig = UPCOMING_PERMISSION_CONFIG[phase.key];
-        if (permConfig && hotelIds.length > 0) {
-          const pd = permConfig.useDepartment ? deptId : null;
-          // Pass the process too, so the detail page's "who will act next"
-          // agrees with the listing's action holders. `processId` is already
-          // derived above for findBestMatchingPolicy; omitting it here made the
-          // two surfaces disagree the moment process-scoped roles are used.
-          const users = await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, permConfig.resource, permConfig.actions, pd, processId).catch(() => []);
-          if (users.length > 0) actors.evaluators = users.map(u => ({ id: u.id, name: u.name }));
-        }
-
-        // Policy-based approvers
-        const entityType = UPCOMING_ENTITY_TYPE_MAP[phase.key];
-        if (entityType) {
-          try {
-            const policy = await findBestMatchingPolicy({ entity_type: entityType, hospitality_company_id: companyId, hotel_id: hotelId, department_id: deptId, process_id: processId });
-            if (policy) {
-              // All entities are department-scoped
-              const resolveDeptId = deptId;
-
-              const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
-              const resourceForEntity = ENTITY_APPROVE_RESOURCE_MAP[entityType] || entityType.toLowerCase();
-              const stepResults = await Promise.allSettled(
-                policySteps.map(async (step) => {
-                  if (step.approver_source_type === 'ROLE') {
-                    const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resourceForEntity, db);
-                    if (!hasBoth) return null;
-                  }
-                  const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, db, null);
-                  if (!ids?.length) return null;
-                  const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);
-                  return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', approvers: names.map(u => ({ id: u.id, name: u.name })) };
-                })
-              );
-              const resolved = stepResults.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
-              if (resolved.length > 0) actors.approver_steps = resolved;
-            }
-          } catch (e) { logError(`Policy resolution failed for ${entityType}`, e); }
-        }
-
-        if (actors.evaluators || actors.approver_steps) phase.upcoming_actors = actors;
-      };
-
-      await Promise.allSettled(
-        phases.filter(p => p.status === 'upcoming' || p.status === 'current').map(resolvePhaseActors)
-      );
+      // 11. Attach the upcoming actors resolved alongside the detail loads.
+      for (const phase of phases) {
+        if (phase.status !== 'upcoming' && phase.status !== 'current') continue;
+        const actors = phaseActors.get(phase.key);
+        if (actors && (actors.evaluators || actors.approver_steps)) phase.upcoming_actors = actors;
+      }
 
       // Surface top-level approval action info for header buttons.
       // Scan all phases for an approval instance where the current user can approve.
@@ -9828,6 +9956,43 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     }
 
     return token; // Return the successfully inserted token
+  },
+  /**
+   * insertVendorRfqToken for many vendors in ONE statement. Same token shape
+   * and same row as the single version (token, vendor_id, rfq_no). Tokens are
+   * made distinct within the batch; a collision with an existing token
+   * (23505) regenerates the whole batch and retries, as the single version
+   * retries its one row.
+   *
+   * @returns {Promise<Map<number, number>>} vendor id → token
+   */
+  insertVendorRfqTokens: async (vendorIds, rfqNumber) => {
+    const ids = [...new Set((vendorIds || []).map(Number).filter(Number.isInteger))];
+    const out = new Map();
+    if (!ids.length) return out;
+    const generateUniqueToken = () => {
+      const timestamp = Date.now();
+      const randomNumber = Math.floor(Math.random() * 1000000);
+      return parseInt((timestamp + randomNumber).toString().substring(0, 16));
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const seen = new Set();
+      const rows = ids.map((vendor_id) => {
+        let token;
+        do { token = generateUniqueToken(); } while (seen.has(token));
+        seen.add(token);
+        return { token, vendor_id, rfq_no: rfqNumber };
+      });
+      try {
+        await db.none(pgp.helpers.insert(rows, ['token', 'vendor_id', 'rfq_no'], 'tbl_vendor_rfq_tokens_non_login'));
+        for (const r of rows) out.set(r.vendor_id, r.token);
+        return out;
+      } catch (err) {
+        if (err.code === '23505') continue;
+        throw err;
+      }
+    }
+    throw new Error('insertVendorRfqTokens: could not generate unique tokens');
   },
   getVendorRfqToken: async (vendorId, rfqNumber) => {
     // Ensure both parameters are valid integers

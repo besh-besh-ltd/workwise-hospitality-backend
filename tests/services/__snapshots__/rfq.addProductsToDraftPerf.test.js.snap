@@ -1,0 +1,132 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`POST /rfq/add-products-to-draft — equivalence + query budget writes the same rows and returns the same body as before 1`] = `
+{
+  "body": {
+    "data": {
+      "added_count": 3,
+      "failed": [
+        {
+          "reason": "Missing variant_id",
+          "variant_id": null,
+        },
+      ],
+      "isNew": true,
+      "rfq_id": "<rfq_id#1>",
+    },
+    "message": "Products added to draft successfully",
+    "status": 1,
+  },
+  "rows": {
+    "products": [
+      {
+        "comment": "",
+        "datasheet": "",
+        "datasheet_file": "",
+        "product_variant_id": "<product_variant_id#1>",
+        "qap": "",
+        "qap_file": "",
+        "sheet_id": null,
+        "spec_file": "",
+        "variant": 0,
+      },
+      {
+        "comment": "",
+        "datasheet": "",
+        "datasheet_file": "",
+        "product_variant_id": "<product_variant_id#2>",
+        "qap": "",
+        "qap_file": "",
+        "sheet_id": null,
+        "spec_file": "",
+        "variant": 0,
+      },
+      {
+        "comment": "",
+        "datasheet": "",
+        "datasheet_file": "",
+        "product_variant_id": "<product_variant_id#1>",
+        "qap": "",
+        "qap_file": "",
+        "sheet_id": null,
+        "spec_file": "",
+        "variant": 1,
+      },
+    ],
+    "vendors": [
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#1>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#2>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#3>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#2>",
+        "sheet_id": null,
+        "user_id": "<user_id#1>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#2>",
+        "sheet_id": null,
+        "user_id": "<user_id#2>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#2>",
+        "sheet_id": null,
+        "user_id": "<user_id#3>",
+        "variant": 0,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#1>",
+        "variant": 1,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#2>",
+        "variant": 1,
+        "vendor_name": null,
+      },
+      {
+        "is_rfq_viewed": 0,
+        "product_variant_id": "<product_variant_id#1>",
+        "sheet_id": null,
+        "user_id": "<user_id#3>",
+        "variant": 1,
+        "vendor_name": null,
+      },
+    ],
+  },
+}
+`;
