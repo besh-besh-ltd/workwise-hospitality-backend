@@ -27,8 +27,12 @@ import { countQueries } from "../helpers/queryCounter.js";
 import { seedRichRfq, cleanupRichRfq, normalizeForSnapshot } from "../helpers/perfRichRfq.js";
 
 const BUYER = IDS.users.a1_proc_buyer;
-// Whole request, auth included. Before: 63 statements / 16-19 waves locally.
-const BUDGET = { statements: 63, waves: 24 };
+// Whole request, auth included.
+//   before: 63 statements, 16-19 waves, critical-path depth 25-28
+//   after : 32 statements,  4-7  waves, critical-path depth 8-9
+// What is left is mostly resolveApprovers (the approval engine's own resolver,
+// reused verbatim for "who acts next" — 3 reads + delegation per USER step).
+const BUDGET = { statements: 32, waves: 8, depth: 10 };
 
 describe("GET /rfq/:rfqId/lifecycle — equivalence + query budget", () => {
   let made;
@@ -64,12 +68,18 @@ describe("GET /rfq/:rfqId/lifecycle — equivalence + query budget", () => {
     for (const r of runs) expect(r.result.body.status).toBe(1);
     const count = Math.max(...runs.map((r) => r.count));
     const waves = Math.min(...runs.map((r) => r.waves));
+    const depth = Math.min(...runs.map((r) => r.depth));
     if (process.env.PERF_DUMP) {
       // eslint-disable-next-line no-console
-      console.log(`[lifecycle] statements=${count} waves=${waves}\n` +
+      console.log(`[lifecycle] statements=${count} waves=${waves} depth=${runs.map((r) => r.depth)} allWaves=${runs.map((r) => r.waves)}\n` +
         runs[0].statements.map((s) => s.slice(0, 140)).join("\n"));
     }
     expect(count).toBeLessThanOrEqual(BUDGET.statements);
     expect(waves).toBeLessThanOrEqual(BUDGET.waves);
+    expect(depth).toBeLessThanOrEqual(BUDGET.depth);
+    // The RFQ row is read exactly once per request (it used to be read 3x;
+    // computeLifecycleStages still reads its own columns by id = ANY).
+    const rfqReads = runs[0].statements.filter((q) => /\bFROM tbl_rfq WHERE id = \d+/i.test(q));
+    expect(rfqReads).toHaveLength(1);
   });
 });

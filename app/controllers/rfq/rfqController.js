@@ -8315,17 +8315,45 @@ const rfqController = {
       }
 
       // Basic row first — for tender guard + draft handling + permission scope.
-      const rfq = await db.oneOrNone(
+      // Read ONCE: the scope check and the lifecycle summary both take this
+      // row instead of re-reading tbl_rfq (it used to be read three times).
+      // process_id is for those two consumers only and is not emitted.
+      const rfqRow = await db.oneOrNone(
         `SELECT id, rfq_no, title, status, is_published, is_tender, hotel_id,
                 department_id, hospitality_company_id, created_by, bid_end_date,
-                ra_start_date, ra_end_date
+                ra_start_date, ra_end_date, process_id
            FROM tbl_rfq WHERE id = $1`,
         [rfqId]
       );
-      if (!rfq) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      if (!rfqRow) return res.status(200).json({ status: 2, message: 'RFQ not found' });
+      const { process_id: _processId, ...rfq } = rfqRow;
       if (Number(rfq.is_tender) === 1) {
         return res.status(403).json({ status: 0, message: 'This is a tender — use the ARC flow' });
       }
+
+      // The scope check and the caller's RFQ-scoped permissions are
+      // independent reads, so they are issued together. The lifecycle summary
+      // (the expensive part) starts only once the scope check has passed, so a
+      // denied caller costs two statements, not the whole build. The
+      // permission read cannot reject (it swallows its own errors), so an early
+      // 403 return leaves no unhandled rejection behind.
+      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
+      const permissionsP = (async () => {
+        if (Number(req.user?.user_type) === 8) {
+          return Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
+        }
+        const perms = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
+        if (rfq.hotel_id != null) {
+          const rows = await rbacModel
+            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
+            .catch(() => []);
+          for (const row of rows) {
+            const resource = String(row.resource);
+            if (perms[resource]) perms[resource].push(String(row.action));
+          }
+        }
+        return perms;
+      })();
 
       // Tenant guard — the same one the sibling /rfq/lifecycle-summary/:rfqId
       // already applies. This payload is not metadata: it carries the full
@@ -8335,36 +8363,21 @@ const rfqController = {
       // gated on the result, so any authenticated user — a vendor included —
       // could walk RFQ ids and read another tenant's approval chain.
       if (userId) {
-        try { await assertCanReadParentRfq(userId, rfqId); }
+        try { await assertCanReadParentRfq(userId, rfqId, db, { rfqRow }); }
         catch (e) {
           if (e instanceof AuthorizationError) return sendScopeError(res, e);
           throw e;
         }
       }
 
-      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
-      const RFQ_PERMISSION_RESOURCES = ['rfq', 'te', 'quote-compare', 'negotiation', 'awarding', 'po'];
-      let permissions;
-      if (Number(req.user?.user_type) === 8) {
-        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, ['read', 'write', 'approve', 'admin']]));
-      } else {
-        permissions = Object.fromEntries(RFQ_PERMISSION_RESOURCES.map((r) => [r, []]));
-        if (rfq.hotel_id != null) {
-          const rows = await rbacModel
-            .getUserPermissionsForHotels(userId, [rfq.hotel_id], null, rfq.department_id || null)
-            .catch(() => []);
-          for (const row of rows) {
-            const resource = String(row.resource);
-            if (permissions[resource]) permissions[resource].push(String(row.action));
-          }
-        }
-      }
-
       // Draft (status 0 = not yet submitted) → redirectable shape so the shell
       // sends the buyer to the edit/create flow instead of the stage page.
-      const summary = (Number(rfq.status) === 0)
-        ? null
-        : await rfqModel.getLifecycleSummary(rfqId, userId);
+      const summaryP = (Number(rfq.status) === 0)
+        ? Promise.resolve(null)
+        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
+
+      // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
+      const [permissions, summary] = await Promise.all([permissionsP, summaryP]);
       if (!summary || !summary.current_stage) {
         return res.status(200).json({
           status: 1,

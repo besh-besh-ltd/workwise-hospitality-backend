@@ -454,6 +454,10 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
             r.contact_name, r.contact_number, r.location, r.bid_end_date,
             r.reverse_auction, r.hospitality_company_id, r.hotel_id, r.department_id,
             r.created_by, r.project_id,
+            -- is_published / is_tender / process_id: only so fetchStageActors
+            -- can hand this row to getLifecycleSummary instead of it re-reading
+            -- tbl_rfq. Not emitted.
+            r.is_published, r.is_tender, r.process_id,
             hc.name AS company_label, hh.name AS hotel_label, dep.title AS department_label
        FROM tbl_rfq r
        LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
@@ -561,7 +565,7 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     fetchVendorTech(id),
     fetchProductTech(id),
     fetchTechBlockedQuoters(id),
-    quotesLocked ? Promise.resolve(null) : fetchStageActors(id, scope),
+    quotesLocked ? Promise.resolve(null) : fetchStageActors(id, scope, rfq),
     countDistinctQuoters(id),
     countInvitedVendors(id),
     rfqHasTechClauses(id),
@@ -2082,10 +2086,12 @@ async function fetchPrimaryRoles(userIds) {
 // further authorization happens here; what is emitted is names, ids and role
 // titles only. Failure-tolerant — a lifecycle hiccup drops the banner, it does
 // not fail the comparison sheet.
-async function fetchStageActors(rfqId, scope) {
+async function fetchStageActors(rfqId, scope, rfqRow = null) {
   try {
     const userId = scope && scope.userId != null ? Number(scope.userId) : null;
-    const summary = await rfqModel.getLifecycleSummary(rfqId, userId);
+    // rfqRow (the view's own header row) spares the summary a tbl_rfq re-read;
+    // the summary itself is now batched (see getLifecycleSummary).
+    const summary = await rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
     const shaped = shapeStageActors(summary, { userId });
     if (!shaped) return null;
 
