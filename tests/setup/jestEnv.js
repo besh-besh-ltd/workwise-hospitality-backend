@@ -93,16 +93,6 @@ if (!/^hospitality_test(_[a-zA-Z0-9_-]+)?$/.test(dbName)) {
 process.env.DATABASE_NAME = dbName;
 process.env.TEST_DB_NAME_RESOLVED = dbName;
 
-// Every suite imports the app afresh (ESM module registry per test file), so
-// every suite gets its OWN app/config/dbConn.js pool and nothing ever ends the
-// previous one. With the production idle timeout (30 s) those orphaned pools
-// keep their connections open across the next several suites; once handlers
-// issue independent reads in parallel (Promise.all) each pool holds more of
-// them at once, and a shard can reach Postgres' default max_connections (100)
-// — observed locally as "sorry, too many clients already" mid-shard. Release
-// idle connections after 1 s in tests. Production keeps its own setting.
-if (!process.env.DATABASE_IDLE_TIMEOUT_MS) process.env.DATABASE_IDLE_TIMEOUT_MS = "1000";
-
 // Stub nodemailer so sendMail calls don't actually try to authenticate against
 // gmail/brevo SMTP (which fail with 535 in the test env, polluting logs).
 // We swap createTransport for a function that returns a transport whose
