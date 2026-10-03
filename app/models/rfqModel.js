@@ -8181,13 +8181,23 @@ LIMIT 2;
           AND vhcs_cat.item_type = 'category'
           AND vhcs_cat.item_id = pc.category_id
           AND vhcs_cat.status IN ('active', 'expired')
-        JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
-          ON vhcs_hotel.vendor_id = pvvm.vendor_id
-          AND vhcs_hotel.item_type = 'hotel'
-          AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
-          AND vhcs_hotel.status IN ('active', 'expired')
         WHERE pvvm.status = TRUE
           AND pvvm.is_approved = TRUE
+          -- Semi-join, not an inner join. A vendor typically subscribes to many
+          -- of the caller's hotels, and as a JOIN each of those rows multiplied
+          -- the (vendor x variant) pairs before COUNT(DISTINCT) collapsed them
+          -- again: measured on prod as 21,373 pairs fanning out to 218,070 rows
+          -- (planner estimate: 74). EXISTS stops at the first matching
+          -- subscription, so the row count no longer depends on how many hotels
+          -- a vendor covers. COUNT(DISTINCT vendor_id) is unchanged by it.
+          AND EXISTS (
+            SELECT 1
+            FROM tbl_vendor_hotel_category_subscription vhcs_hotel
+            WHERE vhcs_hotel.vendor_id = pvvm.vendor_id
+              AND vhcs_hotel.item_type = 'hotel'
+              AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
+              AND vhcs_hotel.status IN ('active', 'expired')
+          )
         GROUP BY pvvm.product_variant_id, pc.category_id
       )`
       : `
@@ -8202,8 +8212,42 @@ LIMIT 2;
         GROUP BY pvvm.product_variant_id
       )`;
 
+    // Candidate generation. `similarity(x, $1) > 0.1` ORed across two tables
+    // cannot use any index, so every keystroke seq-scanned and scored all
+    // ~13k variants x products (the four trigram/FTS indexes on these columns
+    // had idx_scan = 0 on prod). Each UNION branch below is one indexable
+    // predicate: slug (btree), to_tsvector (GIN FTS), and `%` (GIN trigram,
+    // threshold pinned to 0.1 by SET LOCAL in the transaction below). `%` is
+    // `similarity >= threshold`, a superset of `> 0.1`, and matched_variants
+    // re-applies the ORIGINAL searchCondition to every candidate, so the
+    // result set is identical by construction — this only narrows what gets
+    // scored. Measured on prod: 214 ms -> 47 ms for the candidate stage.
+    const candidateCte = isSearchAll
+      ? ''
+      : `
+      candidate_ids AS (
+        SELECT pv.id FROM tbl_product_variant pv
+         WHERE pv.is_approve = 1 AND pv.slug = $1
+        UNION
+        SELECT pv.id FROM tbl_product_variant pv
+         WHERE pv.is_approve = 1
+           AND to_tsvector('english', pv.name) @@ plainto_tsquery('english', $1)
+        UNION
+        SELECT pv.id FROM tbl_product_variant pv
+         WHERE pv.is_approve = 1 AND pv.name % $1
+        UNION
+        SELECT pv.id
+          FROM tbl_product p
+          JOIN tbl_product_variant pv ON pv.product_id = p.id
+         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1
+           AND pv.is_approve = 1
+           AND (to_tsvector('english', p.name) @@ plainto_tsquery('english', $1)
+                OR p.name % $1)
+      ),`;
+
     const q = `
-      WITH matched_variants AS (
+      WITH ${candidateCte}
+      matched_variants AS (
         SELECT pv.id AS variant_id,
                pv.product_id,
                pv.name AS variant_name,
@@ -8223,7 +8267,7 @@ LIMIT 2;
                         ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1))
                       ) AS rank`
                }
-        FROM tbl_product_variant pv
+        FROM ${isSearchAll ? 'tbl_product_variant pv' : 'candidate_ids ci JOIN tbl_product_variant pv ON pv.id = ci.id'}
         JOIN tbl_product p ON pv.product_id = p.id
         WHERE p.status = 1
           AND p.is_deleted = 0
@@ -8291,19 +8335,24 @@ LIMIT 2;
         CASE WHEN ranked_results.slug = $1 THEN 0 ELSE 1 END,
         ranked_results.rank DESC,
         ranked_results.similarity_score DESC,
-        ranked_results.unified_name ASC;
+        ranked_results.unified_name ASC,
+        -- Deterministic tie-break. One row per (variant, category), so a
+        -- variant in two categories used to come back in arbitrary order.
+        ranked_results.variant_id ASC,
+        ranked_results.category_id ASC;
     `;
 
-    return new Promise(function (resolve, reject) {
-      db.query(q, params)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    try {
+      if (isSearchAll) return await db.query(q, params);
+      // SET LOCAL scopes the threshold to this transaction, so it can never
+      // leak onto the pooled connection and change `%` for another caller.
+      return await db.tx('searchProduct', async (t) => {
+        await t.none(`SET LOCAL pg_trgm.similarity_threshold = 0.1`);
+        return t.query(q, params);
+      });
+    } catch (err) {
+      throw new Error(err);
+    }
   },
 
   /**
@@ -8386,37 +8435,40 @@ LIMIT 2;
         GROUP BY rp.product_variant_id
       ),
 
-      -- Candidate variants: must have at least one eligible vendor for selected hotels
+      -- Vendor count per variant scoped to the selected hotels (active or
+      -- expired). This is ALSO the candidate set: a variant is a candidate
+      -- exactly when it has at least one approved mapping to an eligible
+      -- vendor, i.e. when it appears here. The old form scanned the 2M-row
+      -- mapping table twice (once DISTINCT for candidates, once grouped for
+      -- counts) and both sorts spilled to disk; prod 3.4 s -> ~0.5 s.
+      -- COUNT(DISTINCT) on purpose: nothing makes (variant, vendor) unique.
+      vendor_counts AS (
+        SELECT pvvm.product_variant_id AS variant_id,
+               COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
+        FROM tbl_product_variant_vendor_mapping pvvm
+        WHERE pvvm.status = TRUE AND pvvm.is_approved = TRUE
+          AND pvvm.vendor_id IN (SELECT vendor_id FROM eligible_hotel_vendors)
+        GROUP BY pvvm.product_variant_id
+      ),
+
       candidate_variants AS (
-        SELECT DISTINCT
+        SELECT
           pv.id AS variant_id,
           pv.product_id,
           pv.name AS variant_name,
           pv.slug,
           p.name AS product_name,
-          p.description
-        FROM tbl_product_variant pv
+          p.description,
+          vc.vendor_count
+        FROM vendor_counts vc
+        JOIN tbl_product_variant pv ON pv.id = vc.variant_id
         JOIN tbl_product p ON p.id = pv.product_id
-        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
-        JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = pvvm.vendor_id
         WHERE p.status = 1
           AND p.is_deleted = 0
           AND p.is_review = 0
           AND p.is_approve = 1
           AND pv.is_approve = 1
-          AND pvvm.status = TRUE
-          AND pvvm.is_approved = TRUE
           ${stagedExcludeClause}
-      ),
-
-      -- Vendor count per variant scoped to the selected hotels (active or expired)
-      vendor_counts AS (
-        SELECT pvvm.product_variant_id AS variant_id,
-               COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
-        FROM tbl_product_variant_vendor_mapping pvvm
-        JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = pvvm.vendor_id
-        WHERE pvvm.status = TRUE AND pvvm.is_approved = TRUE
-        GROUP BY pvvm.product_variant_id
       ),
 
       -- Per-variant category info (one row per variant, picks first category)
@@ -8441,7 +8493,7 @@ LIMIT 2;
           cv.slug,
           vcat.category_id,
           vcat.category_name,
-          COALESCE(vc.vendor_count, 0) AS vendor_count,
+          COALESCE(cv.vendor_count, 0) AS vendor_count,
           -- Personalization: 100 base, +20 per past use (max 200)
           CASE WHEN uh.history_count > 0 THEN 100 + LEAST(uh.history_count * 20, 100) ELSE 0 END AS user_history_score,
           -- Category match with staged: flat 50 if matches
@@ -8449,7 +8501,6 @@ LIMIT 2;
           -- Popularity: log-scaled (0–30 typical)
           COALESCE(LEAST(pv_pop.popularity, 30), 0) AS popularity_score
         FROM candidate_variants cv
-        LEFT JOIN vendor_counts vc ON vc.variant_id = cv.variant_id
         LEFT JOIN variant_category vcat ON vcat.product_id = cv.product_id
         LEFT JOIN user_history_variants uh ON uh.variant_id = cv.variant_id
         LEFT JOIN popular_variants pv_pop ON pv_pop.variant_id = cv.variant_id
@@ -8473,7 +8524,10 @@ LIMIT 2;
         score DESC,
         user_history_score DESC,
         popularity_score DESC,
-        product_name ASC
+        product_name ASC,
+        -- Deterministic tie-break: variants of one product share every key
+        -- above, so which of them made the cut used to be arbitrary.
+        variant_id ASC
       LIMIT ${limitParam};
     `;
 
