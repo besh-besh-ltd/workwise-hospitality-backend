@@ -151,7 +151,8 @@ export function createPdfRenderer({
           renderTimeoutMs,
           'PDF render'
         );
-        return Buffer.from(bytes);
+        // puppeteer >= 22 returns a Uint8Array; normalise to a Buffer.
+        return bytes ? Buffer.from(bytes) : Buffer.alloc(0);
       } finally {
         // The leak that turned one failed PO into thirteen minutes of them.
         await page.close().catch(() => {});
@@ -169,8 +170,9 @@ export function createPdfRenderer({
 
   /** Render to an in-memory Buffer (no file). */
   async function renderToBuffer(html, pdfOptions = {}) {
-    const { path: _ignored, ...rest } = pdfOptions;
-    return render(html, rest);
+    const options = { ...pdfOptions };
+    delete options.path;
+    return render(html, options);
   }
 
   async function close() {
