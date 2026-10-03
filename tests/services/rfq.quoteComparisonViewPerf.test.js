@@ -21,8 +21,10 @@ const VENDOR_HISTORY = [
   "invited_rfqs", "is_new", "on_time_pct", "orders_done", "po_value",
   "pos_accepted", "quote_pct", "quoted_rfqs", "track_record",
 ];
-// Whole request, auth included. Before: 92 statements / 46 waves locally.
-const BUDGET = { statements: 92, waves: 52 };
+// Whole request, auth included. Before: 92 statements / 46 waves locally;
+// after parallelising: 92 / 26 (the lifecycle batching later trims the
+// statement count, since fetchStageActors runs the lifecycle summary).
+const BUDGET = { statements: 92, waves: 30 };
 
 describe("GET /rfq/quote-comparison-view/:id — equivalence + query budget", () => {
   let made;
