@@ -32,7 +32,9 @@ export function createApp() {
 
   util(app);
 
-  // Clean error handler
+  // Clean error handler. Express recognises error middleware by its arity,
+  // so `next` must stay in the signature.
+  // eslint-disable-next-line no-unused-vars
   app.use(function onError(err, req, res, next) {
     logError('Unhandled error in global handler', err);
     res.statusCode = 500;

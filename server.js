@@ -5,14 +5,8 @@ import './otel-instrument.mjs';
 import http from 'http';
 import dotenv from 'dotenv';
 import { createApp } from './app/app.js';
-import { consoleLogData, logError } from './app/helper/common.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { SocketConfig } from './app/util/socket.js';
-import db, { pgp } from './app/config/dbConn.js';
-const __filename = fileURLToPath(import.meta.url);
-
-const __dirname = path.dirname(__filename);
+import { pgp } from './app/config/dbConn.js';
 
 // env config
 dotenv.config();
