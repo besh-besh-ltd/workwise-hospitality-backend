@@ -260,7 +260,14 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, created_by
  * @param {Object} txContext - Optional transaction context to use same connection
  */
-const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
+// opts.deferNotifications: when true, the publish's DB writes happen here (on
+// txContext, inside the caller's transaction) but the notification work —
+// emails, tbl_notifications rows + web-push fan-out, vendor RFQ tokens — is
+// NOT run; it is returned as `{ notify }` for the caller to run once the
+// transaction has committed (and, on the scheduler endpoint, after the
+// response has gone out). Default false keeps the original inline behaviour
+// for every other caller (scheduleRfqPublish's immediate path).
+const publishRfq = async (rfq, txContext = null, source = 'scheduler', { deferNotifications = false } = {}) => {
   const dbConn = txContext || db;
   const { id, rfq_no, is_tender, created_by } = rfq;
 
@@ -298,6 +305,20 @@ const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
     metadata: { rfq_no, source },
   });
 
+  // A deferred run happens after commit, so it reads through the pool.
+  const notify = () => sendPublishNotifications({ id, rfq_no, is_tender }, deferNotifications ? db : dbConn);
+  if (deferNotifications) return { notify };
+  await notify();
+  return {};
+};
+
+/**
+ * Everything a publish tells people: the "published" email + in-app/web-push
+ * notification to the approval users and creator, and the vendor invitations
+ * (one no-login RFQ token per vendor, then the emails + notifications).
+ * Never throws — a failed notification must not undo or fail a publish.
+ */
+const sendPublishNotifications = async ({ id, rfq_no, is_tender }, dbConn = db) => {
   // Send publish notification emails
   try {
     const rfqDetails = await dbConn.oneOrNone(
@@ -360,12 +381,23 @@ const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
         }
       }
 
-      // Generate tokens and send vendor emails
+      // Generate tokens and send vendor emails. One multi-row INSERT for every
+      // vendor (was one INSERT per vendor, serially); if the batch fails for a
+      // reason other than a token collision it falls back to the per-vendor
+      // path, so one bad vendor still only costs that vendor its invitation.
       const vendorsWithTokens = [];
-      for (const vendorId of Object.keys(vendorMap)) {
-        const vendor = vendorMap[vendorId];
+      const vendorList = Object.keys(vendorMap).map((vendorId) => vendorMap[vendorId]);
+      let tokenByVendor = null;
+      try {
+        tokenByVendor = await rfqModel.insertVendorRfqTokens(vendorList.map((v) => v.user_id), id);
+      } catch (batchErr) {
+        logError('Batch vendor token insert failed — falling back to per-vendor inserts', batchErr);
+      }
+      for (const vendor of vendorList) {
         try {
-          const token = await rfqModel.insertVendorRfqToken(vendor.user_id, id);
+          const token = tokenByVendor
+            ? tokenByVendor.get(Number(vendor.user_id))
+            : await rfqModel.insertVendorRfqToken(vendor.user_id, id);
           vendorsWithTokens.push({
             user_id: vendor.user_id,
             name: vendor.name,
@@ -374,7 +406,7 @@ const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
             products: vendor.products
           });
         } catch (tokenErr) {
-          logError(`Error generating token for vendor ${vendorId}`, tokenErr);
+          logError(`Error generating token for vendor ${vendor.user_id}`, tokenErr);
         }
       }
 
@@ -414,9 +446,16 @@ const publishRfq = async (rfq, txContext = null, source = 'scheduler') => {
  * @param {string} rfq_no - RFQ number for logging
  * @param {string} [source='scheduler'] - 'scheduler' | 'watchdog' | 'force' | 'backfill'
  */
-export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler') => {
+// opts.deferNotifications: when true, the returned result carries a
+// non-enumerable `notify()` the caller must run (after it has responded);
+// when false (default) notify() is awaited here — AFTER the transaction has
+// committed, no longer inside it, so a rolled-back publish emails nobody and
+// SMTP / web-push latency no longer holds the publish transaction open.
+export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler', { deferNotifications = false } = {}) => {
+  let notify = null;
+  let result;
   try {
-    return await db.tx(async t => {
+    result = await db.tx(async t => {
       const rfq = await t.oneOrNone(`
         SELECT id, rfq_no, is_tender, created_by, status, is_published
         FROM tbl_rfq WHERE id = $1
@@ -511,7 +550,7 @@ export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler') => {
         WHERE id = $1
       `, [rfqId]);
 
-      await publishRfq(rfq, t, source);
+      ({ notify } = await publishRfq(rfq, t, source, { deferNotifications: true }));
 
       // Clear failure tracking after a successful publish so any future failure
       // starts fresh (and the watchdog won't re-email about an old error).
@@ -525,6 +564,7 @@ export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler') => {
       return { published: true, autoApproved: wasAutoApproved };
     });
   } catch (err) {
+    notify = null;
     // Record the failure outside the (rolled-back) transaction so the watchdog
     // can see why we failed and the creator email can describe it.
     try {
@@ -541,6 +581,15 @@ export const publishRfqById = async (rfqId, rfq_no, source = 'scheduler') => {
     }
     throw err;
   }
+
+  if (notify) {
+    if (deferNotifications) {
+      Object.defineProperty(result, 'notify', { value: notify, enumerable: false });
+    } else {
+      await notify();
+    }
+  }
+  return result;
 };
 
 /**

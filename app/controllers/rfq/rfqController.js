@@ -18771,7 +18771,10 @@ getClauses: async (req, res) => {
       logger.debug('📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})');
 
       const { publishRfqById } = await import('../../helper/cronManager.js');
-      const result = await publishRfqById(rfqId, rfq_no, 'scheduler');
+      // The publish's DB writes commit inside publishRfqById's transaction;
+      // the notification work (emails, in-app rows + web-push, vendor RFQ
+      // tokens) comes back as result.notify and runs AFTER this response.
+      const result = await publishRfqById(rfqId, rfq_no, 'scheduler', { deferNotifications: true });
 
       const skippedMessages = {
         not_found: 'RFQ not found',
@@ -18786,12 +18789,23 @@ getClauses: async (req, res) => {
         message = skippedMessages[result.reason] || 'RFQ skipped';
       }
 
-      return res.status(200).json({
+      res.status(200).json({
         status: result.skipped ? 0 : 1,
         message,
         rfqId,
         ...result
       });
+      // Off the request path: the scheduler Lambda does not wait on SMTP or
+      // web-push fan-out any more. notify() never throws by contract; the catch
+      // is belt-and-braces so nothing can surface as an unhandled rejection.
+      if (typeof result.notify === 'function') {
+        setImmediate(() => {
+          Promise.resolve()
+            .then(() => result.notify())
+            .catch((err) => logError(`[RFQ Publisher] post-response notifications failed for RFQ ${rfqId}`, err));
+        });
+      }
+      return;
     } catch (error) {
       logError('❌ RFQ publish failed', error);
       return res.status(500).json({ status: 0, message: error.message });

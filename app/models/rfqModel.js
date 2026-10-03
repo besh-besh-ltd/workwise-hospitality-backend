@@ -9957,6 +9957,43 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
 
     return token; // Return the successfully inserted token
   },
+  /**
+   * insertVendorRfqToken for many vendors in ONE statement. Same token shape
+   * and same row as the single version (token, vendor_id, rfq_no). Tokens are
+   * made distinct within the batch; a collision with an existing token
+   * (23505) regenerates the whole batch and retries, as the single version
+   * retries its one row.
+   *
+   * @returns {Promise<Map<number, number>>} vendor id → token
+   */
+  insertVendorRfqTokens: async (vendorIds, rfqNumber) => {
+    const ids = [...new Set((vendorIds || []).map(Number).filter(Number.isInteger))];
+    const out = new Map();
+    if (!ids.length) return out;
+    const generateUniqueToken = () => {
+      const timestamp = Date.now();
+      const randomNumber = Math.floor(Math.random() * 1000000);
+      return parseInt((timestamp + randomNumber).toString().substring(0, 16));
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const seen = new Set();
+      const rows = ids.map((vendor_id) => {
+        let token;
+        do { token = generateUniqueToken(); } while (seen.has(token));
+        seen.add(token);
+        return { token, vendor_id, rfq_no: rfqNumber };
+      });
+      try {
+        await db.none(pgp.helpers.insert(rows, ['token', 'vendor_id', 'rfq_no'], 'tbl_vendor_rfq_tokens_non_login'));
+        for (const r of rows) out.set(r.vendor_id, r.token);
+        return out;
+      } catch (err) {
+        if (err.code === '23505') continue;
+        throw err;
+      }
+    }
+    throw new Error('insertVendorRfqTokens: could not generate unique tokens');
+  },
   getVendorRfqToken: async (vendorId, rfqNumber) => {
     // Ensure both parameters are valid integers
     const safeVendorId = parseInt(vendorId, 10);
