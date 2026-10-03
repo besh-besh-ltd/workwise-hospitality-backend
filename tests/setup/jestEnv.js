@@ -56,6 +56,16 @@ if (!process.env.PGOPTIONS) {
   process.env.PGOPTIONS = "-c timezone=UTC";
 }
 
+// Production keeps idle pooled connections for 10 minutes (dbConn.js) so it
+// stops paying TLS + SCRAM per burst. Under Jest that is the wrong trade: every
+// suite gets a fresh module registry and therefore its OWN app pool, which is
+// never ended. With a 10-minute idle those pools pile up across a shard and hit
+// Postgres max_connections ("sorry, too many clients already"). Release idle
+// test connections after 1 s instead. An explicit env value still wins.
+if (!process.env.DATABASE_IDLE_TIMEOUT_MS) {
+  process.env.DATABASE_IDLE_TIMEOUT_MS = "1000";
+}
+
 function sanitize(s) {
   return String(s).replace(/[^a-zA-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
 }

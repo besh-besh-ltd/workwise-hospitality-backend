@@ -63,8 +63,13 @@ describe("buildConnectionConfig", () => {
 });
 
 describe("production pool sessions", () => {
-  it("the app pool keeps idle connections for 10 minutes", () => {
-    expect(db.$cn.idleTimeoutMillis).toBe(600_000);
+  it("the app pool is built from buildConnectionConfig (idle timeout from env, 10 min by default)", () => {
+    // jestEnv.js pins DATABASE_IDLE_TIMEOUT_MS=1000 so per-suite pools do not
+    // pile up; production leaves it unset and gets the 10-minute default.
+    expect(db.$cn.idleTimeoutMillis).toBe(buildConnectionConfig(process.env).idleTimeoutMillis);
+    expect(db.$cn.statement_timeout).toBe(120_000);
+    const { DATABASE_IDLE_TIMEOUT_MS: _unset, ...prodLikeEnv } = process.env;
+    expect(buildConnectionConfig(prodLikeEnv).idleTimeoutMillis).toBe(600_000);
   });
 
   it("app sessions carry the statement and idle-in-transaction timeouts", async () => {
