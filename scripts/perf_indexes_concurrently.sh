@@ -17,6 +17,10 @@
 set -euo pipefail
 
 : "${PGDATABASE:?set PGDATABASE (hospitality_stage or hospitality_main)}"
+# lock_timeout goes in PGOPTIONS, NOT a leading `SET ...;` in the same -c:
+# psql sends a multi-statement -c string as ONE implicit transaction, and
+# CREATE INDEX CONCURRENTLY refuses to run inside a transaction block.
+export PGOPTIONS="${PGOPTIONS:-} -c lock_timeout=5s"
 PSQL=(psql -X -v ON_ERROR_STOP=1)
 NAMES="'idx_pop_rfq_product_id_inc','idx_pop_purchase_order_id','idx_notif_owner_active','idx_company_location_company_id'"
 
@@ -33,10 +37,10 @@ check_invalid() {
 echo "Target: ${PGHOST:-local}/${PGDATABASE}"
 check_invalid
 
-"${PSQL[@]}" -c "SET lock_timeout = '5s'; CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pop_rfq_product_id_inc ON public.tbl_purchase_order_product (rfq_product_id) INCLUDE (purchase_order_id);"
-"${PSQL[@]}" -c "SET lock_timeout = '5s'; CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pop_purchase_order_id ON public.tbl_purchase_order_product (purchase_order_id);"
-"${PSQL[@]}" -c "SET lock_timeout = '5s'; CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_notif_owner_active ON public.tbl_notifications ((COALESCE(recipient_user_id, sender_user_id)), created_at DESC) INCLUDE (delivered_at, is_read) WHERE dismissed_at IS NULL;"
-"${PSQL[@]}" -c "SET lock_timeout = '5s'; CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_company_location_company_id ON public.tbl_company_location (company_id);"
+"${PSQL[@]}" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pop_rfq_product_id_inc ON public.tbl_purchase_order_product (rfq_product_id) INCLUDE (purchase_order_id);"
+"${PSQL[@]}" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pop_purchase_order_id ON public.tbl_purchase_order_product (purchase_order_id);"
+"${PSQL[@]}" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_notif_owner_active ON public.tbl_notifications ((COALESCE(recipient_user_id, sender_user_id)), created_at DESC) INCLUDE (delivered_at, is_read) WHERE dismissed_at IS NULL;"
+"${PSQL[@]}" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_company_location_company_id ON public.tbl_company_location (company_id);"
 
 "${PSQL[@]}" -c "ANALYZE public.tbl_purchase_order_product; ANALYZE public.tbl_notifications; ANALYZE public.tbl_company_location;"
 
