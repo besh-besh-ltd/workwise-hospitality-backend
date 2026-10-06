@@ -23,9 +23,12 @@ const TEST_USER_AGENT = "jest-test-agent";
  * `tbl_users.user_agent` to the canonical test value so passport's user-agent
  * comparison succeeds.
  *
+ * `ent` (Vendor Networks, spec §4.1): when given, adds the encrypted acting-
+ * entity claim exactly as production's switch-entity does.
+ *
  * Returns { token, headers, userAgent }.
  */
-export async function loginAs(userId) {
+export async function loginAs(userId, { ent } = {}) {
   if (!Number.isInteger(userId)) {
     throw new Error(`loginAs: userId must be an integer (got ${userId})`);
   }
@@ -50,6 +53,7 @@ export async function loginAs(userId) {
       session: "",
       user: true,
       ag: cryptr.encrypt(TEST_USER_AGENT),
+      ...(ent !== undefined && ent !== null ? { ent: cryptr.encrypt(String(ent)) } : {}),
       iat: now,
       exp: now + 60 * 60,
     },

@@ -232,6 +232,16 @@ describe("resolveActingContext", () => {
     expect(await resolveActingContext(await userRow(LONE), bad)).toBeNull();
   });
 
+  it.each(["2147483648", 2147483648, "99999999999", 9007199254740991])(
+    "an ent beyond int4 (%p) is refused, not a Postgres out-of-range error",
+    async (huge) => {
+      await world();
+      expect(await resolveActingContext(await userRow(HQ), huge)).toBeNull();
+      expect(await resolveActingContext(await userRow(LONE), huge)).toBeNull();
+      expect(await collapseToPrincipals([huge, BRANCH])).toEqual([HQ]);
+    }
+  );
+
   it("a digit-string ent claim is accepted", async () => {
     await world();
     expect((await resolveActingContext(await userRow(HQ), String(BRANCH))).entityRow.id).toBe(BRANCH);

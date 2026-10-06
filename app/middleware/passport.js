@@ -10,6 +10,12 @@ import userModel from '../models/userModel.js';
 import { logger } from '../util/logger.js';
 // Claim decryption only (never the auth decision) — see app/helper/claimCrypto.js.
 import { decryptClaim } from '../helper/claimCrypto.js';
+import { resolveActingContext } from '../services/vendorNetwork/actingContext.js';
+import { VENDOR_MEMBER_USER_TYPE } from '../constants/vendorNetwork.js';
+
+// Logins that may act for a vendor network entity (spec §4.1). Every other user
+// type (buyers, admins) keeps today's path untouched: one query, no `ent`.
+const NETWORK_USER_TYPES = new Set([3, VENDOR_MEMBER_USER_TYPE]);
 
 // import models from '../models/productModel.js';
 // const userModel = models.user;
@@ -86,13 +92,17 @@ passport.use(
             });
           } else {
             // console.log('Case 2');
-            isMatch = await isValidPassword(password, user_dtls.password);
+            // A stored value bcrypt cannot read is a failed login, never a 500.
+            isMatch = await isValidPassword(password, user_dtls.password).catch(() => false);
           }
           // console.log('Case 22', isMatch);
           const isMatchAdminApprove = user_dtls.status;
+          // A network person (user_type 11) holds no subscription of its own, so an
+          // inactive (INVITED) one gets the plain not-approved message, never the
+          // hospitality payment flow.
           const isHospitalityVendor =
-            user_dtls.is_hospitality === 1 ||
-            user_dtls.is_hospitality === '1';
+            Number(user_dtls.user_type) !== VENDOR_MEMBER_USER_TYPE &&
+            (user_dtls.is_hospitality === 1 || user_dtls.is_hospitality === '1');
           const sanitizedUser = { ...user_dtls };
           delete sanitizedUser.password;
           if (!isMatch) {
@@ -198,19 +208,44 @@ passport.use(
           }
         }
 
+        // `sub` is the PERSON who logged in; `ag` is checked against that person.
         let user = await userModel.user_detail_check(
           decryptClaim(payload.sub)
         );
 
         let user_details = Object.assign({}, ...user);
         if (
-          user.length > 0 &&
-          decryptClaim(payload.ag) == user_details.user_agent
+          !(user.length > 0 &&
+          decryptClaim(payload.ag) == user_details.user_agent)
         ) {
-          return done(null, Object.assign({}, ...user));
-        } else {
           return done(null, false, { message: 'Unauthorized' });
         }
+        if (!NETWORK_USER_TYPES.has(Number(user_details.user_type))) {
+          return done(null, user_details);
+        }
+
+        // Vendor Networks (spec §4.1): which entity this person acts as, re-checked
+        // on every request so a revoked membership or removed entity is refused on
+        // the very next call. A null context is a tampered/foreign `ent` -> 401.
+        let ent = null;
+        if (payload.ent) {
+          try {
+            ent = decryptClaim(payload.ent);
+          } catch {
+            return done(null, false, { message: 'Unauthorized' });
+          }
+        }
+        const ctx = await resolveActingContext(user_details, ent);
+        if (!ctx) {
+          return done(null, false, { message: 'Unauthorized' });
+        }
+        // A vendor in no network gets exactly today's object: no `network` key at all.
+        return done(
+          null,
+          ctx.network === undefined
+            ? ctx.entityRow
+            : { ...ctx.entityRow, network: ctx.network }
+        );
       } catch (error) {
         logger.error('passport error');
         done(error, false);

@@ -54,6 +54,8 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
+import { profileNetworkFor } from '../../services/vendorNetwork/actingContext.js';
+import { VENDOR_MEMBER_USER_TYPE } from '../../constants/vendorNetwork.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -1638,8 +1640,12 @@ get_company_users: async (req, res, next) => {
       if (req.user.err_msg && req.user.err_msg != '') {
         err_msg = req.user.err_msg;
       }
+      // A network person (user_type 11) has no subscription of its own; it never
+      // takes the hospitality payment branch.
       const isHospitalityPending =
-        req.user && req.user.login_status === 'hospitality_pending';
+        req.user &&
+        req.user.login_status === 'hospitality_pending' &&
+        Number(req.user.user_type) !== VENDOR_MEMBER_USER_TYPE;
       if (isHospitalityPending) {
         // Re-check if vendor has already completed hospitality payment.
         // If payment is done, approve vendor and proceed with normal login.
@@ -2814,6 +2820,10 @@ update_user_detail: async (req, res, next) => {
         // return false;
         user.vendor_approve = vendor_arr;
         user.spoc = spoc;
+
+        // Vendor Networks (spec §4.1): who is acting, for which entity, and where
+        // they may switch to. null for a vendor in no network and for non-vendors.
+        user.network = await profileNetworkFor(req.user);
 
         // Fetch user-to-company/hotel mappings
         // includeHotelRows: expand company-level mappings into individual hotel rows

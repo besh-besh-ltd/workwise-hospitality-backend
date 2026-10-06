@@ -17,10 +17,11 @@ import { loginAs } from "./auth.js";
 /**
  * Returns a per-test supertest client bound to a fixture user.
  * Set userId=null for unauthenticated requests.
+ * `{ ent }` adds the Vendor Networks acting-entity claim (see loginAs).
  */
-export async function httpClient(userId = null) {
+export async function httpClient(userId = null, { ent } = {}) {
   const app = await buildTestApp();
-  const headers = userId == null ? {} : (await loginAs(userId)).headers;
+  const headers = userId == null ? {} : (await loginAs(userId, { ent })).headers;
 
   const wrap = (method) => (path) => {
     let req = request(app)[method](path);

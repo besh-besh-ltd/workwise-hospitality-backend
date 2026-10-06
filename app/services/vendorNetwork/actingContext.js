@@ -5,6 +5,7 @@
 // Query budget: 1 for a vendor acting as itself, 2 otherwise.
 
 import db from "../../config/dbConn.js";
+import userModel from "../../models/userModel.js";
 import {
   VENDOR_MEMBER_USER_TYPE,
   NETWORK_ROLE,
@@ -25,10 +26,14 @@ import {
 const VENDOR_USER_TYPE = 3;
 const INVALID = Symbol("invalid-ent");
 
-/** A positive safe integer, or a /^\d+$/ string of one -> number; anything else -> null. */
+// tbl_users.id is int4: a larger id can never exist, and Postgres would reject it
+// with an out-of-range error (a 500) instead of matching nothing.
+const MAX_INT4 = 2147483647;
+
+/** A positive int4, or a /^\d+$/ string of one -> number; anything else -> null. */
 function toPositiveId(value) {
   const n = typeof value === "string" ? (/^\d+$/.test(value) ? Number(value) : NaN) : value;
-  return Number.isSafeInteger(n) && n > 0 ? n : null;
+  return Number.isSafeInteger(n) && n > 0 && n <= MAX_INT4 ? n : null;
 }
 
 /** null/undefined -> null; a valid id -> number; anything else ('1e5', '0x17', -1, 1.5 ...) -> INVALID. */
@@ -176,6 +181,30 @@ export async function listActableEntities(personRow, runner = db) {
 }
 
 /**
+ * get-profile's `network` block for an authenticated req.user, or null when the
+ * caller acts in no network (no-org vendors, buyers, emailed-link vendors).
+ */
+export async function profileNetworkFor(user, runner = db) {
+  const network = user?.network;
+  if (!network) return null;
+  const person =
+    network.actor_user_id === Number(user.id)
+      ? user
+      : (await userModel.user_detail_check(network.actor_user_id))[0];
+  const { org_id, org_name, role, actor_user_id, actor_name, acting_entity_id, is_principal } = network;
+  return {
+    org_id,
+    org_name,
+    role,
+    actor_user_id,
+    actor_name,
+    acting_entity_id,
+    is_principal,
+    actable_entities: person ? await listActableEntities(person, runner) : [],
+  };
+}
+
+/**
  * Vendor ids whose subscriptions cover `vendorId`: every ACTIVE entity of its org when the
  * vendor is itself ACTIVE in an org, otherwise just [vendorId].
  */
@@ -213,6 +242,7 @@ export async function entityCanOperate(vendorId, runner = db) {
 export default {
   resolveActingContext,
   listActableEntities,
+  profileNetworkFor,
   subscriptionHolderIdsFor,
   collapseToPrincipals,
   entityCanOperate,
