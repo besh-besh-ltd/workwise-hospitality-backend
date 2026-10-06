@@ -126,6 +126,28 @@ const attachHospitalityContext = () => {
 
 const settle = (promise) => promise.then((value) => ({ value }), (err) => ({ err }));
 
+const OPERATE_REFUSALS = {
+  NOT_ACTIVE: { status: 0, message: 'This network entity is suspended', code: 'NOT_ACTIVE' },
+  NO_SEAT: { status: 0, message: 'Network seat required for this entity', code: 'NO_SEAT' },
+};
+
+/**
+ * Whether this request must check that its entity may operate (Vendor Networks spec
+ * §5.1). jwtUsr resolved the acting entity's network on THIS request, so a JWT vendor
+ * with no `network` is in no org and one acting as the principal needs no seat:
+ * neither costs a query. A non-principal acting entity, and (when `tokenPath`) an
+ * emailed-link token vendor (vendorTokenOrJwt, is_verified === false, network never
+ * resolved), pay one query.
+ */
+const needsOperateCheck = (req, { tokenPath }) => {
+  const network = req.user.network;
+  if (network) return !network.is_principal;
+  return tokenPath && req.is_verified === false;
+};
+
+/** 403 body for an entityCanOperate refusal (NOT_ACTIVE when suspended, else NO_SEAT). */
+const operateRefusal = (reason) => OPERATE_REFUSALS[reason] ?? OPERATE_REFUSALS.NO_SEAT;
+
 /**
  * Builds the subscription gate. With `seatGate`, a vendor entity that may not operate
  * in its network (Vendor Networks spec §5.1: a member entity without an active seat,
@@ -156,27 +178,26 @@ const subscriptionGate = ({ seatGate }) => async (req, res, next) => {
       return next(); // Not a vendor, no subscription check needed
     }
 
-    // Independent reads: the subscription and seat checks are only CONSULTED for
-    // a hospitality vendor, but issuing them together saves serial round trips
+    // Independent reads: the subscription check is only CONSULTED for a
+    // hospitality vendor, but issuing the reads together saves serial round trips
     // on every vendor request (non-hospitality vendors are the legacy minority).
-    // A failure of either read only matters if it is consulted, as before — so
-    // each is settled here and re-thrown below only when needed.
+    // A failure of a read only matters if it is consulted, as before — so each is
+    // settled here and re-thrown below only when needed.
     // hasValidPaidSubscription counts the subscriptions of the vendor's whole
     // network (spec §5.2) inside its own statement.
-    //
-    // Seat check: jwtUsr resolved the acting entity's network on THIS request, so a
-    // JWT vendor with no `network` is in no org and acting as the principal needs
-    // no seat: neither costs a query. Only a non-principal acting entity, or an
-    // emailed-link token vendor (vendorTokenOrJwt, is_verified === false, never
-    // resolved), pays the one extra query.
-    const network = req.user.network;
-    const needsSeatCheck =
-      seatGate && (network ? !network.is_principal : req.is_verified === false);
     const [companyDetails, subscription, operate] = await Promise.all([
       userModel.getCompanyDetail(userId),
       settle(hospitalityModel.hasValidPaidSubscription(userId)),
-      needsSeatCheck ? settle(entityCanOperate(userId)) : null,
+      seatGate && needsOperateCheck(req, { tokenPath: true }) ? settle(entityCanOperate(userId)) : null,
     ]);
+
+    // The network operate check applies to every networked vendor, hospitality or
+    // not; a vendor in no org never reaches it.
+    if (operate) {
+      if (operate.err) throw operate.err;
+      if (!operate.value.ok) return res.status(403).json(operateRefusal(operate.value.reason));
+    }
+
     if (!companyDetails || companyDetails.length === 0) {
       return next();
     }
@@ -197,17 +218,6 @@ const subscriptionGate = ({ seatGate }) => async (req, res, next) => {
         message: 'Your subscription has expired. Please renew to continue.',
         subscription_expired: true
       });
-    }
-
-    if (operate) {
-      if (operate.err) throw operate.err;
-      if (!operate.value.ok) {
-        return res.status(403).json({
-          status: 0,
-          message: 'Network seat required for this entity',
-          code: 'NO_SEAT'
-        });
-      }
     }
 
     return next();
@@ -236,6 +246,24 @@ const requireActiveSubscription = subscriptionGate({ seatGate: true });
 const requireActiveSubscriptionForIssuedPo = subscriptionGate({ seatGate: false });
 
 /**
+ * Only the Vendor Networks operate check (spec §5.1), for vendor actions outside the
+ * subscription gate (ARC quote and technical-envelope submission). A non-principal
+ * org entity must be ACTIVE with a live seat: else 403 NOT_ACTIVE / NO_SEAT. Vendors
+ * in no org and principals pass with no query. Use after passportSignIn.
+ */
+const requireNetworkEntityCanOperate = async (req, res, next) => {
+  try {
+    if (!req.user?.id || !needsOperateCheck(req, { tokenPath: false })) return next();
+    const operate = await entityCanOperate(req.user.id);
+    if (!operate.ok) return res.status(403).json(operateRefusal(operate.reason));
+    return next();
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({ status: 3, message: Config.errorText.value });
+  }
+};
+
+/**
  * Variant for noLogin.customer_auth endpoints (quote submission etc.)
  * Only checks subscription if user is authenticated (req.user exists).
  * Unauthenticated requests pass through (handled by other logic).
@@ -261,5 +289,6 @@ export default {
   requireActiveSubscription,
   requireActiveSubscriptionForIssuedPo,
   requireActiveSubscriptionIfAuthenticated,
+  requireNetworkEntityCanOperate,
 };
 

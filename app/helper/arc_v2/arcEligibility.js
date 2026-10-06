@@ -30,7 +30,7 @@
 
 import db from '../../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../../services/vendorNetwork/actingContext.js';
-import { orgKeySelect } from '../../services/vendorNetwork/orgKeySql.js';
+import { orgKeySelect, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
 
 const uniqueIds = (ids) => [...new Set((ids || []).map(Number).filter(Boolean))];
 
@@ -85,6 +85,7 @@ export async function resolveArcVendorCoverage({ category_id, hotel_ids }, runne
        FROM cat
        JOIN hot ON hot.org_key = cat.org_key
        JOIN tbl_users u ON u.id = cat.org_key
+      WHERE ${keyIsInvitable('cat.org_key')}
       GROUP BY u.id, u.name, u.email, u.mobile
       ORDER BY u.name`,
     [Number(category_id), hotels]

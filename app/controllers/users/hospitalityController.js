@@ -34,6 +34,7 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome } from '../../services/notificationLinks.js';
+import { NETWORK_ROLE } from '../../constants/vendorNetwork.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -4265,6 +4266,13 @@ const HospitalityController = {
     try {
       const vendorId = req.user.id;
       const { rfq_ids } = req.body;
+
+      // Vendor Networks: joining enrols the org PRINCIPAL and emails buyers, so inside
+      // a network only the admin acting as HQ may do it. No-org vendors: unchanged.
+      const network = req.user.network;
+      if (network && !(network.role === NETWORK_ROLE.ORG_ADMIN && network.is_principal)) {
+        return res.status(403).json({ status: 0, message: 'Only the network admin acting as HQ can join open RFQs' });
+      }
 
       if (!Array.isArray(rfq_ids) || rfq_ids.length === 0) {
         return res.status(400).json({ status: 0, message: 'rfq_ids must be a non-empty array' });

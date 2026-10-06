@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
-import { orgKeySelect, orgEntitiesOfKeys } from '../services/vendorNetwork/orgKeySql.js';
+import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -789,17 +789,10 @@ const hospitalityModel = {
     // Vendor Networks (spec §5.2): the subscriptions of every holder count, i.e. the
     // ids subscriptionHolderIdsFor returns: all ACTIVE, live-login entities of the
     // vendor's org when the vendor is itself ACTIVE in one, else just the vendor.
-    // Resolved in this same statement (holder_ids mirrors
-    // vendorNetworkModel.listActiveSiblingIds) because requireActiveSubscription runs
-    // this on every vendor request.
+    // Resolved in this same statement from the shared fragment (orgKeySql.js)
+    // because requireActiveSubscription runs this on every vendor request.
     const result = await db.oneOrNone(
-      `WITH siblings AS (
-         SELECT e2.vendor_id
-           FROM tbl_vendor_org_entities e
-           JOIN tbl_vendor_org_entities e2 ON e2.org_id = e.org_id AND e2.status = 'ACTIVE'
-           JOIN tbl_users u2 ON u2.id = e2.vendor_id AND u2.status = 1 AND COALESCE(u2.is_deleted, 0) = 0
-          WHERE e.vendor_id = $1 AND e.status = 'ACTIVE'
-       ),
+      `WITH siblings AS (${activeSiblingIdsSql('$1')}),
        holder_ids AS (
          SELECT vendor_id FROM siblings
          UNION ALL
@@ -1203,7 +1196,8 @@ eligible_hotel_keys AS (
 SELECT mk.org_key AS vendor_id
 FROM mapped_keys mk
 JOIN eligible_category_keys eck ON eck.org_key = mk.org_key
-JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key;
+JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key
+WHERE ${keyIsInvitable('mk.org_key')};
 `,
     [variantId, hotelIds]
   );
@@ -2121,14 +2115,19 @@ getVendorHotelCategoryMappings: async (vendorId) => {
    *   inviteeId  — the org principal (the vendor itself in no org);
    *   holderIds  — the org's counting entities (subscriptionHolderIdsFor), or [] when the
    *                vendor's own rows do not count (a SUSPENDED entity, or an ACTIVE one
-   *                without a live login): such an entity cannot act for the org.
+   *                without a live login), or when the principal's login is dead: then
+   *                nobody can be invited for the org.
    */
   rfqInviteScope: async (vendorId) => {
     const [holderIds, key] = await Promise.all([
       subscriptionHolderIdsFor(vendorId),
-      db.one(`SELECT org_key, counts FROM (${orgKeySelect('SELECT $1::int')}) k`, [Number(vendorId)]),
+      db.one(
+        `SELECT org_key, counts, ${keyIsInvitable('k.org_key')} AS invitable
+           FROM (${orgKeySelect('SELECT $1::int')}) k`,
+        [Number(vendorId)]
+      ),
     ]);
-    return { inviteeId: Number(key.org_key), holderIds: key.counts ? holderIds : [] };
+    return { inviteeId: Number(key.org_key), holderIds: key.counts && key.invitable ? holderIds : [] };
   },
 
   /**

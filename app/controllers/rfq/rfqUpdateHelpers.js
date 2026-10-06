@@ -18,7 +18,7 @@ import {
   isEntityChangeMaterial,
   isTimestampField
 } from './rfqEditableFields.js';
-import { orgKeySelect, orgEntitiesOfKeys } from '../../services/vendorNetwork/orgKeySql.js';
+import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -704,7 +704,8 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
            )
            SELECT mk.org_key AS vendor_id
            FROM mapped_keys mk
-           JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key`,
+           JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key
+           WHERE ${keyIsInvitable('mk.org_key')}`,
           [sp.product_variant_id, hotelIds]
         );
         resolvedVendorIds = eligibleRows.map((r) => Number(r.vendor_id)).filter((n) => !Number.isNaN(n));

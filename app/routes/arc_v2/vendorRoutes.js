@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
+import hospitalityMiddleware from '../../middleware/hospitality.js';
 import * as vendorController from '../../controllers/arc_v2/arcVendorController.js';
 import * as negotiationController from '../../controllers/arc_v2/arcNegotiationController.js';
 import * as contractController from '../../controllers/arc_v2/arcContractController.js';
@@ -27,7 +28,7 @@ r.post('/quote/accept-terms',             passportSignIn, acl([3]), vendorContro
 // Phase 2 — engine-driven stateless preview (qty server-derived; never persists).
 r.post('/quote/preview',                  passportSignIn, acl([3]), vendorController.previewQuote);
 r.post('/quote/draft',                    passportSignIn, acl([3]), vendorController.saveQuoteDraft);
-r.post('/quote/submit',                   passportSignIn, acl([3]), vendorController.submitQuote);
+r.post('/quote/submit',                   passportSignIn, acl([3]), hospitalityMiddleware.requireNetworkEntityCanOperate, vendorController.submitQuote);
 r.post('/quote/withdraw',                 passportSignIn, acl([3]), vendorController.withdrawQuote);
 // Download the vendor's OWN submitted quote as a comprehensive tabular PDF
 // (streamed; vendorId derived from req.user, never the client).
@@ -47,7 +48,7 @@ r.delete('/tech-envelope/file/:fileId',        passportSignIn, acl([3]), vendorC
 // The BUYER's reference document for a clause — read-only, gated on this
 // vendor being invited to the owning ARC (not on owning the file).
 r.get( '/tech-envelope/clause-file/:fileId',   passportSignIn, acl([3]), vendorController.getClauseReference);
-r.post('/tech-envelope/submit',                passportSignIn, acl([3]), vendorController.submitTechEnvelope);
+r.post('/tech-envelope/submit',                passportSignIn, acl([3]), hospitalityMiddleware.requireNetworkEntityCanOperate, vendorController.submitTechEnvelope);
 
 // Universal (ARC-wide) technical envelope — the vendor's clause responses +
 // evidence for the SEPARATE universal configurator. Universal clauses are

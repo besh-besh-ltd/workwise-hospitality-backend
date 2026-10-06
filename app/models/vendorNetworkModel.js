@@ -4,6 +4,7 @@
 
 import db from "../config/dbConn.js";
 import { istDate, VENDOR_MEMBER_USER_TYPE } from "../constants/vendorNetwork.js";
+import { activeSiblingIdsSql } from "../services/vendorNetwork/orgKeySql.js";
 
 /** The live org membership of an entity, with its org: null when the vendor is in no org. */
 export function getOrgByEntity(vendorId, runner = db) {
@@ -112,15 +113,7 @@ export function getActingEntityRow(vendorId, runner = db) {
  * when the vendor itself is ACTIVE there.
  */
 export async function listActiveSiblingIds(vendorId, runner = db) {
-  const rows = await runner.any(
-    `SELECT e2.vendor_id
-       FROM tbl_vendor_org_entities e
-       JOIN tbl_vendor_org_entities e2 ON e2.org_id = e.org_id AND e2.status = 'ACTIVE'
-       JOIN tbl_users u2 ON u2.id = e2.vendor_id AND u2.status = 1 AND COALESCE(u2.is_deleted, 0) = 0
-      WHERE e.vendor_id = $1 AND e.status = 'ACTIVE'
-      ORDER BY e2.vendor_id`,
-    [vendorId]
-  );
+  const rows = await runner.any(`${activeSiblingIdsSql("$1")} ORDER BY ns_e2.vendor_id`, [vendorId]);
   return rows.map((r) => r.vendor_id);
 }
 

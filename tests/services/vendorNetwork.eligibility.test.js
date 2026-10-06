@@ -27,7 +27,14 @@ import {
   addEntity,
   cleanupVendorNetworkFixtures,
 } from "../helpers/vendorNetworkSeed.js";
-import { grantVendorHotelSubs, grantVendorCategorySub, revokeVendorSubs } from "../helpers/arcGroupSeed.js";
+import {
+  grantVendorHotelSubs,
+  grantVendorCategorySub,
+  revokeVendorSubs,
+  openSubmissionWindow,
+  deleteArcs,
+} from "../helpers/arcGroupSeed.js";
+import { seedGroupArcPolicy, cleanupGroupArcPolicies } from "../helpers/arcGroupPolicy.js";
 import hospitalityModel from "../../app/models/hospitalityModel.js";
 import { resolveArcVendorCoverage, vendorCanSubmitForHotels } from "../../app/helper/arc_v2/arcEligibility.js";
 import { collapseToPrincipals } from "../../app/services/vendorNetwork/actingContext.js";
@@ -40,6 +47,7 @@ const M = 95704; // member entity without any subscription
 const S = 95706; // SUSPENDED branch
 const R = 95707; // REMOVED branch
 const U = 95708; // unlinked vendor sharing P's PAN
+const D = 95709; // ACTIVE branch whose login is dead (status 0)
 const ORG = 95701;
 
 const CAT = TEST_CATEGORIES.beverages;
@@ -47,7 +55,7 @@ const H1 = IDS.hotels.A1;
 const H2 = IDS.hotels.A2;
 const BUYER = IDS.users.a1_proc_buyer;
 
-const created = { subIds: [], mappingIds: [], rfqIds: [] };
+const created = { subIds: [], mappingIds: [], rfqIds: [], arcIds: [], policyIds: [] };
 const savedFee = process.env.NETWORK_SEAT_FEE_INR;
 
 afterEach(async () => {
@@ -65,6 +73,8 @@ afterEach(async () => {
     );
     await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [ids]);
   }
+  await cleanupGroupArcPolicies(created.policyIds);
+  await deleteArcs(created.arcIds);
   await db.none(`DELETE FROM tbl_product_variant_vendor_mapping WHERE id = ANY($1::int[])`, [created.mappingIds]);
   await revokeVendorSubs(created.subIds);
   await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id BETWEEN 95701 AND 95719`);
@@ -72,6 +82,8 @@ afterEach(async () => {
   created.subIds = [];
   created.mappingIds = [];
   created.rfqIds = [];
+  created.arcIds = [];
+  created.policyIds = [];
 });
 
 afterAll(async () => {
@@ -93,9 +105,9 @@ async function variantId() {
   return cachedVariantId;
 }
 
-async function vendor(id, { gstin = null } = {}) {
-  await seedVendorEntity({ id, companyId: id, name: `VN Elig ${id}`, email: `vn-elig-${id}@example.com`, gstin });
-  await db.none(`UPDATE tbl_company SET is_hospitality = 1 WHERE id = $1`, [id]);
+async function vendor(id, { gstin = null, status = 1, hospitality = 1 } = {}) {
+  await seedVendorEntity({ id, companyId: id, name: `VN Elig ${id}`, email: `vn-elig-${id}@example.com`, gstin, status });
+  await db.none(`UPDATE tbl_company SET is_hospitality = $2 WHERE id = $1`, [id, hospitality]);
   await db.none(`UPDATE tbl_users SET mobile = $2 WHERE id = $1`, [id, `98000${id}`]);
 }
 
@@ -271,24 +283,44 @@ describe("pooled eligibility: which entities count", () => {
     expect(await rfqVendorRows(rfq.rfq_id)).toEqual([{ user_id: P, routed_from_vendor_id: null }]);
   });
 
+  it("a dead principal login means no invite for the org", async () => {
+    await vendor(P, { status: 0 });
+    await vendor(B);
+    await mapVariant(B);
+    await subscribe(B, [H1]);
+    await linkUnderP(B);
+    const rfq = await openRfq();
+
+    const ids = await eligibleIds();
+    expect(ids).not.toContain(P);
+    expect(ids).not.toContain(B);
+    const arc = (await resolveArcVendorCoverage({ category_id: CAT, hotel_ids: [H1] })).map((r) => Number(r.id));
+    expect(arc).not.toContain(P);
+    expect(arc).not.toContain(B);
+    expect(await hospitalityModel.getMatchingOpenRfqsForVendor(B)).toEqual([]);
+    expect(await hospitalityModel.addVendorToRfq(B, rfq.rfq_id)).toEqual([]);
+  });
+
   it("org key parity: the SQL org key equals collapseToPrincipals", async () => {
     for (const id of [P, B, S, R, N]) await vendor(id);
+    await vendor(D, { status: 0 });
     await linkUnderP(B);
     await linkUnderP(S, { status: "SUSPENDED", withSeat: false });
     await linkUnderP(R, { status: "REMOVED", withSeat: false });
-    const ids = [P, B, S, R, N];
+    await linkUnderP(D);
+    const ids = [P, B, S, R, N, D];
 
     const rows = await db.any(`SELECT vendor_id, org_key, counts FROM (${orgKeySelect("SELECT unnest($1::int[])")}) k`, [ids]);
     const keyOf = Object.fromEntries(rows.map((r) => [Number(r.vendor_id), Number(r.org_key)]));
     for (const id of ids) {
       expect([id, keyOf[id]]).toEqual([id, (await collapseToPrincipals([id]))[0]]);
     }
-    expect(keyOf).toEqual({ [P]: P, [B]: P, [S]: P, [R]: R, [N]: N });
+    expect(keyOf).toEqual({ [P]: P, [B]: P, [S]: P, [R]: R, [N]: N, [D]: P });
     expect(await collapseToPrincipals(ids)).toEqual([...new Set(ids.map((id) => keyOf[id]))].sort((x, y) => x - y));
 
     // Whose rows count: org entities only when ACTIVE with a live login; anyone in no org.
     const counts = Object.fromEntries(rows.map((r) => [Number(r.vendor_id), r.counts]));
-    expect(counts).toEqual({ [P]: true, [B]: true, [S]: false, [R]: true, [N]: true });
+    expect(counts).toEqual({ [P]: true, [B]: true, [S]: false, [R]: true, [N]: true, [D]: false });
   });
 });
 
@@ -420,7 +452,7 @@ describe("the parent's subscription covers the network; non-principals need a se
     }
   });
 
-  it("a SUSPENDED member is not covered and cannot operate", async () => {
+  it("a SUSPENDED member is not covered and is refused as NOT_ACTIVE", async () => {
     await vendor(P);
     await vendor(M);
     await subscribe(P, [H1]);
@@ -429,7 +461,129 @@ describe("the parent's subscription covers the network; non-principals need a se
     expect(await hospitalityModel.hasValidPaidSubscription(M)).toBe(false);
     const res = await (await httpClient(M)).get("/api/v1/rfq/get-rfqs?page=1&limit=10&tech_eval=false");
     expect(res.status).toBe(403);
-    expect(res.body.subscription_expired).toBe(true);
+    expect(res.body).toEqual({ status: 0, message: "This network entity is suspended", code: "NOT_ACTIVE" });
+  });
+});
+
+describe("operate gate beyond hospitality RFQ routes", () => {
+  it("applies to a networked NON-hospitality vendor; a no-org one is unaffected", async () => {
+    await vendor(P);
+    await vendor(M, { hospitality: 0 });
+    await vendor(N, { hospitality: 0 });
+    await linkUnderP(M);
+    await db.none(`UPDATE tbl_vendor_network_seats SET status = 'pending' WHERE entity_vendor_id = $1`, [M]);
+    process.env.NETWORK_SEAT_FEE_INR = "500";
+
+    const path = "/api/v1/rfq/get-rfqs?page=1&limit=10&tech_eval=false";
+    const refused = await (await httpClient(M)).get(path);
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("NO_SEAT");
+    expect((await (await httpClient(N)).get(path)).status).toBe(200);
+  });
+
+  it("ARC quote and technical-envelope submit require an operating entity", async () => {
+    await vendor(P);
+    await vendor(M);
+    await vendor(S);
+    await vendor(N);
+    await linkUnderP(M);
+    await linkUnderP(S, { status: "SUSPENDED", withSeat: false });
+    await db.none(`UPDATE tbl_vendor_network_seats SET status = 'pending' WHERE entity_vendor_id = $1`, [M]);
+    process.env.NETWORK_SEAT_FEE_INR = "500";
+
+    for (const route of ["/api/v1/arc-v2/vendor/quote/submit", "/api/v1/arc-v2/vendor/tech-envelope/submit"]) {
+      const noSeat = await (await httpClient(M)).post(route).send({});
+      expect([noSeat.status, noSeat.body.code]).toEqual([403, "NO_SEAT"]);
+      const suspended = await (await httpClient(S)).post(route).send({});
+      expect([suspended.status, suspended.body.code]).toEqual([403, "NOT_ACTIVE"]);
+      // The principal and a no-org vendor reach the controller (no ARC id: a 4xx of its own).
+      for (const id of [P, N]) {
+        const res = await (await httpClient(id)).post(route).send({});
+        expect(res.body.code).toBeUndefined();
+        expect(res.status).not.toBe(403);
+      }
+    }
+  });
+});
+
+describe("group ARC: a linked branch reads and is picked through its principal", () => {
+  const ADMIN_A = IDS.users.companyA_admin;
+  const H3 = IDS.hotels.A3;
+
+  async function linkedBranchServingTwoHotels() {
+    await vendor(P);
+    await vendor(B);
+    await subscribe(B, [H1]); // B: category + H1
+    created.subIds.push(...(await grantVendorHotelSubs([P], [H2]))); // P: H2 only
+    await linkUnderP(B);
+  }
+
+  it("request detail: a branch invited before linking sees its org's renewal state", async () => {
+    await linkedBranchServingTwoHotels();
+    const arc = await db.one(
+      `INSERT INTO tbl_arc
+         (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id, process_id,
+          status, is_group, submission_start_at, submission_end_at, contract_start_at, contract_end_at, created_by)
+       VALUES ($1, 'VN group ARC', $2, $3, $4, $5, $6, 'floated', true,
+               NOW() - INTERVAL '2 days', NOW() + INTERVAL '10 days',
+               NOW() + INTERVAL '30 days', NOW() + INTERVAL '365 days', $7)
+       RETURNING id`,
+      [`VN-ARC-${Date.now()}`, CAT, IDS.hospitality.A, H1, IDS.departments.proc, IDS.processes.A_P1, BUYER]
+    );
+    const arcId = Number(arc.id);
+    created.arcIds.push(arcId);
+    await db.none(`INSERT INTO tbl_arc_hotel_mappings (arc_id, hotel_id) VALUES ($1, $2)`, [arcId, H2]);
+    const inv = await db.one(
+      `INSERT INTO tbl_arc_invitation (arc_id, vendor_id, status) VALUES ($1, $2, 'invited') RETURNING id`,
+      [arcId, B]
+    );
+    await db.none(
+      `INSERT INTO tbl_arc_invitation_hotel (arc_invitation_id, hotel_id) SELECT $1, h FROM unnest($2::int[]) h`,
+      [inv.id, [H1, H2]]
+    );
+
+    const res = await (await httpClient(B)).get(`/api/v1/arc-v2/vendor/requests/${arcId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.renewal_needed_hotel_ids).toEqual([]);
+  });
+
+  it("publish: a hand-picked linked branch is invited as its principal, not refused", async () => {
+    await linkedBranchServingTwoHotels();
+    const before = await db.any(`SELECT id, user_type FROM tbl_users WHERE id = $1`, [ADMIN_A]);
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [ADMIN_A]);
+    try {
+      created.policyIds.push(await seedGroupArcPolicy({ companyId: IDS.hospitality.A, approver: ADMIN_A, createdBy: ADMIN_A }));
+      const buyer = await httpClient(ADMIN_A);
+      const draft = await buyer.post("/api/v1/arc-v2").send({
+        title: "VN group invite-only",
+        category_id: CAT,
+        department_id: IDS.departments.proc,
+        eligibility_type: "invitation",
+        invited_vendor_ids: [B],
+        is_group: true,
+        hotel_id: H1,
+        hotel_ids: [H1, H2, H3],
+        ...openSubmissionWindow(),
+        items: [{ product_variant_id: await variantId(), uom: "pcs",
+                  hotel_qtys: [{ hotel_id: H1, qty: 10 }, { hotel_id: H2, qty: 10 }, { hotel_id: H3, qty: 10 }] }],
+      });
+      expect(draft.status).toBe(200);
+      const arcId = Number(draft.body.data.arc.id);
+      created.arcIds.push(arcId);
+
+      const res = await buyer.post(`/api/v1/arc-v2/${arcId}/publish`).send({});
+      expect(res.status).toBe(200);
+      expect(res.body.data.uncovered_hotel_ids).toEqual([H3]);
+      const rows = await db.any(
+        `SELECT i.vendor_id, array_agg(ih.hotel_id ORDER BY ih.hotel_id) AS hotel_ids
+           FROM tbl_arc_invitation i JOIN tbl_arc_invitation_hotel ih ON ih.arc_invitation_id = i.id
+          WHERE i.arc_id = $1 GROUP BY i.vendor_id`,
+        [arcId]
+      );
+      expect(rows.map((r) => [Number(r.vendor_id), r.hotel_ids.map(Number)])).toEqual([[P, [H1, H2]]]);
+    } finally {
+      for (const r of before) await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [r.id, r.user_type]);
+    }
   });
 });
 
@@ -520,7 +674,7 @@ describe("RFQ vendor sync", () => {
     expect(rows).toContainEqual({ user_id: M, routed_from_vendor_id: P });
   });
 
-  it("open-RFQ auto-join by a linked entity invites the principal", async () => {
+  it("open-RFQ auto-join: only the admin acting as HQ may join, and the principal is invited", async () => {
     await legacyPair();
     await linkUnderP(B);
     const rfq = await openRfq();
@@ -528,7 +682,16 @@ describe("RFQ vendor sync", () => {
     const matching = await hospitalityModel.getMatchingOpenRfqsForVendor(B);
     expect(matching.map((r) => Number(r.rfq_id))).toContain(rfq.rfq_id);
 
-    const res = await (await httpClient(B))
+    // A member entity cannot enrol its principal: 403 and nothing written.
+    const refused = await (await httpClient(B))
+      .post("/api/v1/hospitality/vendor/join-open-rfqs")
+      .send({ rfq_ids: [rfq.rfq_id] });
+    expect(refused.status).toBe(403);
+    expect(refused.body).toEqual({ status: 0, message: "Only the network admin acting as HQ can join open RFQs" });
+    expect(await rfqVendorRows(rfq.rfq_id)).toEqual([]);
+
+    // The ORG_ADMIN acting as the principal joins on B's eligibility.
+    const res = await (await httpClient(P))
       .post("/api/v1/hospitality/vendor/join-open-rfqs")
       .send({ rfq_ids: [rfq.rfq_id] });
     expect(res.status).toBe(200);
