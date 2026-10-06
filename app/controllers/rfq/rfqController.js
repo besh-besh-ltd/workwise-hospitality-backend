@@ -16891,6 +16891,44 @@ getClauses: async (req, res) => {
         });
       }
 
+      // Responses are written as the authenticated vendor, never as a
+      // vendor_id named in the body. A foreign vendor_id is rejected (not
+      // rewritten) so the attempt is visible, and the batch writes nothing.
+      const callerId = Number(req.user.id);
+      if (Number(req.user.user_type) !== 3) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only vendors can submit technical evaluation responses.'
+        });
+      }
+      if (data.some((r) => r.vendor_id != null && Number(r.vendor_id) !== callerId)) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You can only submit your own technical evaluation responses.'
+        });
+      }
+      for (const r of data) r.vendor_id = callerId;
+
+      // Every clause must belong to an RFQ this vendor is mapped to.
+      const clauseIds = [...new Set(data.map((r) => Number(r.clause_id)))];
+      const clauseRfqs = await rfqModel.getTechEvalClauseRfqIds(clauseIds);
+      const foundClauseIds = new Set(clauseRfqs.map((row) => Number(row.clause_id)));
+      const missingClauseId = clauseIds.find((id) => !foundClauseIds.has(id));
+      if (missingClauseId !== undefined) {
+        return res.status(400).json({
+          status: 0,
+          message: `Clause ID ${missingClauseId} does not exist.`
+        });
+      }
+      for (const rfqId of new Set(clauseRfqs.map((row) => Number(row.rfq_id)))) {
+        if (!(await userModel.user_rfq_access_review(rfqId, callerId, 3))) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You are not invited to this RFQ.'
+          });
+        }
+      }
+
       // Enforce: Tech evaluation responses cannot be updated after quote submission deadline.
       try {
         // We only need to compute the RFQ & deadline once; use the first response's clause_id
@@ -17105,8 +17143,38 @@ getClauses: async (req, res) => {
   },
   getVendorResponses: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, vendor_id } = req.body;
+      const { rfq_id, rfq_product_id } = req.body;
+      let { vendor_id } = req.body;
       // console.log("API Input: ", req.body);
+
+      // A vendor reads only its own answers, on an RFQ it is mapped to.
+      // A buyer reads a vendor's answers only inside its RBAC scope for the
+      // RFQ (the buyer technical-evaluation screen). The model looks the
+      // evaluation up by (rfq_id, rfq_product_id), so authorising rfq_id
+      // also binds the product.
+      if (Number(req.user.user_type) === 3) {
+        const callerId = Number(req.user.id);
+        if (vendor_id != null && Number(vendor_id) !== callerId) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You can only view your own technical evaluation responses.'
+          });
+        }
+        vendor_id = callerId;
+        if (rfq_id && !(await userModel.user_rfq_access_review(rfq_id, callerId, 3))) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You are not invited to this RFQ.'
+          });
+        }
+      } else if (rfq_id) {
+        try {
+          await assertCanReadParentRfq(req.user.id, rfq_id);
+        } catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
 
       // Validate input
       if (!rfq_id || !rfq_product_id || !vendor_id) {

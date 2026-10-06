@@ -700,18 +700,19 @@ RfqRoutes.post('/get-vendor-names',
   rfqController.getVendorNames
 )
 
-// vendor side
+// Vendor (own answers) and buyer tech-eval screen (in-scope RFQs only).
+// Emailed-link vendors arrive with the guest JWT from /users/verify-vendor-token,
+// which jwtUsr accepts. Caller binding is enforced in the controller.
 RfqRoutes.post('/get-vendor-responses',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getVendorResponses),
-  // validateDbBody.rfq_access_check,
   rfqController.getVendorResponses
 )
 
 // vendor side
 RfqRoutes.post('/add-vendor-response',
-  noLogin.customer_auth,
-  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
+  passportSignIn,
+  hospitalityMiddleware.requireActiveSubscription,
   validateBody(rfqSchemas.addVendorResponse),
   rfqController.addVendorResponse
 )

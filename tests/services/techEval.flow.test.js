@@ -17,7 +17,7 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
-import { setupScoredVendor } from "../factories/techEval.js";
+import { setupScoredVendor, attachVendorToRfqProduct } from "../factories/techEval.js";
 
 afterAll(async () => {
   await closeDb();
@@ -292,6 +292,9 @@ describe("addVendorResponse — input validation + deadline lock", () => {
     const { rfq_id, rfq_product_id } = await makeRfqWithProduct({
       bid_end_date: twoDaysAgo,
     });
+    // The vendor must be invited: the controller rejects clauses on RFQs the
+    // caller is not mapped to before it reaches the deadline check.
+    await attachVendorToRfqProduct({ rfq_id, product_variant_id: 1, vendor_id: IDS.users.vendor_alpha });
     // Create a clause via the controller (so the deadline lookup query joins
     // correctly through tech_eval → rfq_product → rfq).
     await rfqController.addClause(

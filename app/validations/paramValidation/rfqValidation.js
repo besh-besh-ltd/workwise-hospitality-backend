@@ -562,7 +562,8 @@ export const rfqSchemas = {
   getVendorResponses: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
-    vendor_id: Joi.number().integer().required()
+    // Required for buyers; a vendor caller may omit it (bound to req.user).
+    vendor_id: Joi.number().integer().optional()
   }),
 
   addVendorResponse: Joi.array()
@@ -570,7 +571,8 @@ export const rfqSchemas = {
       Joi.object({
         rfq_id: Joi.number().integer().required(),
         rfq_product_id: Joi.number().integer().required(),
-        vendor_id: Joi.number().integer().required(),
+        // Optional: the controller binds every element to req.user.id.
+        vendor_id: Joi.number().integer().optional(),
         clause_id: Joi.number().integer().required(),
         vendor_response: Joi.string().optional().allow('').allow(null),
         file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)

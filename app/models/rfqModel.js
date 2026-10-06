@@ -12756,6 +12756,23 @@ ORDER BY m.created_at;
     return await db.any(query, params);
   },
 
+  /**
+   * Resolve each tech-eval clause to the RFQ that owns it
+   * (clause -> tech evaluation -> rfq_product -> rfq).
+   * Returns one { clause_id, rfq_id } row per clause that exists; ids with no
+   * row do not exist.
+   */
+  getTechEvalClauseRfqIds: async (clauseIds) => {
+    return db.any(
+      `SELECT DISTINCT c.id AS clause_id, rp.rfq_id
+         FROM tbl_rfq_product_tech_evaluation_clauses c
+         JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+         JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+        WHERE c.id = ANY($1::int[])`,
+      [clauseIds]
+    );
+  },
+
   addVendorResponse: async (responses) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
