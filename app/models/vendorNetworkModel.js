@@ -155,6 +155,47 @@ export function getOperateState(vendorId, runner = db) {
   );
 }
 
+/**
+ * Persons who can act for each of `entityIds` and should get its web-push (spec §4.4):
+ * ACTIVE ENTITY_MEMBER memberships on the entity, plus ACTIVE ORG_ADMIN persons of the
+ * org when the entity is the principal. Only ACTIVE entities with a live login, only live
+ * persons; the entity itself is excluded. Rows: { entity_id, person_user_id }.
+ */
+export function listPushDelegates(entityIds, runner = db) {
+  return runner.any(
+    `SELECT DISTINCT e.vendor_id AS entity_id, m.person_user_id
+       FROM tbl_vendor_org_entities e
+       JOIN tbl_vendor_orgs o ON o.id = e.org_id
+       JOIN tbl_users eu
+         ON eu.id = e.vendor_id AND eu.status = 1 AND COALESCE(eu.is_deleted, 0) = 0
+       JOIN tbl_vendor_org_members m ON m.org_id = e.org_id AND m.status = 'ACTIVE'
+       JOIN tbl_users pu
+         ON pu.id = m.person_user_id AND pu.status = 1 AND COALESCE(pu.is_deleted, 0) = 0
+      WHERE e.vendor_id = ANY($1::int[]) AND e.status = 'ACTIVE'
+        AND m.person_user_id <> e.vendor_id
+        AND ((m.role = 'ENTITY_MEMBER' AND m.entity_vendor_id = e.vendor_id)
+          OR (m.role = 'ORG_ADMIN' AND e.vendor_id = o.principal_vendor_id))
+      ORDER BY 1, 2`,
+    [entityIds]
+  );
+}
+
+/**
+ * True when `userId` is a live, non-principal network entity with no password of its own:
+ * a login created for the network that people reach only through memberships (spec §4.2).
+ */
+export async function isNetworkManagedLogin(userId, runner = db) {
+  const row = await runner.oneOrNone(
+    `SELECT 1
+       FROM tbl_vendor_org_entities e
+       JOIN tbl_users u ON u.id = e.vendor_id
+      WHERE e.vendor_id = $1 AND e.status <> 'REMOVED' AND e.relationship <> 'PRINCIPAL'
+        AND u.password IS NULL`,
+    [userId]
+  );
+  return !!row;
+}
+
 export default {
   getOrgByEntity,
   getOrgById,
@@ -167,4 +208,6 @@ export default {
   listActiveSiblingIds,
   mapToPrincipalIds,
   getOperateState,
+  listPushDelegates,
+  isNetworkManagedLogin,
 };

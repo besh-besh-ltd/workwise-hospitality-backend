@@ -2,6 +2,7 @@ import webpush from 'web-push';
 import db from '../config/dbConn.js';
 import notificationModel from '../models/notificationModel.js';
 import pushSubscriptionModel from '../models/pushSubscriptionModel.js';
+import { listPushDelegates } from '../models/vendorNetworkModel.js';
 import { emitToUser } from '../util/socket.js';
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
@@ -135,21 +136,38 @@ export const dispatch = async ({
   }
 
   try {
-    const subs = await pushSubscriptionModel.listByUserIds(recipients);
+    // Vendor Networks (spec §4.4): the row belongs to the entity, but the people
+    // acting for it subscribed to push as themselves. Their subscriptions get the
+    // entity's push too (the row id stays the entity's). A recipient's own
+    // subscriptions win when a person is also a direct recipient.
+    const delegates = await listPushDelegates(recipients);
+    const entityForPerson = new Map();
+    for (const { entity_id, person_user_id } of delegates) {
+      const person = Number(person_user_id);
+      if (!recipients.includes(person) && !entityForPerson.has(person)) {
+        entityForPerson.set(person, Number(entity_id));
+      }
+    }
+    const subs = await pushSubscriptionModel.listByUserIds([
+      ...recipients,
+      ...entityForPerson.keys(),
+    ]);
     // Each recipient owns a different notification row, so the payload cannot be
     // shared. Carrying the row id lets the service worker mark that exact
     // notification read when the OS toast is clicked — without it, acting on a
     // push left the row unread and the badge lit.
-    const idByUser = new Map(
+    const rowIdByRecipient = new Map(
       created.map((row) => [Number(row.recipient_user_id), row.id])
     );
+    const rowIdFor = (userId) =>
+      rowIdByRecipient.get(entityForPerson.get(Number(userId)) ?? Number(userId)) || null;
     const payloadFor = (userId) =>
       JSON.stringify({
-        id: idByUser.get(Number(userId)) || null,
+        id: rowIdFor(userId),
         title,
         body,
         data: {
-          id: idByUser.get(Number(userId)) || null,
+          id: rowIdFor(userId),
           url: actionUrl || '/',
           category: normalizedCategory,
           type

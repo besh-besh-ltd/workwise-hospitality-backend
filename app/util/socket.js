@@ -4,6 +4,8 @@ import Config from '../config/app.config.js';
 import { decryptClaim } from '../helper/claimCrypto.js';
 import { logger } from './logger.js';
 import db from '../config/dbConn.js';
+import { resolveActingContext } from '../services/vendorNetwork/actingContext.js';
+import { VENDOR_MEMBER_USER_TYPE } from '../constants/vendorNetwork.js';
 
 let ioInstance = null;
 
@@ -36,6 +38,52 @@ const resolveUserIdFromPayload = (payload) => {
     if (Number.isInteger(n) && n > 0) return n;
   }
   return null;
+};
+
+const NETWORK_USER_TYPES = new Set([3, VENDOR_MEMBER_USER_TYPE]);
+
+/**
+ * The user id whose room a verified token's socket joins, or null to join nothing.
+ *
+ * Vendor Networks (spec §4.4): notifications are addressed to the acting ENTITY,
+ * so a person (user_type 11) or a networked vendor joins `user:<actingEntityId>`,
+ * resolved by the same resolver jwtUsr runs (a foreign or tampered `ent`, a
+ * revoked membership -> null). Buyers, admins, unknown ids and vendors in no
+ * network keep the plain decrypted `sub`.
+ */
+export const resolveSocketUserId = async (payload) => {
+  const uid = resolveUserIdFromPayload(payload);
+  if (!uid) return null;
+
+  const user = await db.oneOrNone(
+    `SELECT * FROM tbl_users WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+    [uid]
+  );
+  if (!user || !NETWORK_USER_TYPES.has(Number(user.user_type))) return uid;
+
+  let ent = null;
+  if (payload.ent) {
+    try {
+      ent = decryptClaim(payload.ent);
+    } catch (_) {
+      return null;
+    }
+  }
+  const ctx = await resolveActingContext(user, ent);
+  return ctx ? Number(ctx.entityRow.id) : null;
+};
+
+/** `user:<id>` for a login token (verified here), or null when it must join nothing. */
+export const resolveSocketUserRoom = async (token) => {
+  if (!token) return null;
+  let payload;
+  try {
+    payload = jwt.verify(token, Config.jwt.secret);
+  } catch (_) {
+    return null;
+  }
+  const id = await resolveSocketUserId(payload);
+  return id ? `user:${id}` : null;
 };
 
 export const getIo = () => ioInstance;
@@ -86,9 +134,14 @@ export const SocketConfig = (SERVER) => {
 
     if (!token) return next();
 
-    jwt.verify(token, Config.jwt.secret, (err, payload) => {
+    jwt.verify(token, Config.jwt.secret, async (err, payload) => {
       if (err || !payload) return next();
-      const uid = resolveUserIdFromPayload(payload);
+      let uid = null;
+      try {
+        uid = await resolveSocketUserId(payload);
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Socket identity resolution failed');
+      }
       if (uid) {
         socket.userId = uid;
         socket.join(`user:${uid}`);

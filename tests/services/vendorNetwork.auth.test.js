@@ -381,3 +381,53 @@ describe("guards", () => {
     expect(requireNetwork({ user: { id: LONE } })).toEqual(denied("Vendor network access required"));
   });
 });
+
+describe("password reset for network-managed logins (§4.2)", () => {
+  const post = async (path, body) => {
+    const app = await buildTestApp();
+    return request(app).post(path).set("User-Agent", UA).send(body);
+  };
+  const REFUSAL = { status: 0, message: "This account is managed by your network admin" };
+
+  it("forgot-password refuses a passwordless non-principal entity", async () => {
+    await world();
+    const res = await post("/api/v1/users/forgot-password-otp-send", { email: `vn-${NOPW_BRANCH}@example.com` });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(REFUSAL);
+    const row = await db.one(`SELECT otp FROM tbl_users WHERE id = $1`, [NOPW_BRANCH]);
+    expect(row.otp).toBeNull();
+  });
+
+  it("a linked legacy entity with its own password, and the principal, are unaffected", async () => {
+    await world();
+    await setPassword(BRANCH);
+    const branch = await post("/api/v1/users/forgot-password-otp-send", { email: `vn-${BRANCH}@example.com` });
+    expect(branch.status).toBe(200);
+    const hq = await post("/api/v1/users/forgot-password-otp-send", { email: `vn-${HQ}@example.com` });
+    expect(hq.status).toBe(200);
+  });
+
+  it("reset-by-OTP refuses a passwordless entity and leaves it without a password", async () => {
+    await world();
+    await db.none(`UPDATE tbl_users SET otp = '987123' WHERE id = $1`, [NOPW_BRANCH]);
+    const res = await post("/api/v1/users/forgot-password-otp-authenticate", {
+      otp: "987123", password: PASSWORD, confirm_password: PASSWORD,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(REFUSAL);
+    const row = await db.one(`SELECT password FROM tbl_users WHERE id = $1`, [NOPW_BRANCH]);
+    expect(row.password).toBeNull();
+  });
+
+  it("reset-by-OTP still works for a linked entity with its own password", async () => {
+    await world();
+    await setPassword(BRANCH, "Old@1234");
+    await db.none(`UPDATE tbl_users SET otp = '987124' WHERE id = $1`, [BRANCH]);
+    const res = await post("/api/v1/users/forgot-password-otp-authenticate", {
+      otp: "987124", password: PASSWORD, confirm_password: PASSWORD,
+    });
+    expect(res.status).toBe(200);
+    const row = await db.one(`SELECT password FROM tbl_users WHERE id = $1`, [BRANCH]);
+    expect(bcrypt.compareSync(PASSWORD, row.password)).toBe(true);
+  });
+});

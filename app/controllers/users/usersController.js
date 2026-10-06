@@ -56,6 +56,14 @@ import {
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
 import { profileNetworkFor } from '../../services/vendorNetwork/actingContext.js';
 import { VENDOR_MEMBER_USER_TYPE } from '../../constants/vendorNetwork.js';
+import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
+
+// A network entity created without a password is reached only through its people's
+// memberships (spec §4.2); a password reset would turn it into a direct login.
+const NETWORK_MANAGED_REFUSAL = {
+  status: 0,
+  message: 'This account is managed by your network admin'
+};
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -2074,6 +2082,9 @@ get_company_users: async (req, res, next) => {
       } else if (email) {
         user_detail = await userModel.getUserAuthEmail(email);
       }
+      if (email && user_detail.length > 0 && (await isNetworkManagedLogin(user_detail[0].id))) {
+        return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+      }
       if (email && user_detail.length > 0) {
         // console.log('user_detail--', user_detail[0].name);
         // return false;
@@ -2177,6 +2188,12 @@ get_company_users: async (req, res, next) => {
       let { otp, password } = req.body;
 
       let user_dtls = await userModel.user_detail_otp_exists(otp);
+      // The update below writes every row holding this OTP, so refuse if any is managed.
+      for (const row of user_dtls) {
+        if (await isNetworkManagedLogin(row.id)) {
+          return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+        }
+      }
       // console.log('userDetail-->', user_dtls);
       user_dtls = Object.assign({}, ...user_dtls);
       logger.debug({ data: user_dtls }, 'forgot_password_otp_authenticate user_dtls');
