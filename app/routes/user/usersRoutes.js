@@ -524,22 +524,7 @@ UsersRoutes.post(
   '/add-spoc',
   passportSignIn,
   validateBody(schemas.user_spoc),
-  (req, res, next) => {
-    // The SPOC always belongs to the caller. A body vendor_id is accepted only
-    // when it is the caller's own id; anything else is refused, not rewritten.
-    if (
-      req.body.vendor_id != null &&
-      req.body.vendor_id !== '' &&
-      Number(req.body.vendor_id) !== Number(req.user.id)
-    ) {
-      return res.status(403).json({
-        status: 0,
-        message: 'You can only add SPOCs to your own account'
-      });
-    }
-    req.params.id = req.user.id;
-    next();
-  },
+  vendorController.authorizeAddSpocTarget,
   vendorController.addSpoc
 )
 

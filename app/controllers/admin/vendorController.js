@@ -132,6 +132,42 @@ const callerOwnsSpocs = async (req, spocIds) => {
   return count === ids.length;
 };
 
+/**
+ * Does the buyer's company have a working relationship with a vendor?
+ * Either the vendor is in the company's private-vendor list
+ * (tbl_buyer_private_vendors_mapping.company_id = tbl_users.company_id of the
+ * buyer), or it is mapped to an RFQ of that company. tbl_rfq has no company_id;
+ * it carries hospitality_company_id, which tbl_hospitality_companies ties to the
+ * buyer company via buyer_company_id.
+ * Identify the vendor by user id, or by the vendor's tbl_users.company_id.
+ */
+const buyerHasVendorRelationship = async (buyerCompanyId, { vendorUserId, vendorCompanyId }) => {
+  if (!buyerCompanyId) return false;
+  const vendorMatch = vendorUserId != null
+    ? 'vu.id = $2'
+    : 'vu.company_id = $2';
+  const target = vendorUserId != null ? Number(vendorUserId) : Number(vendorCompanyId);
+  if (!Number.isInteger(target)) return false;
+  const row = await db.oneOrNone(
+    `SELECT 1
+       FROM tbl_users vu
+      WHERE ${vendorMatch}
+        AND vu.user_type = 3
+        AND (
+          EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping m
+                   WHERE m.vendor_id = vu.id AND m.company_id = $1)
+          OR EXISTS (SELECT 1
+                       FROM tbl_rfq_product_vendors pv
+                       JOIN tbl_rfq r ON r.id = pv.rfq_id
+                       JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
+                      WHERE pv.user_id = vu.id AND hc.buyer_company_id = $1)
+        )
+      LIMIT 1`,
+    [buyerCompanyId, target]
+  );
+  return !!row;
+};
+
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
@@ -605,6 +641,16 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   try {
     const company_id = req.params.id;
 
+    // Owner (vendor or buyer reading its own company), a buyer whose company
+    // works with the vendor owning :id, or the internal console.
+    if (!isInternalAdmin(req) && Number(company_id) !== Number(req.user.company_id)) {
+      const allowed = Number(req.user.user_type) !== 3 &&
+        await buyerHasVendorRelationship(req.user.company_id, { vendorCompanyId: company_id });
+      if (!allowed) {
+        return res.status(403).json({ status: 0, message: 'You can only view locations of your own company or of a vendor your company works with' });
+      }
+    }
+
     // console.log("company_id", company_id)
     let locations;
     const user_type = req.user.user_type; // Get the user type from the request object
@@ -629,6 +675,28 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     });
   }
 },
+ /**
+  * Route middleware for POST /users/add-spoc. Sets req.params.id to the vendor
+  * whose SPOC list grows. A vendor may only add to itself; a buyer may add to a
+  * vendor its company has a relationship with.
+  */
+ authorizeAddSpocTarget: async (req, res, next) => {
+  try {
+    const raw = req.body.vendor_id;
+    const target = raw == null || raw === '' ? req.user.id : Number(raw);
+    if (target !== Number(req.user.id)) {
+      const isVendor = Number(req.user.user_type) === 3;
+      if (isVendor || !(await buyerHasVendorRelationship(req.user.company_id, { vendorUserId: target }))) {
+        return res.status(403).json({ status: 0, message: 'You can only add SPOCs to your own account or to a vendor your company works with' });
+      }
+    }
+    req.params.id = target;
+    return next();
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({ status: 3, message: Config.errorText.value });
+  }
+ },
  addVendorLocation: async (req, res, next) => {
     try {
       const { company_id: bodyCompanyId, address, postal_code, city, state, country } = req.body;

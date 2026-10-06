@@ -31,6 +31,9 @@ import { TEST_CATEGORIES } from "../fixtures/vendors.js";
 
 const VENDOR_A = IDS.users.vendor_alpha;
 const VENDOR_B = IDS.users.vendor_beta;
+// Fixtures already list alpha and beta as company A's preferred vendors, so the
+// buyer relationship tests use gamma, which no buyer company is related to.
+const VENDOR_G = IDS.users.vendor_gamma;
 const BUYER = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_techApp;
 const STAFF = IDS.users.superAdmin;
@@ -42,11 +45,13 @@ const POLICY_ID = 64902; // outside the fixtures' 60001..60099 range and the ame
 const PRODUCT_VARIANT = 1;
 
 // Fixture users leave user_type NULL; these paths branch on it.
-const PERSONAS = { [VENDOR_A]: 3, [VENDOR_B]: 3, [BUYER]: 2, [APPROVER]: 2 };
+const PERSONAS = { [VENDOR_A]: 3, [VENDOR_B]: 3, [VENDOR_G]: 3, [BUYER]: 2, [APPROVER]: 2 };
 let originalUserTypes = [];
 let staffOriginalType;
 let companyA;
 let companyB;
+let companyBuyer;
+let companyG;
 
 beforeAll(async () => {
   originalUserTypes = await db.any(
@@ -59,6 +64,8 @@ beforeAll(async () => {
   staffOriginalType = await stampAdmin(STAFF, 1);
   companyA = (await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [VENDOR_A])).company_id;
   companyB = (await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [VENDOR_B])).company_id;
+  companyG = (await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [VENDOR_G])).company_id;
+  companyBuyer = (await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [BUYER])).company_id;
   expect(companyA).not.toBe(companyB);
 });
 
@@ -91,6 +98,14 @@ describe("POST /arc-v2/amendments/request - contract ownership", () => {
   });
   const amendmentCount = async () =>
     (await db.one(`SELECT COUNT(*)::int AS n FROM tbl_arc_amendment WHERE arc_contract_id = $1`, [contractId])).n;
+
+  const sideEffects = async () => ({
+    events: (await db.one(`SELECT COUNT(*)::int AS n FROM tbl_arc_event_log WHERE arc_id = $1`, [arcId])).n,
+    instances: (await db.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_approval_instances WHERE entity_type = 'ARC_AMENDMENT'
+        AND entity_id IN (SELECT id FROM tbl_arc_amendment WHERE arc_contract_id = $1)`, [contractId])).n,
+    notifications: (await db.one(`SELECT COUNT(*)::int AS n FROM tbl_notifications`)).n,
+  });
 
   beforeAll(async () => {
     const arc = await db.one(
@@ -172,12 +187,14 @@ describe("POST /arc-v2/amendments/request - contract ownership", () => {
 
   it("rejects another vendor's request on this contract with 403 and creates nothing", async () => {
     const vendorB = await httpClient(VENDOR_B);
+    const notificationsBefore = (await sideEffects()).notifications;
 
     const res = await vendorB.post(REQUEST).send(body());
 
     expect(res.status).toBe(403);
     expect(res.body.message).toBe("You can only request amendments on your own contracts");
     expect(await amendmentCount()).toBe(0);
+    expect(await sideEffects()).toEqual({ events: 0, instances: 0, notifications: notificationsBefore });
   });
 
   it("lets the contract's own vendor request an amendment", async () => {
@@ -265,6 +282,86 @@ describe("/users SPOC endpoints - ownership", () => {
   });
 });
 
+describe("/users/add-spoc - buyer adding a SPOC to a vendor", () => {
+  const spocPayload = (vendor_id) => ({
+    spoc_name: "Buyer Added",
+    spoc_email: `buyer-added-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.test`,
+    spoc_mobile: "+91-9876543210",
+    spoc_role: "sales",
+    vendor_id: String(vendor_id),
+  });
+  const spocsOf = (userId) => db.any(`SELECT id FROM tbl_users_spoc WHERE user_id = $1`, [userId]);
+  const rfqIds = [];
+
+  afterEach(async () => {
+    await db.none(`DELETE FROM tbl_users_spoc WHERE user_id = ANY($1::int[])`, [[VENDOR_G]]);
+    await db.none(`DELETE FROM tbl_buyer_private_vendors_mapping WHERE vendor_id = ANY($1::int[])`, [[VENDOR_G]]);
+    if (rfqIds.length) {
+      await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
+      await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
+      await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [rfqIds]);
+      rfqIds.length = 0;
+    }
+  });
+
+  it("is refused with 403 when the buyer's company has no relationship with the vendor", async () => {
+    const buyer = await httpClient(BUYER);
+
+    const res = await buyer.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+
+    expect(res.status).toBe(403);
+    expect(await spocsOf(VENDOR_G)).toEqual([]);
+  });
+
+  it("is refused when the only relationship belongs to a different buyer company", async () => {
+    const other = IDS.users.companyB_admin;
+    const [prev] = await db.any(`SELECT user_type FROM tbl_users WHERE id = $1`, [other]);
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [other]);
+    await db.none(
+      `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+      [BUYER, VENDOR_G, companyBuyer]
+    );
+    try {
+      const otherBuyer = await httpClient(other);
+      const res = await otherBuyer.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+      expect(res.status).toBe(403);
+      expect(await spocsOf(VENDOR_G)).toEqual([]);
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [other, prev.user_type]);
+    }
+  });
+
+  it("is allowed when the vendor is in the buyer company's private-vendor list", async () => {
+    await db.none(
+      `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+      [BUYER, VENDOR_G, companyBuyer]
+    );
+    const buyer = await httpClient(BUYER);
+
+    const res = await buyer.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+
+    expect(res.status).toBe(200);
+    expect(await spocsOf(VENDOR_G)).toHaveLength(1);
+  });
+
+  it("is allowed when the vendor is mapped to an RFQ of the buyer's company", async () => {
+    const { rfq_id } = await makeRFQ(db, { createdBy: BUYER, status: 1, is_published: 1 });
+    rfqIds.push(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0)`,
+      [rfq_id, PRODUCT_VARIANT]
+    );
+    await attachVendorToRfqProduct({ rfq_id, product_variant_id: PRODUCT_VARIANT, vendor_id: VENDOR_G });
+    const buyer = await httpClient(BUYER);
+
+    const res = await buyer.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+
+    expect(res.status).toBe(200);
+    expect(await spocsOf(VENDOR_G)).toHaveLength(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 3. Company locations and SPOC <-> location mapping
 // ---------------------------------------------------------------------------
@@ -288,9 +385,9 @@ describe("vendor location endpoints - company ownership", () => {
   }
 
   afterEach(async () => {
-    const locIds = (await db.any(`SELECT id FROM tbl_company_location WHERE company_id = ANY($1::int[])`, [[companyA, companyB]])).map((r) => r.id);
+    const locIds = (await db.any(`SELECT id FROM tbl_company_location WHERE company_id = ANY($1::int[])`, [[companyA, companyB, companyBuyer, companyG]])).map((r) => r.id);
     if (locIds.length) await db.none(`DELETE FROM tbl_spoc_location_mapping WHERE location_id = ANY($1::int[])`, [locIds]);
-    await db.none(`DELETE FROM tbl_company_location WHERE company_id = ANY($1::int[])`, [[companyA, companyB]]);
+    await db.none(`DELETE FROM tbl_company_location WHERE company_id = ANY($1::int[])`, [[companyA, companyB, companyBuyer, companyG]]);
     await db.none(`DELETE FROM tbl_users_spoc WHERE user_id = ANY($1::int[])`, [[VENDOR_A, VENDOR_B]]);
   });
 
@@ -382,6 +479,92 @@ describe("vendor location endpoints - company ownership", () => {
 
     expect(res.status).toBe(200);
     expect(await mappingsOf(aLoc)).toEqual([{ spoc_id: aSpoc }]);
+  });
+
+  it("a buyer manages its own company's locations (add, update, delete) but not another company's", async () => {
+    const buyer = await httpClient(BUYER);
+    const foreign = await seedLocation(companyA, "Vendor's office");
+
+    const add = await buyer.post("/api/v1/users/add-buyer-vendor-location").send(location({ company_id: companyBuyer }));
+    expect(add.status).toBe(200);
+    const [mine] = await locationsOf(companyBuyer);
+    expect(mine).toBeDefined();
+
+    const upd = await buyer.put("/api/v1/users/update-buyer-vendor-location")
+      .send(location({ id: mine.id, company_id: companyBuyer, address: "Buyer HQ" }));
+    expect(upd.status).toBe(200);
+    expect(await locationsOf(companyBuyer)).toEqual([{ id: mine.id, address: "Buyer HQ" }]);
+
+    const hijack = await buyer.put("/api/v1/users/update-buyer-vendor-location")
+      .send(location({ id: foreign, company_id: companyBuyer, address: "Hijacked" }));
+    expect(hijack.status).toBe(403);
+    const delForeign = await buyer.delete(`/api/v1/users/delete-buyer-vendor-location/${foreign}`);
+    expect(delForeign.status).toBe(403);
+    expect(await locationsOf(companyA)).toEqual([{ id: foreign, address: "Vendor's office" }]);
+
+    const del = await buyer.delete(`/api/v1/users/delete-buyer-vendor-location/${mine.id}`);
+    expect(del.status).toBe(200);
+    expect(await locationsOf(companyBuyer)).toEqual([]);
+  });
+
+  describe("GET /users/get-buyer-vendor-location/:id", () => {
+    const GETLOC = (id) => `/api/v1/users/get-buyer-vendor-location/${id}`;
+    afterEach(async () => {
+      await db.none(`DELETE FROM tbl_buyer_private_vendors_mapping WHERE vendor_id = ANY($1::int[])`, [[VENDOR_G]]);
+    });
+
+    it("a vendor reads its own company, not another's", async () => {
+      await seedLocation(companyA, "A office");
+      await seedLocation(companyB, "B office");
+      const vendorA = await httpClient(VENDOR_A);
+
+      const own = await vendorA.get(GETLOC(companyA));
+      const foreign = await vendorA.get(GETLOC(companyB));
+
+      expect(own.status).toBe(200);
+      expect(own.body.data.map((l) => l.address)).toEqual(["A office"]);
+      expect(foreign.status).toBe(403);
+      expect(JSON.stringify(foreign.body)).not.toContain("B office");
+    });
+
+    it("a buyer reads its own company", async () => {
+      await seedLocation(companyBuyer, "Buyer HQ");
+      const buyer = await httpClient(BUYER);
+
+      const res = await buyer.get(GETLOC(companyBuyer));
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((l) => l.address)).toEqual(["Buyer HQ"]);
+    });
+
+    it("a buyer reads a vendor company only when its company works with that vendor", async () => {
+      await seedLocation(companyG, "A office");
+      const buyer = await httpClient(BUYER);
+
+      const before = await buyer.get(GETLOC(companyG));
+      expect(before.status).toBe(403);
+
+      await db.none(
+        `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+        [BUYER, VENDOR_G, companyBuyer]
+      );
+      const after = await buyer.get(GETLOC(companyG));
+      expect(after.status).toBe(200);
+      expect(after.body.data.map((l) => l.address)).toEqual(["A office"]);
+    });
+
+    it("the internal console still reads any company", async () => {
+      await seedLocation(companyB, "B office");
+      const app = await buildTestApp();
+      const { headers } = await loginAsInternalStaff(STAFF);
+      let r = request(app).get(`/api/v1/admin/vendor/get-vendor-locations/${companyB}`);
+      for (const [k, v] of Object.entries(headers)) r = r.set(k, v);
+
+      const res = await r;
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((l) => l.address)).toEqual(["B office"]);
+    });
   });
 
   describe("internal console keeps its behaviour (jwtAdm, /admin/vendor/*)", () => {
