@@ -40,6 +40,7 @@ jest.unstable_mockModule("../../app/util/socket.js", () => ({
 }));
 
 const { httpClient } = await import("../helpers/http.js");
+const { loginAsInternalStaff } = await import("../helpers/auth.js");
 const { buildTestApp } = await import("../setup/app.js");
 
 const HQ = 95801; // principal of ORG
@@ -371,6 +372,76 @@ describe("rule 5: accept (public)", () => {
   });
 });
 
+describe("rule 5: accept edge cases", () => {
+  it("a double accept of one token at once: exactly one 200, one 410", async () => {
+    await world();
+    const { token, user } = await inviteNew("race@example.com");
+    const results = await Promise.all([accept(token), accept(token, "Other4567")]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 410]);
+    const row = await db.one(`SELECT status, password FROM tbl_users WHERE id = $1`, [user.id]);
+    const winner = results[0].status === 200 ? PASSWORD : "Other4567";
+    expect(row.status).toBe(1);
+    expect(bcrypt.compareSync(winner, row.password)).toBe(true);
+  });
+
+  it("a deleted or non-INVITED (status 0) person's token is 410 on preview and accept, writing nothing", async () => {
+    await world();
+    const { token, user } = await inviteNew("gone@example.com");
+    await db.none(`UPDATE tbl_users SET is_deleted = 1 WHERE id = $1`, [user.id]);
+    expect((await (await publicApp()).get(`${BASE}/member-invites/${token}`)).status).toBe(410);
+    expect((await accept(token)).status).toBe(410);
+
+    await db.none(`UPDATE tbl_users SET is_deleted = 0, status = 2 WHERE id = $1`, [user.id]);
+    expect((await accept(token)).status).toBe(410);
+    expect(await db.one(`SELECT status, password FROM tbl_users WHERE id = $1`, [user.id])).toEqual({ status: 2, password: null });
+    expect((await membersOf(user.id))[0].status).toBe("INVITED");
+  });
+
+  it("removing the entity disables its INVITED memberships and kills their tokens", async () => {
+    await world();
+    const { token, user } = await inviteNew("orphan@example.com", { role: "ENTITY_MEMBER", entity_vendor_id: BRANCH2 });
+    expect((await (await httpClient(HQ)).delete(`${BASE}/entities/${BRANCH2}`)).status).toBe(200);
+    expect((await membersOf(user.id))[0]).toMatchObject({ status: "DISABLED", invite_token_hash: null, invite_expires_at: null });
+    expect((await accept(token)).status).toBe(410);
+  });
+});
+
+describe("an accepted person is never Workwise staff (admin console)", () => {
+  async function acceptedPerson() {
+    await world();
+    const { token, user } = await inviteNew("staffish@example.com");
+    expect((await accept(token)).status).toBe(200);
+    return user;
+  }
+
+  it("cannot log in to the admin console", async () => {
+    await acceptedPerson();
+    const res = await (await publicApp())
+      .post("/api/v1/admin/auth/login")
+      .set("User-Agent", UA)
+      .send({ username: "staffish@example.com", password: PASSWORD });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.token).toBeUndefined();
+  });
+
+  it("admin forgot-password writes no reset token for the person", async () => {
+    const user = await acceptedPerson();
+    const res = await (await publicApp()).post("/api/v1/admin/auth/forgot-password").send({ email: "staffish@example.com" });
+    expect(res.status).toBe(200);
+    expect(await db.one(`SELECT pwd_reset_token_hash FROM tbl_users WHERE id = $1`, [user.id])).toEqual({ pwd_reset_token_hash: null });
+  });
+
+  it("a forged admin JWT for the person (or a vendor) is 401 on admin routes", async () => {
+    const user = await acceptedPerson();
+    for (const id of [user.id, BRANCH]) {
+      const { headers } = await loginAsInternalStaff(id);
+      let req = (await publicApp()).get("/api/v1/admin/buyer/buyer-list");
+      for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
+      expect((await req).status).toBe(401);
+    }
+  });
+});
+
 describe("rule 6: disable / enable / role and entity changes", () => {
   it("a disabled person's next request is 401 and their sockets are closed; enabling restores access", async () => {
     await world();
@@ -405,6 +476,59 @@ describe("rule 6: disable / enable / role and entity changes", () => {
     const second = tokenIn(await mailTo("never@example.com"));
     expect((await membersOf(user.id))[0].invite_token_hash).toBe(sha256(second));
     expect((await accept(second)).status).toBe(200);
+  });
+
+  it("ACTIVE on a still-INVITED membership is 409 INVITE_NOT_ACCEPTED (resend instead)", async () => {
+    await world();
+    const { user } = await inviteNew("notyet@example.com");
+    const [m] = await membersOf(user.id);
+    const res = await (await httpClient(HQ)).patch(`${BASE}/members/${m.id}`).send({ status: "ACTIVE" });
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("INVITE_NOT_ACCEPTED");
+    expect((await membersOf(user.id))[0].status).toBe("INVITED");
+  });
+
+  it("two admins disabling each other at once: exactly one wins, the other is 400 LAST_ADMIN", async () => {
+    await world();
+    await db.none(`UPDATE tbl_vendor_org_members SET status = 'DISABLED' WHERE person_user_id = $1`, [HQ]);
+    await seedPerson({ id: 95812, email: "vn-admin2@example.com", name: "Abe Admin" });
+    await addMember({ orgId: ORG, personId: 95812, role: "ORG_ADMIN" });
+    const [a] = await membersOf(ADMIN_PERSON);
+    const [b] = await membersOf(95812);
+    const clientA = await httpClient(ADMIN_PERSON);
+    const clientB = await httpClient(95812);
+
+    // Hold the org's people lock so both requests are past authentication and queued
+    // on it before either decides; then release and let them race.
+    const holder = await db.connect();
+    let results;
+    try {
+      await holder.one(`SELECT pg_advisory_lock(hashtext('vn_members_org:' || $1))`, [ORG]);
+      const pending = Promise.all([
+        clientA.patch(`${BASE}/members/${b.id}`).send({ status: "DISABLED" }).then((r) => r),
+        clientB.patch(`${BASE}/members/${a.id}`).send({ status: "DISABLED" }).then((r) => r),
+      ]);
+      let queued = 0;
+      for (let i = 0; i < 200 && queued < 2; i += 1) {
+        ({ n: queued } = await db.one(
+          `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`
+        ));
+        if (queued < 2) await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(queued).toBe(2);
+      await holder.one(`SELECT pg_advisory_unlock(hashtext('vn_members_org:' || $1))`, [ORG]);
+      results = await pending;
+    } finally {
+      holder.done();
+    }
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 400]);
+    expect(results.find((r) => r.status === 400).body.reason).toBe("LAST_ADMIN");
+    const active = await db.one(
+      `SELECT count(*)::int AS n FROM tbl_vendor_org_members WHERE org_id = $1 AND role = 'ORG_ADMIN' AND status = 'ACTIVE'`,
+      [ORG]
+    );
+    expect(active.n).toBe(1);
   });
 
   it("never disables or demotes the principal's own ORG_ADMIN membership", async () => {

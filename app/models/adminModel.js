@@ -4,7 +4,7 @@ const adminModel = {
   getUser: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT * FROM tbl_users WHERE status= 1 AND is_deleted = 0 AND email = $1 AND user_type NOT IN (2,3,4)`,
+        `SELECT * FROM tbl_users WHERE status= 1 AND is_deleted = 0 AND email = $1 AND user_type NOT IN (2,3,4,11)`,
         [email]
       )
         .then(function (data) {
@@ -19,7 +19,11 @@ const adminModel = {
   getUserById: async (id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT * FROM tbl_users WHERE status= 1 AND is_deleted = 0 AND id = $1`,
+        // The admin-token session lookup (jwtAdm, customer_auth's admin branch): a
+        // vendor (3) or vendor-network person (11) is never Workwise staff, even
+        // holding a forged or stale admin token. COALESCE keeps NULL-typed rows as before.
+        `SELECT * FROM tbl_users WHERE status= 1 AND is_deleted = 0 AND id = $1
+            AND COALESCE(user_type, 0) NOT IN (3, 11)`,
         [id]
       )
         .then(function (data) {
@@ -43,7 +47,7 @@ const adminModel = {
          FROM tbl_users
         WHERE status = 1
           AND is_deleted = 0
-          AND user_type NOT IN (2, 3, 4)
+          AND user_type NOT IN (2, 3, 4, 11)
           AND LOWER(email) = LOWER($1)`,
       [email]
     );
@@ -55,7 +59,7 @@ const adminModel = {
          FROM tbl_users
         WHERE status = 1
           AND is_deleted = 0
-          AND user_type NOT IN (2, 3, 4)
+          AND user_type NOT IN (2, 3, 4, 11)
           AND id = $1`,
       [id]
     );
@@ -127,7 +131,7 @@ const adminModel = {
           AND pwd_reset_expires_at > NOW()
           AND status = 1
           AND is_deleted = 0
-          AND user_type NOT IN (2, 3, 4)`,
+          AND user_type NOT IN (2, 3, 4, 11)`,
       [tokenHash]
     );
   },

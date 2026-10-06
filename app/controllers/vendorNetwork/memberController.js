@@ -13,12 +13,11 @@
 // queries treat company_id as a tenant key, so NULL keeps persons out of them.
 
 import crypto from "crypto";
-import bcrypt from "bcryptjs";
 import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
 import { logger } from "../../util/logger.js";
 import { disconnectPersonSockets } from "../../util/socket.js";
-import { sendMail } from "../../helper/common.js";
+import { sendMail, generatePassword } from "../../helper/common.js";
 import { generateEmailTemplate } from "../../helper/notificationEmailLayout.js";
 import {
   requireOrgAdmin,
@@ -56,7 +55,6 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 const ROLES = [NETWORK_ROLE.ORG_ADMIN, NETWORK_ROLE.ENTITY_MEMBER];
 const UNIQUE_VIOLATION = "23505";
-const BCRYPT_ROUNDS = 10; // same cost as registration (usersController generatePassword)
 const DEFAULT_FRONT_BASE_URL = "https://hospitality.letsworkwise.com"; // as the password-reset email
 
 /** A positive int4 from a number or a digit string, else null. */
@@ -295,6 +293,13 @@ function nextMembershipState(m, change) {
     if (!entityVendorId) throw new NetworkHttpError(400, "entity_vendor_id is required for an ENTITY_MEMBER");
   }
 
+  if (change.status === MEMBER_STATUS.ACTIVE && m.status === MEMBER_STATUS.INVITED) {
+    throw new NetworkHttpError(
+      409,
+      "This person has not accepted the invitation yet. Resend it instead.",
+      "INVITE_NOT_ACCEPTED"
+    );
+  }
   let status = m.status;
   let reinvite = false;
   if (change.status === MEMBER_STATUS.DISABLED) status = MEMBER_STATUS.DISABLED;
@@ -422,6 +427,12 @@ export async function resendMemberInvite(req, res) {
 }
 
 const GONE = "This invitation is invalid or has already been used";
+/** An invite row still answerable: INVITED, held by a live type-11 person. Expiry is checked separately. */
+const isOpenInvite = (invite) =>
+  !!invite &&
+  invite.status === MEMBER_STATUS.INVITED &&
+  Number(invite.user_type) === VENDOR_MEMBER_USER_TYPE &&
+  Number(invite.is_deleted) === 0;
 const EXPIRED = "This invitation has expired. Ask your network admin to resend it.";
 
 /** GET /member-invites/:token (public): only what the accept page shows. */
@@ -429,7 +440,7 @@ export async function previewMemberInvite(req, res) {
   try {
     const raw = trimmed(req.params.token);
     const invite = TOKEN_RE.test(raw) ? await getMemberInviteByTokenHash(sha256(raw)) : null;
-    if (!invite || invite.status !== MEMBER_STATUS.INVITED) return fail(res, 410, GONE);
+    if (!isOpenInvite(invite)) return fail(res, 410, GONE);
     return res.status(200).json({
       status: 1,
       message: "Invitation",
@@ -461,18 +472,15 @@ export async function acceptMemberInvite(req, res) {
 
     const outcome = await db.tx(async (t) => {
       const invite = await getMemberInviteByTokenHash(sha256(raw), t, { forUpdate: true });
-      if (
-        !invite ||
-        invite.status !== MEMBER_STATUS.INVITED ||
-        Number(invite.user_type) !== VENDOR_MEMBER_USER_TYPE ||
-        Number(invite.is_deleted) !== 0
-      ) {
-        return { gone: GONE };
-      }
+      if (!isOpenInvite(invite)) return { gone: GONE };
       if (invite.expired) return { gone: EXPIRED };
       // Hashed only for a live invite, so unknown tokens cost the server nothing.
-      const passwordHash = bcrypt.hashSync(password, bcrypt.genSaltSync(BCRYPT_ROUNDS));
-      await activatePerson({ orgId: invite.org_id, personId: invite.person_user_id, passwordHash }, t);
+      const activated = await activatePerson(
+        { orgId: invite.org_id, personId: invite.person_user_id, passwordHash: generatePassword(password) },
+        t
+      );
+      // Only a never-activated (status 0) person sets a password here; anything else is not an open invite.
+      if (!activated) throw new NetworkHttpError(410, GONE);
       return { invite };
     });
     if (outcome.gone) return fail(res, 410, outcome.gone);

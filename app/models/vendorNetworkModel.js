@@ -503,7 +503,8 @@ export async function removeEntity(orgId, vendorId, runner = db) {
     [orgId, vendorId]
   );
   await runner.none(
-    `UPDATE tbl_vendor_org_members SET status = 'DISABLED', updated_at = now()
+    `UPDATE tbl_vendor_org_members
+        SET status = 'DISABLED', invite_token_hash = NULL, invite_expires_at = NULL, updated_at = now()
       WHERE org_id = $1 AND entity_vendor_id = $2 AND role = 'ENTITY_MEMBER' AND status <> 'DISABLED'`,
     [orgId, vendorId]
   );
@@ -776,18 +777,23 @@ export function getMemberInviteByTokenHash(tokenHash, runner = db, { forUpdate =
   );
 }
 
-/** Accept: the person gets its password and status 1, and every INVITED membership in the org turns ACTIVE. */
+/**
+ * Accept: a still-INVITED (status 0) person gets its password and status 1, and every
+ * INVITED membership in the org turns ACTIVE. False (nothing written) for any other status.
+ */
 export async function activatePerson({ orgId, personId, passwordHash }, runner = db) {
-  await runner.none(`UPDATE tbl_users SET password = $2, status = 1, updated_at = now() WHERE id = $1`, [
-    personId,
-    passwordHash,
-  ]);
+  const person = await runner.result(
+    `UPDATE tbl_users SET password = $2, status = 1, updated_at = now() WHERE id = $1 AND status = 0`,
+    [personId, passwordHash]
+  );
+  if (person.rowCount !== 1) return false;
   await runner.none(
     `UPDATE tbl_vendor_org_members
         SET status = 'ACTIVE', invite_token_hash = NULL, invite_expires_at = NULL, updated_at = now()
       WHERE org_id = $1 AND person_user_id = $2 AND status = 'INVITED'`,
     [orgId, personId]
   );
+  return true;
 }
 
 export default {
