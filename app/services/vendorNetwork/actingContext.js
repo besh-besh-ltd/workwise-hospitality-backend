@@ -6,8 +6,10 @@
 
 import db from "../../config/dbConn.js";
 import userModel from "../../models/userModel.js";
+import { decryptClaim } from "../../helper/claimCrypto.js";
 import {
   VENDOR_MEMBER_USER_TYPE,
+  isNetworkLoginType,
   NETWORK_ROLE,
   ENTITY_STATUS,
   ENTITY_RELATIONSHIP,
@@ -147,6 +149,26 @@ export async function resolveActingContext(personRow, entClaim, runner = db) {
   return null;
 }
 
+/**
+ * The acting context for a verified login token, shared by jwtUsr and the socket handshake.
+ * Non-network logins (buyers, admins) come back as `{ entityRow: personRow }` with no
+ * query and `ent` ignored. A network login decrypts `ent` (undecryptable -> null) and
+ * goes through resolveActingContext. null => refuse.
+ */
+export async function resolveFromTokenPayload(personRow, payload, runner = db) {
+  if (!personRow) return null;
+  if (!isNetworkLoginType(personRow.user_type)) return { entityRow: personRow, network: undefined };
+  let ent = null;
+  if (payload?.ent) {
+    try {
+      ent = decryptClaim(payload.ent);
+    } catch {
+      return null;
+    }
+  }
+  return resolveActingContext(personRow, ent, runner);
+}
+
 /** Entities the person may switch to: [{ vendor_id, name, relationship, org_id }]. */
 export async function listActableEntities(personRow, runner = db) {
   if (!personRow) return [];
@@ -241,6 +263,7 @@ export async function entityCanOperate(vendorId, runner = db) {
 
 export default {
   resolveActingContext,
+  resolveFromTokenPayload,
   listActableEntities,
   profileNetworkFor,
   subscriptionHolderIdsFor,

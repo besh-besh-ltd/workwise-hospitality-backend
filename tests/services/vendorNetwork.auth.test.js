@@ -266,10 +266,22 @@ describe("POST /vendor-network/switch-entity", () => {
     expect(member.status).toBe(403);
   });
 
-  it("a no-org vendor cannot switch to another vendor", async () => {
+  it("a no-org vendor cannot switch at all, not even to itself", async () => {
     await world();
-    const res = await (await httpClient(LONE)).post(SWITCH).send({ entity_vendor_id: BRANCH });
-    expect(res.status).toBe(403);
+    const client = await httpClient(LONE);
+    expect((await client.post(SWITCH).send({ entity_vendor_id: BRANCH })).status).toBe(403);
+    const self = await client.post(SWITCH).send({ entity_vendor_id: LONE });
+    expect(self.status).toBe(403);
+    expect(self.body).toEqual({ status: 0, message: "Vendor network access required" });
+  });
+
+  it("the switched token keeps the original token's expiry", async () => {
+    await world();
+    const client = await httpClient(HQ);
+    const originalExp = JWT.decode(client.headers.Authorization.replace("Bearer ", "")).exp;
+    const res = await client.post(SWITCH).send({ entity_vendor_id: BRANCH });
+    expect(res.status).toBe(200);
+    expect(JWT.decode(res.body.data.token).exp).toBe(originalExp);
   });
 
   it("a missing or malformed entity_vendor_id is 400", async () => {
@@ -429,5 +441,109 @@ describe("password reset for network-managed logins (§4.2)", () => {
     expect(res.status).toBe(200);
     const row = await db.one(`SELECT password FROM tbl_users WHERE id = $1`, [BRANCH]);
     expect(bcrypt.compareSync(PASSWORD, row.password)).toBe(true);
+  });
+});
+
+describe("identity writes while acting for another login (§4.2)", () => {
+  const login = async (email, password) => {
+    const app = await buildTestApp();
+    return request(app).post("/api/v1/users/login?conform=true").set("User-Agent", UA).send({ email, password });
+  };
+  const hashOf = async (id) => (await db.one(`SELECT password FROM tbl_users WHERE id = $1`, [id])).password;
+  const NEW = "Fresh@9876";
+
+  it("a member's change-password changes the person's password, never the entity's", async () => {
+    await world();
+    await setPassword(BRANCH, "Branch@111");
+    const branchHash = await hashOf(BRANCH);
+
+    const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
+    const res = await client.post("/api/v1/users/change-password").send({ password: NEW, confirm_password: NEW });
+    expect(res.status).toBe(200);
+    expect(bcrypt.compareSync(NEW, await hashOf(MEMBER_PERSON))).toBe(true);
+    expect(await hashOf(BRANCH)).toBe(branchHash);
+
+    // Disabled: the new password opens the person's login, which acts for nothing,
+    // and was never set on the branch.
+    await db.none(`UPDATE tbl_vendor_org_members SET status = 'DISABLED' WHERE person_user_id = $1`, [MEMBER_PERSON]);
+    const asBranch = await login(`vn-${BRANCH}@example.com`, NEW);
+    expect(asBranch.body.token).toBeUndefined();
+    const asPerson = await login("vn-member-person@example.com", NEW);
+    expect(asPerson.status).toBe(200);
+    expect((await withToken("get", PROFILE, asPerson.body.token)).status).toBe(401);
+  });
+
+  it("a passwordless branch never gets a password through a member", async () => {
+    await world();
+    const client = await httpClient(ADMIN_PERSON, { ent: NOPW_BRANCH });
+    const res = await client.post("/api/v1/users/change-password").send({ password: NEW, confirm_password: NEW });
+    expect(res.status).toBe(200);
+    expect(await hashOf(NOPW_BRANCH)).toBeNull();
+    expect(bcrypt.compareSync(NEW, await hashOf(ADMIN_PERSON))).toBe(true);
+  });
+
+  it("a principal acting as itself still changes its own password", async () => {
+    await world();
+    const res = await (await httpClient(HQ)).post("/api/v1/users/change-password").send({ password: NEW, confirm_password: NEW });
+    expect(res.status).toBe(200);
+    expect(bcrypt.compareSync(NEW, await hashOf(HQ))).toBe(true);
+  });
+
+  it("a member cannot change the entity's email or mobile", async () => {
+    await world();
+    const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
+    for (const body of [{ email: "taken-over@example.com" }, { mobile: "9999999999" }]) {
+      const res = await client.put("/api/v1/users/update-user-detail").send(body);
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ status: 0, message: "Entity login details can only be changed by the entity itself" });
+    }
+    const row = await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [BRANCH]);
+    expect(row.email).toBe(`vn-${BRANCH}@example.com`);
+    expect(row.mobile).toBeNull();
+  });
+
+  it("a type-11 login response carries no user_key", async () => {
+    await world();
+    await setPassword(ADMIN_PERSON);
+    const res = await login("vn-admin-person@example.com", PASSWORD);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty("user_key");
+  });
+
+  it("direct login to a passwordless network entity names the network admin", async () => {
+    await world();
+    const res = await login(`vn-${NOPW_BRANCH}@example.com`, PASSWORD);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ status: 2, message: "This account is managed by your network admin" });
+  });
+});
+
+describe("Google social login (§4.2)", () => {
+  // usersController.social_login calls a bare `axios` it never imports, so in production
+  // the route currently always fails. The stub stands in for Google's userinfo call.
+  const google = (email) => {
+    globalThis.axios = { get: async () => ({ data: { id: "g-1", email, name: "G" } }) };
+  };
+  afterEach(() => {
+    delete globalThis.axios;
+  });
+  const social = async () => {
+    const app = await buildTestApp();
+    return request(app).post("/api/v1/users/social-login").set("User-Agent", UA).send({ login_type: "google", access_token: "t" });
+  };
+
+  it("refuses a passwordless network-managed entity", async () => {
+    await world();
+    google(`vn-${NOPW_BRANCH}@example.com`);
+    const res = await social();
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ status: 0, message: "This account is managed by your network admin" });
+  });
+
+  it("does not refuse the principal", async () => {
+    await world();
+    google(`vn-${HQ}@example.com`);
+    const res = await social();
+    expect(res.body.message).not.toBe("This account is managed by your network admin");
   });
 });

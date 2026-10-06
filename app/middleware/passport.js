@@ -10,12 +10,12 @@ import userModel from '../models/userModel.js';
 import { logger } from '../util/logger.js';
 // Claim decryption only (never the auth decision) — see app/helper/claimCrypto.js.
 import { decryptClaim } from '../helper/claimCrypto.js';
-import { resolveActingContext } from '../services/vendorNetwork/actingContext.js';
-import { VENDOR_MEMBER_USER_TYPE } from '../constants/vendorNetwork.js';
-
-// Logins that may act for a vendor network entity (spec §4.1). Every other user
-// type (buyers, admins) keeps today's path untouched: one query, no `ent`.
-const NETWORK_USER_TYPES = new Set([3, VENDOR_MEMBER_USER_TYPE]);
+import { resolveFromTokenPayload } from '../services/vendorNetwork/actingContext.js';
+import {
+  VENDOR_MEMBER_USER_TYPE,
+  NETWORK_MANAGED_MESSAGE
+} from '../constants/vendorNetwork.js';
+import { isNetworkManagedLogin } from '../models/vendorNetworkModel.js';
 
 // import models from '../models/productModel.js';
 // const userModel = models.user;
@@ -85,6 +85,11 @@ passport.use(
           let isMatch = '';
           if (user_dtls.password == null) {
             logger.debug('Case 1');
+            // A passwordless network entity is reached through its people's
+            // memberships; "forgot password" would be refused anyway (§4.2).
+            if (await isNetworkManagedLogin(user_dtls.id)) {
+              return done(null, { id: 0, err_msg: NETWORK_MANAGED_MESSAGE });
+            }
             return done(null, {
               id: 0,
               err_msg:
@@ -220,22 +225,11 @@ passport.use(
         ) {
           return done(null, false, { message: 'Unauthorized' });
         }
-        if (!NETWORK_USER_TYPES.has(Number(user_details.user_type))) {
-          return done(null, user_details);
-        }
-
         // Vendor Networks (spec §4.1): which entity this person acts as, re-checked
         // on every request so a revoked membership or removed entity is refused on
         // the very next call. A null context is a tampered/foreign `ent` -> 401.
-        let ent = null;
-        if (payload.ent) {
-          try {
-            ent = decryptClaim(payload.ent);
-          } catch {
-            return done(null, false, { message: 'Unauthorized' });
-          }
-        }
-        const ctx = await resolveActingContext(user_details, ent);
+        // Buyers and admins return immediately with no query and `ent` ignored.
+        const ctx = await resolveFromTokenPayload(user_details, payload);
         if (!ctx) {
           return done(null, false, { message: 'Unauthorized' });
         }

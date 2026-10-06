@@ -171,7 +171,8 @@ export function listPushDelegates(entityIds, runner = db) {
        JOIN tbl_vendor_org_members m ON m.org_id = e.org_id AND m.status = 'ACTIVE'
        JOIN tbl_users pu
          ON pu.id = m.person_user_id AND pu.status = 1 AND COALESCE(pu.is_deleted, 0) = 0
-      WHERE e.vendor_id = ANY($1::int[]) AND e.status = 'ACTIVE'
+      -- <> 'REMOVED' keeps the partial index ix_vn_entities_live_vendor usable.
+      WHERE e.vendor_id = ANY($1::int[]) AND e.status <> 'REMOVED' AND e.status = 'ACTIVE'
         AND m.person_user_id <> e.vendor_id
         AND ((m.role = 'ENTITY_MEMBER' AND m.entity_vendor_id = e.vendor_id)
           OR (m.role = 'ORG_ADMIN' AND e.vendor_id = o.principal_vendor_id))

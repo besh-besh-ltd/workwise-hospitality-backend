@@ -1,11 +1,16 @@
 // Vendor Networks: org-level endpoints (spec §4.1, §5).
 
+import JWT from "jsonwebtoken";
+import { ExtractJwt } from "passport-jwt";
 import Config from "../../config/app.config.js";
 import userModel from "../../models/userModel.js";
 import jwtHelper from "../../helper/jwtHelper.js";
 import { encryptStable } from "../../helper/claimCrypto.js";
 import { resolveActingContext } from "../../services/vendorNetwork/actingContext.js";
+import { requireNetwork } from "../../services/vendorNetwork/guards.js";
 import { logger } from "../../util/logger.js";
+
+const bearerToken = ExtractJwt.fromAuthHeaderAsBearerToken();
 
 /** A positive int4 from a number or a digit string, else null. */
 function parseVendorId(value) {
@@ -19,20 +24,27 @@ function parseVendorId(value) {
  * The body id is only a target. Whether the caller may act for it is decided by
  * the same resolver jwtUsr runs, recomputed from the PERSON (never the entity
  * the current token happens to act as), so a switch can never widen access.
+ * The new token keeps the current token's `exp`: switching never extends a session.
  */
 export async function switchEntity(req, res) {
   try {
+    const denied = requireNetwork(req);
+    if (denied) return res.status(denied.http).json(denied.body);
+
     const target = parseVendorId(req.body?.entity_vendor_id);
     if (target === null) {
       return res.status(400).json({ status: 0, message: "entity_vendor_id is required" });
     }
 
-    const personId = req.user.network?.actor_user_id ?? req.user.id;
+    const personId = req.user.network.actor_user_id;
     const [person] = await userModel.user_detail_check(personId);
     const ctx = person ? await resolveActingContext(person, target) : null;
     if (!ctx || Number(ctx.entityRow.id) !== target) {
       return res.status(403).json({ status: 0, message: "You cannot act for this entity" });
     }
+
+    // jwtUsr has already verified this token; decode only to read its exp.
+    const currentExp = JWT.decode(bearerToken(req))?.exp;
 
     // Same `sub`/`ag` as a fresh login of this person, so jwtUsr's ag check holds.
     const token = jwtHelper.signAccessTokenUser({
@@ -41,6 +53,7 @@ export async function switchEntity(req, res) {
       user_agent: encryptStable(String(person.user_agent)),
       sessions: "",
       ent: encryptStable(String(target)),
+      exp: currentExp,
     });
     return res.status(200).json({
       status: 1,

@@ -14,7 +14,8 @@ jest.unstable_mockModule("web-push", () => ({
 
 const { db, closeDb } = await import("../setup/db.js");
 const { dispatch } = await import("../../app/services/notificationService.js");
-const { resolveSocketUserRoom } = await import("../../app/util/socket.js");
+const { resolveSocketUserRoom, disconnectPersonSockets } = await import("../../app/util/socket.js");
+const { httpClient } = await import("../helpers/http.js");
 const seed = await import("../helpers/vendorNetworkSeed.js");
 
 const cryptr = new Cryptr(Config.cryptR.secret);
@@ -117,6 +118,59 @@ describe("web-push fan-out to the people acting for an entity", () => {
     await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE vendor_id = $1`, [BRANCH]);
     await dispatch({ userIds: [BRANCH], title: "x", body: "b" });
     expect(endpointsPushed()).toEqual([ep(BRANCH)]);
+  });
+});
+
+describe("push subscriptions belong to the person", () => {
+  const SUB = "https://push.test/vn-member-device";
+
+  afterEach(async () => {
+    await db.none(`DELETE FROM tbl_push_subscriptions WHERE endpoint = $1`, [SUB]);
+  });
+
+  it("a member subscribing while acting for a branch is keyed to the person and gets the branch's push", async () => {
+    await world();
+    const client = await httpClient(MEMBER_PERSON);
+    const res = await client
+      .post("/api/v1/users/notifications/push-subscribe")
+      .send({ endpoint: SUB, keys: { p256dh: "k", auth: "a" } });
+    expect(res.status).toBe(200);
+    const row = await db.one(`SELECT user_id FROM tbl_push_subscriptions WHERE endpoint = $1`, [SUB]);
+    expect(row.user_id).toBe(MEMBER_PERSON);
+
+    await dispatch({ userIds: [BRANCH], title: "New RFQ", body: "b" });
+    expect(endpointsPushed()).toContain(SUB);
+
+    const del = await client.delete("/api/v1/users/notifications/push-subscribe").send({ endpoint: SUB });
+    expect(del.status).toBe(200);
+    expect(await db.oneOrNone(`SELECT 1 FROM tbl_push_subscriptions WHERE endpoint = $1`, [SUB])).toBeNull();
+  });
+
+  it("a DISABLED person's subscription is no longer fanned out", async () => {
+    await world();
+    await db.none(
+      `UPDATE tbl_vendor_org_members SET status = 'DISABLED' WHERE person_user_id = $1`,
+      [MEMBER_PERSON]
+    );
+    await dispatch({ userIds: [BRANCH], title: "x", body: "b" });
+    expect(endpointsPushed()).toEqual([ep(BRANCH)]);
+  });
+});
+
+describe("disconnectPersonSockets", () => {
+  const fakeSocket = (personId) => ({ data: { personId }, disconnect: jest.fn() });
+
+  it("closes every socket of the person, and only theirs", () => {
+    const mine = [fakeSocket(MEMBER_PERSON), fakeSocket(MEMBER_PERSON)];
+    const other = fakeSocket(ADMIN_PERSON);
+    const io = { sockets: { sockets: new Map([["a", mine[0]], ["b", other], ["c", mine[1]]]) } };
+    expect(disconnectPersonSockets(MEMBER_PERSON, io)).toBe(2);
+    for (const s of mine) expect(s.disconnect).toHaveBeenCalledWith(true);
+    expect(other.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op without a server", () => {
+    expect(disconnectPersonSockets(MEMBER_PERSON, null)).toBe(0);
   });
 });
 

@@ -55,14 +55,16 @@ import {
 } from '../../services/approvalPropagationService.js';
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
 import { profileNetworkFor } from '../../services/vendorNetwork/actingContext.js';
-import { VENDOR_MEMBER_USER_TYPE } from '../../constants/vendorNetwork.js';
+import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constants/vendorNetwork.js';
 import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
+import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
 
 // A network entity created without a password is reached only through its people's
 // memberships (spec §4.2); a password reset would turn it into a direct login.
-const NETWORK_MANAGED_REFUSAL = {
+const NETWORK_MANAGED_REFUSAL = { status: 0, message: NETWORK_MANAGED_MESSAGE };
+const ENTITY_LOGIN_DETAILS_REFUSAL = {
   status: 0,
-  message: 'This account is managed by your network admin'
+  message: 'Entity login details can only be changed by the entity itself'
 };
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
@@ -1820,7 +1822,10 @@ get_company_users: async (req, res, next) => {
               token,
               user_detail,
               oldDevice: oldDevice,
-              user_key: cryptr.encrypt(req.user.id),
+              // A network person holds no subscription; user_key is for paying one.
+              ...(Number(req.user.user_type) === VENDOR_MEMBER_USER_TYPE
+                ? {}
+                : { user_key: cryptr.encrypt(req.user.id) }),
               message: 'Login success'
             })
             .end();
@@ -2292,6 +2297,13 @@ update_user_detail: async (req, res, next) => {
         status: false,
         message: "Only company administrators can update other users"
       });
+    }
+
+    // A person acting for a network entity edits that entity's row here; its
+    // email and mobile are its login identity, so only the entity itself may
+    // change them (spec §4.2). Business fields live on tbl_company.
+    if (isActingForAnotherLogin(req) && (reqData.email !== undefined || reqData.mobile !== undefined)) {
+      return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
     }
 
     /* ---- SNAPSHOT OLD STATE for approval impact analysis ----
@@ -2961,7 +2973,10 @@ update_user_detail: async (req, res, next) => {
   },
   change_password: async (req, res, next) => {
     try {
-      var user_id = req.user.id;
+      // "My password": a person acting for a network entity changes their OWN
+      // login, never the entity's (that would hand them a direct entity login
+      // that outlives their membership). Everyone else is unchanged.
+      var user_id = actingPersonId(req);
       let { password } = req.body;
       // console.log('user_id--->', user_id);
       // return false;
@@ -3033,6 +3048,9 @@ update_user_detail: async (req, res, next) => {
           let user_details = await userModel.user_email_exist(email);
           // console.log('user_details123--->', user_details);
           //  return false;
+          if (user_details.length > 0 && (await isNetworkManagedLogin(user_details[0].id))) {
+            return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+          }
           if (user_details.length > 0) {
             // console.log('Case 1');
             let oldDevice = user_details[0].user_agent

@@ -21,4 +21,19 @@ export function requireOrgAdmin(req) {
   return req.user?.network?.role === NETWORK_ROLE.ORG_ADMIN ? null : deny("Network admin access required");
 }
 
-export default { requireNetwork, requireOrgAdmin };
+/**
+ * The PERSON behind the request: for someone acting for a network entity that is
+ * `network.actor_user_id`; otherwise (no-org vendor, buyer, self-acting) req.user.id.
+ * "My account" writes (password, push subscriptions) key on this, never the entity.
+ */
+export function actingPersonId(req) {
+  return req.user?.network?.actor_user_id ?? req.user?.id;
+}
+
+/** True when a person is acting for an entity other than their own login. */
+export function isActingForAnotherLogin(req) {
+  const actor = req.user?.network?.actor_user_id;
+  return actor != null && Number(actor) !== Number(req.user.id);
+}
+
+export default { requireNetwork, requireOrgAdmin, actingPersonId, isActingForAnotherLogin };

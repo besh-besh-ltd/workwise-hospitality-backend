@@ -140,7 +140,17 @@ export const dispatch = async ({
     // acting for it subscribed to push as themselves. Their subscriptions get the
     // entity's push too (the row id stays the entity's). A recipient's own
     // subscriptions win when a person is also a direct recipient.
-    const delegates = await listPushDelegates(recipients);
+    //
+    // Own try/catch: a failure here must never cost the recipients' own pushes.
+    // No user_type pre-check: that would itself be a query, and this one is a
+    // single index probe on tbl_vendor_org_entities.vendor_id that returns
+    // nothing at once for buyers and no-org vendors.
+    let delegates = [];
+    try {
+      delegates = await listPushDelegates(recipients);
+    } catch (err) {
+      logError('notificationService.dispatch network push delegates failed', err);
+    }
     const entityForPerson = new Map();
     for (const { entity_id, person_user_id } of delegates) {
       const person = Number(person_user_id);
