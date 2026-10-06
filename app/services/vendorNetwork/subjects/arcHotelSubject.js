@@ -27,6 +27,8 @@
 // Both sides take line_hotel rows in ascending id order and the engine never locks
 // contract lines, so they cannot deadlock; a release waiting on an accept re-reads the
 // committed fulfilling_vendor_id once the lock is granted.
+// Sweep reconcile (self-heal of NULL rows under an ACCEPTED assignment): line_hotel rows
+// FOR UPDATE in id order, then one UPDATE; it takes no engine lock.
 
 import db from "../../../config/dbConn.js";
 import { logger } from "../../../util/logger.js";
@@ -283,12 +285,51 @@ async function listUnrouted(orgId, runner = db) {
   }));
 }
 
+// The (contract, hotel) ledger rows the org's ACCEPTED, still-ACTIVE assignee should
+// fulfil but that hold NULL — e.g. a row a contract regeneration inserted while the
+// accept was in flight. Shared by the lock step and the update step of reconcile.
+const UNFULFILLED_ROWS = `
+  FROM tbl_arc_contract_line_hotel clh
+  JOIN tbl_arc_contract_line l ON l.id = clh.arc_contract_line_id
+  JOIN tbl_arc_contract c ON c.id = l.arc_contract_id
+  JOIN tbl_vendor_routing_assignments a
+    ON a.subject_type = 'ARC_HOTEL' AND a.status = 'ACCEPTED'
+   AND a.subject_id = l.arc_contract_id AND a.hotel_id = clh.hotel_id
+  JOIN tbl_vendor_orgs o ON o.id = a.org_id AND o.principal_vendor_id = c.vendor_id
+  JOIN tbl_vendor_org_entities e
+    ON e.org_id = a.org_id AND e.vendor_id = a.assigned_vendor_id AND e.status = 'ACTIVE'
+ WHERE clh.fulfilling_vendor_id IS NULL`;
+
+/**
+ * Sweep self-heal: gives every such NULL row its assignee. Two statements in one
+ * transaction: lock the rows FOR UPDATE in id order (the lock order of the header; no
+ * subject or assignment lock is taken), then ONE set-based UPDATE that re-reads the
+ * assignments in a fresh snapshot, so a revoke or supersede committed while it waited
+ * is honoured and a row someone else filled meanwhile is left alone.
+ * @returns {Promise<number>} rows filled
+ */
+async function reconcile(runner = db) {
+  return runner.tx(async (t) => {
+    const ids = (await t.any(`SELECT clh.id ${UNFULFILLED_ROWS} ORDER BY clh.id FOR UPDATE OF clh`)).map((r) => r.id);
+    if (!ids.length) return 0;
+    const res = await t.result(
+      `UPDATE tbl_arc_contract_line_hotel target
+          SET fulfilling_vendor_id = src.assigned_vendor_id, updated_at = CURRENT_TIMESTAMP
+         FROM (SELECT clh.id, a.assigned_vendor_id ${UNFULFILLED_ROWS} AND clh.id = ANY($1::bigint[])) src
+        WHERE target.id = src.id AND target.fulfilling_vendor_id IS NULL`,
+      [ids]
+    );
+    return res.rowCount;
+  });
+}
+
 export const arcHotelSubjectHandler = Object.freeze({
   validateSubject,
   onAccepted,
   onReleased,
   describe,
   listUnrouted,
+  reconcile,
 });
 
 registerSubject(SUBJECT_TYPE.ARC_HOTEL, arcHotelSubjectHandler);

@@ -28,6 +28,7 @@ import { releaseForMr } from "../../app/services/callOffPoService.js";
 import arcContractModel from "../../app/models/arc_v2/arcContractModel.js";
 import arcHotelModel from "../../app/models/arc_v2/arcHotelModel.js";
 import { getSubjectHandler } from "../../app/services/vendorNetwork/routingEngine.js";
+import { runVendorRoutingSweepTick } from "../../app/helper/cronManager.js";
 import { arcHotelSubjectHandler } from "../../app/services/vendorNetwork/subjects/arcHotelSubject.js";
 
 const HQ = 95971; // principal, the contract vendor
@@ -204,8 +205,8 @@ async function routeTo(vendorId, hotelId = H1) {
   return res.body.data.id;
 }
 
-/** An approved MR at `hotelId` for 10 of each line, released in a transaction. */
-async function releaseCallOff(hotelId) {
+/** An approved MR at `hotelId` for 10 of each line ([lineId, variantId] pairs), released in a transaction. */
+async function releaseCallOff(hotelId, lines = lineIds.map((id, i) => [id, VARIANTS[i]])) {
   const mrId = Number(
     (
       await db.one(
@@ -216,11 +217,11 @@ async function releaseCallOff(hotelId) {
     ).id
   );
   mrIds.push(mrId);
-  for (let i = 0; i < lineIds.length; i += 1) {
+  for (const [lineId, variantId] of lines) {
     await db.none(
       `INSERT INTO tbl_material_requisition_item (mr_id, product_variant_id, quantity, uom, arc_contract_id, arc_contract_line_id)
        VALUES ($1, $2, 10, 'pcs', $3, $4)`,
-      [mrId, VARIANTS[i], contractId, lineIds[i]]
+      [mrId, variantId, contractId, lineId]
     );
   }
   const released = await db.tx((t) => releaseForMr(mrId, t));
@@ -621,5 +622,40 @@ describe("fix round 1", () => {
     expect(await fulfilling(H1)).toEqual([null, null]);
     expect((await notices(CREATOR)).map((n) => n.additional_data.fulfilling_vendor_id)).toEqual([B, HQ]);
     expect((await (await httpClient(B)).get(`${ARC_V}/vendor/contracts/${contractId}`)).status).toBe(403);
+  });
+
+  it("the routing sweep fills a NULL row left under an ACCEPTED assignment, and its call-off goes to the member", async () => {
+    await routeTo(B);
+    // The race's end state, built directly: a new line whose H1 row missed the accept.
+    const variant = (await db.one(`SELECT id FROM tbl_product_variant WHERE id <> ALL($1::int[]) ORDER BY id LIMIT 1`, [VARIANTS])).id;
+    const item = await db.one(`INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom) VALUES ($1, $2, 100, 'pcs') RETURNING id`, [arcId, variant]);
+    const line = Number(
+      (await db.one(`INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty) VALUES ($1, $2, 50, 5, 100) RETURNING id`, [contractId, item.id])).id
+    );
+    await db.none(
+      `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty) VALUES ($1, $2, 60), ($1, $3, 40)`,
+      [line, H1, H2]
+    );
+
+    const tick = await runVendorRoutingSweepTick();
+    expect(tick).toMatchObject({ skipped: false });
+    expect(tick.reconciled).toBeGreaterThanOrEqual(1);
+    const rows = await db.any(
+      `SELECT hotel_id, fulfilling_vendor_id FROM tbl_arc_contract_line_hotel WHERE arc_contract_line_id = $1 ORDER BY hotel_id`,
+      [line]
+    );
+    expect(rows).toEqual([
+      { hotel_id: H1, fulfilling_vendor_id: B },
+      { hotel_id: H2, fulfilling_vendor_id: null },
+    ]);
+    expect((await releaseCallOff(H1, [[line, variant]])).finalized_vendor_id).toBe(B);
+  });
+
+  it("the sweep leaves NULL rows alone when the assignee is no longer ACTIVE", async () => {
+    await routeTo(B);
+    await db.none(`UPDATE tbl_arc_contract_line_hotel SET fulfilling_vendor_id = NULL WHERE hotel_id = $1`, [H1]);
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE org_id = $1 AND vendor_id = $2`, [ORG, B]);
+    await runVendorRoutingSweepTick();
+    expect(await fulfilling(H1)).toEqual([null, null]);
   });
 });

@@ -3,7 +3,9 @@
 //   2. self-healing: live rows whose assignee is no longer an ACTIVE entity of the org
 //      (removed, suspended, left: the post-commit revoke in the entity endpoints is
 //      best-effort) → REVOKED
-//   3. AUTO_SINGLE_MATCH orgs: every unrouted subject with exactly one full-coverage
+//   3. self-healing: each subject handler's optional reconcile() repairs subject state
+//      that drifted from its ACCEPTED rows (ARC_HOTEL: ledger rows left NULL)
+//   4. AUTO_SINGLE_MATCH orgs: every unrouted subject with exactly one full-coverage
 //      candidate is assigned to it (auto_routed), unless that candidate already
 //      declined, timed out or was withdrawn from that subject.
 //
@@ -56,6 +58,19 @@ async function revokeOrphans() {
       count += 1;
     } catch (err) {
       logger.error({ err: err.message, assignmentId: id }, "[Vendor Routing Sweep] orphan revoke failed");
+    }
+  }
+  return count;
+}
+
+async function reconcileSubjects() {
+  let count = 0;
+  for (const [subjectType, handler] of registeredSubjects()) {
+    if (!handler.reconcile) continue;
+    try {
+      count += Number(await handler.reconcile(db)) || 0;
+    } catch (err) {
+      logger.error({ err: err.message, subjectType }, "[Vendor Routing Sweep] reconcile failed");
     }
   }
   return count;
@@ -126,7 +141,7 @@ async function autoRoute() {
 
 /**
  * One sweep. Returns { skipped: true } when another sweep holds the lock, else
- * { skipped: false, timedOut, revoked, autoRouted }.
+ * { skipped: false, timedOut, revoked, reconciled, autoRouted }.
  */
 export async function runRoutingSweep(now = new Date()) {
   return db.task(async (c) => {
@@ -134,8 +149,9 @@ export async function runRoutingSweep(now = new Date()) {
     try {
       const timedOut = await timeOutOverdue(now);
       const revoked = await revokeOrphans();
+      const reconciled = await reconcileSubjects();
       const autoRouted = await autoRoute();
-      return { skipped: false, timedOut, revoked, autoRouted };
+      return { skipped: false, timedOut, revoked, reconciled, autoRouted };
     } finally {
       await unlockSweep(c);
     }

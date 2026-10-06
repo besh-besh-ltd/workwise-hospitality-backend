@@ -34,6 +34,8 @@
 //   transition commits and is dropped if it rolls back.
 //   listUnrouted(orgId, runner)  -> [{ subjectId, hotelId|null, hotelIds, categoryId, title?, meta? }]
 //       the org's subjects with no PENDING/ACCEPTED row OF THAT ORG
+//   reconcile(runner) -> number   optional; the sweep's self-heal of subject state that
+//       drifted from the ACCEPTED rows (returns how many things it repaired)
 
 import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
