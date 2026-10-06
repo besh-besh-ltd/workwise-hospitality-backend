@@ -3,6 +3,7 @@
 // the partial unique index ix_vn_entities_live_vendor makes vendor_id lookups exact.
 
 import db from "../config/dbConn.js";
+import { istDate } from "../constants/vendorNetwork.js";
 
 /** The live org membership of an entity, with its org: null when the vendor is in no org. */
 export function getOrgByEntity(vendorId, runner = db) {
@@ -53,17 +54,17 @@ export function getActiveMemberships(personId, runner = db) {
   );
 }
 
-/** The current active seat of an entity in its live org (end_date >= today), or null. */
-export function getActiveSeat(entityId, runner = db) {
+/** The current active seat of an entity in its live org (end_date >= today in IST), or null. */
+export function getActiveSeat(entityId, runner = db, today = istDate()) {
   return runner.oneOrNone(
     `SELECT s.*
        FROM tbl_vendor_network_seats s
        JOIN tbl_vendor_org_entities e
          ON e.vendor_id = s.entity_vendor_id AND e.org_id = s.org_id AND e.status <> 'REMOVED'
-      WHERE s.entity_vendor_id = $1 AND s.status = 'active' AND s.end_date >= CURRENT_DATE
+      WHERE s.entity_vendor_id = $1 AND s.status = 'active' AND s.end_date >= $2::date
       ORDER BY s.end_date DESC
       LIMIT 1`,
-    [entityId]
+    [entityId, today]
   );
 }
 
@@ -139,19 +140,19 @@ export async function mapToPrincipalIds(vendorIds, runner = db) {
   return rows.map((r) => r.id);
 }
 
-/** Entity placement plus a has-current-seat flag, in one query; null for a vendor in no org. */
-export function getOperateState(vendorId, runner = db) {
+/** Entity placement plus a has-current-seat flag (IST `today`), in one query; null for a vendor in no org. */
+export function getOperateState(vendorId, runner = db, today = istDate()) {
   return runner.oneOrNone(
     `SELECT e.org_id, e.relationship, e.status AS entity_status, o.principal_vendor_id,
             EXISTS (
               SELECT 1 FROM tbl_vendor_network_seats s
                WHERE s.entity_vendor_id = e.vendor_id AND s.org_id = e.org_id
-                 AND s.status = 'active' AND s.end_date >= CURRENT_DATE
+                 AND s.status = 'active' AND s.end_date >= $2::date
             ) AS has_seat
        FROM tbl_vendor_org_entities e
        JOIN tbl_vendor_orgs o ON o.id = e.org_id
       WHERE e.vendor_id = $1 AND e.status <> 'REMOVED'`,
-    [vendorId]
+    [vendorId, today]
   );
 }
 
@@ -236,7 +237,7 @@ export function updateOrgSettings(orgId, { name, routing_mode, routing_timeout_h
 }
 
 /** Live entities with their login and current seat (active wins over pending), principal first. */
-export function listEntitiesWithSeats(orgId, runner = db) {
+export function listEntitiesWithSeats(orgId, runner = db, today = istDate()) {
   return runner.any(
     `SELECT e.vendor_id, e.relationship, e.status, e.preference_rank, e.linked_at,
             u.name, u.email, u.status AS user_status,
@@ -246,13 +247,13 @@ export function listEntitiesWithSeats(orgId, runner = db) {
        LEFT JOIN LATERAL (
          SELECT id, status, end_date, fee_amount FROM tbl_vendor_network_seats
           WHERE org_id = e.org_id AND entity_vendor_id = e.vendor_id
-            AND status IN ('active', 'pending') AND end_date >= CURRENT_DATE
+            AND status IN ('active', 'pending') AND end_date >= $2::date
           ORDER BY (status = 'active') DESC, end_date DESC
           LIMIT 1
        ) s ON true
       WHERE e.org_id = $1 AND e.status <> 'REMOVED'
       ORDER BY (e.relationship = 'PRINCIPAL') DESC, e.vendor_id`,
-    [orgId]
+    [orgId, today]
   );
 }
 
@@ -323,13 +324,26 @@ export async function isPrincipalOfAnyOrg(vendorId, runner = db) {
   return !!(await runner.oneOrNone(`SELECT 1 FROM tbl_vendor_orgs WHERE principal_vendor_id = $1`, [vendorId]));
 }
 
-export function createLinkInvite({ orgId, targetVendorId, relationship, tokenHash, ttlDays, createdBy }, runner = db) {
+/**
+ * Inserts a PENDING invite. A stale (expired) PENDING invite to the same target is first
+ * flipped to EXPIRED so it does not hold the one-PENDING-per-(org, target) index; a live
+ * one makes the insert raise 23505.
+ */
+export async function createLinkInvite(
+  { orgId, targetVendorId, relationship, addressedBy, tokenHash, ttlDays, createdBy },
+  runner = db
+) {
+  await runner.none(
+    `UPDATE tbl_vendor_org_link_invites SET status = 'EXPIRED', acted_at = now()
+      WHERE org_id = $1 AND target_vendor_id = $2 AND status = 'PENDING' AND expires_at <= now()`,
+    [orgId, targetVendorId]
+  );
   return runner.one(
     `INSERT INTO tbl_vendor_org_link_invites
-       (org_id, target_vendor_id, relationship, token_hash, status, expires_at, created_by)
-     VALUES ($1, $2, $3, $4, 'PENDING', now() + make_interval(days => $5), $6)
-     RETURNING id, org_id, target_vendor_id, relationship, status, expires_at, created_at`,
-    [orgId, targetVendorId, relationship, tokenHash, ttlDays, createdBy]
+       (org_id, target_vendor_id, relationship, addressed_by, token_hash, status, expires_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, 'PENDING', now() + make_interval(days => $6), $7)
+     RETURNING id, org_id, target_vendor_id, relationship, addressed_by, status, expires_at, created_at`,
+    [orgId, targetVendorId, relationship, addressedBy, tokenHash, ttlDays, createdBy]
   );
 }
 
@@ -345,11 +359,14 @@ export function getLinkInvite(inviteId, runner = db, { forUpdate = false } = {})
   );
 }
 
-export function setLinkInviteStatus(inviteId, status, runner = db) {
-  return runner.none(
-    `UPDATE tbl_vendor_org_link_invites SET status = $2, acted_at = now() WHERE id = $1`,
+/** Moves a PENDING invite to `status`; returns false when it was no longer PENDING. */
+export async function setLinkInviteStatus(inviteId, status, runner = db) {
+  const result = await runner.result(
+    `UPDATE tbl_vendor_org_link_invites SET status = $2, acted_at = now()
+      WHERE id = $1 AND status = 'PENDING'`,
     [inviteId, status]
   );
+  return result.rowCount === 1;
 }
 
 /** PENDING, unexpired invites addressed to a vendor, newest first. */
@@ -364,11 +381,15 @@ export function listIncomingLinkInvites(targetVendorId, runner = db) {
   );
 }
 
-/** PENDING, unexpired invites an org has sent, newest first. */
+/**
+ * PENDING, unexpired invites an org has sent, newest first. The target's email is shown
+ * only when the admin addressed the invite by that email (it already knew it).
+ */
 export function listOutgoingLinkInvites(orgId, runner = db) {
   return runner.any(
-    `SELECT i.id, i.target_vendor_id, u.name AS target_name, u.email AS target_email,
-            i.relationship, i.status, i.expires_at, i.created_at
+    `SELECT i.id, i.target_vendor_id, u.name AS target_name,
+            CASE WHEN i.addressed_by = 'EMAIL' THEN u.email END AS target_email,
+            i.addressed_by, i.relationship, i.status, i.expires_at, i.created_at
        FROM tbl_vendor_org_link_invites i
        JOIN tbl_users u ON u.id = i.target_vendor_id
       WHERE i.org_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()
@@ -433,9 +454,9 @@ export async function insertVendorAccount({ companyName, gstin, email, stateId, 
   return { vendorId: user.id, companyId: company.id };
 }
 
-/** Sets status (and/or preference_rank) of a live entity; returns the row. */
+/** Sets status (and/or preference_rank) of a live entity; returns the row, or null if it is gone. */
 export function updateEntity(orgId, vendorId, { status, preferenceRank }, runner = db) {
-  return runner.one(
+  return runner.oneOrNone(
     `UPDATE tbl_vendor_org_entities
         SET status = COALESCE($3, status),
             preference_rank = COALESCE($4, preference_rank),
@@ -493,15 +514,15 @@ export async function removeEntity(orgId, vendorId, runner = db) {
 // Seats (spec §5.1).
 // ---------------------------------------------------------------------------
 
-/** The entity's current pending-or-active seat in `orgId` (active first), or null. */
-export function getLiveSeat(orgId, vendorId, runner = db) {
+/** The entity's current pending-or-active seat in `orgId` (active first, IST `today`), or null. */
+export function getLiveSeat(orgId, vendorId, runner = db, today = istDate()) {
   return runner.oneOrNone(
     `SELECT * FROM tbl_vendor_network_seats
       WHERE org_id = $1 AND entity_vendor_id = $2
-        AND status IN ('active', 'pending') AND end_date >= CURRENT_DATE
+        AND status IN ('active', 'pending') AND end_date >= $3::date
       ORDER BY (status = 'active') DESC, end_date DESC
       LIMIT 1`,
-    [orgId, vendorId]
+    [orgId, vendorId, today]
   );
 }
 
@@ -525,16 +546,39 @@ export function insertSeat({ orgId, vendorId, feeAmount, startDate, endDate, sta
   );
 }
 
-/** Pending seats among `seatIds` that belong to `orgId` and whose entity is still live there. */
-export function listPayableSeats(orgId, seatIds, runner = db) {
+/**
+ * Pending seats among `seatIds` that belong to `orgId` and whose entity is still live
+ * there, locked FOR UPDATE (call inside a tx) so two checkouts cannot race.
+ */
+export function lockPayableSeats(orgId, seatIds, runner = db) {
   return runner.any(
     `SELECT s.* FROM tbl_vendor_network_seats s
        JOIN tbl_vendor_org_entities e
          ON e.org_id = s.org_id AND e.vendor_id = s.entity_vendor_id AND e.status <> 'REMOVED'
       WHERE s.org_id = $1 AND s.id = ANY($2::int[]) AND s.status = 'pending'
-      ORDER BY s.id`,
+      ORDER BY s.id
+      FOR UPDATE OF s`,
     [orgId, seatIds]
   );
+}
+
+/**
+ * Ids among `seatIds` already covered by an open checkout: a 'created' network_seat
+ * payment of `orgId` younger than `openMinutes` whose metadata lists the seat.
+ */
+export async function listSeatIdsInOpenPayment(orgId, seatIds, openMinutes, runner = db) {
+  const rows = await runner.any(
+    `SELECT DISTINCT (sid.value)::int AS seat_id
+       FROM tbl_vendor_payments p
+       CROSS JOIN LATERAL jsonb_array_elements_text(p.metadata->'seat_ids') AS sid(value)
+      WHERE p.payment_type = 'network_seat' AND p.payment_status = 'created'
+        AND (p.metadata->>'org_id')::int = $1
+        AND p.created_at > now() - make_interval(mins => $3)
+        AND (sid.value)::int = ANY($2::int[])
+      ORDER BY 1`,
+    [orgId, seatIds, openMinutes]
+  );
+  return rows.map((r) => r.seat_id);
 }
 
 export function createSeatPayment({ vendorId, orderId, amountPaise, receipt, beforeResponse, metadata }, runner = db) {
@@ -619,7 +663,8 @@ export default {
   getLiveSeat,
   cancelSeatsFromOtherOrgs,
   insertSeat,
-  listPayableSeats,
+  lockPayableSeats,
+  listSeatIdsInOpenPayment,
   createSeatPayment,
   getSeatPaymentByOrderId,
   markSeatPaymentPaid,

@@ -134,6 +134,25 @@ export async function suggestions(req, res) {
   }
 }
 
+/**
+ * The vendor an admin may invite, or a refusal. By id: only a vendor from the org's own
+ * same-PAN suggestions; any other id is 404 NOT_FOUND exactly like a missing one, so ids
+ * cannot be probed. By email: an exact (case-insensitive) active vendor email.
+ */
+async function resolveInviteTarget(orgId, { targetId, targetEmail }) {
+  const notFound = new NetworkHttpError(404, "No matching vendor account", "NOT_FOUND");
+  if (targetId !== null) {
+    const org = await getOrgById(orgId);
+    const pan = await getVendorPan(org.principal_vendor_id);
+    const candidates = pan ? await listVendorsByPan(pan, org.principal_vendor_id) : [];
+    if (!candidates.some((c) => Number(c.vendor_id) === targetId)) throw notFound;
+    return { id: targetId, addressedBy: "ID" };
+  }
+  const target = await findActiveVendor({ email: targetEmail });
+  if (!target) throw notFound;
+  return { id: target.id, addressedBy: "EMAIL" };
+}
+
 /** POST /entities/link-invites { target_vendor_id | target_email, relationship } */
 export async function createLinkInvite(req, res) {
   try {
@@ -149,8 +168,8 @@ export async function createLinkInvite(req, res) {
     if (req.body?.target_vendor_id != null && targetId === null) return fail(res, 400, "Invalid target_vendor_id");
     if (targetId === null && !targetEmail) return fail(res, 400, "target_vendor_id or target_email is required");
 
-    const target = await findActiveVendor(targetId !== null ? { vendorId: targetId } : { email: targetEmail });
-    if (!target) return fail(res, 409, "No active vendor account matches", "NOT_FOUND");
+    const { org_id: orgId, org_name: orgName } = req.user.network;
+    const target = await resolveInviteTarget(orgId, { targetId, targetEmail });
     if (await isPrincipalOfAnyOrg(target.id)) {
       return fail(res, 409, "That vendor runs its own network and cannot be linked", "IS_PRINCIPAL");
     }
@@ -158,16 +177,24 @@ export async function createLinkInvite(req, res) {
       return fail(res, 409, "That vendor already belongs to a network", "ALREADY_IN_NETWORK");
     }
 
-    const { org_id: orgId, org_name: orgName } = req.user.network;
     const tokenHash = crypto.createHash("sha256").update(crypto.randomBytes(32)).digest("hex");
-    const invite = await insertLinkInvite({
-      orgId,
-      targetVendorId: target.id,
-      relationship,
-      tokenHash,
-      ttlDays: LINK_INVITE_TTL_DAYS,
-      createdBy: actingPersonId(req),
-    });
+    let invite;
+    try {
+      invite = await insertLinkInvite({
+        orgId,
+        targetVendorId: target.id,
+        relationship,
+        addressedBy: target.addressedBy,
+        tokenHash,
+        ttlDays: LINK_INVITE_TTL_DAYS,
+        createdBy: actingPersonId(req),
+      });
+    } catch (err) {
+      if (err.code === UNIQUE_VIOLATION) {
+        return fail(res, 409, "An invitation to this vendor is already pending", "INVITE_PENDING");
+      }
+      throw err;
+    }
 
     await notify({
       userIds: [target.id],
@@ -195,15 +222,20 @@ export async function incomingLinkInvites(req, res) {
 }
 
 /**
- * The invite :id addressed to the caller acting as itself, still PENDING and unexpired.
- * Anyone else gets 404. An expired one is flipped to EXPIRED and answered 410.
+ * The invite :id addressed to the caller, still PENDING and unexpired. Another vendor
+ * gets 404; a person acting for the target (not its own login) gets 403. An expired one
+ * is flipped to EXPIRED (or already is) and answered 410.
  */
 async function respondableInvite(req, t) {
   const id = parseId(req.params.id);
   const invite = id ? await getLinkInvite(id, t, { forUpdate: true }) : null;
-  if (!invite || Number(invite.target_vendor_id) !== Number(req.user.id) || isActingForAnotherLogin(req)) {
+  if (!invite || Number(invite.target_vendor_id) !== Number(req.user.id)) {
     throw new NetworkHttpError(404, "Invitation not found");
   }
+  if (isActingForAnotherLogin(req)) {
+    throw new NetworkHttpError(403, "Only the invited account's own login can answer this invitation");
+  }
+  if (invite.status === LINK_INVITE_STATUS.EXPIRED) throw new NetworkHttpError(410, "This invitation has expired");
   if (invite.status !== LINK_INVITE_STATUS.PENDING) {
     throw new NetworkHttpError(409, `This invitation is already ${invite.status.toLowerCase()}`);
   }
@@ -300,13 +332,15 @@ export async function cancelLinkInvite(req, res) {
     if (denied) return res.status(denied.http).json(denied.body);
 
     const id = parseId(req.params.id);
-    const invite = id ? await getLinkInvite(id) : null;
-    if (!invite || invite.org_id !== req.user.network.org_id) return fail(res, 404, "Invitation not found");
-    if (invite.status !== LINK_INVITE_STATUS.PENDING) {
-      return fail(res, 409, `This invitation is already ${invite.status.toLowerCase()}`);
-    }
-    await setLinkInviteStatus(invite.id, LINK_INVITE_STATUS.CANCELLED);
-    return res.status(200).json({ status: 1, message: "Invitation cancelled", data: { id: invite.id } });
+    const orgId = req.user.network.org_id;
+    await db.tx(async (t) => {
+      const invite = id ? await getLinkInvite(id, t, { forUpdate: true }) : null;
+      if (!invite || invite.org_id !== orgId) throw new NetworkHttpError(404, "Invitation not found");
+      if (!(await setLinkInviteStatus(invite.id, LINK_INVITE_STATUS.CANCELLED, t))) {
+        throw new NetworkHttpError(409, `This invitation is already ${invite.status.toLowerCase()}`);
+      }
+    });
+    return res.status(200).json({ status: 1, message: "Invitation cancelled", data: { id } });
   } catch (error) {
     return handleError(res, error, "cancelLinkInvite");
   }
@@ -343,19 +377,23 @@ export async function createEntity(req, res) {
     const place = await checkStateCity(input.stateId, input.cityId);
     if (!place.state_ok) return fail(res, 400, "Unknown state_id");
     if (!place.city_ok) return fail(res, 400, "city_id does not belong to state_id");
-    if (await findActiveVendorByGstin(input.gstin)) {
-      return fail(
-        res,
-        409,
-        "A vendor account with this GSTIN already exists. Send it a link invite instead.",
-        "GSTIN_EXISTS"
-      );
-    }
-    if (await emailExists(input.email)) return fail(res, 409, "This email is already registered", "EMAIL_EXISTS");
-
     const orgId = req.user.network.org_id;
     const personId = actingPersonId(req);
     const created = await db.tx(async (t) => {
+      // tbl_users.email and tbl_company.gstin carry no unique index: serialise creates of the
+      // same email / GSTIN and check under the locks, so a double-submit cannot duplicate.
+      await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_email:' || lower($1)))`, [input.email]);
+      await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_gstin:' || upper($1)))`, [input.gstin]);
+      if (await findActiveVendorByGstin(input.gstin, t)) {
+        throw new NetworkHttpError(
+          409,
+          "A vendor account with this GSTIN already exists. Send it a link invite instead.",
+          "GSTIN_EXISTS"
+        );
+      }
+      if (await emailExists(input.email, t)) {
+        throw new NetworkHttpError(409, "This email is already registered", "EMAIL_EXISTS");
+      }
       const account = await insertVendorAccount({ ...input, createdBy: personId }, t);
       await insertActiveEntity(
         { orgId, vendorId: account.vendorId, relationship: input.relationship, invitedBy: personId },
@@ -408,6 +446,7 @@ export async function updateEntity(req, res) {
       personIds: suspending ? await listPersonsOnlyViaEntity(orgId, entity.vendor_id, t) : [],
       row: await updateEntityRow(orgId, entity.vendor_id, { status, preferenceRank: rank }, t),
     }));
+    if (!row) return fail(res, 404, "Entity not found in your network");
     if (suspending) {
       await afterEntityLosesAccess(entity.vendor_id, personIds, {
         actorUserId: actingPersonId(req),

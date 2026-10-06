@@ -14,6 +14,7 @@ import {
   ENTITY_STATUS,
   ENTITY_RELATIONSHIP,
   seatFeeInr,
+  istDate,
 } from "../../constants/vendorNetwork.js";
 import {
   getOrgByEntity,
@@ -251,7 +252,7 @@ export async function collapseToPrincipals(vendorIds, runner = db) {
  * active, unexpired seat, unless the seat fee is 0.
  */
 export async function entityCanOperate(vendorId, runner = db) {
-  const state = await getOperateState(vendorId, runner);
+  const state = await getOperateState(vendorId, runner, istDate());
   if (!state) return { ok: true };
   if (state.relationship === ENTITY_RELATIONSHIP.PRINCIPAL || state.principal_vendor_id === Number(vendorId)) {
     return { ok: true };

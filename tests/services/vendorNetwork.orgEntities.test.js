@@ -19,6 +19,7 @@ import {
   addEntity,
   addMember,
   cleanupVendorNetworkFixtures,
+  moveApiSequencesPastFixtures,
 } from "../helpers/vendorNetworkSeed.js";
 
 const razorpayOrders = [];
@@ -64,16 +65,21 @@ const MEMBER_PERSON = 95611; // type 11, ENTITY_MEMBER of BRANCH
 const ORG = 95601;
 const FOREIGN_ORG = 95602;
 
-const HQ_GSTIN = "27ABCDE1234F1Z5";
+// Every fixture vendor shares HQ's PAN (ABCDE1234F) unless a test says otherwise, so it is
+// in HQ's suggestion set and may be invited by id while it is in no org.
+const samePanGstin = (id) => `${String(id % 100).padStart(2, "0")}ABCDE1234F1Z5`;
+const HQ_GSTIN = samePanGstin(95602);
 const BASE = "/api/v1/vendor-network";
 
 async function entity(id, extra = {}) {
-  await seedVendorEntity({ id, companyId: id, name: `VN ${id}`, email: `vn-${id}@example.com`, ...extra });
+  await seedVendorEntity({
+    id, companyId: id, name: `VN ${id}`, email: `vn-${id}@example.com`, gstin: samePanGstin(id), ...extra,
+  });
 }
 
 async function world() {
   await entity(LONE);
-  await entity(HQ, { gstin: HQ_GSTIN });
+  await entity(HQ);
   await entity(BRANCH);
   await entity(TARGET);
   await entity(FOREIGN_HQ);
@@ -105,6 +111,8 @@ async function invite(body) {
 }
 
 const savedFee = process.env.NETWORK_SEAT_FEE_INR;
+
+beforeAll(() => moveApiSequencesPastFixtures());
 
 beforeEach(() => {
   revokeCalls.length = 0;
@@ -158,7 +166,7 @@ describe("vendor network org and entity API", () => {
   it("2. suggestions match active no-org vendors sharing the principal's PAN (GSTIN, else PAN document)", async () => {
     await world();
     await entity(SAME_PAN, { gstin: "29ABCDE1234F1Z3" });
-    await entity(SAME_PAN_DOC);
+    await entity(SAME_PAN_DOC, { gstin: null });
     await db.none(
       `INSERT INTO tbl_vendor_documents (vendor_id, document_type, document_number) VALUES ($1, 'pan', 'abcde1234f')`,
       [SAME_PAN_DOC]
@@ -170,7 +178,7 @@ describe("vendor network org and entity API", () => {
     const res = await (await httpClient(HQ)).get(`${BASE}/entities/suggestions`);
     expect(res.status).toBe(200);
     expect(res.body.data.pan).toBe("ABCDE1234F");
-    expect(res.body.data.suggestions.map((s) => s.vendor_id).sort()).toEqual([SAME_PAN, SAME_PAN_DOC]);
+    expect(res.body.data.suggestions.map((s) => s.vendor_id).sort()).toEqual([LONE, TARGET, SAME_PAN, SAME_PAN_DOC]);
 
     // Fallback: a principal with no GSTIN takes its PAN from the PAN document.
     await db.none(`UPDATE tbl_company SET gstin = NULL WHERE id = $1`, [HQ]);
@@ -179,7 +187,7 @@ describe("vendor network org and entity API", () => {
       [HQ]
     );
     const viaDoc = await (await httpClient(HQ)).get(`${BASE}/entities/suggestions`);
-    expect(viaDoc.body.data.suggestions.map((s) => s.vendor_id).sort()).toEqual([SAME_PAN, SAME_PAN_DOC]);
+    expect(viaDoc.body.data.suggestions.map((s) => s.vendor_id).sort()).toEqual([LONE, TARGET, SAME_PAN, SAME_PAN_DOC]);
 
     // Not an admin: refused.
     expect((await (await httpClient(BRANCH)).get(`${BASE}/entities/suggestions`)).status).toBe(403);
@@ -208,10 +216,33 @@ describe("vendor network org and entity API", () => {
       const r = await invite({ relationship: "BRANCH", ...body });
       return [r.status, r.body.reason];
     };
-    expect(await reasons({ target_vendor_id: FOREIGN_BRANCH })).toEqual([409, "ALREADY_IN_NETWORK"]);
-    expect(await reasons({ target_vendor_id: FOREIGN_HQ })).toEqual([409, "IS_PRINCIPAL"]);
-    expect(await reasons({ target_vendor_id: INACTIVE })).toEqual([409, "NOT_FOUND"]);
-    expect(await reasons({ target_email: "nobody-vn@example.com" })).toEqual([409, "NOT_FOUND"]);
+    // By id, only the org's own same-PAN suggestions; every other id is indistinguishable
+    // from a missing one, so ids cannot be probed.
+    await entity(OTHER_PAN, { gstin: "27ZZZZZ9999Z1Z5" });
+    for (const id of [OTHER_PAN, FOREIGN_BRANCH, FOREIGN_HQ, INACTIVE, 95699]) {
+      expect(await reasons({ target_vendor_id: id })).toEqual([404, "NOT_FOUND"]);
+    }
+    // By email (an address the admin already knows): exact match, reasons are given.
+    expect(await reasons({ target_email: `vn-${OTHER_PAN}@example.com` })).toEqual([201, undefined]);
+    expect(await reasons({ target_email: `vn-${FOREIGN_BRANCH}@example.com` })).toEqual([409, "ALREADY_IN_NETWORK"]);
+    expect(await reasons({ target_email: `vn-${FOREIGN_HQ}@example.com` })).toEqual([409, "IS_PRINCIPAL"]);
+    expect(await reasons({ target_email: `vn-${INACTIVE}@example.com` })).toEqual([404, "NOT_FOUND"]);
+    expect(await reasons({ target_email: "nobody-vn@example.com" })).toEqual([404, "NOT_FOUND"]);
+    expect(await reasons({ target_email: `vn-${LONE}@example` })).toEqual([404, "NOT_FOUND"]);
+
+    // One PENDING invite per (org, target).
+    expect(await reasons({ target_vendor_id: TARGET })).toEqual([409, "INVITE_PENDING"]);
+    expect(await reasons({ target_email: `vn-${TARGET}@example.com` })).toEqual([409, "INVITE_PENDING"]);
+    await db.none(`UPDATE tbl_vendor_org_link_invites SET expires_at = now() - interval '1 minute' WHERE id = $1`, [res.body.data.id]);
+    const reinvite = await invite({ target_vendor_id: TARGET, relationship: "BRANCH" });
+    expect(reinvite.status).toBe(201);
+    expect(await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [res.body.data.id])).toEqual({ status: "EXPIRED" });
+
+    // GET /org shows the target's email only on invites the admin addressed by email.
+    const outgoing = (await (await httpClient(HQ)).get(`${BASE}/org`)).body.data.link_invites;
+    const byTarget = Object.fromEntries(outgoing.map((i) => [i.target_vendor_id, i]));
+    expect(byTarget[TARGET]).toMatchObject({ addressed_by: "ID", target_name: `VN ${TARGET}`, target_email: null });
+    expect(byTarget[LONE]).toMatchObject({ addressed_by: "EMAIL", target_email: `vn-${LONE}@example.com` });
     expect((await invite({ target_vendor_id: TARGET, relationship: "PRINCIPAL" })).status).toBe(400);
     // A member entity is not an admin.
     const asMember = await (await httpClient(BRANCH)).post(`${BASE}/entities/link-invites`).send({ target_vendor_id: TARGET, relationship: "BRANCH" });
@@ -251,6 +282,9 @@ describe("vendor network org and entity API", () => {
     await db.none(`UPDATE tbl_vendor_org_link_invites SET expires_at = now() - interval '1 minute' WHERE id = $1`, [exp.body.data.id]);
     expect((await (await httpClient(LONE)).post(`${BASE}/link-invites/${exp.body.data.id}/accept`)).status).toBe(410);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [exp.body.data.id])).toEqual({ status: "EXPIRED" });
+    // Already EXPIRED: still 410, for accept and decline alike.
+    expect((await (await httpClient(LONE)).post(`${BASE}/link-invites/${exp.body.data.id}/accept`)).status).toBe(410);
+    expect((await (await httpClient(LONE)).post(`${BASE}/link-invites/${exp.body.data.id}/decline`)).status).toBe(410);
 
     // Race: the target joined another network after the invite was sent.
     const race = await invite({ target_vendor_id: LONE, relationship: "BRANCH" });
@@ -278,6 +312,9 @@ describe("vendor network org and entity API", () => {
     const cancelled = await (await httpClient(HQ)).delete(`${BASE}/entities/link-invites/${b}`);
     expect(cancelled.status).toBe(200);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [b])).toEqual({ status: "CANCELLED" });
+    expect((await (await httpClient(HQ)).delete(`${BASE}/entities/link-invites/${b}`)).status).toBe(409);
+    // A declined invite cannot be cancelled either.
+    expect((await (await httpClient(HQ)).delete(`${BASE}/entities/link-invites/${a}`)).status).toBe(409);
     // A cancelled invite can no longer be accepted.
     expect((await (await httpClient(TARGET)).post(`${BASE}/link-invites/${b}/accept`)).status).toBe(409);
   });
@@ -529,6 +566,112 @@ describe("vendor network org and entity API", () => {
         ["B", ORG, "pending"],
       ]);
       expect(await entityCanOperate(FOREIGN_BRANCH)).toEqual({ ok: false, reason: "NO_SEAT" });
+    });
+  });
+
+  describe("fix round 1", () => {
+    it("POST /entities: two concurrent creates with the same email produce exactly one account", async () => {
+      await world();
+      const { state_id } = await aStateWithCity();
+      const admin = await httpClient(HQ);
+      const body = (gstin) => ({
+        company_name: "VN Twin", gstin, email: "vn-twin@example.com", state_id, relationship: "BRANCH",
+      });
+      const results = await Promise.all([
+        admin.post(`${BASE}/entities`).send(body("27TWINA1111A1Z1")),
+        admin.post(`${BASE}/entities`).send(body("27TWINB2222B1Z2")),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+      expect(results.find((r) => r.status === 409).body.reason).toBe("EMAIL_EXISTS");
+      expect(await db.one(`SELECT count(*)::int AS n FROM tbl_users WHERE lower(email) = 'vn-twin@example.com'`)).toEqual({ n: 1 });
+
+      // Same GSTIN, different emails: also exactly one.
+      const gstinRace = await Promise.all([
+        admin.post(`${BASE}/entities`).send({ ...body("27TWINC3333C1Z3"), email: "vn-twin-c1@example.com" }),
+        admin.post(`${BASE}/entities`).send({ ...body("27TWINC3333C1Z3"), email: "vn-twin-c2@example.com" }),
+      ]);
+      expect(gstinRace.map((r) => [r.status, r.body.reason]).sort()).toEqual([[201, undefined], [409, "GSTIN_EXISTS"]]);
+    });
+
+    it("accept: a live-entity insert that races the pre-check maps the unique violation to 409", async () => {
+      await world();
+      const id = (await invite({ target_vendor_id: TARGET, relationship: "BRANCH" })).body.data.id;
+
+      // Another transaction makes TARGET live in FOREIGN_ORG but has not committed, so the
+      // accept's "in no live org" pre-check passes and its insert waits on the unique index.
+      let inserted;
+      const ready = new Promise((r) => (inserted = r));
+      let release;
+      const gate = new Promise((r) => (release = r));
+      const holder = db.tx(async (t) => {
+        await t.none(
+          `INSERT INTO tbl_vendor_org_entities (org_id, vendor_id, relationship, status, linked_at)
+           VALUES ($1, $2, 'BRANCH', 'ACTIVE', now())`,
+          [FOREIGN_ORG, TARGET]
+        );
+        inserted();
+        await gate;
+      });
+      await ready;
+      const accepting = (await httpClient(TARGET)).post(`${BASE}/link-invites/${id}/accept`).then((r) => r);
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const { n } = await db.one(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'INSERT INTO tbl_vendor_org_entities%'`
+        );
+        if (n > 0) break;
+        if (Date.now() > deadline) throw new Error("accept never blocked on the entity insert");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      release();
+      await holder;
+      const res = await accepting;
+      expect([res.status, res.body.reason]).toEqual([409, "ALREADY_IN_NETWORK"]);
+      expect(await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [id])).toEqual({ status: "PENDING" });
+      expect(await db.any(`SELECT org_id FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [TARGET])).toEqual([{ org_id: FOREIGN_ORG }]);
+    });
+
+    it("accept: a person acting for the invited entity (not its own login) is refused 403", async () => {
+      await world();
+      const id = (await invite({ target_vendor_id: TARGET, relationship: "BRANCH" })).body.data.id;
+      // TARGET later joined FOREIGN_ORG, whose principal can now act for it.
+      await addEntity({ orgId: FOREIGN_ORG, vendorId: TARGET });
+      const res = await (await httpClient(FOREIGN_HQ, { ent: TARGET })).post(`${BASE}/link-invites/${id}/accept`);
+      expect(res.status).toBe(403);
+      expect((await (await httpClient(FOREIGN_HQ, { ent: TARGET })).post(`${BASE}/link-invites/${id}/decline`)).status).toBe(403);
+      expect(await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [id])).toEqual({ status: "PENDING" });
+    });
+
+    it("seats: a seat in an open checkout is refused 409 PAYMENT_IN_PROGRESS; a seat cancelled before verify leaves the payment paid with activated 0", async () => {
+      await world();
+      process.env.NETWORK_SEAT_FEE_INR = "1500";
+      const { state_id } = await aStateWithCity();
+      const admin = await httpClient(HQ);
+      const created = await admin.post(`${BASE}/entities`).send({
+        company_name: "VN Checkout Branch", gstin: "27CHKOU1234K1Z2", email: "vn-checkout@example.com", state_id, relationship: "BRANCH",
+      });
+      const vendorId = created.body.data.vendor_id;
+      const seatId = created.body.data.seat.id;
+
+      const pay = await admin.post(`${BASE}/seats/pay`).send({ seat_ids: [seatId] });
+      expect(pay.status).toBe(200);
+      const again = await admin.post(`${BASE}/seats/pay`).send({ seat_ids: [seatId] });
+      expect([again.status, again.body.reason]).toEqual([409, "PAYMENT_IN_PROGRESS"]);
+      expect(await db.one(`SELECT count(*)::int AS n FROM tbl_vendor_payments WHERE payment_type = 'network_seat' AND vendor_id = $1`, [HQ])).toEqual({ n: 1 });
+
+      // The entity is removed after checkout: its pending seat is cancelled.
+      expect((await admin.delete(`${BASE}/entities/${vendorId}`)).status).toBe(200);
+      const orderId = pay.body.data.order.id;
+      const paymentId = "pay_vnseat_removed";
+      const signature = crypto.createHmac("sha256", Config.razorpay.razorpay_secret).update(`${orderId}|${paymentId}`).digest("hex");
+      const verified = await admin.post(`${BASE}/seats/verify-payment`).send({
+        razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature,
+      });
+      expect(verified.status).toBe(200);
+      expect(verified.body.data.activated).toBe(0);
+      expect(await db.one(`SELECT payment_status FROM tbl_vendor_payments WHERE razorpay_order_id = $1`, [orderId])).toEqual({ payment_status: "paid" });
+      expect(await db.one(`SELECT status FROM tbl_vendor_network_seats WHERE id = $1`, [seatId])).toEqual({ status: "cancelled" });
     });
   });
 });

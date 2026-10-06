@@ -4,7 +4,7 @@ import { seedVendorEntity, seedPerson, seedOrg, addEntity, addMember, cleanupVen
 const NEW_TABLES = {
   tbl_vendor_orgs: ["id", "name", "principal_vendor_id", "routing_mode", "routing_timeout_hours", "created_by", "created_at", "updated_at"],
   tbl_vendor_org_entities: ["id", "org_id", "vendor_id", "relationship", "status", "preference_rank", "invited_by", "linked_at", "removed_at"],
-  tbl_vendor_org_link_invites: ["id", "org_id", "target_vendor_id", "relationship", "token_hash", "status", "expires_at", "created_by", "acted_at"],
+  tbl_vendor_org_link_invites: ["id", "org_id", "target_vendor_id", "relationship", "addressed_by", "token_hash", "status", "expires_at", "created_by", "acted_at"],
   tbl_vendor_org_members: ["id", "org_id", "person_user_id", "entity_vendor_id", "role", "status", "invite_token_hash", "invite_expires_at", "invited_by"],
   tbl_vendor_coverage_rules: ["id", "entity_vendor_id", "scope_type", "scope_id", "mode", "category_id", "created_by"],
   tbl_vendor_routing_assignments: ["id", "org_id", "subject_type", "subject_id", "hotel_id", "assigned_vendor_id", "status", "decline_reason", "decline_note", "due_at", "auto_routed", "assigned_by_user_id", "acted_by_user_id", "acted_at"],
@@ -39,6 +39,21 @@ describe("vendor network schema", () => {
              OR (table_name='tbl_rfq_product_vendors' AND column_name='routed_from_vendor_id')`
       );
       expect(extra).toHaveLength(3);
+    });
+  });
+
+  it("allows one PENDING link invite per org and target, and only ID/EMAIL addressing", async () => {
+    await withTx(async (t) => {
+      await world(t);
+      await seedVendorEntity({ id: 95004, companyId: 95004, name: "VN Target", email: "vn-tg@test.local", runner: t });
+      const ins = (hash, extra = "") =>
+        `INSERT INTO tbl_vendor_org_link_invites (org_id, target_vendor_id, relationship, token_hash, status, expires_at, created_by${extra ? ", addressed_by" : ""})
+         VALUES (95001, 95004, 'BRANCH', '${hash}', 'PENDING', now() + interval '7 days', 95001${extra})`;
+      await t.none(ins("h1"));
+      await rejects(t, ins("h2"));
+      await rejects(t, ins("h3", ", 'PHONE'"));
+      await t.none(`UPDATE tbl_vendor_org_link_invites SET status = 'EXPIRED' WHERE token_hash = 'h1'`);
+      await t.none(ins("h4", ", 'EMAIL'"));
     });
   });
 

@@ -244,6 +244,7 @@ export async function verifySeatsPayment(req, res) {
       message: result.already_paid ? "Payment already verified" : "Seats activated",
       data: {
         payment_id: result.payment_id,
+        activated: result.activated,
         seats: result.seats.map((s) => ({ id: s.id, entity_vendor_id: s.entity_vendor_id, status: s.status, end_date: s.end_date })),
       },
     });

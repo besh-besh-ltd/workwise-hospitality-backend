@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS tbl_vendor_org_link_invites (
   org_id INT NOT NULL REFERENCES tbl_vendor_orgs(id),
   target_vendor_id INT NOT NULL REFERENCES tbl_users(id),
   relationship TEXT NOT NULL,
+  -- how the admin addressed the target: by EMAIL it typed, or by ID from its PAN suggestions
+  addressed_by TEXT NOT NULL DEFAULT 'ID' CHECK (addressed_by IN ('ID','EMAIL')),
   token_hash TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('PENDING','ACCEPTED','DECLINED','EXPIRED','CANCELLED')),
   expires_at TIMESTAMPTZ NOT NULL,
@@ -49,6 +51,9 @@ CREATE TABLE IF NOT EXISTS tbl_vendor_org_link_invites (
 );
 CREATE INDEX IF NOT EXISTS ix_vn_link_invites_org ON tbl_vendor_org_link_invites (org_id);
 CREATE INDEX IF NOT EXISTS ix_vn_link_invites_target ON tbl_vendor_org_link_invites (target_vendor_id);
+-- at most one PENDING invite per org and target
+CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_link_invites_one_pending
+  ON tbl_vendor_org_link_invites (org_id, target_vendor_id) WHERE status = 'PENDING';
 
 CREATE TABLE IF NOT EXISTS tbl_vendor_org_members (
   id SERIAL PRIMARY KEY,

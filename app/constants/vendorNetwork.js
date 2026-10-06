@@ -78,3 +78,12 @@ export const SWEEP_CRON = "*/15 * * * *";
 
 export const seatFeeInr = () => Number(process.env.NETWORK_SEAT_FEE_INR ?? 0);
 export const maxNetworkPersons = () => Number(process.env.NETWORK_MAX_PERSONS ?? 25);
+
+/**
+ * Today's calendar date in India (YYYY-MM-DD) at instant `date`. The single date source
+ * for seat liveness (start/end dates are Indian-FY dates), passed to SQL as a parameter
+ * instead of the session-timezone-dependent CURRENT_DATE.
+ */
+export function istDate(date = new Date()) {
+  return new Date(date.getTime() + 330 * 60 * 1000).toISOString().slice(0, 10);
+}

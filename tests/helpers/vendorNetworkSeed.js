@@ -95,6 +95,20 @@ export async function addMember({ orgId, personId, entityVendorId = null, role, 
 }
 
 /**
+ * Moves the tbl_company / tbl_users sequences above every fixture id range (>= 100000).
+ * The test DB's company sequence starts low, and seed_reference has rows that reference
+ * company ids no row holds yet (tbl_approval_processes.company_id 13): an API-created
+ * company landing on such an id could never be cleaned up. Call from beforeAll of suites
+ * that create companies/users through the API.
+ */
+export async function moveApiSequencesPastFixtures(runner = db) {
+  for (const table of ["tbl_company", "tbl_users"]) {
+    // Named directly: these sequences are not OWNED BY the column, so pg_get_serial_sequence is NULL.
+    await runner.one(`SELECT setval('${table}_id_seq', GREATEST((SELECT last_value FROM ${table}_id_seq), 100000))`);
+  }
+}
+
+/**
  * Deletes every fixture row (ids 95001..95999), network tables first. Rows the API
  * itself created under a fixture org (POST /org, POST /entities: serial ids) go too:
  * the org, its entity logins, their companies, locations, payments and notifications.
