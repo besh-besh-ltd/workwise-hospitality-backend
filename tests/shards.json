@@ -76,7 +76,7 @@
     },
     {
       "name": "platform",
-      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification|platform\\.)",
+      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification|platform\\.|vendorNetwork\\.)",
       "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, harness self-checks, and platform config (DB pool)"
     },
     {
