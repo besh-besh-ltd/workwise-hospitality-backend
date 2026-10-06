@@ -505,6 +505,15 @@ export function getLiveSeat(orgId, vendorId, runner = db) {
   );
 }
 
+/** Cancels (no refund) the entity's pending/active seats held from any org other than `orgId`. */
+export function cancelSeatsFromOtherOrgs(orgId, vendorId, runner = db) {
+  return runner.none(
+    `UPDATE tbl_vendor_network_seats SET status = 'cancelled', updated_at = now()
+      WHERE entity_vendor_id = $2 AND org_id <> $1 AND status IN ('pending', 'active')`,
+    [orgId, vendorId]
+  );
+}
+
 /** Inserts a seat; null when the (entity, end_date) live-seat slot is already taken. */
 export function insertSeat({ orgId, vendorId, feeAmount, startDate, endDate, status }, runner = db) {
   return runner.oneOrNone(
@@ -608,6 +617,7 @@ export default {
   listPersonsOnlyViaEntity,
   removeEntity,
   getLiveSeat,
+  cancelSeatsFromOtherOrgs,
   insertSeat,
   listPayableSeats,
   createSeatPayment,

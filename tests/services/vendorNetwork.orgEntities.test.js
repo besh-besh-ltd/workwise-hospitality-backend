@@ -479,4 +479,56 @@ describe("vendor network org and entity API", () => {
     expect((await verify(admin, sign(Config.razorpay.razorpay_secret))).status).toBe(200);
     expect((await seatsOf(vendorId)).map((s) => s.status)).toEqual(["active"]);
   });
+
+  describe("11b. seats on re-link", () => {
+    async function linkAndAccept(admin, vendorId) {
+      const inv = await (await httpClient(admin)).post(`${BASE}/entities/link-invites`).send({ target_vendor_id: vendorId, relationship: "BRANCH" });
+      expect(inv.status).toBe(201);
+      return (await httpClient(vendorId)).post(`${BASE}/link-invites/${inv.body.data.id}/accept`);
+    }
+
+    it("(a) removed then re-added to the SAME org reuses its active seat; with a fee, no new pending seat", async () => {
+      await world();
+      process.env.NETWORK_SEAT_FEE_INR = "1500";
+      const [before] = await seatsOf(BRANCH);
+      expect((await (await httpClient(HQ)).delete(`${BASE}/entities/${BRANCH}`)).status).toBe(200);
+
+      const accepted = await linkAndAccept(HQ, BRANCH);
+      expect(accepted.status).toBe(200);
+      expect(accepted.body.data.seat).toMatchObject({ id: before.id, status: "active", payable: false });
+      expect((await seatsOf(BRANCH)).map((s) => [s.id, s.status])).toEqual([[before.id, "active"]]);
+      expect(await entityCanOperate(BRANCH)).toEqual({ ok: true });
+    });
+
+    it("(b) removed from org A, linked into org B at fee 0: A's seat cancelled, B's active, no 409", async () => {
+      await world();
+      const [aSeat] = await seatsOf(FOREIGN_BRANCH);
+      expect((await (await httpClient(FOREIGN_HQ)).delete(`${BASE}/entities/${FOREIGN_BRANCH}`)).status).toBe(200);
+
+      const accepted = await linkAndAccept(HQ, FOREIGN_BRANCH);
+      expect(accepted.status).toBe(200);
+      const seats = await seatsOf(FOREIGN_BRANCH);
+      expect(seats.map((s) => [s.id === aSeat.id ? "A" : "B", s.org_id, s.status])).toEqual([
+        ["A", FOREIGN_ORG, "cancelled"],
+        ["B", ORG, "active"],
+      ]);
+    });
+
+    it("(c) removed from org A, linked into org B with a fee: A's seat cancelled, B's pending", async () => {
+      await world();
+      process.env.NETWORK_SEAT_FEE_INR = "1500";
+      const [aSeat] = await seatsOf(FOREIGN_BRANCH);
+      expect((await (await httpClient(FOREIGN_HQ)).delete(`${BASE}/entities/${FOREIGN_BRANCH}`)).status).toBe(200);
+
+      const accepted = await linkAndAccept(HQ, FOREIGN_BRANCH);
+      expect(accepted.status).toBe(200);
+      expect(accepted.body.data.seat).toMatchObject({ status: "pending", payable: true, amount: 1500 });
+      const seats = await seatsOf(FOREIGN_BRANCH);
+      expect(seats.map((s) => [s.id === aSeat.id ? "A" : "B", s.org_id, s.status])).toEqual([
+        ["A", FOREIGN_ORG, "cancelled"],
+        ["B", ORG, "pending"],
+      ]);
+      expect(await entityCanOperate(FOREIGN_BRANCH)).toEqual({ ok: false, reason: "NO_SEAT" });
+    });
+  });
 });

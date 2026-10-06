@@ -10,6 +10,7 @@ import { seatFeeInr, SEAT_STATUS } from "../../constants/vendorNetwork.js";
 import {
   getOrgById,
   getLiveSeat,
+  cancelSeatsFromOtherOrgs,
   insertSeat,
   listPayableSeats,
   createSeatPayment,
@@ -35,6 +36,8 @@ export function financialYearEnd(date = new Date()) {
 
 /**
  * Makes sure the entity has a seat in `orgId` for the current financial year.
+ * A pending/active seat of the SAME org is reused (no new row, no new charge); one
+ * held from a different org is cancelled in the same transaction before inserting.
  * Fee 0: an active seat (an existing pending one is activated free).
  * Fee > 0: a pending seat to pay for, unless a pending or active one exists.
  * @returns {{ seat, payable: boolean, amount?: number }}
@@ -62,6 +65,8 @@ export async function ensureSeatForEntity({ orgId, entityVendorId, actorUserId =
       : { seat: existing, payable };
   }
 
+  // A seat still held from a previous org is forfeited (no refund) when joining this one.
+  await cancelSeatsFromOtherOrgs(orgId, entityVendorId, runner);
   const seat = await insertSeat(
     {
       orgId,
@@ -73,8 +78,8 @@ export async function ensureSeatForEntity({ orgId, entityVendorId, actorUserId =
     },
     runner
   );
-  // The only live seat this entity can still hold for the year is one from a previous org.
-  if (!seat) throw new NetworkHttpError(409, "This entity still holds a seat in another network for this year", "SEAT_CONFLICT");
+  // Only reachable through a concurrent insert for the same entity.
+  if (!seat) throw new NetworkHttpError(409, "This entity's seat changed concurrently; retry", "SEAT_CONFLICT");
   return fee <= 0 ? { seat, payable: false } : { seat, payable: true, amount: fee };
 }
 
