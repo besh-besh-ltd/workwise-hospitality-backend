@@ -14,6 +14,17 @@ import { IDS } from "../fixtures/ids.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
 
+// raiseClarification only admits a vendor mapped to the RFQ (security hotfix
+// 2026-10-06), so every RFQ these suites mint is mapped to both fixture vendors.
+async function mapFixtureVendors(rfq_id) {
+  for (const vendor_id of [IDS.users.vendor_alpha, IDS.users.vendor_beta]) {
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`,
+      [rfq_id, vendor_id]
+    );
+  }
+}
+
 // Express req/res mock factory (matches production controller's expected shape).
 function mockExpress(opts = {}) {
   const calls = { status: null, body: null };
@@ -79,6 +90,7 @@ afterEach(async () => {
     `DELETE FROM tbl_rfq_clarifications WHERE rfq_id = ANY($1::int[])`,
     [inserted.rfqIds]
   );
+  await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted.rfqIds]);
 });
 
@@ -104,6 +116,7 @@ async function makePublishedRfqInClarificationWindow(opts = {}) {
     ...opts,
   });
   inserted.rfqIds.push(rfq_id);
+  await mapFixtureVendors(rfq_id);
   return rfq_id;
 }
 
@@ -113,7 +126,7 @@ describe("raiseClarification", () => {
   it("happy path: vendor raises a clarification on a published RFQ in the clarification window", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const { req, res, calls } = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Spec query", question: "What size?" },
     });
     await rfqController.raiseClarification(req, res);
@@ -155,9 +168,10 @@ describe("raiseClarification", () => {
       vendor_clarification_date: farFutureClarif,
     });
     inserted.rfqIds.push(rfq_id);
+    await mapFixtureVendors(rfq_id);
 
     const { req, res, calls } = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Too early", question: "..." },
     });
     await rfqController.raiseClarification(req, res);
@@ -178,9 +192,10 @@ describe("raiseClarification", () => {
       bid_end_date: fiveDaysHence,
     });
     inserted.rfqIds.push(rfq_id);
+    await mapFixtureVendors(rfq_id);
 
     const { req, res, calls } = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Too late", question: "..." },
     });
     await rfqController.raiseClarification(req, res);
@@ -190,7 +205,7 @@ describe("raiseClarification", () => {
 
   it("returns 400 when the RFQ does not exist", async () => {
     const { req, res, calls } = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id: 99999999, subject: "Ghost", question: "?" },
     });
     await rfqController.raiseClarification(req, res);
@@ -203,7 +218,7 @@ describe("raiseClarification", () => {
 
     // A raises first.
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "A's question", question: "from A" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -211,7 +226,7 @@ describe("raiseClarification", () => {
 
     // B tries — should be rejected.
     const b = mockExpress({
-      user: { id: IDS.users.vendor_beta, company_id: IDS.companies.vendorBeta },
+      user: { id: IDS.users.vendor_beta, user_type: 3, company_id: IDS.companies.vendorBeta },
       body: { rfq_id, subject: "B's question", question: "from B" },
     });
     await rfqController.raiseClarification(b.req, b.res);
@@ -227,7 +242,7 @@ describe("raiseClarification", () => {
 
     // A raises.
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "A1", question: "from A" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -243,7 +258,7 @@ describe("raiseClarification", () => {
 
     // B can now raise.
     const b = mockExpress({
-      user: { id: IDS.users.vendor_beta, company_id: IDS.companies.vendorBeta },
+      user: { id: IDS.users.vendor_beta, user_type: 3, company_id: IDS.companies.vendorBeta },
       body: { rfq_id, subject: "B1", question: "from B" },
     });
     await rfqController.raiseClarification(b.req, b.res);
@@ -256,7 +271,7 @@ describe("resolveClarification", () => {
   it("happy path: buyer (creator) closes with a response — status flips OPEN → CLOSED", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Q", question: "?" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -284,7 +299,7 @@ describe("resolveClarification", () => {
   it("F-CLAR-002 — REJECTS close without a response body (buyer must answer or explicitly dismiss)", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Q", question: "?" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -311,7 +326,7 @@ describe("resolveClarification", () => {
   it("rejects close by NON-creator (403)", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Q", question: "?" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -333,7 +348,7 @@ describe("resolveClarification", () => {
   it("rejects close of an already-CLOSED clarification (idempotency)", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const a = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "Q", question: "?" },
     });
     await rfqController.raiseClarification(a.req, a.res);
@@ -374,7 +389,7 @@ describe("listClarifications — privacy", () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     // A raises and resolves.
     const aRaise = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "from A", question: "?" },
     });
     await rfqController.raiseClarification(aRaise.req, aRaise.res);
@@ -388,7 +403,7 @@ describe("listClarifications — privacy", () => {
     );
     // B raises (currently open).
     const bRaise = mockExpress({
-      user: { id: IDS.users.vendor_beta, company_id: IDS.companies.vendorBeta },
+      user: { id: IDS.users.vendor_beta, user_type: 3, company_id: IDS.companies.vendorBeta },
       body: { rfq_id, subject: "from B", question: "??" },
     });
     await rfqController.raiseClarification(bRaise.req, bRaise.res);
@@ -413,7 +428,7 @@ describe("listClarifications — privacy", () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     // A raises, resolves, B raises (only B is currently open).
     const aRaise = mockExpress({
-      user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+      user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
       body: { rfq_id, subject: "from A", question: "?" },
     });
     await rfqController.raiseClarification(aRaise.req, aRaise.res);
@@ -426,7 +441,7 @@ describe("listClarifications — privacy", () => {
       mockExpress({}).res
     );
     const bRaise = mockExpress({
-      user: { id: IDS.users.vendor_beta, company_id: IDS.companies.vendorBeta },
+      user: { id: IDS.users.vendor_beta, user_type: 3, company_id: IDS.companies.vendorBeta },
       body: { rfq_id, subject: "from B", question: "??" },
     });
     await rfqController.raiseClarification(bRaise.req, bRaise.res);
@@ -451,7 +466,7 @@ describe("listClarifications — privacy", () => {
   it("Vendor B (the one currently with an OPEN clarification) sees only their own + flagged as own_open", async () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     const bRaise = mockExpress({
-      user: { id: IDS.users.vendor_beta, company_id: IDS.companies.vendorBeta },
+      user: { id: IDS.users.vendor_beta, user_type: 3, company_id: IDS.companies.vendorBeta },
       body: { rfq_id, subject: "from B", question: "??" },
     });
     await rfqController.raiseClarification(bRaise.req, bRaise.res);
@@ -483,7 +498,7 @@ describe("getActiveClarification — quote-block signal", () => {
     const rfq_id = await makePublishedRfqInClarificationWindow();
     await rfqController.raiseClarification(
       mockExpress({
-        user: { id: IDS.users.vendor_alpha, company_id: IDS.companies.vendorAlpha },
+        user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
         body: { rfq_id, subject: "X", question: "Y" },
       }).req,
       mockExpress({}).res

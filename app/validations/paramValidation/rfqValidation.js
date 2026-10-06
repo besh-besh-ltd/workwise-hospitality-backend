@@ -562,7 +562,8 @@ export const rfqSchemas = {
   getVendorResponses: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
-    vendor_id: Joi.number().integer().required()
+    // Required for buyers; a vendor caller may omit it (bound to req.user).
+    vendor_id: Joi.number().integer().optional()
   }),
 
   addVendorResponse: Joi.array()
@@ -570,10 +571,15 @@ export const rfqSchemas = {
       Joi.object({
         rfq_id: Joi.number().integer().required(),
         rfq_product_id: Joi.number().integer().required(),
-        vendor_id: Joi.number().integer().required(),
+        // Optional: the controller binds every element to req.user.id.
+        vendor_id: Joi.number().integer().optional(),
         clause_id: Joi.number().integer().required(),
         vendor_response: Joi.string().optional().allow('').allow(null),
-        file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
+        file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
+        // Sent by the vendor wizard on a disagree row with a comment.
+        // tbl_rfq_product_tech_evaluation_vendors_response has no column for
+        // it, so it is accepted and not stored.
+        deviation_text: Joi.string().trim().max(2000).optional().allow('', null)
       })
     )
     .min(1),
@@ -606,7 +612,8 @@ export const rfqSchemas = {
   getTechEvaluationResult: Joi.object({
     rfq_id: Joi.number().integer().optional(),
     rfq_product_id: Joi.number().integer().required(),
-    vendor_id: Joi.number().integer().required()
+    // Optional: a vendor caller is bound to itself; a buyer must name one.
+    vendor_id: Joi.number().integer().optional()
   }),
 
   technicalSummary: Joi.object({

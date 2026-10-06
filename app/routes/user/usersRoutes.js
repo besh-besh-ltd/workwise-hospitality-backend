@@ -524,11 +524,7 @@ UsersRoutes.post(
   '/add-spoc',
   passportSignIn,
   validateBody(schemas.user_spoc),
-  (req, res, next) => {
-    // Set vendor ID parameter for vendor controller
-    req.params.id = req.body.vendor_id || req.user.id;
-    next();
-  },
+  vendorController.authorizeAddSpocTarget,
   vendorController.addSpoc
 )
 

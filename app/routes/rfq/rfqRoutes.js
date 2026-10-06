@@ -700,18 +700,19 @@ RfqRoutes.post('/get-vendor-names',
   rfqController.getVendorNames
 )
 
-// vendor side
+// Vendor (own answers) and buyer tech-eval screen (in-scope RFQs only).
+// Emailed-link vendors arrive with the guest JWT from /users/verify-vendor-token,
+// which jwtUsr accepts. Caller binding is enforced in the controller.
 RfqRoutes.post('/get-vendor-responses',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getVendorResponses),
-  // validateDbBody.rfq_access_check,
   rfqController.getVendorResponses
 )
 
 // vendor side
 RfqRoutes.post('/add-vendor-response',
-  noLogin.customer_auth,
-  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
+  passportSignIn,
+  hospitalityMiddleware.requireActiveSubscription,
   validateBody(rfqSchemas.addVendorResponse),
   rfqController.addVendorResponse
 )
@@ -754,7 +755,7 @@ RfqRoutes.get('/get-rfqs',
 
 // vendor side
 RfqRoutes.post('/get-clauses-of-product',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getClausesOfProduct),
   rfqController.getClausesOfProduct
 )
@@ -774,7 +775,7 @@ RfqRoutes.get('/get-next-vendors-for-tech-eval',
 );
 
 RfqRoutes.post('/get-tech-evaluation-result',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
@@ -906,7 +907,9 @@ RfqRoutes.post(
 // Vendor raises clarification (with file uploads)
 RfqRoutes.post(
   '/clarification/raise',
-  noLogin.customer_auth,
+  // Auth first: the upload handler below writes to S3, so it must never run
+  // for an anonymous caller.
+  passportSignIn,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqSchemas.clarificationFileUploadHandler,
 
