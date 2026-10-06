@@ -238,7 +238,8 @@ assign (admin, or auto) ─▶ PENDING ──accept──▶ ACCEPTED ──(rea
 - **On DECLINED / TIMED_OUT / REVOKED:** if the member has no quote, its routed rows are deleted. Revoking is blocked once the member has submitted a quote; the member must regret first.
 - **Buyer view:** buyer counts of invited vendors exclude `routed_from_vendor_id IS NOT NULL` rows. Buyer vendor/quote lists show the entity with an `org_name` label.
 
-### 6.4 ARC_HOTEL subject (Group ARC; single-hotel ARC uses the same path with one hotel)
+### 6.4 ARC_HOTEL subject (Group ARC only in v1)
+- Single-hotel ARC fulfilment routing is deferred. Those contracts have no `tbl_arc_contract_line_hotel` rows, and creating them would change single-ARC call-off and picker behaviour. A single-hotel ARC is fulfilled by the contract vendor.
 - **Where:** the contract accept page (`awaiting_acceptance`) and the active contract page have a per-hotel "Fulfilled by" panel. Only the ORG_ADMIN acting as the principal (the contract vendor) can use it.
 - **Signing is not blocked** by pending assignments.
 - **On ACCEPTED:** `tbl_arc_contract_line_hotel.fulfilling_vendor_id = member` for every line of that contract × hotel, in the same transaction. Event `CONTRACT_FULFILMENT_ASSIGNED` goes to the ARC creator, the covered hotel's buyers and the principal, with entity name, GSTIN and contact.
