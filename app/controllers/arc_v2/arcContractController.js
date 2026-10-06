@@ -16,6 +16,7 @@ import crypto from 'crypto';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
+import { fulfilmentHotelIds } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -549,9 +550,12 @@ export async function getContractDetail(req, res) {
     const vendorUserId = req.user?.id;
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
-    // Tenant guard — a vendor can only read their own contract.
+    // Tenant guard — a vendor reads its own contract, or (Vendor Networks) the hotels of
+    // it that it fulfils as a member entity of the contract vendor's network.
     if (Number(contract.vendor_id) !== Number(vendorUserId)) {
-      return bad(res, 403, 'Not the contracted vendor');
+      const memberHotelIds = await fulfilmentHotelIds(id, contract.vendor_id, vendorUserId);
+      if (!memberHotelIds.length) return bad(res, 403, 'Not the contracted vendor');
+      return ok(res, await fulfilmentMemberContractView(contract, vendorUserId, memberHotelIds));
     }
 
     const [lines, arcInfo, callOffs, amendments] = await Promise.all([
@@ -647,6 +651,84 @@ export async function getContractDetail(req, res) {
     logger.error({ err }, '[contractController.getContractDetail]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
+}
+
+const ARC_CONTEXT_SQL = `
+  SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
+         a.contract_start_at, a.contract_end_at,
+         a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
+         a.escalation_clause_json, a.eligibility_type,
+         cat.title AS category_title,
+         h.name    AS hotel_name, h.city AS hotel_city,
+         hc.name   AS company_name,
+         u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation,
+         a.hotel_id AS lead_hotel_id
+    FROM tbl_arc a
+    LEFT JOIN tbl_category cat ON cat.id = a.category_id
+    LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+    LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+    LEFT JOIN tbl_users u ON u.id = a.created_by
+   WHERE a.id = $1`;
+
+const sumQty = (rows, key) => rows.reduce((s, r) => s + Number(r[key] || 0), 0);
+
+/**
+ * Read-only contract view for a fulfilment member (spec §6.4, §10.9). Everything about
+ * hotels it does not fulfil is withheld: other hotels' ledger rows and quantities, line
+ * totals (replaced by its hotels' sums), the contract PDF (it carries every hotel's
+ * annexure), the lead hotel when it is not one of its hotels, the principal's
+ * amendments and clarifications, and call-offs that are not its own POs for its hotels.
+ */
+async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) {
+  const id = Number(contract.id);
+  const [allLines, arcRow, ledger, callOffs] = await Promise.all([
+    arcContractModel.listLines(id),
+    db.oneOrNone(ARC_CONTEXT_SQL, [contract.arc_id]),
+    arcHotelModel.listContractHotels(id),
+    db.any(
+      `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
+              po.po_number, po.status AS po_status, po.total_value,
+              cl.arc_item_id, pv.name AS variant_name, ai.uom
+         FROM tbl_arc_callof_po cp
+         JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
+         JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
+         JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+         JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
+         LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+        WHERE cp.arc_contract_id = $1 AND mr.hotel_id = ANY($2::int[]) AND po.finalized_vendor_id = $3
+        ORDER BY cp.released_at DESC`,
+      [id, hotelIds, memberVendorId]
+    ),
+  ]);
+  const mine = new Set(hotelIds);
+  const lines = [];
+  for (const line of allLines) {
+    const hotels = (ledger.byLine[String(line.id)] || []).filter((h) => mine.has(h.hotel_id));
+    if (!hotels.length) continue;
+    const committed = sumQty(hotels, 'committed_qty');
+    lines.push({
+      ...line,
+      committed_qty: committed,
+      consumed_qty: sumQty(hotels, 'consumed_qty'),
+      effective_committed_qty: committed,
+      hotels,
+    });
+  }
+  const { lead_hotel_id: leadHotelId, ...arc } = arcRow || {};
+  if (arcRow && !mine.has(Number(leadHotelId))) {
+    arc.hotel_name = null;
+    arc.hotel_city = null;
+  }
+  return {
+    contract: { ...contract, document_s3_url: null, document_hash: null },
+    lines,
+    arc: arcRow ? arc : null,
+    callOffs,
+    amendments: [],
+    clarifications: [],
+    hotels: ledger.hotels.filter((h) => mine.has(h.hotel_id)),
+    viewer_role: 'fulfilment_member',
+  };
 }
 
 export async function requestOtp(req, res) {

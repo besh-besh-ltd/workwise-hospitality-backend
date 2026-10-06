@@ -75,7 +75,80 @@ const arcContractModel = {
     );
   },
 
+  // The vendor's own contracts, then (Vendor Networks §6.4) the contracts it fulfils
+  // hotels of as a member entity, flagged viewer_role 'fulfilment_member' with every
+  // figure limited to its hotels and its own call-offs. A vendor in no network gets
+  // exactly the old rows (the member query returns nothing).
   listForVendor: async (vendorId, statusFilter = null, txContext = null) => {
+    const runner = txContext || db;
+    const [own, fulfilment] = await Promise.all([
+      arcContractModel.listOwnForVendor(vendorId, statusFilter, runner),
+      arcContractModel.listFulfilmentForVendor(vendorId, statusFilter, runner),
+    ]);
+    if (!fulfilment.length) return own;
+    return [...own, ...fulfilment].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  },
+
+  listFulfilmentForVendor: async (vendorId, statusFilter = null, txContext = null) => {
+    const statuses = statusFilter && statusFilter.length > 0 ? statusFilter : null;
+    return (txContext || db).any(
+      `WITH mine AS (
+         SELECT a.subject_id AS contract_id, array_agg(a.hotel_id ORDER BY a.hotel_id) AS hotel_ids
+           FROM tbl_vendor_routing_assignments a
+           JOIN tbl_vendor_org_entities e
+             ON e.org_id = a.org_id AND e.vendor_id = a.assigned_vendor_id AND e.status = 'ACTIVE'
+           JOIN tbl_vendor_orgs o ON o.id = a.org_id
+           JOIN tbl_arc_contract c0 ON c0.id = a.subject_id AND c0.vendor_id = o.principal_vendor_id
+          WHERE a.assigned_vendor_id = $1 AND a.subject_type = 'ARC_HOTEL'
+            AND a.status = 'ACCEPTED' AND a.hotel_id IS NOT NULL
+            AND c0.vendor_id <> $1
+          GROUP BY a.subject_id
+       )
+       SELECT c.*, a.arc_number, a.title AS arc_title, a.contract_start_at, a.contract_end_at,
+              mine.hotel_ids[1] AS hotel_id, a.category_id,
+              cat.title AS category_title,
+              hn.hotel_name,
+              ub.name AS buyer_name,
+              COALESCE(line_agg.committed_value, 0)::numeric AS committed_value,
+              COALESCE(line_agg.consumed_value, 0)::numeric  AS consumed_value,
+              COALESCE(co_agg.call_off_count, 0)::int        AS call_off_count,
+              co_agg.last_call_off_number,
+              co_agg.last_call_off_at,
+              mine.hotel_ids AS fulfilment_hotel_ids,
+              'fulfilment_member'::text AS viewer_role
+         FROM mine
+         JOIN tbl_arc_contract c ON c.id = mine.contract_id
+         JOIN tbl_arc a ON a.id = c.arc_id
+         LEFT JOIN tbl_category cat ON cat.id = a.category_id
+         LEFT JOIN tbl_users ub ON ub.id = a.created_by
+         LEFT JOIN LATERAL (
+           SELECT string_agg(h.name, ', ' ORDER BY h.id) AS hotel_name
+             FROM tbl_hospitality_company_hotels h WHERE h.id = ANY(mine.hotel_ids)
+         ) hn ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(clh.unit_rate_override, cl.unit_rate) * clh.committed_qty) AS committed_value,
+                  SUM(COALESCE(clh.unit_rate_override, cl.unit_rate) * clh.consumed_qty)  AS consumed_value
+             FROM tbl_arc_contract_line cl
+             JOIN tbl_arc_contract_line_hotel clh ON clh.arc_contract_line_id = cl.id
+            WHERE cl.arc_contract_id = c.id AND clh.hotel_id = ANY(mine.hotel_ids)
+         ) line_agg ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) AS call_off_count,
+                  (ARRAY_AGG(po.po_number ORDER BY cp.released_at DESC, cp.id DESC))[1] AS last_call_off_number,
+                  MAX(cp.released_at) AS last_call_off_at
+             FROM tbl_arc_callof_po cp
+             JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id AND po.finalized_vendor_id = $1
+             JOIN tbl_material_requisition mr ON mr.id = cp.mr_id AND mr.hotel_id = ANY(mine.hotel_ids)
+            WHERE cp.arc_contract_id = c.id
+         ) co_agg ON TRUE
+        WHERE ($2::varchar[] IS NULL OR c.status = ANY($2::varchar[]))
+        ORDER BY c.created_at DESC`,
+      [vendorId, statuses]
+    // The signed PDF carries every covered hotel's annexure: not the member's to read.
+    ).then((rows) => rows.map((r) => ({ ...r, document_s3_url: null, document_hash: null })));
+  },
+
+  listOwnForVendor: async (vendorId, statusFilter = null, txContext = null) => {
     const args = [vendorId];
     const where = ['c.vendor_id = $1'];
     if (statusFilter && statusFilter.length > 0) {

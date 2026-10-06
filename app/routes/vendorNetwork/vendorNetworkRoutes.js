@@ -5,8 +5,9 @@
 import { Router } from "express";
 import passport from "../../middleware/passport.js";
 import { acl } from "../../helper/common.js";
-// Registers the RFQ routing subject with the engine (module side effect).
+// Register the RFQ and ARC_HOTEL routing subjects with the engine (module side effects).
 import "../../services/vendorNetwork/subjects/rfqSubject.js";
+import "../../services/vendorNetwork/subjects/arcHotelSubject.js";
 import {
   switchEntity,
   createOrg,

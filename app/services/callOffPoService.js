@@ -71,6 +71,23 @@ function computeAllInUnitPrice(pricingResult) {
  */
 
 /**
+ * FOR UPDATE on the requisition hotel's tbl_arc_contract_line_hotel rows for the
+ * MR's contract lines, ascending id. Taken before any tbl_arc_contract_line lock.
+ */
+async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
+  if (hotelId == null) return;
+  await runner.any(
+    `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
+      WHERE clh.hotel_id = $2
+        AND clh.arc_contract_line_id IN
+            (SELECT arc_contract_line_id FROM tbl_material_requisition_item WHERE mr_id = $1)
+      ORDER BY clh.id
+        FOR UPDATE`,
+    [mrId, hotelId]
+  );
+}
+
+/**
  * Resolve and group MR items into vendor-contract buckets for PO creation.
  * Returns: [{ arc_contract_id, vendor_id, hospitality_company_id, items: [ {mr_item, pricing} ], total_value }]
  */
@@ -85,9 +102,14 @@ async function buildCallOffBuckets(mrId, txContext) {
     [mrId]
   );
   // GROUP rate contract: each line's ledger row for the requisition's hotel.
-  // The supplier is that row's fulfilling vendor when one is set (vendor
-  // distributor networks), else the contract vendor — always the contract
-  // vendor today, so one PO per contract as before.
+  // The supplier is that row's fulfilling vendor when one is set (a vendor
+  // network member that accepted the hotel), else the contract vendor.
+  //
+  // Lock the hotel's ledger rows FIRST, in id order (the lock order of
+  // services/vendorNetwork/subjects/arcHotelSubject.js): a fulfilment change
+  // committing meanwhile is then waited for and read, never half-seen, and the
+  // two paths cannot deadlock.
+  await lockMrHotelLedgerRows(runner, mrId, mr?.hotel_id ?? null);
   const items = await runner.any(
     `SELECT mi.id          AS mr_item_id,
             mi.product_variant_id,
@@ -407,6 +429,8 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
   ))?.arc_id;
 
   const mrHotel = (await runner.oneOrNone(`SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]))?.hotel_id;
+  // Same lock order as the release: the hotel's ledger rows (id order), then lines.
+  await lockMrHotelLedgerRows(runner, mrId, mrHotel ?? null);
   for (const link of links) {
     await runner.none(
       `UPDATE tbl_arc_contract_line

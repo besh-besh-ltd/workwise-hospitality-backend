@@ -74,7 +74,7 @@ r.post('/addendums/:id/decline',          passportSignIn, acl([3]), addendumCont
 
 // ARC Negotiation (vendor side).
 r.get( '/requests/:arcId/negotiation',             passportSignIn, acl([3]), negotiationController.listVendorRounds);
-r.post('/negotiation/rounds/:roundId/quote',       passportSignIn, acl([3]), negotiationController.submitVendorQuote);
+r.post('/negotiation/rounds/:roundId/quote',       passportSignIn, acl([3]), hospitalityMiddleware.requireNetworkEntityCanOperate, negotiationController.submitVendorQuote);
 
 // Contract acceptance + active list.
 r.get( '/pending-acceptance',                       passportSignIn, acl([3]), contractController.getPendingAcceptance);

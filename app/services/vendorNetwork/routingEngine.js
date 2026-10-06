@@ -30,6 +30,8 @@
 //       'ENTITY_REMOVED' | 'ENTITY_SUSPENDED' | 'ENTITY_NOT_ACTIVE'. A handler must not
 //       refuse an ENTITY_* release: the entity has already lost network access.
 //   describe(assignment, runner) -> { title, actionUrl }     notifications/email copy
+//   A hook that must notify someone queues it with afterCommit(t, fn): it runs once the
+//   transition commits and is dropped if it rolls back.
 //   listUnrouted(orgId, runner)  -> [{ subjectId, hotelId|null, hotelIds, categoryId, title?, meta? }]
 //       the org's subjects with no PENDING/ACCEPTED row OF THAT ORG
 
@@ -116,13 +118,42 @@ function asNetworkError(err) {
   return err;
 }
 
+// --- post-commit work queued by hooks ----------------------------------------------
+
+/** The transaction object of a running transition → its queue of post-commit callbacks. */
+const afterCommitQueues = new WeakMap();
+
+/**
+ * Runs `fn` after the transition that owns `t` commits (dropped if it rolls back). For a
+ * hook's notifications: they must neither see uncommitted state nor fail the transition.
+ * A failing callback is logged. Only valid inside a hook the engine called.
+ */
+export function afterCommit(t, fn) {
+  const queue = afterCommitQueues.get(t);
+  if (!queue) throw new Error("afterCommit is only available inside a routing transition");
+  queue.push(fn);
+}
+
 /** db.tx whose errors come out as NetworkHttpError when they are business refusals. */
 async function transition(fn) {
+  const queue = [];
+  let result;
   try {
-    return await db.tx(fn);
+    result = await db.tx((t) => {
+      afterCommitQueues.set(t, queue);
+      return fn(t);
+    });
   } catch (err) {
     throw asNetworkError(err);
   }
+  for (const run of queue) {
+    try {
+      await run();
+    } catch (err) {
+      logger.warn({ err: err.message }, "vendor-routing after-commit hook failed");
+    }
+  }
+  return result;
 }
 
 const subjectOf = (row) => ({
@@ -545,6 +576,7 @@ export async function priorRefusals(orgId, statuses = [DECLINED, TIMED_OUT]) {
 }
 
 export default {
+  afterCommit,
   registerSubject,
   getSubjectHandler,
   registeredSubjects,
