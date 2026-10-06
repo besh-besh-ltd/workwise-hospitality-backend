@@ -282,7 +282,7 @@ All new UI uses the `styles/arc_v2.css` tokens (see `feedback_arc_v2_styling`).
 ## 10. Security invariants (each one gets a test)
 1. A vendor without a network behaves exactly as before: same `req.user`, same responses.
 2. A tampered or foreign `ent` claim → 401. A `user_type 11` person never runs as itself.
-3. A disabled person, removed or suspended entity, or deleted org loses access on the next request.
+3. A disabled person, removed entity, or deleted org loses access on the next request. A SUSPENDED entity loses all network operation on the next request: no assignments, no member quoting, and nobody else can act for it. Its own login still reaches its existing POs (§5.1).
 4. A member of entity A cannot read or act on entity B's RFQs, quotes, POs or contracts (sibling isolation).
 5. Only ORG_ADMIN can manage the org, entities, people, coverage, routing, seats and the dashboard. No tenant ids are accepted from the body.
 6. Linking an existing account requires that account's consent. An entity belongs to at most one org. No nesting: a principal cannot be linked.
