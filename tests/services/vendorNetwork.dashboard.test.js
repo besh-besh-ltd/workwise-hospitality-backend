@@ -56,6 +56,9 @@ beforeEach(async () => {
   await addMember({ orgId: ORG, personId: MP, entityVendorId: B, role: "ENTITY_MEMBER" });
   await seedOrg({ id: F_ORG, principalVendorId: FHQ, name: "Dash Foreign Network" });
   await addEntity({ orgId: F_ORG, vendorId: FB });
+  // Membership periods: linked a month ago; R's period runs past every PO a test creates (tests that need an earlier exit set it).
+  await db.none(`UPDATE tbl_vendor_org_entities SET linked_at = now() - interval '30 days' WHERE vendor_id <> ALL($1::int[])`, [[HQ, FHQ]]);
+  await db.none(`UPDATE tbl_vendor_org_entities SET removed_at = now() + interval '1 hour' WHERE vendor_id = $1`, [R]);
 });
 
 afterEach(async () => {
@@ -228,6 +231,7 @@ describe("GET /dashboard/pos", () => {
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=${FB}`)).status).toBe(404);
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=${FHQ}`)).status).toBe(404);
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=99999999`)).status).toBe(404);
+    expect((await admin.get(`${BASE}/pos?entity_vendor_id=abc`)).status).toBe(400);
   });
 
   it("still lists a removed entity's POs when filtered to it", async () => {
@@ -254,6 +258,52 @@ describe("GET /dashboard/pos", () => {
 
   it("answers 403 to a non-admin member", async () => {
     expect((await (await httpClient(MP)).get(`${BASE}/pos`)).status).toBe(403);
+  });
+});
+
+describe("membership periods bound the POs an org sees", () => {
+  const ids = async (client, query = "") => (await client.get(`${BASE}/pos${query}`)).body.data.items.map((i) => i.id);
+
+  it("a PO from before the branch was linked is not in the org list; one after is", async () => {
+    await db.none(`UPDATE tbl_vendor_org_entities SET linked_at = now() - interval '1 hour' WHERE vendor_id = $1`, [C]);
+    const before = await po(C, { ago: 120 });
+    const after = await po(C, { ago: 30 });
+    const admin = await httpClient(HQ);
+    expect(await ids(admin)).toEqual([after.id]);
+    expect(before.id).toBeDefined();
+    const summary = (await admin.get(`${BASE}/summary`)).body.data;
+    expect(summary.pos.by_status).toEqual({ approved: 1 });
+    expect(summary.entities.find((e) => e.vendor_id === C).open_pos).toBe(1);
+  });
+
+  it("a vendor moved from one org to another: new POs show only in the new org, old ones keep their history", async () => {
+    const X = 95953;
+    await seedVendorEntity({ id: X, companyId: X, name: `VN Dash ${X}`, email: `vn-dash-${X}@example.com` });
+    await addEntity({ orgId: ORG, vendorId: X, status: "REMOVED", withSeat: false });
+    await db.none(
+      `UPDATE tbl_vendor_org_entities SET linked_at = now() - interval '30 days', removed_at = now() - interval '2 days'
+        WHERE org_id = $1 AND vendor_id = $2`,
+      [ORG, X]
+    );
+    await addEntity({ orgId: F_ORG, vendorId: X });
+    await db.none(`UPDATE tbl_vendor_org_entities SET linked_at = now() - interval '2 days' WHERE org_id = $1 AND vendor_id = $2`, [F_ORG, X]);
+    const old = await po(X, { ago: 3 * 1440 }); // inside the first membership (history, kept)
+    const moved = await po(X, { ago: 1440 }); // after the move
+
+    const hq = await httpClient(HQ);
+    const fhq = await httpClient(FHQ);
+    expect(await ids(hq)).toEqual([old.id]);
+    expect(await ids(fhq)).toEqual([moved.id]);
+    expect(await ids(hq, `&entity_vendor_id=${X}`.replace("&", "?"))).toEqual([old.id]);
+    expect((await hq.get(`${BASE}/summary`)).body.data.pos.by_status).toEqual({ approved: 1 });
+    expect((await fhq.get(`${BASE}/summary`)).body.data.pos.by_status).toEqual({ approved: 1 });
+  });
+
+  it("a PO inside the period is still listed after the entity is removed; one after removal is not", async () => {
+    const inside = await po(R, { ago: 60 });
+    await db.none(`UPDATE tbl_vendor_org_entities SET removed_at = now() - interval '10 minutes' WHERE vendor_id = $1`, [R]);
+    await po(R, { ago: 5 });
+    expect(await ids(await httpClient(HQ))).toEqual([inside.id]);
   });
 });
 

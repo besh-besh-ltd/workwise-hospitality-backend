@@ -108,7 +108,8 @@ export async function dashboardPos(req, res) {
     let entityVendorId = null;
     if (req.query?.entity_vendor_id != null && req.query.entity_vendor_id !== "") {
       entityVendorId = parseId(req.query.entity_vendor_id);
-      if (!entityVendorId || !(await dashboardModel.isPoEntity(orgId, entityVendorId))) {
+      if (!entityVendorId) throw new NetworkHttpError(400, "Invalid entity_vendor_id");
+      if (!(await dashboardModel.isPoEntity(orgId, entityVendorId))) {
         throw new NetworkHttpError(404, "Entity not found");
       }
     }

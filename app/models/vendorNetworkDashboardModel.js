@@ -11,7 +11,17 @@ const PO_ENTITY_STATUSES = ["ACTIVE", "SUSPENDED", "REMOVED"];
 // Statuses after which a PO needs no further action.
 const CLOSED_PO_STATUSES = ["draft", "rejected", "rejected_by_vendor", "cancelled", "completed"];
 
-const poEntityIds = `SELECT vendor_id FROM tbl_vendor_org_entities WHERE org_id = $1 AND status = ANY($2::text[])`;
+// A PO belongs to the org's dashboard when its vendor held an entity row of the org (any of
+// PO_ENTITY_STATUSES, $1 = org id, $2 = those statuses) and, for a non-principal, the PO
+// was created inside that row's membership period: a re-link makes a new row, so each
+// period counts and a PO from before linking or after leaving never shows. The principal's
+// POs are unbounded. A NULL linked_at falls back to the row's created_at.
+const orgPo = `EXISTS (
+  SELECT 1 FROM tbl_vendor_org_entities pe
+   WHERE pe.org_id = $1 AND pe.vendor_id = po.finalized_vendor_id AND pe.status = ANY($2::text[])
+     AND (pe.relationship = 'PRINCIPAL'
+          OR (po.created_at >= COALESCE(pe.linked_at, pe.created_at)
+              AND (pe.removed_at IS NULL OR po.created_at <= pe.removed_at))))`;
 
 /** True when `vendorId` is a PO entity of the org (any of ACTIVE, SUSPENDED, REMOVED). */
 export async function isPoEntity(orgId, vendorId, runner = db) {
@@ -39,7 +49,7 @@ export async function openPoCounts(orgId, runner = db) {
   const rows = await runner.any(
     `SELECT po.finalized_vendor_id, COUNT(*)::int AS n
        FROM tbl_rfq_purchase_order po
-      WHERE po.finalized_vendor_id IN (${poEntityIds}) AND po.status::text <> ALL($3::text[])
+      WHERE ${orgPo} AND po.status::text <> ALL($3::text[])
       GROUP BY po.finalized_vendor_id`,
     [orgId, PO_ENTITY_STATUSES, CLOSED_PO_STATUSES]
   );
@@ -63,7 +73,7 @@ export async function poCountsByStatus(orgId, runner = db) {
   const rows = await runner.any(
     `SELECT po.status::text AS status, COUNT(*)::int AS n
        FROM tbl_rfq_purchase_order po
-      WHERE po.finalized_vendor_id IN (${poEntityIds})
+      WHERE ${orgPo}
       GROUP BY po.status`,
     [orgId, PO_ENTITY_STATUSES]
   );
@@ -72,7 +82,7 @@ export async function poCountsByStatus(orgId, runner = db) {
 
 /** One page of the org's POs (newest first), optionally of one entity / one status. */
 export async function listPos(orgId, { entityVendorId = null, status = null, limit, offset }, runner = db) {
-  const where = `po.finalized_vendor_id IN (${poEntityIds})
+  const where = `${orgPo}
         AND ($3::int IS NULL OR po.finalized_vendor_id = $3)
         AND ($4::text IS NULL OR po.status::text = $4)`;
   const params = [orgId, PO_ENTITY_STATUSES, entityVendorId, status];
