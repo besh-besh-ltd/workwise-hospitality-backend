@@ -2301,9 +2301,18 @@ update_user_detail: async (req, res, next) => {
 
     // A person acting for a network entity edits that entity's row here; its
     // email and mobile are its login identity, so only the entity itself may
-    // change them (spec §4.2). Business fields live on tbl_company.
-    if (isActingForAnotherLogin(req) && (reqData.email !== undefined || reqData.mobile !== undefined)) {
-      return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
+    // CHANGE them (spec §4.2). The profile form always re-sends both, so values
+    // equal to the stored ones pass through and the name/company save proceeds.
+    if (isActingForAnotherLogin(req)) {
+      const norm = (v) => (v == null ? '' : String(v).trim());
+      const emailChanged =
+        reqData.email !== undefined &&
+        norm(reqData.email).toLowerCase() !== norm(loggedInUser.email).toLowerCase();
+      const mobileChanged =
+        reqData.mobile !== undefined && norm(reqData.mobile) !== norm(loggedInUser.mobile);
+      if (emailChanged || mobileChanged) {
+        return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
+      }
     }
 
     /* ---- SNAPSHOT OLD STATE for approval impact analysis ----
@@ -2588,8 +2597,11 @@ update_user_detail: async (req, res, next) => {
     };
 
     if (reqData.name !== undefined) updateData.name = reqData.name.trim();
-    if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
-    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
+    // A network actor's email/mobile were verified unchanged above; leave the
+    // stored values exactly as they are (no re-casing, no NULL -> '').
+    const keepsLoginIdentity = isActingForAnotherLogin(req);
+    if (reqData.email !== undefined && !keepsLoginIdentity) updateData.email = reqData.email.trim().toLowerCase();
+    if (reqData.mobile !== undefined && !keepsLoginIdentity) updateData.mobile = reqData.mobile.trim();
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
 
     // Handle hospitality employee fields
@@ -2609,8 +2621,8 @@ update_user_detail: async (req, res, next) => {
 
     const whereClause =
       isAdmin && targetUserId !== loggedInUser.id
-        ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
-        : `id = ${targetUserId}`;
+        ? { where: 'id = $1 AND company_id = $2', values: [targetUserId, loggedInUser.company_id] }
+        : { where: 'id = $1', values: [targetUserId] };
 
     await rfqModel.updateWhere("tbl_users", updateData, whereClause);
 

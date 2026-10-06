@@ -489,17 +489,49 @@ describe("identity writes while acting for another login (§4.2)", () => {
     expect(bcrypt.compareSync(NEW, await hashOf(HQ))).toBe(true);
   });
 
-  it("a member cannot change the entity's email or mobile", async () => {
+  it("a member saving the profile form with unchanged email/mobile and a new name succeeds", async () => {
+    await world();
+    await db.none(`UPDATE tbl_users SET email = 'VN-Branch@Example.com', mobile = '9811100000' WHERE id = $1`, [BRANCH]);
+    const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
+    const res = await client
+      .put("/api/v1/users/update-user-detail")
+      .send({ name: "Branch Renamed", email: "vn-branch@EXAMPLE.com", mobile: " 9811100000 " });
+    expect(res.status).toBe(200);
+    const row = await db.one(`SELECT name, email, mobile FROM tbl_users WHERE id = $1`, [BRANCH]);
+    expect(row).toEqual({ name: "Branch Renamed", email: "VN-Branch@Example.com", mobile: "9811100000" });
+  });
+
+  it("a member cannot change the entity's email", async () => {
     await world();
     const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
-    for (const body of [{ email: "taken-over@example.com" }, { mobile: "9999999999" }]) {
-      const res = await client.put("/api/v1/users/update-user-detail").send(body);
-      expect(res.status).toBe(403);
-      expect(res.body).toEqual({ status: 0, message: "Entity login details can only be changed by the entity itself" });
-    }
-    const row = await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [BRANCH]);
-    expect(row.email).toBe(`vn-${BRANCH}@example.com`);
+    const res = await client
+      .put("/api/v1/users/update-user-detail")
+      .send({ name: "X", email: "taken-over@example.com" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ status: 0, message: "Entity login details can only be changed by the entity itself" });
+    const row = await db.one(`SELECT name, email, mobile FROM tbl_users WHERE id = $1`, [BRANCH]);
+    expect(row).toEqual({ name: `VN ${BRANCH}`, email: `vn-${BRANCH}@example.com`, mobile: null });
+  });
+
+  it("a member cannot change the entity's mobile", async () => {
+    await world();
+    const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
+    const res = await client
+      .put("/api/v1/users/update-user-detail")
+      .send({ email: `vn-${BRANCH}@example.com`, mobile: "9999999999" });
+    expect(res.status).toBe(403);
+    const row = await db.one(`SELECT mobile FROM tbl_users WHERE id = $1`, [BRANCH]);
     expect(row.mobile).toBeNull();
+  });
+
+  it("a no-org vendor still edits its own email and mobile", async () => {
+    await world();
+    const res = await (await httpClient(LONE))
+      .put("/api/v1/users/update-user-detail")
+      .send({ name: "Lone", email: "Lone-New@Example.com", mobile: "9800000000" });
+    expect(res.status).toBe(200);
+    const row = await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [LONE]);
+    expect(row).toEqual({ email: "lone-new@example.com", mobile: "9800000000" });
   });
 
   it("a type-11 login response carries no user_key", async () => {
