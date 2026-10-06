@@ -40,6 +40,13 @@ import {
   lookupCities,
   lookupHotels,
 } from "../../controllers/vendorNetwork/coverageController.js";
+import {
+  routingQueue,
+  assignSubject,
+  revokeAssignment,
+  assignedToMe,
+  respondToAssignment,
+} from "../../controllers/vendorNetwork/routingController.js";
 
 const passportSignIn = passport.authenticate("jwtUsr", { session: false });
 const vendor = [passportSignIn, acl([3])];
@@ -83,6 +90,13 @@ VendorNetworkRoutes.get("/coverage/lookup/cities", ...vendor, lookupCities);
 VendorNetworkRoutes.get("/coverage/lookup/hotels", ...vendor, lookupHotels);
 VendorNetworkRoutes.get("/coverage/:vendorId", ...vendor, getCoverage);
 VendorNetworkRoutes.put("/coverage/:vendorId", ...vendor, putCoverage);
+
+// Routing (§6.2): static paths before /routing/:id
+VendorNetworkRoutes.get("/routing/queue", ...vendor, routingQueue);
+VendorNetworkRoutes.get("/routing/assigned-to-me", ...vendor, assignedToMe);
+VendorNetworkRoutes.post("/routing/assign", ...vendor, assignSubject);
+VendorNetworkRoutes.post("/routing/:id/revoke", ...vendor, revokeAssignment);
+VendorNetworkRoutes.post("/routing/:id/respond", ...vendor, respondToAssignment);
 
 // Seats (§5.1)
 VendorNetworkRoutes.post("/seats/pay", ...vendor, paySeats);

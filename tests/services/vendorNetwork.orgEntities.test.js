@@ -4,10 +4,9 @@
 // remove/leave, settings, isolation and seats (incl. Razorpay order + HMAC verify).
 // Pattern B: committed fixtures (ids 95601..95699), removed in afterEach.
 //
-// Two module boundaries are replaced, both before the app graph loads:
-//   - the Razorpay SDK (orders.create is a network call to Razorpay)
-//   - routingEngine.js, recording revokeLiveAssignmentsForEntity calls (Task 8
-//     implements the revocation; this task only owns the call and its reason)
+// One module boundary is replaced before the app graph loads: the Razorpay SDK
+// (orders.create is a network call to Razorpay). Suspend / remove / leave run the real
+// routing engine: their effect is asserted on tbl_vendor_routing_assignments.
 
 import { jest } from "@jest/globals";
 import crypto from "crypto";
@@ -35,14 +34,6 @@ jest.unstable_mockModule("razorpay", () => ({
         },
       };
     }
-  },
-}));
-
-const revokeCalls = [];
-jest.unstable_mockModule("../../app/services/vendorNetwork/routingEngine.js", () => ({
-  revokeLiveAssignmentsForEntity: async (vendorId, opts = {}) => {
-    revokeCalls.push({ vendorId: Number(vendorId), ...opts });
-    return 0;
   },
 }));
 
@@ -102,6 +93,22 @@ async function aStateWithCity() {
 const notificationsFor = (userId, type) =>
   db.any(`SELECT * FROM tbl_notifications WHERE recipient_user_id = $1 AND type = $2`, [userId, type]);
 
+/** A live routing assignment for `vendorId` (no subject handler is involved in this suite). */
+const liveAssignment = (orgId, vendorId, subjectId, status = "PENDING") =>
+  db.one(
+    `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, assigned_vendor_id, status)
+     VALUES ($1, 'ARC_HOTEL', $2, $3, $4) RETURNING id`,
+    [orgId, subjectId, vendorId, status]
+  );
+const assignmentStatuses = (vendorId) =>
+  db
+    .any(`SELECT status FROM tbl_vendor_routing_assignments WHERE assigned_vendor_id = $1 ORDER BY id`, [vendorId])
+    .then((rows) => rows.map((r) => r.status));
+const assignmentActors = (vendorId) =>
+  db
+    .any(`SELECT acted_by_user_id FROM tbl_vendor_routing_assignments WHERE assigned_vendor_id = $1 ORDER BY id`, [vendorId])
+    .then((rows) => rows.map((r) => r.acted_by_user_id));
+
 const seatsOf = (vendorId) =>
   db.any(`SELECT * FROM tbl_vendor_network_seats WHERE entity_vendor_id = $1 ORDER BY id`, [vendorId]);
 
@@ -115,7 +122,6 @@ const savedFee = process.env.NETWORK_SEAT_FEE_INR;
 beforeAll(() => moveApiSequencesPastFixtures());
 
 beforeEach(() => {
-  revokeCalls.length = 0;
   delete process.env.NETWORK_SEAT_FEE_INR;
 });
 
@@ -365,17 +371,22 @@ describe("vendor network org and entity API", () => {
     await world();
     await seedPerson({ id: MEMBER_PERSON, email: "vn-member-95611@example.com", name: "Mira Member" });
     await addMember({ orgId: ORG, personId: MEMBER_PERSON, entityVendorId: BRANCH, role: "ENTITY_MEMBER" });
+    await liveAssignment(ORG, BRANCH, 1, "PENDING");
+    await liveAssignment(ORG, BRANCH, 2, "ACCEPTED");
+    await liveAssignment(ORG, BRANCH, 3, "DECLINED");
     const admin = await httpClient(HQ);
 
     expect((await admin.patch(`${BASE}/entities/${HQ}`).send({ status: "SUSPENDED" })).status).toBe(400);
     expect((await (await httpClient(BRANCH)).patch(`${BASE}/entities/${BRANCH}`).send({ status: "SUSPENDED" })).status).toBe(403);
     expect((await admin.patch(`${BASE}/entities/${BRANCH}`).send({ status: "REMOVED" })).status).toBe(400);
-    expect(revokeCalls).toEqual([]);
+    expect(await assignmentStatuses(BRANCH)).toEqual(["PENDING", "ACCEPTED", "DECLINED"]);
 
     const res = await admin.patch(`${BASE}/entities/${BRANCH}`).send({ status: "SUSPENDED" });
     expect(res.status).toBe(200);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [BRANCH])).toEqual({ status: "SUSPENDED" });
-    expect(revokeCalls).toEqual([{ vendorId: BRANCH, actorUserId: HQ, reason: "ENTITY_SUSPENDED" }]);
+    // Its live routing assignments are revoked, attributed to the admin; terminal ones untouched.
+    expect(await assignmentStatuses(BRANCH)).toEqual(["REVOKED", "REVOKED", "DECLINED"]);
+    expect((await assignmentActors(BRANCH)).slice(0, 2)).toEqual([HQ, HQ]);
     expect(await entityCanOperate(BRANCH)).toEqual({ ok: false, reason: "NOT_ACTIVE" });
     // The person whose only access was this entity loses it on the next request.
     expect((await (await httpClient(MEMBER_PERSON)).get("/api/v1/users/get-profile")).status).toBe(401);
@@ -384,7 +395,8 @@ describe("vendor network org and entity API", () => {
     expect(back.status).toBe(200);
     expect(await db.one(`SELECT status, preference_rank FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [BRANCH])).toEqual({ status: "ACTIVE", preference_rank: 5 });
     expect(await entityCanOperate(BRANCH)).toEqual({ ok: true });
-    expect(revokeCalls).toHaveLength(1);
+    // Reactivating does not resurrect them.
+    expect(await assignmentStatuses(BRANCH)).toEqual(["REVOKED", "REVOKED", "DECLINED"]);
   });
 
   it("8. remove (admin) and leave (self): REMOVED, memberships disabled, pending seats cancelled, active seats kept; never the principal", async () => {
@@ -396,6 +408,7 @@ describe("vendor network org and entity API", () => {
        VALUES ($1, $2, 500, CURRENT_DATE, CURRENT_DATE + 400, 'pending')`,
       [ORG, BRANCH]
     );
+    await liveAssignment(ORG, BRANCH, 1, "ACCEPTED");
     const admin = await httpClient(HQ);
 
     expect((await admin.delete(`${BASE}/entities/${HQ}`)).status).toBe(400);
@@ -409,16 +422,19 @@ describe("vendor network org and entity API", () => {
     expect(ent.removed_at).not.toBeNull();
     expect(await db.one(`SELECT status FROM tbl_vendor_org_members WHERE person_user_id = $1`, [MEMBER_PERSON])).toEqual({ status: "DISABLED" });
     expect((await seatsOf(BRANCH)).map((s) => s.status)).toEqual(["active", "cancelled"]);
-    expect(revokeCalls).toEqual([{ vendorId: BRANCH, actorUserId: HQ, reason: "ENTITY_REMOVED" }]);
+    expect(await assignmentStatuses(BRANCH)).toEqual(["REVOKED"]);
+    expect(await assignmentActors(BRANCH)).toEqual([HQ]);
     // Removed: no longer a target of this org.
     expect((await admin.delete(`${BASE}/entities/${BRANCH}`)).status).toBe(404);
 
     // Leave: a linked entity leaves on its own login.
     await addEntity({ orgId: ORG, vendorId: TARGET });
+    await liveAssignment(ORG, TARGET, 2, "PENDING");
     const left = await (await httpClient(TARGET)).post(`${BASE}/entities/self/leave`);
     expect(left.status).toBe(200);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [TARGET])).toEqual({ status: "REMOVED" });
-    expect(revokeCalls[1]).toEqual({ vendorId: TARGET, actorUserId: TARGET, reason: "ENTITY_REMOVED" });
+    expect(await assignmentStatuses(TARGET)).toEqual(["REVOKED"]);
+    expect(await assignmentActors(TARGET)).toEqual([TARGET]);
     // Out of the network now: leaving again is refused.
     expect((await (await httpClient(TARGET)).post(`${BASE}/entities/self/leave`)).status).toBe(403);
   });
@@ -452,6 +468,7 @@ describe("vendor network org and entity API", () => {
 
   it("10. every :vendorId target must be an entity of the caller's org, else 404", async () => {
     await world();
+    await liveAssignment(FOREIGN_ORG, FOREIGN_BRANCH, 1, "PENDING");
     const admin = await httpClient(HQ);
     for (const target of [FOREIGN_BRANCH, LONE, 2147483647]) {
       expect((await admin.patch(`${BASE}/entities/${target}`).send({ status: "SUSPENDED" })).status).toBe(404);
@@ -459,7 +476,7 @@ describe("vendor network org and entity API", () => {
     }
     expect((await admin.delete(`${BASE}/entities/abc`)).status).toBe(404);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [FOREIGN_BRANCH])).toEqual({ status: "ACTIVE" });
-    expect(revokeCalls).toEqual([]);
+    expect(await assignmentStatuses(FOREIGN_BRANCH)).toEqual(["PENDING"]);
   });
 
   it("11. seats: free seats activate at once; a fee leaves the seat pending (NO_SEAT) until paid and HMAC-verified", async () => {

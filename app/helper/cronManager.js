@@ -17,6 +17,8 @@ import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
 import { recordSystemEvent } from '../services/activity/systemEvents.js';
 import { CATEGORIES } from '../services/activity/eventRegistry.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import { runRoutingSweep } from '../services/vendorNetwork/routingSweep.js';
+import { SWEEP_CRON } from '../constants/vendorNetwork.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -824,6 +826,27 @@ export const runRfqStuckPublishWatchdogTick = async () => {
 export const startRfqStuckPublishWatchdog = () => {
   cron.schedule('*/5 * * * *', () => { runRfqStuckPublishWatchdogTick(); });
   logger.info('[RFQ Watchdog] Cron scheduled: every 5 minutes (grace=2m, max-attempts-before-email=3)');
+};
+
+// ============= VENDOR NETWORK ROUTING SWEEP =============
+
+/**
+ * One routing sweep (spec §6.2): times out overdue PENDING assignments, revokes those
+ * whose assignee left the network, and auto-routes for AUTO_SINGLE_MATCH orgs. Guarded
+ * by a Postgres advisory lock, so overlapping ticks (or instances) skip instead of racing.
+ */
+export const runVendorRoutingSweepTick = async (now = new Date()) => {
+  try {
+    return await runRoutingSweep(now);
+  } catch (err) {
+    logError('[Vendor Routing Sweep] Cron tick failed', err);
+    return { skipped: false, error: err.message };
+  }
+};
+
+export const startVendorRoutingSweep = () => {
+  cron.schedule(SWEEP_CRON, () => { runVendorRoutingSweepTick(); });
+  logger.info(`[Vendor Routing Sweep] Cron scheduled: ${SWEEP_CRON}`);
 };
 
 // ============= PO DOCUMENT WATCHDOG =============
