@@ -17884,6 +17884,18 @@ getClauses: async (req, res) => {
       const files = req.files || [];
       const user = req.user;
 
+      // Raising a clarification freezes quoting for every vendor on the RFQ,
+      // so only a vendor mapped to this RFQ may do it. The route lets
+      // header-less callers through (noLogin.customer_auth).
+      if (!user) {
+        return res.status(401).json({ status: 0, message: 'Authentication required' });
+      }
+      if (Number(user.user_type) !== 3) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only vendors can raise a clarification'
+        });
+      }
       // Fetch RFQ details
       const rfq = await db.oneOrNone(
         `SELECT id, is_tender, tender_publish_date, vendor_clarification_date, created_by, rfq_no, status, is_published
@@ -17895,6 +17907,18 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: 'RFQ not found'
+        });
+      }
+
+      // Invited vendors only.
+      const mapped = await db.oneOrNone(
+        `SELECT 1 FROM tbl_rfq_product_vendors WHERE rfq_id = $1 AND user_id = $2 LIMIT 1`,
+        [Number(rfq_id), user.id]
+      );
+      if (!mapped) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not invited to this RFQ'
         });
       }
 

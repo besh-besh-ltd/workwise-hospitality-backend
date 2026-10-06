@@ -22,7 +22,7 @@ import moment from 'moment';
 import userModel from '../../models/userModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { isNumber } from 'razorpay/dist/utils/razorpay-utils.js';
-import { pgp } from '../../config/dbConn.js';
+import db, { pgp } from '../../config/dbConn.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { vendorHome } from '../../services/notificationLinks.js';
 
@@ -82,6 +82,54 @@ const extractBuyerCompanyIds = (input) => {
 
   ids = [...new Set(ids)];
   return { provided: true, ids };
+};
+
+// ---------------------------------------------------------------------------
+// Ownership rules for the location / SPOC-map handlers.
+//
+// These handlers are mounted twice:
+//   - /users/{add,update,delete}-buyer-vendor-location, /users/map-spoc-location
+//     behind jwtUsr (vendor and buyer callers), and
+//   - /admin/vendor/{add-vendor-location,update-vendor-location/:id,
+//     delete-vendor-location/:id,map-spoc-location} behind jwtAdm.
+// jwtAdm marks its callers `is_internal_admin` (middleware/passport.js), and
+// they keep their existing behaviour. Every other caller is held to its own
+// company (req.user.company_id) and its own SPOCs (req.user.id).
+// ---------------------------------------------------------------------------
+const FORBIDDEN = Symbol('forbidden');
+const isInternalAdmin = (req) => req.user?.is_internal_admin === true;
+
+/** company_id to write: the caller's own. A different body value is refused, not rewritten. */
+const resolveLocationCompanyId = (req, bodyCompanyId) => {
+  if (isInternalAdmin(req)) return bodyCompanyId;
+  const own = req.user?.company_id;
+  if (!own) return FORBIDDEN;
+  if (bodyCompanyId != null && bodyCompanyId !== '' && Number(bodyCompanyId) !== Number(own)) {
+    return FORBIDDEN;
+  }
+  return own;
+};
+
+const callerOwnsLocation = async (req, locationId) => {
+  if (isInternalAdmin(req)) return true;
+  if (!req.user?.company_id || !Number.isInteger(Number(locationId))) return false;
+  const row = await db.oneOrNone(
+    'SELECT 1 FROM tbl_company_location WHERE id = $1 AND company_id = $2',
+    [Number(locationId), req.user.company_id]
+  );
+  return !!row;
+};
+
+const callerOwnsSpocs = async (req, spocIds) => {
+  if (isInternalAdmin(req)) return true;
+  const ids = [...new Set([].concat(spocIds ?? []).map(Number))];
+  if (ids.some((n) => !Number.isInteger(n))) return false;
+  if (ids.length === 0) return true;
+  const { count } = await db.one(
+    'SELECT COUNT(*)::int AS count FROM tbl_users_spoc WHERE id = ANY($1::int[]) AND user_id = $2',
+    [ids, req.user.id]
+  );
+  return count === ids.length;
 };
 
 const vendorController = {
@@ -583,7 +631,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 },
  addVendorLocation: async (req, res, next) => {
     try {
-      const { company_id, address, postal_code, city, state, country } = req.body;
+      const { company_id: bodyCompanyId, address, postal_code, city, state, country } = req.body;
+      const company_id = resolveLocationCompanyId(req, bodyCompanyId);
+      if (company_id === FORBIDDEN) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const locationData = {
         company_id,
         address,
@@ -608,7 +660,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   },
   updateVendorLocation: async (req, res, next) => {
     try {
-      const { id, company_id, address, postal_code, city, state, country } = req.body;
+      const { id, company_id: bodyCompanyId, address, postal_code, city, state, country } = req.body;
+      const company_id = resolveLocationCompanyId(req, bodyCompanyId);
+      if (company_id === FORBIDDEN || !(await callerOwnsLocation(req, id))) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const locationData = {
         company_id,
         address,
@@ -637,6 +693,9 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   deleteVendorLocation: async (req, res, next) => {
     try {
       const location_id = req.params.id;
+      if (!(await callerOwnsLocation(req, location_id))) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const deleted = await rfqModel.delete('tbl_company_location', { id: Number(location_id) });
       return res.status(200).json({
         status: 1,
@@ -661,6 +720,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           message: 'Please provide spoc_id and location_id'
         });
       }
+      if (!(await callerOwnsSpocs(req, spoc_id)) || !(await callerOwnsLocation(req, location_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You can only map your own SPOCs to your own company locations'
+        });
+      }
+
              //Delete the existing mapping if there any
               await rfqModel.delete('tbl_spoc_location_mapping', { location_id });
 
