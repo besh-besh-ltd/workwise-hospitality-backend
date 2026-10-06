@@ -8,6 +8,7 @@ import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqControll
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
+import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 /**
  * "You are an approver on this RFQ, so you may read it."
@@ -5829,17 +5830,30 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO data query failed`); return []; }),
 
         db.one(`
-          WITH assigned_products AS (
+          -- Vendor Networks (spec §6.3): a member's routed copy belongs to its principal's
+          -- invite. Each invited user maps to its org key (the principal it was routed
+          -- from, else itself), invites and quotes roll up per key, so an org is invited
+          -- once and is not "remaining" after its member quoted. A vendor in no network
+          -- maps to itself: results are unchanged.
+          WITH vendor_keys AS (
+            SELECT rpv.user_id, COALESCE(MAX(rpv.routed_from_vendor_id), rpv.user_id) AS org_key
+            FROM tbl_rfq_product_vendors rpv
+            WHERE rpv.rfq_id = $1
+            GROUP BY rpv.user_id
+          ),
+          assigned_products AS (
             SELECT DISTINCT
-              rpv.user_id,
+              vk.org_key AS user_id,
               rpv.product_variant_id,
               COALESCE(rpv.variant::text, '0') AS variant_key
             FROM tbl_rfq_product_vendors rpv
+            JOIN vendor_keys vk ON vk.user_id = rpv.user_id
             WHERE rpv.rfq_id = $1
           ),
           vendor_regrets AS (
-            SELECT DISTINCT q.created_by AS user_id
+            SELECT DISTINCT vk.org_key AS user_id
             FROM tbl_quotes q
+            JOIN vendor_keys vk ON vk.user_id = q.created_by
             WHERE q.rfq_id = $1
               AND q.is_regret = 1
           ),
@@ -5866,9 +5880,11 @@ LIMIT 2;
                 AND COALESCE(qi.unit_price, 0) > 0
               ) AS has_commercial_submission
             FROM assigned_products ap
+            LEFT JOIN vendor_keys vq
+              ON vq.org_key = ap.user_id
             LEFT JOIN tbl_quotes q
               ON q.rfq_id = $1
-             AND q.created_by = ap.user_id
+             AND q.created_by = vq.user_id
              AND COALESCE(q.is_regret, 0) != 1
             LEFT JOIN tbl_quote_items qi
               ON qi.quote_id = q.id
@@ -16433,6 +16449,22 @@ ORDER BY tq.timestamp DESC;
       logError(error);
       throw error;
     }
+  },
+
+  /**
+   * Gives a tech-eval replacement vendor its invite row for the product (it needs one for
+   * the UI), and network members routed this RFQ their copy of it (Vendor Networks §6.3).
+   * Live routing assignments are locked first (the lock order of rfqSubject.js).
+   */
+  addTechEvalReplacementVendorRow: async (t, { rfqId, productVariantId, variant, vendorId }) => {
+    await lockLiveRfqAssignments(t, rfqId);
+    await t.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING`,
+      [rfqId, productVariantId, variant || 0, vendorId]
+    );
+    await propagateRoutedCopies(t, rfqId);
   },
 
   /**

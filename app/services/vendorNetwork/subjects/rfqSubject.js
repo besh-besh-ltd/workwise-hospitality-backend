@@ -19,9 +19,10 @@
 //   engine transition: subject lock (950601) → assignment rows FOR UPDATE → entity FOR
 //                      SHARE → [hook] org-quote lock (950603) → tbl_rfq_product_vendors
 //                      INSERT/DELETE (tbl_rfq / tbl_quotes only read, never locked)
-//   RFQ write paths:   their own rpv/tbl_rfq writes → propagateRoutedCopies, which takes the
-//                      live assignment rows FOR SHARE (never 950601/950603); the engine only
-//                      plain-reads RFQ tables, so the wait is one-way
+//   RFQ write paths:   live RFQ assignment rows FOR SHARE FIRST (lockLiveRfqAssignments) →
+//                      their own tbl_rfq / rpv writes → propagateRoutedCopies. Same order as
+//                      the engine (assignment rows, then rpv), never 950601/950603; the
+//                      engine only plain-reads tbl_rfq / tbl_rfq_products
 //   quote path:        org-quote lock (950603) FIRST in its transaction → plain reads of
 //                      assignments → tbl_quotes / tbl_quote_items writes
 // The quote path never takes an engine lock (950601, assignment or entity rows) and never

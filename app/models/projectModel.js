@@ -135,7 +135,8 @@ const projectModel = {
                                         ),
                                         'vendors', (
                                             SELECT json_build_object(
-                                                'total_vendors', COUNT(DISTINCT trpv.user_id),
+                                                -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+                                                'total_vendors', COUNT(DISTINCT trpv.user_id) FILTER (WHERE trpv.routed_from_vendor_id IS NULL),
                                                 'quote_received', (
                                                     SELECT COUNT(DISTINCT tq.created_by)
                                                     FROM tbl_quotes tq
@@ -551,7 +552,8 @@ ORDER BY
                   ),
                   'vendors', (
                       SELECT json_build_object(
-                          'total_vendors', COUNT(DISTINCT trpv.user_id),
+                          -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+                          'total_vendors', COUNT(DISTINCT trpv.user_id) FILTER (WHERE trpv.routed_from_vendor_id IS NULL),
                           'quote_received', (
                               SELECT COUNT(DISTINCT tq.created_by)
                               FROM tbl_quotes tq

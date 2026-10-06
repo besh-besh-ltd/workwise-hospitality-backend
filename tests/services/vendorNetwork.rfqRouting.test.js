@@ -9,6 +9,8 @@
 import nodemailer from "nodemailer";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { TEST_CATEGORIES } from "../fixtures/vendors.js";
+import { grantVendorHotelSubs, grantVendorCategorySub } from "../helpers/arcGroupSeed.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 import { countQueries } from "../helpers/queryCounter.js";
@@ -27,6 +29,7 @@ import {
 } from "../../app/services/vendorNetwork/routingEngine.js";
 import { rfqSubjectHandler } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
 import rfqModel from "../../app/models/rfqModel.js";
+import { lockRoutingSubject, getAssignment, releaseAssignment } from "../../app/models/vendorRoutingModel.js";
 import { propagateRoutedCopies } from "../../app/services/vendorNetwork/subjects/rfqRoutedCopies.js";
 
 const HQ = 95951; // principal of ORG_A
@@ -44,6 +47,8 @@ const HOUR = 3600 * 1000;
 
 let VARIANT;
 let VARIANT2;
+let VARIANT_CAT;
+const CAT = TEST_CATEGORIES.beverages;
 let buyerTypeBefore;
 const rfqIds = [];
 const hierarchyIds = [];
@@ -62,6 +67,15 @@ beforeAll(async () => {
     close() {},
   });
   [VARIANT, VARIANT2] = (await db.any(`SELECT id FROM tbl_product_variant ORDER BY id ASC LIMIT 2`)).map((r) => r.id);
+  VARIANT_CAT = (
+    await db.one(
+      `SELECT pv.id FROM tbl_product_variant pv
+         JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+        WHERE pc.category_id = $1 AND pv.id NOT IN ($2, $3)
+        ORDER BY pv.id LIMIT 1`,
+      [CAT, VARIANT, VARIANT2]
+    )
+  ).id;
   buyerTypeBefore = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [BUYER])).user_type;
   await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
 });
@@ -72,6 +86,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await db.none(`DELETE FROM tbl_product_variant_vendor_mapping WHERE vendor_id BETWEEN 95951 AND 95969`);
+  await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id BETWEEN 95951 AND 95969`);
   await cleanupRfqs();
   await cleanupVendorNetworkFixtures();
 });
@@ -130,6 +146,7 @@ async function cleanupRfqs() {
   await db.none(`DELETE FROM tbl_quote_items WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id BETWEEN 95951 AND 95969`);
+  await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_change_history WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = ANY($1::int[])`, [ids]);
@@ -235,6 +252,17 @@ async function routeAndAccept(rfqId, member = B, admin = HQ) {
   const r = await respond(member, a.body.data.id, { decision: "ACCEPT" });
   expect(r.status).toBe(200);
   return a.body.data.id;
+}
+
+/** The first value under `key` anywhere in a JSON body (depth-first), or undefined. */
+function findKey(node, key) {
+  if (!node || typeof node !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(node, key) && node[key] != null) return node[key];
+  for (const v of Object.values(node)) {
+    const hit = findKey(v, key);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
 }
 
 // --- tests -------------------------------------------------------------------------------
@@ -428,8 +456,24 @@ describe("buyer view", () => {
       return (typeof vendors === "string" ? JSON.parse(vendors) : vendors)[0].total_vendors;
     };
 
+    // GET /rfq/lifecycle-summary/:id → the awaiting-quotes rollup; GET /rfq/quote-comparison-view/:id
+    const awaiting = async () => {
+      const res = await buyer.get(`/api/v1/rfq/lifecycle-summary/${rfq.rfq_id}`);
+      expect(res.status).toBe(200);
+      const found = findKey(res.body.data, "awaiting_quotes");
+      expect(found).toBeTruthy();
+      return found;
+    };
+    const quotesInvited = async () => {
+      const res = await buyer.get(`/api/v1/rfq/quote-comparison-view/${rfq.rfq_id}`);
+      expect(res.status).toBe(200);
+      return findKey(res.body, "quotes_invited");
+    };
+
     expect((await detail()).vendors_count).toBe("3");
     expect(Number(await cardCount())).toBe(3);
+    expect(await awaiting()).toMatchObject({ total_invited: 3, participated: 0, remaining: 3 });
+    expect(await quotesInvited()).toBe(3);
 
     await routeAndAccept(rfq.rfq_id);
     expect((await createQuote(B, rfq)).status).toBe(200);
@@ -437,6 +481,9 @@ describe("buyer view", () => {
     const product = await detail();
     expect(product.vendors_count).toBe("3"); // HQ counted once, B's routed copy excluded
     expect(Number(await cardCount())).toBe(3);
+    // the org is invited once and, its member having quoted, is not remaining
+    expect(await awaiting()).toMatchObject({ total_invited: 3, participated: 1, sent_quotes: 1, remaining: 2 });
+    expect(await quotesInvited()).toBe(3);
     const orgOf = Object.fromEntries(product.vendor_details.map((v) => [v.user_id, v.org_name]));
     expect(orgOf).toEqual({ [HQ]: "Org A Network", [B]: "Org A Network", [FHQ]: "Org F Network", [NO]: null });
 
@@ -499,7 +546,9 @@ describe("isolation and back-compat", () => {
     expect(get.status).toBe(200);
     expect(get.body.data).toEqual([]);
     const res = await createQuote(C, rfq);
-    expect(res.status).not.toBe(200);
+    // the RFQ access check (no invite rows for C) refuses before the network gate
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ status: 3, message: "The RFQ is not belongs to you!" });
     expect(await quotesOf(rfq.rfq_id)).toEqual([]);
   });
 
@@ -528,28 +577,42 @@ describe("isolation and back-compat", () => {
     expect(texts.filter((s) => /pg_advisory_xact_lock|tbl_vendor_routing_assignments/.test(s))).toEqual([]);
     // the placement lookup the gate would run is jwtUsr's alone (once per request)
     expect(texts.filter((s) => /AS entity_status, o\.name AS org_name/.test(s))).toHaveLength(1);
+
+    // the buyer's quote lists carry org_name: null for it, in both
+    await db.none(`UPDATE tbl_rfq SET bid_end_date = $2 WHERE id = $1`, [rfq.rfq_id, istString(-HOUR)]);
+    const buyer = await httpClient(BUYER);
+    const quotes = await buyer.get(`/api/v1/rfq/get-quotes/${rfq.rfq_id}`);
+    const vd = quotes.body.data.flatMap((p) => p.quotations || []).map((q) => q.quote_details.vendor_details);
+    expect(vd.map((v) => [v.id, v.org_name])).toEqual([[NO, null]]);
+    const view = await buyer.get(`/api/v1/rfq/quote-comparison-view/${rfq.rfq_id}`);
+    expect(view.body.vendors.map((v) => [v.id, v.org_name])).toEqual([[NO, null]]);
   });
 });
 
 describe("routed copies follow the principal's invite (RFQ edits)", () => {
-  /** PUT /rfq/update as the creator: adds VARIANT2 invited to `vendors`. */
-  async function addProduct(rfqId, vendors) {
+  /** The Edit RFQ snapshot in the wire shape the FE sends (ids, not the model's objects). */
+  async function editSnapshot(rfqId) {
     const snap = JSON.parse(JSON.stringify(await rfqModel.getFullRfqForEdit(rfqId)));
-    // the wire shape the FE sends: ids, not the model's objects
     const idOf = (v) => (v && typeof v === "object" ? Number(v.user_id ?? v.terms_id ?? v.term_id ?? v.id) : v);
     snap.terms = (snap.terms || []).map(idOf);
     for (const p of snap.products) p.vendors = (p.vendors || []).map(idOf);
-    snap.products.push({
-      id: null,
-      product_variant_id: VARIANT2,
-      variant: 0,
-      product_name: "added after routing",
-      comment: "",
-      specs: { Quantity: "5", Unit: "NOS" },
-      files: { qap_file: [], spec_file: [], datasheet_file: [] },
-      vendors,
-      tech_eval_clauses: [],
-    });
+    return snap;
+  }
+  const newLine = (productVariantId, vendors) => ({
+    id: null,
+    product_variant_id: productVariantId,
+    variant: 0,
+    product_name: "added after routing",
+    comment: "",
+    specs: { Quantity: "5", Unit: "NOS" },
+    files: { qap_file: [], spec_file: [], datasheet_file: [] },
+    vendors,
+    tech_eval_clauses: [],
+  });
+  /** PUT /rfq/update as the creator: adds VARIANT2 invited to `vendors`. */
+  async function addProduct(rfqId, vendors) {
+    const snap = await editSnapshot(rfqId);
+    snap.products.push(newLine(VARIANT2, vendors));
     return (await httpClient(BUYER)).put("/api/v1/rfq/update").send({ rfq_id: rfqId, snapshot: snap });
   }
   const variantsOf = async (rfqId, userId) =>
@@ -600,25 +663,155 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(await propagateRoutedCopies(db, rfq.rfq_id)).toBe(0);
   });
 
-  it("join-open-RFQs / refresh paths: rows added for the principal by addVendorToRfq reach the member", async () => {
+  it("an edit removing + adding products racing a release (engine holds the assignment FOR UPDATE) neither deadlocks nor errors", async () => {
+    const rfq = await openRfq();
+    // a second line invited to HQ, copied to B by the routing
+    const second = await db.one(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
+      [rfq.rfq_id, VARIANT2]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, $2, 'Quantity', '3', 0), ($1, $2, 'Unit', 'NOS', 0)`,
+      [rfq.rfq_id, VARIANT2]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 0)`,
+      [rfq.rfq_id, VARIANT2, HQ]
+    );
+    const id = (await assign(rfq.rfq_id, B)).body.data.id;
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(2);
+
+    // The edit: drop the VARIANT2 line (its rows, B's copy included) and add a VARIANT_CAT line.
+    const snap = await editSnapshot(rfq.rfq_id);
+    snap.products = snap.products.filter((p) => Number(p.id) !== Number(second.id));
+    snap.deleted_product_ids = [second.id];
+    snap.products.push(newLine(VARIANT_CAT, [HQ]));
+
+    let edit;
+    // The engine side of a decline, step by step with its own locks: subject lock, then the
+    // assignment FOR UPDATE, then (after the edit is parked) the status change and the
+    // RFQ handler's onReleased, which deletes B's routed rows.
+    await db.tx(async (t1) => {
+      await lockRoutingSubject(t1, { orgId: ORG_A, subjectType: "RFQ", subjectId: rfq.rfq_id, hotelId: null });
+      await getAssignment(id, t1, { forUpdate: true });
+
+      const client = await httpClient(BUYER);
+      edit = client.put("/api/v1/rfq/update").send({ rfq_id: rfq.rfq_id, snapshot: snap }).then((r) => r);
+
+      // Wait until the edit is blocked on the assignment lock.
+      for (let i = 0; ; i++) {
+        const waiting = await db.oneOrNone(
+          `SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query ILIKE '%tbl_vendor_routing_assignments%' AND query ILIKE '%FOR SHARE%'
+            LIMIT 1`
+        );
+        if (waiting) break;
+        if (i > 200) throw new Error("the edit never waited on the routing assignment lock");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      const updated = await releaseAssignment(t1, id, { status: "DECLINED", actorUserId: B, declineReason: "NO_STOCK" });
+      await rfqSubjectHandler.onReleased({ ...updated, release_reason: "DECLINED" }, "PENDING", t1);
+    });
+
+    const res = await edit;
+    expect(res.status).toBe(200);
+    expect((await assignment(id)).status).toBe("DECLINED");
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([]); // released: no copies, not even of the new line
+    expect((await rowsOf(rfq.rfq_id, HQ)).map((r) => r.product_variant_id).sort((x, y) => x - y)).toEqual(
+      [VARIANT, VARIANT_CAT].sort((x, y) => x - y)
+    );
+  });
+
+  /** HQ becomes eligible for VARIANT_CAT at hotel A1 (variant mapping + hotel and category subs). */
+  async function makeHqEligible() {
+    await db.none(
+      `INSERT INTO tbl_product_variant_vendor_mapping
+         (product_variant_id, vendor_id, status, is_approved, created_by, created_at, updated_at)
+       VALUES ($1, $2, true, true, $2, now(), now())`,
+      [VARIANT_CAT, HQ]
+    );
+    await grantVendorHotelSubs([HQ], [IDS.hotels.A1]);
+    await grantVendorCategorySub(HQ, CAT);
+  }
+  /** An RFQ as in openRfq plus a VARIANT_CAT line invited to NO only, and its hotel mapping. */
+  async function rfqWithUninvitedLine() {
+    const rfq = await openRfq();
+    await db.none(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0)`,
+      [rfq.rfq_id, VARIANT_CAT]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 0)`,
+      [rfq.rfq_id, VARIANT_CAT, NO]
+    );
+    await db.none(`INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [
+      rfq.rfq_id,
+      IDS.hotels.A1,
+      BUYER,
+    ]);
+    return rfq;
+  }
+
+  it("POST /hospitality/vendor/join-open-rfqs (HQ joins a new line) → the member gets its copy", async () => {
+    const rfq = await rfqWithUninvitedLine();
+    await routeAndAccept(rfq.rfq_id);
+    await makeHqEligible();
+    const res = await (await httpClient(HQ))
+      .post("/api/v1/hospitality/vendor/join-open-rfqs")
+      .send({ rfq_ids: [rfq.rfq_id] });
+    expect(res.status).toBe(200);
+    expect(res.body.data.joined_count).toBe(1);
+    expect(await variantsOf(rfq.rfq_id, B)).toEqual(
+      [[VARIANT, HQ], [VARIANT_CAT, HQ]].sort((x, y) => x[0] - y[0])
+    );
+  });
+
+  it("POST /rfq/refresh-vendors (HQ newly eligible on a line) → the member gets its copy", async () => {
+    const rfq = await rfqWithUninvitedLine();
+    await routeAndAccept(rfq.rfq_id);
+    await makeHqEligible();
+    const res = await (await httpClient(BUYER)).post("/api/v1/rfq/refresh-vendors").send({ rfq_id: rfq.rfq_id });
+    expect(res.status).toBe(200);
+    expect((await rowsOf(rfq.rfq_id, HQ)).map((r) => r.product_variant_id)).toContain(VARIANT_CAT);
+    expect(await variantsOf(rfq.rfq_id, B)).toEqual(
+      [[VARIANT, HQ], [VARIANT_CAT, HQ]].sort((x, y) => x[0] - y[0])
+    );
+  });
+
+  it("POST /rfq/add-product-to-rfq (deprecated route, explicit vendors) → the member gets its copy", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);
-    // a principal-row insert outside the edit flow, followed by the shared propagation
+    const res = await (await httpClient(BUYER))
+      .post("/api/v1/rfq/add-product-to-rfq")
+      .send({ rfq_id: rfq.rfq_id, variant_id: VARIANT2, vendors: [HQ], specs: {} });
+    expect(res.status).toBe(200);
+    expect((await variantsOf(rfq.rfq_id, B)).map(([v]) => v).sort((x, y) => x - y)).toEqual(
+      [VARIANT, VARIANT2].sort((x, y) => x - y)
+    );
+  });
+
+  it("tech-eval replacement vendor row (rfqModel.addTechEvalReplacementVendorRow, used by handleTechnicalPostApproval) → the member gets its copy", async () => {
+    // The full scored tech-eval approval cannot be driven deterministically here (it needs a
+    // failed round, a reserve or quoting vendor without an invite row, and the approval
+    // engine); the row writer it calls is exercised against the real tables instead.
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
     await db.none(
       `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
        VALUES ($1, '', '', '', '', '', $2, 0)`,
       [rfq.rfq_id, VARIANT2]
     );
-    await db.none(`INSERT INTO tbl_product_variant_vendor_mapping (product_variant_id, vendor_id, status, is_approved)
-                   VALUES ($1, $2, true, true)`, [VARIANT2, HQ]);
-    const { default: hospitalityModel } = await import("../../app/models/hospitalityModel.js");
-    const added = await hospitalityModel.addVendorToRfq(HQ, rfq.rfq_id, { inviteeId: HQ, holderIds: [HQ] });
-    await db.none(`DELETE FROM tbl_product_variant_vendor_mapping WHERE product_variant_id = $1 AND vendor_id = $2`, [VARIANT2, HQ]);
-    expect(added.map((r) => r.product_variant_id)).toEqual([VARIANT2]);
-    expect(await variantsOf(rfq.rfq_id, B)).toEqual([
-      [VARIANT, HQ],
-      [VARIANT2, HQ],
-    ]);
+    await db.tx((t) =>
+      rfqModel.addTechEvalReplacementVendorRow(t, { rfqId: rfq.rfq_id, productVariantId: VARIANT2, variant: 0, vendorId: HQ })
+    );
+    expect(await variantsOf(rfq.rfq_id, B)).toEqual(
+      [[VARIANT, HQ], [VARIANT2, HQ]].sort((x, y) => x[0] - y[0])
+    );
   });
 });
 

@@ -10,13 +10,29 @@
 // helpers that the routing engine's import graph must not reach.
 
 /**
+ * Locks the live (PENDING/ACCEPTED) RFQ assignments of `rfqId` FOR SHARE. Any transaction
+ * that writes tbl_rfq_product_vendors of an existing RFQ and then propagates takes this
+ * FIRST, before its own rpv writes: the engine holds those rows FOR UPDATE and then writes
+ * rpv in its hooks, so taking them in the same order (assignments, then rpv) cannot deadlock.
+ */
+export function lockLiveRfqAssignments(runner, rfqId) {
+  return runner.any(
+    `SELECT id FROM tbl_vendor_routing_assignments
+      WHERE subject_type = 'RFQ' AND subject_id = $1 AND status IN ('PENDING', 'ACCEPTED')
+      ORDER BY id
+      FOR SHARE`,
+    [rfqId]
+  );
+}
+
+/**
  * One set-based INSERT: for each live RFQ assignment of `rfqId` (only `assignmentId` when
  * given), copy every principal row the assignee lacks (same product_variant + variant).
  * Each org's assignee only gets rows of its OWN principal. Idempotent.
- * Locks the live assignment rows FOR SHARE: an RFQ write racing a release waits for it and
- * then re-checks the status, so no copy is left behind for a member that just declined.
- * (The engine holds those rows FOR UPDATE and only plain-reads RFQ tables, so this never
- * deadlocks with it; called from inside a hook, the rows are already the hook's own.)
+ * Locks the live assignment rows FOR SHARE (re-checking their status after any wait), so
+ * no copy is left behind for a member that was just released. A transaction that also
+ * WRITES rpv rows before calling this must take lockLiveRfqAssignments first (see there);
+ * a single-statement caller or an engine hook (whose rows are already its own) need not.
  * Returns the number of rows added.
  */
 export async function propagateRoutedCopies(runner, rfqId, { assignmentId = null } = {}) {
@@ -41,4 +57,4 @@ export async function propagateRoutedCopies(runner, rfqId, { assignmentId = null
   return res.rowCount;
 }
 
-export default { propagateRoutedCopies };
+export default { lockLiveRfqAssignments, propagateRoutedCopies };

@@ -63,6 +63,7 @@ afterEach(async () => {
   else process.env.NETWORK_SEAT_FEE_INR = savedFee;
   if (created.rfqIds.length) {
     const ids = created.rfqIds;
+    await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [ids]);
@@ -636,7 +637,7 @@ describe("ARC coverage is pooled per org and goes to the principal", () => {
 });
 
 describe("RFQ vendor sync", () => {
-  it("does not add a linked entity and never deletes routed rows", async () => {
+  it("does not add a linked entity; routed copies follow their principal's invite (removed with it unless quoted)", async () => {
     await legacyPair();
     await vendor(M);
     await linkUnderP(B);
@@ -659,18 +660,41 @@ describe("RFQ vendor sync", () => {
     expect(users).not.toContain(B);
     expect(rows).toContainEqual({ user_id: M, routed_from_vendor_id: P });
 
-    // A hotel change that leaves no one eligible removes invites, never routed rows.
+    // A hotel change that leaves no one eligible removes the invites, and with the
+    // principal's invite goes the routed copy made from it (M has no quote).
     await hospitalityModel.recomputeVendorsForRfq(rfq.rfq_id, [IDS.hotels.B2]);
     rows = await rfqVendorRows(rfq.rfq_id);
-    expect(rows).toContainEqual({ user_id: M, routed_from_vendor_id: P });
     expect(rows.map((r) => Number(r.user_id))).not.toContain(P);
+    expect(rows.map((r) => Number(r.user_id))).not.toContain(M);
 
-    // The non-destructive refresh (POST /rfq/refresh-vendors) adds the principal, not B.
+    // The non-destructive refresh (POST /rfq/refresh-vendors) adds the principal, not B
+    // (and not M: it holds no live routing assignment to copy for).
     await hospitalityModel.addMissingVendorsForRfq(rfq.rfq_id, [H1]);
     rows = await rfqVendorRows(rfq.rfq_id);
     users = rows.map((r) => Number(r.user_id));
     expect(users).toContain(P);
     expect(users).not.toContain(B);
+    expect(users).not.toContain(M);
+  });
+
+  it("recompute keeps a routed copy whose member already quoted", async () => {
+    await legacyPair();
+    await vendor(M);
+    await linkUnderP(M);
+    const rfq = await openRfq();
+    const variant = await variantId();
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant, routed_from_vendor_id)
+       VALUES ($1, $2, $3, 1, $4)`,
+      [rfq.rfq_id, variant, M, P]
+    );
+    await db.none(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, is_regret) VALUES ($1, $2, $3, $3, 1, 0)`,
+      [rfq.rfq_id, rfq.rfq_no ?? 1, M]
+    );
+    await hospitalityModel.recomputeVendorsForRfq(rfq.rfq_id, [IDS.hotels.B2]);
+    const rows = await rfqVendorRows(rfq.rfq_id);
+    expect(rows.map((r) => Number(r.user_id))).not.toContain(P);
     expect(rows).toContainEqual({ user_id: M, routed_from_vendor_id: P });
   });
 

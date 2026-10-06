@@ -4763,14 +4763,12 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
 
           // Ensure replacement vendor has a product-vendor record (needed for UI display)
           if (!newVendor.rfq_product_vendor_id) {
-            await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING`,
-              [techEval.rfq_id, techEval.product_variant_id, techEval.variant || 0, newVendor.vendor_id]
-            );
-            // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
-            await propagateRoutedCopies(t, techEval.rfq_id);
+            await rfqModel.addTechEvalReplacementVendorRow(t, {
+              rfqId: techEval.rfq_id,
+              productVariantId: techEval.product_variant_id,
+              variant: techEval.variant,
+              vendorId: newVendor.vendor_id,
+            });
           }
 
           // Create empty vendor response records for new vendor (skips if already exist)

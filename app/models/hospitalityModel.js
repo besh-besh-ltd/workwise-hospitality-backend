@@ -2,7 +2,7 @@ import db, { pgp } from '../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
 import { resolveHotelLocationIds } from '../helper/hotelLocation.js';
-import { propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -1305,6 +1305,11 @@ WHERE ${keyIsInvitable('mk.org_key')};
 recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
   const ctx = txContext || db;
 
+  // Vendor Networks lock order (rfqSubject.js header): live routing assignments of the
+  // RFQ FOR SHARE before any tbl_rfq_product_vendors write. Without a transaction there is
+  // nothing held between statements, so the lock only matters inside one.
+  await lockLiveRfqAssignments(ctx, rfq_id);
+
   // Get all products for this RFQ
   const rfqProducts = await ctx.any(
     `SELECT rp.id AS rfq_product_id, rp.product_variant_id, rp.variant,
@@ -1327,8 +1332,9 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
     const eligibleVendorIds = new Set(eligibleRows.map(r => r.vendor_id));
 
     // Get current vendors for this product. Rows a network routing added for a
-    // member entity (routed_from_vendor_id set) belong to the routing engine: they
-    // are neither counted nor ever removed here.
+    // member entity (routed_from_vendor_id set) are not invites: they are not counted
+    // here, and follow their principal's row (removed with it below, added by the
+    // propagation at the end).
     const currentVendors = await ctx.any(
       `SELECT user_id FROM tbl_rfq_product_vendors
        WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
@@ -1351,13 +1357,18 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
       );
     }
 
-    // Remove stale vendor mappings
+    // Remove stale vendor mappings, and the network members' routed copies of them
+    // (spec §6.3) unless that member already quoted on the RFQ (its rows then stay, so
+    // the buyer still sees who quoted, as when its assignment ends).
     if (toRemove.length > 0) {
       await ctx.none(
-        `DELETE FROM tbl_rfq_product_vendors
-         WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
-           AND user_id IN ($4:csv)
-           AND routed_from_vendor_id IS NULL`,
+        `DELETE FROM tbl_rfq_product_vendors r
+         WHERE r.rfq_id = $1 AND r.product_variant_id = $2 AND r.variant = $3
+           AND (
+             (r.routed_from_vendor_id IS NULL AND r.user_id IN ($4:csv))
+             OR (r.routed_from_vendor_id IN ($4:csv)
+                 AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.rfq_id AND q.created_by = r.user_id))
+           )`,
         [rfq_id, product.product_variant_id, product.variant, toRemove]
       );
     }

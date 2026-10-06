@@ -19,7 +19,7 @@ import {
   isTimestampField
 } from './rfqEditableFields.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
-import { propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { lockLiveRfqAssignments, propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -558,6 +558,13 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
     }
   }
 
+  // Vendor Networks lock order (rfqSubject.js header): the RFQ's live routing assignments
+  // FOR SHARE before any tbl_rfq_product_vendors write below, as the engine does.
+  const touchesVendors =
+    productDiff.removed.length || productDiff.added.length ||
+    productDiff.updated.some((u) => u.vendors.added.length);
+  if (touchesVendors) await lockLiveRfqAssignments(t, rfqId);
+
   // ── Removed products ────────────────────────────────────────────────────
   for (const r of productDiff.removed) {
     const label = r.current.product_name || `product ${r.id}`;
@@ -892,7 +899,7 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
 
   // Vendor Networks (spec §6.3): members routed this RFQ get copies of any rows just
   // added for their principal (new products, added vendors). One statement.
-  if (productDiff.added.length || productDiff.updated.some((u) => u.vendors.added.length)) {
+  if (touchesVendors) {
     await propagateRoutedCopies(t, rfqId);
   }
 
