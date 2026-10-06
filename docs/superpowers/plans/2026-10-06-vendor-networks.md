@@ -329,7 +329,7 @@ export function financialYearEnd(date = new Date())                          // 
    - Insert `tbl_company(company_name, gstin)` + `tbl_users(user_type 3, status 1, company_id, email, name = company_name, password NULL)` + `tbl_company_location(company_id, country_id 1, state_id, city_id, address)` + entity ACTIVE + `ensureSeatForEntity`. One tx.
 7. **Suspend / reactivate:**
    - Admin only; cannot target the principal (400).
-   - Suspending calls `routingEngine.revokeLiveAssignmentsForEntity(vendorId, reason)`. **Task 8 provides this; until then call it through a no-op stub exported from `routingEngine.js` that Task 8 replaces.** Create `routingEngine.js` with `export async function revokeLiveAssignmentsForEntity() { return 0; }` in this task.
+   - Suspending calls `routingEngine.revokeLiveAssignmentsForEntity(vendorId, { actorUserId, reason: 'ENTITY_SUSPENDED' })`. **Task 8 provides this; until then call it through a no-op stub exported from `routingEngine.js` that Task 8 replaces.** Create `routingEngine.js` with `export async function revokeLiveAssignmentsForEntity(vendorId, { actorUserId = null, reason = 'ENTITY_REMOVED' } = {}) { return 0; }` in this task (same signature Task 8 implements).
 8. **Remove (admin) and leave (self):**
    - Entity → REMOVED, `removed_at`; revoke live assignments; disable ENTITY_MEMBER memberships for that entity; cancel pending seats; active seats stay until expiry, unused.
    - The principal can't leave or be removed (400).
@@ -703,6 +703,23 @@ export async function supplierDetailsFor(vendorId, runner = db)
 - Tests: RTL for the panel (admin vs member rendering), the link fix, and the buyer label.
 
 - [ ] **Steps:** tests → implement → pass → build (FE) + BE test if touched → commit in each repo `feat(vendor-network): ARC fulfilment panels, buyer fulfilment visibility, call-off link fix`.
+
+### Task 18: Follow-ups from the authz hotfix (single-PR delivery)
+
+**Files:**
+- Modify: `app/routes/rfq/rfqRoutes.js` (`/clarification/message`, ~line 920)
+- Modify: `app/controllers/rfq/rfqController.js` (`addVendorResponse`)
+- Modify: `app/models/rfqModel.js` (`addVendorResponse`, ~12759)
+- Test: extend `tests/services/security.vendorOwnershipHotfix.test.js` and `tests/services/security.techEvalVendorResponseAuth.test.js`
+
+**Required behaviour:**
+1. **`/rfq/clarification/message`** runs `noLogin.customer_auth` before `clarificationFileUploadHandler`, so anonymous S3 uploads happen before the controller rejects them. Switch it to `passportSignIn`, the same change already made to `/clarification/raise` in commit acae7b23. Check the FE origin/main callers send a JWT. Test: anonymous multipart → 401 and no row; an authenticated owner still works.
+2. **Persist disagree reasons.** For each element whose `vendor_response` is `'I Dont Agree'` and has a non-empty trimmed `deviation_text`, insert into `tbl_rfq_product_tech_evaluation_comments` (`tbl_rfq_product_tech_evaluation_clauses_id`, `timestamp now()`, `sender_id` = vendor, `receiver_id` = RFQ owner (the buyer `created_by` on `tbl_rfq`; confirm against how existing chat messages set receiver_id via `grep -n "tbl_rfq_product_tech_evaluation_comments" app/models/rfqModel.js`), `text` = deviation_text).
+   - Use the same transaction as the response write.
+   - Do not insert a duplicate when an identical text from the same sender already exists as the latest comment on that clause (re-submits).
+   - **Tests:** a disagree with text → the comment row exists and `getDeviationPreviews` returns it; an agree with text → no comment; a re-submit of the same text → still one comment.
+
+- [ ] **Steps:** failing tests → implement → pass + `npm test -- --testPathPatterns "tests/services/(security|techEval|rfq\.clarification)"` → commit `fix: persist vendor disagree reasons to clause chat; auth before clarification message upload`.
 
 ### Task 17: E2E seed and full verification run
 
