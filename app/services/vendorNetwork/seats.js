@@ -1,0 +1,175 @@
+// Network seats (spec §5.1). Every non-principal entity needs an active seat to
+// operate. At NETWORK_SEAT_FEE_INR = 0 seats are free and activate at once; above 0
+// a seat is created `pending` and the org admin pays for it through the same
+// Razorpay order/verify pattern the hospitality subscription uses.
+
+import crypto from "crypto";
+import db from "../../config/dbConn.js";
+import Config from "../../config/app.config.js";
+import { seatFeeInr, SEAT_STATUS } from "../../constants/vendorNetwork.js";
+import {
+  getOrgById,
+  getLiveSeat,
+  insertSeat,
+  listPayableSeats,
+  createSeatPayment,
+  getSeatPaymentByOrderId,
+  markSeatPaymentPaid,
+  activatePendingSeats,
+} from "../../models/vendorNetworkModel.js";
+import { NetworkHttpError } from "./guards.js";
+
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+/** The calendar date in India (YYYY-MM-DD) at instant `date`. */
+export function istDate(date = new Date()) {
+  return new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** 'YYYY-03-31' closing the Indian financial year (1 Apr - 31 Mar) that contains `date`. */
+export function financialYearEnd(date = new Date()) {
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  const year = ist.getUTCMonth() >= 3 ? ist.getUTCFullYear() + 1 : ist.getUTCFullYear();
+  return `${year}-03-31`;
+}
+
+/**
+ * Makes sure the entity has a seat in `orgId` for the current financial year.
+ * Fee 0: an active seat (an existing pending one is activated free).
+ * Fee > 0: a pending seat to pay for, unless a pending or active one exists.
+ * @returns {{ seat, payable: boolean, amount?: number }}
+ */
+// actorUserId is part of the shared signature; seats carry no actor column yet.
+export async function ensureSeatForEntity({ orgId, entityVendorId, actorUserId = null }, runner = db) {
+  const fee = seatFeeInr();
+  const existing = await getLiveSeat(orgId, entityVendorId, runner);
+  const today = istDate();
+  const endDate = financialYearEnd();
+
+  if (fee <= 0) {
+    if (existing?.status === SEAT_STATUS.active) return { seat: existing, payable: false };
+    if (existing) {
+      const [seat] = await activatePendingSeats(
+        { orgId, seatIds: [existing.id], paymentId: null, startDate: today, endDate },
+        runner
+      );
+      return { seat, payable: false };
+    }
+  } else if (existing) {
+    const payable = existing.status === SEAT_STATUS.pending;
+    return payable
+      ? { seat: existing, payable, amount: Number(existing.fee_amount) }
+      : { seat: existing, payable };
+  }
+
+  const seat = await insertSeat(
+    {
+      orgId,
+      vendorId: entityVendorId,
+      feeAmount: Math.max(fee, 0),
+      startDate: today,
+      endDate,
+      status: fee <= 0 ? SEAT_STATUS.active : SEAT_STATUS.pending,
+    },
+    runner
+  );
+  // The only live seat this entity can still hold for the year is one from a previous org.
+  if (!seat) throw new NetworkHttpError(409, "This entity still holds a seat in another network for this year", "SEAT_CONFLICT");
+  return fee <= 0 ? { seat, payable: false } : { seat, payable: true, amount: fee };
+}
+
+/**
+ * Creates one Razorpay order for the org's pending seats `seatIds` and records it as a
+ * `network_seat` payment of the org's principal. Every id must be a pending seat of a
+ * live entity of `orgId`, else 404 (the ids are targets, never scope).
+ */
+export async function createSeatPaymentOrder({ orgId, seatIds, actorUserId }) {
+  const ids = [...new Set(seatIds)];
+  const seats = await listPayableSeats(orgId, ids);
+  if (seats.length !== ids.length) throw new NetworkHttpError(404, "Seat not found or not awaiting payment");
+  const amountPaise = Math.round(seats.reduce((sum, s) => sum + Number(s.fee_amount), 0) * 100);
+  if (amountPaise <= 0) throw new NetworkHttpError(409, "Nothing to pay for these seats");
+
+  const org = await getOrgById(orgId);
+  const { default: Razorpay } = await import("razorpay");
+  const razorpay = new Razorpay({
+    key_id: Config.razorpay.razorpay_key,
+    key_secret: Config.razorpay.razorpay_secret,
+  });
+  const receipt = `NETSEAT-${orgId}-${Date.now()}`;
+  const order = await razorpay.orders.create({
+    amount: amountPaise,
+    currency: "INR",
+    receipt,
+    payment_capture: 1,
+  });
+
+  const payment = await createSeatPayment({
+    vendorId: org.principal_vendor_id,
+    orderId: order.id,
+    amountPaise,
+    receipt,
+    beforeResponse: JSON.stringify(order),
+    metadata: { type: "network_seat", org_id: orgId, seat_ids: ids, actor_user_id: actorUserId },
+  });
+  return { order, payment_id: payment.id, amount: amountPaise / 100, razorpay_key: Config.razorpay.razorpay_key };
+}
+
+/** On a verified payment: the payment becomes 'paid' and the seats it paid for 'active'. */
+export async function activateSeatsForPayment(paymentId, runner = db) {
+  const payment = await runner.one(`SELECT * FROM tbl_vendor_payments WHERE id = $1`, [paymentId]);
+  const meta = typeof payment.metadata === "string" ? JSON.parse(payment.metadata) : payment.metadata ?? {};
+  await markSeatPaymentPaid(paymentId, {}, runner);
+  return activatePendingSeats(
+    {
+      orgId: meta.org_id,
+      seatIds: meta.seat_ids ?? [],
+      paymentId,
+      startDate: istDate(),
+      endDate: financialYearEnd(),
+    },
+    runner
+  );
+}
+
+/** Razorpay's checkout signature: HMAC-SHA256(order_id|payment_id) with the key secret. */
+export function isValidRazorpaySignature(orderId, paymentId, signature) {
+  const expected = crypto
+    .createHmac("sha256", Config.razorpay.razorpay_secret)
+    .update(`${orderId}|${paymentId}`)
+    .digest("hex");
+  const given = Buffer.from(String(signature));
+  const wanted = Buffer.from(expected);
+  return given.length === wanted.length && crypto.timingSafeEqual(given, wanted);
+}
+
+/**
+ * Verifies a seat payment of `orgId` and activates its seats. A payment of another org
+ * is 404 even with a valid signature. Re-verifying a paid payment is a no-op.
+ */
+export async function verifySeatPayment({ orgId, razorpayOrderId, razorpayPaymentId, razorpaySignature }) {
+  if (!isValidRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature)) {
+    throw new NetworkHttpError(400, "Payment verification failed - invalid signature");
+  }
+  return db.tx(async (t) => {
+    const payment = await getSeatPaymentByOrderId(razorpayOrderId, t, { forUpdate: true });
+    const meta = typeof payment?.metadata === "string" ? JSON.parse(payment.metadata) : payment?.metadata;
+    if (!payment || Number(meta?.org_id) !== Number(orgId)) {
+      throw new NetworkHttpError(404, "Payment record not found");
+    }
+    if (payment.payment_status === "paid") return { payment_id: payment.id, already_paid: true, seats: [] };
+    await markSeatPaymentPaid(payment.id, { razorpayPaymentId, razorpaySignature }, t);
+    const seats = await activateSeatsForPayment(payment.id, t);
+    return { payment_id: payment.id, already_paid: false, seats };
+  });
+}
+
+export default {
+  istDate,
+  financialYearEnd,
+  ensureSeatForEntity,
+  createSeatPaymentOrder,
+  activateSeatsForPayment,
+  isValidRazorpaySignature,
+  verifySeatPayment,
+};

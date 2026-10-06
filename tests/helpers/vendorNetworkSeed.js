@@ -94,12 +94,35 @@ export async function addMember({ orgId, personId, entityVendorId = null, role, 
   );
 }
 
-/** Deletes every fixture row (ids 95001..95999), network tables first. */
+/**
+ * Deletes every fixture row (ids 95001..95999), network tables first. Rows the API
+ * itself created under a fixture org (POST /org, POST /entities: serial ids) go too:
+ * the org, its entity logins, their companies, locations, payments and notifications.
+ */
 export async function cleanupVendorNetworkFixtures(runner = db) {
   const lo = FIXTURE_ID_MIN;
   const hi = FIXTURE_ID_MAX;
-  const users = `SELECT id FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi}`;
+  const fixtureOrgs = `SELECT id FROM tbl_vendor_orgs
+                        WHERE id BETWEEN ${lo} AND ${hi} OR principal_vendor_id BETWEEN ${lo} AND ${hi}`;
+  const apiUserIds = (
+    await runner.any(
+      `SELECT DISTINCT vendor_id FROM tbl_vendor_org_entities
+        WHERE org_id IN (${fixtureOrgs}) AND vendor_id NOT BETWEEN ${lo} AND ${hi}`
+    )
+  ).map((r) => Number(r.vendor_id));
+  const apiCompanyIds = apiUserIds.length
+    ? (
+        await runner.any(`SELECT company_id FROM tbl_users WHERE id = ANY($1::int[]) AND company_id IS NOT NULL`, [
+          apiUserIds,
+        ])
+      ).map((r) => Number(r.company_id))
+    : [];
+  const apiUsers = apiUserIds.length ? apiUserIds.join(",") : "NULL";
+  const apiCompanies = apiCompanyIds.length ? apiCompanyIds.join(",") : "NULL";
+
+  const users = `SELECT id FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiUsers})`;
   const orgs = `SELECT id FROM tbl_vendor_orgs WHERE id BETWEEN ${lo} AND ${hi} OR principal_vendor_id IN (${users})`;
+  await runner.none(`DELETE FROM tbl_notifications WHERE recipient_user_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_network_seats WHERE org_id IN (${orgs}) OR entity_vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_routing_assignments WHERE org_id IN (${orgs}) OR assigned_vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id IN (${users})`);
@@ -107,9 +130,10 @@ export async function cleanupVendorNetworkFixtures(runner = db) {
   await runner.none(`DELETE FROM tbl_vendor_org_link_invites WHERE org_id IN (${orgs}) OR target_vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_org_entities WHERE org_id IN (${orgs}) OR vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_orgs WHERE id IN (${orgs})`);
+  await runner.none(`DELETE FROM tbl_vendor_payments WHERE vendor_id IN (${users})`);
   await runner.none(
-    `DELETE FROM tbl_company_location WHERE company_id BETWEEN ${lo} AND ${hi}`
+    `DELETE FROM tbl_company_location WHERE company_id BETWEEN ${lo} AND ${hi} OR company_id IN (${apiCompanies})`
   );
-  await runner.none(`DELETE FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi}`);
-  await runner.none(`DELETE FROM tbl_company WHERE id BETWEEN ${lo} AND ${hi}`);
+  await runner.none(`DELETE FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiUsers})`);
+  await runner.none(`DELETE FROM tbl_company WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiCompanies})`);
 }

@@ -36,4 +36,32 @@ export function isActingForAnotherLogin(req) {
   return actor != null && Number(actor) !== Number(req.user.id);
 }
 
-export default { requireNetwork, requireOrgAdmin, actingPersonId, isActingForAnotherLogin };
+/**
+ * A business refusal raised from inside a service or transaction: the controller
+ * catches it and answers `{ status: 0, message, reason? }` with `http`.
+ */
+export class NetworkHttpError extends Error {
+  constructor(http, message, reason = undefined) {
+    super(message);
+    this.http = http;
+    this.reason = reason;
+  }
+}
+
+/** Sends a NetworkHttpError as its HTTP answer; returns false for any other error. */
+export function sendIfNetworkError(res, err) {
+  if (!(err instanceof NetworkHttpError)) return false;
+  const body = { status: 0, message: err.message };
+  if (err.reason) body.reason = err.reason;
+  res.status(err.http).json(body);
+  return true;
+}
+
+export default {
+  requireNetwork,
+  requireOrgAdmin,
+  actingPersonId,
+  isActingForAnotherLogin,
+  NetworkHttpError,
+  sendIfNetworkError,
+};
