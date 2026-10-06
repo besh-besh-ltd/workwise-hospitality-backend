@@ -5,9 +5,9 @@ import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
-import pricingEngine from './pricingEngine.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
+import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
 
 // Phase 2 — run the pricing engine for a contract line at a given quantity.
 // Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
@@ -18,20 +18,10 @@ import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 // no double-tax).
 function computeLineEngineOut(pricingResult, quantity) {
   const { unit_rate, gst_pct, charges } = pricingResult;
-  const canonicalCharges = normalizeArcCharges(charges);
-  return pricingEngine.calculateLineTotal({
-    unit_price:    Number(unit_rate || 0),
-    quantity:      Number(quantity || 0),
-    tax:           Number(gst_pct || 0),
-    tax_mode:      'percentage',
-    other_charges: canonicalCharges.map((c) => ({
-      name:        c.name ?? null,
-      amount:      Number(c.amount ?? 0),
-      amount_mode: (c.amount_mode === 'percentage' || c.amount_mode === '%') ? 'percentage' : 'absolute',
-      tax:         (c.tax !== null && c.tax !== undefined && c.tax !== '') ? Number(c.tax) : null,
-      tax_mode:    (c.tax_mode === 'percentage' || c.tax_mode === '%') ? 'percentage' : 'absolute',
-    })),
-  });
+  // The one engine mapping shared with the call-off document and PO detail tax split
+  // (helper/arc_v2/callOffLineTax.js), so their taxable value + tax rows add up to the
+  // total_price stored here.
+  return computeCallOffLine({ unit_price: unit_rate, quantity, tax: gst_pct, other_charges: charges });
 }
 
 // Per-unit landed price (qty=1) — base + per-unit charges + taxes. Display/back-compat

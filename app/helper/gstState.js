@@ -2,8 +2,9 @@
 //
 // The supplier's state is the first two characters of its GSTIN. The place of supply is
 // the buyer hotel: its GSTIN, else its state_id resolved to a GST code by state name.
-// Same state: CGST + SGST, each half the GST rate. Different states: IGST at the full
-// rate. Either side unknown: null, and callers keep the legacy single "GST" presentation.
+// Same state: CGST + SGST, each half the GST rate (CGST + UTGST in a Union Territory
+// without a legislature). Different states: IGST at the full rate. Either side unknown:
+// null, and callers keep the legacy single "GST" presentation.
 
 import db from "../config/dbConn.js";
 
@@ -11,7 +12,8 @@ import db from "../config/dbConn.js";
  * The official GST state code list (GSTN). 25 and 28 are kept for reading old GSTINs:
  *   - 25 Daman and Diu merged into 26 on 26 Jan 2020 ("Dadra and Nagar Haveli and
  *     Daman and Diu"); its registrations were moved to 26.
- *   - 28 is Andhra Pradesh before the 2014 division; GST-era Andhra Pradesh is 37.
+ *   - 28 is Andhra Pradesh before the 2014 division; GST-era Andhra Pradesh is 37. A 28
+ *     GSTIN is not mapped to either state: its tax split is unknown.
  */
 export const GST_STATE_CODES = Object.freeze({
   "01": "Jammu and Kashmir",
@@ -56,7 +58,13 @@ export const GST_STATE_CODES = Object.freeze({
 });
 
 // Codes that denote the same state today (see GST_STATE_CODES).
-const CURRENT_CODE = Object.freeze({ "25": "26", "28": "37" });
+const CURRENT_CODE = Object.freeze({ "25": "26" });
+
+// Union Territories without a legislature levy UTGST in place of SGST (UTGST Act 2017):
+// Chandigarh, Daman and Diu (legacy), Dadra and Nagar Haveli and Daman and Diu,
+// Lakshadweep, Andaman and Nicobar Islands, Ladakh, Other Territory. Delhi, Puducherry
+// and Jammu and Kashmir have legislatures and levy SGST.
+export const UTGST_CODES = Object.freeze(new Set(["04", "25", "26", "31", "35", "38", "97"]));
 
 // Same format check as POST /entities (entityController GSTIN_RE).
 export const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
@@ -126,28 +134,42 @@ export async function stateCodeForHotel(hotelId, runner = db) {
   return stateCodeFromGstin(row.gst) ?? stateCodeFromName(row.state_name);
 }
 
-/** 'CGST_SGST' within one state, 'IGST' across states, null when either side is unknown. */
+/**
+ * 'CGST_SGST' within one state ('CGST_UTGST' within a UT without a legislature), 'IGST'
+ * across states, null when either side is unknown (or is the pre-division 28).
+ */
 export function taxSplitFor(supplierCode, placeCode) {
   if (!GST_STATE_CODES[supplierCode] || !GST_STATE_CODES[placeCode]) return null;
+  if (supplierCode === "28" || placeCode === "28") return null;
   const a = CURRENT_CODE[supplierCode] ?? supplierCode;
   const b = CURRENT_CODE[placeCode] ?? placeCode;
-  return a === b ? "CGST_SGST" : "IGST";
+  if (a !== b) return "IGST";
+  return UTGST_CODES.has(b) ? "CGST_UTGST" : "CGST_SGST";
+}
+
+/** The column labels of a split, in print order. */
+export function taxLabelsFor(split) {
+  if (split === "CGST_SGST") return ["CGST", "SGST"];
+  if (split === "CGST_UTGST") return ["CGST", "UTGST"];
+  if (split === "IGST") return ["IGST"];
+  return ["GST"];
 }
 
 /**
- * The tax rows for one line's GST: [{ label, rate, amount }]. The amount is first rounded
- * to paise; CGST takes the lower half and SGST the rest, so CGST + SGST is exactly the GST
- * amount. A null split gives the single legacy 'GST' row.
+ * The tax rows for one GST amount at one rate: [{ label, rate, amount }]. The amount is
+ * first rounded to paise; CGST takes the lower half and SGST (or UTGST) the rest, so the
+ * two add up to the GST amount exactly. A null split gives the single legacy 'GST' row.
  */
 export function taxLinesFor(split, ratePct, gstAmount) {
   const rate = ratePct == null ? null : Number(ratePct);
   const paise = Math.round(Number(gstAmount || 0) * 100);
-  if (split === "CGST_SGST") {
+  if (split === "CGST_SGST" || split === "CGST_UTGST") {
     const cgst = Math.floor(paise / 2);
     const half = rate == null ? null : rate / 2;
+    const [, second] = taxLabelsFor(split);
     return [
       { label: "CGST", rate: half, amount: cgst / 100 },
-      { label: "SGST", rate: half, amount: (paise - cgst) / 100 },
+      { label: second, rate: half, amount: (paise - cgst) / 100 },
     ];
   }
   return [{ label: split === "IGST" ? "IGST" : "GST", rate, amount: paise / 100 }];
@@ -226,6 +248,7 @@ export default {
   stateCodeFromName,
   stateCodeForHotel,
   taxSplitFor,
+  taxLabelsFor,
   taxLinesFor,
   summarizeTaxLines,
   supplierDetailsFor,

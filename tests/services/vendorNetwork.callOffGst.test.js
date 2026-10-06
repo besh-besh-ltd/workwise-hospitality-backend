@@ -36,6 +36,7 @@ import {
   renderContractDocumentHtml,
 } from "../../app/controllers/arc_v2/arcContractController.js";
 import { findPosNeedingVendorReminder } from "../../app/helper/cronManager.js";
+import { callOffLineTax, callOffPoTax } from "../../app/helper/arc_v2/callOffLineTax.js";
 import { sendPOAcceptanceReminderToVendor } from "../../app/controllers/po/purchaseOrderEmails.js";
 import { httpClient } from "../helpers/http.js";
 import { makeRFQ } from "../factories/rfq.js";
@@ -248,14 +249,46 @@ describe("GST state codes", () => {
     expect(rows.filter((r) => stateCodeFromName(r.state_name) == null).map((r) => r.state_name)).toEqual([]);
   });
 
+  it("maps every Indian state name in production's tbl_location_states to a code", () => {
+    // Production list (country 1), verified by the controller, typo row included.
+    const prod = [
+      "Andaman and Nicobar Islands", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chandigarh",
+      "Chhattisgarh", "Dadra and Nagar Haveli", "Delhi", "Goa", "Gujarat", "Haryana", "Himachal Praddesh",
+      "Himachal Pradesh", "Jammu and Kashmir", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh",
+      "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Puducherry", "Punjab",
+      "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttarakhand", "Uttar Pradesh", "West Bengal",
+    ];
+    expect(prod.filter((name) => stateCodeFromName(name) == null)).toEqual([]);
+    expect(stateCodeFromName("Himachal Praddesh")).toBe("02");
+    expect(stateCodeFromName("Dadra and Nagar Haveli")).toBe("26");
+  });
+
+  it("levies UTGST instead of SGST inside a Union Territory without a legislature", () => {
+    expect(taxSplitFor("04", "04")).toBe("CGST_UTGST"); // Chandigarh
+    expect(taxSplitFor("26", "26")).toBe("CGST_UTGST");
+    expect(taxSplitFor("07", "07")).toBe("CGST_SGST"); // Delhi has a legislature
+    expect(taxSplitFor("04", "03")).toBe("IGST");
+    expect(taxLinesFor("CGST_UTGST", 18, 10.01)).toEqual([
+      { label: "CGST", rate: 9, amount: 5 },
+      { label: "UTGST", rate: 9, amount: 5.01 },
+    ]);
+  });
+
+  it("does not guess a state for the pre-division Andhra Pradesh code 28", () => {
+    expect(stateCodeFromGstin("28AABCD0971F1ZW")).toBe("28");
+    expect(taxSplitFor("28", "37")).toBeNull();
+    expect(taxSplitFor("28", "28")).toBeNull();
+    expect(taxSplitFor("37", "28")).toBeNull();
+  });
+
   it("splits within a state, charges IGST across states, and gives no answer when a side is unknown", () => {
     expect(taxSplitFor("27", "27")).toBe("CGST_SGST");
     expect(taxSplitFor("09", "27")).toBe("IGST");
     expect(taxSplitFor(null, "27")).toBeNull();
     expect(taxSplitFor("27", null)).toBeNull();
     expect(taxSplitFor("27", "99")).toBeNull();
-    // A pre-merger Daman and Diu GSTIN (25) is the same state as 26 today.
-    expect(taxSplitFor("25", "26")).toBe("CGST_SGST");
+    // A pre-merger Daman and Diu GSTIN (25) is the same territory as 26 today (a UT: UTGST).
+    expect(taxSplitFor("25", "26")).toBe("CGST_UTGST");
   });
 
   it("halves the rate for CGST and SGST, and their amounts add up to the GST exactly", () => {
@@ -357,6 +390,7 @@ describe("call-off document of a network member", () => {
     expect(a.body.data.tax_split).toBe("IGST");
     expect(a.body.data.place_of_supply_state_code).toBe("27");
     expect(a.body.data.pricing.tax_breakdown).toEqual([{ label: "IGST", rate: 5, amount: 45 }]);
+    expect(a.body.data.pricing.taxable_value).toBe(900);
     expect(a.body.data.vendor).toMatchObject({ id: M_UP, gstin: M_UP_GSTIN, state_code: "09", state_name: "Uttar Pradesh", address: "12 Industrial Area, Noida" });
 
     const b = await member.get(`/api/v1/po/vendor/detail/${split.id}`);
@@ -364,6 +398,74 @@ describe("call-off document of a network member", () => {
     expect(b.body.data.pricing.tax_breakdown).toEqual([
       { label: "CGST", rate: 2.5, amount: 22.5 },
       { label: "SGST", rate: 2.5, amount: 22.5 },
+    ]);
+  });
+});
+
+describe("call-off GST includes the tax on charges", () => {
+  // 10 × ₹90 at 5%, freight 2% of base (inherits 5%), packing ₹50 taxed at 18%:
+  // base 900 + 45; freight 18 + 0.90; packing 50 + 9 → taxable 968, GST 54.90, total 1022.90.
+  const CHARGES = [
+    { name: "Freight", amount: 2, amount_mode: "percentage", tax: null },
+    { name: "Packing", amount: 50, amount_mode: "absolute", tax: 18, tax_mode: "percentage" },
+  ];
+  const paise = (v) => Math.round(Number(v) * 100);
+  const reconciles = (t, total) =>
+    expect(paise(t.taxable_value) + t.tax_lines.reduce((sum, r) => sum + paise(r.amount), 0)).toBe(paise(total));
+
+  it("every split reconciles to the line total to the paisa, odd rates included", () => {
+    for (const freight of [2, 1.5, 0.37]) {
+      for (const quantity of [1, 7, 10, 333]) {
+        const line = {
+          unit_price: 90.17, quantity, tax: 5,
+          other_charges: [{ ...CHARGES[0], amount: freight }, CHARGES[1]],
+        };
+        for (const split of ["IGST", "CGST_SGST", "CGST_UTGST", null]) {
+          const t = callOffLineTax(line, split);
+          reconciles(t, t.total);
+        }
+      }
+    }
+  });
+
+  it("IGST and CGST/SGST documents and the detail API carry the charge tax, reconciling to total_price", async () => {
+    await db.none(`UPDATE tbl_arc_contract_line SET charges = $2 WHERE id = $1`, [hqLineId, JSON.stringify(CHARGES)]);
+    const igst = await releaseCallOff(hqContractId, hqLineId, H_MH, "CHG1");
+    const split = await releaseCallOff(hqContractId, hqLineId, H_UP, "CHG2");
+
+    for (const [po, mode] of [[igst, "IGST"], [split, "CGST_SGST"]]) {
+      const lines = await db.any(`SELECT unit_price, quantity, charges_meta, total_price FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po.id]);
+      expect(Number(lines[0].total_price)).toBe(1022.9);
+      const t = callOffPoTax(lines, mode);
+      expect(t.taxable_value).toBe(968);
+      reconciles(t, lines[0].total_price);
+    }
+
+    const igstHtml = renderCallOffPoHtml(await loadCallOffPoContext(igst.id));
+    expect(igstHtml).toContain("Taxable value</span><span>₹968.00");
+    expect(igstHtml).toContain("incl. IGST @ 5%</span><span>₹45.90");
+    expect(igstHtml).toContain("incl. IGST @ 18%</span><span>₹9.00");
+    expect(igstHtml).toContain("5% + 18%<br/>₹54.90");
+
+    const splitHtml = renderCallOffPoHtml(await loadCallOffPoContext(split.id));
+    expect(splitHtml).toContain("incl. CGST @ 2.5%</span><span>₹22.95");
+    expect(splitHtml).toContain("incl. SGST @ 2.5%</span><span>₹22.95");
+    expect(splitHtml).toContain("incl. CGST @ 9%</span><span>₹4.50");
+    expect(splitHtml).toContain("incl. SGST @ 9%</span><span>₹4.50");
+
+    const member = await httpClient(M_UP);
+    const a = (await member.get(`/api/v1/po/vendor/detail/${igst.id}`)).body.data;
+    expect(a.pricing.taxable_value).toBe(968);
+    expect(a.pricing.tax_breakdown).toEqual([
+      { label: "IGST", rate: 5, amount: 45.9 },
+      { label: "IGST", rate: 18, amount: 9 },
+    ]);
+    const b = (await member.get(`/api/v1/po/vendor/detail/${split.id}`)).body.data;
+    expect(b.pricing.tax_breakdown).toEqual([
+      { label: "CGST", rate: 2.5, amount: 22.95 },
+      { label: "SGST", rate: 2.5, amount: 22.95 },
+      { label: "CGST", rate: 9, amount: 4.5 },
+      { label: "SGST", rate: 9, amount: 4.5 },
     ]);
   });
 });
@@ -392,6 +494,23 @@ describe("contract document supplier GSTIN", () => {
     await db.none(`INSERT INTO tbl_arc_quote (arc_id, vendor_id, gstin_used) VALUES ($1, $2, '27AABCH0971F2ZV')`, [arcId, HQ]);
     const { html } = await renderFor(hqContractId);
     expect(supplierMeta(html)).toContain("GSTIN: 27AABCH0971F2ZV");
+  });
+
+  const purchaserMeta = (html) => html.slice(html.indexOf('<div class="role">Purchaser</div>'), html.indexOf('<div class="role">Supplier</div>'));
+
+  it("prints the lead hotel's GSTIN for the purchaser, else its company's, else N/A", async () => {
+    expect(purchaserMeta((await renderFor(hqContractId)).html)).toContain(`GSTIN: ${H_MH_GSTIN}`);
+
+    const companyGst = (await db.one(`SELECT gst FROM tbl_hospitality_companies WHERE id = $1`, [HC_A])).gst;
+    try {
+      await db.none(`UPDATE tbl_hospitality_company_hotels SET gst = NULL WHERE id = $1`, [H_MH]);
+      await db.none(`UPDATE tbl_hospitality_companies SET gst = '27AAACW1234F1ZQ' WHERE id = $1`, [HC_A]);
+      expect(purchaserMeta((await renderFor(hqContractId)).html)).toContain("GSTIN: 27AAACW1234F1ZQ");
+      await db.none(`UPDATE tbl_hospitality_companies SET gst = NULL WHERE id = $1`, [HC_A]);
+      expect(purchaserMeta((await renderFor(hqContractId)).html)).toContain("GSTIN: N/A");
+    } finally {
+      await db.none(`UPDATE tbl_hospitality_companies SET gst = $2 WHERE id = $1`, [HC_A, companyGst]);
+    }
   });
 
   it("still prints N/A for a vendor with no GSTIN anywhere", async () => {

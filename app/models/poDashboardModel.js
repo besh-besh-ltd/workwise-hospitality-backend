@@ -18,7 +18,8 @@
 import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
 import pricingEngine from "../services/pricingEngine.js";
-import { supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLinesFor, summarizeTaxLines } from "../helper/gstState.js";
+import { supplierDetailsFor, stateCodeForHotel, taxSplitFor } from "../helper/gstState.js";
+import { callOffPoTax } from "../helper/arc_v2/callOffLineTax.js";
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
 
@@ -948,20 +949,23 @@ export async function getPODetailFull(po_id, scope) {
 
   // Call-off POs (Vendor Networks §6.4): the supplier is the fulfilling entity (the
   // PO's finalized vendor), and GST splits by its GSTIN state vs the ordering hotel:
-  // IGST across states, CGST + SGST within one, a single GST row when either is
-  // unknown. Computed here and in the PDF from the same helpers; nothing is stored.
-  // RFQ POs are untouched.
+  // IGST across states, CGST + SGST (UTGST) within one, a single GST row when either is
+  // unknown. Every tax component (base and charges) comes from the same engine mapping
+  // as the stored line totals and the PDF (callOffLineTax.js), so taxable_value + the
+  // tax rows add up to the lines' total_price. Nothing is stored. RFQ POs are untouched.
   let callOffSupplier = null;
   if (po.is_call_off) {
     const supplier = await supplierDetailsFor(po.finalized_vendor_id);
     const placeCode = await stateCodeForHotel(po.hotel_id);
     const taxSplit = taxSplitFor(supplier?.state_code ?? null, placeCode);
-    pricing.tax_breakdown = summarizeTaxLines(
-      items.flatMap((it) => {
-        const t = lineTax(it);
-        return t.gst_amount == null ? [] : taxLinesFor(taxSplit, t.gst_pct, t.gst_amount);
-      })
+    const poLines = await db.any(
+      `SELECT unit_price, quantity, charges_meta FROM tbl_purchase_order_product
+        WHERE purchase_order_id = $1 ORDER BY id`,
+      [poId]
     );
+    const tax = callOffPoTax(poLines, taxSplit);
+    pricing.taxable_value = tax.taxable_value;
+    pricing.tax_breakdown = tax.tax_lines;
     callOffSupplier = { supplier, placeCode, taxSplit };
   }
 
@@ -1329,7 +1333,11 @@ export async function getPODetailFull(po_id, scope) {
       id: po.finalized_vendor_id,
       name: po.vendor_name || "Unknown Vendor",
       short: initialsOf(po.vendor_name),
-      gstin: po.vendor_gstin || po.gstin || callOffSupplier?.supplier?.gstin || null,
+      // Call-offs: the GSTIN the tax split was decided from (supplierDetailsFor), so the
+      // GSTIN and state shown can never disagree.
+      gstin: callOffSupplier
+        ? callOffSupplier.supplier?.gstin ?? null
+        : po.vendor_gstin || po.gstin || null,
       ...(callOffSupplier
         ? {
             address: callOffSupplier.supplier?.address ?? null,

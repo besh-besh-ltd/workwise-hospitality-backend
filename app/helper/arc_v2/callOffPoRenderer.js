@@ -6,10 +6,8 @@ import { pdfRenderer } from '../../util/pdfRenderer.js';
 import db from '../../config/dbConn.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
-import pricingEngine from '../../services/pricingEngine.js';
-import {
-  supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLinesFor, summarizeTaxLines,
-} from '../gstState.js';
+import { supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLabelsFor, summarizeTaxLines } from '../gstState.js';
+import { callOffLineTax } from './callOffLineTax.js';
 
 /**
  * Call-off Purchase Order document renderer (audit CO10).
@@ -39,20 +37,20 @@ function fmtDate(d) {
   return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-/**
- * The GST rows of one call-off line under `split` ('IGST' | 'CGST_SGST' | null): GST on
- * the line's basic (qty × base rate), split by gstState.taxLinesFor. Null when the line
- * has no GST rate.
- */
-export function callOffLineTaxLines(line, split) {
-  if (line.gst_pct == null) return null;
-  const t = pricingEngine.lineTaxBreakdown({
-    unit_price: line.unit_price, quantity: line.quantity, tax: line.gst_pct, tax_mode: 'percentage',
-  });
-  return taxLinesFor(split, t.gst_pct, t.gst_amount);
-}
+const SPLITS = new Set(['IGST', 'CGST_SGST', 'CGST_UTGST']);
+const pct = (rate) => (rate == null ? '—' : `${Number(rate)}%`);
 
-const pct = (rate) => `${Number(rate)}%`;
+/**
+ * A line's GST under `split`, every component (base and charge tax), from the shared
+ * call-off engine mapping (callOffLineTax.js). The GST rate is the stored charges_meta.tax,
+ * else the contract line's gst_pct. Null when the line has no GST rate at all.
+ */
+function lineTax(line, split) {
+  const cm = line.charges_meta || {};
+  const rate = cm.tax ?? line.gst_pct;
+  if (rate == null) return null;
+  return callOffLineTax({ unit_price: line.unit_price, quantity: line.quantity, tax: rate, other_charges: cm.other_charges }, split);
+}
 
 /**
  * Pure, deterministic HTML for a call-off PO. `ctx` shape:
@@ -60,9 +58,9 @@ const pct = (rate) => `${Number(rate)}%`;
  *     buyer: { company_name, hotel_name, gst, delivery_address },
  *     vendor: { name, email },
  *     supplier: { name, email, gstin, address, state_name, state_code } | null,
- *     tax_split: 'IGST' | 'CGST_SGST' | null,
+ *     tax_split: 'IGST' | 'CGST_SGST' | 'CGST_UTGST' | null,
  *     arc: { arc_number, arc_title, mr_number },
- *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, total_price }] }
+ *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, charges_meta, total_price }] }
  *
  * Back-compat: a supplier with no GSTIN keeps the name + email block, and a null
  * tax_split keeps the single "GST" rate column, byte for byte as before (spec §6.4).
@@ -73,7 +71,7 @@ export function renderCallOffPoHtml(ctx) {
   const vendor = ctx.vendor || {};
   const arc = ctx.arc || {};
   const lines = Array.isArray(ctx.lines) ? ctx.lines : [];
-  const split = ctx.tax_split === 'IGST' || ctx.tax_split === 'CGST_SGST' ? ctx.tax_split : null;
+  const split = SPLITS.has(ctx.tax_split) ? ctx.tax_split : null;
   // The supplier's registered identity (the fulfilling entity's own GSTIN, address and
   // state) is printed once a GSTIN is known.
   const supplier = ctx.supplier && ctx.supplier.gstin ? ctx.supplier : null;
@@ -86,23 +84,35 @@ export function renderCallOffPoHtml(ctx) {
         <div>State: ${esc(supplier.state_name)}${supplier.state_code ? ` (${esc(supplier.state_code)})` : ''}</div>` : ''}`
     : '';
 
-  const taxHeads = split === 'CGST_SGST'
-    ? '<th class="r">CGST</th><th class="r">SGST</th>'
-    : `<th class="r">${split === 'IGST' ? 'IGST' : 'GST'}</th>`;
-  const colCount = split === 'CGST_SGST' ? 7 : 6;
-  const lineTaxes = lines.map((l) => (split ? callOffLineTaxLines(l, split) : null));
+  // Split mode: one column per tax label; each cell lists the line's rates for that
+  // label (base and charges may differ) and their amount. Null split: the legacy column.
+  const labels = taxLabelsFor(split);
+  const taxHeads = split
+    ? labels.map((label) => `<th class="r">${label}</th>`).join('')
+    : '<th class="r">GST</th>';
+  const colCount = 5 + (split ? labels.length : 1);
+  const lineTaxes = lines.map((l) => (split ? lineTax(l, split) : null));
   const taxCells = (l, i) => {
     if (!split) return `<td class="r">${l.gst_pct != null ? `${Number(l.gst_pct)}%` : '—'}</td>`;
-    const taxLines = lineTaxes[i];
-    const width = split === 'CGST_SGST' ? 2 : 1;
-    if (!taxLines) return '<td class="r">—</td>'.repeat(width);
-    return taxLines.map((t) => `<td class="r">${pct(t.rate)}<br/>${inr(t.amount)}</td>`).join('');
+    const t = lineTaxes[i];
+    return labels.map((label) => {
+      const rows = t ? t.tax_lines.filter((r) => r.label === label) : [];
+      if (!rows.length) return '<td class="r">—</td>';
+      const amountPaise = rows.reduce((sum, r) => sum + Math.round(r.amount * 100), 0);
+      return `<td class="r">${rows.map((r) => pct(r.rate)).join(' + ')}<br/>${inr(amountPaise / 100)}</td>`;
+    }).join('');
   };
-  const taxTotals = split
-    ? summarizeTaxLines(lineTaxes.filter(Boolean).flat())
+  let taxTotals = '';
+  if (split) {
+    const taxed = lineTaxes.filter(Boolean);
+    // Lines without a GST rate are taxable at their full amount.
+    const taxablePaise = lines.reduce((sum, l, i) => sum + Math.round(Number(lineTaxes[i] ? lineTaxes[i].taxable_value : l.total_price || 0) * 100), 0);
+    taxTotals = `
+      <div><span>Taxable value</span><span>${inr(taxablePaise / 100)}</span></div>`
+      + summarizeTaxLines(taxed.flatMap((t) => t.tax_lines))
         .map((t) => `
-      <div><span>incl. ${t.label} @ ${pct(t.rate)}</span><span>${inr(t.amount)}</span></div>`).join('')
-    : '';
+      <div><span>incl. ${t.label} @ ${pct(t.rate)}</span><span>${inr(t.amount)}</span></div>`).join('');
+  }
 
   const subtotal = lines.reduce((s, l) => s + Number(l.total_price || 0), 0);
   const rows = lines.map((l, i) => `
@@ -209,7 +219,7 @@ export async function loadCallOffPoContext(poId, runner = db) {
   );
   if (!head) return null;
   const lines = await runner.any(
-    `SELECT pop.quantity, pop.unit, pop.unit_price, pop.total_price,
+    `SELECT pop.quantity, pop.unit, pop.unit_price, pop.total_price, pop.charges_meta,
             cl.gst_pct, pv.name AS product_name
        FROM tbl_purchase_order_product pop
        LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id

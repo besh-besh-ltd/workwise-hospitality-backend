@@ -244,7 +244,7 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
     <div class="party">
       <div class="role">Purchaser</div>
       <div class="nm">${esc(buyerOrg)}</div>
-      <div class="meta">${ctx.hotel_name ? esc(ctx.hotel_name) + '<br/>' : ''}${buyerCity ? esc(buyerCity) + '<br/>' : ''}Authorised signatory: <strong>${esc(buyerPoc)}</strong>${ctx.buyer_designation ? ', ' + esc(ctx.buyer_designation) : ''}<br/>GSTIN: N/A</div>
+      <div class="meta">${ctx.hotel_name ? esc(ctx.hotel_name) + '<br/>' : ''}${buyerCity ? esc(buyerCity) + '<br/>' : ''}Authorised signatory: <strong>${esc(buyerPoc)}</strong>${ctx.buyer_designation ? ', ' + esc(ctx.buyer_designation) : ''}<br/>GSTIN: ${esc(ctx.purchaser_gstin || 'N/A')}</div>
     </div>
     <div class="party">
       <div class="role">Supplier</div>
@@ -382,6 +382,8 @@ export async function loadContractDocContext(arcId, runner = db) {
             cat.title AS category_title,
             h.name AS hotel_name, h.city AS hotel_city, h.state AS hotel_state,
             hc.name AS company_name,
+            -- Purchaser GSTIN on the contract: the lead hotel's, else its company's.
+            COALESCE(NULLIF(trim(h.gst), ''), NULLIF(trim(hc.gst), '')) AS purchaser_gstin,
             u.name AS buyer_name, u.designation AS buyer_designation, u.email AS buyer_email
        FROM tbl_arc a
        LEFT JOIN tbl_category cat ON cat.id = a.category_id
