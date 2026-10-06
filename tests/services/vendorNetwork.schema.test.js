@@ -130,6 +130,27 @@ describe("vendor network schema", () => {
     });
   });
 
+  // The engine maps a 23505 to 409 only for these index NAMES (ROUTING_UNIQUE_INDEXES),
+  // and they must be per org (several orgs may route the same RFQ).
+  it("names the routing unique indexes as the engine expects, keyed by org_id", async () => {
+    const { ROUTING_UNIQUE_INDEXES } = await import("../../app/models/vendorRoutingModel.js");
+    expect([...ROUTING_UNIQUE_INDEXES].sort()).toEqual(["ix_vn_assign_org_one_accepted", "ix_vn_assign_org_one_pending"]);
+    const rows = await db.any(
+      `SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'tbl_vendor_routing_assignments'
+          AND indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [["ix_vn_assign_org_one_pending", "ix_vn_assign_org_one_accepted"]]
+    );
+    expect(rows.map((r) => r.indexname)).toEqual(["ix_vn_assign_org_one_accepted", "ix_vn_assign_org_one_pending"]);
+    for (const { indexdef } of rows) {
+      expect(indexdef).toMatch(/^CREATE UNIQUE INDEX/);
+      expect(indexdef).toMatch(/\(org_id, subject_type, subject_id, COALESCE\(hotel_id, 0\)\)/);
+    }
+    expect(rows[0].indexdef).toContain("'ACCEPTED'");
+    expect(rows[1].indexdef).toContain("'PENDING'");
+  });
+
   it("allows payment_type network_seat", async () => {
     await withTx(async (t) => {
       await world(t);

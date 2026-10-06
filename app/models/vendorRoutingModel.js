@@ -12,6 +12,11 @@ import db from "../config/dbConn.js";
 export const ROUTING_SUBJECT_LOCK_NS = 950601;
 export const ROUTING_SWEEP_LOCK_NS = 950602;
 export const ROUTING_SWEEP_LOCK_KEY = "vendor_routing_sweep";
+/**
+ * One org's quoting on one RFQ (key `<orgId>:<rfqId>`), taken by the RFQ subject's
+ * quote gate and hooks (app/services/vendorNetwork/subjects/rfqSubject.js).
+ */
+export const RFQ_ORG_QUOTE_LOCK_NS = 950603;
 
 /** The routing unique indexes: a 23505 on one of these is a routing race (409). */
 export const ROUTING_UNIQUE_INDEXES = Object.freeze(["ix_vn_assign_org_one_pending", "ix_vn_assign_org_one_accepted"]);
@@ -221,6 +226,7 @@ export default {
   ROUTING_SUBJECT_LOCK_NS,
   ROUTING_SWEEP_LOCK_NS,
   ROUTING_SWEEP_LOCK_KEY,
+  RFQ_ORG_QUOTE_LOCK_NS,
   ROUTING_UNIQUE_INDEXES,
   lockRoutingSubject,
   lockLiveRowsForSubject,

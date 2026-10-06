@@ -84,6 +84,11 @@ import { buildNegotiationMetrics } from '../../services/quoteComparisonMetrics.j
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
+import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
+import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
+
+/** A Vendor Networks quote-gate refusal as its HTTP answer body. */
+const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
 
 // "Pending for me" grouping precedence. An approval is the most specific and
 // most blocking claim on this user; a response is personal and usually blocks
@@ -9865,6 +9870,18 @@ const rfqController = {
         // failing COMMIT unreportable. The markers resolve the callback normally,
         // so exactly the same work commits as before.
         const quoteOutcome = await db.tx(async (t) => {
+          // Vendor Networks (spec §6.3): routing and one quote per org, checked under
+          // the org-quote lock as this transaction's first statement, before any write
+          // (regrets included). No query for a JWT vendor in no org.
+          if (quoteGateApplies(req)) {
+            try {
+              await assertOrgMayQuote(rfq_id, user.id, t);
+            } catch (err) {
+              if (err instanceof NetworkHttpError) return deferJson(err.http, networkRefusalBody(err));
+              throw err;
+            }
+          }
+
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -15195,6 +15212,19 @@ sendFollowUpEmails: async (req, res) => {
           status: 0,
           message: 'You are not allowed to update this quote.'
         });
+      }
+
+      // Vendor Networks (spec §6.3): a member keeps quoting only while it holds the
+      // ACCEPTED assignment; the principal not while a member does; one quote per org.
+      // This route writes outside a transaction, so the check runs in its own one
+      // (after any in-flight routing transition of the org+RFQ has committed).
+      if (quoteGateApplies(req)) {
+        try {
+          await db.tx((t) => assertOrgMayQuote(quoteExists[0].rfq_id, user.id, t));
+        } catch (err) {
+          if (err instanceof NetworkHttpError) return res.status(err.http).json(networkRefusalBody(err));
+          throw err;
+        }
       }
 
       // Get RFQ details to check dates

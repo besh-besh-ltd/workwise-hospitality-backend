@@ -3438,7 +3438,19 @@ LIMIT 1;`;
                   FROM tbl_users U
                   JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
-                )
+                )${
+                  // Vendor Networks (spec §6.3): buyers see which network a vendor
+                  // entity belongs to. Vendor callers' payload is unchanged.
+                  user_type != 3
+                    ? `,
+             'org_name', (
+                  SELECT VN_O.name
+                  FROM tbl_vendor_org_entities VN_E
+                  JOIN tbl_vendor_orgs VN_O ON VN_O.id = VN_E.org_id
+                  WHERE VN_E.vendor_id = RFQ_P_V.user_id AND VN_E.status <> 'REMOVED'
+                )`
+                    : ''
+                }
 
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
@@ -3462,6 +3474,8 @@ LIMIT 1;`;
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
               AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
+              -- a network's routed copy is not another invited vendor (spec §6.3)
+              AND RFQ_P_V.routed_from_vendor_id IS NULL
         ) AS vendors_count
         ,(
             SELECT COUNT(DISTINCT TQ.created_by)
@@ -4315,7 +4329,8 @@ LIMIT 2;
           ) AS "quotes",
           ARRAY(
             SELECT json_build_object(
-              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+              'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL),
               'quote_received',
               (
                 SELECT COUNT(*) FROM (
@@ -4841,7 +4856,8 @@ LIMIT 2;
         ) AS has_tech_unstartable_product,
         ARRAY(
           SELECT json_build_object(
-            'total_vendors', COUNT(DISTINCT TRPV.user_id),
+            -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+            'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL),
             'quote_received',
             (
               SELECT COUNT(*) FROM (
@@ -5699,7 +5715,7 @@ LIMIT 2;
           SELECT te.id AS tech_eval_id, te.tbl_rfq_product_id AS product_id,
             COALESCE(pv.name, 'Product ' || te.tbl_rfq_product_id) AS product_name,
             te.minimum_passing_score, te.current_round,
-            (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = $1 AND rpv.product_variant_id = rp.product_variant_id AND COALESCE(rpv.variant::text, '0') = COALESCE(rp.variant::text, '0')) AS total_vendors
+            (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = $1 AND rpv.product_variant_id = rp.product_variant_id AND COALESCE(rpv.variant::text, '0') = COALESCE(rp.variant::text, '0') AND rpv.routed_from_vendor_id IS NULL) AS total_vendors
           FROM tbl_rfq_product_tech_evaluation te
           LEFT JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
           LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
@@ -8128,6 +8144,13 @@ LIMIT 2;
                       'mobile', TU.mobile,
                       -- 'address', TCL3.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
+                      -- Vendor Networks (spec §6.3): the network the quoting entity belongs to
+                      'org_name', (
+                        SELECT VN_O.name
+                        FROM tbl_vendor_org_entities VN_E
+                        JOIN tbl_vendor_orgs VN_O ON VN_O.id = VN_E.org_id
+                        WHERE VN_E.vendor_id = TU.id AND VN_E.status <> 'REMOVED'
+                      ),
                       'rfq_product_vendor_id', (
                         SELECT rpv.id
                         FROM tbl_rfq_product_vendors rpv

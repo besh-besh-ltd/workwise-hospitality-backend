@@ -5,6 +5,8 @@
 import { Router } from "express";
 import passport from "../../middleware/passport.js";
 import { acl } from "../../helper/common.js";
+// Registers the RFQ routing subject with the engine (module side effect).
+import "../../services/vendorNetwork/subjects/rfqSubject.js";
 import {
   switchEntity,
   createOrg,

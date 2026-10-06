@@ -1,0 +1,604 @@
+// Vendor Networks: the RFQ routing subject and the quote gates (spec §6.3, §10.4, §10.8).
+// Pattern B: committed fixtures (vendor ids 95951..95969), removed in afterEach. Every
+// endpoint over HTTP (routing API, POST /rfq/quote/create, PUT /rfq/quote/update/:id,
+// GET /rfq/getRfqById/:id, GET /rfq/get-quotes/:id, POST /rfq/finalize); the sweep
+// through cronManager.runVendorRoutingSweepTick.
+//
+// SMTP: nodemailer.createTransport is swapped for a no-op recorder.
+
+import nodemailer from "nodemailer";
+import { db, closeDb } from "../setup/db.js";
+import { IDS } from "../fixtures/ids.js";
+import { makeRFQ } from "../factories/rfq.js";
+import { httpClient } from "../helpers/http.js";
+import { countQueries } from "../helpers/queryCounter.js";
+import {
+  seedVendorEntity,
+  seedPerson,
+  seedOrg,
+  addEntity,
+  addMember,
+  cleanupVendorNetworkFixtures,
+} from "../helpers/vendorNetworkSeed.js";
+import { runVendorRoutingSweepTick } from "../../app/helper/cronManager.js";
+import {
+  getSubjectHandler,
+  revokeLiveAssignmentsForEntity,
+} from "../../app/services/vendorNetwork/routingEngine.js";
+import { rfqSubjectHandler } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
+import rfqModel from "../../app/models/rfqModel.js";
+
+const HQ = 95951; // principal of ORG_A
+const B = 95952; // BRANCH of ORG_A
+const C = 95953; // BRANCH of ORG_A (sibling of B)
+const MP = 95955; // type-11 person, ENTITY_MEMBER of B
+const FHQ = 95956; // principal of ORG_F
+const FB = 95957; // BRANCH of ORG_F
+const NO = 95958; // vendor in no network
+const ORG_A = 95951;
+const ORG_F = 95952;
+const BUYER = IDS.users.a1_proc_buyer;
+const BASE = "/api/v1/vendor-network";
+const HOUR = 3600 * 1000;
+
+let VARIANT;
+let buyerTypeBefore;
+const rfqIds = [];
+const hierarchyIds = [];
+
+// --- SMTP no-op ----------------------------------------------------------------------
+let realTransport;
+beforeAll(async () => {
+  realTransport = nodemailer.createTransport;
+  nodemailer.createTransport = () => ({
+    sendMail(_mail, cb) {
+      const info = { messageId: "<vn-rfq>", response: "250 OK" };
+      if (typeof cb === "function") cb(null, info);
+      return Promise.resolve(info);
+    },
+    verify: () => Promise.resolve(true),
+    close() {},
+  });
+  VARIANT = (await db.one(`SELECT id FROM tbl_product_variant ORDER BY id ASC LIMIT 1`)).id;
+  buyerTypeBefore = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [BUYER])).user_type;
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
+});
+
+beforeEach(async () => {
+  rfqIds.length = 0;
+  await world();
+});
+
+afterEach(async () => {
+  await cleanupRfqs();
+  await cleanupVendorNetworkFixtures();
+});
+
+afterAll(async () => {
+  await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [BUYER, buyerTypeBefore]);
+  nodemailer.createTransport = realTransport;
+  await closeDb();
+});
+
+async function world() {
+  for (const id of [HQ, B, C, FHQ, FB, NO]) {
+    await seedVendorEntity({ id, companyId: id, name: `VN RFQ ${id}`, email: `vn-rfq-${id}@example.com` });
+  }
+  await seedOrg({ id: ORG_A, principalVendorId: HQ, name: "Org A Network" });
+  await addEntity({ orgId: ORG_A, vendorId: B });
+  await addEntity({ orgId: ORG_A, vendorId: C });
+  await seedPerson({ id: MP, email: "vn-rfq-member@example.com", name: "Mia Member" });
+  await addMember({ orgId: ORG_A, personId: MP, entityVendorId: B, role: "ENTITY_MEMBER" });
+  await seedOrg({ id: ORG_F, principalVendorId: FHQ, name: "Org F Network" });
+  await addEntity({ orgId: ORG_F, vendorId: FB });
+}
+
+async function cleanupRfqs() {
+  if (!rfqIds.length) return;
+  const ids = rfqIds;
+  const productIds = (await db.any(`SELECT id FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids])).map((r) => r.id);
+  const instances = (
+    await db.any(
+      `SELECT id FROM tbl_approval_instances
+        WHERE (entity_type IN ('NEGOTIATION_QUOTE', 'ARC') AND entity_id = ANY($1::int[]))
+           OR (entity_type = 'RFQ' AND entity_id = ANY($2::int[]))`,
+      [productIds, ids]
+    )
+  ).map((r) => r.id);
+  if (instances.length) {
+    await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`, [instances]);
+    await db.none(
+      `DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id IN
+         (SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[]))`,
+      [instances]
+    );
+    await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])`, [instances]);
+    await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [instances]);
+  }
+  if (hierarchyIds.length) {
+    await db.none(`DELETE FROM tbl_approval_hierarchy WHERE id = ANY($1::int[])`, [hierarchyIds]);
+    hierarchyIds.length = 0;
+  }
+  await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_quote_finalization_history WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_quote_finalization WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_quote_activity WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_quotes_payment_terms WHERE quote_id IN (SELECT id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]))`, [ids]);
+  await db.none(`DELETE FROM tbl_quote_item_history WHERE quote_item_id IN (SELECT id FROM tbl_quote_items WHERE rfq_id = ANY($1::int[]))`, [ids]);
+  await db.none(`DELETE FROM tbl_quote_items WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id BETWEEN 95951 AND 95969`);
+  await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [ids]);
+}
+
+// --- helpers -----------------------------------------------------------------------------
+
+/** "YYYY-MM-DD HH:mm:ss" IST wall clock `offsetMs` from now: how bid_end_date is stored. */
+const istString = (offsetMs) =>
+  new Date(Date.now() + offsetMs + 5.5 * HOUR).toISOString().replace("T", " ").slice(0, 19);
+const utcString = (offsetMs) => new Date(Date.now() + offsetMs).toISOString().replace("T", " ").slice(0, 19);
+
+/** A published RFQ open for 3 days, one product, invited: HQ, FHQ and NO (principal rows). */
+async function openRfq({ bidEndOffsetMs = 3 * 24 * HOUR, invite = [HQ, FHQ, NO] } = {}) {
+  const { rfq_id, rfq_no } = await makeRFQ(db, {
+    createdBy: BUYER,
+    status: 1,
+    is_published: 1,
+    tender_publish_date: utcString(-2 * 24 * HOUR),
+    vendor_clarification_date: utcString(-24 * HOUR),
+    bid_end_date: istString(bidEndOffsetMs),
+    hospitality: IDS.hospitality.A,
+    hotel: IDS.hotels.A1,
+    department: IDS.departments.proc,
+    process: IDS.processes.A_P1,
+    title: "VN routed RFQ",
+  });
+  rfqIds.push(rfq_id);
+  await db.none(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1, '', '', '', '', '', $2, 0)`,
+    [rfq_id, VARIANT]
+  );
+  for (const v of invite) {
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 0)`,
+      [rfq_id, VARIANT, v]
+    );
+  }
+  return { rfq_id, rfq_no };
+}
+
+const quoteBody = ({ rfq_id, rfq_no }, { regret = false, price = 100 } = {}) => ({
+  rfq_id,
+  rfq_no,
+  status: 1,
+  products: [
+    {
+      product_id: VARIANT,
+      product_name: "VN product",
+      unit_price: regret ? "" : price,
+      tax: 18,
+      total_price: 0,
+      comment: "",
+      delivery_period: "7",
+      quantity: "10",
+      variant: 0,
+      tax_mode: "percentage",
+      other_charges: [],
+      document_files: [],
+    },
+  ],
+  globalPaymentTerms: "",
+  globalComment: "",
+  global_payment_term_list: [],
+  term_and_condition_files: [],
+  vendorGSTIN: "",
+  global_charges: [],
+  ...(regret ? { is_regret: 1, regret_reason: "No stock" } : {}),
+});
+
+async function createQuote(userId, rfq, opts) {
+  return (await httpClient(userId)).post("/api/v1/rfq/quote/create").send(quoteBody(rfq, opts));
+}
+const assign = async (rfqId, assignee, actor = HQ) =>
+  (await httpClient(actor)).post(`${BASE}/routing/assign`).send({ subject_type: "RFQ", subject_id: rfqId, assignee_vendor_id: assignee });
+const respond = async (userId, id, body) => (await httpClient(userId)).post(`${BASE}/routing/${id}/respond`).send(body);
+const revoke = async (id, actor = HQ) => (await httpClient(actor)).post(`${BASE}/routing/${id}/revoke`).send({});
+const vendorGet = async (userId, rfqId) => (await httpClient(userId)).get(`/api/v1/rfq/getRfqById/${rfqId}`);
+
+const quotesOf = (rfqId) =>
+  db.any(`SELECT created_by, is_regret FROM tbl_quotes WHERE rfq_id = $1 ORDER BY id`, [rfqId]);
+const rowsOf = (rfqId, userId) =>
+  db.any(
+    `SELECT user_id, routed_from_vendor_id, product_variant_id, variant FROM tbl_rfq_product_vendors
+      WHERE rfq_id = $1 AND user_id = $2 ORDER BY id`,
+    [rfqId, userId]
+  );
+const assignment = (id) => db.one(`SELECT * FROM tbl_vendor_routing_assignments WHERE id = $1`, [id]);
+
+/** Routes `rfq` to `member` and has it accept; returns the assignment id. */
+async function routeAndAccept(rfqId, member = B, admin = HQ) {
+  const a = await assign(rfqId, member, admin);
+  expect(a.status).toBe(201);
+  const r = await respond(member, a.body.data.id, { decision: "ACCEPT" });
+  expect(r.status).toBe(200);
+  return a.body.data.id;
+}
+
+// --- tests -------------------------------------------------------------------------------
+
+describe("routing an RFQ invite to a member", () => {
+  it("1. PENDING: the member can GET the RFQ (copied invite rows) but createQuote → 403 ROUTING_REQUIRED", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    expect(a.status).toBe(201);
+
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([
+      { user_id: B, routed_from_vendor_id: HQ, product_variant_id: VARIANT, variant: 0 },
+    ]);
+    const get = await vendorGet(B, rfq.rfq_id);
+    expect(get.status).toBe(200);
+    expect(get.body.data.id).toBe(rfq.rfq_id);
+
+    const res = await createQuote(B, rfq);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ status: 0, reason: "ROUTING_REQUIRED" });
+    // the person acting for B gets the same answer
+    expect((await createQuote(MP, rfq)).body.reason).toBe("ROUTING_REQUIRED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+
+  it("2. ACCEPTED: the member quotes as itself (created_by = member) and the principal is blocked (409 ROUTED_TO_MEMBER)", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+
+    const res = await createQuote(MP, rfq); // a person acting for B
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: B, is_regret: 0 }]);
+
+    const hq = await createQuote(HQ, rfq);
+    expect(hq.status).toBe(409);
+    expect(hq.body.reason).toBe("ROUTED_TO_MEMBER");
+    expect(await quotesOf(rfq.rfq_id)).toHaveLength(1);
+  });
+
+  it("2b. a principal regret while a member holds ACCEPTED is refused too (regret writes a quote row)", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const res = await createQuote(HQ, rfq, { regret: true });
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("ROUTED_TO_MEMBER");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+});
+
+describe("one quote per org", () => {
+  it("3a. principal quoted while the member was PENDING → the member's accept is refused (409 ORG_ALREADY_QUOTED), and re-routing too", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    expect((await createQuote(HQ, rfq)).status).toBe(200);
+
+    const acc = await respond(B, a.body.data.id, { decision: "ACCEPT" });
+    expect(acc.status).toBe(409);
+    expect(acc.body.reason).toBe("ORG_ALREADY_QUOTED");
+    expect((await assignment(a.body.data.id)).status).toBe("PENDING");
+
+    const again = await assign(rfq.rfq_id, C);
+    expect(again.status).toBe(409);
+    expect(again.body.reason).toBe("ORG_ALREADY_QUOTED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: HQ, is_regret: 0 }]);
+  });
+
+  it("3b. a suspended member that quoted keeps its quote; the principal then gets 409 ORG_ALREADY_QUOTED", async () => {
+    const rfq = await openRfq();
+    const id = await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+
+    // Suspension revokes the entity's live assignments; an ENTITY_* release is never refused.
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE vendor_id = $1`, [B]);
+    expect(await revokeLiveAssignmentsForEntity(B, { reason: "ENTITY_SUSPENDED", orgId: ORG_A })).toBe(1);
+    expect((await assignment(id)).status).toBe("REVOKED");
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(1); // it quoted: the buyer still sees it
+
+    const hq = await createQuote(HQ, rfq);
+    expect(hq.status).toBe(409);
+    expect(hq.body.reason).toBe("ORG_ALREADY_QUOTED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: B, is_regret: 0 }]);
+  });
+
+  it("3c. updateQuoteItems: a member whose assignment ended can no longer change its quote (403 ROUTING_REQUIRED)", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+    const quoteId = (await db.one(`SELECT id FROM tbl_quotes WHERE rfq_id = $1`, [rfq.rfq_id])).id;
+
+    const ok = await (await httpClient(B)).put(`/api/v1/rfq/quote/update/${quoteId}`).send(quoteBody(rfq, { price: 90 }));
+    expect(ok.status).toBe(200);
+
+    await revokeLiveAssignmentsForEntity(B, { reason: "ENTITY_SUSPENDED", orgId: ORG_A }); // entity stays ACTIVE here
+    const res = await (await httpClient(B)).put(`/api/v1/rfq/quote/update/${quoteId}`).send(quoteBody(rfq, { price: 80 }));
+    expect(res.status).toBe(403);
+    expect(res.body.reason).toBe("ROUTING_REQUIRED");
+    const { unit_price } = await db.one(`SELECT unit_price FROM tbl_quote_items WHERE quote_id = $1`, [quoteId]);
+    expect(Number(unit_price)).toBe(90);
+  });
+
+  it("3d. the emailed-link (token) path is gated too: principal → 409 ROUTED_TO_MEMBER", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const token = 9595100000 + Math.floor(Math.random() * 99999);
+    await db.none(
+      `INSERT INTO tbl_vendor_rfq_tokens_non_login (id, token, vendor_id, rfq_no)
+       VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM tbl_vendor_rfq_tokens_non_login), $1, $2, $3)`,
+      [token, HQ, rfq.rfq_no]
+    );
+    const anon = await httpClient(null);
+    const res = await anon.post(`/api/v1/rfq/quote/create?token=${token}`).send(quoteBody(rfq));
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("ROUTED_TO_MEMBER");
+  });
+});
+
+describe("releases", () => {
+  it("4. decline → the member's routed rows are gone and its RFQ GET answers like any unmapped vendor's", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    const res = await respond(B, a.body.data.id, { decision: "DECLINE", reason: "NO_STOCK" });
+    expect(res.status).toBe(200);
+
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([]);
+    expect(await rowsOf(rfq.rfq_id, HQ)).toHaveLength(1); // the principal's invite is untouched
+    const unmapped = await vendorGet(C, rfq.rfq_id);
+    const member = await vendorGet(B, rfq.rfq_id);
+    expect(member.status).toBe(unmapped.status);
+    expect(member.body).toEqual(unmapped.body);
+    expect(member.body.data).toEqual([]);
+  });
+
+  it("5. the principal can quote after the member timed out (sweep, past due_at)", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    const id = a.body.data.id;
+    await db.none(`UPDATE tbl_vendor_routing_assignments SET due_at = now() - interval '1 minute' WHERE id = $1`, [id]);
+
+    const tick = await runVendorRoutingSweepTick(new Date());
+    expect(tick.timedOut).toBeGreaterThanOrEqual(1);
+    expect((await assignment(id)).status).toBe("TIMED_OUT");
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([]);
+
+    const res = await createQuote(HQ, rfq);
+    expect(res.status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: HQ, is_regret: 0 }]);
+  });
+
+  it("6. revoke after the member quoted → 409 QUOTE_SUBMITTED, the assignment stays ACCEPTED", async () => {
+    const rfq = await openRfq();
+    const id = await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+
+    const res = await revoke(id);
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("QUOTE_SUBMITTED");
+    expect((await assignment(id)).status).toBe("ACCEPTED");
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(1);
+  });
+
+  it("6b. a member that regretted may be revoked; it keeps its rows (it answered) and the principal may then quote", async () => {
+    const rfq = await openRfq();
+    const id = await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq, { regret: true })).status).toBe(200);
+
+    expect((await revoke(id)).status).toBe(200);
+    expect((await assignment(id)).status).toBe("REVOKED");
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(1);
+
+    expect((await createQuote(HQ, rfq)).status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([
+      { created_by: B, is_regret: 1 },
+      { created_by: HQ, is_regret: 0 },
+    ]);
+  });
+});
+
+describe("buyer view", () => {
+  it("7. invited-vendor counts ignore routed rows; vendor and quote lists carry org_name", async () => {
+    const rfq = await openRfq();
+    const buyer = await httpClient(BUYER);
+    const detail = async () => {
+      const res = await buyer.get(`/api/v1/rfq/getRfqById/${rfq.rfq_id}?includeVendors=true`);
+      expect(res.status).toBe(200);
+      return res.body.data.products[0];
+    };
+    // POST /rfq/list-view's per-card details (the controller reads vendors[0].total_vendors)
+    const cardCount = async () => {
+      const { vendors } = (await rfqModel.getRfqListViewCardDetails([rfq.rfq_id], BUYER))[rfq.rfq_id];
+      return (typeof vendors === "string" ? JSON.parse(vendors) : vendors)[0].total_vendors;
+    };
+
+    expect((await detail()).vendors_count).toBe("3");
+    expect(Number(await cardCount())).toBe(3);
+
+    await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+
+    const product = await detail();
+    expect(product.vendors_count).toBe("3"); // HQ counted once, B's routed copy excluded
+    expect(Number(await cardCount())).toBe(3);
+    const orgOf = Object.fromEntries(product.vendor_details.map((v) => [v.user_id, v.org_name]));
+    expect(orgOf).toEqual({ [HQ]: "Org A Network", [B]: "Org A Network", [FHQ]: "Org F Network", [NO]: null });
+
+    // quotes are visible to the buyer once bidding has closed
+    await db.none(`UPDATE tbl_rfq SET bid_end_date = $2 WHERE id = $1`, [rfq.rfq_id, istString(-HOUR)]);
+    const quotes = await buyer.get(`/api/v1/rfq/get-quotes/${rfq.rfq_id}`);
+    expect(quotes.status).toBe(200);
+    const vd = quotes.body.data
+      .flatMap((p) => p.quotations || [])
+      .map((q) => (q.quote_details || q).vendor_details)
+      .filter(Boolean);
+    expect(vd.map((v) => [v.id, v.org_name])).toEqual([[B, "Org A Network"]]);
+
+    const view = await buyer.get(`/api/v1/rfq/quote-comparison-view/${rfq.rfq_id}`);
+    expect(view.status).toBe(200);
+    expect(view.body.vendors.map((v) => [v.id, v.org_name])).toEqual([[B, "Org A Network"]]);
+  });
+
+  it("8. the buyer finalizes the member's quote → the award (tbl_quote_finalization) names the member", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+    const item = await db.one(`SELECT id FROM tbl_quote_items WHERE rfq_id = $1`, [rfq.rfq_id]);
+    // finalize needs the buyer in the company's PO hierarchy (or no hierarchy at all)
+    const { company_id } = await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [BUYER]);
+    hierarchyIds.push(
+      (
+        await db.one(
+          `INSERT INTO tbl_approval_hierarchy (company_id, user_id, approval_level, bypass_cap, hierarchy_type)
+           VALUES ($1, $2, 1, 0, 'po') RETURNING id`,
+          [company_id, BUYER]
+        )
+      ).id
+    );
+    // bids closed: finalization opens
+    await db.none(`UPDATE tbl_rfq SET bid_end_date = $2 WHERE id = $1`, [rfq.rfq_id, istString(-HOUR)]);
+
+    const res = await (await httpClient(BUYER)).post("/api/v1/rfq/finalize").send({
+      rfq_id: rfq.rfq_id,
+      rfq_no: rfq.rfq_no,
+      product_variant_id: VARIANT,
+      variant: 0,
+      vendor_id: B,
+      quote_id: item.id,
+      quote_item_id: item.id,
+      route_type: "PO",
+      comment: "awarding the routed member",
+    });
+    expect(res.status).toBe(200);
+    const fin = await db.any(`SELECT vendor_id FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfq.rfq_id]);
+    expect(fin.map((f) => f.vendor_id)).toEqual([B]);
+  });
+});
+
+describe("isolation and back-compat", () => {
+  it("9. sibling isolation: C cannot read or quote the RFQ routed to B", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const get = await vendorGet(C, rfq.rfq_id);
+    expect(get.status).toBe(200);
+    expect(get.body.data).toEqual([]);
+    const res = await createQuote(C, rfq);
+    expect(res.status).not.toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+
+  it("10. two orgs route one RFQ: each member's rows come from its own principal, both quote", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id, B, HQ);
+    await routeAndAccept(rfq.rfq_id, FB, FHQ);
+    expect((await rowsOf(rfq.rfq_id, B)).map((r) => r.routed_from_vendor_id)).toEqual([HQ]);
+    expect((await rowsOf(rfq.rfq_id, FB)).map((r) => r.routed_from_vendor_id)).toEqual([FHQ]);
+
+    expect((await createQuote(B, rfq)).status).toBe(200);
+    expect((await createQuote(FB, rfq)).status).toBe(200);
+    expect((await createQuote(FHQ, rfq)).body.reason).toBe("ROUTED_TO_MEMBER");
+    expect((await quotesOf(rfq.rfq_id)).map((q) => q.created_by).sort()).toEqual([B, FB]);
+  });
+
+  it("11. a vendor in no network quotes as before, and the gate costs it no query", async () => {
+    const rfq = await openRfq();
+    const client = await httpClient(NO);
+    const { result: res, statements } = await countQueries(() =>
+      client.post("/api/v1/rfq/quote/create").send(quoteBody(rfq))
+    );
+    expect(res.status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: NO, is_regret: 0 }]);
+    const texts = statements.map((s) => (typeof s === "string" ? s : s.text ?? ""));
+    expect(texts.filter((s) => /pg_advisory_xact_lock|tbl_vendor_routing_assignments/.test(s))).toEqual([]);
+    // the placement lookup the gate would run is jwtUsr's alone (once per request)
+    expect(texts.filter((s) => /AS entity_status, o\.name AS org_name/.test(s))).toHaveLength(1);
+  });
+});
+
+describe("handler", () => {
+  it("is the registered RFQ subject", () => {
+    expect(getSubjectHandler("RFQ")).toBe(rfqSubjectHandler);
+  });
+
+  it("dueCap = bid_end − 6h as an IST instant, whatever the PG session timezone (UTC, Singapore, Kolkata)", async () => {
+    const rfq = await openRfq({ bidEndOffsetMs: 30 * HOUR });
+    const { bid_end_date } = await db.one(`SELECT bid_end_date FROM tbl_rfq WHERE id = $1`, [rfq.rfq_id]);
+    // bid_end_date is IST wall clock: the instant is that wall clock minus 5h30m.
+    const bidEndInstant = new Date(`${bid_end_date.replace(" ", "T")}Z`).getTime() - 5.5 * HOUR;
+    for (const zone of ["UTC", "Asia/Singapore", "Asia/Kolkata"]) {
+      const v = await db.tx(async (t) => {
+        await t.none(`SET LOCAL TIME ZONE '${zone}'`);
+        return rfqSubjectHandler.validateSubject({ orgId: ORG_A, principalVendorId: HQ, subjectId: rfq.rfq_id, hotelId: null }, t);
+      });
+      expect(v.ok).toBe(true);
+      expect(v.dueCap).toBeInstanceOf(Date);
+      expect(v.dueCap.getTime()).toBe(bidEndInstant - 6 * HOUR);
+      expect(v.hotelIds).toEqual([IDS.hotels.A1]);
+    }
+  });
+
+  it("the bid-end check is IST: an RFQ that closed 1h ago (IST) is not routable under a UTC session", async () => {
+    const rfq = await openRfq({ bidEndOffsetMs: -HOUR });
+    const v = await db.tx(async (t) => {
+      await t.none(`SET LOCAL TIME ZONE 'UTC'`);
+      return rfqSubjectHandler.validateSubject({ orgId: ORG_A, principalVendorId: HQ, subjectId: rfq.rfq_id, hotelId: null }, t);
+    });
+    expect(v).toMatchObject({ ok: false, http: 409, code: "RFQ_NOT_OPEN" });
+  });
+
+  it("assign caps due_at at bid_end − 6h (bid ends in 8h, org timeout 24h → due in ~2h)", async () => {
+    const rfq = await openRfq({ bidEndOffsetMs: 8 * HOUR });
+    const a = await assign(rfq.rfq_id, B);
+    expect(a.status).toBe(201);
+    const due = new Date((await assignment(a.body.data.id)).due_at).getTime();
+    expect(Math.abs(due - (Date.now() + 2 * HOUR))).toBeLessThan(2 * 60 * 1000);
+  });
+
+  it("refuses: an RFQ the principal is not invited to (404), a closed RFQ (409), a hotel id (400)", async () => {
+    const notInvited = await openRfq({ invite: [NO] });
+    expect((await assign(notInvited.rfq_id, B)).status).toBe(404);
+    const closed = await openRfq();
+    await db.none(`UPDATE tbl_rfq SET status = 2 WHERE id = $1`, [closed.rfq_id]);
+    expect((await assign(closed.rfq_id, B)).body.reason).toBe("RFQ_NOT_OPEN");
+    const withHotel = await (await httpClient(HQ))
+      .post(`${BASE}/routing/assign`)
+      .send({ subject_type: "RFQ", subject_id: closed.rfq_id, hotel_id: IDS.hotels.A1, assignee_vendor_id: B });
+    expect(withHotel.status).toBe(400);
+    expect(await db.any(`SELECT 1 FROM tbl_vendor_routing_assignments WHERE org_id = $1`, [ORG_A])).toEqual([]);
+  });
+
+  it("listUnrouted: open RFQs invited to the principal, minus routed, quoted and closed ones", async () => {
+    const free = await openRfq();
+    const routed = await openRfq();
+    const quoted = await openRfq();
+    const closed = await openRfq();
+    const other = await openRfq({ invite: [FHQ] });
+    await assign(routed.rfq_id, B);
+    expect((await createQuote(HQ, quoted)).status).toBe(200);
+    await db.none(`UPDATE tbl_rfq SET bid_end_date = $2 WHERE id = $1`, [closed.rfq_id, istString(-HOUR)]);
+
+    const items = await rfqSubjectHandler.listUnrouted(ORG_A, db);
+    const mine = items.filter((i) => rfqIds.includes(i.subjectId));
+    expect(mine.map((i) => i.subjectId)).toEqual([free.rfq_id]);
+    expect(mine[0]).toMatchObject({ hotelId: null, hotelIds: [IDS.hotels.A1] });
+    expect(mine[0].title).toContain(`RFQ #${free.rfq_no}`);
+    expect((await rfqSubjectHandler.listUnrouted(ORG_F, db)).map((i) => i.subjectId)).toEqual(
+      expect.arrayContaining([other.rfq_id, free.rfq_id])
+    );
+  });
+
+  it("describe: RFQ number and title, linking to the vendor RFQ page", async () => {
+    const rfq = await openRfq();
+    const d = await rfqSubjectHandler.describe({ subject_id: rfq.rfq_id }, db);
+    expect(d).toEqual({
+      title: `RFQ #${rfq.rfq_no} · VN routed RFQ`,
+      actionUrl: `/dashboard/vendor/inquiries-details?id=${rfq.rfq_id}`,
+    });
+  });
+});
