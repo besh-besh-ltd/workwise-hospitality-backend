@@ -85,6 +85,7 @@ import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
 import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
+import { propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
@@ -4768,6 +4769,8 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
                ON CONFLICT DO NOTHING`,
               [techEval.rfq_id, techEval.product_variant_id, techEval.variant || 0, newVendor.vendor_id]
             );
+            // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+            await propagateRoutedCopies(t, techEval.rfq_id);
           }
 
           // Create empty vendor response records for new vendor (skips if already exist)
@@ -7870,6 +7873,8 @@ const rfqController = {
         });
 
         await Promise.all(vendorPromises);
+        // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+        await propagateRoutedCopies(db, rfq_id);
       }
 
       res.status(200).json({

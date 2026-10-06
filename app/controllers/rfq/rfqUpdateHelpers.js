@@ -19,6 +19,7 @@ import {
   isTimestampField
 } from './rfqEditableFields.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
+import { propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -887,6 +888,12 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
         is_material: true
       });
     }
+  }
+
+  // Vendor Networks (spec §6.3): members routed this RFQ get copies of any rows just
+  // added for their principal (new products, added vendors). One statement.
+  if (productDiff.added.length || productDiff.updated.some((u) => u.vendors.added.length)) {
+    await propagateRoutedCopies(t, rfqId);
   }
 
   return history;

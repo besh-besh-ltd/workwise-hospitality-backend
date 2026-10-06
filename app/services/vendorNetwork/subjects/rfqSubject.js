@@ -19,6 +19,9 @@
 //   engine transition: subject lock (950601) → assignment rows FOR UPDATE → entity FOR
 //                      SHARE → [hook] org-quote lock (950603) → tbl_rfq_product_vendors
 //                      INSERT/DELETE (tbl_rfq / tbl_quotes only read, never locked)
+//   RFQ write paths:   their own rpv/tbl_rfq writes → propagateRoutedCopies, which takes the
+//                      live assignment rows FOR SHARE (never 950601/950603); the engine only
+//                      plain-reads RFQ tables, so the wait is one-way
 //   quote path:        org-quote lock (950603) FIRST in its transaction → plain reads of
 //                      assignments → tbl_quotes / tbl_quote_items writes
 // The quote path never takes an engine lock (950601, assignment or entity rows) and never
@@ -30,6 +33,7 @@ import { registerSubject } from "../routingEngine.js";
 import { NetworkHttpError } from "../guards.js";
 import { getOrgByEntity } from "../../../models/vendorNetworkModel.js";
 import { RFQ_ORG_QUOTE_LOCK_NS } from "../../../models/vendorRoutingModel.js";
+import { propagateRoutedCopies } from "./rfqRoutedCopies.js";
 import {
   ASSIGNMENT_STATUS,
   SUBJECT_TYPE,
@@ -124,19 +128,7 @@ async function validateSubject({ orgId, principalVendorId, subjectId, hotelId },
 
 /** The member gets copies of the principal's invite rows (rows it already has are kept). */
 async function onPending(assignment, t) {
-  await t.none(
-    `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, sheet_id, user_id, routed_from_vendor_id)
-     SELECT p.rfq_id, p.product_variant_id, p.variant, p.sheet_id, $3, o.principal_vendor_id
-       FROM tbl_vendor_orgs o
-       JOIN tbl_rfq_product_vendors p ON p.user_id = o.principal_vendor_id AND p.rfq_id = $2
-      WHERE o.id = $1
-        AND NOT EXISTS (
-              SELECT 1 FROM tbl_rfq_product_vendors x
-               WHERE x.rfq_id = p.rfq_id AND x.user_id = $3
-                 AND x.product_variant_id = p.product_variant_id
-                 AND x.variant IS NOT DISTINCT FROM p.variant)`,
-    [assignment.org_id, assignment.subject_id, assignment.assigned_vendor_id]
-  );
+  await propagateRoutedCopies(t, assignment.subject_id, { assignmentId: assignment.id });
 }
 
 /**
@@ -154,6 +146,9 @@ async function onAccepted(assignment, _previous, t) {
   if (sibling_quoted) {
     throw new NetworkHttpError(409, "Your network has already quoted on this RFQ", "ORG_ALREADY_QUOTED");
   }
+  // Catch-up: a product added to the RFQ while this row was being created (the RFQ
+  // write could not yet see it) reaches the member before it can quote.
+  await propagateRoutedCopies(t, assignment.subject_id, { assignmentId: assignment.id });
 }
 
 /**

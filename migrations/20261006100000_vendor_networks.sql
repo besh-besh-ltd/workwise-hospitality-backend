@@ -114,6 +114,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_assign_org_one_accepted
   ON tbl_vendor_routing_assignments (org_id, subject_type, subject_id, COALESCE(hotel_id, 0)) WHERE status = 'ACCEPTED';
 CREATE INDEX IF NOT EXISTS ix_vn_assign_org ON tbl_vendor_routing_assignments (org_id);
 CREATE INDEX IF NOT EXISTS ix_vn_assign_vendor ON tbl_vendor_routing_assignments (assigned_vendor_id);
+-- live assignments of one subject across orgs (RFQ routed-copy propagation on every RFQ edit)
+CREATE INDEX IF NOT EXISTS ix_vn_assign_live_subject
+  ON tbl_vendor_routing_assignments (subject_type, subject_id) WHERE status IN ('PENDING', 'ACCEPTED');
 
 ALTER TABLE tbl_hospitality_company_hotels
   ADD COLUMN IF NOT EXISTS state_id INT NULL REFERENCES tbl_location_states(id),

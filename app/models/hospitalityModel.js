@@ -2,6 +2,7 @@ import db, { pgp } from '../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
 import { resolveHotelLocationIds } from '../helper/hotelLocation.js';
+import { propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -1379,6 +1380,9 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
     }
   }
 
+  // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+  if (results.some((r) => r.added > 0)) await propagateRoutedCopies(ctx, rfq_id);
+
   return {
     recomputed: true,
     products: results,
@@ -1452,6 +1456,9 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
       });
     }
   }
+
+  // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+  if (!options.preview && totalAdded > 0) await propagateRoutedCopies(db, rfq_id);
 
   return { refreshed: true, products: results, productsWithNoVendors, totalAdded, uniqueVendorCount: uniqueVendorsAdded.size };
 },
@@ -2232,7 +2239,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   addVendorToRfq: async (vendorId, rfqId, scope) => {
     const { inviteeId, holderIds } = scope ?? (await hospitalityModel.rfqInviteScope(vendorId));
     if (holderIds.length === 0) return [];
-    return db.any(
+    const added = await db.any(
       `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
        SELECT rp.rfq_id, rp.product_variant_id, $3, rp.variant
        FROM tbl_rfq_products rp
@@ -2260,6 +2267,9 @@ getVendorHotelCategoryMappings: async (vendorId) => {
        RETURNING product_variant_id, variant`,
       [holderIds, rfqId, inviteeId]
     );
+    // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+    if (added.length) await propagateRoutedCopies(db, rfqId);
+    return added;
   },
 
 };
