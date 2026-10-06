@@ -188,6 +188,55 @@ describe("resolveActingContext", () => {
     expect(await resolveActingContext(await userRow(HQ), BRANCH)).toBeNull();
   });
 
+  it("member-entity login without ent acts as itself with ENTITY_MEMBER", async () => {
+    await world();
+    const ctx = await resolveActingContext(await userRow(BRANCH), null);
+    expect(ctx.entityRow.id).toBe(BRANCH);
+    expect(ctx.network).toMatchObject({
+      org_id: ORG,
+      role: "ENTITY_MEMBER",
+      actor_user_id: BRANCH,
+      acting_entity_id: BRANCH,
+      is_principal: false,
+      entity_relationship: "BRANCH",
+      entity_status: "ACTIVE",
+    });
+  });
+
+  it("member-entity login with ent = principal is refused", async () => {
+    await world();
+    expect(await resolveActingContext(await userRow(BRANCH), HQ)).toBeNull();
+  });
+
+  it("member-entity login with ent = sibling is refused", async () => {
+    await world();
+    expect(await resolveActingContext(await userRow(BRANCH), SIBLING)).toBeNull();
+  });
+
+  it("SUSPENDED member-entity login still acts as itself, carrying entity_status, but cannot operate", async () => {
+    await world();
+    const ctx = await resolveActingContext(await userRow(SUSPENDED_BRANCH), null);
+    expect(ctx.entityRow.id).toBe(SUSPENDED_BRANCH);
+    expect(ctx.network).toMatchObject({
+      role: "ENTITY_MEMBER",
+      acting_entity_id: SUSPENDED_BRANCH,
+      is_principal: false,
+      entity_status: "SUSPENDED",
+    });
+    expect(await entityCanOperate(SUSPENDED_BRANCH)).toEqual({ ok: false, reason: "NOT_ACTIVE" });
+  });
+
+  it.each(["abc", "1e5", "0x17", -1, 1.5, "", " 95102", 0])("a malformed ent claim (%p) is refused", async (bad) => {
+    await world();
+    expect(await resolveActingContext(await userRow(HQ), bad)).toBeNull();
+    expect(await resolveActingContext(await userRow(LONE), bad)).toBeNull();
+  });
+
+  it("a digit-string ent claim is accepted", async () => {
+    await world();
+    expect((await resolveActingContext(await userRow(HQ), String(BRANCH))).entityRow.id).toBe(BRANCH);
+  });
+
   it("a person or acting entity with status 0 is refused", async () => {
     await world();
     await seedPerson({ id: ADMIN_PERSON, email: "vn-admin@test.local", name: "Asha Admin", status: 0 });
@@ -229,6 +278,27 @@ describe("subscription holder helpers", () => {
     expect(await subscriptionHolderIdsFor(BRANCH)).toEqual([HQ, BRANCH, SIBLING]);
     expect(await subscriptionHolderIdsFor(HQ)).toEqual([HQ, BRANCH, SIBLING]);
     expect(await subscriptionHolderIdsFor(LONE)).toEqual([LONE]);
+  });
+
+  it("subscriptionHolderIdsFor skips siblings whose login is deleted or inactive", async () => {
+    await world();
+    await db.none(`UPDATE tbl_users SET is_deleted = 1 WHERE id = $1`, [SIBLING]);
+    expect(await subscriptionHolderIdsFor(BRANCH)).toEqual([HQ, BRANCH]);
+    await db.none(`UPDATE tbl_users SET status = 0 WHERE id = $1`, [BRANCH]);
+    expect(await subscriptionHolderIdsFor(HQ)).toEqual([HQ]);
+  });
+
+  it("collapseToPrincipals collapses only ACTIVE/SUSPENDED entities and drops invalid ids", async () => {
+    await world();
+    const INVITED = 95108;
+    const REMOVED = 95109;
+    await entity(INVITED);
+    await entity(REMOVED);
+    await addEntity({ orgId: ORG, vendorId: INVITED, status: "INVITED", withSeat: false });
+    await addEntity({ orgId: ORG, vendorId: REMOVED, status: "REMOVED", withSeat: false });
+    expect(await collapseToPrincipals([INVITED, REMOVED, SUSPENDED_BRANCH])).toEqual([HQ, INVITED, REMOVED]);
+    expect(await collapseToPrincipals(["abc", "1e5", 1.5, -1, null, String(BRANCH)])).toEqual([HQ]);
+    expect(await collapseToPrincipals(["abc"])).toEqual([]);
   });
 
   it("collapseToPrincipals maps live org entities to their principal, distinct and sorted", async () => {

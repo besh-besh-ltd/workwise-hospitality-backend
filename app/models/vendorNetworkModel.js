@@ -106,12 +106,16 @@ export function getActingEntityRow(vendorId, runner = db) {
   );
 }
 
-/** Ids of the ACTIVE entities of the vendor's org when the vendor itself is ACTIVE there. */
+/**
+ * Ids of the ACTIVE entities of the vendor's org whose login is live (status 1, not deleted),
+ * when the vendor itself is ACTIVE there.
+ */
 export async function listActiveSiblingIds(vendorId, runner = db) {
   const rows = await runner.any(
     `SELECT e2.vendor_id
        FROM tbl_vendor_org_entities e
        JOIN tbl_vendor_org_entities e2 ON e2.org_id = e.org_id AND e2.status = 'ACTIVE'
+       JOIN tbl_users u2 ON u2.id = e2.vendor_id AND u2.status = 1 AND COALESCE(u2.is_deleted, 0) = 0
       WHERE e.vendor_id = $1 AND e.status = 'ACTIVE'
       ORDER BY e2.vendor_id`,
     [vendorId]
@@ -119,12 +123,14 @@ export async function listActiveSiblingIds(vendorId, runner = db) {
   return rows.map((r) => r.vendor_id);
 }
 
-/** Distinct ids with every live org entity replaced by its org's principal, ascending. */
+/** Distinct ids with every ACTIVE/SUSPENDED org entity replaced by its org's principal, ascending. */
 export async function mapToPrincipalIds(vendorIds, runner = db) {
+  // `<> 'REMOVED'` keeps the partial index ix_vn_entities_live_vendor usable.
   const rows = await runner.any(
     `SELECT DISTINCT COALESCE(o.principal_vendor_id, v.id) AS id
        FROM unnest($1::int[]) AS v(id)
-       LEFT JOIN tbl_vendor_org_entities e ON e.vendor_id = v.id AND e.status <> 'REMOVED'
+       LEFT JOIN tbl_vendor_org_entities e
+         ON e.vendor_id = v.id AND e.status <> 'REMOVED' AND e.status IN ('ACTIVE', 'SUSPENDED')
        LEFT JOIN tbl_vendor_orgs o ON o.id = e.org_id
       WHERE v.id IS NOT NULL
       ORDER BY 1`,

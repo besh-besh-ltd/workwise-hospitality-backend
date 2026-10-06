@@ -25,11 +25,16 @@ import {
 const VENDOR_USER_TYPE = 3;
 const INVALID = Symbol("invalid-ent");
 
-/** null/undefined -> null; a positive integer (or its string form) -> number; anything else -> INVALID. */
+/** A positive safe integer, or a /^\d+$/ string of one -> number; anything else -> null. */
+function toPositiveId(value) {
+  const n = typeof value === "string" ? (/^\d+$/.test(value) ? Number(value) : NaN) : value;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/** null/undefined -> null; a valid id -> number; anything else ('1e5', '0x17', -1, 1.5 ...) -> INVALID. */
 function parseEnt(entClaim) {
   if (entClaim === null || entClaim === undefined) return null;
-  const n = typeof entClaim === "string" && entClaim.trim() !== "" ? Number(entClaim) : entClaim;
-  return Number.isInteger(n) && n > 0 ? n : INVALID;
+  return toPositiveId(entClaim) ?? INVALID;
 }
 
 const isLiveLogin = (row) => Number(row.status) === 1 && Number(row.is_deleted ?? 0) === 0;
@@ -179,9 +184,12 @@ export async function subscriptionHolderIdsFor(vendorId, runner = db) {
   return ids.length ? ids : [Number(vendorId)];
 }
 
-/** Distinct, ascending ids with each live org entity replaced by its org's principal. */
+/**
+ * Distinct, ascending ids with each ACTIVE or SUSPENDED org entity replaced by its org's
+ * principal (INVITED and REMOVED entities stay themselves). Invalid ids are dropped.
+ */
 export async function collapseToPrincipals(vendorIds, runner = db) {
-  const ids = (vendorIds ?? []).filter((v) => v !== null && v !== undefined).map(Number);
+  const ids = (vendorIds ?? []).map(toPositiveId).filter((v) => v !== null);
   if (!ids.length) return [];
   return mapToPrincipalIds(ids, runner);
 }
