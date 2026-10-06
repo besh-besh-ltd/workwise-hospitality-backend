@@ -331,6 +331,84 @@ describe("/users/add-spoc - buyer adding a SPOC to a vendor", () => {
     }
   });
 
+  // Prod: one tbl_company holds buyers of several unrelated hospitality
+  // clients. A relationship held by one client must not leak to another buyer
+  // that merely shares the tbl_company.
+  async function withSiblingBuyer(fn) {
+    const sibling = IDS.users.companyB_admin; // mapped to hospitality B
+    const [prev] = await db.any(`SELECT user_type, company_id FROM tbl_users WHERE id = $1`, [sibling]);
+    await db.none(`UPDATE tbl_users SET user_type = 2, company_id = $2 WHERE id = $1`, [sibling, companyBuyer]);
+    try {
+      await fn(sibling);
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2, company_id = $3 WHERE id = $1`, [sibling, prev.user_type, prev.company_id]);
+    }
+  }
+
+  it("does not leak one hospitality client's relationship to a buyer sharing the same tbl_company", async () => {
+    await db.none(
+      `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+      [BUYER, VENDOR_G, companyBuyer]
+    );
+    await withSiblingBuyer(async (sibling) => {
+      const owner = await httpClient(BUYER);
+      const other = await httpClient(sibling);
+
+      const allowed = await owner.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+      const leaked = await other.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+
+      expect(allowed.status).toBe(200);
+      expect(leaked.status).toBe(403);
+      expect(await spocsOf(VENDOR_G)).toHaveLength(1);
+    });
+  });
+
+  it("does not leak an RFQ-based relationship to a buyer of another hospitality client", async () => {
+    const { rfq_id } = await makeRFQ(db, { createdBy: BUYER, status: 1, is_published: 1 });
+    rfqIds.push(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0)`,
+      [rfq_id, PRODUCT_VARIANT]
+    );
+    await attachVendorToRfqProduct({ rfq_id, product_variant_id: PRODUCT_VARIANT, vendor_id: VENDOR_G });
+    await withSiblingBuyer(async (sibling) => {
+      const other = await httpClient(sibling);
+
+      const res = await other.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+
+      expect(res.status).toBe(403);
+      expect(await spocsOf(VENDOR_G)).toEqual([]);
+    });
+  });
+
+  it("is refused for a buyer with no hospitality mapping at all", async () => {
+    await db.none(
+      `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+      [BUYER, VENDOR_G, companyBuyer]
+    );
+    const unmapped = IDS.users.inactive;
+    const [prev] = await db.any(`SELECT user_type, company_id, status FROM tbl_users WHERE id = $1`, [unmapped]);
+    await db.none(`UPDATE tbl_users SET user_type = 2, company_id = $2, status = 1 WHERE id = $1`, [unmapped, companyBuyer]);
+    const savedMappings = await db.any(`SELECT * FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [unmapped]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [unmapped]);
+    try {
+      const client = await httpClient(unmapped);
+      const res = await client.post("/api/v1/users/add-spoc").send(spocPayload(VENDOR_G));
+      expect(res.status).toBe(403);
+    } finally {
+      for (const m of savedMappings) {
+        await db.none(
+          `INSERT INTO tbl_hospitality_user_mappings (id, user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [m.id, m.user_id, m.hospitality_company_id, m.hospitality_hotel_id, m.mapping_type]
+        );
+      }
+      await db.none(`UPDATE tbl_users SET user_type = $2, company_id = $3, status = $4 WHERE id = $1`,
+        [unmapped, prev.user_type, prev.company_id, prev.status]);
+    }
+  });
+
   it("is allowed when the vendor is in the buyer company's private-vendor list", async () => {
     await db.none(
       `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
@@ -553,6 +631,26 @@ describe("vendor location endpoints - company ownership", () => {
       expect(after.body.data.map((l) => l.address)).toEqual(["A office"]);
     });
 
+    it("a buyer sharing the vendor-relationship holder's tbl_company does not inherit the read", async () => {
+      await seedLocation(companyG, "G office");
+      await db.none(
+        `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id) VALUES ($1, $2, $3)`,
+        [BUYER, VENDOR_G, companyBuyer]
+      );
+      const sibling = IDS.users.companyB_admin;
+      const [prev] = await db.any(`SELECT user_type, company_id FROM tbl_users WHERE id = $1`, [sibling]);
+      await db.none(`UPDATE tbl_users SET user_type = 2, company_id = $2 WHERE id = $1`, [sibling, companyBuyer]);
+      try {
+        const owner = await httpClient(BUYER);
+        const other = await httpClient(sibling);
+
+        expect((await owner.get(GETLOC(companyG))).status).toBe(200);
+        expect((await other.get(GETLOC(companyG))).status).toBe(403);
+      } finally {
+        await db.none(`UPDATE tbl_users SET user_type = $2, company_id = $3 WHERE id = $1`, [sibling, prev.user_type, prev.company_id]);
+      }
+    });
+
     it("the internal console still reads any company", async () => {
       await seedLocation(companyB, "B office");
       const app = await buildTestApp();
@@ -656,6 +754,20 @@ describe("POST /rfq/clarification/raise - RFQ mapping", () => {
     const res = await vendorA.post(RAISE).send(payload(rfq_id));
 
     expect(res.status).toBe(403);
+    expect(await clarificationsOf(rfq_id)).toEqual([]);
+  });
+
+  it("refuses an anonymous multipart upload with 401 before the upload handler runs", async () => {
+    const rfq_id = await makeRfq({ vendors: [VENDOR_A] });
+    const anon = await httpClient(null);
+
+    const res = await anon.post(RAISE)
+      .field("rfq_id", String(rfq_id))
+      .field("subject", "Delivery schedule")
+      .field("question", "Can the delivery window be extended by a week?")
+      .attach("files", Buffer.from("anonymous upload"), "note.txt");
+
+    expect(res.status).toBe(401);
     expect(await clarificationsOf(rfq_id)).toEqual([]);
   });
 

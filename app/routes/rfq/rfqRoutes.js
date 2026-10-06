@@ -755,7 +755,7 @@ RfqRoutes.get('/get-rfqs',
 
 // vendor side
 RfqRoutes.post('/get-clauses-of-product',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getClausesOfProduct),
   rfqController.getClausesOfProduct
 )
@@ -775,7 +775,7 @@ RfqRoutes.get('/get-next-vendors-for-tech-eval',
 );
 
 RfqRoutes.post('/get-tech-evaluation-result',
-  noLogin.customer_auth,
+  passportSignIn,
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
@@ -907,7 +907,9 @@ RfqRoutes.post(
 // Vendor raises clarification (with file uploads)
 RfqRoutes.post(
   '/clarification/raise',
-  noLogin.customer_auth,
+  // Auth first: the upload handler below writes to S3, so it must never run
+  // for an anonymous caller.
+  passportSignIn,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqSchemas.clarificationFileUploadHandler,
 

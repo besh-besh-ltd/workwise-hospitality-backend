@@ -133,37 +133,50 @@ const callerOwnsSpocs = async (req, spocIds) => {
 };
 
 /**
- * Does the buyer's company have a working relationship with a vendor?
- * Either the vendor is in the company's private-vendor list
- * (tbl_buyer_private_vendors_mapping.company_id = tbl_users.company_id of the
- * buyer), or it is mapped to an RFQ of that company. tbl_rfq has no company_id;
- * it carries hospitality_company_id, which tbl_hospitality_companies ties to the
- * buyer company via buyer_company_id.
- * Identify the vendor by user id, or by the vendor's tbl_users.company_id.
+ * Does the buyer work with this vendor?
+ *
+ * The boundary is the buyer's HOSPITALITY CLIENTS, not tbl_users.company_id:
+ * on prod one tbl_company holds hundreds of buyer users spread over several
+ * unrelated hospitality clients, so company_id alone would mean "any buyer".
+ *
+ * H = the hospitality_company_id values the caller is mapped to in
+ * tbl_hospitality_user_mappings (company-level and hotel-level rows both
+ * carry it). The relationship holds when
+ *   (a) the vendor is mapped (tbl_rfq_product_vendors) on an RFQ whose
+ *       tbl_rfq.hospitality_company_id is in H, or
+ *   (b) the vendor is in tbl_buyer_private_vendors_mapping under a row whose
+ *       created_by user is mapped to a hospitality company in H.
+ * Empty H -> false. Identify the vendor by user id or by its tbl_users.company_id.
  */
-const buyerHasVendorRelationship = async (buyerCompanyId, { vendorUserId, vendorCompanyId }) => {
-  if (!buyerCompanyId) return false;
-  const vendorMatch = vendorUserId != null
-    ? 'vu.id = $2'
-    : 'vu.company_id = $2';
-  const target = vendorUserId != null ? Number(vendorUserId) : Number(vendorCompanyId);
+const buyerHasVendorRelationship = async (buyerUserId, { vendorUserId, vendorCompanyId }) => {
+  if (!Number.isInteger(Number(buyerUserId))) return false;
+  const byUser = vendorUserId != null;
+  const target = Number(byUser ? vendorUserId : vendorCompanyId);
   if (!Number.isInteger(target)) return false;
   const row = await db.oneOrNone(
-    `SELECT 1
+    `WITH h AS (
+       SELECT DISTINCT hospitality_company_id
+         FROM tbl_hospitality_user_mappings
+        WHERE user_id = $1
+     )
+     SELECT 1
        FROM tbl_users vu
-      WHERE ${vendorMatch}
+      WHERE ${byUser ? 'vu.id' : 'vu.company_id'} = $2
         AND vu.user_type = 3
         AND (
-          EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping m
-                   WHERE m.vendor_id = vu.id AND m.company_id = $1)
+          EXISTS (SELECT 1
+                    FROM tbl_rfq_product_vendors pv
+                    JOIN tbl_rfq r ON r.id = pv.rfq_id
+                   WHERE pv.user_id = vu.id
+                     AND r.hospitality_company_id IN (SELECT hospitality_company_id FROM h))
           OR EXISTS (SELECT 1
-                       FROM tbl_rfq_product_vendors pv
-                       JOIN tbl_rfq r ON r.id = pv.rfq_id
-                       JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
-                      WHERE pv.user_id = vu.id AND hc.buyer_company_id = $1)
+                       FROM tbl_buyer_private_vendors_mapping m
+                       JOIN tbl_hospitality_user_mappings um ON um.user_id = m.created_by
+                      WHERE m.vendor_id = vu.id
+                        AND um.hospitality_company_id IN (SELECT hospitality_company_id FROM h))
         )
       LIMIT 1`,
-    [buyerCompanyId, target]
+    [Number(buyerUserId), target]
   );
   return !!row;
 };
@@ -643,9 +656,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
     // Owner (vendor or buyer reading its own company), a buyer whose company
     // works with the vendor owning :id, or the internal console.
-    if (!isInternalAdmin(req) && Number(company_id) !== Number(req.user.company_id)) {
+    const ownsCompany = req.user.company_id != null && Number(company_id) === Number(req.user.company_id);
+    if (!isInternalAdmin(req) && !ownsCompany) {
       const allowed = Number(req.user.user_type) !== 3 &&
-        await buyerHasVendorRelationship(req.user.company_id, { vendorCompanyId: company_id });
+        await buyerHasVendorRelationship(req.user.id, { vendorCompanyId: company_id });
       if (!allowed) {
         return res.status(403).json({ status: 0, message: 'You can only view locations of your own company or of a vendor your company works with' });
       }
@@ -686,7 +700,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     const target = raw == null || raw === '' ? req.user.id : Number(raw);
     if (target !== Number(req.user.id)) {
       const isVendor = Number(req.user.user_type) === 3;
-      if (isVendor || !(await buyerHasVendorRelationship(req.user.company_id, { vendorUserId: target }))) {
+      if (isVendor || !(await buyerHasVendorRelationship(req.user.id, { vendorUserId: target }))) {
         return res.status(403).json({ status: 0, message: 'You can only add SPOCs to your own account or to a vendor your company works with' });
       }
     }
