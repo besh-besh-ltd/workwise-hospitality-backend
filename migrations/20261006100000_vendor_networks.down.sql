@@ -1,5 +1,6 @@
 -- Reverts 20261006100000_vendor_networks.sql.
 -- Any tbl_vendor_payments row with payment_type = 'network_seat' must be removed first or the restored CHECK fails.
+DROP FUNCTION IF EXISTS vn_backfill_hotel_location_ids();
 DROP TABLE IF EXISTS tbl_vendor_network_seats;
 DROP TABLE IF EXISTS tbl_vendor_routing_assignments;
 DROP TABLE IF EXISTS tbl_vendor_coverage_rules;

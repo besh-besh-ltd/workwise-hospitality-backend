@@ -117,6 +117,27 @@ describe("vendor network schema", () => {
     });
   });
 
+  it("hotel backfill leaves ambiguous city names NULL but sets the state", async () => {
+    await withTx(async (t) => {
+      const st = await t.one(`INSERT INTO tbl_location_states (id, state_name, country_id) VALUES (95001, 'VN Testland', 1) RETURNING id`);
+      await t.none(`INSERT INTO tbl_location_cities (id, city_name, state_id) VALUES (95001, 'Dupville', $1), (95002, ' dupville ', $1), (95003, 'Uniqton', $1)`, [st.id]);
+      const co = await t.one(`SELECT id FROM tbl_hospitality_companies LIMIT 1`);
+      const mk = (name, city) => t.one(
+        `INSERT INTO tbl_hospitality_company_hotels (hospitality_company_id, name, city, state)
+         VALUES ($1, $2, $3, 'vn testland') RETURNING id`, [co.id, name, city]);
+      const dup = await mk("VN Dup Hotel", "Dupville");
+      const uni = await mk("VN Uni Hotel", "Uniqton");
+      await t.any(`SELECT vn_backfill_hotel_location_ids()`);
+      const rows = await t.any(
+        `SELECT id, state_id, city_id FROM tbl_hospitality_company_hotels WHERE id IN ($1, $2)`, [dup.id, uni.id]);
+      const by = Object.fromEntries(rows.map((r) => [r.id, r]));
+      expect(by[dup.id].state_id).toBe(st.id);
+      expect(by[dup.id].city_id).toBeNull();
+      expect(by[uni.id].state_id).toBe(st.id);
+      expect(by[uni.id].city_id).not.toBeNull();
+    });
+  });
+
   it("cleanupVendorNetworkFixtures removes every committed fixture row", async () => {
     await cleanupVendorNetworkFixtures();
     try {
@@ -130,7 +151,7 @@ describe("vendor network schema", () => {
       `SELECT (SELECT count(*) FROM tbl_users WHERE id BETWEEN 95001 AND 95999)::int
             + (SELECT count(*) FROM tbl_company WHERE id BETWEEN 95001 AND 95999)::int
             + (SELECT count(*) FROM tbl_vendor_orgs WHERE id BETWEEN 95001 AND 95999)::int
-            + (SELECT count(*) FROM tbl_vendor_network_seats)::int AS n`
+            + (SELECT count(*) FROM tbl_vendor_network_seats WHERE org_id BETWEEN 95001 AND 95999)::int AS n`
     );
     expect(left.n).toBe(0);
   });

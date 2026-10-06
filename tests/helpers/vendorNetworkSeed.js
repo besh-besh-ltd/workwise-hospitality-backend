@@ -55,7 +55,7 @@ async function insertSeat(runner, orgId, vendorId) {
   );
 }
 
-/** Org + PRINCIPAL entity (ACTIVE, with seat) + ORG_ADMIN membership for the principal. */
+/** Org + PRINCIPAL entity (ACTIVE, no seat: the principal needs none) + ORG_ADMIN membership for the principal. */
 export async function seedOrg({ id, principalVendorId, name, routingMode = "ADMIN_ROUTES", runner = db }) {
   await runner.none(
     `INSERT INTO tbl_vendor_orgs (id, name, principal_vendor_id, routing_mode, created_by)
@@ -67,7 +67,6 @@ export async function seedOrg({ id, principalVendorId, name, routingMode = "ADMI
      VALUES ($1, $2, 'PRINCIPAL', 'ACTIVE', now())`,
     [id, principalVendorId]
   );
-  await insertSeat(runner, id, principalVendorId);
   await runner.none(
     `INSERT INTO tbl_vendor_org_members (org_id, person_user_id, entity_vendor_id, role, status)
      VALUES ($1, $2, NULL, 'ORG_ADMIN', 'ACTIVE')`,

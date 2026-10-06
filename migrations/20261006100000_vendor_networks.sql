@@ -133,11 +133,24 @@ ALTER TABLE tbl_vendor_payments DROP CONSTRAINT IF EXISTS tbl_vendor_payments_pa
 ALTER TABLE tbl_vendor_payments ADD CONSTRAINT tbl_vendor_payments_payment_type_check
   CHECK (payment_type IN ('hospitality','tender','network_seat'));
 
--- hotel location backfill (India = country_id 1 in tbl_location_states)
-UPDATE tbl_hospitality_company_hotels h SET state_id = s.id
-  FROM tbl_location_states s
- WHERE h.state_id IS NULL AND s.country_id = 1 AND lower(trim(s.state_name)) = lower(trim(h.state));
-UPDATE tbl_hospitality_company_hotels h SET city_id = c.id
-  FROM tbl_location_cities c
- WHERE h.city_id IS NULL AND h.state_id IS NOT NULL AND c.state_id = h.state_id
-   AND lower(trim(c.city_name)) = lower(trim(h.city));
+-- hotel location backfill (India = country_id 1 in tbl_location_states).
+-- Only unambiguous names match: tbl_location_states/cities have no unique name
+-- constraint (prod has duplicate cities inside one state), so a duplicated
+-- name stays NULL rather than receiving an arbitrary id.
+CREATE OR REPLACE FUNCTION vn_backfill_hotel_location_ids() RETURNS void
+LANGUAGE sql AS $fn$
+  UPDATE tbl_hospitality_company_hotels h SET state_id = s.id
+    FROM (SELECT min(id) AS id, lower(trim(state_name)) AS nm
+            FROM tbl_location_states WHERE country_id = 1
+           GROUP BY lower(trim(state_name)) HAVING count(*) = 1) s
+   WHERE h.state_id IS NULL AND s.nm = lower(trim(h.state));
+
+  UPDATE tbl_hospitality_company_hotels h SET city_id = c.id
+    FROM (SELECT min(id) AS id, state_id, lower(trim(city_name)) AS nm
+            FROM tbl_location_cities
+           GROUP BY state_id, lower(trim(city_name)) HAVING count(*) = 1) c
+   WHERE h.city_id IS NULL AND h.state_id IS NOT NULL
+     AND c.state_id = h.state_id AND c.nm = lower(trim(h.city));
+$fn$;
+
+SELECT vn_backfill_hotel_location_ids();
