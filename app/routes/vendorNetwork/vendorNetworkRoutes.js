@@ -33,6 +33,13 @@ import {
   previewMemberInvite,
   acceptMemberInvite,
 } from "../../controllers/vendorNetwork/memberController.js";
+import {
+  getCoverage,
+  putCoverage,
+  lookupStates,
+  lookupCities,
+  lookupHotels,
+} from "../../controllers/vendorNetwork/coverageController.js";
 
 const passportSignIn = passport.authenticate("jwtUsr", { session: false });
 const vendor = [passportSignIn, acl([3])];
@@ -69,6 +76,13 @@ VendorNetworkRoutes.post("/members/:id/resend", ...vendor, resendMemberInvite);
 // Member invite accept page: PUBLIC (no session yet). The 256-bit emailed token is the credential.
 VendorNetworkRoutes.post("/member-invites/accept", acceptMemberInvite);
 VendorNetworkRoutes.get("/member-invites/:token", previewMemberInvite);
+
+// Coverage rules (§6.1): static lookup paths before /coverage/:vendorId
+VendorNetworkRoutes.get("/coverage/lookup/states", ...vendor, lookupStates);
+VendorNetworkRoutes.get("/coverage/lookup/cities", ...vendor, lookupCities);
+VendorNetworkRoutes.get("/coverage/lookup/hotels", ...vendor, lookupHotels);
+VendorNetworkRoutes.get("/coverage/:vendorId", ...vendor, getCoverage);
+VendorNetworkRoutes.put("/coverage/:vendorId", ...vendor, putCoverage);
 
 // Seats (§5.1)
 VendorNetworkRoutes.post("/seats/pay", ...vendor, paySeats);

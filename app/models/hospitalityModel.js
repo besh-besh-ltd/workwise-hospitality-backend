@@ -1,6 +1,7 @@
 import db, { pgp } from '../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
+import { resolveHotelLocationIds } from '../helper/hotelLocation.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -128,13 +129,18 @@ const hospitalityModel = {
     );
   },
 
+  // state_id / city_id follow the free-text state / city on every write (vendor
+  // network coverage keys on them; spec §3). createHOFromCompany writes no state or
+  // city, so its ids stay NULL like the text.
   createHotel: async (hotelObj) => {
+    const location = await resolveHotelLocationIds(hotelObj.state || null, hotelObj.city || null);
     return db.one(
       `INSERT INTO tbl_hospitality_company_hotels
         (hospitality_company_id, name, city, keys, status, full_address, state,
          gst, pan, bank_account_number, bank_name, ifsc_code, account_holder_name,
-         msme, delivery_address, created_by, updated_by, fee_amount, email, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, $19)
+         msme, delivery_address, created_by, updated_by, fee_amount, email, payment_status,
+         state_id, city_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, $19, $20, $21)
        RETURNING *`,
       [
         hotelObj.hospitality_company_id,
@@ -155,7 +161,9 @@ const hospitalityModel = {
         hotelObj.created_by,
         hotelObj.fee_amount,
         hotelObj.email || null,
-        hotelObj.payment_status || 'onboarding'
+        hotelObj.payment_status || 'onboarding',
+        location.state_id,
+        location.city_id
       ]
     );
   },
@@ -239,6 +247,7 @@ const hospitalityModel = {
   },
 
   updateHotel: async (hotelId, hotelObj, companyId) => {
+    const location = await resolveHotelLocationIds(hotelObj.state || null, hotelObj.city || null);
     return db.one(
       `UPDATE tbl_hospitality_company_hotels
        SET name = $1,
@@ -258,6 +267,8 @@ const hospitalityModel = {
            updated_by = $15,
            email = $18,
            fee_amount = $19,
+           state_id = $20,
+           city_id = $21,
            updated_at = NOW()
        WHERE id = $16 AND hospitality_company_id = $17 AND is_deleted = 0
        RETURNING *`,
@@ -280,7 +291,9 @@ const hospitalityModel = {
         hotelId,
         companyId,
         hotelObj.email || null,
-        hotelObj.fee_amount
+        hotelObj.fee_amount,
+        location.state_id,
+        location.city_id
       ]
     );
   },

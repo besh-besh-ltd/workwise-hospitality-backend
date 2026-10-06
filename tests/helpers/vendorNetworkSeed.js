@@ -3,6 +3,7 @@
 
 import { db } from "../setup/db.js";
 import { VENDOR_MEMBER_USER_TYPE } from "../../app/constants/vendorNetwork.js";
+import { IDS } from "../fixtures/ids.js";
 
 export const FIXTURE_ID_MIN = 95001;
 export const FIXTURE_ID_MAX = 95999;
@@ -95,6 +96,22 @@ export async function addMember({ orgId, personId, entityVendorId = null, role, 
 }
 
 /**
+ * Buyer hotel (business unit) with explicit location ids: id in the fixture range, under
+ * Hospitality A by default. state/city text and state_id/city_id are written as given
+ * (no resolution), so a test can seed a hotel whose text and ids disagree or are NULL.
+ */
+export async function seedHotel(
+  { id, name, state = null, city = null, stateId = null, cityId = null, hospitalityId = IDS.hospitality.A, runner = db }
+) {
+  await runner.none(
+    `INSERT INTO tbl_hospitality_company_hotels (id, hospitality_company_id, name, state, city, state_id, city_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [id, hospitalityId, name, state, city, stateId, cityId]
+  );
+  return { id };
+}
+
+/**
  * Moves the tbl_company / tbl_users sequences above every fixture id range (>= 100000).
  * The test DB's company sequence starts low, and seed_reference has rows that reference
  * company ids no row holds yet (tbl_approval_processes.company_id 13): an API-created
@@ -153,5 +170,6 @@ export async function cleanupVendorNetworkFixtures(runner = db) {
     `DELETE FROM tbl_company_location WHERE company_id BETWEEN ${lo} AND ${hi} OR company_id IN (${apiCompanies})`
   );
   await runner.none(`DELETE FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiUsers})`);
+  await runner.none(`DELETE FROM tbl_hospitality_company_hotels WHERE id BETWEEN ${lo} AND ${hi}`);
   await runner.none(`DELETE FROM tbl_company WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiCompanies})`);
 }
