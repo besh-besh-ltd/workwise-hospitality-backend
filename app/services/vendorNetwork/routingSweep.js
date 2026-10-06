@@ -8,7 +8,9 @@
 //      declined, timed out or was withdrawn from that subject.
 //
 // One sweep at a time across all app instances: a session advisory lock taken with
-// pg_try_advisory_lock; a tick that cannot take it returns { skipped: true }. Each
+// pg_try_advisory_lock (two-key form, its own namespace; see vendorRoutingModel); a tick
+// that cannot take it returns { skipped: true }. Everything is per org: auto-routing asks
+// each handler for one org's unrouted subjects and only ever adds that org's rows. Each
 // transition is its own engine transaction under the subject lock, so the sweep is safe
 // next to HTTP transitions and idempotent (a raced row is simply skipped).
 
@@ -16,6 +18,13 @@ import db from "../../config/dbConn.js";
 import { logger } from "../../util/logger.js";
 import { ROUTING_MODE, ASSIGNMENT_STATUS } from "../../constants/vendorNetwork.js";
 import { resolveCoverageCandidates } from "./coverage.js";
+import {
+  listOverduePendingIds,
+  listOrphanedLiveIds,
+  listOrgIdsByRoutingMode,
+  tryLockSweep,
+  unlockSweep,
+} from "../../models/vendorRoutingModel.js";
 import {
   assign,
   timeOut,
@@ -25,19 +34,11 @@ import {
   subjectKey,
 } from "./routingEngine.js";
 
-export const SWEEP_LOCK_KEY = "vendor_routing_sweep";
 const BATCH_LIMIT = 500;
 
 async function timeOutOverdue(now) {
-  const rows = await db.any(
-    `SELECT id FROM tbl_vendor_routing_assignments
-      WHERE status = 'PENDING' AND due_at <= $1
-      ORDER BY due_at, id
-      LIMIT $2`,
-    [now, BATCH_LIMIT]
-  );
   let count = 0;
-  for (const { id } of rows) {
+  for (const id of await listOverduePendingIds(now, BATCH_LIMIT)) {
     try {
       if (await timeOut(id, now)) count += 1;
     } catch (err) {
@@ -48,18 +49,8 @@ async function timeOutOverdue(now) {
 }
 
 async function revokeOrphans() {
-  const rows = await db.any(
-    `SELECT a.id FROM tbl_vendor_routing_assignments a
-      WHERE a.status IN ('PENDING', 'ACCEPTED')
-        AND NOT EXISTS (
-              SELECT 1 FROM tbl_vendor_org_entities e
-               WHERE e.org_id = a.org_id AND e.vendor_id = a.assigned_vendor_id AND e.status = 'ACTIVE')
-      ORDER BY a.id
-      LIMIT $1`,
-    [BATCH_LIMIT]
-  );
   let count = 0;
-  for (const { id } of rows) {
+  for (const id of await listOrphanedLiveIds(BATCH_LIMIT)) {
     try {
       await revokeOrphaned(id);
       count += 1;
@@ -122,11 +113,8 @@ async function autoRouteOrg(orgId) {
 }
 
 async function autoRoute() {
-  const orgs = await db.any(`SELECT id FROM tbl_vendor_orgs WHERE routing_mode = $1 ORDER BY id`, [
-    ROUTING_MODE.AUTO_SINGLE_MATCH,
-  ]);
   let count = 0;
-  for (const { id } of orgs) {
+  for (const id of await listOrgIdsByRoutingMode(ROUTING_MODE.AUTO_SINGLE_MATCH)) {
     try {
       count += await autoRouteOrg(id);
     } catch (err) {
@@ -142,17 +130,16 @@ async function autoRoute() {
  */
 export async function runRoutingSweep(now = new Date()) {
   return db.task(async (c) => {
-    const { locked } = await c.one(`SELECT pg_try_advisory_lock(hashtext($1)) AS locked`, [SWEEP_LOCK_KEY]);
-    if (!locked) return { skipped: true };
+    if (!(await tryLockSweep(c))) return { skipped: true };
     try {
       const timedOut = await timeOutOverdue(now);
       const revoked = await revokeOrphans();
       const autoRouted = await autoRoute();
       return { skipped: false, timedOut, revoked, autoRouted };
     } finally {
-      await c.one(`SELECT pg_advisory_unlock(hashtext($1)) AS unlocked`, [SWEEP_LOCK_KEY]);
+      await unlockSweep(c);
     }
   });
 }
 
-export default { runRoutingSweep, SWEEP_LOCK_KEY };
+export default { runRoutingSweep };

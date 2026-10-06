@@ -106,9 +106,17 @@ describe("vendor network schema", () => {
     });
   });
 
-  it.each(["PENDING", "ACCEPTED"])("rejects a second %s assignment per subject+hotel", async (status) => {
+  it.each(["PENDING", "ACCEPTED"])("rejects a second %s assignment per org+subject+hotel; another org may hold its own", async (status) => {
     await withTx(async (t) => {
       await world(t);
+      await seedVendorEntity({ id: 95003, companyId: 95003, name: "VN Other HQ", email: "vn-ohq@test.local", runner: t });
+      await seedVendorEntity({ id: 95004, companyId: 95004, name: "VN Other Br", email: "vn-obr@test.local", runner: t });
+      await seedOrg({ id: 95002, principalVendorId: 95003, name: "VN Other Org", runner: t });
+      await addEntity({ orgId: 95002, vendorId: 95004, runner: t });
+      await t.none(
+        `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status)
+         VALUES (95002, 'RFQ', 95001, NULL, 95004, '${status}')`
+      );
       const ins = `INSERT INTO tbl_vendor_routing_assignments
         (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status)
         VALUES (95001, 'RFQ', 95001, NULL, $1, '${status}')`;

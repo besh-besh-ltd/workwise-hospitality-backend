@@ -103,11 +103,15 @@ CREATE TABLE IF NOT EXISTS tbl_vendor_routing_assignments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   acted_at TIMESTAMPTZ
 );
--- at most one PENDING and at most one ACCEPTED per subject + hotel
-CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_assign_one_pending
-  ON tbl_vendor_routing_assignments (subject_type, subject_id, COALESCE(hotel_id, 0)) WHERE status = 'PENDING';
-CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_assign_one_accepted
-  ON tbl_vendor_routing_assignments (subject_type, subject_id, COALESCE(hotel_id, 0)) WHERE status = 'ACCEPTED';
+-- at most one PENDING and at most one ACCEPTED per org + subject + hotel: several orgs
+-- may each route the same RFQ (every org's principal is invited separately).
+-- The org-less first draft of these indexes is dropped on any database that ran it.
+DROP INDEX IF EXISTS ix_vn_assign_one_pending;
+DROP INDEX IF EXISTS ix_vn_assign_one_accepted;
+CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_assign_org_one_pending
+  ON tbl_vendor_routing_assignments (org_id, subject_type, subject_id, COALESCE(hotel_id, 0)) WHERE status = 'PENDING';
+CREATE UNIQUE INDEX IF NOT EXISTS ix_vn_assign_org_one_accepted
+  ON tbl_vendor_routing_assignments (org_id, subject_type, subject_id, COALESCE(hotel_id, 0)) WHERE status = 'ACCEPTED';
 CREATE INDEX IF NOT EXISTS ix_vn_assign_org ON tbl_vendor_routing_assignments (org_id);
 CREATE INDEX IF NOT EXISTS ix_vn_assign_vendor ON tbl_vendor_routing_assignments (assigned_vendor_id);
 

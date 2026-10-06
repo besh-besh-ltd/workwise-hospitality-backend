@@ -158,10 +158,6 @@ export async function cleanupVendorNetworkFixtures(runner = db) {
   const users = `SELECT id FROM tbl_users WHERE id BETWEEN ${lo} AND ${hi} OR id IN (${apiUsers})`;
   const orgs = `SELECT id FROM tbl_vendor_orgs WHERE id BETWEEN ${lo} AND ${hi} OR principal_vendor_id IN (${users})`;
   await runner.none(`DELETE FROM tbl_notifications WHERE recipient_user_id IN (${users})`);
-  await runner.none(
-    `DELETE FROM tbl_activity_events
-      WHERE event_key LIKE 'vendor\\_routing\\_%' AND (metadata->>'org_id')::int IN (${orgs})`
-  );
   await runner.none(`DELETE FROM tbl_vendor_network_seats WHERE org_id IN (${orgs}) OR entity_vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_routing_assignments WHERE org_id IN (${orgs}) OR assigned_vendor_id IN (${users})`);
   await runner.none(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id IN (${users})`);

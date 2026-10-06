@@ -14,7 +14,6 @@
 import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
 import { logger } from "../../util/logger.js";
-import { resolveActor } from "../../middleware/requestContext.js";
 import {
   requireNetwork,
   requireOrgAdmin,
@@ -55,8 +54,6 @@ function handleError(res, error, label) {
   logger.error({ err: error.message }, `vendor-network ${label} failed`);
   return res.status(400).json({ status: 3, message: Config.errorText.value });
 }
-
-const actorLabelOf = (req) => resolveActor(req)?.actorLabel ?? null;
 
 /** The handler's title and link for a row; a failing describe never fails the list. */
 async function described(row) {
@@ -99,7 +96,15 @@ export async function routingQueue(req, res) {
     const unroutedByKey = new Map();
     for (const [subjectType, handler] of registeredSubjects()) {
       if (!handler.listUnrouted) continue;
-      for (const item of (await handler.listUnrouted(orgId, db)) ?? []) {
+      // One failing subject type must not hide the others' queue.
+      let items;
+      try {
+        items = (await handler.listUnrouted(orgId, db)) ?? [];
+      } catch (err) {
+        logger.warn({ err: err.message, orgId, subjectType }, "vendor-routing listUnrouted failed");
+        continue;
+      }
+      for (const item of items) {
         const key = subjectKey(subjectType, item.subjectId, item.hotelId);
         const view = {
           subject_type: subjectType,
@@ -136,8 +141,9 @@ export async function routingQueue(req, res) {
           const scope = { orgId, principalVendorId, subjectId: row.subject_id, hotelId: row.hotel_id };
           const valid = handler ? await db.tx((t) => handler.validateSubject(scope, t)) : null;
           if (valid?.ok) candidates = await candidatesFor(orgId, valid, refused.get(key));
-        } catch {
+        } catch (err) {
           // A subject that can no longer be routed simply has no candidates.
+          logger.warn({ err: err.message, assignmentId: row.id }, "vendor-routing queue re-validation failed");
         }
       }
       declined.push({ ...row, candidates });
@@ -175,7 +181,6 @@ export async function assignSubject(req, res) {
       hotelId,
       assigneeVendorId,
       actorUserId: actingPersonId(req),
-      actorLabel: actorLabelOf(req),
     });
     return res.status(201).json({ status: 1, message: "Assigned", data: row });
   } catch (error) {
@@ -194,7 +199,6 @@ export async function revokeAssignment(req, res) {
       assignmentId: id,
       orgId: req.user.network.org_id,
       actorUserId: actingPersonId(req),
-      actorLabel: actorLabelOf(req),
     });
     return res.status(200).json({ status: 1, message: "Assignment revoked", data: row });
   } catch (error) {
@@ -231,7 +235,6 @@ export async function respondToAssignment(req, res) {
       assignmentId: id,
       actingVendorId: req.user.id,
       actorUserId: actingPersonId(req),
-      actorLabel: actorLabelOf(req),
       decision,
       reason,
       note,

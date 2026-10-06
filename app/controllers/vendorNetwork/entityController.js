@@ -93,9 +93,9 @@ async function notify({ userIds, type, title, body, senderUserId = null, actionU
  * After an entity is suspended or removed (committed): revoke its live routing
  * assignments and close the sockets of persons who had no other access.
  */
-async function afterEntityLosesAccess(vendorId, personIds, { actorUserId, reason }) {
+async function afterEntityLosesAccess(vendorId, personIds, { orgId, actorUserId, reason }) {
   try {
-    await revokeLiveAssignmentsForEntity(vendorId, { actorUserId, reason });
+    await revokeLiveAssignmentsForEntity(vendorId, { orgId, actorUserId, reason });
   } catch (err) {
     logger.error({ err: err.message, vendorId, reason }, "vendor-network revoke assignments failed");
   }
@@ -449,6 +449,7 @@ export async function updateEntity(req, res) {
     if (!row) return fail(res, 404, "Entity not found in your network");
     if (suspending) {
       await afterEntityLosesAccess(entity.vendor_id, personIds, {
+        orgId,
         actorUserId: actingPersonId(req),
         reason: "ENTITY_SUSPENDED",
       });
@@ -469,7 +470,7 @@ async function removeAndRevoke(req, orgId, vendorId) {
     await removeEntity(orgId, vendorId, t);
     return ids;
   });
-  await afterEntityLosesAccess(vendorId, personIds, { actorUserId: actingPersonId(req), reason: "ENTITY_REMOVED" });
+  await afterEntityLosesAccess(vendorId, personIds, { orgId, actorUserId: actingPersonId(req), reason: "ENTITY_REMOVED" });
 }
 
 /** DELETE /entities/:vendorId (admin) */

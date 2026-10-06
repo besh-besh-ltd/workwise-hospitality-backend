@@ -10,7 +10,6 @@
 
 import nodemailer from "nodemailer";
 import { db, closeDb } from "../setup/db.js";
-import { IDS } from "../fixtures/ids.js";
 import {
   seedVendorEntity,
   seedPerson,
@@ -27,7 +26,10 @@ import {
   revokeLiveAssignmentsForEntity,
 } from "../../app/services/vendorNetwork/routingEngine.js";
 import { runVendorRoutingSweepTick } from "../../app/helper/cronManager.js";
-import { SWEEP_LOCK_KEY } from "../../app/services/vendorNetwork/routingSweep.js";
+import {
+  ROUTING_SWEEP_LOCK_NS,
+  ROUTING_SWEEP_LOCK_KEY,
+} from "../../app/models/vendorRoutingModel.js";
 
 const HQ = 95901; // principal of ORG
 const B1 = 95902; // ACTIVE BRANCH, seated
@@ -82,9 +84,6 @@ const fake = {
     );
     const routed = new Set(live.map((r) => r.subject_id));
     return cfg.unrouted.filter((i) => i.orgId === orgId && !routed.has(i.subjectId));
-  },
-  async activityScope(a) {
-    return { hospitalityCompanyId: IDS.hospitality.A, entityType: "RFQ", entityId: a.subject_id };
   },
 };
 let previousRfqHandler;
@@ -163,14 +162,6 @@ const rowsFor = (subjectId) =>
 const getRow = (id) => db.one(`SELECT * FROM tbl_vendor_routing_assignments WHERE id = $1`, [id]);
 const notes = (userId, type) =>
   db.any(`SELECT * FROM tbl_notifications WHERE recipient_user_id = $1 AND type = $2 ORDER BY id`, [userId, type]);
-const activity = (assignmentId) =>
-  db.any(
-    `SELECT event_key, actor_type, actor_user_id, actor_label, hospitality_company_id, entity_type, entity_id, metadata
-       FROM tbl_activity_events
-      WHERE event_key LIKE 'vendor\\_routing\\_%' AND (metadata->>'assignment_id')::int = $1
-      ORDER BY id`,
-    [assignmentId]
-  );
 
 async function postAssign(userId, body) {
   return (await httpClient(userId)).post(`${BASE}/routing/assign`).send({ subject_type: "RFQ", ...body });
@@ -195,7 +186,7 @@ async function insertAssignment({ subjectId, vendorId = B1, status = "PENDING", 
 // --- tests ------------------------------------------------------------------------------
 
 describe("assign", () => {
-  it("1. admin assigns → PENDING, onPending ran, assignee notified + emailed (entity and member persons), activity by the person", async () => {
+  it("1. admin assigns → PENDING, onPending ran, assignee notified + emailed (entity and member persons)", async () => {
     const res = await postAssign(ADMIN_P, { subject_id: 7001, assignee_vendor_id: B1 });
     expect(res.status).toBe(201);
     const [row] = await rowsFor(7001);
@@ -216,17 +207,6 @@ describe("assign", () => {
     expect(n).toMatchObject({ category: "network", action_url: "/fake/rfq/7001" });
     expect(sent.map((m) => m.to).sort()).toEqual(["vn-95902@example.com", "vn-routing-member@example.com"]);
     expect(sent[0].subject).toContain("Fake RFQ 7001");
-
-    const [ev] = await activity(row.id);
-    expect(ev).toMatchObject({
-      event_key: "vendor_routing_pending",
-      actor_type: "VENDOR",
-      actor_user_id: ADMIN_P,
-      hospitality_company_id: IDS.hospitality.A,
-      entity_type: "RFQ",
-      entity_id: "7001",
-    });
-    expect(ev.actor_label).toContain("Ada Admin");
   });
 
   it("1b. a failing mailer never fails the assignment", async () => {
@@ -301,15 +281,29 @@ describe("assign", () => {
     nearly((await rowsFor(7051))[0].due_at, Date.now() + 5 * HOUR);
   });
 
-  it("12. two concurrent assigns for one subject leave exactly one PENDING", async () => {
+  it("12. two concurrent assigns for one subject serialise on the subject lock: both 201, one REVOKED, one PENDING", async () => {
     const results = await Promise.all([
       postAssign(HQ, { subject_id: 7060, assignee_vendor_id: B1 }),
       postAssign(HQ, { subject_id: 7060, assignee_vendor_id: B2 }),
     ]);
-    for (const r of results) expect([201, 409]).toContain(r.status);
+    expect(results.map((r) => r.status)).toEqual([201, 201]);
     const rows = await rowsFor(7060);
-    expect(rows.filter((r) => r.status === "PENDING")).toHaveLength(1);
-    expect(rows.every((r) => ["PENDING", "REVOKED"].includes(r.status))).toBe(true);
+    expect(rows.map((r) => r.status)).toEqual(["REVOKED", "PENDING"]);
+    expect(new Set(rows.map((r) => r.assigned_vendor_id))).toEqual(new Set([B1, B2]));
+  });
+
+  it("attribution: assigned_by_user_id / acted_by_user_id are the PERSON ids, not the entity", async () => {
+    // A type-11 ORG_ADMIN (acting as the principal) assigns; a type-11 member of B1 accepts.
+    const a = (await postAssign(ADMIN_P, { subject_id: 7065, assignee_vendor_id: B1 })).body.data;
+    expect((await postRespond(MEMBER_P, a.id, { decision: "ACCEPT" })).status).toBe(200);
+    expect(await getRow(a.id)).toMatchObject({ assigned_by_user_id: ADMIN_P, acted_by_user_id: MEMBER_P });
+    // ... and when it is revoked, the revoke is the admin person's.
+    expect((await postRevoke(ADMIN_P, a.id)).status).toBe(200);
+    expect(await getRow(a.id)).toMatchObject({ status: "REVOKED", acted_by_user_id: ADMIN_P });
+    // A declining member is recorded as itself.
+    const b = (await postAssign(ADMIN_P, { subject_id: 7066, assignee_vendor_id: B1 })).body.data;
+    expect((await postRespond(MEMBER_P, b.id, { decision: "DECLINE", reason: "NO_STOCK" })).status).toBe(200);
+    expect(await getRow(b.id)).toMatchObject({ status: "DECLINED", acted_by_user_id: MEMBER_P });
   });
 
   it("handler refusals propagate with their status: validateSubject {ok:false} → that status, nothing written", async () => {
@@ -339,10 +333,6 @@ describe("respond", () => {
     expect(await getRow(a1.id)).toMatchObject({ status: "ACCEPTED", acted_by_user_id: MEMBER_P });
     expect(calls).toContainEqual(["accepted", a1.id, null]);
     expect(await notes(HQ, "NETWORK_ROUTING_ACCEPTED")).toHaveLength(1);
-    expect((await activity(a1.id)).map((e) => [e.event_key, e.actor_user_id])).toEqual([
-      ["vendor_routing_pending", HQ],
-      ["vendor_routing_accepted", MEMBER_P],
-    ]);
 
     const again = await postAssign(HQ, { subject_id: 7100, assignee_vendor_id: B1 });
     expect(again.status).toBe(409);
@@ -440,12 +430,15 @@ describe("revoke", () => {
     expect((await getRow(accepted.id)).status).toBe("ACCEPTED");
   });
 
-  it("revokeLiveAssignmentsForEntity revokes every live row of the entity and counts them", async () => {
+  it("revokeLiveAssignmentsForEntity revokes every live row of the entity in that org and counts them", async () => {
     const p = await insertAssignment({ subjectId: 7220, status: "PENDING" });
     const acc = await insertAssignment({ subjectId: 7221, status: "ACCEPTED" });
     const done = await insertAssignment({ subjectId: 7222, status: "DECLINED" });
     const other = await insertAssignment({ subjectId: 7223, vendorId: B2 });
-    expect(await revokeLiveAssignmentsForEntity(B1, { actorUserId: HQ, reason: "ENTITY_SUSPENDED" })).toBe(2);
+    // B1's row from a former org (it left FOREIGN_ORG earlier): not this org's to revoke.
+    const former = await insertAssignment({ subjectId: 7224, vendorId: B1, orgId: FOREIGN_ORG });
+    expect(await revokeLiveAssignmentsForEntity(B1, { orgId: ORG, actorUserId: HQ, reason: "ENTITY_SUSPENDED" })).toBe(2);
+    expect((await getRow(former.id)).status).toBe("PENDING");
     expect((await getRow(p.id)).status).toBe("REVOKED");
     expect((await getRow(acc.id)).status).toBe("REVOKED");
     expect((await getRow(done.id)).status).toBe("DECLINED");
@@ -482,8 +475,54 @@ describe("routing queue", () => {
   });
 });
 
+describe("two orgs routing the same subject", () => {
+  const orgRows = (orgId, subjectId) =>
+    db.any(
+      `SELECT id, assigned_vendor_id, status FROM tbl_vendor_routing_assignments
+        WHERE org_id = $1 AND subject_id = $2 ORDER BY id`,
+      [orgId, subjectId]
+    );
+
+  it("assign / accept / revoke in org B never touch org A's rows of the same RFQ", async () => {
+    const a = (await postAssign(HQ, { subject_id: 7800, assignee_vendor_id: B1 })).body.data;
+    const b1 = await postAssign(FHQ, { subject_id: 7800, assignee_vendor_id: FB });
+    expect(b1.status).toBe(201);
+    expect((await orgRows(ORG, 7800)).map((r) => [r.id, r.status])).toEqual([[a.id, "PENDING"]]);
+
+    expect((await postRespond(FB, b1.body.data.id, { decision: "ACCEPT" })).status).toBe(200);
+    expect((await postRespond(B1, a.id, { decision: "ACCEPT" })).status).toBe(200);
+    expect((await orgRows(ORG, 7800)).map((r) => r.status)).toEqual(["ACCEPTED"]);
+    expect((await orgRows(FOREIGN_ORG, 7800)).map((r) => r.status)).toEqual(["ACCEPTED"]);
+
+    expect((await postRevoke(FHQ, b1.body.data.id)).status).toBe(200);
+    const b2 = await postAssign(FHQ, { subject_id: 7800, assignee_vendor_id: FB });
+    expect(b2.status).toBe(201);
+    expect((await orgRows(FOREIGN_ORG, 7800)).map((r) => r.status)).toEqual(["REVOKED", "PENDING"]);
+    expect((await orgRows(ORG, 7800)).map((r) => [r.id, r.status])).toEqual([[a.id, "ACCEPTED"]]);
+    // No hook ever released org A's row.
+    expect(calls.filter((c) => c[0] === "released" && c[1] === a.id)).toEqual([]);
+    // Org A cannot revoke org B's row either.
+    expect((await postRevoke(HQ, b2.body.data.id)).status).toBe(404);
+  });
+
+  it("auto-routing works in both orgs for the same RFQ", async () => {
+    await db.none(
+      `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode)
+       VALUES ($1, 'HOTEL', $3, 'INCLUDE'), ($2, 'HOTEL', $3, 'INCLUDE')`,
+      [B1, FB, H1]
+    );
+    await db.none(`UPDATE tbl_vendor_orgs SET routing_mode = 'AUTO_SINGLE_MATCH' WHERE id IN ($1, $2)`, [ORG, FOREIGN_ORG]);
+    cfg.unrouted = [ORG, FOREIGN_ORG].map((orgId) => ({
+      orgId, subjectId: 7801, hotelId: null, hotelIds: [H1], categoryId: null,
+    }));
+    expect(await runVendorRoutingSweepTick()).toMatchObject({ skipped: false, autoRouted: 2 });
+    expect((await orgRows(ORG, 7801)).map((r) => [r.assigned_vendor_id, r.status])).toEqual([[B1, "PENDING"]]);
+    expect((await orgRows(FOREIGN_ORG, 7801)).map((r) => [r.assigned_vendor_id, r.status])).toEqual([[FB, "PENDING"]]);
+  });
+});
+
 describe("sweep", () => {
-  it("8. times out overdue PENDING rows and notifies the principal (activity by SYSTEM)", async () => {
+  it("8. times out overdue PENDING rows and notifies the principal (no acting person)", async () => {
     const overdue = await insertAssignment({ subjectId: 7400, dueAt: new Date(Date.now() - HOUR) });
     const future = await insertAssignment({ subjectId: 7401, dueAt: new Date(Date.now() + HOUR) });
     const result = await runVendorRoutingSweepTick();
@@ -492,9 +531,7 @@ describe("sweep", () => {
     expect((await getRow(future.id)).status).toBe("PENDING");
     expect(calls).toContainEqual(["released", overdue.id, "TIMED_OUT", "PENDING", "TIMED_OUT"]);
     expect(await notes(HQ, "NETWORK_ROUTING_TIMED_OUT")).toHaveLength(1);
-    expect((await activity(overdue.id)).map((e) => [e.event_key, e.actor_type, e.actor_user_id])).toEqual([
-      ["vendor_routing_timed_out", "SYSTEM", null],
-    ]);
+    expect((await getRow(overdue.id)).acted_by_user_id).toBeNull();
     // Idempotent: a second tick finds nothing.
     expect(await runVendorRoutingSweepTick()).toMatchObject({ skipped: false, timedOut: 0 });
   });
@@ -576,11 +613,11 @@ describe("sweep", () => {
     cfg.gate = null;
     cfg.onListUnrouted = null;
     await db.task(async (c) => {
-      await c.one(`SELECT pg_advisory_lock(hashtext($1))`, [SWEEP_LOCK_KEY]);
+      await c.one(`SELECT pg_advisory_lock($1::int, hashtext($2))`, [ROUTING_SWEEP_LOCK_NS, ROUTING_SWEEP_LOCK_KEY]);
       try {
         expect(await runVendorRoutingSweepTick()).toEqual({ skipped: true });
       } finally {
-        await c.one(`SELECT pg_advisory_unlock(hashtext($1))`, [SWEEP_LOCK_KEY]);
+        await c.one(`SELECT pg_advisory_unlock($1::int, hashtext($2))`, [ROUTING_SWEEP_LOCK_NS, ROUTING_SWEEP_LOCK_KEY]);
       }
     });
     expect(await runVendorRoutingSweepTick()).toMatchObject({ skipped: false });
