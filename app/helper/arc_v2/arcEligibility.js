@@ -19,15 +19,18 @@
 // Vendor distributor networks: when a vendor can attach local distributors,
 // widen hotel coverage HERE and nowhere else.
 //
-// VENDOR NETWORKS (spec §5.2): the invitation goes to the org principal. An eligible
-// entity linked into an org (ACTIVE or SUSPENDED, the collapseToPrincipals rule) is
-// reported as its principal, and the principal's row unions the hotels of every
-// entity collapsed into it. A hotel needs renewal only when no contributing entity
-// is fully active for it. Submission (vendorCanSubmitForHotels) counts the
-// subscriptions of every holder (subscriptionHolderIdsFor).
+// VENDOR NETWORKS (spec §5.2): eligibility is POOLED per org and the invitation goes
+// to the principal. Every category and hotel subscription is mapped to its org key
+// (orgKeySql.js) before the two are intersected, so an org qualifies for a hotel when
+// ANY counting (ACTIVE, live-login) entity holds the category and ANY holds that hotel.
+// The principal's row lists the org's hotels; a hotel needs renewal unless the org
+// holds an active category AND an active hotel subscription for it. A vendor in no org
+// is its own key and gets exactly its pre-network row. Submission
+// (vendorCanSubmitForHotels) pools the same way over subscriptionHolderIdsFor.
 
 import db from '../../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../../services/vendorNetwork/actingContext.js';
+import { orgKeySelect } from '../../services/vendorNetwork/orgKeySql.js';
 
 const uniqueIds = (ids) => [...new Set((ids || []).map(Number).filter(Boolean))];
 
@@ -38,49 +41,50 @@ const uniqueIds = (ids) => [...new Set((ids || []).map(Number).filter(Boolean))]
 export async function resolveArcVendorCoverage({ category_id, hotel_ids }, runner = db) {
   const hotels = uniqueIds(hotel_ids);
   if (!Number(category_id) || hotels.length === 0) return [];
-  // The collapse is done in this statement (not with collapseToPrincipals) because the
-  // union needs each entity's principal, not only the set of principals.
   const rows = await runner.any(
-    `WITH cat AS (
+    `WITH cat_subs AS (
        SELECT vendor_id, bool_or(status = 'active') AS cat_active
          FROM tbl_vendor_hotel_category_subscription
         WHERE item_type = 'category' AND item_id = $1
           AND status IN ('active', 'expired')
         GROUP BY vendor_id
      ),
-     hot AS (
+     hot_subs AS (
        SELECT vendor_id, item_id AS hotel_id, bool_or(status = 'active') AS hotel_active
          FROM tbl_vendor_hotel_category_subscription
         WHERE item_type = 'hotel' AND item_id = ANY($2::int[])
           AND status IN ('active', 'expired')
         GROUP BY vendor_id, item_id
      ),
-     eligible AS (
-       SELECT u.id AS vendor_id, hot.hotel_id, (hot.hotel_active AND cat.cat_active) AS fully_active
-         FROM tbl_users u
-         JOIN cat ON cat.vendor_id = u.id
-         JOIN hot ON hot.vendor_id = u.id
-        WHERE u.user_type = 3
-          AND u.status = 1
+     -- Subscribers whose rows count, with their org key; same vendor filter as before.
+     holders AS (
+       SELECT k.vendor_id, k.org_key
+         FROM (${orgKeySelect('SELECT vendor_id FROM cat_subs UNION SELECT vendor_id FROM hot_subs')}) k
+         JOIN tbl_users hu ON hu.id = k.vendor_id
+        WHERE k.counts
+          AND hu.user_type = 3
+          AND hu.status = 1
      ),
-     by_principal AS (
-       SELECT COALESCE(o.principal_vendor_id, el.vendor_id) AS vendor_id,
-              el.hotel_id,
-              bool_or(el.fully_active) AS fully_active
-         FROM eligible el
-         LEFT JOIN tbl_vendor_org_entities e
-           ON e.vendor_id = el.vendor_id AND e.status IN ('ACTIVE', 'SUSPENDED')
-         LEFT JOIN tbl_vendor_orgs o ON o.id = e.org_id
-        GROUP BY 1, 2
+     cat AS (
+       SELECT h.org_key, bool_or(c.cat_active) AS cat_active
+         FROM cat_subs c JOIN holders h ON h.vendor_id = c.vendor_id
+        GROUP BY h.org_key
+     ),
+     hot AS (
+       SELECT h.org_key, s.hotel_id, bool_or(s.hotel_active) AS hotel_active
+         FROM hot_subs s JOIN holders h ON h.vendor_id = s.vendor_id
+        GROUP BY h.org_key, s.hotel_id
      )
      SELECT u.id, u.name, u.email, u.mobile,
-            array_agg(bp.hotel_id ORDER BY bp.hotel_id) AS hotel_ids,
+            array_agg(hot.hotel_id ORDER BY hot.hotel_id) AS hotel_ids,
             COALESCE(
-              array_agg(bp.hotel_id ORDER BY bp.hotel_id) FILTER (WHERE NOT bp.fully_active),
+              array_agg(hot.hotel_id ORDER BY hot.hotel_id)
+                FILTER (WHERE NOT (hot.hotel_active AND cat.cat_active)),
               '{}'
             ) AS renewal_needed_hotel_ids
-       FROM by_principal bp
-       JOIN tbl_users u ON u.id = bp.vendor_id
+       FROM cat
+       JOIN hot ON hot.org_key = cat.org_key
+       JOIN tbl_users u ON u.id = cat.org_key
       GROUP BY u.id, u.name, u.email, u.mobile
       ORDER BY u.name`,
     [Number(category_id), hotels]

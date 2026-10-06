@@ -1,34 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
-import { collapseToPrincipals } from '../services/vendorNetwork/actingContext.js';
-
-/**
- * Vendor Networks (spec §5.2): invites go to the org principal. `rows` carry
- * `{ vendor_id, principal_id }`, where principal_id is the vendor's org principal when
- * the vendor is an ACTIVE/SUSPENDED org entity (the collapseToPrincipals rule) and the
- * vendor itself otherwise. Returns `{ vendor_id }` rows, one per principal. A result
- * with no org entity in it comes back in the same order with the same shape as before
- * networks existed; when something collapses, survivors keep their order and
- * principals reached only through the collapse are appended.
- */
-function collapseVendorRows(rows) {
-  const principals = new Set(rows.map((r) => Number(r.principal_id)));
-  const seen = new Set();
-  const out = [];
-  for (const row of rows) {
-    const id = Number(row.vendor_id);
-    if (principals.has(id) && !seen.has(id)) {
-      seen.add(id);
-      out.push({ vendor_id: row.vendor_id });
-    }
-  }
-  for (const id of principals) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      out.push({ vendor_id: id });
-    }
-  }
-  return out;
-}
+import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
+import { orgKeySelect, orgEntitiesOfKeys } from '../services/vendorNetwork/orgKeySql.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -1170,12 +1142,14 @@ getEligibleVendorsForVariant: async (variantId, hotelIds) => {
   // subscription for the product's category. Cancelled subscriptions
   // are excluded from both checks.
   //
-  // Vendor Networks: an eligible entity linked into an org is replaced by the
-  // org's principal, so linked duplicates produce one invite (collapseVendorRows).
-  // The principal is resolved in this statement, not with collapseToPrincipals:
-  // this runs once per product on publish/add-to-draft paths whose statement
-  // budgets are pinned by tests (rfq.addProductsToDraftPerf).
-  const rows = await db.any(
+  // Vendor Networks (spec §5.2): eligibility is POOLED per org. Each requirement
+  // (variant mapping, category subscription, hotel subscription) is mapped to its
+  // org key (orgKeySql.js) before the sets are intersected: an org qualifies when
+  // each requirement is met by ANY of its counting (ACTIVE, live-login) entities,
+  // and the returned vendor_id is the principal. A vendor in no org is its own key,
+  // so its answer is unchanged. One statement: this runs once per product on
+  // publish/add-to-draft paths whose statement budgets are pinned by tests.
+  return db.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
     FROM tbl_product_variant_vendor_mapping
@@ -1191,36 +1165,48 @@ product_categories AS (
     WHERE pv.id = $1
 ),
 
-eligible_category_vendors AS (
-    SELECT DISTINCT s.vendor_id
+mapped_keys AS (
+    SELECT DISTINCT org_key
+    FROM (${orgKeySelect('SELECT vendor_id FROM variant_vendors')}) mk
+    WHERE mk.counts
+),
+
+-- The mapped vendors plus the ACTIVE entities of their orgs: the only vendors whose
+-- subscriptions can make a mapped key eligible.
+candidate_keys AS (
+    SELECT ck.vendor_id, ck.org_key
+    FROM (${orgKeySelect(`SELECT vendor_id FROM variant_vendors
+                          UNION
+                          ${orgEntitiesOfKeys('SELECT org_key FROM mapped_keys')}`)}) ck
+    WHERE ck.counts
+      AND ck.org_key IN (SELECT org_key FROM mapped_keys)
+),
+
+eligible_category_keys AS (
+    SELECT DISTINCT ck.org_key
     FROM tbl_vendor_hotel_category_subscription s
-    JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+    JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
     JOIN product_categories pc ON pc.category_id = s.item_id
     WHERE s.item_type = 'category'
       AND s.status IN ('active', 'expired')
 ),
 
-eligible_hotel_vendors AS (
-    SELECT DISTINCT s.vendor_id
+eligible_hotel_keys AS (
+    SELECT DISTINCT ck.org_key
     FROM tbl_vendor_hotel_category_subscription s
-    JOIN variant_vendors vv
-        ON vv.vendor_id = s.vendor_id
+    JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
     WHERE s.item_type = 'hotel'
       AND s.item_id = ANY ($2)
       AND s.status IN ('active', 'expired')
 )
 
-SELECT vv.vendor_id, COALESCE(o.principal_vendor_id, vv.vendor_id) AS principal_id
-FROM variant_vendors vv
-JOIN eligible_category_vendors ecv ON ecv.vendor_id = vv.vendor_id
-JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id
-LEFT JOIN tbl_vendor_org_entities ne
-       ON ne.vendor_id = vv.vendor_id AND ne.status IN ('ACTIVE', 'SUSPENDED')
-LEFT JOIN tbl_vendor_orgs o ON o.id = ne.org_id;
+SELECT mk.org_key AS vendor_id
+FROM mapped_keys mk
+JOIN eligible_category_keys eck ON eck.org_key = mk.org_key
+JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key;
 `,
     [variantId, hotelIds]
   );
-  return collapseVendorRows(rows);
 },
 
 
@@ -2130,34 +2116,52 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   // ============================================================
 
   /**
+   * Vendor Networks (spec §5.2): who receives the RFQ invite when `vendorId` joins open
+   * RFQs, and whose mappings/subscriptions qualify it (pooled per org).
+   *   inviteeId  — the org principal (the vendor itself in no org);
+   *   holderIds  — the org's counting entities (subscriptionHolderIdsFor), or [] when the
+   *                vendor's own rows do not count (a SUSPENDED entity, or an ACTIVE one
+   *                without a live login): such an entity cannot act for the org.
+   */
+  rfqInviteScope: async (vendorId) => {
+    const [holderIds, key] = await Promise.all([
+      subscriptionHolderIdsFor(vendorId),
+      db.one(`SELECT org_key, counts FROM (${orgKeySelect('SELECT $1::int')}) k`, [Number(vendorId)]),
+    ]);
+    return { inviteeId: Number(key.org_key), holderIds: key.counts ? holderIds : [] };
+  },
+
+  /**
    * Find open (published & active) RFQs where the vendor is eligible
    * (has product-variant mapping + category subscription + hotel subscription)
    * but is NOT yet added to tbl_rfq_product_vendors.
    *
-   * Vendor Networks: eligibility is still the vendor's own, but the invite belongs to
-   * its org principal (spec §5.2), so "not yet added" is checked for the principal
-   * (the vendor itself when it is in no org).
+   * Vendor Networks: eligibility is pooled over the org's counting entities and the
+   * invite belongs to the principal (spec §5.2), so "not yet added" is checked for the
+   * principal. In no org both are the vendor itself, exactly as before.
    *
    * @param {number} vendorId - The vendor's user ID
+   * @param {{inviteeId:number, holderIds:number[]}} [scope] - rfqInviteScope(vendorId), if known
    * @returns {Promise<Array>} Matching RFQs with rfq_id, rfq_no, title, is_tender, bid_end_date, created_by
    */
-  getMatchingOpenRfqsForVendor: async (vendorId) => {
-    const [inviteeId = Number(vendorId)] = await collapseToPrincipals([vendorId]);
+  getMatchingOpenRfqsForVendor: async (vendorId, scope) => {
+    const { inviteeId, holderIds } = scope ?? (await hospitalityModel.rfqInviteScope(vendorId));
+    if (holderIds.length === 0) return [];
     return db.any(
       `WITH vendor_variants AS (
-        SELECT product_variant_id
+        SELECT DISTINCT product_variant_id
         FROM tbl_product_variant_vendor_mapping
-        WHERE vendor_id = $1 AND status = true AND is_approved = true
+        WHERE vendor_id = ANY($1::int[]) AND status = true AND is_approved = true
       ),
       vendor_hotels AS (
-        SELECT item_id AS hotel_id
+        SELECT DISTINCT item_id AS hotel_id
         FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'hotel' AND status IN ('active', 'expired')
+        WHERE vendor_id = ANY($1::int[]) AND item_type = 'hotel' AND status IN ('active', 'expired')
       ),
       vendor_cats AS (
-        SELECT item_id AS category_id
+        SELECT DISTINCT item_id AS category_id
         FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'category' AND status IN ('active', 'expired')
+        WHERE vendor_id = ANY($1::int[]) AND item_type = 'category' AND status IN ('active', 'expired')
       ),
       -- Products that have an approved PO (approved/sent/GRN/completed)
       finalized_products AS (
@@ -2194,7 +2198,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
             AND rpv.user_id = $2
         )
       ORDER BY r.id DESC`,
-      [vendorId, inviteeId]
+      [holderIds, inviteeId]
     );
   },
 
@@ -2203,17 +2207,19 @@ getVendorHotelCategoryMappings: async (vendorId) => {
    * Only inserts rows where the vendor has an approved product-variant mapping
    * and is not already present.
    *
-   * Vendor Networks: the row is written for the vendor's org principal (spec §5.2),
-   * the invitee. Pass `inviteeId` when the caller already resolved it (one lookup for
-   * many RFQs); otherwise it is resolved here. In no org, the invitee is the vendor.
+   * Vendor Networks: the row is written for the org principal (the invitee), and the
+   * mapping may be held by any of the org's counting entities (spec §5.2, pooled). Pass
+   * `scope` (rfqInviteScope) when the caller already resolved it for many RFQs. In no
+   * org the invitee and the only holder are the vendor itself.
    *
-   * @param {number} vendorId - The vendor's user ID (whose variant mappings qualify)
+   * @param {number} vendorId - The vendor's user ID
    * @param {number} rfqId - The RFQ ID
-   * @param {number} [inviteeId] - collapseToPrincipals([vendorId])[0], if known
+   * @param {{inviteeId:number, holderIds:number[]}} [scope]
    * @returns {Promise<Array>} Inserted rows with product_variant_id and variant
    */
-  addVendorToRfq: async (vendorId, rfqId, inviteeId) => {
-    const invitee = inviteeId ?? (await collapseToPrincipals([vendorId]))[0] ?? Number(vendorId);
+  addVendorToRfq: async (vendorId, rfqId, scope) => {
+    const { inviteeId, holderIds } = scope ?? (await hospitalityModel.rfqInviteScope(vendorId));
+    if (holderIds.length === 0) return [];
     return db.any(
       `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
        SELECT rp.rfq_id, rp.product_variant_id, $3, rp.variant
@@ -2222,7 +2228,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
          AND EXISTS (
            SELECT 1 FROM tbl_product_variant_vendor_mapping m
            WHERE m.product_variant_id = rp.product_variant_id
-             AND m.vendor_id = $1 AND m.status = true AND m.is_approved = true
+             AND m.vendor_id = ANY($1::int[]) AND m.status = true AND m.is_approved = true
          )
          AND NOT EXISTS (
            SELECT 1 FROM tbl_rfq_product_vendors rpv
@@ -2240,7 +2246,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
          )
        ON CONFLICT DO NOTHING
        RETURNING product_variant_id, variant`,
-      [vendorId, rfqId, invitee]
+      [holderIds, rfqId, inviteeId]
     );
   },
 

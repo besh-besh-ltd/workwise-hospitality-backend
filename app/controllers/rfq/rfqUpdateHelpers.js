@@ -18,7 +18,7 @@ import {
   isEntityChangeMaterial,
   isTimestampField
 } from './rfqEditableFields.js';
-import { collapseToPrincipals } from '../../services/vendorNetwork/actingContext.js';
+import { orgKeySelect, orgEntitiesOfKeys } from '../../services/vendorNetwork/orgKeySql.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -670,6 +670,9 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
       if (hotelIds.length > 0) {
         // Inline copy of hospitalityModel.getEligibleVendorsForVariant so
         // the read participates in the same transaction as the inserts.
+        // Vendor Networks (spec §5.2): pooled per org like the original — the
+        // mapping and the hotel subscription may come from any counting entity of
+        // the org, and the principal is the one invited (orgKeySql.js).
         const eligibleRows = await t.any(
           `WITH variant_vendors AS (
              SELECT DISTINCT vendor_id
@@ -678,29 +681,33 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
                AND status = true
                AND is_approved = true
            ),
-           eligible_hotel_vendors AS (
-             SELECT DISTINCT s.vendor_id
+           mapped_keys AS (
+             SELECT DISTINCT org_key
+             FROM (${orgKeySelect('SELECT vendor_id FROM variant_vendors')}) mk
+             WHERE mk.counts
+           ),
+           candidate_keys AS (
+             SELECT ck.vendor_id, ck.org_key
+             FROM (${orgKeySelect(`SELECT vendor_id FROM variant_vendors
+                                   UNION
+                                   ${orgEntitiesOfKeys('SELECT org_key FROM mapped_keys')}`)}) ck
+             WHERE ck.counts
+               AND ck.org_key IN (SELECT org_key FROM mapped_keys)
+           ),
+           eligible_hotel_keys AS (
+             SELECT DISTINCT ck.org_key
              FROM tbl_vendor_hotel_category_subscription s
-             JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+             JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
              WHERE s.item_type = 'hotel'
                AND s.item_id = ANY ($2)
                AND s.status IN ('active', 'expired')
            )
-           SELECT vv.vendor_id
-           FROM variant_vendors vv
-           JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id`,
+           SELECT mk.org_key AS vendor_id
+           FROM mapped_keys mk
+           JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key`,
           [sp.product_variant_id, hotelIds]
         );
         resolvedVendorIds = eligibleRows.map((r) => Number(r.vendor_id)).filter((n) => !Number.isNaN(n));
-        // Vendor Networks (spec §5.2), as getEligibleVendorsForVariant does: a linked
-        // org entity is invited as its principal, once. Survivors keep their order.
-        if (resolvedVendorIds.length > 0) {
-          const principals = await collapseToPrincipals(resolvedVendorIds, t);
-          const keep = new Set(principals);
-          const survivors = [...new Set(resolvedVendorIds.filter((id) => keep.has(id)))];
-          const added = principals.filter((id) => !survivors.includes(id));
-          resolvedVendorIds = [...survivors, ...added];
-        }
       }
     }
 

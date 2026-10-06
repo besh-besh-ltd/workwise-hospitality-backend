@@ -34,7 +34,6 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome } from '../../services/notificationLinks.js';
-import { collapseToPrincipals } from '../../services/vendorNetwork/actingContext.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -4277,9 +4276,10 @@ const HospitalityController = {
       }
 
       // Vendor Networks (spec §5.2): the invite, its token and its email go to the
-      // vendor's org principal; the vendor's own variant mappings decide the products.
-      // In no org the invitee is the vendor itself.
-      const [inviteeId = Number(vendorId)] = await collapseToPrincipals([vendorId]);
+      // vendor's org principal; the org's pooled variant mappings decide the products.
+      // In no org the invitee is the vendor itself. Resolved once for all RFQs.
+      const scope = await hospitalityModel.rfqInviteScope(vendorId);
+      const { inviteeId } = scope;
 
       // Batch-fetch: invitee details + all open RFQs in one go
       const [vendorUser, openRfqs] = await Promise.all([
@@ -4308,7 +4308,7 @@ const HospitalityController = {
 
       // Insert vendor into all RFQs in parallel
       const insertResults = await Promise.all(
-        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id, inviteeId))
+        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id, scope))
       );
 
       // Collect joined RFQs and product variant IDs
