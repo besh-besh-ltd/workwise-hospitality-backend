@@ -111,7 +111,8 @@ export async function moveApiSequencesPastFixtures(runner = db) {
 /**
  * Deletes every fixture row (ids 95001..95999), network tables first. Rows the API
  * itself created under a fixture org (POST /org, POST /entities: serial ids) go too:
- * the org, its entity logins, their companies, locations, payments and notifications.
+ * the org, its entity logins and member persons (POST /members), their companies,
+ * locations, payments and notifications.
  */
 export async function cleanupVendorNetworkFixtures(runner = db) {
   const lo = FIXTURE_ID_MIN;
@@ -120,10 +121,13 @@ export async function cleanupVendorNetworkFixtures(runner = db) {
                         WHERE id BETWEEN ${lo} AND ${hi} OR principal_vendor_id BETWEEN ${lo} AND ${hi}`;
   const apiUserIds = (
     await runner.any(
-      `SELECT DISTINCT vendor_id FROM tbl_vendor_org_entities
-        WHERE org_id IN (${fixtureOrgs}) AND vendor_id NOT BETWEEN ${lo} AND ${hi}`
+      `SELECT vendor_id AS id FROM tbl_vendor_org_entities
+        WHERE org_id IN (${fixtureOrgs}) AND vendor_id NOT BETWEEN ${lo} AND ${hi}
+       UNION
+       SELECT person_user_id FROM tbl_vendor_org_members
+        WHERE org_id IN (${fixtureOrgs}) AND person_user_id NOT BETWEEN ${lo} AND ${hi}`
     )
-  ).map((r) => Number(r.vendor_id));
+  ).map((r) => Number(r.id));
   const apiCompanyIds = apiUserIds.length
     ? (
         await runner.any(`SELECT company_id FROM tbl_users WHERE id = ANY($1::int[]) AND company_id IS NOT NULL`, [

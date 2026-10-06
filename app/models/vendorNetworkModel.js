@@ -3,7 +3,7 @@
 // the partial unique index ix_vn_entities_live_vendor makes vendor_id lookups exact.
 
 import db from "../config/dbConn.js";
-import { istDate } from "../constants/vendorNetwork.js";
+import { istDate, VENDOR_MEMBER_USER_TYPE } from "../constants/vendorNetwork.js";
 
 /** The live org membership of an entity, with its org: null when the vendor is in no org. */
 export function getOrgByEntity(vendorId, runner = db) {
@@ -257,16 +257,20 @@ export function listEntitiesWithSeats(orgId, runner = db, today = istDate()) {
   );
 }
 
-/** Non-disabled memberships of an org with each person's name and email. */
-export function listMembers(orgId, runner = db) {
+/**
+ * Memberships of an org with each person's name and email and the entity's name;
+ * DISABLED ones only with `includeDisabled`. Never exposes the invite token hash.
+ */
+export function listMembers(orgId, runner = db, { includeDisabled = false } = {}) {
   return runner.any(
     `SELECT m.id, m.person_user_id, m.entity_vendor_id, m.role, m.status, m.invite_expires_at,
-            u.name, u.email
+            u.name, u.email, eu.name AS entity_name
        FROM tbl_vendor_org_members m
        JOIN tbl_users u ON u.id = m.person_user_id
-      WHERE m.org_id = $1 AND m.status <> 'DISABLED'
+       LEFT JOIN tbl_users eu ON eu.id = m.entity_vendor_id
+      WHERE m.org_id = $1 AND ($2 OR m.status <> 'DISABLED')
       ORDER BY m.role, m.id`,
-    [orgId]
+    [orgId, includeDisabled]
   );
 }
 
@@ -625,7 +629,181 @@ export function activatePendingSeats({ orgId, seatIds, paymentId, startDate, end
   );
 }
 
+// ---------------------------------------------------------------------------
+// People: type-11 persons and their memberships (Task 5, spec §5 "People").
+// ---------------------------------------------------------------------------
+
+/** The tbl_users row holding `email` (case-insensitive; lowest id when duplicated), or null. */
+export function findUserByEmail(email, runner = db) {
+  return runner.oneOrNone(
+    `SELECT id, user_type, status, COALESCE(is_deleted, 0) AS is_deleted, name, email
+       FROM tbl_users WHERE lower(email) = lower($1)
+      ORDER BY id LIMIT 1`,
+    [email]
+  );
+}
+
+/** Distinct org ids in which the person holds any membership row (any status). */
+export async function listPersonOrgIds(personId, runner = db) {
+  const rows = await runner.any(
+    `SELECT DISTINCT org_id FROM tbl_vendor_org_members WHERE person_user_id = $1 ORDER BY 1`,
+    [personId]
+  );
+  return rows.map((r) => r.org_id);
+}
+
+/** Distinct persons with a non-DISABLED membership in the org, `excludePersonId` aside. */
+export async function countLivePersons(orgId, excludePersonId = null, runner = db) {
+  const row = await runner.one(
+    `SELECT count(DISTINCT person_user_id)::int AS n FROM tbl_vendor_org_members
+      WHERE org_id = $1 AND status <> 'DISABLED' AND person_user_id IS DISTINCT FROM $2`,
+    [orgId, excludePersonId]
+  );
+  return row.n;
+}
+
+/** True when the person holds a non-DISABLED membership in the org other than `exceptMembershipId`. */
+export async function hasLiveMembership(orgId, personId, exceptMembershipId = null, runner = db) {
+  return !!(await runner.oneOrNone(
+    `SELECT 1 FROM tbl_vendor_org_members
+      WHERE org_id = $1 AND person_user_id = $2 AND status <> 'DISABLED' AND id IS DISTINCT FROM $3
+      LIMIT 1`,
+    [orgId, personId, exceptMembershipId]
+  ));
+}
+
+/** True when the person has an INVITED membership in the org whose token is still unexpired. */
+export async function hasOpenMemberInvite(orgId, personId, runner = db) {
+  return !!(await runner.oneOrNone(
+    `SELECT 1 FROM tbl_vendor_org_members
+      WHERE org_id = $1 AND person_user_id = $2 AND status = 'INVITED'
+        AND invite_token_hash IS NOT NULL AND invite_expires_at > now()
+      LIMIT 1`,
+    [orgId, personId]
+  ));
+}
+
+/** ACTIVE ORG_ADMIN memberships of the org, `excludeMembershipId` aside. */
+export async function countActiveOrgAdmins(orgId, excludeMembershipId = null, runner = db) {
+  const row = await runner.one(
+    `SELECT count(*)::int AS n FROM tbl_vendor_org_members
+      WHERE org_id = $1 AND role = 'ORG_ADMIN' AND status = 'ACTIVE' AND id IS DISTINCT FROM $2`,
+    [orgId, excludeMembershipId]
+  );
+  return row.n;
+}
+
+/** A new person login: type 11, status 0 (INVITED), no password, no company. */
+export function insertPerson({ email, name, createdBy }, runner = db) {
+  return runner.one(
+    `INSERT INTO tbl_users (name, email, user_type, status, company_id, password, created_by)
+     VALUES ($1, $2, ${VENDOR_MEMBER_USER_TYPE}, 0, NULL, NULL, $3) RETURNING id`,
+    [name, email, createdBy]
+  );
+}
+
+const MEMBER_COLUMNS = `id, org_id, person_user_id, entity_vendor_id, role, status, invite_expires_at,
+                        invited_by, created_at, updated_at`;
+
+/** Inserts a membership; a `tokenHash` also stamps invite_expires_at = now() + `ttlHours`. */
+export function insertMembership(
+  { orgId, personId, entityVendorId, role, status, tokenHash = null, ttlHours = 0, invitedBy },
+  runner = db
+) {
+  return runner.one(
+    `INSERT INTO tbl_vendor_org_members
+       (org_id, person_user_id, entity_vendor_id, role, status, invite_token_hash, invite_expires_at, invited_by)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6::text IS NULL THEN NULL ELSE now() + make_interval(hours => $7) END, $8)
+     RETURNING ${MEMBER_COLUMNS}`,
+    [orgId, personId, entityVendorId, role, status, tokenHash, ttlHours, invitedBy]
+  );
+}
+
+/** A membership of the org with its person's login state; FOR UPDATE inside a tx. */
+export function getMembership(orgId, membershipId, runner = db, { forUpdate = false } = {}) {
+  return runner.oneOrNone(
+    `SELECT m.id, m.org_id, m.person_user_id, m.entity_vendor_id, m.role, m.status, m.invite_expires_at,
+            u.email, u.name, u.status AS user_status
+       FROM tbl_vendor_org_members m
+       JOIN tbl_users u ON u.id = m.person_user_id
+      WHERE m.org_id = $1 AND m.id = $2
+      ${forUpdate ? "FOR UPDATE OF m" : ""}`,
+    [orgId, membershipId]
+  );
+}
+
+/** Sets status / role / entity of a membership; clears its invite token when it leaves INVITED. */
+export function updateMembership(membershipId, { status, role, entityVendorId }, runner = db) {
+  return runner.one(
+    `UPDATE tbl_vendor_org_members
+        SET status = $2, role = $3, entity_vendor_id = $4,
+            invite_token_hash = CASE WHEN $2 = 'INVITED' THEN invite_token_hash END,
+            invite_expires_at = CASE WHEN $2 = 'INVITED' THEN invite_expires_at END,
+            updated_at = now()
+      WHERE id = $1
+      RETURNING ${MEMBER_COLUMNS}`,
+    [membershipId, status, role, entityVendorId]
+  );
+}
+
+/** Gives an INVITED membership a fresh token hash and expiry; null when it is not INVITED. */
+export function rotateMemberInvite(membershipId, tokenHash, ttlHours, runner = db) {
+  return runner.oneOrNone(
+    `UPDATE tbl_vendor_org_members
+        SET invite_token_hash = $2, invite_expires_at = now() + make_interval(hours => $3), updated_at = now()
+      WHERE id = $1 AND status = 'INVITED'
+      RETURNING ${MEMBER_COLUMNS}`,
+    [membershipId, tokenHash, ttlHours]
+  );
+}
+
+/**
+ * The membership holding invite token `tokenHash`, with what the accept page may show
+ * (person email, org name, entity name) and `expired`; FOR UPDATE inside a tx.
+ */
+export function getMemberInviteByTokenHash(tokenHash, runner = db, { forUpdate = false } = {}) {
+  return runner.oneOrNone(
+    `SELECT m.id, m.org_id, m.person_user_id, m.status, m.invite_expires_at <= now() AS expired,
+            u.email, u.user_type, COALESCE(u.is_deleted, 0) AS is_deleted,
+            o.name AS org_name, eu.name AS entity_name
+       FROM tbl_vendor_org_members m
+       JOIN tbl_users u ON u.id = m.person_user_id
+       JOIN tbl_vendor_orgs o ON o.id = m.org_id
+       LEFT JOIN tbl_users eu ON eu.id = m.entity_vendor_id
+      WHERE m.invite_token_hash = $1
+      ${forUpdate ? "FOR UPDATE OF m" : ""}`,
+    [tokenHash]
+  );
+}
+
+/** Accept: the person gets its password and status 1, and every INVITED membership in the org turns ACTIVE. */
+export async function activatePerson({ orgId, personId, passwordHash }, runner = db) {
+  await runner.none(`UPDATE tbl_users SET password = $2, status = 1, updated_at = now() WHERE id = $1`, [
+    personId,
+    passwordHash,
+  ]);
+  await runner.none(
+    `UPDATE tbl_vendor_org_members
+        SET status = 'ACTIVE', invite_token_hash = NULL, invite_expires_at = NULL, updated_at = now()
+      WHERE org_id = $1 AND person_user_id = $2 AND status = 'INVITED'`,
+    [orgId, personId]
+  );
+}
+
 export default {
+  findUserByEmail,
+  listPersonOrgIds,
+  countLivePersons,
+  hasLiveMembership,
+  hasOpenMemberInvite,
+  countActiveOrgAdmins,
+  insertPerson,
+  insertMembership,
+  getMembership,
+  updateMembership,
+  rotateMemberInvite,
+  getMemberInviteByTokenHash,
+  activatePerson,
   getOrgByEntity,
   getOrgById,
   getEntity,

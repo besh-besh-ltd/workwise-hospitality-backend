@@ -1,4 +1,5 @@
-// /api/v1/vendor-network/* (spec §4-§5). Every route is acl([3]): after jwtUsr a
+// /api/v1/vendor-network/* (spec §4-§5). Every route but the two public
+// /member-invites ones is acl([3]): after jwtUsr a
 // type-11 person is already acting as a type-3 entity. Scope comes from req.user;
 // admin-only handlers check requireOrgAdmin themselves.
 import { Router } from "express";
@@ -24,6 +25,14 @@ import {
   deleteEntity,
   leaveNetwork,
 } from "../../controllers/vendorNetwork/entityController.js";
+import {
+  listOrgMembers,
+  inviteMember,
+  updateMember,
+  resendMemberInvite,
+  previewMemberInvite,
+  acceptMemberInvite,
+} from "../../controllers/vendorNetwork/memberController.js";
 
 const passportSignIn = passport.authenticate("jwtUsr", { session: false });
 const vendor = [passportSignIn, acl([3])];
@@ -50,6 +59,16 @@ VendorNetworkRoutes.delete("/entities/:vendorId", ...vendor, deleteEntity);
 VendorNetworkRoutes.get("/link-invites/incoming", ...vendor, incomingLinkInvites);
 VendorNetworkRoutes.post("/link-invites/:id/accept", ...vendor, acceptLinkInvite);
 VendorNetworkRoutes.post("/link-invites/:id/decline", ...vendor, declineLinkInvite);
+
+// People (§5): admin-managed type-11 logins
+VendorNetworkRoutes.get("/members", ...vendor, listOrgMembers);
+VendorNetworkRoutes.post("/members", ...vendor, inviteMember);
+VendorNetworkRoutes.patch("/members/:id", ...vendor, updateMember);
+VendorNetworkRoutes.post("/members/:id/resend", ...vendor, resendMemberInvite);
+
+// Member invite accept page: PUBLIC (no session yet). The 256-bit emailed token is the credential.
+VendorNetworkRoutes.post("/member-invites/accept", acceptMemberInvite);
+VendorNetworkRoutes.get("/member-invites/:token", previewMemberInvite);
 
 // Seats (§5.1)
 VendorNetworkRoutes.post("/seats/pay", ...vendor, paySeats);
