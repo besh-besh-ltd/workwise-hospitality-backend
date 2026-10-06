@@ -55,7 +55,7 @@ const operableCandidatesSql = (orgParam, feeFreeParam, todayParam) => `
     FROM tbl_vendor_org_entities e
     JOIN tbl_vendor_orgs o ON o.id = e.org_id
     JOIN tbl_users u ON u.id = e.vendor_id
-   WHERE e.org_id = ${orgParam} AND e.status <> 'REMOVED' AND e.status = 'ACTIVE'
+   WHERE e.org_id = ${orgParam} AND e.status = 'ACTIVE'
      AND e.relationship <> 'PRINCIPAL' AND e.vendor_id <> o.principal_vendor_id
      AND (${feeFreeParam}::boolean OR EXISTS (
            SELECT 1 FROM tbl_vendor_network_seats s
@@ -105,77 +105,6 @@ export async function entityCoversHotel(entityVendorId, hotelId, categoryId = nu
   return { covered: row.mode === "INCLUDE", specificity: Number(row.specificity) };
 }
 
-/** Rules of an entity, most specific first. */
-export function listCoverageRules(entityVendorId, runner = db) {
-  return runner.any(
-    `SELECT r.id, r.scope_type, r.scope_id, r.mode, r.category_id, r.created_by, r.created_at,
-            CASE r.scope_type
-              WHEN 'STATE' THEN st.state_name
-              WHEN 'CITY'  THEN ct.city_name
-              ELSE h.name
-            END AS scope_name,
-            cat.title AS category_name
-       FROM tbl_vendor_coverage_rules r
-       LEFT JOIN tbl_location_states st ON r.scope_type = 'STATE' AND st.id = r.scope_id
-       LEFT JOIN tbl_location_cities ct ON r.scope_type = 'CITY' AND ct.id = r.scope_id
-       LEFT JOIN tbl_hospitality_company_hotels h ON r.scope_type = 'HOTEL' AND h.id = r.scope_id
-       LEFT JOIN tbl_category cat ON cat.id = r.category_id
-      WHERE r.entity_vendor_id = $1
-      ORDER BY CASE r.scope_type WHEN 'HOTEL' THEN 1 WHEN 'CITY' THEN 2 ELSE 3 END,
-               r.scope_id, r.category_id NULLS FIRST, r.id`,
-    [entityVendorId]
-  );
-}
-
-/**
- * Of the given rules, the (scope_type, scope_id) and category ids that do not exist:
- * { scopes: [{ scope_type, scope_id }], categories: number[] }. STATE ids must be India
- * states; HOTEL ids live (is_deleted = 0) hotels; categories live categories.
- */
-export async function findUnknownRuleTargets(rules, runner = db) {
-  const idsOf = (type) => toIds(rules.filter((r) => r.scope_type === type).map((r) => r.scope_id));
-  const categoryIds = toIds(rules.map((r) => r.category_id).filter((c) => c != null));
-  const row = await runner.one(
-    `SELECT
-       ARRAY(SELECT x FROM unnest($1::int[]) x
-              WHERE NOT EXISTS (SELECT 1 FROM tbl_location_states s WHERE s.id = x AND s.country_id = 1)) AS states,
-       ARRAY(SELECT x FROM unnest($2::int[]) x
-              WHERE NOT EXISTS (SELECT 1 FROM tbl_location_cities c WHERE c.id = x)) AS cities,
-       ARRAY(SELECT x FROM unnest($3::int[]) x
-              WHERE NOT EXISTS (SELECT 1 FROM tbl_hospitality_company_hotels h
-                                 WHERE h.id = x AND COALESCE(h.is_deleted, 0) = 0)) AS hotels,
-       ARRAY(SELECT x FROM unnest($4::int[]) x
-              WHERE NOT EXISTS (SELECT 1 FROM tbl_category c
-                                 WHERE c.id = x AND COALESCE(c.is_deleted, 0) = 0)) AS categories`,
-    [idsOf("STATE"), idsOf("CITY"), idsOf("HOTEL"), categoryIds]
-  );
-  const scopes = [
-    ...row.states.map((id) => ({ scope_type: "STATE", scope_id: Number(id) })),
-    ...row.cities.map((id) => ({ scope_type: "CITY", scope_id: Number(id) })),
-    ...row.hotels.map((id) => ({ scope_type: "HOTEL", scope_id: Number(id) })),
-  ];
-  return { scopes, categories: row.categories.map(Number) };
-}
-
-/** Replaces every rule of an entity with `rules` (call inside a transaction). */
-export async function replaceCoverageRules(entityVendorId, rules, createdBy, runner) {
-  await runner.none(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [entityVendorId]);
-  if (!rules.length) return;
-  await runner.none(
-    `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode, category_id, created_by)
-     SELECT $1, t.scope_type, t.scope_id, t.mode, t.category_id, $6
-       FROM unnest($2::text[], $3::int[], $4::text[], $5::int[]) AS t(scope_type, scope_id, mode, category_id)`,
-    [
-      entityVendorId,
-      rules.map((r) => r.scope_type),
-      rules.map((r) => r.scope_id),
-      rules.map((r) => r.mode),
-      rules.map((r) => r.category_id),
-      createdBy,
-    ]
-  );
-}
-
 /**
  * The preview hotel set of an org (spec simplification): live hotels of any RFQ
  * (tbl_rfq.hotel_id or tbl_rfq_hotel_mappings) the principal was invited to through
@@ -200,6 +129,90 @@ const previewHotelIdsSql = (principalParam) => `
         WHERE am.arc_id IN (SELECT arc_id FROM tbl_arc_invitation WHERE vendor_id = ${principalParam}))
    ORDER BY h.id
    LIMIT ${PREVIEW_HOTEL_CAP + 1}`;
+
+/** The preview hotel set as offered and validated: the first PREVIEW_HOTEL_CAP of it. */
+const cappedPreviewSql = (principalParam) =>
+  `SELECT * FROM (${previewHotelIdsSql(principalParam)}) pv ORDER BY id LIMIT ${PREVIEW_HOTEL_CAP}`;
+
+/**
+ * Rules of an entity, most specific first. A HOTEL rule's scope_name resolves only for
+ * hotels in the org's preview set (PUT never stores others; this guards it anyway).
+ */
+export function listCoverageRules(entityVendorId, principalVendorId, runner = db) {
+  return runner.any(
+    `WITH preview AS (${cappedPreviewSql("$2")})
+     SELECT r.id, r.scope_type, r.scope_id, r.mode, r.category_id, r.created_by, r.created_at,
+            CASE r.scope_type
+              WHEN 'STATE' THEN st.state_name
+              WHEN 'CITY'  THEN ct.city_name
+              ELSE h.name
+            END AS scope_name,
+            cat.title AS category_name
+       FROM tbl_vendor_coverage_rules r
+       LEFT JOIN tbl_location_states st ON r.scope_type = 'STATE' AND st.id = r.scope_id
+       LEFT JOIN tbl_location_cities ct ON r.scope_type = 'CITY' AND ct.id = r.scope_id
+       LEFT JOIN preview h ON r.scope_type = 'HOTEL' AND h.id = r.scope_id
+       LEFT JOIN tbl_category cat ON cat.id = r.category_id
+      WHERE r.entity_vendor_id = $1
+      ORDER BY CASE r.scope_type WHEN 'HOTEL' THEN 1 WHEN 'CITY' THEN 2 ELSE 3 END,
+               r.scope_id, r.category_id NULLS FIRST, r.id`,
+    [entityVendorId, principalVendorId]
+  );
+}
+
+/**
+ * Of the given rules, the targets that are not allowed:
+ *   scopes:     STATE / CITY ids that do not exist (STATE must be an India state)
+ *   categories: category ids that are not live categories
+ *   hotelsOutsideNetwork: true when any HOTEL id is not in the org's capped preview set.
+ * Locations and categories are public master data, so they are listed; hotels are only
+ * a flag, so a refusal never reveals whether another tenant's hotel id exists.
+ */
+export async function findInvalidRuleTargets(rules, principalVendorId, runner = db) {
+  const idsOf = (type) => toIds(rules.filter((r) => r.scope_type === type).map((r) => r.scope_id));
+  const categoryIds = toIds(rules.map((r) => r.category_id).filter((c) => c != null));
+  const row = await runner.one(
+    `WITH preview AS (${cappedPreviewSql("$5")})
+     SELECT
+       ARRAY(SELECT x FROM unnest($1::int[]) x
+              WHERE NOT EXISTS (SELECT 1 FROM tbl_location_states s WHERE s.id = x AND s.country_id = 1)) AS states,
+       ARRAY(SELECT x FROM unnest($2::int[]) x
+              WHERE NOT EXISTS (SELECT 1 FROM tbl_location_cities c WHERE c.id = x)) AS cities,
+       EXISTS (SELECT 1 FROM unnest($3::int[]) x
+                WHERE NOT EXISTS (SELECT 1 FROM preview p WHERE p.id = x)) AS hotels_outside,
+       ARRAY(SELECT x FROM unnest($4::int[]) x
+              WHERE NOT EXISTS (SELECT 1 FROM tbl_category c
+                                 WHERE c.id = x AND COALESCE(c.is_deleted, 0) = 0)) AS categories`,
+    [idsOf("STATE"), idsOf("CITY"), idsOf("HOTEL"), categoryIds, principalVendorId]
+  );
+  return {
+    scopes: [
+      ...row.states.map((id) => ({ scope_type: "STATE", scope_id: Number(id) })),
+      ...row.cities.map((id) => ({ scope_type: "CITY", scope_id: Number(id) })),
+    ],
+    categories: row.categories.map(Number),
+    hotelsOutsideNetwork: row.hotels_outside,
+  };
+}
+
+/** Replaces every rule of an entity with `rules` (call inside a transaction). */
+export async function replaceCoverageRules(entityVendorId, rules, createdBy, runner) {
+  await runner.none(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [entityVendorId]);
+  if (!rules.length) return;
+  await runner.none(
+    `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode, category_id, created_by)
+     SELECT $1, t.scope_type, t.scope_id, t.mode, t.category_id, $6
+       FROM unnest($2::text[], $3::int[], $4::text[], $5::int[]) AS t(scope_type, scope_id, mode, category_id)`,
+    [
+      entityVendorId,
+      rules.map((r) => r.scope_type),
+      rules.map((r) => r.scope_id),
+      rules.map((r) => r.mode),
+      rules.map((r) => r.category_id),
+      createdBy,
+    ]
+  );
+}
 
 /**
  * Which preview-set hotels the entity's rules cover for `categoryId`:
@@ -232,9 +245,9 @@ export async function previewCoveredHotels({ principalVendorId, entityVendorId, 
 /** Preview-set hotels whose name contains `q` (case-insensitive), at most `limit`. */
 export function searchPreviewHotels({ principalVendorId, q = "", limit = 50 }, runner = db) {
   return runner.any(
-    `WITH preview AS (${previewHotelIdsSql("$1")})
+    `WITH preview AS (${cappedPreviewSql("$1")})
      SELECT p.id, p.name, p.city, p.state, p.state_id, p.city_id
-       FROM (SELECT * FROM preview ORDER BY id LIMIT ${PREVIEW_HOTEL_CAP}) p
+       FROM preview p
       WHERE $2 = '' OR p.name ILIKE '%' || $2 || '%'
       ORDER BY p.name, p.id
       LIMIT $3`,
@@ -266,7 +279,7 @@ export default {
   resolveCoverageCandidates,
   entityCoversHotel,
   listCoverageRules,
-  findUnknownRuleTargets,
+  findInvalidRuleTargets,
   replaceCoverageRules,
   previewCoveredHotels,
   searchPreviewHotels,

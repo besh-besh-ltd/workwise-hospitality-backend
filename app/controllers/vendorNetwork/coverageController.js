@@ -8,17 +8,20 @@
 //
 // The org comes from req.user.network; :vendorId is only a target, verified to be a live
 // entity of that org (404 otherwise). The preview hotel set is derived from the org's
-// principal, never from a client-supplied id.
+// principal, never from a client-supplied id; HOTEL rules may only target hotels in it,
+// and a refusal never says which hotel ids exist (no cross-tenant existence oracle).
+// The principal is the fallback, never a candidate: PUT on it is refused (400), GET
+// answers 200 with its (always empty) rules.
 
 import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
 import { logger } from "../../util/logger.js";
 import { requireOrgAdmin, actingPersonId } from "../../services/vendorNetwork/guards.js";
-import { COVERAGE_SCOPE, COVERAGE_MODE } from "../../constants/vendorNetwork.js";
+import { COVERAGE_SCOPE, COVERAGE_MODE, ENTITY_RELATIONSHIP } from "../../constants/vendorNetwork.js";
 import { getEntity, getOrgById } from "../../models/vendorNetworkModel.js";
 import {
   listCoverageRules,
-  findUnknownRuleTargets,
+  findInvalidRuleTargets,
   replaceCoverageRules,
   previewCoveredHotels,
   searchPreviewHotels,
@@ -36,6 +39,9 @@ function parseId(value) {
   const n = typeof value === "string" ? (/^\d+$/.test(value) ? Number(value) : NaN) : value;
   return Number.isSafeInteger(n) && n > 0 && n <= 2147483647 ? n : null;
 }
+
+const PRINCIPAL_HAS_NO_RULES = "Coverage rules apply to member entities only";
+const HOTELS_OUTSIDE_NETWORK = "One or more hotels are not in your network's hotel set";
 
 const fail = (res, http, message, extra = {}) => res.status(http).json({ status: 0, message, ...extra });
 
@@ -100,7 +106,7 @@ export async function getCoverage(req, res) {
 
     const principalVendorId = await principalOf(req);
     const [rules, preview] = await Promise.all([
-      listCoverageRules(entity.vendor_id),
+      listCoverageRules(entity.vendor_id, principalVendorId),
       previewCoveredHotels({ principalVendorId, entityVendorId: entity.vendor_id, categoryId }),
     ]);
     return res.status(200).json({
@@ -121,32 +127,39 @@ export async function putCoverage(req, res) {
 
     const entity = await targetEntity(req);
     if (!entity) return fail(res, 404, "Entity not found in your network");
+    if (entity.relationship === ENTITY_RELATIONSHIP.PRINCIPAL) return fail(res, 400, PRINCIPAL_HAS_NO_RULES);
 
     const { rules, error } = parseRules(req.body);
     if (error) return fail(res, 400, error);
-    const unknown = await findUnknownRuleTargets(rules);
-    if (unknown.scopes.length || unknown.categories.length) {
-      return fail(res, 400, "Some rules point at a state, city, hotel or category that does not exist", {
-        data: unknown,
-      });
-    }
+    const principalVendorId = await principalOf(req);
 
-    const saved = await db.tx(async (t) => {
+    const outcome = await db.tx(async (t) => {
       // Lock the entity row: concurrent replace-alls serialise instead of colliding.
       const locked = await t.oneOrNone(
         `SELECT vendor_id FROM tbl_vendor_org_entities
           WHERE org_id = $1 AND vendor_id = $2 AND status <> 'REMOVED' FOR UPDATE`,
         [req.user.network.org_id, entity.vendor_id]
       );
-      if (!locked) return null;
+      if (!locked) return { http: 404, message: "Entity not found in your network" };
+      const invalid = await findInvalidRuleTargets(rules, principalVendorId, t);
+      if (invalid.hotelsOutsideNetwork) return { http: 400, message: HOTELS_OUTSIDE_NETWORK };
+      if (invalid.scopes.length || invalid.categories.length) {
+        return {
+          http: 400,
+          message: "Some rules point at a state, city or category that does not exist",
+          data: { scopes: invalid.scopes, categories: invalid.categories },
+        };
+      }
       await replaceCoverageRules(entity.vendor_id, rules, actingPersonId(req), t);
-      return listCoverageRules(entity.vendor_id, t);
+      return { saved: await listCoverageRules(entity.vendor_id, principalVendorId, t) };
     });
-    if (!saved) return fail(res, 404, "Entity not found in your network");
+    if (!outcome.saved) {
+      return fail(res, outcome.http, outcome.message, outcome.data ? { data: outcome.data } : {});
+    }
     return res.status(200).json({
       status: 1,
       message: "Coverage saved",
-      data: { vendor_id: entity.vendor_id, rules: saved },
+      data: { vendor_id: entity.vendor_id, rules: outcome.saved },
     });
   } catch (error) {
     return handleError(res, error, "putCoverage");

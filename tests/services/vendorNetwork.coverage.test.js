@@ -65,6 +65,10 @@ const BASE = "/api/v1/vendor-network";
 const BUYER_ADMIN = IDS.users.companyA_admin;
 
 const savedFee = process.env.NETWORK_SEAT_FEE_INR;
+// The hotel routes are gated by requireCompanyAdmin, whose legacy path is user_type 7, and
+// the fixture admin carries user_type NULL (same approach as
+// security.hospitalityProjectIdor.test.js). The hotel-write tests set 7 and afterEach
+// restores the original value.
 let priorAdminUserType;
 const created = { rfqIds: [], hotelIds: [] };
 
@@ -124,6 +128,17 @@ async function rules(runner, ...rows) {
       [entity, scopeType, scopeId, mode, categoryId]
     );
   }
+}
+
+/** Committed RFQ at `hotel` with a tbl_rfq_product_vendors row for the principal: puts the hotel in ORG's preview set. */
+async function principalQuotedAt(hotel) {
+  const rfq = await makeRFQ(db, { createdBy: IDS.users.a1_proc_buyer, hotel, title: "VN cov preview" });
+  created.rfqIds.push(rfq.rfq_id);
+  const variant = await db.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`);
+  await db.none(
+    `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 1)`,
+    [rfq.rfq_id, variant.id, P]
+  );
 }
 
 const covers = (t, entity, hotel, category = null) => entityCoversHotel(entity, hotel, category, t);
@@ -418,6 +433,7 @@ describe("coverage preview set", () => {
 
 describe("/coverage routes", () => {
   it("PUT replaces all rules; GET returns them", async () => {
+    await principalQuotedAt(H_PUNE);
     const client = await httpClient(P);
     let res = await client.put(`${BASE}/coverage/${B1}`).send({
       rules: [
@@ -451,11 +467,70 @@ describe("/coverage routes", () => {
     expect(res.body.data.rules).toEqual([
       expect.objectContaining({ scope_type: "STATE", scope_id: GOA, mode: "INCLUDE", scope_name: "Goa" }),
     ]);
-    expect(res.body.data.preview).toEqual({ hotels_considered: 0, truncated: false, covered: [] });
+    expect(res.body.data.preview).toEqual({ hotels_considered: 1, truncated: false, covered: [] });
 
     res = await client.put(`${BASE}/coverage/${B1}`).send({ rules: [] });
     expect(res.status).toBe(200);
     expect(await db.any(`SELECT 1 FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [B1])).toEqual([]);
+  });
+
+  it("PUT refuses a HOTEL outside the network's preview set with one generic 400, leaking no id or name", async () => {
+    await principalQuotedAt(H_PUNE);
+    const client = await httpClient(P);
+    await client.put(`${BASE}/coverage/${B1}`).send({ rules: [{ scope_type: "STATE", scope_id: GOA, mode: "INCLUDE" }] });
+
+    const bodies = [];
+    // A live hotel of the buyer tenant that the principal never quoted, and an id that does not exist.
+    for (const hotel of [H_MUMBAI, 99999902]) {
+      const res = await client.put(`${BASE}/coverage/${B1}`).send({
+        rules: [
+          { scope_type: "HOTEL", scope_id: H_PUNE, mode: "INCLUDE" },
+          { scope_type: "HOTEL", scope_id: hotel, mode: "INCLUDE" },
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ status: 0, message: "One or more hotels are not in your network's hotel set" });
+      const raw = JSON.stringify(res.body);
+      expect(raw).not.toContain(String(hotel));
+      expect(raw).not.toContain("VN Cov");
+      bodies.push(res.body);
+    }
+    expect(bodies[0]).toEqual(bodies[1]); // existing and missing ids are indistinguishable
+    expect(await db.any(`SELECT scope_id FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [B1])).toEqual([
+      { scope_id: GOA },
+    ]);
+
+    const ok = await client.put(`${BASE}/coverage/${B1}`).send({
+      rules: [{ scope_type: "HOTEL", scope_id: H_PUNE, mode: "INCLUDE" }],
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.data.rules).toEqual([
+      expect.objectContaining({ scope_type: "HOTEL", scope_id: H_PUNE, scope_name: "VN Cov Pune" }),
+    ]);
+  });
+
+  it("GET resolves a HOTEL rule's name only inside the preview set", async () => {
+    // A rule stored outside the set (not creatable through PUT) must not reveal the hotel's name.
+    await db.none(
+      `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode) VALUES ($1, 'HOTEL', $2, 'INCLUDE')`,
+      [B1, H_MUMBAI]
+    );
+    const res = await (await httpClient(P)).get(`${BASE}/coverage/${B1}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.rules).toEqual([expect.objectContaining({ scope_id: H_MUMBAI, scope_name: null })]);
+  });
+
+  it("the principal has no coverage rules: PUT 400, GET 200 with none", async () => {
+    const client = await httpClient(P);
+    const put = await client.put(`${BASE}/coverage/${P}`).send({
+      rules: [{ scope_type: "STATE", scope_id: MAHARASHTRA, mode: "INCLUDE" }],
+    });
+    expect(put.status).toBe(400);
+    expect(put.body).toEqual({ status: 0, message: "Coverage rules apply to member entities only" });
+    expect(await db.any(`SELECT 1 FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [P])).toEqual([]);
+    const get = await client.get(`${BASE}/coverage/${P}`);
+    expect(get.status).toBe(200);
+    expect(get.body.data.rules).toEqual([]);
   });
 
   it("PUT refuses unknown scope ids and categories with 400 and writes nothing", async () => {
@@ -464,7 +539,6 @@ describe("/coverage routes", () => {
     const bad = [
       { scope_type: "STATE", scope_id: PUNE, mode: "INCLUDE" }, // a city id is not a state
       { scope_type: "CITY", scope_id: 99999901, mode: "INCLUDE" },
-      { scope_type: "HOTEL", scope_id: 99999902, mode: "INCLUDE" },
       { scope_type: "STATE", scope_id: MAHARASHTRA, mode: "INCLUDE", category_id: 99999903 },
     ];
     for (const rule of bad) {
@@ -532,13 +606,7 @@ describe("/coverage routes", () => {
     expect(res.body.data.map((c) => c.id)).not.toContain(BARDEZ);
 
     // Preview set: the principal quoted an RFQ at the Pune hotel only.
-    const rfq = await makeRFQ(db, { createdBy: IDS.users.a1_proc_buyer, hotel: H_PUNE, title: "VN cov lookup" });
-    created.rfqIds.push(rfq.rfq_id);
-    const variant = await db.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`);
-    await db.none(
-      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 1)`,
-      [rfq.rfq_id, variant.id, P]
-    );
+    await principalQuotedAt(H_PUNE);
     res = await client.get(`${BASE}/coverage/lookup/hotels?q=VN%20Cov`);
     expect(res.status).toBe(200);
     expect(res.body.data.map((h) => h.id)).toEqual([H_PUNE]);
