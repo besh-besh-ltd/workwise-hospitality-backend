@@ -1,4 +1,5 @@
 import db from '../../config/dbConn.js';
+import { isActiveFulfiller } from '../../services/vendorNetwork/fulfilmentSql.js';
 
 /**
  * ARC v2 — Group rate contract hotel model.
@@ -311,14 +312,18 @@ const arcHotelModel = {
       // holding the ACCEPTED ARC_HOTEL routing assignment for (contract, hotel), if
       // any (Vendor Networks §6.4) — else every line of the hotel would not share
       // one supplier. Existing rows keep theirs (the conflict branch leaves it).
+      // The assignee must still be ACTIVE in the contract vendor's network (the
+      // call-off release's rule); otherwise the row starts with no fulfiller.
       await runner.none(
         `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty, fulfilling_vendor_id)
          VALUES ($1, $2, $3, (
            SELECT a.assigned_vendor_id
              FROM tbl_vendor_routing_assignments a
              JOIN tbl_arc_contract_line l ON l.id = $1
+             JOIN tbl_arc_contract c ON c.id = l.arc_contract_id
             WHERE a.subject_type = 'ARC_HOTEL' AND a.subject_id = l.arc_contract_id
               AND a.hotel_id = $2 AND a.status = 'ACCEPTED'
+              AND ${isActiveFulfiller('a.assigned_vendor_id', 'c.vendor_id')}
             ORDER BY a.id DESC
             LIMIT 1))
          ON CONFLICT (arc_contract_line_id, hotel_id) DO UPDATE

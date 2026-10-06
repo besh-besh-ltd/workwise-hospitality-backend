@@ -17,6 +17,7 @@ import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { fulfilmentHotelIds, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
+import { supplierDetailsFor } from '../../helper/gstState.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -355,6 +356,23 @@ export async function generateContractPdf(ctx, vendor, lines, contractId, { sign
   }
 }
 
+/**
+ * The Supplier party of a contract document: the contract vendor's login name and
+ * email (as before), and its GSTIN. The GSTIN is the one it quoted under
+ * (tbl_arc_quote.gstin_used), else its registered one (gstState.supplierDetailsFor:
+ * tbl_company.gstin, then the 'gst' vendor document). Null when none is known; the
+ * template then prints "N/A".
+ * @param {{ arc_id, vendor_id, vendor_name, vendor_email }} contract
+ */
+export async function loadContractVendorParty(contract, runner = db) {
+  const quoted = await runner.oneOrNone(
+    `SELECT NULLIF(trim(gstin_used), '') AS gstin FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+    [contract.arc_id, contract.vendor_id]
+  );
+  const gstin = quoted?.gstin || (await supplierDetailsFor(contract.vendor_id, runner))?.gstin || null;
+  return { name: contract.vendor_name, email: contract.vendor_email, gstin };
+}
+
 // Fetch the ARC + buyer scope a contract document needs (one query per ARC).
 export async function loadContractDocContext(arcId, runner = db) {
   return runner.oneOrNone(
@@ -504,7 +522,8 @@ export async function generateContractPdfsForArc(arcId) {
       if (c.document_s3_url) continue; // already rendered
       try {
         const lines = await arcContractModel.listLines(c.id);
-        const { url, hash } = await generateContractPdf(ctx, { name: c.vendor_name, email: c.vendor_email }, lines, c.id, { signed: false });
+        const vendor = await loadContractVendorParty(c);
+        const { url, hash } = await generateContractPdf(ctx, vendor, lines, c.id, { signed: false });
         await arcContractModel.setDocument(c.id, { url, hash });
         logger.info({ contractId: c.id, url }, '[arcContract] draft PDF generated');
       } catch (perErr) {
@@ -790,7 +809,8 @@ export async function verifyOtp(req, res) {
       try {
         const ctx = await loadContractDocContext(contract.arc_id);
         const lines = await arcContractModel.listLines(id);
-        const pdf = await generateContractPdf(ctx, { name: contract.vendor_name, email: contract.vendor_email }, lines, id, { signed: true, signedAt });
+        const vendor = await loadContractVendorParty(contract);
+        const pdf = await generateContractPdf(ctx, vendor, lines, id, { signed: true, signedAt });
         documentHash = pdf.hash;
         documentUrl = pdf.url;
       } catch (pdfErr) {

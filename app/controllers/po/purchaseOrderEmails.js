@@ -439,14 +439,24 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
     if (!vendor || !vendor[0]) return;
     vendor = vendor[0];
 
-    const products = await db.any(
-      `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
-       FROM tbl_purchase_order_product pop
-       JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
-       JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
-       WHERE pop.purchase_order_id = $1`,
-      [purchaseOrder.id]
-    );
+    // Call-off lines carry no RFQ product; their variant is on the line itself.
+    const products = purchaseOrder.is_call_off
+      ? await db.any(
+          `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+           FROM tbl_purchase_order_product pop
+           JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+           WHERE pop.purchase_order_id = $1
+           ORDER BY pop.id`,
+          [purchaseOrder.id]
+        )
+      : await db.any(
+          `SELECT pv.name, pop.quantity, pop.unit, pop.total_price
+           FROM tbl_purchase_order_product pop
+           JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+           JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+           WHERE pop.purchase_order_id = $1`,
+          [purchaseOrder.id]
+        );
     const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
     const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
@@ -489,7 +499,9 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
         <h4>Purchase Order Details</h4>
         <ul>
           <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
-          <li><strong>RFQ:</strong> #${rfqLabel(rfqDetails)}</li>
+          ${purchaseOrder.is_call_off
+            ? `<li><strong>Rate contract:</strong> ${rfqDetails?.arc_number || 'N/A'}</li>`
+            : `<li><strong>RFQ:</strong> #${rfqLabel(rfqDetails)}</li>`}
           <li><strong>Product(s):</strong> ${products.map(p => p.name).join(", ")}</li>
           <li><strong>Quantity:</strong> ${computedQuantity || 'N/A'}</li>
           <li><strong>Total Value:</strong> Rs. ${computedTotal.toLocaleString('en-IN')}</li>

@@ -7,6 +7,7 @@ import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
 import pricingEngine from './pricingEngine.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
+import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 
 // Phase 2 — run the pricing engine for a contract line at a given quantity.
 // Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
@@ -118,23 +119,15 @@ async function buildCallOffBuckets(mrId, txContext) {
             mi.uom,
             mi.arc_contract_id,
             mi.arc_contract_line_id,
-            COALESCE(fe.vendor_id, c.vendor_id) AS vendor_id,
+            -- The fulfilling entity counts only while it is ACTIVE in the contract
+            -- vendor's network (the same rule as the MR line picker).
+            ${effectiveSupplierExpr('clh.fulfilling_vendor_id', 'c.vendor_id')} AS vendor_id,
             c.arc_id,
             clh.id         AS hotel_line_id
        FROM tbl_material_requisition_item mi
        JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
        LEFT JOIN tbl_arc_contract_line_hotel clh
               ON clh.arc_contract_line_id = mi.arc_contract_line_id AND clh.hotel_id = $2
-       -- The fulfilling entity counts only while it is ACTIVE in the contract
-       -- vendor's network: a removal/suspension commits before its assignments are
-       -- revoked (after commit), and no call-off may reach it in between.
-       LEFT JOIN LATERAL (
-         SELECT e.vendor_id
-           FROM tbl_vendor_org_entities e
-           JOIN tbl_vendor_orgs o ON o.id = e.org_id AND o.principal_vendor_id = c.vendor_id
-          WHERE e.vendor_id = clh.fulfilling_vendor_id AND e.status = 'ACTIVE'
-          LIMIT 1
-       ) fe ON TRUE
       WHERE mi.mr_id = $1`,
     [mrId, mr?.hotel_id ?? null]
   );

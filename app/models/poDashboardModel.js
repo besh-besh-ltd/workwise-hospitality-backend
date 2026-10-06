@@ -18,6 +18,7 @@
 import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
 import pricingEngine from "../services/pricingEngine.js";
+import { supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLinesFor, summarizeTaxLines } from "../helper/gstState.js";
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
 
@@ -945,6 +946,25 @@ export async function getPODetailFull(po_id, scope) {
     total: po.total_value != null ? Number(po.total_value) : 0,
   };
 
+  // Call-off POs (Vendor Networks §6.4): the supplier is the fulfilling entity (the
+  // PO's finalized vendor), and GST splits by its GSTIN state vs the ordering hotel:
+  // IGST across states, CGST + SGST within one, a single GST row when either is
+  // unknown. Computed here and in the PDF from the same helpers; nothing is stored.
+  // RFQ POs are untouched.
+  let callOffSupplier = null;
+  if (po.is_call_off) {
+    const supplier = await supplierDetailsFor(po.finalized_vendor_id);
+    const placeCode = await stateCodeForHotel(po.hotel_id);
+    const taxSplit = taxSplitFor(supplier?.state_code ?? null, placeCode);
+    pricing.tax_breakdown = summarizeTaxLines(
+      items.flatMap((it) => {
+        const t = lineTax(it);
+        return t.gst_amount == null ? [] : taxLinesFor(taxSplit, t.gst_pct, t.gst_amount);
+      })
+    );
+    callOffSupplier = { supplier, placeCode, taxSplit };
+  }
+
   // Documents: tbl_purchase_order_document + the PO PDF itself.
   const docRows = await db.any(
     `SELECT id, document_type, document_url, created_at
@@ -1302,11 +1322,21 @@ export async function getPODetailFull(po_id, scope) {
       vendors_participated: rfqStats ? rfqStats.participated : 0,
       rounds: null, // negotiation round count not derivable cleanly here
     },
+    ...(callOffSupplier
+      ? { tax_split: callOffSupplier.taxSplit, place_of_supply_state_code: callOffSupplier.placeCode }
+      : {}),
     vendor: {
       id: po.finalized_vendor_id,
       name: po.vendor_name || "Unknown Vendor",
       short: initialsOf(po.vendor_name),
-      gstin: po.vendor_gstin || po.gstin || null,
+      gstin: po.vendor_gstin || po.gstin || callOffSupplier?.supplier?.gstin || null,
+      ...(callOffSupplier
+        ? {
+            address: callOffSupplier.supplier?.address ?? null,
+            state_name: callOffSupplier.supplier?.state_name ?? null,
+            state_code: callOffSupplier.supplier?.state_code ?? null,
+          }
+        : {}),
       pan: null, // vendor PAN not stored on tbl_company
       contact: null,
       email: po.vendor_email || null,

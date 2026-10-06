@@ -6,6 +6,10 @@ import { pdfRenderer } from '../../util/pdfRenderer.js';
 import db from '../../config/dbConn.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
+import pricingEngine from '../../services/pricingEngine.js';
+import {
+  supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLinesFor, summarizeTaxLines,
+} from '../gstState.js';
 
 /**
  * Call-off Purchase Order document renderer (audit CO10).
@@ -36,12 +40,32 @@ function fmtDate(d) {
 }
 
 /**
+ * The GST rows of one call-off line under `split` ('IGST' | 'CGST_SGST' | null): GST on
+ * the line's basic (qty × base rate), split by gstState.taxLinesFor. Null when the line
+ * has no GST rate.
+ */
+export function callOffLineTaxLines(line, split) {
+  if (line.gst_pct == null) return null;
+  const t = pricingEngine.lineTaxBreakdown({
+    unit_price: line.unit_price, quantity: line.quantity, tax: line.gst_pct, tax_mode: 'percentage',
+  });
+  return taxLinesFor(split, t.gst_pct, t.gst_amount);
+}
+
+const pct = (rate) => `${Number(rate)}%`;
+
+/**
  * Pure, deterministic HTML for a call-off PO. `ctx` shape:
  *   { po: { po_number, total_value, created_at },
  *     buyer: { company_name, hotel_name, gst, delivery_address },
  *     vendor: { name, email },
+ *     supplier: { name, email, gstin, address, state_name, state_code } | null,
+ *     tax_split: 'IGST' | 'CGST_SGST' | null,
  *     arc: { arc_number, arc_title, mr_number },
  *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, total_price }] }
+ *
+ * Back-compat: a supplier with no GSTIN keeps the name + email block, and a null
+ * tax_split keeps the single "GST" rate column, byte for byte as before (spec §6.4).
  */
 export function renderCallOffPoHtml(ctx) {
   const po = ctx.po || {};
@@ -49,6 +73,36 @@ export function renderCallOffPoHtml(ctx) {
   const vendor = ctx.vendor || {};
   const arc = ctx.arc || {};
   const lines = Array.isArray(ctx.lines) ? ctx.lines : [];
+  const split = ctx.tax_split === 'IGST' || ctx.tax_split === 'CGST_SGST' ? ctx.tax_split : null;
+  // The supplier's registered identity (the fulfilling entity's own GSTIN, address and
+  // state) is printed once a GSTIN is known.
+  const supplier = ctx.supplier && ctx.supplier.gstin ? ctx.supplier : null;
+  const supplierName = supplier ? (supplier.name || vendor.name) : vendor.name;
+  const supplierEmail = supplier ? (supplier.email || vendor.email) : vendor.email;
+  const supplierExtra = supplier
+    ? `
+        <div>GSTIN: ${esc(supplier.gstin)}</div>${supplier.address ? `
+        <div>${esc(supplier.address)}</div>` : ''}${supplier.state_name ? `
+        <div>State: ${esc(supplier.state_name)}${supplier.state_code ? ` (${esc(supplier.state_code)})` : ''}</div>` : ''}`
+    : '';
+
+  const taxHeads = split === 'CGST_SGST'
+    ? '<th class="r">CGST</th><th class="r">SGST</th>'
+    : `<th class="r">${split === 'IGST' ? 'IGST' : 'GST'}</th>`;
+  const colCount = split === 'CGST_SGST' ? 7 : 6;
+  const lineTaxes = lines.map((l) => (split ? callOffLineTaxLines(l, split) : null));
+  const taxCells = (l, i) => {
+    if (!split) return `<td class="r">${l.gst_pct != null ? `${Number(l.gst_pct)}%` : '—'}</td>`;
+    const taxLines = lineTaxes[i];
+    const width = split === 'CGST_SGST' ? 2 : 1;
+    if (!taxLines) return '<td class="r">—</td>'.repeat(width);
+    return taxLines.map((t) => `<td class="r">${pct(t.rate)}<br/>${inr(t.amount)}</td>`).join('');
+  };
+  const taxTotals = split
+    ? summarizeTaxLines(lineTaxes.filter(Boolean).flat())
+        .map((t) => `
+      <div><span>incl. ${t.label} @ ${pct(t.rate)}</span><span>${inr(t.amount)}</span></div>`).join('')
+    : '';
 
   const subtotal = lines.reduce((s, l) => s + Number(l.total_price || 0), 0);
   const rows = lines.map((l, i) => `
@@ -57,7 +111,7 @@ export function renderCallOffPoHtml(ctx) {
       <td>${esc(l.product_name || '—')}</td>
       <td class="r">${Number(l.quantity || 0)} ${esc(l.unit || '')}</td>
       <td class="r">${inr(l.unit_price)}</td>
-      <td class="r">${l.gst_pct != null ? `${Number(l.gst_pct)}%` : '—'}</td>
+      ${taxCells(l, i)}
       <td class="r">${inr(l.total_price)}</td>
     </tr>`).join('');
 
@@ -103,16 +157,16 @@ export function renderCallOffPoHtml(ctx) {
         ${buyer.delivery_address ? `<div>Deliver to: ${esc(buyer.delivery_address)}</div>` : ''}
       </div>
       <div class="party"><div class="lbl">Supplier</div>
-        <div class="nm">${esc(vendor.name || '—')}</div>
-        <div>${esc(vendor.email || '')}</div>
+        <div class="nm">${esc(supplierName || '—')}</div>
+        <div>${esc(supplierEmail || '')}</div>${supplierExtra}
       </div>
     </div>
     <table>
-      <thead><tr><th class="c">#</th><th>Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">GST</th><th class="r">Amount</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="c">No line items</td></tr>'}</tbody>
+      <thead><tr><th class="c">#</th><th>Item</th><th class="r">Qty</th><th class="r">Rate</th>${taxHeads}<th class="r">Amount</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${colCount}" class="c">No line items</td></tr>`}</tbody>
     </table>
     <div class="totals">
-      <div><span>Subtotal</span><span>${inr(subtotal)}</span></div>
+      <div><span>Subtotal</span><span>${inr(subtotal)}</span></div>${taxTotals}
       <div class="grand"><span>Total</span><span>${inr(po.total_value != null ? po.total_value : subtotal)}</span></div>
     </div>
     <div class="note">
@@ -124,10 +178,17 @@ export function renderCallOffPoHtml(ctx) {
   </div></body></html>`;
 }
 
-/** Load the document context for a released call-off PO. */
+/**
+ * Load the document context for a released call-off PO.
+ *
+ * The supplier is the PO's finalized vendor: the fulfilling network entity when one
+ * supplied the hotel, else the contract vendor. tax_split compares its GSTIN state with
+ * the place of supply (the ordering hotel; gstState.stateCodeForHotel).
+ */
 export async function loadCallOffPoContext(poId, runner = db) {
   const head = await runner.oneOrNone(
     `SELECT po.id AS po_id, po.po_number, po.total_value, po.created_at,
+            po.finalized_vendor_id, h.id AS hotel_id,
             v.name AS vendor_name, v.email AS vendor_email,
             a.arc_number, a.title AS arc_title,
             h.name AS hotel_name, h.gst AS hotel_gst,
@@ -157,6 +218,8 @@ export async function loadCallOffPoContext(poId, runner = db) {
       ORDER BY pop.id`,
     [poId]
   );
+  const supplier = await supplierDetailsFor(head.finalized_vendor_id, runner);
+  const placeOfSupplyCode = await stateCodeForHotel(head.hotel_id, runner);
   return {
     po: { po_number: head.po_number, total_value: head.total_value, created_at: head.created_at },
     buyer: {
@@ -164,6 +227,9 @@ export async function loadCallOffPoContext(poId, runner = db) {
       gst: head.hotel_gst, delivery_address: head.hotel_delivery_address,
     },
     vendor: { name: head.vendor_name, email: head.vendor_email },
+    supplier,
+    place_of_supply_code: placeOfSupplyCode,
+    tax_split: taxSplitFor(supplier?.state_code ?? null, placeOfSupplyCode),
     arc: { arc_number: head.arc_number, arc_title: head.arc_title, mr_number: head.mr_number },
     lines,
   };
