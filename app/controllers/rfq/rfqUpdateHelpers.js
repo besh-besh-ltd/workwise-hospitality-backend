@@ -18,6 +18,7 @@ import {
   isEntityChangeMaterial,
   isTimestampField
 } from './rfqEditableFields.js';
+import { collapseToPrincipals } from '../../services/vendorNetwork/actingContext.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -691,6 +692,15 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
           [sp.product_variant_id, hotelIds]
         );
         resolvedVendorIds = eligibleRows.map((r) => Number(r.vendor_id)).filter((n) => !Number.isNaN(n));
+        // Vendor Networks (spec §5.2), as getEligibleVendorsForVariant does: a linked
+        // org entity is invited as its principal, once. Survivors keep their order.
+        if (resolvedVendorIds.length > 0) {
+          const principals = await collapseToPrincipals(resolvedVendorIds, t);
+          const keep = new Set(principals);
+          const survivors = [...new Set(resolvedVendorIds.filter((id) => keep.has(id)))];
+          const added = principals.filter((id) => !survivors.includes(id));
+          resolvedVendorIds = [...survivors, ...added];
+        }
       }
     }
 

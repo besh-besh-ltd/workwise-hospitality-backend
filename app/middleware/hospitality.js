@@ -2,6 +2,7 @@ import userModel from '../models/userModel.js';
 import hospitalityModel from '../models/hospitalityModel.js';
 import Config from '../config/app.config.js';
 import { logError } from '../helper/common.js';
+import { entityCanOperate } from '../services/vendorNetwork/actingContext.js';
 
 /**
  * Middleware to check if user's company is hospitality
@@ -123,12 +124,14 @@ const attachHospitalityContext = () => {
   };
 };
 
+const settle = (promise) => promise.then((value) => ({ value }), (err) => ({ err }));
+
 /**
- * Middleware to block hospitality vendors with expired/no subscription.
- * Non-hospitality vendors and non-vendor users pass through unaffected.
- * Use after passportSignIn on endpoints that require active subscription.
+ * Builds the subscription gate. With `seatGate`, a vendor entity that may not operate
+ * in its network (Vendor Networks spec §5.1: a member entity without an active seat,
+ * or not ACTIVE) is refused too; principals and vendors in no org always pass it.
  */
-const requireActiveSubscription = async (req, res, next) => {
+const subscriptionGate = ({ seatGate }) => async (req, res, next) => {
   try {
     if (!req.user || !req.user.id) {
       return next(); // Let auth middleware handle this
@@ -153,14 +156,26 @@ const requireActiveSubscription = async (req, res, next) => {
       return next(); // Not a vendor, no subscription check needed
     }
 
-    // Independent reads: the subscription check is only CONSULTED for a
-    // hospitality vendor, but issuing both together saves a serial round trip
+    // Independent reads: the subscription and seat checks are only CONSULTED for
+    // a hospitality vendor, but issuing them together saves serial round trips
     // on every vendor request (non-hospitality vendors are the legacy minority).
-    // A failure of the subscription read only matters if it is consulted, as
-    // before — so it is settled here and re-thrown below only when needed.
-    const [companyDetails, subscription] = await Promise.all([
+    // A failure of either read only matters if it is consulted, as before — so
+    // each is settled here and re-thrown below only when needed.
+    // hasValidPaidSubscription counts the subscriptions of the vendor's whole
+    // network (spec §5.2) inside its own statement.
+    //
+    // Seat check: jwtUsr resolved the acting entity's network on THIS request, so a
+    // JWT vendor with no `network` is in no org and acting as the principal needs
+    // no seat: neither costs a query. Only a non-principal acting entity, or an
+    // emailed-link token vendor (vendorTokenOrJwt, is_verified === false, never
+    // resolved), pays the one extra query.
+    const network = req.user.network;
+    const needsSeatCheck =
+      seatGate && (network ? !network.is_principal : req.is_verified === false);
+    const [companyDetails, subscription, operate] = await Promise.all([
       userModel.getCompanyDetail(userId),
-      hospitalityModel.hasValidPaidSubscription(userId).then((ok) => ({ ok }), (err) => ({ err })),
+      settle(hospitalityModel.hasValidPaidSubscription(userId)),
+      needsSeatCheck ? settle(entityCanOperate(userId)) : null,
     ]);
     if (!companyDetails || companyDetails.length === 0) {
       return next();
@@ -176,15 +191,26 @@ const requireActiveSubscription = async (req, res, next) => {
     }
 
     if (subscription.err) throw subscription.err;
-    if (subscription.ok) {
-      return next();
+    if (!subscription.value) {
+      return res.status(403).json({
+        status: 0,
+        message: 'Your subscription has expired. Please renew to continue.',
+        subscription_expired: true
+      });
     }
 
-    return res.status(403).json({
-      status: 0,
-      message: 'Your subscription has expired. Please renew to continue.',
-      subscription_expired: true
-    });
+    if (operate) {
+      if (operate.err) throw operate.err;
+      if (!operate.value.ok) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Network seat required for this entity',
+          code: 'NO_SEAT'
+        });
+      }
+    }
+
+    return next();
   } catch (error) {
     logError(error);
     return res.status(400).json({
@@ -193,6 +219,21 @@ const requireActiveSubscription = async (req, res, next) => {
     });
   }
 };
+
+/**
+ * Middleware to block hospitality vendors with expired/no subscription, and network
+ * entities that may not operate (no active seat).
+ * Non-hospitality vendors and non-vendor users pass through unaffected.
+ * Use after passportSignIn on endpoints that require active subscription.
+ */
+const requireActiveSubscription = subscriptionGate({ seatGate: true });
+
+/**
+ * The subscription check WITHOUT the seat gate, for actions on POs already addressed
+ * to the vendor (dispatch, invoice). Spec §5.1: those stay actionable when an
+ * entity's seat lapses, so buyers are never stranded.
+ */
+const requireActiveSubscriptionForIssuedPo = subscriptionGate({ seatGate: false });
 
 /**
  * Variant for noLogin.customer_auth endpoints (quote submission etc.)
@@ -218,6 +259,7 @@ export default {
   requireHospitality,
   attachHospitalityContext,
   requireActiveSubscription,
+  requireActiveSubscriptionForIssuedPo,
   requireActiveSubscriptionIfAuthenticated,
 };
 

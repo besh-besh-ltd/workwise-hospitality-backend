@@ -34,6 +34,7 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome } from '../../services/notificationLinks.js';
+import { collapseToPrincipals } from '../../services/vendorNetwork/actingContext.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -4275,9 +4276,14 @@ const HospitalityController = {
         return res.status(400).json({ status: 0, message: 'No valid RFQ IDs provided' });
       }
 
-      // Batch-fetch: vendor details + all open RFQs in one go
+      // Vendor Networks (spec §5.2): the invite, its token and its email go to the
+      // vendor's org principal; the vendor's own variant mappings decide the products.
+      // In no org the invitee is the vendor itself.
+      const [inviteeId = Number(vendorId)] = await collapseToPrincipals([vendorId]);
+
+      // Batch-fetch: invitee details + all open RFQs in one go
       const [vendorUser, openRfqs] = await Promise.all([
-        db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [vendorId]),
+        db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [inviteeId]),
         db.any(
           // NULLIF guard mirrors hospitalityModel.getMatchingOpenRfqsForVendor:
           // bid_end_date is TEXT and can be '' (empty string, not NULL). An
@@ -4302,7 +4308,7 @@ const HospitalityController = {
 
       // Insert vendor into all RFQs in parallel
       const insertResults = await Promise.all(
-        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id))
+        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id, inviteeId))
       );
 
       // Collect joined RFQs and product variant IDs
@@ -4332,7 +4338,7 @@ const HospitalityController = {
         ),
         db.any(`SELECT id, name, email FROM tbl_users WHERE id = ANY($1::int[])`, [creatorIds]),
         ...joinedRfqs.map(j =>
-          rfqModel.insertVendorRfqToken(vendorId, j.rfq.rfq_no).catch(() => null)
+          rfqModel.insertVendorRfqToken(inviteeId, j.rfq.rfq_no).catch(() => null)
         )
       ]);
 
