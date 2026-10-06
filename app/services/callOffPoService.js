@@ -103,7 +103,8 @@ async function buildCallOffBuckets(mrId, txContext) {
   );
   // GROUP rate contract: each line's ledger row for the requisition's hotel.
   // The supplier is that row's fulfilling vendor when one is set (a vendor
-  // network member that accepted the hotel), else the contract vendor.
+  // network member that accepted the hotel) and still ACTIVE in the contract
+  // vendor's network, else the contract vendor.
   //
   // Lock the hotel's ledger rows FIRST, in id order (the lock order of
   // services/vendorNetwork/subjects/arcHotelSubject.js): a fulfilment change
@@ -117,13 +118,23 @@ async function buildCallOffBuckets(mrId, txContext) {
             mi.uom,
             mi.arc_contract_id,
             mi.arc_contract_line_id,
-            COALESCE(clh.fulfilling_vendor_id, c.vendor_id) AS vendor_id,
+            COALESCE(fe.vendor_id, c.vendor_id) AS vendor_id,
             c.arc_id,
             clh.id         AS hotel_line_id
        FROM tbl_material_requisition_item mi
        JOIN tbl_arc_contract c ON c.id = mi.arc_contract_id
        LEFT JOIN tbl_arc_contract_line_hotel clh
               ON clh.arc_contract_line_id = mi.arc_contract_line_id AND clh.hotel_id = $2
+       -- The fulfilling entity counts only while it is ACTIVE in the contract
+       -- vendor's network: a removal/suspension commits before its assignments are
+       -- revoked (after commit), and no call-off may reach it in between.
+       LEFT JOIN LATERAL (
+         SELECT e.vendor_id
+           FROM tbl_vendor_org_entities e
+           JOIN tbl_vendor_orgs o ON o.id = e.org_id AND o.principal_vendor_id = c.vendor_id
+          WHERE e.vendor_id = clh.fulfilling_vendor_id AND e.status = 'ACTIVE'
+          LIMIT 1
+       ) fe ON TRUE
       WHERE mi.mr_id = $1`,
     [mrId, mr?.hotel_id ?? null]
   );

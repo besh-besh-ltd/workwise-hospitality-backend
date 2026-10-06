@@ -56,7 +56,7 @@ const refuse = (http, message, code) => ({ ok: false, http, message, code });
 function getContractForHotel(contractId, hotelId, runner) {
   return runner.oneOrNone(
     `SELECT c.id, c.status, c.vendor_id, c.arc_id, a.category_id, a.arc_number, a.title,
-            h.hotel_rows, h.all_suspended
+            COALESCE(a.is_group, false) AS is_group, h.hotel_rows, h.all_suspended
        FROM tbl_arc_contract c
        JOIN tbl_arc a ON a.id = c.arc_id
        CROSS JOIN LATERAL (
@@ -144,6 +144,10 @@ async function validateSubject({ principalVendorId, subjectId, hotelId }, t) {
   const c = await getContractForHotel(subjectId, hotelId, t);
   // Not found and another vendor's contract answer alike.
   if (!c || Number(c.vendor_id) !== Number(principalVendorId)) return refuse(404, "Contract not found", "NOT_FOUND");
+  // v1 (spec §6.4): a single-hotel contract has no per-hotel ledger to route.
+  if (!c.is_group) {
+    return refuse(400, "Fulfilment routing is available for group rate contracts only", "GROUP_ARC_ONLY");
+  }
   if (!ROUTABLE_CONTRACT_STATUSES.includes(c.status)) {
     return refuse(409, `This contract can no longer be routed (status ${c.status})`, "CONTRACT_NOT_ROUTABLE");
   }
@@ -187,16 +191,10 @@ async function onReleased(assignment, priorStatus, t) {
   // Never accepted: the contract was never touched.
   if (priorStatus !== ACCEPTED) return;
   if (assignment.hotel_id == null) return;
-
-  const newer = await t.oneOrNone(
-    `SELECT 1 FROM tbl_vendor_routing_assignments
-      WHERE org_id = $1 AND subject_type = 'ARC_HOTEL' AND subject_id = $2 AND hotel_id = $3
-        AND status = 'ACCEPTED' AND id <> $4
-      LIMIT 1`,
-    [assignment.org_id, assignment.subject_id, assignment.hotel_id, assignment.id]
-  );
-  if (newer) return;
-
+  // No "is a newer row ACCEPTED?" check: the org holds at most one ACCEPTED row per
+  // subject+hotel (ix_vn_assign_org_one_accepted), and a supersede returned above, so a
+  // REVOKED-from-ACCEPTED row is always the hotel's current fulfiller. The
+  // fulfilling_vendor_id = assignee guard below still never clobbers another vendor.
   const ids = await lockHotelRows(t, assignment.subject_id, assignment.hotel_id);
   if (!ids.length) return; // placeholder or deleted contract: nothing to reset
   const reset = await t.result(

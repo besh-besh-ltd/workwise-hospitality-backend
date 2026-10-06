@@ -75,12 +75,14 @@ const arcContractModel = {
     );
   },
 
-  // The vendor's own contracts, then (Vendor Networks §6.4) the contracts it fulfils
-  // hotels of as a member entity, flagged viewer_role 'fulfilment_member' with every
-  // figure limited to its hotels and its own call-offs. A vendor in no network gets
-  // exactly the old rows (the member query returns nothing).
-  listForVendor: async (vendorId, statusFilter = null, txContext = null) => {
+  // The vendor's own contracts. With includeFulfilment (contract list views only),
+  // also (Vendor Networks §6.4) the contracts it fulfils hotels of as a member entity,
+  // flagged viewer_role 'fulfilment_member' with every figure limited to its hotels and
+  // its own call-offs. Signing queues and value rollups never opt in: a member neither
+  // signs nor was awarded those contracts.
+  listForVendor: async (vendorId, statusFilter = null, txContext = null, { includeFulfilment = false } = {}) => {
     const runner = txContext || db;
+    if (!includeFulfilment) return arcContractModel.listOwnForVendor(vendorId, statusFilter, runner);
     const [own, fulfilment] = await Promise.all([
       arcContractModel.listOwnForVendor(vendorId, statusFilter, runner),
       arcContractModel.listFulfilmentForVendor(vendorId, statusFilter, runner),

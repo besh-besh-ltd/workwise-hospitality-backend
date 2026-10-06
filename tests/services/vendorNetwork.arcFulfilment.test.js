@@ -25,6 +25,8 @@ import {
   cleanupVendorNetworkFixtures,
 } from "../helpers/vendorNetworkSeed.js";
 import { releaseForMr } from "../../app/services/callOffPoService.js";
+import arcContractModel from "../../app/models/arc_v2/arcContractModel.js";
+import arcHotelModel from "../../app/models/arc_v2/arcHotelModel.js";
 import { getSubjectHandler } from "../../app/services/vendorNetwork/routingEngine.js";
 import { arcHotelSubjectHandler } from "../../app/services/vendorNetwork/subjects/arcHotelSubject.js";
 
@@ -503,5 +505,121 @@ describe("network operate gate on the ARC negotiation quote", () => {
     const d = await httpClient(D);
     const res = await d.post(`${ARC_V}/vendor/negotiation/rounds/999999999/quote`).send({});
     expect(res.status).toBe(403);
+  });
+});
+
+describe("fix round 1", () => {
+  it("refuses a single-hotel (non-group) contract with GROUP_ARC_ONLY", async () => {
+    await db.none(`UPDATE tbl_arc SET is_group = false WHERE id = $1`, [arcId]);
+    const res = await assignHotel(B);
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      status: 0,
+      reason: "GROUP_ARC_ONLY",
+      message: "Fulfilment routing is available for group rate contracts only",
+    });
+  });
+
+  it("an accepted member sees nothing in pending-acceptance; the principal still does", async () => {
+    await routeTo(B);
+    await db.none(`UPDATE tbl_arc_contract SET status = 'awaiting_acceptance', signed_by_vendor_at = NULL WHERE id = $1`, [contractId]);
+    const b = await (await httpClient(B)).get(`${ARC_V}/vendor/pending-acceptance`);
+    expect(b.status).toBe(200);
+    expect(b.body.data.contracts.some((r) => Number(r.id) === contractId)).toBe(false);
+    const hq = await (await httpClient(HQ)).get(`${ARC_V}/vendor/pending-acceptance`);
+    expect(hq.body.data.contracts.filter((r) => Number(r.id) === contractId)).toHaveLength(1);
+  });
+
+  it("the member's dashboard value rollups leave fulfilment contracts out", async () => {
+    await routeTo(B);
+    const res = await (await httpClient(B)).get(`${ARC_V}/vendor/dashboard`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.totals.awarded_value).toBe(0);
+    expect(res.body.data.spend_by_category).toEqual([]);
+    expect(res.body.data.spend_by_bu).toEqual([]);
+    const hq = await (await httpClient(HQ)).get(`${ARC_V}/vendor/dashboard`);
+    expect(hq.body.data.totals.awarded_value).toBe(90 * 1000 * 2);
+  });
+
+  it("the member may not request, verify or decline the principal's addendum OTP", async () => {
+    await routeTo(B);
+    const am = await db.one(
+      `INSERT INTO tbl_arc_amendment (arc_contract_id, amendment_type, amendment_from, status, reason, requested_by)
+       VALUES ($1, 'term', CURRENT_DATE, 'approved', 'terms', $2) RETURNING id`,
+      [contractId, HQ]
+    );
+    const doc = await db.one(
+      `INSERT INTO tbl_arc_amendment_document (arc_amendment_id, arc_contract_id, addendum_number)
+       VALUES ($1, $2, 1) RETURNING id`,
+      [am.id, contractId]
+    );
+    const b = await httpClient(B);
+    expect((await b.post(`${ARC_V}/vendor/addendums/${doc.id}/otp/request`).send({})).status).toBe(403);
+    expect((await b.post(`${ARC_V}/vendor/addendums/${doc.id}/otp/verify`).send({ code: "123456" })).status).toBe(403);
+    expect((await b.post(`${ARC_V}/vendor/addendums/${doc.id}/decline`).send({ reason: "no" })).status).toBe(403);
+    expect((await db.one(`SELECT status FROM tbl_arc_amendment_document WHERE id = $1`, [doc.id])).status).toBe("awaiting_signature");
+  });
+
+  it("a regenerated contract line's new H1 row inherits the accepted member", async () => {
+    await routeTo(B);
+    const variant = (await db.one(`SELECT id FROM tbl_product_variant WHERE id <> ALL($1::int[]) ORDER BY id LIMIT 1`, [VARIANTS])).id;
+    const item = await db.one(`INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom) VALUES ($1, $2, 100, 'pcs') RETURNING id`, [arcId, variant]);
+    const fresh = await db.tx(async (t) => {
+      const line = await arcContractModel.addLine(contractId, { arc_item_id: item.id, unit_rate: 50, committed_qty: 100 }, t);
+      await arcHotelModel.syncContractLineHotels(line.id, [{ hotel_id: H1, allocated_qty: 60 }, { hotel_id: H2, allocated_qty: 40 }], t);
+      return Number(line.id);
+    });
+    const rows = await db.any(
+      `SELECT hotel_id, fulfilling_vendor_id FROM tbl_arc_contract_line_hotel WHERE arc_contract_line_id = $1 ORDER BY hotel_id`,
+      [fresh]
+    );
+    expect(rows).toEqual([
+      { hotel_id: H1, fulfilling_vendor_id: B },
+      { hotel_id: H2, fulfilling_vendor_id: null },
+    ]);
+  });
+
+  it("a call-off never reaches a member suspended before its revoke ran", async () => {
+    await routeTo(B);
+    // The entity status write alone, as committed before the after-commit revoke.
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE org_id = $1 AND vendor_id = $2`, [ORG, B]);
+    expect(await fulfilling(H1)).toEqual([B, B]);
+    expect((await releaseCallOff(H1)).finalized_vendor_id).toBe(HQ);
+  });
+
+  it("the member's lines carry its hotel's rate override and no amendment fields", async () => {
+    await routeTo(B);
+    await db.none(
+      `UPDATE tbl_arc_contract_line_hotel SET unit_rate_override = 80 WHERE hotel_id = $1 AND arc_contract_line_id = $2`,
+      [H1, lineIds[0]]
+    );
+    const res = await (await httpClient(B)).get(`${ARC_V}/vendor/contracts/${contractId}`);
+    expect(res.status).toBe(200);
+    const [first, second] = res.body.data.lines;
+    expect(Number(first.effective_unit_rate)).toBe(80);
+    expect(first.hotels[0]).toMatchObject({ hotel_id: H1, unit_rate_override: 80, effective_unit_rate: 80 });
+    expect(Number(second.effective_unit_rate)).toBe(90);
+    for (const line of res.body.data.lines) {
+      for (const f of ["amendment_id", "amendment_type", "amendment_effective_from", "amendment_effective_to"]) {
+        expect(line).not.toHaveProperty(f);
+      }
+    }
+  });
+
+  it("the member view is refused on a declined contract", async () => {
+    await routeTo(B);
+    await db.none(`UPDATE tbl_arc_contract SET status = 'declined' WHERE id = $1`, [contractId]);
+    expect((await (await httpClient(B)).get(`${ARC_V}/vendor/contracts/${contractId}`)).status).toBe(403);
+  });
+
+  it("suspending B through the entity API resets H1, tells the buyer and closes B's view", async () => {
+    const id = await routeTo(B);
+    const res = await (await httpClient(HQ)).patch(`${BASE}/entities/${B}`).send({ status: "SUSPENDED" });
+    expect(res.status).toBe(200);
+    const row = await db.one(`SELECT status FROM tbl_vendor_routing_assignments WHERE id = $1`, [id]);
+    expect(row.status).toBe("REVOKED");
+    expect(await fulfilling(H1)).toEqual([null, null]);
+    expect((await notices(CREATOR)).map((n) => n.additional_data.fulfilling_vendor_id)).toEqual([B, HQ]);
+    expect((await (await httpClient(B)).get(`${ARC_V}/vendor/contracts/${contractId}`)).status).toBe(403);
   });
 });

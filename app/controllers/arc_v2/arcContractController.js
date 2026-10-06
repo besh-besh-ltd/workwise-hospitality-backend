@@ -16,7 +16,7 @@ import crypto from 'crypto';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
-import { fulfilmentHotelIds } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
+import { fulfilmentHotelIds, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -536,13 +536,68 @@ export async function getVendorActiveContracts(req, res) {
     const vendorId = req.user?.id;
     // Approved-and-live plus the archive: the page's tabs filter between
     // active / expiring / expired client-side.
-    const contracts = await arcContractModel.listForVendor(vendorId, ['active','expiring_soon','expired']);
+    const contracts = await arcContractModel.listForVendor(vendorId, ['active','expiring_soon','expired'], null, { includeFulfilment: true });
     return ok(res, { contracts });
   } catch (err) {
     logger.error({ err }, '[contractController.getVendorActiveContracts]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }
+
+// ARC context the detail page's hero/doc sections need: term, category, BU,
+// escalation, eligibility, and the buyer contact (creator). lead_hotel_id is read
+// for the member view's filtering and never returned.
+const ARC_CONTEXT_SQL = `
+  SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
+         a.contract_start_at, a.contract_end_at,
+         a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
+         a.escalation_clause_json, a.eligibility_type,
+         cat.title AS category_title,
+         h.name    AS hotel_name, h.city AS hotel_city,
+         hc.name   AS company_name,
+         u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation,
+         a.hotel_id AS lead_hotel_id
+    FROM tbl_arc a
+    LEFT JOIN tbl_category cat ON cat.id = a.category_id
+    LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+    LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+    LEFT JOIN tbl_users u ON u.id = a.created_by
+   WHERE a.id = $1`;
+
+/** { arc, leadHotelId } for a contract page; arc is null when the ARC is gone. */
+async function loadArcContext(arcId) {
+  const row = await db.oneOrNone(ARC_CONTEXT_SQL, [arcId]);
+  if (!row) return { arc: null, leadHotelId: null };
+  const { lead_hotel_id: lead, ...arc } = row;
+  return { arc, leadHotelId: lead == null ? null : Number(lead) };
+}
+
+/**
+ * Call-off POs issued against a contract, newest first. A fulfilment member passes
+ * hotelIds + vendorId: only its own POs at its hotels.
+ */
+function listContractCallOffs(contractId, { hotelIds = null, vendorId = null } = {}) {
+  return db.any(
+    `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
+            po.po_number, po.status AS po_status, po.total_value,
+            cl.arc_item_id, pv.name AS variant_name, ai.uom
+       FROM tbl_arc_callof_po cp
+       JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
+       JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+      WHERE cp.arc_contract_id = $1
+        AND ($2::int[] IS NULL OR mr.hotel_id = ANY($2::int[]))
+        AND ($3::int IS NULL OR po.finalized_vendor_id = $3)
+      ORDER BY cp.released_at DESC`,
+    [contractId, hotelIds, vendorId]
+  );
+}
+
+// A fulfilment member may read a contract that is live, being signed, or expired —
+// not one declined, terminated or never issued.
+const MEMBER_VIEWABLE_STATUSES = new Set([...ROUTABLE_CONTRACT_STATUSES, 'expired']);
 
 export async function getContractDetail(req, res) {
   try {
@@ -553,46 +608,17 @@ export async function getContractDetail(req, res) {
     // Tenant guard — a vendor reads its own contract, or (Vendor Networks) the hotels of
     // it that it fulfils as a member entity of the contract vendor's network.
     if (Number(contract.vendor_id) !== Number(vendorUserId)) {
-      const memberHotelIds = await fulfilmentHotelIds(id, contract.vendor_id, vendorUserId);
+      const memberHotelIds = MEMBER_VIEWABLE_STATUSES.has(contract.status)
+        ? await fulfilmentHotelIds(id, contract.vendor_id, vendorUserId)
+        : [];
       if (!memberHotelIds.length) return bad(res, 403, 'Not the contracted vendor');
       return ok(res, await fulfilmentMemberContractView(contract, vendorUserId, memberHotelIds));
     }
 
-    const [lines, arcInfo, callOffs, amendments] = await Promise.all([
+    const [lines, { arc: arcInfo }, callOffs, amendments] = await Promise.all([
       arcContractModel.listLines(id),
-      // ARC context the detail page's hero/doc sections need: term, category,
-      // BU, escalation, eligibility, and the buyer contact (creator).
-      db.oneOrNone(
-        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
-                a.contract_start_at, a.contract_end_at,
-                a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
-                a.escalation_clause_json, a.eligibility_type,
-                cat.title AS category_title,
-                h.name    AS hotel_name, h.city AS hotel_city,
-                hc.name   AS company_name,
-                u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation
-           FROM tbl_arc a
-           LEFT JOIN tbl_category cat ON cat.id = a.category_id
-           LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
-           LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
-           LEFT JOIN tbl_users u ON u.id = a.created_by
-          WHERE a.id = $1`,
-        [contract.arc_id]
-      ),
-      // Call-off POs issued against this contract.
-      db.any(
-        `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
-                po.po_number, po.status AS po_status, po.total_value,
-                cl.arc_item_id, pv.name AS variant_name, ai.uom
-           FROM tbl_arc_callof_po cp
-           JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
-           JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
-           LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
-           LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
-          WHERE cp.arc_contract_id = $1
-          ORDER BY cp.released_at DESC`,
-        [id]
-      ),
+      loadArcContext(contract.arc_id),
+      listContractCallOffs(id),
       // The vendor's amendment requests on this contract (any status), with
       // buyer-side edit history joined. Shaped through vendorView below so
       // approver identities reduce to numbered levels before leaving the API.
@@ -653,80 +679,62 @@ export async function getContractDetail(req, res) {
   }
 }
 
-const ARC_CONTEXT_SQL = `
-  SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
-         a.contract_start_at, a.contract_end_at,
-         a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
-         a.escalation_clause_json, a.eligibility_type,
-         cat.title AS category_title,
-         h.name    AS hotel_name, h.city AS hotel_city,
-         hc.name   AS company_name,
-         u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation,
-         a.hotel_id AS lead_hotel_id
-    FROM tbl_arc a
-    LEFT JOIN tbl_category cat ON cat.id = a.category_id
-    LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
-    LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
-    LEFT JOIN tbl_users u ON u.id = a.created_by
-   WHERE a.id = $1`;
-
 const sumQty = (rows, key) => rows.reduce((s, r) => s + Number(r[key] || 0), 0);
+const AMENDMENT_LINE_FIELDS = ['amendment_id', 'amendment_type', 'amendment_effective_from', 'amendment_effective_to'];
 
 /**
  * Read-only contract view for a fulfilment member (spec §6.4, §10.9). Everything about
  * hotels it does not fulfil is withheld: other hotels' ledger rows and quantities, line
  * totals (replaced by its hotels' sums), the contract PDF (it carries every hotel's
  * annexure), the lead hotel when it is not one of its hotels, the principal's
- * amendments and clarifications, and call-offs that are not its own POs for its hotels.
+ * amendments and clarifications (and the amendment fields on lines), and call-offs
+ * that are not its own POs for its hotels. Each of its hotel rows carries that hotel's
+ * rate: a live price amendment, else the hotel's override, else the contract rate (the
+ * precedence of arcPricingResolver); the line's effective rate is that rate when all
+ * its hotels share one.
  */
 async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) {
   const id = Number(contract.id);
-  const [allLines, arcRow, ledger, callOffs] = await Promise.all([
+  const [allLines, { arc, leadHotelId }, ledger, callOffs] = await Promise.all([
     arcContractModel.listLines(id),
-    db.oneOrNone(ARC_CONTEXT_SQL, [contract.arc_id]),
-    arcHotelModel.listContractHotels(id),
-    db.any(
-      `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
-              po.po_number, po.status AS po_status, po.total_value,
-              cl.arc_item_id, pv.name AS variant_name, ai.uom
-         FROM tbl_arc_callof_po cp
-         JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
-         JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
-         JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
-         JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
-         LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
-        WHERE cp.arc_contract_id = $1 AND mr.hotel_id = ANY($2::int[]) AND po.finalized_vendor_id = $3
-        ORDER BY cp.released_at DESC`,
-      [id, hotelIds, memberVendorId]
-    ),
+    loadArcContext(contract.arc_id),
+    arcHotelModel.listContractHotels(id, null, { hotelIds, withOverrides: true }),
+    listContractCallOffs(id, { hotelIds, vendorId: memberVendorId }),
   ]);
-  const mine = new Set(hotelIds);
   const lines = [];
   for (const line of allLines) {
-    const hotels = (ledger.byLine[String(line.id)] || []).filter((h) => mine.has(h.hotel_id));
-    if (!hotels.length) continue;
+    const ledgerRows = ledger.byLine[String(line.id)] || [];
+    if (!ledgerRows.length) continue;
+    const amendedRate = line.amendment_type === 'price' ? Number(line.effective_unit_rate) : null;
+    const hotels = ledgerRows.map((h) => ({
+      ...h,
+      effective_unit_rate: amendedRate ?? h.unit_rate_override ?? Number(line.unit_rate),
+    }));
+    const rates = new Set(hotels.map((h) => h.effective_unit_rate));
     const committed = sumQty(hotels, 'committed_qty');
-    lines.push({
+    const view = {
       ...line,
       committed_qty: committed,
       consumed_qty: sumQty(hotels, 'consumed_qty'),
       effective_committed_qty: committed,
+      effective_unit_rate: rates.size === 1 ? [...rates][0] : null,
       hotels,
-    });
+    };
+    for (const f of AMENDMENT_LINE_FIELDS) delete view[f];
+    lines.push(view);
   }
-  const { lead_hotel_id: leadHotelId, ...arc } = arcRow || {};
-  if (arcRow && !mine.has(Number(leadHotelId))) {
+  if (arc && !hotelIds.includes(leadHotelId)) {
     arc.hotel_name = null;
     arc.hotel_city = null;
   }
   return {
     contract: { ...contract, document_s3_url: null, document_hash: null },
     lines,
-    arc: arcRow ? arc : null,
+    arc,
     callOffs,
     amendments: [],
     clarifications: [],
-    hotels: ledger.hotels.filter((h) => mine.has(h.hotel_id)),
+    hotels: ledger.hotels,
     viewer_role: 'fulfilment_member',
   };
 }

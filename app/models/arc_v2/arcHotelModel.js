@@ -262,25 +262,31 @@ const arcHotelModel = {
    * @returns {{ hotels: Array<{ hotel_id, name, city, state }>,
    *             byLine: { [line_id]: Array<{ hotel_id, committed_qty, consumed_qty }> } }}
    */
-  listContractHotels: async (contractId, txContext = null) => {
+  //   opts.hotelIds       only these hotels (a fulfilment member's view)
+  //   opts.withOverrides  add each row's unit_rate_override / charges_override
+  listContractHotels: async (contractId, txContext = null, { hotelIds = null, withOverrides = false } = {}) => {
     const rows = await (txContext || db).any(
       `SELECT clh.arc_contract_line_id AS line_id, clh.hotel_id, h.name, h.city, h.state,
-              clh.committed_qty, clh.consumed_qty
+              clh.committed_qty, clh.consumed_qty, clh.unit_rate_override, clh.charges_override
          FROM tbl_arc_contract_line_hotel clh
          JOIN tbl_arc_contract_line l ON l.id = clh.arc_contract_line_id
          JOIN tbl_hospitality_company_hotels h ON h.id = clh.hotel_id
         WHERE l.arc_contract_id = $1
+          AND ($2::int[] IS NULL OR clh.hotel_id = ANY($2::int[]))
         ORDER BY clh.arc_contract_line_id, clh.hotel_id`,
-      [contractId]
+      [contractId, hotelIds]
     );
     const hotels = new Map();
     const byLine = {};
     for (const r of rows) {
       const hotelId = Number(r.hotel_id);
       if (!hotels.has(hotelId)) hotels.set(hotelId, { hotel_id: hotelId, name: r.name, city: r.city, state: r.state });
-      (byLine[String(r.line_id)] ||= []).push({
-        hotel_id: hotelId, committed_qty: Number(r.committed_qty), consumed_qty: Number(r.consumed_qty),
-      });
+      const entry = { hotel_id: hotelId, committed_qty: Number(r.committed_qty), consumed_qty: Number(r.consumed_qty) };
+      if (withOverrides) {
+        entry.unit_rate_override = r.unit_rate_override == null ? null : Number(r.unit_rate_override);
+        entry.charges_override = r.charges_override ?? null;
+      }
+      (byLine[String(r.line_id)] ||= []).push(entry);
     }
     return { hotels: [...hotels.values()].sort((a, b) => a.hotel_id - b.hotel_id), byLine };
   },
@@ -301,9 +307,20 @@ const arcHotelModel = {
     const keep = [];
     for (const row of awardHotels || []) {
       keep.push(Number(row.hotel_id));
+      // A NEW (line, hotel) row inherits the hotel's fulfiller: the member entity
+      // holding the ACCEPTED ARC_HOTEL routing assignment for (contract, hotel), if
+      // any (Vendor Networks §6.4) — else every line of the hotel would not share
+      // one supplier. Existing rows keep theirs (the conflict branch leaves it).
       await runner.none(
-        `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty)
-         VALUES ($1, $2, $3)
+        `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty, fulfilling_vendor_id)
+         VALUES ($1, $2, $3, (
+           SELECT a.assigned_vendor_id
+             FROM tbl_vendor_routing_assignments a
+             JOIN tbl_arc_contract_line l ON l.id = $1
+            WHERE a.subject_type = 'ARC_HOTEL' AND a.subject_id = l.arc_contract_id
+              AND a.hotel_id = $2 AND a.status = 'ACCEPTED'
+            ORDER BY a.id DESC
+            LIMIT 1))
          ON CONFLICT (arc_contract_line_id, hotel_id) DO UPDATE
            SET committed_qty = EXCLUDED.committed_qty, updated_at = CURRENT_TIMESTAMP`,
         [contractLineId, Number(row.hotel_id), Number(row.allocated_qty)]
