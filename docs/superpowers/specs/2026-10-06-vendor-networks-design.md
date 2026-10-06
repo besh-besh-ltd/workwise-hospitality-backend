@@ -105,9 +105,9 @@ tbl_vendor_routing_assignments(
   decline_reason TEXT CHECK (decline_reason IN ('NO_STOCK','CANNOT_MEET_DEADLINE','OUT_OF_AREA','OTHER')),
   decline_note TEXT, due_at TIMESTAMPTZ, auto_routed BOOLEAN NOT NULL DEFAULT false,
   assigned_by_user_id INT, acted_by_user_id INT, created_at, acted_at)
-  -- at most one PENDING and at most one ACCEPTED per subject+hotel:
-  UNIQUE INDEX ON (subject_type, subject_id, COALESCE(hotel_id,0)) WHERE status = 'PENDING'
-  UNIQUE INDEX ON (subject_type, subject_id, COALESCE(hotel_id,0)) WHERE status = 'ACCEPTED'
+  -- at most one PENDING and at most one ACCEPTED per org+subject+hotel (several orgs may route the same RFQ):
+  UNIQUE INDEX ON (org_id, subject_type, subject_id, COALESCE(hotel_id,0)) WHERE status = 'PENDING'
+  UNIQUE INDEX ON (org_id, subject_type, subject_id, COALESCE(hotel_id,0)) WHERE status = 'ACCEPTED'
 
 ALTER tbl_hospitality_company_hotels ADD state_id INT NULL REFERENCES tbl_location_states(id),
                                      ADD city_id  INT NULL REFERENCES tbl_location_cities(id);
