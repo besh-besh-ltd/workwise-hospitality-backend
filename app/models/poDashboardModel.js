@@ -19,7 +19,7 @@ import db from "../config/dbConn.js";
 import { logError } from "../helper/common.js";
 import pricingEngine from "../services/pricingEngine.js";
 import { supplierDetailsFor, stateCodeForHotel, taxSplitFor } from "../helper/gstState.js";
-import { callOffPoTax } from "../helper/arc_v2/callOffLineTax.js";
+import { callOffPoTax, callOffLineTax } from "../helper/arc_v2/callOffLineTax.js";
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
 
@@ -848,9 +848,13 @@ export async function getPODetailFull(po_id, scope) {
         `SELECT pv.name AS name, ai.spec_text AS spec,
                 cp.quantity, ai.uom AS unit, cp.price_applied AS unit_price,
                 (cp.quantity * cp.price_applied) AS total_price,
-                cl.gst_pct AS gst_pct, NULL AS hsn, NULL AS charges_meta
+                cl.gst_pct AS gst_pct, NULL AS hsn, NULL AS charges_meta,
+                pop.charges_meta AS calloff_charges_meta,
+                pop.unit_price AS calloff_unit_price, pop.quantity AS calloff_quantity
            FROM tbl_arc_callof_po cp
            JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
+           LEFT JOIN tbl_purchase_order_product pop
+                  ON pop.purchase_order_id = cp.po_id AND pop.arc_contract_line_id = cp.arc_contract_line_id
            JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
            JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
           WHERE cp.po_id = $1
@@ -906,6 +910,24 @@ export async function getPODetailFull(po_id, scope) {
     });
   };
 
+  // A call-off line's GST is the FULL tax: on the base and on every charge, through the
+  // same engine mapping and line rows as the header breakdown (callOffPoTax). The split
+  // into CGST/SGST rows never changes the sum, so no split is needed here.
+  const fullLineGst = (it) => {
+    const cm = it.calloff_charges_meta || {};
+    const t = callOffLineTax(
+      {
+        unit_price: it.calloff_unit_price ?? it.unit_price,
+        quantity: it.calloff_quantity ?? it.quantity,
+        tax: cm.tax ?? it.gst_pct,
+        other_charges: cm.other_charges,
+      },
+      null
+    );
+    return t.tax_lines.reduce((sum, r) => sum + Math.round(r.amount * 100), 0) / 100;
+  };
+  const gstAmountOf = (it) => (po.is_call_off ? fullLineGst(it) : lineTax(it).gst_amount);
+
   const mappedItems = items.map((it) => {
     const cm = it.charges_meta || {};
     const t = lineTax(it);
@@ -922,7 +944,7 @@ export async function getPODetailFull(po_id, scope) {
       // entry); `gst_amount` is the rupee figure; `tax_mode` says how the
       // vendor entered it so a re-pricing caller can forward it unchanged.
       gst: t.gst_pct,
-      gst_amount: t.gst_amount,
+      gst_amount: gstAmountOf(it),
       tax_mode: t.tax_mode,
       amount: Number(it.total_price) || 0,
       charges_meta: Object.keys(cm).length ? cm : null,
@@ -937,7 +959,7 @@ export async function getPODetailFull(po_id, scope) {
   for (const it of items) {
     const basic = (Number(it.unit_price) || 0) * (Number(it.quantity) || 0);
     subtotal += basic;
-    tax += lineTax(it).gst_amount || 0;
+    tax += gstAmountOf(it) || 0;
   }
   const pricing = {
     subtotal: Math.round(subtotal * 100) / 100,

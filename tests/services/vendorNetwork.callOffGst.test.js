@@ -468,6 +468,22 @@ describe("call-off GST includes the tax on charges", () => {
       { label: "SGST", rate: 9, amount: 4.5 },
     ]);
   });
+
+  it("header tax, tax_breakdown and item gst_amount all carry the full line tax", async () => {
+    await db.none(`UPDATE tbl_arc_contract_line SET charges = $2 WHERE id = $1`, [hqLineId, JSON.stringify(CHARGES)]);
+    const igst = await releaseCallOff(hqContractId, hqLineId, H_MH, "FULL1");
+    const split = await releaseCallOff(hqContractId, hqLineId, H_UP, "FULL2");
+    const member = await httpClient(M_UP);
+    for (const po of [igst, split]) {
+      const d = (await member.get(`/api/v1/po/vendor/detail/${po.id}`)).body.data;
+      const breakdown = d.pricing.tax_breakdown.reduce((sum, r) => sum + paise(r.amount), 0);
+      const items = d.items.reduce((sum, i) => sum + paise(i.gst_amount), 0);
+      expect(paise(d.pricing.tax)).toBe(5490);
+      expect(breakdown).toBe(5490);
+      expect(items).toBe(5490);
+      expect(paise(d.pricing.taxable_value) + paise(d.pricing.tax)).toBe(paise(d.pricing.total));
+    }
+  });
 });
 
 // --- contract PDF -----------------------------------------------------------------------

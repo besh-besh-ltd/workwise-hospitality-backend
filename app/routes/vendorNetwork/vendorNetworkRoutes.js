@@ -17,6 +17,11 @@ import {
   verifySeatsPayment,
 } from "../../controllers/vendorNetwork/orgController.js";
 import {
+  dashboardSummary,
+  dashboardPos,
+  dashboardContracts,
+} from "../../controllers/vendorNetwork/dashboardController.js";
+import {
   suggestions,
   createLinkInvite,
   incomingLinkInvites,
@@ -100,6 +105,11 @@ VendorNetworkRoutes.get("/routing/assigned-to-me", ...vendor, assignedToMe);
 VendorNetworkRoutes.post("/routing/assign", ...vendor, assignSubject);
 VendorNetworkRoutes.post("/routing/:id/revoke", ...vendor, revokeAssignment);
 VendorNetworkRoutes.post("/routing/:id/respond", ...vendor, respondToAssignment);
+
+// HQ dashboard (§8), admin only
+VendorNetworkRoutes.get("/dashboard/summary", ...vendor, dashboardSummary);
+VendorNetworkRoutes.get("/dashboard/pos", ...vendor, dashboardPos);
+VendorNetworkRoutes.get("/dashboard/contracts", ...vendor, dashboardContracts);
 
 // Seats (§5.1)
 VendorNetworkRoutes.post("/seats/pay", ...vendor, paySeats);
