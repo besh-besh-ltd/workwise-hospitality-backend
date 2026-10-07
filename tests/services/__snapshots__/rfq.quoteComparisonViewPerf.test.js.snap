@@ -25,7 +25,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
   ],
   "has_delivery_charges": false,
   "negotiation_metrics": {
-    "achieved_total": 404,
+    "achieved_total": 4040,
     "achieved_total_awarded": 0,
     "available": true,
     "baseline_sources": {
@@ -35,11 +35,11 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "prior_round": 0,
       "quote_history": 0,
     },
-    "baseline_total": 426,
+    "baseline_total": 4260,
     "baseline_total_awarded": 0,
     "gain_pct": 5.16,
     "gain_pct_awarded": null,
-    "gain_value": 22,
+    "gain_value": 220,
     "gain_value_awarded": 0,
     "pairs_counted": 4,
     "pairs_counted_awarded": 0,

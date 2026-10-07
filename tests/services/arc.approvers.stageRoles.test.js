@@ -152,12 +152,17 @@ async function systemRoleId(title) {
   return row.id;
 }
 
+// The role's capabilities. Buyer-dashboard widget grants (resource
+// 'dashboard') are left out: every procurement role, ARC ones included, is
+// seeded the cross-role cards by migration 20260928102000, and they say what a
+// role can see on its dashboard, not what it can do.
 async function permissionKeysOf(roleId) {
   const rows = await db.any(
     `SELECT p.resource::text AS resource, p.action::text AS action
        FROM tbl_role_permissions rp
        JOIN tbl_permissions p ON p.id = rp.permission_id
-      WHERE rp.role_id = $1`,
+      WHERE rp.role_id = $1
+        AND p.resource::text <> 'dashboard'`,
     [roleId]
   );
   return [...new Set(rows.map((r) => `${r.resource}.${r.action}`))].sort();

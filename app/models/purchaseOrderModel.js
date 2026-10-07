@@ -693,6 +693,15 @@ function calculatePricing(items) {
   };
 }
 
+/**
+ * The catalogue variant of an RFQ PO line, read from its rfq_product at insert
+ * time ($2 is the line's rfq_product_id in both inserts below). RFQ lines used
+ * to leave product_variant_id NULL — only the ARC call-off path wrote it — which
+ * emptied every report that reaches an item through the line.
+ */
+const LINE_VARIANT_FROM_RFQ_PRODUCT =
+  `(SELECT rp_v.product_variant_id FROM tbl_rfq_products rp_v WHERE rp_v.id = $2)`;
+
 export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null) => {
     try {
       const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
@@ -770,8 +779,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
         await t.none(
           `INSERT INTO tbl_purchase_order_product
-          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price, product_variant_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${LINE_VARIANT_FROM_RFQ_PRODUCT})`,
           [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
 
@@ -855,8 +864,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
         await t.none(
           `INSERT INTO tbl_purchase_order_product
-          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price, product_variant_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${LINE_VARIANT_FROM_RFQ_PRODUCT})`,
           [po.id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
       }
