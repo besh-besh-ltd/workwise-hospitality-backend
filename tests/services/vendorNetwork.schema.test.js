@@ -1,4 +1,10 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { db, withTx } from "../setup/db.js";
+import { IDS } from "../fixtures/ids.js";
+import { TEST_CATEGORIES } from "../fixtures/vendors.js";
+import { makeRFQ } from "../factories/rfq.js";
 import { seedVendorEntity, seedPerson, seedOrg, addEntity, addMember, cleanupVendorNetworkFixtures } from "../helpers/vendorNetworkSeed.js";
 
 const NEW_TABLES = {
@@ -198,5 +204,97 @@ describe("vendor network schema", () => {
             + (SELECT count(*) FROM tbl_vendor_network_seats WHERE org_id BETWEEN 95001 AND 95999)::int AS n`
     );
     expect(left.n).toBe(0);
+  });
+
+  // up → down → up on a seeded world, inside one rolled-back transaction (PG DDL is
+  // transactional), so the shared test DB is never left without the network schema.
+  it("down migration drops unquoted routed copies, keeps quoted ones as plain invites, resets call-off fulfilment; up re-applies", async () => {
+    const MIGRATIONS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../migrations");
+    const sql = (f) => fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8");
+    await withTx(async (t) => {
+      await world(t); // HQ 95001 principal, B 95002 branch
+      await seedVendorEntity({ id: 95003, companyId: 95003, name: "VN C", email: "vn-c@test.local", runner: t });
+      await addEntity({ orgId: 95001, vendorId: 95003, runner: t });
+      const BUYER = IDS.users.a1_proc_buyer;
+      const variant = (await t.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`)).id;
+      const { rfq_id, rfq_no } = await makeRFQ(t, { createdBy: BUYER, status: 1, is_published: 1 });
+      const rpv = (user, routedFrom) =>
+        t.none(
+          `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant, routed_from_vendor_id)
+           VALUES ($1, $2, $3, 0, $4)`,
+          [rfq_id, variant, user, routedFrom]
+        );
+      await rpv(95001, null); // the principal's real invite
+      await rpv(95002, 95001); // routed to B, B never quoted
+      await rpv(95003, 95001); // routed to C, C quoted
+      await t.none(
+        `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status) VALUES ($1, $2, 95003, 95003, 1)`,
+        [rfq_id, rfq_no]
+      );
+
+      const arcId = (
+        await t.one(
+          `INSERT INTO tbl_arc (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id,
+                                status, is_group, contract_start_at, contract_end_at, created_by)
+           VALUES ('ARC-VN-DOWN-' || floor(random() * 1e9)::text, 'Down', $1, $2, $3, $4,
+                   'contract_active', true, NOW() - INTERVAL '1 day', NOW() + INTERVAL '30 days', $5)
+           RETURNING id`,
+          [TEST_CATEGORIES.beverages, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, BUYER]
+        )
+      ).id;
+      const itemId = (
+        await t.one(
+          `INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom) VALUES ($1, $2, 10, 'pcs') RETURNING id`,
+          [arcId, variant]
+        )
+      ).id;
+      const contractId = (
+        await t.one(`INSERT INTO tbl_arc_contract (arc_id, vendor_id, status) VALUES ($1, 95001, 'active') RETURNING id`, [arcId])
+      ).id;
+      const lineId = (
+        await t.one(
+          `INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty)
+           VALUES ($1, $2, 90, 5, 10) RETURNING id`,
+          [contractId, itemId]
+        )
+      ).id;
+      await t.none(
+        `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty, fulfilling_vendor_id)
+         VALUES ($1, $2, 6, 95002), ($1, $3, 4, NULL)`,
+        [lineId, IDS.hotels.A1, IDS.hotels.A2]
+      );
+
+      await t.multi(sql("20261006100000_vendor_networks.down.sql"));
+
+      const invites = await t.any(
+        `SELECT user_id FROM tbl_rfq_product_vendors WHERE rfq_id = $1 ORDER BY user_id`,
+        [rfq_id]
+      );
+      expect(invites.map((r) => r.user_id)).toEqual([95001, 95003]);
+      const fulfil = await t.any(
+        `SELECT fulfilling_vendor_id FROM tbl_arc_contract_line_hotel WHERE arc_contract_line_id = $1`,
+        [lineId]
+      );
+      expect(fulfil.map((r) => r.fulfilling_vendor_id)).toEqual([null, null]);
+      const left = await t.one(
+        `SELECT to_regclass('public.tbl_vendor_orgs') AS orgs,
+                EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'tbl_rfq_product_vendors'
+                          AND column_name = 'routed_from_vendor_id') AS routed_col`
+      );
+      expect(left).toEqual({ orgs: null, routed_col: false });
+
+      await t.multi(sql("20261006100000_vendor_networks.sql"));
+      for (const table of Object.keys(NEW_TABLES)) {
+        expect((await t.one(`SELECT to_regclass($1) AS r`, [`public.${table}`])).r).not.toBeNull();
+      }
+      const back = await t.any(
+        `SELECT user_id, routed_from_vendor_id FROM tbl_rfq_product_vendors WHERE rfq_id = $1 ORDER BY user_id`,
+        [rfq_id]
+      );
+      expect(back).toEqual([
+        { user_id: 95001, routed_from_vendor_id: null },
+        { user_id: 95003, routed_from_vendor_id: null },
+      ]);
+    });
   });
 });
