@@ -4968,6 +4968,15 @@ const formatChangeValue = (v) => {
  *     vendor concerned (handled separately by NEW_PRODUCT / REMOVED_VENDOR
  *     emails, not in this map)
  */
+/**
+ * Vendor Networks: the members holding a routed copy (on this RFQ line) of a vendor in
+ * `directIds`. `line` is a getFullRfqForEdit product; its `routed_vendors` lists them.
+ */
+const routedCopyHolders = (line, directIds) =>
+  (line?.routed_vendors || [])
+    .filter((r) => directIds.has(Number(r.routed_from_vendor_id)))
+    .map((r) => Number(r.user_id));
+
 const buildPerVendorChangedDetails = (diff) => {
   const map = new Map(); // vendorId -> string[]
   const push = (vendorId, line) => {
@@ -5013,12 +5022,14 @@ const buildPerVendorChangedDetails = (diff) => {
     if (lines.length === 0) continue;
 
     // These changes are visible to vendors that remain on the product after
-    // the edit. Existing vendors = current vendors - removed + added.
+    // the edit. Existing vendors = current vendors - removed + added, plus the
+    // network members holding a routed copy of one of them (Vendor Networks).
     const vendorsAfter = new Set(
       (u.current.vendors || []).map((v) => Number(v.user_id))
     );
     for (const removedId of u.vendors.removed) vendorsAfter.delete(Number(removedId));
     for (const addedId of u.vendors.added) vendorsAfter.add(Number(addedId));
+    for (const id of routedCopyHolders(u.current, vendorsAfter)) vendorsAfter.add(id);
 
     for (const v of vendorsAfter) for (const line of lines) push(v, line);
   }
@@ -5112,7 +5123,10 @@ const sendVendorEditNotifications = async (rfq_id, userId, diff) => {
   // ── Bucket 2: REMOVED_VENDOR ───────────────────────────────────────────
   const removedVendorIds = new Set();
   for (const r of diff.products.removed) {
-    for (const v of (r.current.vendors || [])) removedVendorIds.add(Number(v.user_id));
+    const direct = new Set((r.current.vendors || []).map((v) => Number(v.user_id)));
+    for (const v of direct) removedVendorIds.add(v);
+    // Vendor Networks: members routed this line lose it with their principal.
+    for (const v of routedCopyHolders(r.current, direct)) removedVendorIds.add(v);
   }
   for (const u of diff.products.updated) {
     for (const v of u.vendors.removed.map(Number)) removedVendorIds.add(v);

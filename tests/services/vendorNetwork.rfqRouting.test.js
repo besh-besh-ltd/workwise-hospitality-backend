@@ -56,12 +56,14 @@ let buyerTypeBefore;
 const rfqIds = [];
 const hierarchyIds = [];
 
-// --- SMTP no-op ----------------------------------------------------------------------
+// --- SMTP no-op (records what was sent) -----------------------------------------------
 let realTransport;
+const sentMails = [];
 beforeAll(async () => {
   realTransport = nodemailer.createTransport;
   nodemailer.createTransport = () => ({
-    sendMail(_mail, cb) {
+    sendMail(mail, cb) {
+      sentMails.push(mail);
       const info = { messageId: "<vn-rfq>", response: "250 OK" };
       if (typeof cb === "function") cb(null, info);
       return Promise.resolve(info);
@@ -713,7 +715,10 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     const snap = JSON.parse(JSON.stringify(await rfqModel.getFullRfqForEdit(rfqId)));
     const idOf = (v) => (v && typeof v === "object" ? Number(v.user_id ?? v.terms_id ?? v.term_id ?? v.id) : v);
     snap.terms = (snap.terms || []).map(idOf);
-    for (const p of snap.products) p.vendors = (p.vendors || []).map(idOf);
+    for (const p of snap.products) {
+      p.vendors = (p.vendors || []).map(idOf);
+      delete p.routed_vendors; // server-side only: the FE snapshot never carries it
+    }
     return snap;
   }
   const newLine = (productVariantId, vendors) => ({
@@ -813,6 +818,60 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     // B still quotes only through the assignment: once it ends, B holds nothing.
     expect((await revoke(id)).status).toBe(200);
     expect(await rowsOf(rfq.rfq_id, B)).toEqual([]);
+  });
+
+  it("Task 22 fix 1: the routed member is emailed an edit of its line and the removal of a line, like its principal", async () => {
+    const rfq = await openRfq();
+    // a second line, VARIANT2, invited to HQ (copied to B by the routing)
+    await db.none(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0)`,
+      [rfq.rfq_id, VARIANT2]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, title, value, variant)
+       VALUES ($1, $2, 'Quantity', '3', 0), ($1, $2, 'Unit', 'NOS', 0)`,
+      [rfq.rfq_id, VARIANT2]
+    );
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 0)`,
+      [rfq.rfq_id, VARIANT2, HQ]
+    );
+    await routeAndAccept(rfq.rfq_id);
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(2);
+
+    const to = (email) => sentMails.filter((m) => [].concat(m.to, m.cc).includes(email));
+    const bEmail = "vn-rfq-95952@example.com";
+    const hqEmail = "vn-rfq-95951@example.com";
+    const save = async (snap) => {
+      sentMails.length = 0;
+      const res = await (await httpClient(BUYER)).put("/api/v1/rfq/update").send({ rfq_id: rfq.rfq_id, snapshot: snap });
+      expect(res.status).toBe(200);
+      // the mails go out after the response
+      for (let i = 0; i < 200 && (to(hqEmail).length === 0 || to(bEmail).length < to(hqEmail).length); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    };
+
+    // (a) the buyer edits a spec of the line B holds a routed copy of
+    let snap = await editSnapshot(rfq.rfq_id);
+    snap.products.find((p) => Number(p.product_variant_id) === Number(VARIANT)).specs.Quantity = "25";
+    await save(snap);
+    const updated = to(bEmail);
+    expect(updated.map((m) => m.subject)).toEqual(to(hqEmail).map((m) => m.subject));
+    expect(updated).toHaveLength(1);
+    expect(updated[0].subject).toMatch(/has been updated/);
+    expect(updated[0].html).toContain("Quantity");
+
+    // (b) the buyer removes the other line B holds a routed copy of
+    snap = await editSnapshot(rfq.rfq_id);
+    const line2 = snap.products.find((p) => Number(p.product_variant_id) === Number(VARIANT2));
+    snap.products = snap.products.filter((p) => p !== line2);
+    snap.deleted_product_ids = [line2.id];
+    await save(snap);
+    expect(to(bEmail).map((m) => m.subject)).toEqual([`Update on RFQ #${rfq.rfq_no}`]);
+    expect(to(hqEmail).map((m) => m.subject)).toEqual([`Update on RFQ #${rfq.rfq_no}`]);
   });
 
   it("Task 22: POST /rfq/save-draft never deletes a routed copy nor adds the routed member as a direct invite", async () => {

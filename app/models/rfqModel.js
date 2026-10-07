@@ -1146,6 +1146,7 @@ WHERE NOT EXISTS (
     let specsByKey = {};
     let filesByProduct = {};
     let vendorsByKey = {};
+    let routedVendorsByKey = {};
     let techEvalByProduct = {};
 
     if (productRows.length > 0) {
@@ -1166,14 +1167,11 @@ WHERE NOT EXISTS (
           [productIds]
         ),
         db_con.any(
-          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id,
+          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id, rpv.routed_from_vendor_id,
                   u.name, u.email
            FROM tbl_rfq_product_vendors rpv
            LEFT JOIN tbl_users u ON u.id = rpv.user_id
            WHERE rpv.rfq_id = $1
-             -- Vendor Networks: the edit's vendor list is the direct invites; routed
-             -- copies follow their assignment and are never diffed here.
-             AND rpv.routed_from_vendor_id IS NULL
            ORDER BY rpv.user_id`,
           [rfq_id]
         ),
@@ -1220,9 +1218,21 @@ WHERE NOT EXISTS (
         if (bucket) filesByProduct[f.rfq_product_id][bucket].push(f.file_url);
       }
 
-      // Vendors keyed by product_variant_id+variant
+      // Vendors keyed by product_variant_id+variant. Vendor Networks: `vendors` is the
+      // direct invites (the edit diffs only those); a member's routed copies are kept
+      // apart as `routed_vendors` (the edit emails reach them; they are never diffed).
       for (const v of vendorRows) {
         const k = `${v.product_variant_id}:${v.variant}`;
+        if (v.routed_from_vendor_id != null) {
+          if (!routedVendorsByKey[k]) routedVendorsByKey[k] = [];
+          routedVendorsByKey[k].push({
+            user_id: v.user_id,
+            routed_from_vendor_id: v.routed_from_vendor_id,
+            name: v.name,
+            email: v.email
+          });
+          continue;
+        }
         if (!vendorsByKey[k]) vendorsByKey[k] = [];
         vendorsByKey[k].push({
           user_id: v.user_id,
@@ -1251,6 +1261,7 @@ WHERE NOT EXISTS (
           datasheet_file: []
         },
         vendors: vendorsByKey[key] || [],
+        routed_vendors: routedVendorsByKey[key] || [],
         tech_eval_clauses: techEvalByProduct[p.id] || []
       };
     });
