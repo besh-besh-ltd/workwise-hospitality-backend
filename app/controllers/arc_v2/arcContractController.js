@@ -1207,9 +1207,27 @@ export async function getActiveSummary(req, res) {
       consumption: await arcContractModel.consumptionForContract(c.id),
     })));
     // GROUP rate contract: how each covered hotel is using it (PRD §8 step 8).
-    const group = arc.is_group
-      ? { hotels: await arcHotelModel.listArcHotels(arc), ...(await arcHotelModel.hotelUsageForArc(arc)) }
-      : {};
+    // Each hotel row also says who supplies it on each live contract (Vendor Networks
+    // §6.4): a network member entity that accepted the hotel, else the contract vendor.
+    let group = {};
+    if (arc.is_group) {
+      const [hotels, usage, fulfilment] = await Promise.all([
+        arcHotelModel.listArcHotels(arc),
+        arcHotelModel.hotelUsageForArc(arc),
+        arcHotelModel.hotelFulfilmentForArc(arcId, [...MEMBER_VIEWABLE_STATUSES]),
+      ]);
+      const hotel_usage = usage.hotel_usage.map((h) => ({
+        ...h,
+        fulfilled_by: fulfilment
+          .filter((f) => f.hotel_id === Number(h.hotel_id))
+          .map((f) => ({
+            contract_id: f.contract_id,
+            fulfilling_vendor_id: f.fulfilling_vendor_id,
+            fulfilling_name: f.fulfilling_name,
+          })),
+      }));
+      group = { hotels, ...usage, hotel_usage };
+    }
     return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums, ...group });
   } catch (err) {
     logger.error({ err }, '[contractController.getActiveSummary]');

@@ -659,3 +659,40 @@ describe("fix round 1", () => {
     expect(await fulfilling(H1)).toEqual([null, null]);
   });
 });
+
+describe("the buyer's view of who supplies each hotel", () => {
+  const fulfilledBy = async () => {
+    const res = await (await httpClient(CREATOR)).get(`${ARC_V}/${arcId}/active-summary`);
+    expect(res.status).toBe(200);
+    return Object.fromEntries(res.body.data.hotel_usage.map((h) => [h.hotel_id, h.fulfilled_by]));
+  };
+  const row = (vendorId) => ({ contract_id: contractId, fulfilling_vendor_id: vendorId, fulfilling_name: `VN ARC ${vendorId}` });
+
+  it("shows the contract vendor for every hotel until a member accepts one", async () => {
+    await assignHotel(B); // PENDING: nothing changes for the buyer
+    const map = await fulfilledBy();
+    // The foreign contract has no ledger rows, so only HQ's contract appears.
+    expect(map[A1]).toEqual([row(HQ)]);
+    expect(map[H1]).toEqual([row(HQ)]);
+    expect(map[H2]).toEqual([row(HQ)]);
+  });
+
+  it("shows the accepted member for its hotel only, and the contract vendor again once it is suspended", async () => {
+    await routeTo(B);
+    let map = await fulfilledBy();
+    expect(map[H1]).toEqual([row(B)]);
+    expect(map[H2]).toEqual([row(HQ)]);
+    expect(map[A1]).toEqual([row(HQ)]);
+
+    // A suspended entity no longer supplies, even before its revoke has run.
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE org_id = $1 AND vendor_id = $2`, [ORG, B]);
+    map = await fulfilledBy();
+    expect(map[H1]).toEqual([row(HQ)]);
+  });
+
+  it("leaves out contracts that are not live (declined)", async () => {
+    await db.none(`UPDATE tbl_arc_contract SET status = 'declined' WHERE id = $1`, [contractId]);
+    const map = await fulfilledBy();
+    expect(map[H1]).toEqual([]);
+  });
+});

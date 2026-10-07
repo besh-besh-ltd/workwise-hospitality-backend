@@ -1,5 +1,5 @@
 import db from '../../config/dbConn.js';
-import { isActiveFulfiller } from '../../services/vendorNetwork/fulfilmentSql.js';
+import { isActiveFulfiller, effectiveSupplierExpr } from '../../services/vendorNetwork/fulfilmentSql.js';
 
 /**
  * ARC v2 — Group rate contract hotel model.
@@ -253,6 +253,38 @@ const arcHotelModel = {
       (byAward[String(r.award_id)] ||= []).push({ hotel_id: Number(r.hotel_id), allocated_qty: Number(r.allocated_qty) });
     }
     return byAward;
+  },
+
+  /**
+   * Who supplies each hotel on each contract of a group ARC (Vendor Networks §6.4,
+   * buyer view): the effective supplier — the hotel's ACTIVE fulfilling member entity,
+   * else the contract vendor. Only contracts in `statuses`.
+   *
+   * @returns {Promise<Array<{ contract_id, hotel_id, fulfilling_vendor_id, fulfilling_name }>>}
+   */
+  hotelFulfilmentForArc: async (arcId, statuses, txContext = null) => {
+    const rows = await (txContext || db).any(
+      `SELECT x.contract_id, x.hotel_id, x.supplier_id AS fulfilling_vendor_id, su.name AS fulfilling_name
+         FROM (
+           SELECT DISTINCT ON (c.id, clh.hotel_id)
+                  c.id AS contract_id, clh.hotel_id,
+                  ${effectiveSupplierExpr('clh.fulfilling_vendor_id', 'c.vendor_id')} AS supplier_id
+             FROM tbl_arc_contract c
+             JOIN tbl_arc_contract_line l ON l.arc_contract_id = c.id
+             JOIN tbl_arc_contract_line_hotel clh ON clh.arc_contract_line_id = l.id
+            WHERE c.arc_id = $1 AND c.status = ANY($2::varchar[])
+            ORDER BY c.id, clh.hotel_id, clh.id
+         ) x
+         JOIN tbl_users su ON su.id = x.supplier_id
+        ORDER BY x.hotel_id, x.contract_id`,
+      [arcId, statuses]
+    );
+    return rows.map((r) => ({
+      contract_id: Number(r.contract_id),
+      hotel_id: Number(r.hotel_id),
+      fulfilling_vendor_id: Number(r.fulfilling_vendor_id),
+      fulfilling_name: r.fulfilling_name,
+    }));
   },
 
   /**
