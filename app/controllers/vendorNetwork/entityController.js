@@ -394,7 +394,7 @@ export async function createEntity(req, res) {
       if (await emailExists(input.email, t)) {
         throw new NetworkHttpError(409, "This email is already registered", "EMAIL_EXISTS");
       }
-      const account = await insertVendorAccount({ ...input, createdBy: personId }, t);
+      const account = await insertVendorAccount({ ...input, orgId, createdBy: personId }, t);
       await insertActiveEntity(
         { orgId, vendorId: account.vendorId, relationship: input.relationship, invitedBy: personId },
         t

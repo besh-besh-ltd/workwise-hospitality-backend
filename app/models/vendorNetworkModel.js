@@ -70,6 +70,40 @@ export function getActiveSeat(entityId, runner = db, today = istDate()) {
 }
 
 /**
+ * What a member entity's hospitality subscription standing rests on (spec §5.1, §5.2), for
+ * the subscription-status / profile surfaces: its live org row, the org's principal, the
+ * entity's seat, and the latest end date of a valid subscription among the org's holders.
+ * The holder set and the validity predicate are hasValidPaidSubscription's, so the dates
+ * shown match what the subscription gate decides. null when the vendor is in no org.
+ */
+export function getNetworkSubscriptionStanding(vendorId, runner = db, today = istDate()) {
+  return runner.oneOrNone(
+    `SELECT e.org_id, o.name AS org_name, e.relationship, e.status AS entity_status,
+            o.principal_vendor_id, COALESCE(pc.company_name, pu.name) AS principal_name,
+            (SELECT MAX(s.end_date) FROM tbl_vendor_network_seats s
+              WHERE s.entity_vendor_id = e.vendor_id AND s.org_id = e.org_id
+                AND s.status = 'active' AND s.end_date >= $2::date)::text AS seat_valid_until,
+            (SELECT MAX(s.end_date) FROM tbl_vendor_network_seats s
+              WHERE s.entity_vendor_id = e.vendor_id AND s.org_id = e.org_id
+                AND s.status IN ('active', 'expired'))::text AS last_seat_end,
+            (SELECT MAX(vhcs.end_date)
+               FROM tbl_vendor_hotel_category_subscription vhcs
+               LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+              WHERE vhcs.vendor_id IN (${activeSiblingIdsSql("$1")})
+                AND vhcs.status = 'active'
+                AND vhcs.end_date >= CURRENT_DATE
+                AND (vp.payment_status IN ('paid', 'success') OR vhcs.payment_id IS NULL)
+            )::date::text AS subscription_valid_until
+       FROM tbl_vendor_org_entities e
+       JOIN tbl_vendor_orgs o ON o.id = e.org_id
+       JOIN tbl_users pu ON pu.id = o.principal_vendor_id
+       LEFT JOIN tbl_company pc ON pc.id = pu.company_id
+      WHERE e.vendor_id = $1 AND e.status <> 'REMOVED'`,
+    [vendorId, today]
+  );
+}
+
+/**
  * Every entity a type-11 person may act as, in one query: ACTIVE memberships joined to
  * the ACTIVE, logged-in-able (status 1, not deleted, user_type 3) entities they cover.
  * ORG_ADMIN covers every ACTIVE entity of its org; ENTITY_MEMBER covers its own entity.
@@ -432,11 +466,26 @@ export function checkStateCity(stateId, cityId, runner = db) {
   );
 }
 
-/** tbl_company + passwordless type-3 tbl_users + tbl_company_location for a new network entity. */
-export async function insertVendorAccount({ companyName, gstin, email, stateId, cityId, address, createdBy }, runner = db) {
+/**
+ * tbl_company + passwordless type-3 tbl_users + tbl_company_location for a new network entity
+ * of org `orgId`. The company inherits the principal's `is_hospitality`: a hospitality
+ * vendor's branch is a hospitality vendor, so the hospitality subscription gate and the
+ * profile's has_valid_hospitality_subscription evaluate it (over the org's pooled
+ * subscriptions, spec §5.2) instead of skipping it as a non-hospitality account.
+ */
+export async function insertVendorAccount(
+  { orgId, companyName, gstin, email, stateId, cityId, address, createdBy },
+  runner = db
+) {
   const company = await runner.one(
-    `INSERT INTO tbl_company (company_name, gstin) VALUES ($1, $2) RETURNING id`,
-    [companyName, gstin]
+    `INSERT INTO tbl_company (company_name, gstin, is_hospitality)
+     VALUES ($1, $2, COALESCE((SELECT pc.is_hospitality
+                                 FROM tbl_vendor_orgs o
+                                 JOIN tbl_users pu ON pu.id = o.principal_vendor_id
+                                 JOIN tbl_company pc ON pc.id = pu.company_id
+                                WHERE o.id = $3), 0))
+     RETURNING id`,
+    [companyName, gstin, orgId]
   );
   const user = await runner.one(
     `INSERT INTO tbl_users (name, email, user_type, status, company_id, password, created_by)
@@ -814,6 +863,7 @@ export default {
   listActiveSiblingIds,
   mapToPrincipalIds,
   getOperateState,
+  getNetworkSubscriptionStanding,
   listPushDelegates,
   isNetworkManagedLogin,
   createOrgWithPrincipal,

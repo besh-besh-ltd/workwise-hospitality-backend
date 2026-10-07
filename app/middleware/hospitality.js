@@ -264,6 +264,23 @@ const requireNetworkEntityCanOperate = async (req, res, next) => {
 };
 
 /**
+ * Vendor Networks (spec §5.2): the org's subscription is bought and changed by the
+ * principal. A request acting as a non-principal entity (a member's own login, a
+ * person acting for it, or the admin switched into it) may not renew, preview,
+ * modify or extend a subscription for that entity: 403 reason NETWORK_MEMBER.
+ * Vendors in no network and the principal pass with no query.
+ */
+const refuseNetworkMemberSubscriptionChange = (req, res, next) => {
+  const network = req.user?.network;
+  if (!network || network.is_principal) return next();
+  return res.status(403).json({
+    status: 0,
+    message: `Your subscription is covered by ${network.org_name}. Ask your network admin to change it.`,
+    reason: 'NETWORK_MEMBER',
+  });
+};
+
+/**
  * Variant for noLogin.customer_auth endpoints (quote submission etc.)
  * Only checks subscription if user is authenticated (req.user exists).
  * Unauthenticated requests pass through (handled by other logic).
@@ -290,5 +307,6 @@ export default {
   requireActiveSubscriptionForIssuedPo,
   requireActiveSubscriptionIfAuthenticated,
   requireNetworkEntityCanOperate,
+  refuseNetworkMemberSubscriptionChange,
 };
 

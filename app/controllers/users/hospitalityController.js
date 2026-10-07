@@ -35,6 +35,7 @@ import {
 } from '../../services/approvalPropagationService.js';
 import { buyerHome } from '../../services/notificationLinks.js';
 import { NETWORK_ROLE } from '../../constants/vendorNetwork.js';
+import { networkSubscriptionCoverage } from '../../services/vendorNetwork/subscriptionCoverage.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -2948,6 +2949,7 @@ const HospitalityController = {
 
       const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
+      const coveredByNetwork = await networkSubscriptionCoverage(req.user);
 
       // Separate current (active/non-expired), expired, and pending subscriptions.
       // Unpaid self-registration rows stay in pending state; only paid or admin-assigned
@@ -3017,7 +3019,11 @@ const HospitalityController = {
           } : null,
           is_expired: isExpired,
           has_pending: pendingSubs.length > 0,
-          can_renew: canRenew
+          can_renew: canRenew,
+          // Vendor Networks (spec §5.1/§5.2): a member entity is covered by its network's
+          // subscription plus its own seat. The key is absent for a vendor in no network
+          // and for the principal, whose response stays exactly as before.
+          ...(coveredByNetwork ? { covered_by_network: coveredByNetwork } : {})
         }
       });
     } catch (error) {
@@ -3446,6 +3452,7 @@ const HospitalityController = {
       const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
       const history = await hospitalityModel.getVendorPaymentHistory(vendorId, { limit: 50 });
+      const coveredByNetwork = await networkSubscriptionCoverage(req.user);
 
       // A subscription row is "valid to surface" when it is either linked to
       // a successful payment OR admin-assigned (payment_id IS NULL — only
@@ -3599,7 +3606,9 @@ const HospitalityController = {
             can_modify: canModify,
             can_renew: canRenew,
             blocked_reason: blockedReason
-          }
+          },
+          // Vendor Networks: see getVendorSubscriptionStatus. Absent outside a network.
+          ...(coveredByNetwork ? { covered_by_network: coveredByNetwork } : {})
         }
       });
     } catch (error) {
