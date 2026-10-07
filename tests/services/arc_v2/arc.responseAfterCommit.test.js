@@ -38,7 +38,7 @@
 //
 // Enforced statically as well, by scripts/check-response-in-tx.mjs.
 
-import request from "supertest";
+import { boundRequest } from "../../helpers/http.js";
 import express from "express";
 import util from "../../../app/util/index.js";
 import appDb from "../../../app/config/dbConn.js";
@@ -106,6 +106,7 @@ function expectCommittedBeforeResponse(writeMatcher) {
 }
 
 let app;
+let bound;
 let headers;
 const createdArcs = [];
 
@@ -119,6 +120,7 @@ beforeAll(async () => {
   );
 
   app = buildRecordingApp();
+  bound = await boundRequest(app);
   headers = (await loginAs(BUYER)).headers;
 
   previousQueryHook = appDb.$config.options.query;
@@ -147,7 +149,7 @@ beforeEach(() => {
 });
 
 function req(method, path) {
-  let r = request(app)[method](path);
+  let r = bound[method](path);
   for (const [k, v] of Object.entries(headers)) r = r.set(k, v);
   return r;
 }

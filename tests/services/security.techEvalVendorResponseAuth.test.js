@@ -22,10 +22,9 @@
 //      still submit its own answers.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "@jest/globals";
-import request from "supertest";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import { buildTestApp } from "../setup/app.js";
 import { makeRFQ } from "../factories/rfq.js";
@@ -255,14 +254,14 @@ describe("POST /rfq/add-vendor-response", () => {
     );
     inserted.tokenIds.push(tok.id);
 
-    const verify = await request(app)
+    const verify = await (await boundRequest(app))
       .post("/api/v1/users/verify-vendor-token")
       .set("User-Agent", TEST_USER_AGENT)
       .send({ token: linkToken });
     expect(verify.status).toBe(200);
     const guestJwt = verify.body.data.token;
 
-    const res = await request(app)
+    const res = await (await boundRequest(app))
       .post(ADD)
       .set("Authorization", `Bearer ${guestJwt}`)
       .set("User-Agent", TEST_USER_AGENT)

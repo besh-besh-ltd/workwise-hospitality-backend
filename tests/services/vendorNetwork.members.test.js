@@ -12,7 +12,6 @@ import { jest } from "@jest/globals";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
-import request from "supertest";
 import { db, closeDb } from "../setup/db.js";
 import {
   seedVendorEntity,
@@ -39,7 +38,7 @@ jest.unstable_mockModule("../../app/util/socket.js", () => ({
   SocketConfig: () => null,
 }));
 
-const { httpClient } = await import("../helpers/http.js");
+const { httpClient, boundRequest } = await import("../helpers/http.js");
 const { loginAsInternalStaff } = await import("../helpers/auth.js");
 const { buildTestApp } = await import("../setup/app.js");
 
@@ -144,7 +143,7 @@ async function invite(body, as = HQ) {
 }
 
 async function publicApp() {
-  return request(await buildTestApp());
+  return boundRequest(await buildTestApp());
 }
 
 async function accept(token, password = PASSWORD) {

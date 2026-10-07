@@ -32,12 +32,11 @@
 // production model function with the exact string the call site used to build.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "@jest/globals";
-import request from "supertest";
 import JWT from "jsonwebtoken";
 import Cryptr from "cryptr";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import { makeRFQ } from "../factories/rfq.js";
 import Config from "../../app/config/app.config.js";
 import rfqModel from "../../app/models/rfqModel.js";
@@ -71,8 +70,9 @@ async function adminClient(userId) {
     Config.jwt.secret
   );
   const headers = { Authorization: `Bearer ${token}`, "User-Agent": TEST_USER_AGENT };
+  const bound = await boundRequest(app);
   const wrap = (method) => (path) => {
-    let req = request(app)[method](path);
+    let req = bound[method](path);
     for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
     return req;
   };

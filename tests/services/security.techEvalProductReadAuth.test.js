@@ -11,10 +11,9 @@
 // `deviation_text` the vendor wizard sends on a disagree row.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "@jest/globals";
-import request from "supertest";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import { buildTestApp } from "../setup/app.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { attachVendorToRfqProduct, seedTechEvalWithClauses } from "../factories/techEval.js";

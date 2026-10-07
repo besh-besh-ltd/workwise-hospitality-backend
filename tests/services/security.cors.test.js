@@ -12,7 +12,7 @@
 //     anything else gets no Access-Control-Allow-Origin at all
 
 import { describe, it, expect, afterAll, afterEach } from "@jest/globals";
-import request from "supertest";
+import { boundRequest } from "../helpers/http.js";
 import { closeDb } from "../setup/db.js";
 import { createApp } from "../../app/app.js";
 import { buildCorsOptions, parseCorsOrigins } from "../../app/util/corsOptions.js";
@@ -40,8 +40,8 @@ const appWith = (corsOrigins) => {
   return createApp();
 };
 
-const preflight = (app, origin) =>
-  request(app)
+const preflight = async (app, origin) =>
+  (await boundRequest(app))
     .options(PATH)
     .set("Origin", origin)
     .set("Access-Control-Request-Method", "GET")
@@ -70,7 +70,7 @@ describe("CORS_ORIGINS unset (current permissive behaviour)", () => {
   });
 
   it("simple request still gets Access-Control-Allow-Origin: *", async () => {
-    const res = await request(appWith(undefined)).get(PATH).set("Origin", FRONTEND);
+    const res = await (await boundRequest(appWith(undefined))).get(PATH).set("Origin", FRONTEND);
     expect(res.headers["access-control-allow-origin"]).toBe("*");
   });
 });
@@ -86,7 +86,7 @@ describe("CORS_ORIGINS set (allowlist)", () => {
   });
 
   it("reflects an allowed origin on the actual request", async () => {
-    const res = await request(appWith(FRONTEND)).get(PATH).set("Origin", FRONTEND);
+    const res = await (await boundRequest(appWith(FRONTEND))).get(PATH).set("Origin", FRONTEND);
     expect(res.headers["access-control-allow-origin"]).toBe(FRONTEND);
   });
 
@@ -94,7 +94,7 @@ describe("CORS_ORIGINS set (allowlist)", () => {
     const app = appWith(FRONTEND);
     const pre = await preflight(app, EVIL);
     expect(pre.headers["access-control-allow-origin"]).toBeUndefined();
-    const res = await request(app).get(PATH).set("Origin", EVIL);
+    const res = await (await boundRequest(app)).get(PATH).set("Origin", EVIL);
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 

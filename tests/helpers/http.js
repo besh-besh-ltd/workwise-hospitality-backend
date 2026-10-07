@@ -25,7 +25,10 @@ const servers = new Map(); // app -> Promise<http.Server>
 
 // Registered at import time (hooks cannot be declared inside a running test).
 // Each jest test file gets its own module registry, so this runs once per file.
-// Runs BEFORE the suite's own afterAll hooks (registered first; jest-circus runs afterAll in declaration order).
+// Ordering (jest-circus): afterAll hooks declared inside a describe() run BEFORE
+// this root-level hook (nested suites finish first); root-level suite hooks
+// declared after this import run AFTER it, in declaration order. So a
+// describe-level afterAll may still use the servers; root-level ones may not.
 if (typeof afterAll === "function") {
   afterAll(async () => {
     const pending = [...servers.values()];
@@ -40,7 +43,7 @@ if (typeof afterAll === "function") {
   });
 }
 
-function serverFor(app) {
+export function serverFor(app) {
   if (!servers.has(app)) {
     servers.set(
       app,
@@ -56,6 +59,14 @@ function serverFor(app) {
     );
   }
   return servers.get(app);
+}
+
+/**
+ * supertest client for ANY express app (custom/mocked apps included), bound to
+ * 127.0.0.1:0 via the shared server cache; closed by the registered afterAll.
+ */
+export async function boundRequest(app) {
+  return request(await serverFor(app));
 }
 
 /**

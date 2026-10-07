@@ -4,7 +4,6 @@
 // Pattern B: committed fixtures (ids 95001..95999), removed in afterEach.
 
 import express from "express";
-import request from "supertest";
 import bcrypt from "bcryptjs";
 import JWT from "jsonwebtoken";
 import Cryptr from "cryptr";
@@ -16,7 +15,7 @@ import { resolveActingContext } from "../../app/services/vendorNetwork/actingCon
 import { requireOrgAdmin, requireNetwork } from "../../app/services/vendorNetwork/guards.js";
 import { db, closeDb } from "../setup/db.js";
 import { buildTestApp } from "../setup/app.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import { loginAs } from "../helpers/auth.js";
 import { countQueries } from "../helpers/queryCounter.js";
 import {
@@ -81,12 +80,12 @@ function whoamiApp() {
 
 async function whoami(userId, opts) {
   const { headers } = await loginAs(userId, opts);
-  return request(whoamiApp()).get("/whoami").set(headers);
+  return (await boundRequest(whoamiApp())).get("/whoami").set(headers);
 }
 
 async function withToken(method, path, token) {
   const app = await buildTestApp();
-  return request(app)[method](path).set({ Authorization: `Bearer ${token}`, "User-Agent": UA });
+  return (await boundRequest(app))[method](path).set({ Authorization: `Bearer ${token}`, "User-Agent": UA });
 }
 
 afterEach(async () => {
@@ -113,8 +112,8 @@ describe("jwtUsr back-compat (§10.1)", () => {
       [BUYER]
     );
     const { headers } = await loginAs(BUYER, { ent: LONE });
-    const app = whoamiApp();
-    const { result: res, count } = await countQueries(() => request(app).get("/whoami").set(headers));
+    const bound = await boundRequest(whoamiApp());
+    const { result: res, count } = await countQueries(() => bound.get("/whoami").set(headers));
     expect(res.status).toBe(200);
     expect(count).toBe(1);
     const row = await db.one(`SELECT * FROM tbl_users WHERE id = $1`, [BUYER]);
@@ -194,7 +193,7 @@ describe("type-11 person acting context (§4.1)", () => {
       },
       Config.jwt.secret
     );
-    const res = await request(whoamiApp()).get("/whoami").set({ Authorization: `Bearer ${token}` });
+    const res = await (await boundRequest(whoamiApp())).get("/whoami").set({ Authorization: `Bearer ${token}` });
     expect(res.status).toBe(401);
   });
 
@@ -333,7 +332,7 @@ describe("audit attribution (§4.3, §10.10)", () => {
 describe("login (§4.2)", () => {
   const login = async (email, password = PASSWORD) => {
     const app = await buildTestApp();
-    return request(app).post("/api/v1/users/login?conform=true").set("User-Agent", UA).send({ email, password });
+    return (await boundRequest(app)).post("/api/v1/users/login?conform=true").set("User-Agent", UA).send({ email, password });
   };
 
   it("a type-11 person logs in by email and the token resolves to the principal", async () => {
@@ -397,7 +396,7 @@ describe("guards", () => {
 describe("password reset for network-managed logins (§4.2)", () => {
   const post = async (path, body) => {
     const app = await buildTestApp();
-    return request(app).post(path).set("User-Agent", UA).send(body);
+    return (await boundRequest(app)).post(path).set("User-Agent", UA).send(body);
   };
   const REFUSAL = { status: 0, message: "This account is managed by your network admin" };
 
@@ -447,7 +446,7 @@ describe("password reset for network-managed logins (§4.2)", () => {
 describe("identity writes while acting for another login (§4.2)", () => {
   const login = async (email, password) => {
     const app = await buildTestApp();
-    return request(app).post("/api/v1/users/login?conform=true").set("User-Agent", UA).send({ email, password });
+    return (await boundRequest(app)).post("/api/v1/users/login?conform=true").set("User-Agent", UA).send({ email, password });
   };
   const hashOf = async (id) => (await db.one(`SELECT password FROM tbl_users WHERE id = $1`, [id])).password;
   const NEW = "Fresh@9876";
@@ -561,7 +560,7 @@ describe("Google social login (§4.2)", () => {
   });
   const social = async () => {
     const app = await buildTestApp();
-    return request(app).post("/api/v1/users/social-login").set("User-Agent", UA).send({ login_type: "google", access_token: "t" });
+    return (await boundRequest(app)).post("/api/v1/users/social-login").set("User-Agent", UA).send({ login_type: "google", access_token: "t" });
   };
 
   it("refuses a passwordless network-managed entity", async () => {

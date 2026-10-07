@@ -20,10 +20,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import { loginAsInternalStaff, stampAdmin } from "../helpers/auth.js";
 import { buildTestApp } from "../setup/app.js";
-import request from "supertest";
 import { makeRFQ } from "../factories/rfq.js";
 import { attachVendorToRfqProduct } from "../factories/techEval.js";
 import { ensureArcApprovable } from "../helpers/arcApproverPerms.js";
@@ -655,7 +654,7 @@ describe("vendor location endpoints - company ownership", () => {
       await seedLocation(companyB, "B office");
       const app = await buildTestApp();
       const { headers } = await loginAsInternalStaff(STAFF);
-      let r = request(app).get(`/api/v1/admin/vendor/get-vendor-locations/${companyB}`);
+      let r = (await boundRequest(app)).get(`/api/v1/admin/vendor/get-vendor-locations/${companyB}`);
       for (const [k, v] of Object.entries(headers)) r = r.set(k, v);
 
       const res = await r;
@@ -669,8 +668,9 @@ describe("vendor location endpoints - company ownership", () => {
     async function staff() {
       const app = await buildTestApp();
       const { headers } = await loginAsInternalStaff(STAFF);
+      const bound = await boundRequest(app);
       const call = (method, path) => {
-        let r = request(app)[method](path);
+        let r = bound[method](path);
         for (const [k, v] of Object.entries(headers)) r = r.set(k, v);
         return r;
       };
