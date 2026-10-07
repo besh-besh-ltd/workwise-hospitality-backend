@@ -85,7 +85,7 @@ import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
 import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
-import { propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 
@@ -2641,6 +2641,11 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   };
 
   await db.tx(async (t) => {
+    // Vendor Networks lock order (rfqSubject.js header), as refresh-vendors
+    // (hospitalityModel.recomputeVendorsForRfq): the RFQ's live routing assignments
+    // FOR SHARE before any tbl_rfq_product_vendors write below (product deletes,
+    // vendor-filter deletes incl. routed copies, addable inserts). No rows → no-op.
+    if (rfq_id) await lockLiveRfqAssignments(t, rfq_id);
     rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
     if(rfqDetail)
       rfqDetail = rfqDetail[0]
