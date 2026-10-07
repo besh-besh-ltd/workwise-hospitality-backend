@@ -73,7 +73,7 @@ contract line ids) change on every run.
 |---|---|---|---|
 | Buyer "Priya" | `employee_code=E2EBUY01` | 95801 | user_type 2. Buyers can only log in with an employee code. |
 | Daikin HQ | `e2e.daikin.hq@example.com` | 95811 | Principal, ORG_ADMIN, MH GSTIN `27AADCD1234F1ZW` |
-| Person "Ravi" | `e2e.daikin.person@example.com` | 95821 | user_type 11, ENTITY_MEMBER of Daikin UP. The token resolves to HQ until he switches entity. |
+| Person "Ravi" | `e2e.daikin.person@example.com` | 95821 | user_type 11, ENTITY_MEMBER of Daikin UP. His token resolves to **Daikin UP (95812)**, his only entity, by default (verified live 2026-10-07). A type-11 person never acts as itself, and he has no HQ membership to switch to. The header shows the static label "Daikin UP (E2E) · Daikin Network (E2E)". |
 | Daikin Goa | `e2e.daikin.goa@example.com` | 95813 | Stand-alone vendor in no network (Goa GSTIN), for the link-invite flow |
 | Daikin UP | none | 95812 | BRANCH, ACTIVE, seat active. Passwordless, network-managed. UP GSTIN `09AADCD1234F1Z3` |
 
@@ -98,6 +98,10 @@ contract line ids) change on every run.
   - is mapped to variants 3178 (AC INDOOR COOLING UNIT) and 3176 (AC CONDENSOR UNIT).
 - Org 95811 "Daikin Network (E2E)" runs in `ADMIN_ROUTES` mode. Its entities are HQ
   (PRINCIPAL) and Daikin UP (BRANCH).
+- None of the seeded vendor companies has `is_hospitality = 1`, so the hospitality
+  subscription gate (`requireActiveSubscription`) skips them. The subscription status
+  endpoint still reports Daikin UP as `covered_by_network` (network + seat), so its header
+  pill reads "Covered by Daikin Network (E2E)", not "Subscribe".
 - **No coverage rules are seeded.** Scenario 2 creates "Daikin UP covers UP". Until then the
   routing queue shows the RFQ with no suggested candidate.
 
@@ -206,7 +210,13 @@ login '{"employee_code":"E2EBUY01","password":"E2e@12345"}'                     
   ```
   Run it with `psql -h 127.0.0.1 -d hospitality_test_e2e`.
 - **ARC signing OTP (scenario 6).** The response of `request-otp` carries `data.dev_code`.
-- **Expected tax on the UP call-off (scenario 8).** The supplier is Daikin UP (09) and the
-  buyer is the Lucknow hotel (09). That is the same state, so the call-off shows CGST + SGST,
-  not IGST, even though the contract principal is in MH.
+- **Expected tax on the call-offs (scenario 8).** The tax splits on the supplier's GSTIN
+  state against the ordering hotel's (its GSTIN, else its `state_id`). Both cases were
+  checked on the 2026-10-07 run, in the PO PDF and on the vendor and buyer PO detail pages
+  (`pricing.tax_breakdown`):
+  - **Intra-state (PO 3):** Daikin UP (09) fulfils the Lucknow hotel (09). Same state, so
+    CGST 9% + SGST 9%, not IGST, even though the contract principal is in MH.
+  - **Inter-state (PO 4):** Daikin UP (09) fulfils the Mumbai hotel (27). Different states,
+    so IGST 18%: ₹54,000 + ₹9,720 = ₹63,720.
+  - A call-off where either state is unknown keeps the single "GST" line.
 - **Fresh start.** Re-run the seed. If that fails, run step 1 and then the seed.
