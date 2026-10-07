@@ -25,11 +25,12 @@ const servers = new Map(); // app -> Promise<http.Server>
 
 // Registered at import time (hooks cannot be declared inside a running test).
 // Each jest test file gets its own module registry, so this runs once per file.
+// Runs BEFORE the suite's own afterAll hooks (registered first; jest-circus runs afterAll in declaration order).
 if (typeof afterAll === "function") {
   afterAll(async () => {
     const pending = [...servers.values()];
     servers.clear();
-    await Promise.all(
+    await Promise.allSettled(
       pending.map(async (p) => {
         const server = await p;
         server.closeAllConnections?.();
@@ -47,6 +48,10 @@ function serverFor(app) {
         const server = http.createServer(app);
         server.once("error", reject);
         server.listen(0, "127.0.0.1", () => resolve(server));
+      }).catch((err) => {
+        // A failed listen must not poison the cache: the next call retries.
+        servers.delete(app);
+        throw err;
       })
     );
   }
