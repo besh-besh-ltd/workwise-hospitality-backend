@@ -97,11 +97,10 @@ describe("GET /dashboard-v2/abc-analysis — classification (Sr 297/298/303)", (
     expect(data.items[0].product_variant_id).toBe(seeded.bigVariant);
   });
 
-  it("classifies by volume when metric=volume", async () => {
+  it("is value-only: metric=volume is ignored (quantities across mixed units are not additive)", async () => {
     const data = await fetchAbc("volume");
-    expect(data.metric).toBe("volume");
-    const big = data.items.find((i) => i.product_variant_id === seeded.bigVariant);
-    expect(big).toBeDefined();
-    expect(big.class).toBe("A");
+    expect(data.metric).toBe("value");
+    expect(data).not.toHaveProperty("total_volume");
+    data.items.forEach((i) => expect(i).not.toHaveProperty("volume"));
   });
 });

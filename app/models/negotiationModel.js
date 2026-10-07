@@ -2904,6 +2904,8 @@ const negotiationModel = {
        ), facts AS (
          SELECT p.*,
                 qi.total_price AS cur_total,
+                qi.unit_price  AS cur_unit,
+                CASE WHEN qi.quantity ~ '^[0-9]+(\\.[0-9]+)?$' THEN qi.quantity::numeric END AS cur_qty,
                 hist.first_total,
                 EXISTS (
                   SELECT 1 FROM tbl_approval_instances ai
@@ -2932,18 +2934,49 @@ const negotiationModel = {
               WHERE h.quote_item_id = qi.id
               ORDER BY h.timestamp ASC, h.id ASC LIMIT 1
            ) hist(first_total) ON TRUE
+       ), norm AS (
+         -- UNIT vs LINE normalisation. Round quotes are meant to be LINE totals
+         -- (the ladder compares them with tbl_quote_items.total_price), but 26
+         -- of 728 production round prices (May–Aug 2026) were entered at UNIT
+         -- rate — e.g. RFQ 808, qty 600, Rs 385 -> Rs 362 — which understated
+         -- those pairs' savings by the quantity. A price is treated as a unit
+         -- rate, and scaled by the quote line's quantity, only when the line
+         -- quantity is > 1, the price sits closer to the line's unit price
+         -- than to its line total, AND it is at most 1.2 x that unit price. The
+         -- last test stops a deep line-total discount at a small quantity (qty 2,
+         -- Rs 1,400 on a Rs 2,000 line) being read as a rate and doubled; a real
+         -- unit rate is never far above the unit price. Each price is judged independently, so a
+         -- line-total baseline paired with a unit-rate counter still compares
+         -- like with like.
+         SELECT f.*,
+                CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
+                      AND f.previous_price IS NOT NULL
+                      AND abs(f.previous_price - f.cur_unit) < abs(f.previous_price - f.cur_total)
+                      AND f.previous_price <= 1.2 * f.cur_unit
+                     THEN f.previous_price * f.cur_qty ELSE f.previous_price END AS previous_price_n,
+                CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
+                      AND f.first_quoted IS NOT NULL
+                      AND abs(f.first_quoted - f.cur_unit) < abs(f.first_quoted - f.cur_total)
+                      AND f.first_quoted <= 1.2 * f.cur_unit
+                     THEN f.first_quoted * f.cur_qty ELSE f.first_quoted END AS first_quoted_n,
+                CASE WHEN f.cur_qty > 1 AND f.cur_unit IS NOT NULL AND f.cur_total IS NOT NULL
+                      AND f.achieved IS NOT NULL
+                      AND abs(f.achieved - f.cur_unit) < abs(f.achieved - f.cur_total)
+                      AND f.achieved <= 1.2 * f.cur_unit
+                     THEN f.achieved * f.cur_qty ELSE f.achieved END AS achieved_n
+           FROM facts f
        ), scored AS (
-         SELECT f.rfq_id, f.achieved, f.is_awarded,
-                COALESCE(f.previous_price,
+         SELECT f.rfq_id, f.achieved_n AS achieved, f.is_awarded,
+                COALESCE(f.previous_price_n,
                          f.first_total,
-                         CASE WHEN f.n_rounds > 1 THEN f.first_quoted END,
+                         CASE WHEN f.n_rounds > 1 THEN f.first_quoted_n END,
                          f.cur_total) AS baseline,
                 CASE WHEN f.previous_price IS NOT NULL           THEN 'previous_price'
                      WHEN f.first_total    IS NOT NULL           THEN 'quote_history'
                      WHEN f.n_rounds > 1                         THEN 'prior_round'
                      WHEN f.cur_total      IS NOT NULL           THEN 'current_quote'
                      ELSE NULL END AS baseline_source
-           FROM facts f
+           FROM norm f
        )
        SELECT rfq_id,
               COUNT(*) FILTER (WHERE baseline IS NOT NULL AND achieved IS NOT NULL)::int AS pairs_counted,
