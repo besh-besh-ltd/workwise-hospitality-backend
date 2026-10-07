@@ -30,6 +30,7 @@ import {
   entityCoversHotel,
   previewCoveredHotels,
   searchPreviewHotels,
+  findInvalidRuleTargets,
 } from "../../app/services/vendorNetwork/coverage.js";
 import { entityCanOperate } from "../../app/services/vendorNetwork/actingContext.js";
 import { findUnmatchedHotels, formatReport } from "../../scripts/vendor_networks/hotel_location_report.mjs";
@@ -427,6 +428,36 @@ describe("coverage preview set", () => {
       const found = await searchPreviewHotels({ principalVendorId: P, q: "vn cov" }, t);
       expect(found.map((h) => h.id).sort()).toEqual([H_PUNE, H_GOA].sort());
       expect(await searchPreviewHotels({ principalVendorId: XP, q: "" }, t)).toEqual([]);
+    });
+  });
+
+  // Task 20 / D9: a hotel the org knows only through a (Group) ARC it was invited to —
+  // lead hotel or tbl_arc_hotel_mappings — is in the set, so it can take a HOTEL rule.
+  // An ARC the principal was not invited to contributes nothing.
+  it("includes ARC-only hotels of ARCs the principal was invited to, and only those", async () => {
+    await withTx(async (t) => {
+      const arc = async (number, leadHotel, mapped, invitee) => {
+        const { id } = await t.one(
+          `INSERT INTO tbl_arc (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id,
+                                status, is_group, created_by)
+           VALUES ($1, 'VN cov ARC', $2, $3, $4, $5, 'contract_active', true, $6) RETURNING id`,
+          [number, CAT, IDS.hospitality.A, leadHotel, IDS.departments.proc, BUYER_ADMIN]
+        );
+        for (const h of mapped) {
+          await t.none(`INSERT INTO tbl_arc_hotel_mappings (arc_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [id, h, BUYER_ADMIN]);
+        }
+        await t.none(`INSERT INTO tbl_arc_invitation (arc_id, vendor_id, status) VALUES ($1, $2, 'submitted')`, [id, invitee]);
+      };
+      await arc("ARC-VN-COV-1", H_MUMBAI, [H_MUMBAI, H_NAGPUR], P);
+      await arc("ARC-VN-COV-2", H_GOA, [H_GOA], XP); // another org's invitation
+
+      const found = (await searchPreviewHotels({ principalVendorId: P, q: "" }, t)).map((h) => h.id);
+      expect(found).toEqual(expect.arrayContaining([H_MUMBAI, H_NAGPUR]));
+      expect(found).not.toContain(H_GOA);
+
+      const hotelRule = (id) => [{ scope_type: "HOTEL", scope_id: id, mode: "INCLUDE", category_id: null }];
+      expect((await findInvalidRuleTargets(hotelRule(H_NAGPUR), P, t)).hotelsOutsideNetwork).toBe(false);
+      expect((await findInvalidRuleTargets(hotelRule(H_GOA), P, t)).hotelsOutsideNetwork).toBe(true);
     });
   });
 });

@@ -613,6 +613,13 @@ async function seedGroupArc(t, variants) {
     ID.hotels.UP,
     ID.buyer,
   ]);
+  // Every product path that ends in a contract (award, manual entry) has invited the
+  // contract vendor first. The coverage preview hotel set reads this invitation, so
+  // without it Mumbai (an ARC-only hotel) could not take a HOTEL coverage rule.
+  await t.none(
+    `INSERT INTO tbl_arc_invitation (arc_id, vendor_id, status, responded_at) VALUES ($1, $2, 'submitted', NOW() - INTERVAL '12 days')`,
+    [arc.id, ID.hq]
+  );
   const contract = await t.one(
     `INSERT INTO tbl_arc_contract (arc_id, vendor_id, status, generated_at, awaiting_until)
      VALUES ($1, $2, 'awaiting_acceptance', NOW(), NOW() + INTERVAL '7 days')
