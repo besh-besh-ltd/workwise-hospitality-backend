@@ -2456,6 +2456,14 @@ WHERE NOT EXISTS (
         throw new Error('Buyer not found or no company associated');
       const companyId = buyer.company_id;
 
+      // Every value is a bind parameter (pg-promise $n), never spliced into the SQL.
+      // $1 draftId, $2 rfqProductId, $3 vendor_name (as before); the rest are appended.
+      const params = [draftId, rfqProductId, filters?.vendor_name];
+      const bind = (value) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
+
       let {
         vendor_approved_by,
         state,
@@ -2486,11 +2494,11 @@ WHERE NOT EXISTS (
         const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
 
         if (turnOver.from > 0 && turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from} AND ${turnOver.to}`;
+          turnoverCondition += `${turnoverField} BETWEEN ${bind(turnOver.from)} AND ${bind(turnOver.to)}`;
         } else if (turnOver.from > 0) {
-          turnoverCondition += `${turnoverField} >= ${turnOver.from}`;
+          turnoverCondition += `${turnoverField} >= ${bind(turnOver.from)}`;
         } else if (turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} <= ${turnOver.to}`;
+          turnoverCondition += `${turnoverField} <= ${bind(turnOver.to)}`;
         }
 
         turnoverCondition += ')';
@@ -2555,7 +2563,7 @@ WHERE NOT EXISTS (
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
           LEFT JOIN tbl_quote_finalization qf 
-            ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+            ON qf.vendor_id = tu.id AND qf.created_by = ${bind(buyerId)}
         `;
       }
 
@@ -2565,30 +2573,28 @@ WHERE NOT EXISTS (
             SELECT DISTINCT rpv.user_id
             FROM tbl_rfq_product_vendors rpv
             JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
-            WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+            WHERE rfq.created_by = ${bind(buyerId)} AND rfq.is_published = 1
           ) rfqv ON rfqv.user_id = tu.id
         `;
       }
 
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
-        dynamicWhere += ` AND tcl.city_id::int IN (${city.join(',')})`;
+        dynamicWhere += ` AND tcl.city_id::int IN (${bind(city)}:csv)`;
       } else if (typeof city == 'string' || typeof city == 'number') {
-        dynamicWhere += ` AND tcl.city_id = '${city}'`;
+        dynamicWhere += ` AND tcl.city_id = ${bind(String(city))}`;
       }
 
       if (state && Array.isArray(state) && state.length > 0) {
-        dynamicWhere += ` AND tcl.state_id::int IN (${state.join(',')})`;
+        dynamicWhere += ` AND tcl.state_id::int IN (${bind(state)}:csv)`;
       } else if (typeof state == 'string' || typeof state == 'number') {
-        dynamicWhere += ` AND tcl.state_id = '${state}'`;
+        dynamicWhere += ` AND tcl.state_id = ${bind(String(state))}`;
       }
 
       if (country && Array.isArray(country) && country.length > 0) {
-        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${country.join(
-          ','
-        )})`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${bind(country)}:csv)`;
       } else if (typeof country == 'string' || typeof country == 'number') {
-        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = '${country}'`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = ${bind(String(country))}`;
       }
 
       if (turnoverCondition) {
@@ -2600,9 +2606,7 @@ WHERE NOT EXISTS (
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendor_type
-              .map((type) => `'${type.toLowerCase()}'`)
-              .join(',')})
+            WHERE TRIM(nb) IN (${bind(vendor_type.map((type) => String(type).toLowerCase()))}:csv)
           )
         `;
       } else if (
@@ -2613,7 +2617,7 @@ WHERE NOT EXISTS (
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN ('${vendor_type}')
+            WHERE TRIM(nb) IN (${bind(String(vendor_type))})
           )
         `;
       }
@@ -2627,14 +2631,12 @@ WHERE NOT EXISTS (
         Array.isArray(vendor_approved_by) &&
         vendor_approved_by.length > 0
       ) {
-        dynamicWhere += ` AND vum.vendor_approve_id IN (${vendor_approved_by.join(
-          ','
-        )})`;
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${bind(vendor_approved_by)}:csv)`;
       } else if (
         typeof vendor_approved_by == 'string' ||
         typeof vendor_approved_by == 'number'
       ) {
-        dynamicWhere += ` AND vum.vendor_approve_id IN ('${vendor_approved_by}')`;
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${bind(String(vendor_approved_by))})`;
       }
 
       if (vendor_info === 'is_private') {
@@ -2661,7 +2663,7 @@ WHERE NOT EXISTS (
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) IN (${productMakes.map(pm => `'${pm.toLowerCase()}'`).join(', ')})
+            AND LOWER(pvmm.make_name) IN (${bind(productMakes.map((pm) => String(pm).toLowerCase()))}:csv)
           )
         `;
       } else if (
@@ -2673,7 +2675,7 @@ WHERE NOT EXISTS (
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) = '${String(productMakes).toLowerCase()}'
+            AND LOWER(pvmm.make_name) = ${bind(String(productMakes).toLowerCase())}
           )
         `;
       }
@@ -2716,7 +2718,7 @@ WHERE NOT EXISTS (
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_company_location tcl ON tu.company_id = tcl.company_id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
-              ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
+              ON tu.id = bvm.vendor_id AND bvm.company_id = ${bind(companyId)}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
           JOIN tbl_company tc ON tu.company_id = tc.id
 
@@ -2733,7 +2735,7 @@ WHERE NOT EXISTS (
 
       logger.debug({ data: q }, 'GET DRAFT VENDORS query');
 
-      return db.any(q, [draftId, rfqProductId, vendor_name]);
+      return db.any(q, params);
     } catch (error) {
       logError('getDraftProductVendors failed', error);
       throw error;
@@ -7389,6 +7391,16 @@ LIMIT 2;
         throw new Error('Buyer not found or no company associated');
       const companyId = buyer.company_id;
 
+      // Every value is a bind parameter (pg-promise $n), never spliced into the SQL.
+      const params = [productId];
+      const bind = (value) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
+      const excludeParam = excludeArray && excludeArray.length > 0 ? bind(excludeArray) : null;
+      const searchParam = searchTerm ? bind(searchTerm) : null;
+      const companyParam = bind(companyId);
+
       let q = `
       SELECT 
       DISTINCT
@@ -7401,7 +7413,7 @@ LIMIT 2;
         C.company_name,
         ${
           searchTerm
-            ? `similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') AS similarity_score,`
+            ? `similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) AS similarity_score,`
             : ''
         }
         CASE
@@ -7414,24 +7426,24 @@ LIMIT 2;
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
         JOIN tbl_company_location CL ON C.id = CL.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyParam}
   
         WHERE PVVM.product_variant_id = $1
         AND U.status = 1
         AND (PVVM.is_approved OR BVM.vendor_id IS NOT NULL)
         AND (C.is_private = 0 OR (C.is_private = 1 AND BVM.vendor_id IS NOT NULL))
         ${
-          excludeArray && excludeArray.length > 0
-            ? ` AND U.id NOT IN ($2:csv)`
+          excludeParam
+            ? ` AND U.id NOT IN (${excludeParam}:csv)`
             : ``
         }
         ${
           searchTerm
             ? `
           AND (
-            to_tsvector('english', COALESCE(C.company_name, U.organization_name)) @@ plainto_tsquery('english', '${searchTerm}')
-            OR (char_length('${searchTerm}') = 1 AND similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') > 0)
-            OR (char_length('${searchTerm}') > 1 AND similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') > 0.1)
+            to_tsvector('english', COALESCE(C.company_name, U.organization_name)) @@ plainto_tsquery('english', ${searchParam})
+            OR (char_length(${searchParam}) = 1 AND similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) > 0)
+            OR (char_length(${searchParam}) > 1 AND similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) > 0.1)
           )
         `
             : ''
@@ -7441,11 +7453,6 @@ LIMIT 2;
           searchTerm ? 'similarity_score DESC, ' : ''
         } is_linked_with_buyer DESC, C.company_name;
       `;
-
-      const params = [productId];
-      if (excludeArray && excludeArray.length > 0) {
-        params.push(excludeArray);
-      }
 
       // Vendor Networks: a member entity is offered as its org's principal (the pooled
       // rule: the invite goes to the principal), once, and excludeIds applies to it.

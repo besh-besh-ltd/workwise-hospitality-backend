@@ -920,6 +920,52 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(list.body.data.map((v) => Number(v.user_id)).sort((x, y) => x - y)).toEqual([HQ, FHQ, NO].sort((x, y) => x - y));
   });
 
+  it("Task 22 fix 5: the vendor pickers take search and filter values as data, never as SQL", async () => {
+    const rfq = await openRfq();
+    const rp = await db.one(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`, [rfq.rfq_id, VARIANT]);
+    for (const v of [HQ, FHQ, NO]) {
+      await db.none(
+        `INSERT INTO tbl_product_variant_vendor_mapping
+           (product_variant_id, vendor_id, status, is_approved, created_by, created_at, updated_at)
+         VALUES ($1, $2, true, true, $2, now(), now())`,
+        [VARIANT, v]
+      );
+    }
+    await db.none(`INSERT INTO tbl_company_location (company_id, country_id, state_id, address) VALUES ($1, 1, 7, 'a'), ($2, 1, 7, 'b'), ($3, 1, 8, 'c')`, [HQ, FHQ, NO]);
+    const buyer = await httpClient(BUYER);
+    const INJECT = "x' OR '1'='1";
+    const pickerIds = async (searchTerm) => {
+      const res = await buyer.post("/api/v1/rfq/get-vendors-for-product").send({ productId: VARIANT, excludeIds: [], searchTerm });
+      expect(res.status).toBe(200);
+      return res.body.data.map((v) => Number(v.id)).filter((id) => [HQ, FHQ, NO].includes(id));
+    };
+    const draftIds = async (filters) => {
+      const res = await buyer.post(`/api/v1/rfq/get-draft-vendors/${rfq.rfq_id}`).query({ rfqProductId: rp.id }).send(filters);
+      if (res.status !== 200) return { refused: res.status };
+      return res.body.data.map((v) => Number(v.user_id)).sort((x, y) => x - y);
+    };
+
+    // get-vendors-for-product: a normal search still matches; a quote is just a character
+    expect((await pickerIds(`VN RFQ ${NO}`))[0]).toBe(NO); // best similarity first
+    expect(await pickerIds(INJECT)).toEqual([]);
+    expect(await pickerIds("O'Brien")).toEqual([]);
+
+    // get-draft-vendors: filter values are data too
+    // ($3 vendor_name is the one value the function always bound; the rest were spliced)
+    expect(await draftIds({})).toEqual([HQ, FHQ, NO].sort((x, y) => x - y));
+    expect(await draftIds({ state: [7] })).toEqual([HQ, FHQ].sort((x, y) => x - y));
+    expect(await draftIds({ state: "8" })).toEqual([NO]);
+    // tcl.state_id (and vum.vendor_approve_id) are integers: a non-numeric value is refused by Postgres as data
+    // (22P02), so it can only error, never match or widen.
+    expect(await draftIds({ state: INJECT })).toEqual({ refused: 500 });
+    expect(await draftIds({ vendor_type: [INJECT] })).toEqual([]);
+    expect(await draftIds({ vendor_type: INJECT })).toEqual([]);
+    expect(await draftIds({ productMakes: [INJECT] })).toEqual([]);
+    expect(await draftIds({ productMakes: INJECT })).toEqual([]);
+    expect(await draftIds({ vendor_approved_by: INJECT })).toEqual({ refused: 500 }); // integer column, as state
+    expect(await draftIds({ country: INJECT })).toEqual({ refused: 500 }); // integer column, as state
+  });
+
   it("Task 22: POST /rfq/save-draft never deletes a routed copy nor adds the routed member as a direct invite", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);
