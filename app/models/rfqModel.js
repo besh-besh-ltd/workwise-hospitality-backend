@@ -12863,9 +12863,9 @@ ORDER BY m.created_at;
       WHERE c.id = $1;
     `;
 
-    const getLatestOwnCommentQuery = `
-      SELECT text FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND sender_id = $2
+    const getLatestCommentQuery = `
+      SELECT sender_id, text FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
       ORDER BY timestamp DESC, id DESC
       LIMIT 1;
     `;
@@ -12932,23 +12932,35 @@ ORDER BY m.created_at;
             }
           }
 
-          // Persist the disagree reason to the clause chat. Skipped when the
-          // vendor's latest message on this clause already says the same
-          // thing (re-submit), so the thread is not spammed.
+          // Persist the disagree reason to the clause chat. Skipped only when
+          // the LATEST message on the clause (from anyone) is this vendor's
+          // identical reason (re-submit); a buyer reply in between means the
+          // reason is posted again.
           const reason =
             vendor_response === 'I Dont Agree' && typeof deviation_text === 'string'
               ? deviation_text.trim()
               : '';
           if (reason) {
-            const latest = await t.query(getLatestOwnCommentQuery, [clause_id, vendor_id]);
-            if (!(latest.length > 0 && String(latest[0].text || '').trim() === reason)) {
+            const latest = await t.query(getLatestCommentQuery, [clause_id]);
+            const isRepeat =
+              latest.length > 0 &&
+              Number(latest[0].sender_id) === Number(vendor_id) &&
+              String(latest[0].text || '').trim() === reason;
+            if (!isRepeat) {
               const owner = await t.query(getClauseRfqOwnerQuery, [clause_id]);
-              await t.query(insertDeviationCommentQuery, [
-                clause_id,
-                vendor_id,
-                owner[0].created_by,
-                reason
-              ]);
+              if (owner.length > 0 && owner[0].created_by) {
+                await t.query(insertDeviationCommentQuery, [
+                  clause_id,
+                  vendor_id,
+                  owner[0].created_by,
+                  reason
+                ]);
+              } else {
+                logger.warn(
+                  { clause_id },
+                  'addVendorResponse: no RFQ owner for clause; deviation comment skipped'
+                );
+              }
             }
           }
 

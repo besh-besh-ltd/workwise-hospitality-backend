@@ -26,6 +26,7 @@ import request from "supertest";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
+import rfqModel from "../../app/models/rfqModel.js";
 import { buildTestApp } from "../setup/app.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { attachVendorToRfqProduct, seedTechEvalWithClauses } from "../factories/techEval.js";
@@ -411,17 +412,51 @@ describe("POST /rfq/add-vendor-response persists the disagree reason to the clau
     ]);
   });
 
-  it("writes nothing from a batch that fails part-way (single transaction)", async () => {
+  it("re-posts the same reason when the buyer replied in between", async () => {
     const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+    const send = () =>
+      vendorA.post(ADD).send([answer(rfq, { vendor_response: "I Dont Agree", deviation_text: "Cannot meet this spec" })]);
+
+    await send();
+    await db.none(
+      `INSERT INTO tbl_rfq_product_tech_evaluation_comments
+         (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, "timestamp")
+       VALUES ($1, $2, $3, 'Please reconsider', NOW() + interval '1 second')`,
+      [rfq.clause_id, BUYER_IN_SCOPE, VENDOR_A]
+    );
+    expect((await send()).status).toBe(200);
+
+    expect((await commentsOf(rfq.clause_id)).map((c) => c.text)).toEqual([
+      "Cannot meet this spec",
+      "Please reconsider",
+      "Cannot meet this spec",
+    ]);
+  });
+
+  it("leaves no comment when an unmapped vendor is refused with 403", async () => {
+    const notMine = await makeTechEvalRfq({ vendors: [VENDOR_B] });
     const vendorA = await httpClient(VENDOR_A);
 
     const res = await vendorA.post(ADD).send([
-      answer(rfq, { vendor_response: "I Dont Agree", deviation_text: "Cannot meet this spec" }),
-      answer(rfq, { clause_id: 2147483000 }),
+      answer(notMine, { vendor_response: "I Dont Agree", deviation_text: "Cannot meet this spec" }),
     ]);
 
-    expect(res.status).not.toBe(200);
-    expect(await commentsOf(rfq.clause_id)).toEqual([]);
+    expect(res.status).toBe(403);
+    expect(await commentsOf(notMine.clause_id)).toEqual([]);
+  });
+
+  it("model transaction: a failure on element 2 rolls back element 1's response and comment", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+
+    await expect(
+      rfqModel.addVendorResponse([
+        { ...answer(rfq), vendor_id: VENDOR_A, vendor_response: "I Dont Agree", deviation_text: "Cannot meet this spec" },
+        { ...answer(rfq), vendor_id: 2147483000 },
+      ])
+    ).rejects.toMatchObject({ status: 0 });
+
     expect(await responsesOf(rfq.clause_id, VENDOR_A)).toEqual([]);
+    expect(await commentsOf(rfq.clause_id)).toEqual([]);
   });
 });
