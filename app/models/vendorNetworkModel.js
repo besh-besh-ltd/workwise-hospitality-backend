@@ -535,10 +535,12 @@ export async function listPersonsOnlyViaEntity(orgId, vendorId, runner = db) {
 
 /**
  * Removes a live entity from its org (spec §5): entity REMOVED, its ENTITY_MEMBER
- * memberships DISABLED, its pending seats cancelled. Active seats stay to expiry.
+ * memberships DISABLED, its pending seats cancelled, its coverage rules deleted (they are
+ * keyed by entity only, so kept rules would route for any org it later joins). Active
+ * seats stay to expiry.
  */
 export async function removeEntity(orgId, vendorId, runner = db) {
-  await runner.none(
+  const removed = await runner.result(
     `UPDATE tbl_vendor_org_entities
         SET status = 'REMOVED', removed_at = now(), updated_at = now()
       WHERE org_id = $1 AND vendor_id = $2 AND status <> 'REMOVED'`,
@@ -555,6 +557,10 @@ export async function removeEntity(orgId, vendorId, runner = db) {
       WHERE org_id = $1 AND entity_vendor_id = $2 AND status = 'pending'`,
     [orgId, vendorId]
   );
+  // Only when it left THIS org now: a stale call must not wipe rules it holds elsewhere.
+  if (removed.rowCount > 0) {
+    await runner.none(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [vendorId]);
+  }
 }
 
 // ---------------------------------------------------------------------------

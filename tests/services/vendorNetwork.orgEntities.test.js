@@ -409,6 +409,14 @@ describe("vendor network org and entity API", () => {
       [ORG, BRANCH]
     );
     await liveAssignment(ORG, BRANCH, 1, "ACCEPTED");
+    const rulesOf = (vendorId) =>
+      db.any(`SELECT scope_type FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = $1`, [vendorId]);
+    const addRule = (vendorId) =>
+      db.none(
+        `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode) VALUES ($1, 'STATE', 1, 'INCLUDE')`,
+        [vendorId]
+      );
+    await addRule(BRANCH);
     const admin = await httpClient(HQ);
 
     expect((await admin.delete(`${BASE}/entities/${HQ}`)).status).toBe(400);
@@ -424,14 +432,18 @@ describe("vendor network org and entity API", () => {
     expect((await seatsOf(BRANCH)).map((s) => s.status)).toEqual(["active", "cancelled"]);
     expect(await assignmentStatuses(BRANCH)).toEqual(["REVOKED"]);
     expect(await assignmentActors(BRANCH)).toEqual([HQ]);
+    // Its coverage rules are gone: they never route for a future org.
+    expect(await rulesOf(BRANCH)).toEqual([]);
     // Removed: no longer a target of this org.
     expect((await admin.delete(`${BASE}/entities/${BRANCH}`)).status).toBe(404);
 
     // Leave: a linked entity leaves on its own login.
     await addEntity({ orgId: ORG, vendorId: TARGET });
     await liveAssignment(ORG, TARGET, 2, "PENDING");
+    await addRule(TARGET);
     const left = await (await httpClient(TARGET)).post(`${BASE}/entities/self/leave`);
     expect(left.status).toBe(200);
+    expect(await rulesOf(TARGET)).toEqual([]);
     expect(await db.one(`SELECT status FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [TARGET])).toEqual({ status: "REMOVED" });
     expect(await assignmentStatuses(TARGET)).toEqual(["REVOKED"]);
     expect(await assignmentActors(TARGET)).toEqual([TARGET]);
