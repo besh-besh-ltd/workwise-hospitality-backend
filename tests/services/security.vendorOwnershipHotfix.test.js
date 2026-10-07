@@ -792,3 +792,73 @@ describe("POST /rfq/clarification/raise - RFQ mapping", () => {
     expect(await clarificationsOf(rfq_id)).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4b. Clarification messages: auth before the upload handler
+// ---------------------------------------------------------------------------
+describe("POST /rfq/clarification/message - auth before upload", () => {
+  const MESSAGE = "/api/v1/rfq/clarification/message";
+  const rfqIds = [];
+
+  async function makeOpenClarification() {
+    const { rfq_id } = await makeRFQ(db, { createdBy: BUYER, status: 1, is_published: 1 });
+    rfqIds.push(rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', $2, 0)`,
+      [rfq_id, PRODUCT_VARIANT]
+    );
+    await attachVendorToRfqProduct({ rfq_id, product_variant_id: PRODUCT_VARIANT, vendor_id: VENDOR_A });
+    const vendorA = await httpClient(VENDOR_A);
+    const raised = await vendorA.post("/api/v1/rfq/clarification/raise").send({
+      rfq_id,
+      subject: "Delivery schedule",
+      question: "Can the delivery window be extended by a week?",
+    });
+    expect(raised.status).toBe(200);
+    const row = await db.one(`SELECT id FROM tbl_rfq_clarifications WHERE rfq_id = $1`, [rfq_id]);
+    return { rfq_id, clarification_id: row.id, vendorA };
+  }
+  const messagesOf = (clarification_id) =>
+    db.any(`SELECT id FROM tbl_rfq_clarification_messages WHERE clarification_id = $1`, [clarification_id]);
+
+  afterEach(async () => {
+    if (!rfqIds.length) return;
+    const clar = `SELECT id FROM tbl_rfq_clarifications WHERE rfq_id = ANY($1::int[])`;
+    await db.none(
+      `DELETE FROM tbl_rfq_clarification_message_files WHERE message_id IN
+         (SELECT id FROM tbl_rfq_clarification_messages WHERE clarification_id IN (${clar}))`,
+      [rfqIds]
+    ).catch(() => {});
+    await db.none(`DELETE FROM tbl_rfq_clarification_messages WHERE clarification_id IN (${clar})`, [rfqIds]).catch(() => {});
+    await db.none(`DELETE FROM tbl_rfq_clarifications WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
+    await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
+    await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [rfqIds]);
+    rfqIds.length = 0;
+  });
+
+  it("refuses an anonymous multipart upload with 401 and stores no message", async () => {
+    const { clarification_id } = await makeOpenClarification();
+    const before = (await messagesOf(clarification_id)).length;
+    const anon = await httpClient(null);
+
+    const res = await anon.post(MESSAGE)
+      .field("clarification_id", String(clarification_id))
+      .field("message", "anonymous")
+      .attach("files", Buffer.from("anonymous upload"), "note.txt");
+
+    expect(res.status).toBe(401);
+    expect(await messagesOf(clarification_id)).toHaveLength(before);
+  });
+
+  it("lets the vendor who raised the clarification post a message", async () => {
+    const { clarification_id, vendorA } = await makeOpenClarification();
+    const before = (await messagesOf(clarification_id)).length;
+
+    const res = await vendorA.post(MESSAGE).send({ clarification_id, message: "Any update?" });
+
+    expect(res.status).toBe(200);
+    expect(await messagesOf(clarification_id)).toHaveLength(before + 1);
+  });
+});

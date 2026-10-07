@@ -12852,106 +12852,131 @@ ORDER BY m.created_at;
       VALUES ($1, $2, NOW());
     `;
 
-    return new Promise((resolve, reject) => {
-      // Iterate over each vendor response
-      const promises = responses.map(async (response) => {
-        const { vendor_id, clause_id, vendor_response, file_url } = response;
+    // The disagree reason lives in the per-clause chat thread (that is where
+    // the buyer's technical-evaluation screen and getDeviationPreviews read
+    // it), addressed to the RFQ creator exactly as the vendor chat drawer does.
+    const getClauseRfqOwnerQuery = `
+      SELECT r.created_by
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+      JOIN tbl_rfq r ON r.id = te.rfq_id
+      WHERE c.id = $1;
+    `;
 
-        // Validate clause existence
-        const clauseResult = await db.query(validateClauseQuery, [clause_id]);
-        // console.log("Clause validation result =", clauseResult);
-        if (!clauseResult[0].clause_exists) {
-          throw {
-            status: 0,
-            message: `Clause ID ${clause_id} does not exist.`
-          };
-        }
+    const getLatestOwnCommentQuery = `
+      SELECT text FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND sender_id = $2
+      ORDER BY timestamp DESC, id DESC
+      LIMIT 1;
+    `;
 
-        // Validate vendor existence
-        const vendorResult = await db.query(validateVendorQuery, [vendor_id]);
-        // console.log("Vendor validation result =", vendorResult);
-        if (!vendorResult[0].vendor_exists) {
-          reject({
-            status: 0,
-            message: `Vendor ID ${vendor_id} does not exist.`
-          });
-          return;
-        }
+    const insertDeviationCommentQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments
+      (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, timestamp)
+      VALUES ($1, $2, $3, $4, NOW());
+    `;
 
-        // Check if Vendor Response already exists
-        const existingResponse = await db.query(getExistingResponseQuery, [
-          clause_id,
-          vendor_id
-        ]);
+    try {
+      // One transaction for the whole request: a failure on any element rolls
+      // back every response, file and deviation comment written before it.
+      const results = await db.tx(async (t) => {
+        const out = [];
+        for (const response of responses) {
+          const { vendor_id, clause_id, vendor_response, file_url, deviation_text } = response;
 
-        let responseId;
-
-        if (existingResponse.length > 0 && existingResponse[0].id) {
-          // UPDATE existing response
-          const existingId = existingResponse[0].id;
-
-          // Update the response text
-          await db.query(updateVendorResponseQuery, [vendor_response, existingId]);
-          responseId = existingId;
-
-          // Only delete existing files if new files are provided
-          // If file_url is empty/null, keep existing files unchanged
-          if (file_url && file_url.length > 0) {
-            await db.query(deleteExistingFilesQuery, [existingId]);
+          const clauseResult = await t.query(validateClauseQuery, [clause_id]);
+          if (!clauseResult[0].clause_exists) {
+            throw {
+              status: 0,
+              message: `Clause ID ${clause_id} does not exist.`
+            };
           }
-        } else {
-          // INSERT new response
-          const insertResponseResult = await db.query(insertVendorResponseQuery, [
-            vendor_id,
+
+          const vendorResult = await t.query(validateVendorQuery, [vendor_id]);
+          if (!vendorResult[0].vendor_exists) {
+            throw {
+              status: 0,
+              message: `Vendor ID ${vendor_id} does not exist.`
+            };
+          }
+
+          const existingResponse = await t.query(getExistingResponseQuery, [
             clause_id,
-            vendor_response
+            vendor_id
           ]);
-          responseId = insertResponseResult[0].id;
-        }
 
-        // Insert associated files if provided
-        if (file_url && file_url.length > 0) {
-          for (const url of file_url) {
-            await db
-              .query(insertFileQuery, [responseId, url])
-              .catch((fileError) => {
-                logError(`Error adding file: ${url}`, fileError);
-                reject({
-                  status: 0,
-                  message:
-                    'Failed to add files associated with the vendor response.',
-                  error: fileError.message
-                });
-                return;
-              });
+          let responseId;
+
+          if (existingResponse.length > 0 && existingResponse[0].id) {
+            const existingId = existingResponse[0].id;
+            await t.query(updateVendorResponseQuery, [vendor_response, existingId]);
+            responseId = existingId;
+
+            // Only delete existing files if new files are provided
+            // If file_url is empty/null, keep existing files unchanged
+            if (file_url && file_url.length > 0) {
+              await t.query(deleteExistingFilesQuery, [existingId]);
+            }
+          } else {
+            const insertResponseResult = await t.query(insertVendorResponseQuery, [
+              vendor_id,
+              clause_id,
+              vendor_response
+            ]);
+            responseId = insertResponseResult[0].id;
           }
-        }
 
-        return {
-          status: 1,
-          message: 'Vendor response and files successfully added.',
-          response_id: responseId
-        };
+          if (file_url && file_url.length > 0) {
+            for (const url of file_url) {
+              await t.query(insertFileQuery, [responseId, url]);
+            }
+          }
+
+          // Persist the disagree reason to the clause chat. Skipped when the
+          // vendor's latest message on this clause already says the same
+          // thing (re-submit), so the thread is not spammed.
+          const reason =
+            vendor_response === 'I Dont Agree' && typeof deviation_text === 'string'
+              ? deviation_text.trim()
+              : '';
+          if (reason) {
+            const latest = await t.query(getLatestOwnCommentQuery, [clause_id, vendor_id]);
+            if (!(latest.length > 0 && String(latest[0].text || '').trim() === reason)) {
+              const owner = await t.query(getClauseRfqOwnerQuery, [clause_id]);
+              await t.query(insertDeviationCommentQuery, [
+                clause_id,
+                vendor_id,
+                owner[0].created_by,
+                reason
+              ]);
+            }
+          }
+
+          out.push({
+            status: 1,
+            message: 'Vendor response and files successfully added.',
+            response_id: responseId
+          });
+        }
+        return out;
       });
 
-      // Wait for all vendor responses to be processed
-      Promise.all(promises)
-        .then((results) => {
-          resolve({
-            status: 1,
-            message: 'All vendor responses successfully added.',
-            results: results
-          });
-        })
-        .catch((error) => {
-          logError('Error in addVendorResponses', error);
-          reject({
-            status: 0,
-            message: 'Error adding vendor responses or associated files.',
-            error: error.message
-          });
-        });
-    });
+      return {
+        status: 1,
+        message: 'All vendor responses successfully added.',
+        results
+      };
+    } catch (error) {
+      logError('Error in addVendorResponses', error);
+      if (error && error.status === 0 && /^Vendor ID .* does not exist\.$/.test(error.message || '')) {
+        throw { status: 0, message: error.message };
+      }
+      throw {
+        status: 0,
+        message: 'Error adding vendor responses or associated files.',
+        error: error.message
+      };
+    }
   },
 
   addtechEvaluationClearedVendors: (

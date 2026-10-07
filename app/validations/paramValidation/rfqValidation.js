@@ -576,9 +576,8 @@ export const rfqSchemas = {
         clause_id: Joi.number().integer().required(),
         vendor_response: Joi.string().optional().allow('').allow(null),
         file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
-        // Sent by the vendor wizard on a disagree row with a comment.
-        // tbl_rfq_product_tech_evaluation_vendors_response has no column for
-        // it, so it is accepted and not stored.
+        // Sent by the vendor wizard on a disagree row with a comment. Stored
+        // as a message in the per-clause chat thread, not on the response row.
         deviation_text: Joi.string().trim().max(2000).optional().allow('', null)
       })
     )

@@ -920,7 +920,8 @@ RfqRoutes.post(
 // Send message in clarification thread (both vendor and buyer can send)
 RfqRoutes.post(
   '/clarification/message',
-  noLogin.customer_auth,
+  // Auth first: the upload handler below writes to S3.
+  passportSignIn,
   hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqSchemas.clarificationFileUploadHandler,
   validateBody(rfqSchemas.sendClarificationMessage),

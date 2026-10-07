@@ -99,6 +99,11 @@ afterEach(async () => {
       [teIds]
     );
     await db.none(
+      `DELETE FROM tbl_rfq_product_tech_evaluation_comments
+        WHERE tbl_rfq_product_tech_evaluation_clauses_id IN (${clauseSel})`,
+      [teIds]
+    );
+    await db.none(
       `DELETE FROM tbl_rfq_product_tech_evaluation_clauses
         WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[])`,
       [teIds]
@@ -342,5 +347,81 @@ describe("POST /rfq/get-vendor-responses", () => {
 
     expect(res.status).toBe(403);
     expect(JSON.stringify(res.body)).not.toContain("B secret");
+  });
+});
+
+describe("POST /rfq/add-vendor-response persists the disagree reason to the clause chat", () => {
+  const commentsOf = (clause_id) =>
+    db.any(
+      `SELECT sender_id, receiver_id, text FROM tbl_rfq_product_tech_evaluation_comments
+        WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 ORDER BY id`,
+      [clause_id]
+    );
+
+  it("stores a trimmed disagree reason from the vendor to the RFQ creator, visible in deviation previews", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+
+    const res = await vendorA.post(ADD).send([
+      answer(rfq, { vendor_response: "I Dont Agree", deviation_text: "  Cannot meet this spec  " }),
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(await commentsOf(rfq.clause_id)).toEqual([
+      { sender_id: VENDOR_A, receiver_id: BUYER_IN_SCOPE, text: "Cannot meet this spec" },
+    ]);
+    const previews = await vendorA.post("/api/v1/rfq/get-deviation-previews").send({ rfq_product_id: rfq.rfq_product_id });
+    expect(previews.status).toBe(200);
+    expect(JSON.stringify(previews.body)).toContain("Cannot meet this spec");
+  });
+
+  it("stores no comment for an agree row, even when text is sent", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+
+    const res = await vendorA.post(ADD).send([answer(rfq, { deviation_text: "ignored" })]);
+
+    expect(res.status).toBe(200);
+    expect(await commentsOf(rfq.clause_id)).toEqual([]);
+  });
+
+  it("stores no comment for a disagree row with blank text", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+
+    await vendorA.post(ADD).send([answer(rfq, { vendor_response: "I Dont Agree", deviation_text: "   " })]);
+
+    expect(await commentsOf(rfq.clause_id)).toEqual([]);
+  });
+
+  it("does not duplicate the comment when the same reason is re-submitted, but stores a changed one", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+    const send = (text) =>
+      vendorA.post(ADD).send([answer(rfq, { vendor_response: "I Dont Agree", deviation_text: text })]);
+
+    expect((await send("Cannot meet this spec")).status).toBe(200);
+    expect((await send("  Cannot meet this spec ")).status).toBe(200);
+    expect(await commentsOf(rfq.clause_id)).toHaveLength(1);
+
+    expect((await send("Can meet with a 2 week delay")).status).toBe(200);
+    expect((await commentsOf(rfq.clause_id)).map((c) => c.text)).toEqual([
+      "Cannot meet this spec",
+      "Can meet with a 2 week delay",
+    ]);
+  });
+
+  it("writes nothing from a batch that fails part-way (single transaction)", async () => {
+    const rfq = await makeTechEvalRfq({ vendors: [VENDOR_A] });
+    const vendorA = await httpClient(VENDOR_A);
+
+    const res = await vendorA.post(ADD).send([
+      answer(rfq, { vendor_response: "I Dont Agree", deviation_text: "Cannot meet this spec" }),
+      answer(rfq, { clause_id: 2147483000 }),
+    ]);
+
+    expect(res.status).not.toBe(200);
+    expect(await commentsOf(rfq.clause_id)).toEqual([]);
+    expect(await responsesOf(rfq.clause_id, VENDOR_A)).toEqual([]);
   });
 });
