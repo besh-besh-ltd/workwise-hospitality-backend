@@ -11122,7 +11122,8 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           (
             SELECT json_build_object(
               'quotes_received', COUNT(DISTINCT TQ.created_by),
-              'total_vendors', COUNT(DISTINCT TRPV.user_id)
+              -- a network member's routed copy is not another invited vendor
+              'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL)
             )
             FROM tbl_quotes TQ
             RIGHT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
@@ -11187,7 +11188,9 @@ getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter 
   // Base query
   const baseQuery = `
     WITH vendors AS (
-      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type, COUNT(DISTINCT trpv.user_id) AS total_vendors
+      -- a network member's routed copy is not another invited vendor
+      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type,
+             COUNT(DISTINCT trpv.user_id) FILTER (WHERE trpv.routed_from_vendor_id IS NULL) AS total_vendors
       FROM tbl_rfq tr
       LEFT JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = tr.id
       GROUP BY tr.id

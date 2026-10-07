@@ -522,6 +522,21 @@ describe("buyer view", () => {
     expect(row.invited_vendor_count).toBe(3); // HQ, FHQ, NO; not B's routed copy
   });
 
+  it("7d. the platform-admin RFQ lists count invited vendors without routed rows", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id); // B holds a routed copy
+    const listed = await rfqModel.getAllRfqsForAdmin(10, 0, null, null, "DESC", rfq.rfq_no, []);
+    const row = listed.find((r) => r.id === rfq.rfq_id);
+    expect(row).toBeTruthy();
+    expect(Number(row.stats.total_vendors)).toBe(3); // HQ, FHQ, NO
+
+    const { company_id } = await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [BUYER]);
+    const clients = await rfqModel.getAllClientsrfqsForAdmin(1, 1000, "", "3days", "", "", [company_id]);
+    const clientRow = clients.data.find((r) => r.rfq_id === rfq.rfq_id);
+    expect(clientRow).toBeTruthy();
+    expect(Number(clientRow.total_vendors)).toBe(3);
+  });
+
   it("8. the buyer finalizes the member's quote → the award (tbl_quote_finalization) names the member", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);
