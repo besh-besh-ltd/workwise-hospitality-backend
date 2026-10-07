@@ -20,6 +20,7 @@ import {
 } from './rfqEditableFields.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
 import { lockLiveRfqAssignments, propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -720,6 +721,13 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
       }
     }
 
+    // Vendor Networks: a routed member is never invited directly (its principal is).
+    resolvedVendorIds = await directInviteIdsForLine(
+      t,
+      { rfqId, productVariantId: sp.product_variant_id, variant: nextVariant },
+      resolvedVendorIds
+    );
+
     const productLabel = sp.product_name || `product ${inserted.id}`;
     for (const userId of resolvedVendorIds) {
       await t.none(
@@ -864,8 +872,16 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
       });
     }
 
-    // Vendors
-    for (const userId of u.vendors.added) {
+    // Vendors. Vendor Networks: a routed member re-sent by the client is never invited
+    // directly; it becomes its principal, who is usually invited already.
+    const addedVendorIds = await directInviteIdsForLine(
+      t,
+      { rfqId, productVariantId: u.current.product_variant_id, variant: u.current.variant },
+      u.vendors.added
+    );
+    // The notifications read u.vendors.added after this: email only who was invited.
+    u.vendors.added = addedVendorIds;
+    for (const userId of addedVendorIds) {
       await t.none(
         `INSERT INTO tbl_rfq_product_vendors
            (rfq_id, product_variant_id, variant, user_id)

@@ -1171,6 +1171,9 @@ WHERE NOT EXISTS (
            FROM tbl_rfq_product_vendors rpv
            LEFT JOIN tbl_users u ON u.id = rpv.user_id
            WHERE rpv.rfq_id = $1
+             -- Vendor Networks: the edit's vendor list is the direct invites; routed
+             -- copies follow their assignment and are never diffed here.
+             AND rpv.routed_from_vendor_id IS NULL
            ORDER BY rpv.user_id`,
           [rfq_id]
         ),
@@ -1303,6 +1306,9 @@ WHERE NOT EXISTS (
           `user_id IN (${value.map(() => `$${index++}`).join(', ')})`
         );
         conditionValues.push(...value);
+      } else if (key === '$directInvitesOnly' && value === true) {
+        // tbl_rfq_product_vendors only: leave Vendor Networks routed copies alone.
+        conditionClauses.push('routed_from_vendor_id IS NULL');
       } else if (key === '-user_ids' && (value?.length ?? []) > 0) {
         conditionClauses.push(
           `user_id NOT IN (${value.map(() => `$${index++}`).join(', ')})`
@@ -3460,7 +3466,12 @@ LIMIT 1;`;
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
-              AND U.status = 1
+              AND U.status = 1${
+                // Vendor Networks (spec §6.3): a buyer sees the invited vendors (the
+                // principal, labelled via org_name), not a member's routed copy.
+                user_type != 3 ? `
+              AND RFQ_P_V.routed_from_vendor_id IS NULL` : ''
+              }
           ) AS vendor_details
           `
             : ''

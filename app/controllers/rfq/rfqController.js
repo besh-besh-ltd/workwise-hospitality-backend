@@ -86,6 +86,7 @@ import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredRespon
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
 import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
 import { propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
@@ -3169,9 +3170,10 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             continue;
           }
 
+          // Vendor Networks: a routed copy follows its assignment, never this vendor list.
           await rfqModel.delete(
             'tbl_rfq_product_vendors',
-            deletingCondition,
+            { ...deletingCondition, $directInvitesOnly: true },
             t,
           );
 
@@ -3253,9 +3255,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
         const addable = updatableVendors[rfqProductId]?.addable ?? [];
         const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
 
-        // Insert new vendors
-        if (!hasGlobalOrLocalFilters && addable.length > 0) {
-          const addableData = addable.map((vendor) => ({
+        // Insert new vendors. Vendor Networks: a routed member is never invited
+        // directly (it becomes its principal); a vendor already on the line is skipped.
+        const addableIds = hasGlobalOrLocalFilters
+          ? []
+          : await directInviteIdsForLine(t, { rfqId: rfq_id, productVariantId: productId, variant }, addable);
+        if (addableIds.length > 0) {
+          const addableData = addableIds.map((vendor) => ({
             rfq_id,
             product_variant_id: productId,
             user_id: vendor,
@@ -3286,7 +3292,9 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               rfq_id,
               product_variant_id: productId,
               user_id: vendor,
-              variant
+              variant,
+              // Vendor Networks: a routed copy follows its assignment, never this list.
+              $directInvitesOnly: true
             };
 
             await rfqModel.delete(

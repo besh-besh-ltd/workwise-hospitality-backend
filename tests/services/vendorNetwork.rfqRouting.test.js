@@ -488,7 +488,9 @@ describe("buyer view", () => {
     expect(await awaiting()).toMatchObject({ total_invited: 3, participated: 1, sent_quotes: 1, remaining: 2 });
     expect(await quotesInvited()).toBe(3);
     const orgOf = Object.fromEntries(product.vendor_details.map((v) => [v.user_id, v.org_name]));
-    expect(orgOf).toEqual({ [HQ]: "Org A Network", [B]: "Org A Network", [FHQ]: "Org F Network", [NO]: null });
+    // Task 22: the invite list is the org's principal (labelled with its org), not B's copy;
+    // the member who quoted is named in the quote lists below.
+    expect(orgOf).toEqual({ [HQ]: "Org A Network", [FHQ]: "Org F Network", [NO]: null });
 
     // quotes are visible to the buyer once bidding has closed
     await db.none(`UPDATE tbl_rfq SET bid_end_date = $2 WHERE id = $1`, [rfq.rfq_id, istString(-HOUR)]);
@@ -753,6 +755,57 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(await variantsOf(rfq.rfq_id, FB)).toEqual([[VARIANT, FHQ]]);
     // idempotent: a second pass adds nothing
     expect(await propagateRoutedCopies(db, rfq.rfq_id)).toBe(0);
+  });
+
+  it("Task 22: the buyer's vendor_details lists the principal, never the routed member (org shown via org_name)", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    expect(await rowsOf(rfq.rfq_id, B)).toHaveLength(1);
+    const res = await (await httpClient(BUYER)).get(`/api/v1/rfq/getRfqById/${rfq.rfq_id}?includeVendors=true`);
+    expect(res.status).toBe(200);
+    const vd = res.body.data.products[0].vendor_details;
+    expect(vd.map((v) => v.user_id).sort((x, y) => x - y)).toEqual([HQ, FHQ, NO].sort((x, y) => x - y));
+    expect(vd.find((v) => v.user_id === HQ).org_name).toBe("Org A Network");
+  });
+
+  it("Task 22: an edit that re-sends the routed member as a vendor keeps its rows routed and creates no direct invite", async () => {
+    const rfq = await openRfq();
+    const id = await routeAndAccept(rfq.rfq_id);
+    // A stale or hand-made snapshot: B listed on the existing line and on a new line.
+    const snap = await editSnapshot(rfq.rfq_id);
+    snap.products[0].vendors = [...new Set([...snap.products[0].vendors, B])];
+    snap.products.push(newLine(VARIANT2, [HQ, B]));
+    const res = await (await httpClient(BUYER)).put("/api/v1/rfq/update").send({ rfq_id: rfq.rfq_id, snapshot: snap });
+    expect(res.status).toBe(200);
+
+    // B: one routed copy per line (the new line's comes from HQ's row), none direct.
+    expect(await variantsOf(rfq.rfq_id, B)).toEqual(
+      [[VARIANT, HQ], [VARIANT2, HQ]].sort((x, y) => x[0] - y[0])
+    );
+    // HQ is invited once per line.
+    expect((await rowsOf(rfq.rfq_id, HQ)).map((r) => r.product_variant_id).sort((x, y) => x - y)).toEqual(
+      [VARIANT, VARIANT2].sort((x, y) => x - y)
+    );
+    // B still quotes only through the assignment: once it ends, B holds nothing.
+    expect((await revoke(id)).status).toBe(200);
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([]);
+  });
+
+  it("Task 22: POST /rfq/save-draft never deletes a routed copy nor adds the routed member as a direct invite", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const rp = await db.one(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`, [rfq.rfq_id, VARIANT]);
+    const res = await (await httpClient(BUYER))
+      .post("/api/v1/rfq/save-draft")
+      .send({
+        rfq_id: rfq.rfq_id,
+        filters: { global: {}, local: {} },
+        updatableData: { vendors: { [rp.id]: { product_id: VARIANT, variant: 0, deletable: [B], addable: [B] } } },
+      });
+    expect(res.status).toBe(200);
+    expect(await rowsOf(rfq.rfq_id, B)).toEqual([
+      { user_id: B, routed_from_vendor_id: HQ, product_variant_id: VARIANT, variant: 0 },
+    ]);
   });
 
   it("an edit removing + adding products racing a release (engine holds the assignment FOR UPDATE) neither deadlocks nor errors", async () => {
