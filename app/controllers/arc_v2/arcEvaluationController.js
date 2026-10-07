@@ -16,6 +16,7 @@ import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.j
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
+import { notifyApprovalChanged } from '../../services/approvalEvents.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -1482,6 +1483,7 @@ export async function sendBackCommEvalToTech(req, res) {
       // proposal back — cancel it so a later re-finalize can spawn a fresh one.
       if (committee?.status === 'PENDING') {
         await t.none(`UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1`, [committee.id]);
+        notifyApprovalChanged({ instanceIds: committee.id }, t);
       }
 
       // Reopen technical: supersede the settled ARC_TECH approval so the stage is
@@ -1496,6 +1498,7 @@ export async function sendBackCommEvalToTech(req, res) {
       );
       if (techInst && techInst.status !== 'CANCELLED') {
         await t.none(`UPDATE tbl_approval_instances SET status='CANCELLED', completed_at=NOW() WHERE id=$1`, [techInst.id]);
+        if (techInst.status === 'PENDING') notifyApprovalChanged({ instanceIds: techInst.id }, t);
       }
 
       // Park commercial (status sent_back → lifecycle shows locked/sent_back_to_tech,

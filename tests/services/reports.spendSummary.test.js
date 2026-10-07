@@ -152,11 +152,13 @@ async function makePo({ lineTotal, hotel = IDS.hotels.A1, vendorId = IDS.users.v
      [quote.id], IDS.users.a1_proc_buyer]
   );
   inserted.poIds.push(po.id);
+  // Prod shape: RFQ PO lines carry NO product_variant_id (0 of 2,387 on prod);
+  // the variant is reached through the line's rfq_product.
   const line = await db.one(
     `INSERT INTO tbl_purchase_order_product
        (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, total_price, product_variant_id)
-     VALUES ($1,$2,$3,1,'NOS',$4,$4,$5) RETURNING id`,
-    [po.id, product.id, quote.id, lineTotal, VARIANT_ID]
+     VALUES ($1,$2,$3,1,'NOS',$4,$4,NULL) RETURNING id`,
+    [po.id, product.id, quote.id, lineTotal]
   );
   inserted.poProductIds.push(line.id);
   return po;

@@ -1,6 +1,11 @@
-// Wave-style integration test for the Awarding P1/P2 dashboard widgets.
+// Integration test for the Awarding widgets. The award IS the PO:
+//   · "POs awaiting my approval" — the PO approval queue (P1/P2/P3 approve POs
+//     on prod; the old widget queried NEGOTIATION_QUOTE instead);
+//   · "Recently approved POs" — POs whose approval completed in the window;
+//   · "PO value by stage" — every PO raised in the window, bucketed.
 
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import moment from "moment-timezone";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -8,281 +13,222 @@ import {
   makeRfqVisibleToDashboard,
   cleanupRfqs,
   addProductToRfq,
+  cleanupTechEvals,
   makePO,
   cleanupPurchaseOrders,
-  makeApprovalInstanceWithApprover,
-  cleanupApprovalInstances,
+  makeApprovalChain,
+  cleanupApprovalInstanceIds,
 } from "../helpers/dashboardSeed.js";
 
-const inserted = { rfqIds: [], poIds: [], nrqIds: [], roundIds: [] };
+const inserted = { rfqIds: [], poIds: [], instanceIds: [] };
 const seeded = {};
+const poApp = IDS.users.a1_proc_poApp;
+const istDate = (d) => moment.tz("Asia/Kolkata").add(d, "days").format("YYYY-MM-DD");
+
+/** An RFQ + product + PO; optionally a PO approval chain. */
+async function po(t, title, { value, lineTotal, status, createdAgoDays = 0, hotel = IDS.hotels.A1, approval }) {
+  const r = await makeRfqVisibleToDashboard(t, {
+    createdBy: IDS.users.a1_proc_buyer, hospitality: IDS.hospitality.A, hotel,
+    status: 1, is_published: 1, title,
+  });
+  inserted.rfqIds.push(r.rfq_id);
+  const rp = await addProductToRfq(t, r.rfq_id);
+  const p = await makePO(t, {
+    rfq_id: r.rfq_id, rfq_product_id: rp.rfq_product_id, vendor_user_id: IDS.users.vendor_alpha,
+    company_id: IDS.companies.A, status, unit_price: value, quantity: 1, total_value: value,
+    created_ago_days: createdAgoDays, line_total: lineTotal,
+  });
+  inserted.poIds.push(p.po_id);
+  if (approval) {
+    const { instance_id } = await makeApprovalChain(t, {
+      entity_type: "PO", entity_id: p.po_id, policy_id: IDS.policies.A1_P1_PO,
+      hospitality: IDS.hospitality.A, hotel: approval.hotel === undefined ? hotel : approval.hotel,
+      status: approval.status ?? "PENDING",
+      created_ago_hours: approval.createdAgo,
+      metadata: { po_id: p.po_id, rfq_id: r.rfq_id, total_value: value },
+      steps: [approval.status && approval.status !== "PENDING"
+        ? { approver: approval.approver ?? poApp, status: approval.status, acted_ago_hours: approval.actedAgo }
+        : { approver: approval.approver ?? poApp }],
+    });
+    inserted.instanceIds.push(instance_id);
+  }
+  return { rfq_id: r.rfq_id, po_id: p.po_id };
+}
 
 beforeAll(async () => {
   await db.tx(async (t) => {
-    // ── 2 pending NEGOTIATION_QUOTE award approvals on poApp ───────
-    // RFQ with a negotiation round and a quote needing award approval.
-    const r1 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Award candidate 1",
+    // ── Awaiting poApp's approval ─────────────────────────────────────
+    const p1 = await po(t, "PO awaiting — oldest", { value: 12000, status: "pending_approval", approval: { createdAgo: 30 } });
+    // Company-level approval (NULL hotel) — prod PO 3's shape, still mine.
+    const p2 = await po(t, "PO awaiting — company level", { value: 3000, status: "pending_approval", approval: { createdAgo: 10, hotel: null } });
+    const pA2 = await po(t, "PO awaiting at A2", { value: 700, status: "pending_approval", hotel: IDS.hotels.A2, approval: { createdAgo: 5 } });
+    const pElse = await po(t, "PO awaiting someone else", { value: 800, status: "pending_approval", approval: { createdAgo: 5, approver: IDS.users.a1_proc_commApp } });
+
+    // ── Approved ──────────────────────────────────────────────────────
+    const p3 = await po(t, "PO approved by me 2 days ago", {
+      value: 9000, status: "approved", createdAgoDays: 3, approval: { status: "APPROVED", createdAgo: 72, actedAgo: 48 },
     });
-    const rp1 = await addProductToRfq(t, r1.rfq_id);
-    const round1 = await t.one(
-      `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, round_number, status, created_by, end_date, vendor_ids)
-       VALUES ($1, 1, 'CLOSED', $2, NOW() - INTERVAL '1 day', ARRAY[$3]::int[])
-       RETURNING id`,
-      [r1.rfq_id, IDS.users.a1_proc_commEval, IDS.users.vendor_alpha]
-    );
-    const nrq1 = await t.one(
-      `INSERT INTO tbl_negotiation_round_quotes
-         (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, submitted_at)
-       VALUES ($1, $2, $3, 7500, NOW() - INTERVAL '12 hours') RETURNING id`,
-      [round1.id, IDS.users.vendor_alpha, rp1.rfq_product_id]
-    );
-    const award1 = await makeApprovalInstanceWithApprover(t, {
-      entity_type: "NEGOTIATION_QUOTE", entity_id: nrq1.id,
-      approver_user_id: IDS.users.a1_proc_poApp,
-      policy_id: IDS.policies.A1_P1_NEGOTIATION_QUOTE,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      initiated_by: IDS.users.a1_proc_commEval,
+    const p5 = await po(t, "PO dispatched, approved 4 days ago", {
+      value: 6000, status: "dispatched", createdAgoDays: 5,
+      approval: { status: "APPROVED", createdAgo: 120, actedAgo: 96, approver: IDS.users.a1_proc_commApp },
+    });
+    const p4 = await po(t, "PO approved 39 days ago", {
+      value: 4000, status: "approved", createdAgoDays: 40,
+      approval: { status: "APPROVED", createdAgo: 960, actedAgo: 936, approver: IDS.users.a1_proc_commApp },
     });
 
-    const r2 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Award candidate 2",
-    });
-    const rp2 = await addProductToRfq(t, r2.rfq_id);
-    const round2 = await t.one(
-      `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, round_number, status, created_by, end_date, vendor_ids)
-       VALUES ($1, 1, 'CLOSED', $2, NOW() - INTERVAL '1 day', ARRAY[$3]::int[])
-       RETURNING id`,
-      [r2.rfq_id, IDS.users.a1_proc_commEval, IDS.users.vendor_beta]
-    );
-    const nrq2 = await t.one(
-      `INSERT INTO tbl_negotiation_round_quotes
-         (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, submitted_at)
-       VALUES ($1, $2, $3, 4500, NOW() - INTERVAL '6 hours') RETURNING id`,
-      [round2.id, IDS.users.vendor_beta, rp2.rfq_product_id]
-    );
-    const award2 = await makeApprovalInstanceWithApprover(t, {
-      entity_type: "NEGOTIATION_QUOTE", entity_id: nrq2.id,
-      approver_user_id: IDS.users.a1_proc_poApp,
-      policy_id: IDS.policies.A1_P1_NEGOTIATION_QUOTE,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      initiated_by: IDS.users.a1_proc_commEval,
+    // Header total_value carries freight the lines don't (5,000 vs 4,800).
+    // Spend everywhere is the line total, so every PO widget must show 4,800.
+    const p9 = await po(t, "PO approved yesterday, header ≠ lines", {
+      value: 5000, lineTotal: 4800, status: "approved", createdAgoDays: 1,
+      approval: { status: "APPROVED", createdAgo: 24, actedAgo: 20, approver: IDS.users.a1_proc_commApp },
     });
 
-    // ── 1 recently APPROVED award by poApp ────────────────────────
-    const r3 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Recently awarded",
-    });
-    const rp3 = await addProductToRfq(t, r3.rfq_id);
-    const round3 = await t.one(
-      `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, round_number, status, created_by, end_date, closed_at, vendor_ids)
-       VALUES ($1, 1, 'COMPLETED', $2, NOW() - INTERVAL '5 days', NOW() - INTERVAL '4 days', ARRAY[$3]::int[])
-       RETURNING id`,
-      [r3.rfq_id, IDS.users.a1_proc_commEval, IDS.users.vendor_alpha]
-    );
-    const nrq3 = await t.one(
-      `INSERT INTO tbl_negotiation_round_quotes
-         (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, submitted_at)
-       VALUES ($1, $2, $3, 9000, NOW() - INTERVAL '5 days') RETURNING id`,
-      [round3.id, IDS.users.vendor_alpha, rp3.rfq_product_id]
-    );
-    await makeApprovalInstanceWithApprover(t, {
-      entity_type: "NEGOTIATION_QUOTE", entity_id: nrq3.id,
-      approver_user_id: IDS.users.a1_proc_poApp,
-      policy_id: IDS.policies.A1_P1_NEGOTIATION_QUOTE,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      initiated_by: IDS.users.a1_proc_commEval,
-      instance_status: "APPROVED",
-      approver_status: "APPROVED",
-      created_ago_hours: 24 * 4,
-      acted_ago_hours: 24 * 3,
-    });
-    // PO linked to that award.
-    const poRecent = await makePO(t, {
-      rfq_id: r3.rfq_id, rfq_product_id: rp3.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 90, quantity: 100, total_value: 9000,
-      status: "approved",
+    // Internally approved yesterday but the vendor hasn't accepted: not
+    // committed spend, so not a "recently approved PO" either.
+    const p10 = await po(t, "PO approved, awaiting vendor acceptance", {
+      value: 700, status: "acceptance_pending", createdAgoDays: 1,
+      approval: { status: "APPROVED", createdAgo: 24, actedAgo: 12 },
     });
 
-    // ── POs for value pipeline at A1 ────────────────────────────
-    // Completed (status='completed'): ₹15000
-    const rPipe1 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 2, is_published: 1, title: "Pipeline completed",
-    });
-    const rpPipe1 = await addProductToRfq(t, rPipe1.rfq_id);
-    const poComp1 = await makePO(t, {
-      rfq_id: rPipe1.rfq_id, rfq_product_id: rpPipe1.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 150, quantity: 100, total_value: 15000,
-      status: "completed",
-    });
+    // ── Only in the value pipeline ────────────────────────────────────
+    const p6 = await po(t, "PO rejected", { value: 1000, status: "rejected" });
+    const p7 = await po(t, "PO cancelled", { value: 500, status: "cancelled" });
+    const p8 = await po(t, "PO draft", { value: 250, status: "draft" });
 
-    // Approved (still counts as completed bucket): ₹5000
-    const rPipe2 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Pipeline approved",
-    });
-    const rpPipe2 = await addProductToRfq(t, rPipe2.rfq_id);
-    const poApp = await makePO(t, {
-      rfq_id: rPipe2.rfq_id, rfq_product_id: rpPipe2.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 50, quantity: 100, total_value: 5000,
-      status: "approved",
-    });
-
-    // Ongoing: pending_approval ₹2000 + acceptance_pending ₹3000
-    const rPipe3 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Pipeline pending_approval",
-    });
-    const rpPipe3 = await addProductToRfq(t, rPipe3.rfq_id);
-    const poPa = await makePO(t, {
-      rfq_id: rPipe3.rfq_id, rfq_product_id: rpPipe3.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 20, quantity: 100, total_value: 2000,
-      status: "pending_approval",
-    });
-
-    const rPipe4 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Pipeline acceptance_pending",
-    });
-    const rpPipe4 = await addProductToRfq(t, rPipe4.rfq_id);
-    const poAp = await makePO(t, {
-      rfq_id: rPipe4.rfq_id, rfq_product_id: rpPipe4.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 30, quantity: 100, total_value: 3000,
-      status: "acceptance_pending",
-    });
-
-    // Rejected — should NOT count toward either bucket.
-    const rPipe5 = await makeRfqVisibleToDashboard(t, {
-      createdBy: IDS.users.a1_proc_buyer,
-      hospitality: IDS.hospitality.A, hotel: IDS.hotels.A1,
-      status: 1, is_published: 1, title: "Pipeline rejected",
-    });
-    const rpPipe5 = await addProductToRfq(t, rPipe5.rfq_id);
-    const poRej = await makePO(t, {
-      rfq_id: rPipe5.rfq_id, rfq_product_id: rpPipe5.rfq_product_id,
-      vendor_user_id: IDS.users.vendor_alpha,
-      company_id: IDS.companies.A,
-      unit_price: 10, quantity: 100, total_value: 1000,
-      status: "rejected",
-    });
-
-    seeded.award1 = award1.instance_id;
-    seeded.award2 = award2.instance_id;
-    seeded.r3 = r3.rfq_id;
-    seeded.poRecent = poRecent.po_id;
-
-    inserted.nrqIds = [nrq1.id, nrq2.id, nrq3.id];
-    inserted.roundIds = [round1.id, round2.id, round3.id];
-    inserted.poIds = [
-      poRecent.po_id, poComp1.po_id, poApp.po_id, poPa.po_id, poAp.po_id, poRej.po_id,
-    ];
-    inserted.rfqIds = [
-      r1.rfq_id, r2.rfq_id, r3.rfq_id,
-      rPipe1.rfq_id, rPipe2.rfq_id, rPipe3.rfq_id, rPipe4.rfq_id, rPipe5.rfq_id,
-    ];
+    Object.assign(seeded, { p1, p2, pA2, pElse, p3, p4, p5, p6, p7, p8, p9, p10 });
   });
 });
 
 afterAll(async () => {
-  await cleanupApprovalInstances(db, "NEGOTIATION_QUOTE", inserted.nrqIds);
-  await db.none(`DELETE FROM tbl_negotiation_round_quotes WHERE id = ANY($1)`, [inserted.nrqIds]);
-  await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1)`, [inserted.roundIds]);
+  await cleanupApprovalInstanceIds(db, inserted.instanceIds);
   await cleanupPurchaseOrders(db, inserted.poIds);
-  await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1)`, [inserted.rfqIds]);
+  await cleanupTechEvals(db, inserted.rfqIds);
   await cleanupRfqs(db, inserted.rfqIds);
   await closeDb();
 });
 
-describe("Buyer Dashboard — Awarding P1/P2 widgets (real data)", () => {
-  /* ────────── /my-award-approvals-pending ───────── */
+const get = async (user, path, query = {}) => {
+  const client = await httpClient(user);
+  return client.get(`/api/v1/dashboard-v2/${path}`).query({ hotel_ids: String(IDS.hotels.A1), ...query });
+};
 
-  it("returns the 2 pending NEGOTIATION_QUOTE award approvals with accurate ₹", async () => {
-    const client = await httpClient(IDS.users.a1_proc_poApp);
-    const res = await client
-      .get("/api/v1/dashboard-v2/my-award-approvals-pending")
-      .query({ hotel_ids: String(IDS.hotels.A1) });
-
+describe("POs awaiting my approval", () => {
+  it("lists my PO approvals, oldest first, with PO number, RFQ and ₹", async () => {
+    const res = await get(poApp, "my-award-approvals-pending");
     expect(res.status).toBe(200);
-    expect(res.body.data.count).toBe(2);
-    // Quoted prices: 7500 + 4500 = 12000
-    expect(res.body.data.total_value).toBe(12000);
+    const { count, total_value, items } = res.body.data;
+    expect(count).toBe(2);
+    expect(items.map((i) => i.po_id)).toEqual([seeded.p1.po_id, seeded.p2.po_id]);
+    expect(total_value).toBe(15000);
 
-    const ids = res.body.data.items.map((i) => i.id).sort();
-    expect(ids).toEqual([seeded.award1, seeded.award2].sort());
+    const first = items[0];
+    expect(first.entity_type).toBe("PO");
+    expect(first.rfq_id).toBe(seeded.p1.rfq_id);
+    expect(first.po_number).toBeTruthy();
+    expect(first.value).toBe(12000);
+    expect(first.vendor_names).toHaveLength(1);
+
+    const ids = items.map((i) => i.po_id);
+    expect(ids).not.toContain(seeded.pA2.po_id);
+    expect(ids).not.toContain(seeded.pElse.po_id);
   });
 
-  /* ────────── /recent-awards ───────── */
+  it("count equals the PO rows of the Action Centre drill-down", async () => {
+    const [queue, detail] = await Promise.all([get(poApp, "my-award-approvals-pending"), get(poApp, "pending-approvals")]);
+    expect(queue.body.data.count).toBe(detail.body.data.filter((r) => r.entity_type === "PO").length);
+  });
+});
 
-  it("returns the recently cleared award with linked PO", async () => {
-    const client = await httpClient(IDS.users.a1_proc_poApp);
-    const res = await client
-      .get("/api/v1/dashboard-v2/recent-awards")
-      .query({ hotel_ids: String(IDS.hotels.A1) });
-
+describe("Recently approved POs", () => {
+  it("defaults to the last 30 days, newest approval first, flags my own approvals", async () => {
+    const res = await get(poApp, "recent-awards");
     expect(res.status).toBe(200);
-    expect(res.body.data.items.length).toBe(1);
-    const award = res.body.data.items[0];
-    expect(award.rfq_id).toBe(seeded.r3);
-    expect(Number(award.value)).toBe(9000);
-    expect(award.po_id).toBe(seeded.poRecent);
-    expect(res.body.data.total_value).toBe(9000);
+    const { count, total_value, items, window } = res.body.data;
+    expect(items.map((i) => i.po_id)).toEqual([seeded.p9.po_id, seeded.p3.po_id, seeded.p5.po_id]);
+    expect(count).toBe(3);
+    // Line totals, not the header: p9 counts 4,800, not 5,000.
+    expect(total_value).toBe(19800);
+    expect(items[0].value).toBe(4800);
+    expect(items[1].approved_by_me).toBe(true);
+    expect(items[2].approved_by_me).toBe(false);
+    expect(items[1].rfq_id).toBe(seeded.p3.rfq_id);
+    expect(window.end_date).toBe(istDate(0));
   });
 
-  /* ────────── /award-value-pipeline ───────── */
-
-  it("aggregates POs into completed vs ongoing value buckets", async () => {
-    const client = await httpClient(IDS.users.a1_proc_poApp);
-    const res = await client
-      .get("/api/v1/dashboard-v2/award-value-pipeline")
-      .query({ hotel_ids: String(IDS.hotels.A1) });
-
-    expect(res.status).toBe(200);
-    // Completed = poRecent(9000) [status='approved'] + poComp1(15000) [completed] + poApp(5000) [approved] = 29000
-    // Ongoing  = poPa(2000) [pending_approval] + poAp(3000) [acceptance_pending] = 5000
-    // Rejected (1000) excluded.
-    expect(res.body.data.completed_value).toBe(29000);
-    expect(res.body.data.completed_po_count).toBe(3);
-    expect(res.body.data.ongoing_value).toBe(5000);
-    expect(res.body.data.ongoing_po_count).toBe(2);
+  it("is committed spend only: a PO awaiting vendor acceptance is not listed", async () => {
+    const res = await get(poApp, "recent-awards", { start_date: istDate(-59), end_date: istDate(0) });
+    expect(res.body.data.items.map((i) => i.po_id)).not.toContain(seeded.p10.po_id);
   });
 
-  /* ────────── Scope isolation ───────── */
-
-  it("Hotel B sees zero Awarding widgets for our seeded data", async () => {
-    const client = await httpClient(IDS.users.companyB_admin);
-    const [pending, recent, pipeline] = await Promise.all([
-      client.get("/api/v1/dashboard-v2/my-award-approvals-pending").query({ hotel_ids: String(IDS.hotels.B1) }),
-      client.get("/api/v1/dashboard-v2/recent-awards").query({ hotel_ids: String(IDS.hotels.B1) }),
-      client.get("/api/v1/dashboard-v2/award-value-pipeline").query({ hotel_ids: String(IDS.hotels.B1) }),
+  it("over a window covering every PO it equals the committed spend (D1)", async () => {
+    const range = { start_date: istDate(-400), end_date: istDate(0) };
+    const [recent, pipe, snap] = await Promise.all([
+      get(poApp, "recent-awards", range),
+      get(poApp, "award-value-pipeline", range),
+      get(poApp, "procurement-snapshot", range),
     ]);
-    expect(pending.body.data.count).toBe(0);
-    expect(pending.body.data.total_value).toBe(0);
-    expect(recent.body.data.items.length).toBe(0);
-    expect(pipeline.body.data.completed_value).toBe(0);
-    expect(pipeline.body.data.ongoing_value).toBe(0);
+    // Every committed PO in this fixture went through an approval, so the
+    // two populations coincide exactly; on real data recently-approved is a
+    // subset (POs committed without an approval instance are not listed).
+    expect(recent.body.data.count).toBe(pipe.body.data.committed_po_count);
+    expect(recent.body.data.total_value).toBe(pipe.body.data.committed_value);
+    expect(recent.body.data.total_value).toBe(snap.body.data.total_spend);
+  });
+
+  it("honours an explicit window", async () => {
+    const res = await get(poApp, "recent-awards", { start_date: istDate(-59), end_date: istDate(0) });
+    expect(res.body.data.items.map((i) => i.po_id)).toEqual([seeded.p9.po_id, seeded.p3.po_id, seeded.p5.po_id, seeded.p4.po_id]);
+    expect(res.body.data.total_value).toBe(23800);
+  });
+});
+
+describe("PO value by stage", () => {
+  const stageMap = (data) => Object.fromEntries(data.stages.map((s) => [s.key, s]));
+
+  it("buckets POs raised in the window; drafts and cancelled POs never happened", async () => {
+    const res = await get(poApp, "award-value-pipeline", { start_date: istDate(-29), end_date: istDate(0) });
+    expect(res.status).toBe(200);
+    const s = stageMap(res.body.data);
+    // Mine (12,000 + 3,000) and the one awaiting someone else (800): the
+    // pipeline is the business unit's, not my queue.
+    expect(s.in_approval).toMatchObject({ value: 15800, po_count: 3 });
+    expect(s.awaiting_acceptance).toMatchObject({ value: 700, po_count: 1 });
+    expect(s.approved).toMatchObject({ value: 13800, po_count: 2 });
+    expect(s.in_fulfilment).toMatchObject({ value: 6000, po_count: 1 });
+    expect(s.rejected).toMatchObject({ value: 1000, po_count: 1 });
+    expect(res.body.data.committed_value).toBe(19800);
+    expect(res.body.data.committed_po_count).toBe(3);
+    expect(res.body.data.pending_value).toBe(16500);
+    // The A2 PO is outside the selected hotel.
+    const total = res.body.data.stages.reduce((sum, x) => sum + x.value, 0);
+    expect(total).toBe(37300);
+  });
+
+  it("committed value reconciles with the procurement snapshot's spend (D1)", async () => {
+    for (const range of [{ start_date: istDate(-29), end_date: istDate(0) }, {}]) {
+      const [pipe, snap] = await Promise.all([
+        get(poApp, "award-value-pipeline", range),
+        get(poApp, "procurement-snapshot", range),
+      ]);
+      expect(snap.status).toBe(200);
+      expect(pipe.body.data.committed_value).toBe(snap.body.data.total_spend);
+      expect(pipe.body.data.committed_po_count).toBe(snap.body.data.pos_issued);
+    }
+  });
+
+  it("with no range covers every PO, including the 40-day-old one", async () => {
+    const res = await get(poApp, "award-value-pipeline");
+    expect(stageMap(res.body.data).approved).toMatchObject({ value: 17800, po_count: 3 });
+    expect(res.body.data.committed_value).toBe(23800);
+  });
+
+  it("Hotel B user sees nothing", async () => {
+    const client = await httpClient(IDS.users.companyB_admin);
+    const [q, recent, pipe] = await Promise.all(["my-award-approvals-pending", "recent-awards", "award-value-pipeline"]
+      .map((p) => client.get(`/api/v1/dashboard-v2/${p}`).query({ hotel_ids: String(IDS.hotels.B1) })));
+    expect(q.body.data.count).toBe(0);
+    expect(recent.body.data.count).toBe(0);
+    expect(pipe.body.data.committed_value).toBe(0);
   });
 });

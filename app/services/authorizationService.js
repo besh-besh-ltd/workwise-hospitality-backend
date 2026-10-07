@@ -396,16 +396,24 @@ export function buildApproverReadExemption(entityIdExpr, entityTypes, userParam)
  * @param {number} rfqId — the parent RFQ to source scope from (PO/TE/QC
  *   entities all roll up to one RFQ)
  * @param {Object} [dbContext]
+ * @param {Object} [opts]
+ * @param {Object} [opts.rfqRow] - already-loaded tbl_rfq row for rfqId
  */
-export async function assertCanReadParentRfq(userId, rfqId, dbContext = db) {
+export async function assertCanReadParentRfq(userId, rfqId, dbContext = db, { rfqRow = null } = {}) {
   if (!rfqId) {
     throw new AuthorizationError('Missing rfq id for scope check', {});
   }
-  const rfq = await dbContext.oneOrNone(
-    `SELECT id, hospitality_company_id, hotel_id, department_id, process_id, is_tender
-     FROM tbl_rfq WHERE id = $1`,
-    [rfqId]
-  );
+  // opts.rfqRow: the caller's own tbl_rfq row for THIS id (it must carry id,
+  // hospitality_company_id, hotel_id, department_id, process_id, is_tender).
+  // Hot read endpoints already hold it; re-reading it here was a full serial
+  // round trip on every request. Ignored if it is for a different id.
+  const rfq = (rfqRow && Number(rfqRow.id) === Number(rfqId))
+    ? rfqRow
+    : await dbContext.oneOrNone(
+      `SELECT id, hospitality_company_id, hotel_id, department_id, process_id, is_tender
+       FROM tbl_rfq WHERE id = $1`,
+      [rfqId]
+    );
   // Non-existent RFQ: leave the existing handler's own not-found behavior intact.
   if (!rfq) return;
 

@@ -15,136 +15,29 @@
 // cleaned up in afterAll so the seeded fixture state is preserved for
 // subsequent suites.
 
-import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import { describe, it, expect, afterAll } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
 import { ROLE_IDS } from "../fixtures/users.js";
 
-// The 7 cross-role + 18 persona-targeted widget actions the FE declares in
-// components/dashboard/buyer/DashboardRegistry.js. Keep this in sync.
-const DASHBOARD_WIDGETS = [
-  // Cross-role
-  "action_center",
-  "procurement_snapshot",
-  "negotiation_savings",
-  "cost_intelligence",
-  "category_insights",
-  "abc_analysis",
-  "workflow_efficiency",
-  "smart_insights",
-  // RFQ Creator
-  "my_drafts",
-  "my_active_rfqs",
-  "my_no_response_rfqs",
-  // Tech Evaluator
-  "my_tech_evals_pending",
-  "tech_evals_with_vendor_disagreements",
-  "tech_eval_throughput",
-  // Tech Approver
-  "my_tech_approvals_pending",
-  "tech_approval_oldest_pending",
-  "tech_approval_throughput",
-  // Commercial Evaluator / N1
-  "my_quote_compares",
-  "my_active_negotiations",
-  "savings_pipeline",
-  // Commercial Approver
-  "my_commercial_approvals_pending",
-  "deals_with_price_anomalies",
-  "commercial_approval_throughput",
-  // Awarding P1/P2
-  "my_award_approvals_pending",
-  "recent_awards",
-  "award_value_pipeline",
-];
-
-// Recommended preset bundles per persona. Mirrors the admin doc tooltip
-// the plan calls for — used by these tests to grant role-appropriate
-// widgets and then assert the right subset surfaces.
+// The widget grants themselves come from the migrations, exactly as in a real
+// environment: 20260928100000 registers the v1 catalogue and 20260928102000
+// grants it by capability (see dashboard.v3Migrations.test.js for the matrix).
+// This suite asserts how those grants RESOLVE for a user — per BU, per role,
+// across BUs — which is what the frontend's widget list is built from.
+//
+// The persona bundles the seeded fixture roles are expected to carry.
 const PRESETS = {
-  RFQ_CREATOR: ["my_drafts", "my_active_rfqs", "my_no_response_rfqs", "action_center"],
-  TECH_EVAL:   ["my_tech_evals_pending", "tech_evals_with_vendor_disagreements", "tech_eval_throughput"],
-  TECH_APP:    ["my_tech_approvals_pending", "tech_approval_oldest_pending", "tech_approval_throughput"],
+  RFQ_CREATOR: ["my_drafts", "my_active_rfqs", "my_no_response_rfqs", "my_rfqs_bid_closed_no_quotes", "action_center"],
+  TECH_EVAL:   ["my_tech_evals_pending", "tech_evals_with_vendor_disagreements"],
+  TECH_APP:    ["my_tech_approvals_pending", "approval_turnaround"],
   COMM_EVAL:   ["my_quote_compares", "my_active_negotiations", "savings_pipeline", "negotiation_savings"],
-  COMM_APP:    ["my_commercial_approvals_pending", "deals_with_price_anomalies", "commercial_approval_throughput"],
+  COMM_APP:    ["my_commercial_approvals_pending", "approval_turnaround"],
   AWARDING:    ["my_award_approvals_pending", "recent_awards", "award_value_pipeline", "procurement_snapshot"],
 };
 
-// Track inserted permission/role-permission IDs for clean teardown.
-const insertedPermissionIds = [];
-const insertedRolePermissionPairs = []; // { role_id, permission_id }
-
-beforeAll(async () => {
-  // 0) Extend the `resource_type` + `permission_action_type` enums so the
-  //    25 dashboard widget codes are valid values. The real schema
-  //    migration backing this feature will add them permanently; here we
-  //    extend the per-run test DB so the suite is self-contained. ALTER
-  //    TYPE ADD VALUE can't run inside a tx — pg handles it as a stand-
-  //    alone DDL.
-  await db.none(`ALTER TYPE resource_type ADD VALUE IF NOT EXISTS 'dashboard'`);
-  for (const action of DASHBOARD_WIDGETS) {
-    await db.none(
-      `ALTER TYPE permission_action_type ADD VALUE IF NOT EXISTS '${action}'`
-    );
-  }
-
-  // 1) Seed the dashboard widget catalogue. The migration that owns this
-  //    long-term will live backend-side; this beforeAll is a test-time
-  //    stand-in so the suite is self-contained.
-  for (const action of DASHBOARD_WIDGETS) {
-    const existing = await db.oneOrNone(
-      `SELECT id FROM tbl_permissions WHERE resource = $1 AND action = $2`,
-      ["dashboard", action]
-    );
-    if (existing) continue;
-    const inserted = await db.one(
-      `INSERT INTO tbl_permissions (resource, action)
-       VALUES ($1, $2) RETURNING id`,
-      ["dashboard", action]
-    );
-    insertedPermissionIds.push(inserted.id);
-  }
-
-  // 2) Apply recommended preset bundles to the fixture roles.
-  const grantBundle = async (roleId, actions) => {
-    for (const action of actions) {
-      const p = await db.one(
-        `SELECT id FROM tbl_permissions WHERE resource = 'dashboard' AND action = $1`,
-        [action]
-      );
-      const existing = await db.oneOrNone(
-        `SELECT 1 FROM tbl_role_permissions WHERE role_id = $1 AND permission_id = $2`,
-        [roleId, p.id]
-      );
-      if (existing) continue;
-      await db.none(
-        `INSERT INTO tbl_role_permissions (role_id, permission_id) VALUES ($1, $2)`,
-        [roleId, p.id]
-      );
-      insertedRolePermissionPairs.push({ role_id: roleId, permission_id: p.id });
-    }
-  };
-  await grantBundle(ROLE_IDS.TENDER_CREATOR,    PRESETS.RFQ_CREATOR);
-  await grantBundle(ROLE_IDS.TECH_EVAL,         PRESETS.TECH_EVAL);
-  await grantBundle(ROLE_IDS.TECH_APPROVER,     PRESETS.TECH_APP);
-  await grantBundle(ROLE_IDS.COMM_NEGO_N1,      PRESETS.COMM_EVAL);
-  await grantBundle(ROLE_IDS.COMM_APPROVER,     PRESETS.COMM_APP);
-  await grantBundle(ROLE_IDS.FINAL_AWARDING_P1, PRESETS.AWARDING);
-});
-
 afterAll(async () => {
-  // Tear down role-permission grants we created.
-  for (const pair of insertedRolePermissionPairs) {
-    await db.none(
-      `DELETE FROM tbl_role_permissions WHERE role_id = $1 AND permission_id = $2`,
-      [pair.role_id, pair.permission_id]
-    );
-  }
-  // Tear down permission rows we inserted.
-  for (const id of insertedPermissionIds) {
-    await db.none(`DELETE FROM tbl_permissions WHERE id = $1`, [id]);
-  }
   await closeDb();
 });
 
@@ -220,12 +113,28 @@ describe("Role-aware buyer dashboard — permission resolution", () => {
   });
 
   it("user with no dashboard.* grants gets an empty (or missing) dashboard array — drives the EmptyDashboard UI", async () => {
-    // companyB_admin has CEO role but we never granted any dashboard.* perms
-    // to CEO — so their dashboard permission list should be empty in B1.
-    const res = await getDashboardPerms(IDS.users.companyB_admin, [IDS.hotels.B1]);
-    expect(res.status).toBe(200);
-    const perms = dashActions(res);
-    expect(perms).toEqual([]);
+    // Every seeded role earns at least the cross-role cards, so "no grants"
+    // means a role that holds nothing: companyB_admin's only scope is pointed
+    // at an empty custom role for the duration of the test.
+    const empty = await db.one(
+      `INSERT INTO tbl_roles (title, description, created_by) VALUES ('empty probe', 'no permissions', $1) RETURNING id`,
+      [IDS.users.companyB_admin]
+    );
+    await db.none(
+      `UPDATE tbl_user_role_scopes SET role_id = $1 WHERE user_id = $2 AND role_id = $3`,
+      [empty.id, IDS.users.companyB_admin, ROLE_IDS.CEO]
+    );
+    try {
+      const res = await getDashboardPerms(IDS.users.companyB_admin, [IDS.hotels.B1]);
+      expect(res.status).toBe(200);
+      expect(dashActions(res)).toEqual([]);
+    } finally {
+      await db.none(
+        `UPDATE tbl_user_role_scopes SET role_id = $1 WHERE user_id = $2 AND role_id = $3`,
+        [ROLE_IDS.CEO, IDS.users.companyB_admin, empty.id]
+      );
+      await db.none(`DELETE FROM tbl_roles WHERE id = $1`, [empty.id]);
+    }
   });
 
   it("respects BU scope — RFQ creator at A1 sees no grants when filtering to a hotel they aren't mapped to", async () => {
