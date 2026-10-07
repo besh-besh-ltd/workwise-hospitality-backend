@@ -511,6 +511,28 @@ describe("routing queue", () => {
     expect(p.candidates.map((c) => c.vendor_id)).toEqual([B1, B2]); // the pending assignee included
     expect(p.excluded).toEqual([]);
   });
+
+  // Fix round 1 / review minor 3: an entity that declined earlier and was then assigned
+  // again by hand is the live assignee, not a refusal.
+  it("never lists the live assignee among the excluded, even after an earlier refusal", async () => {
+    await db.none(
+      `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode)
+       VALUES ($1, 'HOTEL', $3, 'INCLUDE'), ($2, 'HOTEL', $3, 'INCLUDE')`,
+      [B1, B2, H1]
+    );
+    cfg.valid = () => ({ ok: true, hotelIds: [H1], categoryId: null });
+    const declined = await insertAssignment({ subjectId: 7320, vendorId: B1, status: "DECLINED" });
+    await db.none(`UPDATE tbl_vendor_routing_assignments SET acted_at = now() - interval '1 hour' WHERE id = $1`, [declined.id]);
+    await insertAssignment({ subjectId: 7320, vendorId: B2, status: "TIMED_OUT" });
+    const live = await insertAssignment({ subjectId: 7320, vendorId: B1 }); // re-assigned by hand
+
+    const data = (await (await httpClient(HQ)).get(`${BASE}/routing/queue`)).body.data;
+    const pendingRow = data.pending.find((r) => r.id === live.id);
+    expect(pendingRow.excluded).toEqual([{ vendor_id: B2, name: `VN ${B2}`, reason: "TIMED_OUT" }]);
+    expect(pendingRow.candidates.map((c) => c.vendor_id)).toEqual([B1]);
+    const refusedRow = data.declined.find((r) => r.id === declined.id);
+    expect(refusedRow.excluded.map((e) => e.vendor_id)).toEqual([B2]);
+  });
 });
 
 describe("two orgs routing the same subject", () => {

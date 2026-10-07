@@ -38,6 +38,8 @@ import { ASSIGNMENT_STATUS, SUBJECT_TYPE } from "../../constants/vendorNetwork.j
 
 const { PENDING, ACCEPTED, DECLINED, TIMED_OUT } = ASSIGNMENT_STATUS;
 const RECENT_DAYS = 7;
+// Queue rows whose suggestions are computed at once (each may use a pool connection).
+const SUGGESTION_CONCURRENCY = 4;
 const SUBJECT_TYPES = Object.values(SUBJECT_TYPE);
 const STATUSES = Object.values(ASSIGNMENT_STATUS);
 
@@ -83,13 +85,16 @@ const candidateView = (c) => ({
  * where reason is the refusal's status (DECLINED | TIMED_OUT). `refused` is the item's
  * Map<vendorId, status> from refusalStatuses.
  */
-async function suggestionsFor(orgId, { hotelIds, categoryId }, refused) {
+async function suggestionsFor(orgId, { hotelIds, categoryId }, refused, liveIds) {
   const ranked = await resolveCoverageCandidates({ orgId, hotelIds, categoryId: categoryId ?? null });
   const candidates = [];
   const excluded = [];
   for (const c of ranked) {
-    const reason = refused?.get(Number(c.entity_vendor_id));
-    if (reason) excluded.push({ vendor_id: Number(c.entity_vendor_id), name: c.name, reason });
+    const id = Number(c.entity_vendor_id);
+    // The item's live assignee (PENDING / ACCEPTED) is never a refusal, even when it
+    // declined earlier and was then assigned again by hand.
+    const reason = liveIds?.has(id) ? null : refused?.get(id);
+    if (reason) excluded.push({ vendor_id: id, name: c.name, reason });
     else candidates.push(candidateView(c));
   }
   return { candidates, excluded };
@@ -103,6 +108,20 @@ export async function routingQueue(req, res) {
     const orgId = req.user.network.org_id;
     const { principal_vendor_id: principalVendorId } = await getOrgById(orgId);
     const refused = await refusalStatuses(orgId);
+
+    // Live assignments first: their assignees are never listed as refusals.
+    const since = new Date(Date.now() - RECENT_DAYS * 24 * 3600 * 1000);
+    const [pending, accepted, declinedRows] = await Promise.all([
+      listForOrg(orgId, { status: PENDING }).then(withDescription),
+      listForOrg(orgId, { status: ACCEPTED }).then(withDescription),
+      listForOrg(orgId, { status: [DECLINED, TIMED_OUT], actedSince: since }).then(withDescription),
+    ]);
+    const liveByKey = new Map();
+    for (const row of [...pending, ...accepted]) {
+      const key = subjectKey(row.subject_type, row.subject_id, row.hotel_id);
+      if (!liveByKey.has(key)) liveByKey.set(key, new Set());
+      liveByKey.get(key).add(Number(row.assigned_vendor_id));
+    }
 
     const unrouted = [];
     const unroutedByKey = new Map();
@@ -126,45 +145,56 @@ export async function routingQueue(req, res) {
           category_id: item.categoryId ?? null,
           title: item.title ?? null,
           meta: item.meta ?? null,
-          ...(await suggestionsFor(orgId, item, refused.get(key))),
+          ...(await suggestionsFor(orgId, item, refused.get(key), liveByKey.get(key))),
         };
         unroutedByKey.set(key, view);
         unrouted.push(view);
       }
     }
 
-    const since = new Date(Date.now() - RECENT_DAYS * 24 * 3600 * 1000);
-    const [pending, accepted, declinedRows] = await Promise.all([
-      listForOrg(orgId, { status: PENDING }).then(withDescription),
-      listForOrg(orgId, { status: ACCEPTED }).then(withDescription),
-      listForOrg(orgId, { status: [DECLINED, TIMED_OUT], actedSince: since }).then(withDescription),
-    ]);
-
     // Suggestions for a routed row: the unrouted entry's when the item is back in the
     // queue; otherwise the subject is re-validated for its hotels.
-    const withSuggestions = async (row) => {
+    // One re-validation per subject key, however many rows share it. validateSubject only
+    // reads (no locks), each in its own short transaction as the handlers expect.
+    const suggestionsByKey = new Map();
+    const suggestionsOf = (row) => {
       const key = subjectKey(row.subject_type, row.subject_id, row.hotel_id);
       const queued = unroutedByKey.get(key);
-      if (queued) return { ...row, candidates: queued.candidates, excluded: queued.excluded };
-      let suggestions = { candidates: [], excluded: [] };
-      try {
-        const handler = getSubjectHandler(row.subject_type);
-        const scope = { orgId, principalVendorId, subjectId: row.subject_id, hotelId: row.hotel_id };
-        const valid = handler ? await db.tx((t) => handler.validateSubject(scope, t)) : null;
-        if (valid?.ok) suggestions = await suggestionsFor(orgId, valid, refused.get(key));
-      } catch (err) {
-        // A subject that can no longer be routed simply has no candidates.
-        logger.warn({ err: err.message, assignmentId: row.id }, "vendor-routing queue re-validation failed");
+      if (queued) return Promise.resolve({ candidates: queued.candidates, excluded: queued.excluded });
+      if (!suggestionsByKey.has(key)) {
+        suggestionsByKey.set(
+          key,
+          (async () => {
+            try {
+              const handler = getSubjectHandler(row.subject_type);
+              const scope = { orgId, principalVendorId, subjectId: row.subject_id, hotelId: row.hotel_id };
+              const valid = handler ? await db.tx((t) => handler.validateSubject(scope, t)) : null;
+              if (valid?.ok) return await suggestionsFor(orgId, valid, refused.get(key), liveByKey.get(key));
+            } catch (err) {
+              // A subject that can no longer be routed simply has no candidates.
+              logger.warn({ err: err.message, assignmentId: row.id }, "vendor-routing queue re-validation failed");
+            }
+            return { candidates: [], excluded: [] };
+          })()
+        );
       }
-      return { ...row, ...suggestions };
+      return suggestionsByKey.get(key);
     };
 
     // Declined / timed-out items, and pending ones (so a reassignment is offered the same
-    // suggestions, the pending assignee among them).
-    const declined = [];
-    for (const row of declinedRows) declined.push(await withSuggestions(row));
-    const pendingWithSuggestions = [];
-    for (const row of pending) pendingWithSuggestions.push(await withSuggestions(row));
+    // suggestions, the pending assignee among them), SUGGESTION_CONCURRENCY at a time so a
+    // long queue cannot take the whole connection pool.
+    const rowsNeedingSuggestions = [...declinedRows, ...pending];
+    const suggested = new Array(rowsNeedingSuggestions.length);
+    for (let i = 0; i < rowsNeedingSuggestions.length; i += SUGGESTION_CONCURRENCY) {
+      const chunk = rowsNeedingSuggestions.slice(i, i + SUGGESTION_CONCURRENCY);
+      const results = await Promise.all(chunk.map(suggestionsOf));
+      results.forEach((r, j) => {
+        suggested[i + j] = { ...chunk[j], ...r };
+      });
+    }
+    const declined = suggested.slice(0, declinedRows.length);
+    const pendingWithSuggestions = suggested.slice(declinedRows.length);
 
     return res.status(200).json({
       status: 1,
