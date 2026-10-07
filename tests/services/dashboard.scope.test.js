@@ -93,8 +93,8 @@ async function quoteAt(rfqId, variantId, unitPrice, vendorId = IDS.users.vendor_
 //    1000 clears the model's `> market * 1.15` (1150 > … no — 1000 > 805) and
 //    the widget renders B's prices in A's "Market: ₹…" copy. Scoped to A only,
 //    the market IS A's own average and the alert cannot fire.
-// B) CROSS-BU (deals-with-price-anomalies): a completed PO at hotel A2 sets the
-//    "last paid" benchmark that an A1-only approver is shown.
+// B) CROSS-BU (award-value-pipeline): a completed PO at hotel A2 must not be
+//    counted for an A1-only user.
 // C) CROSS-DEPARTMENT (abc / cost-intelligence / category-insights / the "my"
 //    widgets): an RFQ at hotel A1 but department Engineering, invisible to a
 //    Procurement-scoped user in every other buyer surface.
@@ -280,15 +280,16 @@ describe("dashboard scoping — cross-tenant", () => {
 });
 
 describe("dashboard scoping — cross-business-unit inside one legal entity", () => {
-  it("/deals-with-price-anomalies does not benchmark against another BU's paid price", async () => {
+  it("/award-value-pipeline does not count another BU's PO", async () => {
+    // The only completed PO for fx.buVariant lives at hotel A2; an A1-only
+    // view must not see it (the price-anomaly card this used to exercise was
+    // cut from catalogue v1 — see SPEC).
     const client = await httpClient(IDS.users.a1_proc_commApp);
-    const res = await client.get(`${BASE}/deals-with-price-anomalies`).query({ hotel_ids: String(IDS.hotels.A1) });
+    const res = await client.get(`${BASE}/award-value-pipeline`).query({ hotel_ids: String(IDS.hotels.A1) });
     expect(res.status).toBe(200);
-    const items = res.body.data.items || [];
-    const leak = items.find((i) => String(i.product_name).includes(fx.buVariant.name));
-    // The only "last paid" price for this variant lives at hotel A2, which is
-    // outside this approver's scope — so no anomaly row may be produced.
-    expect(leak).toBeUndefined();
+    const completed = res.body.data.stages.find((st) => st.key === "completed");
+    expect(completed.po_count).toBe(0);
+    expect(completed.value).toBe(0);
   });
 
   it("/pending-approvals agrees with the /action-center badge count", async () => {
@@ -399,7 +400,7 @@ describe('dashboard scoping — the "my" widgets are bound to the calling user',
     const client = await httpClient(IDS.users.a1_proc_poApp);
     const res = await client.get(`${BASE}/award-value-pipeline`).query(q);
     expect(res.status).toBe(200);
-    const total = Number(res.body.data.completed_value) + Number(res.body.data.ongoing_value);
+    const total = res.body.data.stages.reduce((sum, st) => sum + Number(st.value), 0);
     expect(total).toBeLessThan(9_000_000);
   });
 

@@ -1,15 +1,12 @@
-// Smoke test for the 18 role-aware buyer-dashboard widget routes. Each
-// endpoint today returns a safe-default empty shape so the FE renders
-// the EmptyState path instead of erroring. This suite asserts:
+// Smoke test for the 16 role-aware buyer-dashboard persona routes of widget
+// catalogue v1 (docs/dashboard_v3/SPEC.md). This suite asserts:
 //
 //   1. Every route is registered (no 404/405).
 //   2. Every route authenticates (401 when no JWT).
 //   3. Every route returns 200 + { status: 1, data: <shape> } for an
 //      authenticated user with the necessary scope.
 //   4. The response shape matches what the FE component expects.
-//
-// As real aggregation logic is implemented per widget, swap-in or
-// extend these expectations to assert on real counts / items.
+//   5. The routes cut from v1 are gone (404).
 
 import { describe, it, expect, afterAll } from "@jest/globals";
 import { closeDb } from "../setup/db.js";
@@ -26,34 +23,47 @@ afterAll(async () => {
  */
 const WIDGETS = [
   // RFQ Creator
-  { path: "/api/v1/dashboard-v2/my-drafts",                          keys: ["count", "items"] },
+  { path: "/api/v1/dashboard-v2/my-drafts",                          keys: ["count", "oldest_created_at", "items"] },
   { path: "/api/v1/dashboard-v2/my-active-rfqs",                     keys: ["total", "stages"] },
   { path: "/api/v1/dashboard-v2/my-no-response-rfqs",                keys: ["count", "silent_vendor_count", "items"] },
+  { path: "/api/v1/dashboard-v2/my-rfqs-bid-closed-no-quotes",       keys: ["count", "items"] },
   // Technical Evaluator
-  { path: "/api/v1/dashboard-v2/my-tech-evals-pending",              keys: ["count", "items"] },
+  { path: "/api/v1/dashboard-v2/my-tech-evals-pending",              keys: ["count", "oldest_waiting_since", "items"] },
   { path: "/api/v1/dashboard-v2/tech-evals-with-disagreements",      keys: ["count", "total_disagreement_clauses", "items"] },
-  { path: "/api/v1/dashboard-v2/tech-eval-throughput",               keys: ["current_period_avg_hours", "prior_period_avg_hours", "delta_pct", "unit", "sparkline"] },
-  // Technical Approver
-  { path: "/api/v1/dashboard-v2/my-tech-approvals-pending",          keys: ["count", "items"] },
-  { path: "/api/v1/dashboard-v2/tech-approval-oldest-pending",       keys: ["items"] },
-  { path: "/api/v1/dashboard-v2/tech-approval-throughput",           keys: ["current_period_avg_hours", "delta_pct", "sparkline"] },
+  // Approval queues
+  { path: "/api/v1/dashboard-v2/my-tech-approvals-pending",          keys: ["count", "oldest_age_days", "items"] },
+  { path: "/api/v1/dashboard-v2/my-rfq-approvals-pending",           keys: ["count", "oldest_age_days", "items"] },
+  { path: "/api/v1/dashboard-v2/my-commercial-approvals-pending",    keys: ["count", "total_value", "items"] },
+  { path: "/api/v1/dashboard-v2/my-award-approvals-pending",         keys: ["count", "total_value", "items"] },
+  { path: "/api/v1/dashboard-v2/approval-turnaround",                keys: ["window", "tabs"] },
   // Commercial Evaluator / N1
   { path: "/api/v1/dashboard-v2/my-quote-compares",                  keys: ["count", "items"] },
-  { path: "/api/v1/dashboard-v2/my-active-negotiations",             keys: ["count", "total_silent_vendors", "items"] },
-  { path: "/api/v1/dashboard-v2/savings-pipeline",                   keys: ["total_savings", "prior_period_savings", "negotiation_count", "avg_savings_pct"] },
-  // Commercial Approver
-  { path: "/api/v1/dashboard-v2/my-commercial-approvals-pending",    keys: ["count", "total_value", "top_by_value"] },
-  { path: "/api/v1/dashboard-v2/deals-with-price-anomalies",         keys: ["count", "items"] },
-  { path: "/api/v1/dashboard-v2/commercial-approval-throughput",     keys: ["current_period_avg_hours", "delta_pct", "sparkline"] },
-  // Awarding P1 / P2
-  { path: "/api/v1/dashboard-v2/my-award-approvals-pending",         keys: ["count", "total_value", "items"] },
-  { path: "/api/v1/dashboard-v2/recent-awards",                      keys: ["items", "total_value"] },
-  { path: "/api/v1/dashboard-v2/award-value-pipeline",               keys: ["completed_value", "completed_po_count", "ongoing_value", "ongoing_po_count"] },
+  { path: "/api/v1/dashboard-v2/my-active-negotiations",             keys: ["count", "awaiting_approval_count", "total_silent_vendors", "items"] },
+  { path: "/api/v1/dashboard-v2/savings-pipeline",                   keys: ["basis", "total_savings", "prior_period_savings", "negotiation_count", "avg_savings_pct", "window"] },
+  // Awarding
+  { path: "/api/v1/dashboard-v2/recent-awards",                      keys: ["count", "items", "total_value", "window"] },
+  { path: "/api/v1/dashboard-v2/award-value-pipeline",               keys: ["committed_value", "committed_po_count", "pending_value", "pending_po_count", "stages"] },
+];
+
+/** Routes cut from the v1 catalogue — must no longer be served. */
+const REMOVED = [
+  "/api/v1/dashboard-v2/tech-eval-throughput",
+  "/api/v1/dashboard-v2/tech-approval-oldest-pending",
+  "/api/v1/dashboard-v2/tech-approval-throughput",
+  "/api/v1/dashboard-v2/deals-with-price-anomalies",
+  "/api/v1/dashboard-v2/commercial-approval-throughput",
 ];
 
 describe("Buyer dashboard — role-aware widget routes are registered", () => {
-  it("registers exactly 18 widget routes", () => {
-    expect(WIDGETS).toHaveLength(18);
+  it("registers exactly the 16 persona widget routes of catalogue v1", () => {
+    expect(WIDGETS).toHaveLength(16);
+  });
+
+  it.each(REMOVED)("%s is no longer served", async (path) => {
+    const client = await httpClient(IDS.users.a1_proc_buyer);
+    const res = await client.get(path).query({ hotel_ids: String(IDS.hotels.A1) });
+    // The app answers unknown paths with its catch-all 405.
+    expect([404, 405]).toContain(res.status);
   });
 
   it.each(WIDGETS)("$path requires authentication (401 without JWT)", async ({ path }) => {

@@ -53,16 +53,39 @@ export const REPORT_ROW_CAP = 50000;
  * Requires `pv` (tbl_product_variant) in scope. See the double-count note at
  * the top of this file — do not reach a category any other way.
  */
-const LEAF_CATEGORY_JOIN = `
-  LEFT JOIN LATERAL (
-    SELECT c.id, c.title, c.parent_id
+// Set-based rather than a per-line LATERAL: on prod the lateral re-ran for every
+// PO line and the planner probed all categories each time (≈380k index probes,
+// 609 ms for spend-by-category). Picking one category per product once and
+// hash-joining it returns the identical row per line in ~42 ms.
+export const LEAF_CATEGORY_JOIN = `
+  LEFT JOIN (
+    SELECT DISTINCT ON (pc.product_id)
+           pc.product_id, c.id, c.title, c.parent_id
       FROM tbl_product_categories pc
       JOIN tbl_category c ON c.id = pc.category_id
-     WHERE pc.product_id = pv.product_id
-       AND COALESCE(c.is_deleted, 0) = 0
-     ORDER BY (COALESCE(c.parent_id, 0) <> 0) DESC, c.id
-     LIMIT 1
-  ) cat ON TRUE`;
+     WHERE COALESCE(c.is_deleted, 0) = 0
+     ORDER BY pc.product_id, (COALESCE(c.parent_id, 0) <> 0) DESC, c.id
+  ) cat ON cat.product_id = pv.product_id`;
+
+/**
+ * The catalogue variant of a PO line — the only sanctioned way to get from a
+ * line to its item (and from there, through LEAF_CATEGORY_JOIN, to a category).
+ *
+ * tbl_purchase_order_product.product_variant_id is written by the ARC call-off
+ * path only. RFQ PO lines left it NULL until 2026-09 — every one of the 2,387
+ * RFQ lines on prod — so joining the variant through that column alone made
+ * every category, rate-variance and single-source sheet come back empty. An
+ * RFQ line reaches its variant through its rfq_product instead; a call-off line
+ * has no rfq_product and keeps its own.
+ *
+ * LINE_VARIANT_JOIN must sit after the `pop` join; lineVariant() then names the
+ * resolved id. The dashboard re-exports both so the two surfaces cannot drift.
+ */
+export const LINE_VARIANT_JOIN = `
+  LEFT JOIN tbl_rfq_products line_rp ON line_rp.id = pop.rfq_product_id`;
+
+export const lineVariant = (pop = "pop", rp = "line_rp") =>
+  `COALESCE(${pop}.product_variant_id, ${rp}.product_variant_id)`;
 
 /**
  * A vendor's display name.
@@ -97,10 +120,14 @@ function spendBase(scope, { from, to }, values, startIndex) {
   // The FY window is Indian wall-clock; created_at is an absolute instant.
   // Comparing the two without AT TIME ZONE moves every boundary by 5h30m and
   // silently files the first evening of April into the previous year.
+  // The ::timestamp hop matters: `<date> AT TIME ZONE` resolves the date via
+  // the SESSION zone first (timestamptz wins the implicit cast), so on prod's
+  // UTC session the bound landed at 11:00 IST instead of midnight. Casting to
+  // a naive timestamp first makes AT TIME ZONE read the wall clock as IST.
   const where = `
       po.status = ANY($${statusIdx}::po_status[])
-      AND po.created_at >= ($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata')
-      AND po.created_at <  ($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata')
+      AND po.created_at >= ($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+      AND po.created_at <  ($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata')
       AND ${scoped.clause}`;
 
   return { where, nextIndex: i };
@@ -162,7 +189,8 @@ export async function spendByVendor(scope, { from, to, priorFrom, priorTo }) {
             FROM tbl_rfq_purchase_order po
             JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
             LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-            LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+            ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
             ${LEAF_CATEGORY_JOIN}
            WHERE ${cur.where}
              AND cat.title IS NOT NULL
@@ -224,10 +252,15 @@ export async function spendByMonth(scope, { from, to, priorFrom, priorTo }) {
     `date_trunc('month', ${alias}.created_at AT TIME ZONE 'Asia/Kolkata')`;
 
   return db.any(
+    // The series runs from the 1st of the month `from` falls in to the month of
+    // the window's last day (`to` is exclusive). Stepping from the raw `from`
+    // date gave rows keyed to e.g. the 31st, which never matched the
+    // date_trunc'd spend below: a 31 Aug – 30 Sep window came back as a single
+    // ₹0 "Aug" row with no September at all.
     `WITH months AS (
        SELECT generate_series(
-                $${fromIdx}::date,
-                ($${toIdx}::date - INTERVAL '1 day'),
+                date_trunc('month', $${fromIdx}::date),
+                date_trunc('month', $${toIdx}::date - INTERVAL '1 day'),
                 INTERVAL '1 month'
               )::date AS month_start
      ),
@@ -342,7 +375,8 @@ export async function spendByCategory(scope, { from, to, priorFrom, priorTo }, {
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-         LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+         ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
          ${LEAF_CATEGORY_JOIN}
         WHERE ${whereClause}
           AND cat.id IS NOT NULL
@@ -392,7 +426,8 @@ export async function spendByCategoryProperty(scope, { from, to }, { level = "pa
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
        ${LEAF_CATEGORY_JOIN}
        LEFT JOIN tbl_category cc ON cc.id = ${groupExpr}
        LEFT JOIN tbl_hospitality_company_hotels h
@@ -434,17 +469,18 @@ export async function interPropertyRateVariance(
        -- in boxes at one property and in pieces at another compares directly
        -- and reports an 86x "rate variance" that is really a unit mismatch —
        -- observed on staging before this was added.
-       SELECT pop.product_variant_id                AS variant_id,
+       SELECT ${lineVariant()}                     AS variant_id,
               LOWER(TRIM(pop.unit))                 AS unit,
               COALESCE(rfq.hotel_id, mr.hotel_id)   AS hotel_id,
               SUM(pop.total_price)                  AS value,
               SUM(pop.quantity)                     AS qty
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         ${LINE_VARIANT_JOIN}
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
          LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
         WHERE ${base.where}
-          AND pop.product_variant_id IS NOT NULL
+          AND ${lineVariant()} IS NOT NULL
         GROUP BY 1, 2, 3
        HAVING SUM(pop.quantity) > 0
      ),
@@ -675,8 +711,8 @@ export async function poApprovalTat(scope, { from, to }) {
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE ai.completed_at IS NOT NULL
-        AND ai.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND ai.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ai.completed_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND ai.completed_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       ORDER BY ai.completed_at DESC
       LIMIT ${REPORT_ROW_CAP}`,
@@ -723,8 +759,8 @@ export async function poApprovalTatByApprover(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE a.acted_at IS NOT NULL
         AND a.status IN ('APPROVED', 'REJECTED')
-        AND a.acted_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND a.acted_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND a.acted_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND a.acted_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       GROUP BY 1, 2, 3, 4
       ORDER BY decisions DESC, avg_hours DESC
@@ -763,8 +799,8 @@ export async function poApprovalTatByStage(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
       WHERE s.completed_at IS NOT NULL
         AND s.status = 'APPROVED'
-        AND s.completed_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND s.completed_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND s.completed_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND s.completed_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       GROUP BY 1
       ORDER BY 1`,
@@ -792,7 +828,8 @@ export async function categoryVendorSpend(scope, { from, to }) {
        FROM tbl_rfq_purchase_order po
        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
        LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = pop.product_variant_id
+       ${LINE_VARIANT_JOIN}
+            LEFT JOIN tbl_product_variant pv ON pv.id = ${lineVariant()}
        ${LEAF_CATEGORY_JOIN}
        LEFT JOIN tbl_category cc ON cc.id = COALESCE(NULLIF(cat.parent_id, 0), cat.id)
        LEFT JOIN tbl_users v  ON v.id = po.finalized_vendor_id
@@ -819,16 +856,17 @@ export async function singleSourceItems(scope, { from, to }) {
 
   return db.any(
     `WITH per_item AS (
-       SELECT pop.product_variant_id               AS variant_id,
+       SELECT ${lineVariant()}                    AS variant_id,
               COUNT(DISTINCT po.finalized_vendor_id) AS vendors,
               MIN(po.finalized_vendor_id)          AS sole_vendor_id,
               SUM(pop.total_price)                 AS amount,
               SUM(pop.quantity)                    AS qty
          FROM tbl_rfq_purchase_order po
          JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+         ${LINE_VARIANT_JOIN}
          LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
         WHERE ${base.where}
-          AND pop.product_variant_id IS NOT NULL
+          AND ${lineVariant()} IS NOT NULL
         GROUP BY 1
        HAVING COUNT(DISTINCT po.finalized_vendor_id) = 1
      )
@@ -974,8 +1012,8 @@ export async function approvalAuditTrail(scope, { from, to }) {
        LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
        LEFT JOIN tbl_hospitality_company_hotels h
               ON h.id = COALESCE(rfq.hotel_id, mr.hotel_id)
-      WHERE act.created_at >= (($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
-        AND act.created_at <  (($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+      WHERE act.created_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
+        AND act.created_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
       ORDER BY act.created_at DESC
       LIMIT ${REPORT_ROW_CAP}`,
@@ -1157,8 +1195,8 @@ export async function rejectedPoLog(scope, { from, to }) {
           ORDER BY p2.created_at ASC
           LIMIT 1
        ) rr ON TRUE
-      WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date AT TIME ZONE 'Asia/Kolkata')
-        AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date  AT TIME ZONE 'Asia/Kolkata')
+      WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+        AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata')
       ORDER BY COALESCE(e.event_at, e.updated_at) DESC
       LIMIT ${REPORT_ROW_CAP}`,
     values

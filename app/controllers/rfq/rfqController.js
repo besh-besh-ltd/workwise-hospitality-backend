@@ -8894,6 +8894,13 @@ const rfqController = {
         departmentId: asStrArr(f.departmentId), productId: asStrArr(f.productId), vendorId: asStrArr(f.vendorId),
         dateFrom: asISODate(f.dateFrom),
         dateTo: asISODate(f.dateTo),
+        // "Created by me" — the dashboard's My-drafts / My-active View-all.
+        // The creator is always the JWT user, never a client-supplied id.
+        mine: f.mine === true || f.mine === 'true' || f.mine === 1 || f.mine === '1',
+        // The Vendor disagreements card's View-all: RFQs with an open technical
+        // evaluation a vendor disagreed with (the card's own predicate).
+        vendor_disagreement: f.vendor_disagreement === true || f.vendor_disagreement === 'true'
+          || f.vendor_disagreement === 1 || f.vendor_disagreement === '1',
       };
       const hotel_ids = Array.isArray(body.hotel_ids) ? body.hotel_ids : undefined;
 
@@ -8902,7 +8909,14 @@ const rfqController = {
       //    tabs, facets, counts, sorting and the pending passes read. The
       //    heavy per-card columns are fetched for the visible page in step 8a.
       const FETCH_CAP = 1000;
-      const all = await rfqModel.getRfqListViewRows(FETCH_CAP, user_id, search, hotel_ids);
+      // `mine` / `vendor_disagreement` are pushed into the SQL so they narrow
+      // BEFORE the cap (filtering the newest 1,000 in JS would drop a creator's
+      // older RFQs once their scope passes the cap) and before tab counts and
+      // facets, so every number on the page describes the set the card counted.
+      const all = await rfqModel.getRfqListViewRows(FETCH_CAP, user_id, search, hotel_ids, {
+        mine: filters.mine,
+        vendorDisagreement: filters.vendor_disagreement,
+      });
       const rows = Array.isArray(all) ? all : [];
 
       // 2. Lifecycle stage → bucket + normalized status key.

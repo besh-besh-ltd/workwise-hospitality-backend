@@ -7,6 +7,7 @@ import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
+import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 
 /**
@@ -4438,6 +4439,22 @@ LIMIT 2;
         -- (hotel x department x process) tuple. See
         -- authorizationService.buildApproverReadExemption for why.
         ${RFQ_APPROVER_READ_EXEMPTION(user_id)}
+        ${include_drafts ? `
+        -- The creator's own early draft, saved before a company context existed
+        -- (hospitality_company_id NULL — prod RFQ 1128). No role scope can match a
+        -- NULL company, yet the "My drafts" widget counts it; the tenant stays
+        -- bounded by a hotel mapping the creator actually holds.
+        OR (RFQ.is_published = 0 AND RFQ.status = 1
+            AND RFQ.created_by = ${Number(user_id)}
+            AND RFQ.hospitality_company_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_hotel_mappings _rhm_own
+              JOIN tbl_hospitality_company_hotels _hch_own ON _hch_own.id = _rhm_own.hotel_id
+              JOIN tbl_hospitality_user_mappings _hum_own ON _hum_own.user_id = ${Number(user_id)}
+                AND (_hum_own.hospitality_hotel_id = _hch_own.id
+                     OR (_hum_own.mapping_type = 0 AND _hum_own.hospitality_hotel_id IS NULL
+                         AND _hum_own.hospitality_company_id = _hch_own.hospitality_company_id))
+              WHERE _rhm_own.rfq_id = RFQ.id))` : ''}
         OR EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
         JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
@@ -4552,7 +4569,10 @@ LIMIT 2;
    * duplicated across hotels share one), which reproduces the order the old
    * plan's backward scan of idx_rfq_timestamp returned them in.
    */
-  getRfqListViewRows: async (cap, user_id, search, hotel_ids) => {
+  // opts.mine / opts.vendorDisagreement narrow in SQL, BEFORE the cap: the
+  // dashboard's "Created by me" and "Vendor disagreements" View-all links must
+  // count the same set their cards counted, never the newest `cap` filtered in JS.
+  getRfqListViewRows: async (cap, user_id, search, hotel_ids, { mine = false, vendorDisagreement = false } = {}) => {
     const uid = Number(user_id);
     if (!Number.isFinite(uid)) return [];
     const hotelList = Array.isArray(hotel_ids)
@@ -4633,6 +4653,21 @@ LIMIT 2;
       AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4) OR (RFQ.is_published = 0 AND RFQ.created_by = $1))
       AND (
         ${RFQ_APPROVER_READ_EXEMPTION(uid)}
+        -- The creator's own early draft, saved before a company context existed
+        -- (hospitality_company_id NULL — prod RFQ 1128). No role scope can match a
+        -- NULL company, yet the "My drafts" widget counts it; the tenant stays
+        -- bounded by a hotel mapping the creator actually holds.
+        OR (RFQ.is_published = 0 AND RFQ.status = 1
+            AND RFQ.created_by = $1
+            AND RFQ.hospitality_company_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_hotel_mappings _rhm_own
+              JOIN tbl_hospitality_company_hotels _hch_own ON _hch_own.id = _rhm_own.hotel_id
+              JOIN tbl_hospitality_user_mappings _hum_own ON _hum_own.user_id = $1
+                AND (_hum_own.hospitality_hotel_id = _hch_own.id
+                     OR (_hum_own.mapping_type = 0 AND _hum_own.hospitality_hotel_id IS NULL
+                         AND _hum_own.hospitality_company_id = _hch_own.hospitality_company_id))
+              WHERE _rhm_own.rfq_id = RFQ.id))
         OR EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
           JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
@@ -4653,6 +4688,8 @@ LIMIT 2;
       AND ($2::text IS NULL OR RFQ.rfq_no::text LIKE '%' || $2 || '%' OR RFQ.title ILIKE '%' || $2 || '%')
       AND RFQ.is_tender = 0
       ${hotelList.length > 0 ? 'AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id = ANY($4::int[]))' : ''}
+      ${mine ? 'AND RFQ.created_by = $1' : ''}
+      ${vendorDisagreement ? `AND RFQ.status = 1 AND ${hasOpenVendorDisagreement('RFQ')}` : ''}
       ORDER BY RFQ."timestamp" DESC, RFQ.ctid DESC
       LIMIT $3
       `,
