@@ -534,6 +534,44 @@ describe("vendor network org and entity API", () => {
     expect((await seatsOf(vendorId)).map((s) => s.status)).toEqual(["active"]);
   });
 
+  it("11a. the public /hospitality/verify-payment refuses a network_seat order; the seat flow still completes it", async () => {
+    await world();
+    process.env.NETWORK_SEAT_FEE_INR = "1500";
+    const { state_id } = await aStateWithCity();
+    const admin = await httpClient(HQ);
+    const created = await admin.post(`${BASE}/entities`).send({
+      company_name: "VN Wrong Verify Branch", gstin: "27WRONG1234K1Z2", email: "vn-wrong-verify@example.com", state_id, relationship: "BRANCH",
+    });
+    expect(created.status).toBe(201);
+    const seatId = created.body.data.seat.id;
+    const pay = await admin.post(`${BASE}/seats/pay`).send({ seat_ids: [seatId] });
+    expect(pay.status).toBe(200);
+    const orderId = pay.body.data.order.id;
+    const paymentId = "pay_vnseat_wrong_verify";
+    const body = {
+      razorpay_order_id: orderId,
+      razorpay_payment_id: paymentId,
+      razorpay_signature: crypto.createHmac("sha256", Config.razorpay.razorpay_secret).update(`${orderId}|${paymentId}`).digest("hex"),
+    };
+    const hqBefore = await db.one(`SELECT status FROM tbl_users WHERE id = $1`, [HQ]);
+
+    const wrong = await admin.post(`/api/v1/hospitality/verify-payment`).send(body);
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.status).toBe(2);
+    expect(await db.one(`SELECT payment_status, razorpay_payment_id FROM tbl_vendor_payments WHERE razorpay_order_id = $1`, [orderId])).toEqual({
+      payment_status: "created",
+      razorpay_payment_id: null,
+    });
+    expect(await db.one(`SELECT status FROM tbl_users WHERE id = $1`, [HQ])).toEqual(hqBefore);
+    // the open checkout still blocks a second order for the same seat
+    const again = await admin.post(`${BASE}/seats/pay`).send({ seat_ids: [seatId] });
+    expect([again.status, again.body.reason]).toEqual([409, "PAYMENT_IN_PROGRESS"]);
+
+    const ok = await admin.post(`${BASE}/seats/verify-payment`).send(body);
+    expect(ok.status).toBe(200);
+    expect(await db.one(`SELECT status FROM tbl_vendor_network_seats WHERE id = $1`, [seatId])).toEqual({ status: "active" });
+  });
+
   describe("11b. seats on re-link", () => {
     async function linkAndAccept(admin, vendorId) {
       const inv = await (await httpClient(admin)).post(`${BASE}/entities/link-invites`).send({ target_vendor_id: vendorId, relationship: "BRANCH" });

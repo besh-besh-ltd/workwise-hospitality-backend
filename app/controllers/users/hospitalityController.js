@@ -3220,6 +3220,16 @@ const HospitalityController = {
       const payment = vendorPayment[0];
       const userId = payment.vendor_id;
 
+      // A Vendor Networks seat order completes only through
+      // POST /vendor-network/seats/verify-payment (it activates the seats). Marking it
+      // 'success' here would activate nothing and release the open-checkout lock.
+      if (payment.payment_type === 'network_seat') {
+        return res.status(400).json({
+          status: 2,
+          message: 'This payment is for network seats; verify it from the network entities page'
+        });
+      }
+
       // Mark payment as successful
       await db.none(
         `UPDATE tbl_vendor_payments
