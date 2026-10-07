@@ -37,9 +37,10 @@ jest.unstable_mockModule("../../app/services/notificationService.js", () => ({
     recipients.map((r) => r.user_id || r.id).filter(Boolean),
 }));
 
-const { sendApprovalStepNotification, approvalStepEmailContext } = await import(
+const { sendApprovalStepNotification } = await import(
   "../../app/helper/sendEmailFunctions/approvalEmails.js"
 );
+const { approvalStepEmailContext } = await import("../../app/helper/approvalEmailContext.js");
 
 const PO_METADATA = {
   po_id: 626,

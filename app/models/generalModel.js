@@ -1,7 +1,8 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
-import { sendApprovalStepNotification, approvalStepEmailContext } from '../helper/sendEmailFunctions/approvalEmails.js';
+import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
+import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
 import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificationLinks.js';
 
 // Maps entity_type to the permission resource used in tbl_permissions
