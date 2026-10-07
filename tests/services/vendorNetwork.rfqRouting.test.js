@@ -1106,6 +1106,20 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     );
   });
 
+  it("Task 22 fix 4: POST /rfq/add-product-to-rfq with the routed member in its explicit vendors invites the principal, never the member directly", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const res = await (await httpClient(BUYER))
+      .post("/api/v1/rfq/add-product-to-rfq")
+      .send({ rfq_id: rfq.rfq_id, variant_id: VARIANT2, vendors: [B, NO], specs: {} });
+    expect(res.status).toBe(200);
+    const line = async (userId) =>
+      (await rowsOf(rfq.rfq_id, userId)).filter((r) => Number(r.product_variant_id) === Number(VARIANT2));
+    expect((await line(HQ)).map((r) => r.routed_from_vendor_id)).toEqual([null]);
+    expect((await line(B)).map((r) => r.routed_from_vendor_id)).toEqual([HQ]);
+    expect(await line(NO)).toHaveLength(1);
+  });
+
   it("tech-eval replacement vendor row (rfqModel.addTechEvalReplacementVendorRow, used by handleTechnicalPostApproval) → the member gets its copy", async () => {
     // The full scored tech-eval approval cannot be driven deterministically here (it needs a
     // failed round, a reserve or quoting vendor without an invite row, and the approval

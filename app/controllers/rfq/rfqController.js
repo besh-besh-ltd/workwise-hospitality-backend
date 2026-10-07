@@ -7892,6 +7892,14 @@ const rfqController = {
         });
       }
 
+      // Vendor Networks: an org entity in the list is invited as its principal (a routed
+      // member is never a direct invitee); a vendor already on the line is skipped.
+      vendorIds = await directInviteIdsForLine(
+        db,
+        { rfqId: rfq_id, productVariantId: product.variant_id, variant },
+        vendorIds
+      );
+
       if (vendorIds.length > 0) {
         const vendorPromises = vendorIds.map(async (vendor) => {
           const vendorData = {
