@@ -900,6 +900,32 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(excluded).not.toContain(B);
   });
 
+  it("Task 22 round 3: a member is not offered through a principal the buyer may not see (private, unlinked) or that is deleted", async () => {
+    await db.none(
+      `INSERT INTO tbl_product_variant_vendor_mapping
+         (product_variant_id, vendor_id, status, is_approved, created_by, created_at, updated_at)
+       VALUES ($1, $2, true, true, $2, now(), now())`,
+      [VARIANT_CAT, B]
+    );
+    await db.none(`INSERT INTO tbl_company_location (company_id, country_id, address) VALUES ($1, 1, 'B street'), ($2, 1, 'HQ street')`, [B, HQ]);
+    const offered = async () => {
+      const res = await (await httpClient(BUYER)).post("/api/v1/rfq/get-vendors-for-product").send({ productId: VARIANT_CAT, excludeIds: [] });
+      expect(res.status).toBe(200);
+      return res.body.data.map((v) => Number(v.id)).filter((id) => [HQ, B].includes(id));
+    };
+    expect(await offered()).toEqual([HQ]); // public principal: offered for B
+
+    // HQ's company is private and not linked to this buyer: neither HQ nor B
+    await db.none(`UPDATE tbl_company SET is_private = 1 WHERE id = $1`, [HQ]);
+    expect(await offered()).toEqual([]);
+
+    // public again, but the principal's login is deleted: neither
+    await db.none(`UPDATE tbl_company SET is_private = 0 WHERE id = $1`, [HQ]);
+    await db.none(`UPDATE tbl_users SET is_deleted = 1 WHERE id = $1`, [HQ]);
+    expect(await offered()).toEqual([]);
+    await db.none(`UPDATE tbl_users SET is_deleted = 0 WHERE id = $1`, [HQ]);
+  });
+
   it("Task 22 fix 3: the create-wizard vendor list (get-draft-vendors) omits routed copies", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);

@@ -7470,7 +7470,14 @@ LIMIT 2;
                          THEN 1 ELSE 0 END AS is_linked_with_buyer
                FROM tbl_users U
                JOIN tbl_company C ON C.id = U.company_id
-              WHERE U.id = ANY($1::int[]) AND U.status = 1`,
+              WHERE U.id = ANY($1::int[])
+                -- the main query's liveness and visibility, applied to the principal
+                -- itself (keyIsInvitable: a live login); not visible → its members
+                -- are not offered either
+                AND U.status = 1 AND COALESCE(U.is_deleted, 0) = 0
+                AND (C.is_private = 0
+                     OR EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping BVM
+                                 WHERE BVM.vendor_id = U.id AND BVM.company_id = $2))`,
             [ids, companyId]
           ),
       });
