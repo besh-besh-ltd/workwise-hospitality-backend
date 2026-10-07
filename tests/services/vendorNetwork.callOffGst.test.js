@@ -534,6 +534,56 @@ describe("contract document supplier GSTIN", () => {
     expect(vendor.gstin).toBeNull();
     expect(supplierMeta(html)).toContain("GSTIN: N/A");
   });
+
+  // Task 20 / D2: the vendor accept/contract page previews the document from this JSON,
+  // so it must carry the same two GSTINs the PDF prints.
+  const detail = async (userId, contractId) => {
+    const res = await (await httpClient(userId)).get(`/api/v1/arc-v2/vendor/contracts/${contractId}`);
+    expect(res.status).toBe(200);
+    return res.body.data;
+  };
+
+  it("the vendor contract detail JSON carries the document's supplier and purchaser GSTINs", async () => {
+    const hq = await detail(HQ, hqContractId);
+    expect(hq.contract.vendor_gstin).toBe(HQ_GSTIN);
+    expect(hq.arc.purchaser_gstin).toBe(H_MH_GSTIN);
+    expect(hq.arc).not.toHaveProperty("company_gstin");
+
+    await db.none(`INSERT INTO tbl_arc_quote (arc_id, vendor_id, gstin_used) VALUES ($1, $2, '27AABCH0971F2ZV')`, [arcId, HQ]);
+    expect((await detail(HQ, hqContractId)).contract.vendor_gstin).toBe("27AABCH0971F2ZV");
+
+    const leg = await detail(LEG, legContractId);
+    expect(leg.contract.vendor_gstin).toBeNull();
+  });
+
+  it("a fulfilment member's view names the contract holder's GSTIN; a hidden lead hotel's GSTIN is withheld", async () => {
+    // The member view is granted by ACCEPTED ARC_HOTEL assignments (spec §6.4).
+    await db.none(
+      `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status)
+       SELECT $1, 'ARC_HOTEL', $2, h, $3, 'ACCEPTED' FROM unnest($4::int[]) h`,
+      [ORG, hqContractId, M_UP, [H_MH, H_UP]]
+    );
+    const member = await detail(M_UP, hqContractId);
+    expect(member.viewer_role).toBe("fulfilment_member");
+    expect(member.contract.vendor_gstin).toBe(HQ_GSTIN);
+    expect(member.arc.purchaser_gstin).toBe(H_MH_GSTIN); // it fulfils the lead hotel
+
+    // M_UP keeps only H_UP: the lead hotel (and its GSTIN) is no longer its business.
+    await db.none(
+      `UPDATE tbl_vendor_routing_assignments SET status = 'REVOKED'
+        WHERE org_id = $1 AND subject_id = $2 AND hotel_id = $3`,
+      [ORG, hqContractId, H_MH]
+    );
+    await db.none(
+      `UPDATE tbl_arc_contract_line_hotel SET fulfilling_vendor_id = NULL WHERE arc_contract_line_id = $1 AND hotel_id = $2`,
+      [hqLineId, H_MH]
+    );
+    const companyGst = (await db.one(`SELECT NULLIF(trim(gst), '') AS gst FROM tbl_hospitality_companies WHERE id = $1`, [HC_A])).gst;
+    const narrowed = await detail(M_UP, hqContractId);
+    expect(narrowed.arc.hotel_name).toBeNull();
+    expect(narrowed.arc.purchaser_gstin).toBe(companyGst);
+    expect(narrowed.arc.purchaser_gstin).not.toBe(H_MH_GSTIN);
+  });
 });
 
 // --- MR picker and ledger inheritance use the release's ACTIVE gate ---------------------

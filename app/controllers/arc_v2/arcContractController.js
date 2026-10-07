@@ -576,6 +576,10 @@ const ARC_CONTEXT_SQL = `
          cat.title AS category_title,
          h.name    AS hotel_name, h.city AS hotel_city,
          hc.name   AS company_name,
+         -- Purchaser GSTIN, as the contract document prints it (loadContractDocContext):
+         -- the lead hotel's, else its company's.
+         COALESCE(NULLIF(trim(h.gst), ''), NULLIF(trim(hc.gst), '')) AS purchaser_gstin,
+         NULLIF(trim(hc.gst), '') AS company_gstin,
          u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation,
          a.hotel_id AS lead_hotel_id
     FROM tbl_arc a
@@ -589,8 +593,8 @@ const ARC_CONTEXT_SQL = `
 async function loadArcContext(arcId) {
   const row = await db.oneOrNone(ARC_CONTEXT_SQL, [arcId]);
   if (!row) return { arc: null, leadHotelId: null };
-  const { lead_hotel_id: lead, ...arc } = row;
-  return { arc, leadHotelId: lead == null ? null : Number(lead) };
+  const { lead_hotel_id: lead, company_gstin: companyGstin, ...arc } = row;
+  return { arc, leadHotelId: lead == null ? null : Number(lead), companyGstin };
 }
 
 /**
@@ -688,8 +692,10 @@ export async function getContractDetail(req, res) {
       hotels = ledger.hotels;
       for (const line of lines) line.hotels = ledger.byLine[String(line.id)] || [];
     }
+    // The Supplier GSTIN exactly as the contract document prints it (quoted, else registered).
+    const { gstin: vendorGstin } = await loadContractVendorParty(contract);
     return ok(res, {
-      contract, lines, arc: arcInfo, callOffs,
+      contract: { ...contract, vendor_gstin: vendorGstin }, lines, arc: arcInfo, callOffs,
       amendments: amendments.map(arcAmendmentModel.vendorView),
       clarifications,
       hotels,
@@ -716,11 +722,13 @@ const AMENDMENT_LINE_FIELDS = ['amendment_id', 'amendment_type', 'amendment_effe
  */
 async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) {
   const id = Number(contract.id);
-  const [allLines, { arc, leadHotelId }, ledger, callOffs] = await Promise.all([
+  const [allLines, { arc, leadHotelId, companyGstin }, ledger, callOffs, supplier] = await Promise.all([
     arcContractModel.listLines(id),
     loadArcContext(contract.arc_id),
     arcHotelModel.listContractHotels(id, null, { hotelIds, withOverrides: true }),
     listContractCallOffs(id, { hotelIds, vendorId: memberVendorId }),
+    // The contract holder (the principal) as the contract document names it.
+    loadContractVendorParty(contract),
   ]);
   const lines = [];
   for (const line of allLines) {
@@ -747,9 +755,11 @@ async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) 
   if (arc && !hotelIds.includes(leadHotelId)) {
     arc.hotel_name = null;
     arc.hotel_city = null;
+    // The lead hotel's GSTIN is withheld with its name: the buyer company's stands in.
+    arc.purchaser_gstin = companyGstin ?? null;
   }
   return {
-    contract: { ...contract, document_s3_url: null, document_hash: null },
+    contract: { ...contract, vendor_gstin: supplier.gstin, document_s3_url: null, document_hash: null },
     lines,
     arc,
     callOffs,
