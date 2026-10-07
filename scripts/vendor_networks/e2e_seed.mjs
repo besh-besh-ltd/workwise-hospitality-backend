@@ -76,6 +76,8 @@ const db = pgp(conn);
 
 const RANGE = [95801, 95899];
 const PASSWORD = "E2e@12345";
+// Logins an E2E run creates through the API with this email shape are cleaned up with the seed.
+const SEED_EMAIL_MARKER = "e2e.%@example.com";
 
 const ID = Object.freeze({
   buyerCompany: 95801, // tbl_company (buyer parent)
@@ -127,27 +129,22 @@ async function cleanup(t) {
   const [lo, hi] = RANGE;
   const inRange = (col) => `${col} BETWEEN ${lo} AND ${hi}`;
 
-  // Logins the API created under this org (POST /entities, POST /members) are ours too.
-  const apiUsers = (
+  // OWNED users: the seed's own range, plus logins an E2E run created with the seed's email
+  // marker (e2e.<anything>@example.com, see the runbook). Only owned users, and what hangs off
+  // them, are ever deleted. Any OTHER login merely linked into the seed org (a pre-existing
+  // vendor HQ invited, say) only loses its org edges: entity, member, seat and invite rows.
+  const userIds = (
     await t.any(
-      `SELECT vendor_id AS id FROM tbl_vendor_org_entities WHERE ${inRange("org_id")} AND NOT ${inRange("vendor_id")}
-       UNION
-       SELECT person_user_id FROM tbl_vendor_org_members WHERE ${inRange("org_id")} AND NOT ${inRange("person_user_id")}
-       UNION
-       SELECT o.principal_vendor_id FROM tbl_vendor_orgs o WHERE ${inRange("o.principal_vendor_id")} AND NOT ${inRange("o.id")}`
+      `SELECT id FROM tbl_users WHERE ${inRange("id")} OR email LIKE $1`,
+      [SEED_EMAIL_MARKER]
     )
   ).map((r) => Number(r.id));
-  const userIds = [
-    ...(await t.any(`SELECT id FROM tbl_users WHERE ${inRange("id")}`)).map((r) => Number(r.id)),
-    ...apiUsers,
-  ];
   const companyIds = [
     ...new Set([
       ...(await t.any(`SELECT id FROM tbl_company WHERE ${inRange("id")}`)).map((r) => Number(r.id)),
-      ...(apiUsers.length
-        ? await t.any(`SELECT company_id FROM tbl_users WHERE id = ANY($1::int[]) AND company_id IS NOT NULL`, [apiUsers])
-        : []
-      ).map((r) => Number(r.company_id)),
+      ...(await t.any(`SELECT company_id FROM tbl_users WHERE id = ANY($1::int[]) AND company_id IS NOT NULL`, [userIds])).map(
+        (r) => Number(r.company_id)
+      ),
     ]),
   ];
   const hotelIds = Object.values(ID.hotels);
@@ -187,21 +184,18 @@ async function cleanup(t) {
       [rfqIds, contractIds, mrIds, userIds]
     )
   ).map((r) => Number(r.id));
-  const rfqProductIds = (
-    await t.any(`SELECT id FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [rfqIds])
-  ).map((r) => Number(r.id));
 
-  // Approval instances are polymorphic (entity_type, entity_id): collect ours before the entities go.
+  // Approval instances are polymorphic (entity_type, entity_id). Every instance this world
+  // produces carries the seed's hospitality company; the id-based branches are limited to the
+  // types whose entity_id IS an RFQ / ARC id (TECHNICAL, NEGOTIATION, ARC_* use round or
+  // amendment ids, which could collide with unrelated rows).
   const instanceIds = (
     await t.any(
       `SELECT id FROM tbl_approval_instances
         WHERE hospitality_company_id = $1
-           OR (entity_type IN ('RFQ', 'TECHNICAL', 'NEGOTIATION') AND entity_id = ANY($2::int[]))
-           OR (entity_type = 'NEGOTIATION_QUOTE' AND entity_id = ANY($3::int[]))
-           OR (entity_type = 'PO' AND entity_id = ANY($4::int[]))
-           OR (entity_type = 'MR' AND entity_id = ANY($5::int[]))
-           OR (entity_type LIKE 'ARC%' AND entity_id = ANY($6::int[]))`,
-      [ID.hospitality, rfqIds, rfqProductIds, poIds, mrIds, arcIds]
+           OR (entity_type = 'RFQ' AND entity_id = ANY($2::int[]))
+           OR (entity_type = 'ARC' AND entity_id = ANY($3::int[]))`,
+      [ID.hospitality, rfqIds, arcIds]
     )
   ).map((r) => Number(r.id));
 
@@ -226,7 +220,7 @@ async function cleanup(t) {
   await del(
     `DELETE FROM tbl_lifecycle_history
       WHERE (entity_type = 'PO' AND entity_id = ANY($1::int[]))
-         OR (entity_type IN ('RFQ', 'TENDER', 'TECHNICAL', 'NEGOTIATION') AND entity_id = ANY($2::int[]))
+         OR (entity_type IN ('RFQ', 'TENDER') AND entity_id = ANY($2::int[]))
          OR (entity_type = 'ARC' AND entity_id = ANY($3::int[]))`,
     [poIds, rfqIds, arcIds]
   );
@@ -292,7 +286,8 @@ async function cleanup(t) {
 
   // Vendor network (seats/members/invites/entities/coverage, then the org).
   await del(`DELETE FROM tbl_vendor_network_seats WHERE org_id = ANY($1::int[]) OR entity_vendor_id = ANY($2::int[])`, [orgIds, userIds]);
-  await del(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = ANY($1::int[])`, [userIds]);
+  // Coverage authored by the seed org's admins, or for an owned entity.
+  await del(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = ANY($1::int[]) OR created_by = ANY($1::int[])`, [userIds]);
   await del(`DELETE FROM tbl_vendor_org_members WHERE org_id = ANY($1::int[]) OR person_user_id = ANY($2::int[])`, [orgIds, userIds]);
   await del(`DELETE FROM tbl_vendor_org_link_invites WHERE org_id = ANY($1::int[]) OR target_vendor_id = ANY($2::int[])`, [orgIds, userIds]);
   await del(`DELETE FROM tbl_vendor_org_entities WHERE org_id = ANY($1::int[]) OR vendor_id = ANY($2::int[])`, [orgIds, userIds]);
@@ -613,8 +608,12 @@ async function seedGroupArc(t, variants) {
 }
 
 async function main() {
-  const where = await db.one(`SELECT current_database() AS db, inet_server_addr() AS addr`);
+  const where = await db.one(`SELECT current_database() AS db, host(inet_server_addr()) AS addr`);
   if (where.db !== conn.database) throw new Error(`connected to '${where.db}', expected '${conn.database}'`);
+  // Belt and braces on top of the host-name check: the server we reached must answer on loopback.
+  if (!["127.0.0.1", "::1"].includes(where.addr)) {
+    throw new Error(`server address is '${where.addr}', not loopback: refusing to seed`);
+  }
 
   const variants = await db.any(
     `SELECT pv.id, pv.name

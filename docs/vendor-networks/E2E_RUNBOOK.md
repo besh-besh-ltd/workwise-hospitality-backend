@@ -1,7 +1,10 @@
 # Vendor Networks: local E2E runbook
 
 How to stand up a local backend, with seeded data, for the Vendor Networks E2E scenarios
-(Task 17). Everything runs on this machine. Nothing connects to stage or production.
+(Task 17). Everything runs on this machine. The database, AWS and mail stay on loopback;
+nothing connects to stage or production. The few integrations that can still reach the
+internet with dummy keys, all off the scenarios, are listed in the
+[integration table](#integrations).
 
 ## Safety model
 
@@ -14,8 +17,8 @@ the app loads `.env`.
 | Piece | Guard |
 |---|---|
 | `e2e_prepare_db.mjs` | Uses the test harness (`tests/setup/prepareTestDb.js`), so the harness guards apply: `NODE_ENV=test`, the DB name must match `^hospitality_test_…`, and the host comes from `.env.test` (local Postgres). It also refuses a non-local host. |
-| `e2e_seed.mjs` | Never reads any `.env` file. It refuses unless the DB name matches `/^hospitality_test_\|local\|dev/` and contains none of `prod`, `stage`, `staging` or `main`, and the host is `localhost`, `127.0.0.1` or `::1`. |
-| `e2e_server.sh` | Applies the same DB-name and host checks, then exports the DB, AWS, SMTP and the other integrations (see below) before `node server.js` starts. |
+| `e2e_seed.mjs` | Never reads any `.env` file. It refuses unless the DB name matches `/^hospitality_test_\|local\|dev/` and contains none of `prod`, `stage`, `staging` or `main` (any case), and the host is `localhost`, `127.0.0.1` or `::1`. Once connected it also asserts that `inet_server_addr()` is loopback. |
+| `e2e_server.sh` | Applies the same DB-name (case-insensitive) and host checks. It then exports the DB, AWS, secrets and the other integrations (see below), and preloads the mail and AWS sinks before `node server.js` starts. |
 
 ## 1. Prepare the database
 
@@ -44,10 +47,17 @@ node scripts/vendor_networks/e2e_seed.mjs            # hospitality_test_e2e @ 12
 # options: --db=  --host=  --port=  --user=   (or E2E_DB_NAME / E2E_DB_HOST / E2E_DB_PORT / E2E_DB_USER / E2E_DB_PASSWORD)
 ```
 
-The seed is idempotent. Every row it owns is in the id range **95801–95899**, or hangs off
-one of those rows. A re-run first deletes that whole world, including what an E2E run built
-on top of it (quotes, routing assignments, POs, MRs, call-offs, notifications, network rows
-created through the API), then seeds it again. If a run leaves rows the cleanup does not
+The seed is idempotent. A re-run first deletes the seed's world, then seeds it again. The
+world is everything **owned** by the seed, plus what an E2E run built on top of it (quotes,
+routing assignments, POs, MRs, call-offs, notifications).
+
+- **Owned logins:** ids **95801–95899**, plus any login whose email matches
+  `e2e.%@example.com`. When the E2E run creates entities or persons through the API
+  (`POST /entities`, `POST /members`), use emails like `e2e.<something>@example.com` so a
+  re-seed removes them.
+- **Any other login linked into the seed org** loses only its org edges: entity, member,
+  seat and invite rows (and coverage rules the seed org's admin authored). Its user,
+  company, subscriptions, mappings, contracts, POs and RFQs are never touched. If a run leaves rows the cleanup does not
 know about, the seed fails, rolls back, and says so. Rebuild the database with step 1.
 
 The seed prints every login and id. Rows that use the sequence (RFQ id, ARC id, contract id,
@@ -121,17 +131,37 @@ echo $!                                                       # the node PID (th
 |---|---|
 | Database | `HOST=127.0.0.1`, `DATABASE_NAME=hospitality_test_e2e`, `DATABASE_USERNAME=$(whoami)`, `DATABASE_PASSWORD=` (empty), `DATABASE_PORT=5432`, `TEST_DB_NO_SSL=1`. Override with `E2E_DB_NAME`, `E2E_DB_HOST`, `E2E_DB_USER`, `E2E_DB_PASSWORD`, `E2E_DB_PORT`. |
 | Node env | `NODE_ENV=development`. Not `production`, so `POST …/contracts/:id/request-otp` returns the signing OTP as `data.dev_code`. Not `test`, so the real code paths run: PDFs render and crons start. |
-| AWS | Fake keys, plus `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3=http://localhost:9555`. That port is `scripts/vendor_networks/e2e_aws_sink.mjs`, loaded in the same process with `--import`. It stores PUT objects under `/tmp/vn-e2e-aws-sink/` and answers any other AWS call with 200 `{}`. This matters because PO approval is strict about the PO document: render, upload, store. Without a reachable "S3" no PO can be approved. The URL stored on the PO is the usual `https://vn-e2e-local.s3…amazonaws.com/…`, so clicking "download" in the UI fails. The PDF itself is in `/tmp/vn-e2e-aws-sink/vn-e2e-local.localhost/`. Override the port with `E2E_AWS_SINK_PORT`. |
-| SMTP | Dummy credentials. Sends fail and the app logs `[MAIL] ERROR` and carries on. Check in-app notifications (`tbl_notifications`) instead of email. |
-| Other integrations | WhatsApp/AiSensy, AI, OTP and Flux point at `127.0.0.1:9`, which is unroutable. Razorpay gets dummy keys; the seat fee defaults to 0. OTel exports to `127.0.0.1:4317`. |
+| AWS | Fake keys, plus `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_S3=http://localhost:9555`. That port is `scripts/vendor_networks/e2e_aws_sink.mjs`, loaded in the same process with `--import`, listening on loopback only (`[::1]` and `127.0.0.1`). It stores PUT objects under `/tmp/vn-e2e-aws-sink/` and answers any other AWS call with 200 `{}`. This matters because PO approval is strict about the PO document: render, upload, store. Without a reachable "S3" no PO can be approved. The URL stored on the PO is the usual `https://vn-e2e-local.s3…amazonaws.com/…`, so clicking "download" in the UI fails. The PDF itself is in `/tmp/vn-e2e-aws-sink/vn-e2e-local.localhost/`. Override the port with `E2E_AWS_SINK_PORT`. |
+| Mail | `scripts/vendor_networks/e2e_mail_sink.mjs`, preloaded with `--import`, replaces `nodemailer.createTransport` on the shared export. Every transport the app creates writes the message as a JSON file to `/tmp/vn-e2e-mail/<epoch-ms>-<n>.json` (override with `E2E_MAIL_DIR`). No SMTP connection is made. That matters because the SMTP host `smtp-relay.brevo.com` is hard-coded in `app/config/app.config.js`, so swapping the credentials alone still dials out. The app logs `[MAIL] Email sent successfully`. To read who got what: `for f in /tmp/vn-e2e-mail/*.json; do node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log(m.to[0].address, "|", m.subject)' "$f"; done` |
+| Secrets | Throwaway fixed literals for `JWT_SECRET`, `REFRESH_TOKEN_SECRET`, `CRYPT_SECRET`, `SCHEDULER_SECRET` and `WEBHOOK_SECRET`; the stage values in `.env` are never used. A throwaway VAPID pair is generated once with `web-push` into `/tmp/vn-e2e/vapid.json`. `WEB_PUSH_CONTACT` is `mailto:vn-e2e@localhost.invalid`. The seed depends on none of these: it stores bcrypt password hashes only, and `CRYPT_SECRET` only encrypts ids in responses and token claims. Tokens survive a server restart. |
+| Other integrations | See the integration table below. |
 | Links | `FRONT_END_WEBSITE=http://localhost:3000`, `APP_BASE_PATH=http://localhost:8122` |
 
 - **Check it is local.** The startup log shows `[e2e-server] db=hospitality_test_e2e@127.0.0.1…`.
   `lsof -nP -p <pid> -iTCP -a` should list only `127.0.0.1:5432` connections.
 - **Why not `npm run dev`?** It would work with the same exports, but it runs `nodemon`,
   which restarts on every file edit in the worktree, and pipes through `pino-pretty`, so
-  `$!` is not the node PID. It also does not load the AWS sink. The launcher is the
-  supported path.
+  `$!` is not the node PID. It also does not load the mail and AWS sinks. The launcher is
+  the supported path.
+
+### Integrations
+
+These are the scenarios' exposure to every outbound integration the backend has. **Neutralised** means no
+packet leaves the machine.
+
+| Integration | Where it is called | Status on the E2E run |
+|---|---|---|
+| Postgres | everywhere | **Neutralised.** `127.0.0.1:5432`, `hospitality_test_e2e` |
+| S3 upload (PO, call-off, contract and addendum PDFs) | `uploadToS3`, `generateContractPdf` | **Neutralised.** Goes to the loopback AWS sink |
+| EventBridge Scheduler, Lambda | RFQ publish scheduling (`app/helper/createSchedule.js`) | **Neutralised.** `AWS_ENDPOINT_URL` points at the sink. Not on the scenarios: the RFQ is seeded already published. |
+| Email (nodemailer) | `sendMail` / `notificationMail` in `app/helper/common.js` | **Neutralised.** JSON files in `/tmp/vn-e2e-mail`. No SMTP. |
+| WhatsApp / AiSensy, OTP SMS, Flux chat, `AI_BASE_URL` | notification and OTP helpers, AI chat | **Neutralised.** `127.0.0.1:9` refuses the connection, and the callers log and carry on. |
+| OpenTelemetry export | `otel-instrument.mjs` | **Neutralised.** `127.0.0.1:4317` |
+| Gemini (`generativelanguage.googleapis.com`) | `app/helper/processBOQWithAI.js`, the AI BOQ upload in RFQ create | **Not neutralised.** It would call Google with the dummy key `vn-e2e` and get rejected. Not on the scenarios: no RFQ is created from a BOQ. |
+| Server-side fetches of stored S3 URLs | `axios.get(file_url)` in `arcVendorController` / `arcEvaluationController` (tech-envelope evidence), and `arcContractController` vendor-documents bundle | **Not neutralised.** The stored URLs are `https://vn-e2e-local.s3…amazonaws.com/…`, a bucket that does not exist, so they would reach AWS's public endpoint and fail. That is not stage. Not on the scenarios: no evidence or vendor documents are uploaded. |
+| PO PDF company-logo fetch | `getBase64FromUrl` in `app/controllers/seo/seoController.js` (5 s timeout; on failure the PDF renders without a logo) | **Neutralised on the scenarios.** It runs only when the buyer company has a logo URL, and the seed sets none. Chromium itself renders self-contained HTML; see `app/util/pdfRenderer.js`. |
+| Razorpay | seat payments (`/vendor-network/seats/pay`), hospitality subscriptions, paid RFQs | **Not neutralised.** Throwaway test-style keys (`rzp_test_vn_e2e`), so `api.razorpay.com` rejects them. Not on the scenarios: `NETWORK_SEAT_FEE_INR` defaults to 0, so no order is created, and the seeded subscriptions are already active. |
+| Web push | `webpush.sendNotification` to subscriptions stored on `tbl_users` | **Not neutralised** if the browser subscribes: pushes would go to the browser vendor's push service, signed with the throwaway VAPID pair. Seeded users have no subscription. |
 
 ## 4. Point the frontend at it
 

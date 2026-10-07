@@ -11,8 +11,7 @@
 //   GET  /<key>  serves a stored object (404 if absent)
 //   anything else (EventBridge Scheduler, Lambda ...)  answers 200 with an empty JSON body
 //
-// Port: E2E_AWS_SINK_PORT (default 9555). Listens on :: (dual stack), because
-// the SDK addresses S3 virtual-host style: <bucket>.localhost resolves to ::1.
+// Port: E2E_AWS_SINK_PORT (default 9555). Listens on loopback only (::1 and 127.0.0.1).
 
 import http from "http";
 import fs from "fs";
@@ -30,7 +29,7 @@ function objectPath(req) {
   return file;
 }
 
-const server = http.createServer((req, res) => {
+function handle(req, res) {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
@@ -53,13 +52,20 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
   });
-});
+}
 
-server.on("error", (err) => {
-  console.error(`[e2e-aws-sink] cannot listen on ${PORT}: ${err.message}`);
-  process.exit(1);
+// Loopback only, on both families: the SDK addresses S3 virtual-host style and
+// <bucket>.localhost resolves to ::1, while plain localhost may resolve to 127.0.0.1.
+const listeners = ["::1", "127.0.0.1"].map((host) => {
+  const listener = http.createServer(handle);
+  listener.on("error", (err) => {
+    console.error(`[e2e-aws-sink] cannot listen on [${host}]:${PORT}: ${err.message}`);
+    process.exit(1);
+  });
+  listener.listen({ port: PORT, host }, () => {
+    console.log(`[e2e-aws-sink] AWS stand-in on [${host}]:${PORT}, objects under ${ROOT}`);
+  });
+  listener.unref();
+  return listener;
 });
-server.listen({ port: PORT, host: "::", ipv6Only: false }, () => {
-  console.log(`[e2e-aws-sink] AWS stand-in on :${PORT}, objects under ${ROOT}`);
-});
-server.unref();
+export default listeners;
