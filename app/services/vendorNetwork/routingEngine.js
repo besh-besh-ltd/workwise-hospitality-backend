@@ -569,10 +569,21 @@ export const subjectKey = (subjectType, subjectId, hotelId) => `${subjectType}:$
  */
 export async function priorRefusals(orgId, statuses = [DECLINED, TIMED_OUT]) {
   const map = new Map();
+  for (const [key, byVendor] of await refusalStatuses(orgId, statuses)) map.set(key, new Set(byVendor.keys()));
+  return map;
+}
+
+/**
+ * Like priorRefusals, but each vendor id maps to the status of its latest such row
+ * (DECLINED or TIMED_OUT): Map<subjectKey, Map<vendorId, status>>. The routing queue
+ * uses it to say WHY a covering entity is not suggested.
+ */
+export async function refusalStatuses(orgId, statuses = [DECLINED, TIMED_OUT]) {
+  const map = new Map();
   for (const r of await listOrgAssigneesByStatus(orgId, statuses)) {
     const key = subjectKey(r.subject_type, r.subject_id, Number(r.hotel_key) || null);
-    if (!map.has(key)) map.set(key, new Set());
-    map.get(key).add(Number(r.assigned_vendor_id));
+    if (!map.has(key)) map.set(key, new Map());
+    map.get(key).set(Number(r.assigned_vendor_id), r.status);
   }
   return map;
 }
@@ -592,5 +603,6 @@ export default {
   listForOrg,
   listForAssignee,
   priorRefusals,
+  refusalStatuses,
   subjectKey,
 };

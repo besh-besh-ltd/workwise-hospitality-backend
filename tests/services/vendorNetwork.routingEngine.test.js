@@ -473,6 +473,44 @@ describe("routing queue", () => {
     expect(accepted).toEqual([]);
     expect(refused.map((r) => [r.id, r.candidates.map((c) => c.vendor_id)])).toEqual([[declined.id, [B2]]]);
   });
+
+  // Task 20 / D3: the admin is told WHY a covering entity is not suggested, and a pending
+  // row carries the same suggestions so "already pending with X" can be said.
+  it("names covering entities left out (DECLINED / TIMED_OUT, latest refusal wins) and suggests for pending rows", async () => {
+    await db.none(
+      `INSERT INTO tbl_vendor_coverage_rules (entity_vendor_id, scope_type, scope_id, mode)
+       VALUES ($1, 'HOTEL', $3, 'INCLUDE'), ($2, 'HOTEL', $3, 'INCLUDE')`,
+      [B1, B2, H1]
+    );
+    cfg.valid = () => ({ ok: true, hotelIds: [H1], categoryId: null });
+    cfg.unrouted = [{ orgId: ORG, subjectId: 7310, hotelId: null, hotelIds: [H1], categoryId: null, title: "RFQ 7310" }];
+    const refuse = async (vendorId, status, agoHours) => {
+      const row = await insertAssignment({ subjectId: 7310, vendorId, status });
+      await db.none(`UPDATE tbl_vendor_routing_assignments SET acted_at = now() - $2 * interval '1 hour' WHERE id = $1`, [
+        row.id,
+        agoHours,
+      ]);
+    };
+    await refuse(B1, "TIMED_OUT", 3);
+    await refuse(B1, "DECLINED", 1); // B1's latest refusal
+    await refuse(B2, "TIMED_OUT", 2);
+    const pending = await insertAssignment({ subjectId: 7311, vendorId: B2 });
+
+    const { unrouted, pending: live, declined } = (await (await httpClient(HQ)).get(`${BASE}/routing/queue`)).body.data;
+    expect(unrouted).toHaveLength(1);
+    expect(unrouted[0].candidates).toEqual([]);
+    expect(unrouted[0].excluded).toEqual([
+      { vendor_id: B1, name: `VN ${B1}`, reason: "DECLINED" },
+      { vendor_id: B2, name: `VN ${B2}`, reason: "TIMED_OUT" },
+    ]);
+    // The refused rows of 7310 carry the same, from the queued entry.
+    expect(declined.map((r) => r.excluded.map((e) => e.reason))).toEqual(declined.map(() => ["DECLINED", "TIMED_OUT"]));
+
+    const [p] = live;
+    expect(p.id).toBe(pending.id);
+    expect(p.candidates.map((c) => c.vendor_id)).toEqual([B1, B2]); // the pending assignee included
+    expect(p.excluded).toEqual([]);
+  });
 });
 
 describe("two orgs routing the same subject", () => {

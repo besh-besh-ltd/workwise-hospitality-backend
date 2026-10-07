@@ -29,7 +29,7 @@ import {
   listForAssignee,
   registeredSubjects,
   getSubjectHandler,
-  priorRefusals,
+  refusalStatuses,
   subjectKey,
 } from "../../services/vendorNetwork/routingEngine.js";
 import { resolveCoverageCandidates } from "../../services/vendorNetwork/coverage.js";
@@ -77,10 +77,22 @@ const candidateView = (c) => ({
   hotels_covered: c.hotels_covered,
 });
 
-/** Ranked candidates minus the entities that already declined or timed out on this item. */
-async function candidatesFor(orgId, { hotelIds, categoryId }, excluded) {
+/**
+ * Ranked candidates minus the entities that already declined or timed out on this item,
+ * and those left out with why: { candidates, excluded: [{ vendor_id, name, reason }] }
+ * where reason is the refusal's status (DECLINED | TIMED_OUT). `refused` is the item's
+ * Map<vendorId, status> from refusalStatuses.
+ */
+async function suggestionsFor(orgId, { hotelIds, categoryId }, refused) {
   const ranked = await resolveCoverageCandidates({ orgId, hotelIds, categoryId: categoryId ?? null });
-  return ranked.filter((c) => !excluded?.has(Number(c.entity_vendor_id))).map(candidateView);
+  const candidates = [];
+  const excluded = [];
+  for (const c of ranked) {
+    const reason = refused?.get(Number(c.entity_vendor_id));
+    if (reason) excluded.push({ vendor_id: Number(c.entity_vendor_id), name: c.name, reason });
+    else candidates.push(candidateView(c));
+  }
+  return { candidates, excluded };
 }
 
 /** GET /routing/queue */
@@ -90,7 +102,7 @@ export async function routingQueue(req, res) {
     if (denied) return res.status(denied.http).json(denied.body);
     const orgId = req.user.network.org_id;
     const { principal_vendor_id: principalVendorId } = await getOrgById(orgId);
-    const refused = await priorRefusals(orgId);
+    const refused = await refusalStatuses(orgId);
 
     const unrouted = [];
     const unroutedByKey = new Map();
@@ -114,7 +126,7 @@ export async function routingQueue(req, res) {
           category_id: item.categoryId ?? null,
           title: item.title ?? null,
           meta: item.meta ?? null,
-          candidates: await candidatesFor(orgId, item, refused.get(key)),
+          ...(await suggestionsFor(orgId, item, refused.get(key))),
         };
         unroutedByKey.set(key, view);
         unrouted.push(view);
@@ -128,31 +140,36 @@ export async function routingQueue(req, res) {
       listForOrg(orgId, { status: [DECLINED, TIMED_OUT], actedSince: since }).then(withDescription),
     ]);
 
-    // Declined / timed-out items: the unrouted entry's candidates when the item is back in
-    // the queue; otherwise (already re-routed) the subject is re-validated for its hotels.
-    const declined = [];
-    for (const row of declinedRows) {
+    // Suggestions for a routed row: the unrouted entry's when the item is back in the
+    // queue; otherwise the subject is re-validated for its hotels.
+    const withSuggestions = async (row) => {
       const key = subjectKey(row.subject_type, row.subject_id, row.hotel_id);
-      let candidates = unroutedByKey.get(key)?.candidates;
-      if (!candidates) {
-        candidates = [];
-        try {
-          const handler = getSubjectHandler(row.subject_type);
-          const scope = { orgId, principalVendorId, subjectId: row.subject_id, hotelId: row.hotel_id };
-          const valid = handler ? await db.tx((t) => handler.validateSubject(scope, t)) : null;
-          if (valid?.ok) candidates = await candidatesFor(orgId, valid, refused.get(key));
-        } catch (err) {
-          // A subject that can no longer be routed simply has no candidates.
-          logger.warn({ err: err.message, assignmentId: row.id }, "vendor-routing queue re-validation failed");
-        }
+      const queued = unroutedByKey.get(key);
+      if (queued) return { ...row, candidates: queued.candidates, excluded: queued.excluded };
+      let suggestions = { candidates: [], excluded: [] };
+      try {
+        const handler = getSubjectHandler(row.subject_type);
+        const scope = { orgId, principalVendorId, subjectId: row.subject_id, hotelId: row.hotel_id };
+        const valid = handler ? await db.tx((t) => handler.validateSubject(scope, t)) : null;
+        if (valid?.ok) suggestions = await suggestionsFor(orgId, valid, refused.get(key));
+      } catch (err) {
+        // A subject that can no longer be routed simply has no candidates.
+        logger.warn({ err: err.message, assignmentId: row.id }, "vendor-routing queue re-validation failed");
       }
-      declined.push({ ...row, candidates });
-    }
+      return { ...row, ...suggestions };
+    };
+
+    // Declined / timed-out items, and pending ones (so a reassignment is offered the same
+    // suggestions, the pending assignee among them).
+    const declined = [];
+    for (const row of declinedRows) declined.push(await withSuggestions(row));
+    const pendingWithSuggestions = [];
+    for (const row of pending) pendingWithSuggestions.push(await withSuggestions(row));
 
     return res.status(200).json({
       status: 1,
       message: "Routing queue",
-      data: { unrouted, pending, accepted, declined },
+      data: { unrouted, pending: pendingWithSuggestions, accepted, declined },
     });
   } catch (error) {
     return handleError(res, error, "routingQueue");

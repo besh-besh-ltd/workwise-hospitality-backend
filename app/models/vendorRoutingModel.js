@@ -163,12 +163,18 @@ export async function listOrgIdsByRoutingMode(routingMode, runner = db) {
   return rows.map((r) => r.id);
 }
 
-/** (subject_type, subject_id, hotel_key, assigned_vendor_id) of the org's rows in `statuses`. */
+/**
+ * (subject_type, subject_id, hotel_key, assigned_vendor_id, status) of the org's rows in
+ * `statuses`: one row per subject and assignee, carrying the status of its latest row.
+ */
 export function listOrgAssigneesByStatus(orgId, statuses, runner = db) {
   return runner.any(
-    `SELECT DISTINCT subject_type, subject_id, COALESCE(hotel_id, 0) AS hotel_key, assigned_vendor_id
+    `SELECT DISTINCT ON (subject_type, subject_id, COALESCE(hotel_id, 0), assigned_vendor_id)
+            subject_type, subject_id, COALESCE(hotel_id, 0) AS hotel_key, assigned_vendor_id, status
        FROM tbl_vendor_routing_assignments
-      WHERE org_id = $1 AND status = ANY($2::text[])`,
+      WHERE org_id = $1 AND status = ANY($2::text[])
+      ORDER BY subject_type, subject_id, COALESCE(hotel_id, 0), assigned_vendor_id,
+               COALESCE(acted_at, created_at) DESC, id DESC`,
     [orgId, statuses]
   );
 }
