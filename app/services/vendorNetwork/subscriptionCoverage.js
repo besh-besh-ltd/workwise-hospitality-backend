@@ -9,7 +9,7 @@
 
 import db from "../../config/dbConn.js";
 import { ENTITY_RELATIONSHIP, ENTITY_STATUS, seatFeeInr, istDate } from "../../constants/vendorNetwork.js";
-import { getNetworkSubscriptionStanding } from "../../models/vendorNetworkModel.js";
+import { getNetworkSubscriptionStanding, getOrgByEntity } from "../../models/vendorNetworkModel.js";
 
 /**
  * The `covered_by_network` block for the entity `req.user` acts as, or null when the
@@ -56,4 +56,19 @@ export async function networkSubscriptionCoverage(user, runner = db) {
   };
 }
 
-export default { networkSubscriptionCoverage };
+/**
+ * The org of `vendorId` when it is a NON-principal entity of one (any status but
+ * REMOVED), else null. Purchase paths that are not JWT-authenticated (the user_key
+ * subscription payment) use it: such an entity's subscription is the network's, bought
+ * by the principal (spec §5.2), so it may not buy or renew one of its own.
+ */
+export async function memberEntityOrg(vendorId, runner = db) {
+  const org = await getOrgByEntity(Number(vendorId), runner);
+  if (!org) return null;
+  if (org.relationship === ENTITY_RELATIONSHIP.PRINCIPAL || Number(org.principal_vendor_id) === Number(vendorId)) {
+    return null;
+  }
+  return org;
+}
+
+export default { networkSubscriptionCoverage, memberEntityOrg };

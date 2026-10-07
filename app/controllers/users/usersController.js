@@ -55,6 +55,7 @@ import {
 } from '../../services/approvalPropagationService.js';
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
 import { profileNetworkFor } from '../../services/vendorNetwork/actingContext.js';
+import { memberEntityOrg } from '../../services/vendorNetwork/subscriptionCoverage.js';
 import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constants/vendorNetwork.js';
 import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
 import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
@@ -3795,6 +3796,17 @@ publish_profile_reviews: async (req, res, next) => {
         return res.status(400).json({
           status: 2,
           message: 'Only vendors can purchase hospitality subscriptions'
+        });
+      }
+      // Vendor Networks (spec §5.2): a non-principal entity's subscription is its
+      // network's, bought by the principal. This path is keyed on user_key, not a JWT,
+      // so the JWT routes' NETWORK_MEMBER guard cannot see it: check the entity itself.
+      const memberOf = await memberEntityOrg(decryptedUserId);
+      if (memberOf) {
+        return res.status(403).json({
+          status: 0,
+          message: `Your subscription is covered by ${memberOf.org_name}. Ask your network admin to change it.`,
+          reason: 'NETWORK_MEMBER'
         });
       }
       // Only block if vendor already has an active (non-expired) subscription

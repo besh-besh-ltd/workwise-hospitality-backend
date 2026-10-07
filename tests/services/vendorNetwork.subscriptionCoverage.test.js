@@ -261,3 +261,74 @@ describe("POST /entities inherits the principal's hospitality flag (D1)", () => 
     expect(await companyFlag(branch)).toBe(0);
   });
 });
+
+// Fix round 1 / review minor 5: the remaining entity states.
+describe("covered_by_network for an INVITED entity and a lapsed org subscription", () => {
+  it("an INVITED entity is not covered (no pooled subscription)", async () => {
+    await network({ entityStatus: "INVITED" });
+    const cov = (await (await httpClient(M)).get(STATUS)).body.data.covered_by_network;
+    expect(cov).toMatchObject({ entity_status: "INVITED", subscription_active: false, covered: false });
+  });
+
+  it("an ACTIVE, seated member of a network whose subscription lapsed is not covered", async () => {
+    await network();
+    await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`, [P]);
+    const cov = (await (await httpClient(M)).get(STATUS)).body.data.covered_by_network;
+    expect(cov).toMatchObject({
+      entity_status: "ACTIVE",
+      seat_active: true,
+      seat_valid_until: fyEnd(),
+      subscription_active: false,
+      subscription_valid_until: null,
+      covered: false,
+    });
+  });
+});
+
+// Fix round 1 / review Important 1: the public, user_key-authenticated purchase path.
+describe("POST /hospitality/subscription-payment (user_key, no JWT)", () => {
+  const PAY = "/api/v1/hospitality/subscription-payment";
+  const userKeyOf = async (userId) => (await (await httpClient(userId)).get(PROFILE)).body.data.user_key;
+  const rowsOf = async (vendorId) => ({
+    payments: Number((await db.one(`SELECT count(*) FROM tbl_vendor_payments WHERE vendor_id = $1`, [vendorId])).count),
+    subs: Number(
+      (await db.one(`SELECT count(*) FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`, [vendorId])).count
+    ),
+  });
+  // Hotels only: a zero total, so the free path writes rows without calling Razorpay.
+  const body = (user_key) => ({ user_key, categories: [], subcategories: [], hotels: [H1] });
+
+  it("a member entity's user_key (own login or a person acting for it, any live status) gets 403 and writes nothing", async () => {
+    await network();
+    await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`, [P]); // org lapsed
+    const anon = await httpClient(null);
+
+    for (const keyFrom of [M, PERSON]) {
+      const res = await anon.post(PAY).send(body(await userKeyOf(keyFrom)));
+      expect([res.status, res.body.reason]).toEqual([403, "NETWORK_MEMBER"]);
+    }
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE vendor_id = $1`, [M]);
+    const suspended = await anon.post(PAY).send(body(await userKeyOf(M)));
+    expect([suspended.status, suspended.body.reason]).toEqual([403, "NETWORK_MEMBER"]);
+
+    expect(await rowsOf(M)).toEqual({ payments: 0, subs: 0 });
+  });
+
+  it("the principal and a vendor in no network keep today's behaviour", async () => {
+    await network();
+    await db.none(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = $1`, [P]);
+    await vendor(LONE);
+    const anon = await httpClient(null);
+
+    // They pass the guard and reach the purchase logic, which records the zero-total
+    // payment. (That free path then fails today with a 400 of its own: it stores the
+    // payment row object as payment_id. Pre-existing and out of this task's scope; the
+    // assertion only pins that no network refusal happens.)
+    for (const id of [P, LONE]) {
+      const res = await anon.post(PAY).send(body(await userKeyOf(id)));
+      expect(res.status).not.toBe(403);
+      expect(res.body.reason).toBeUndefined();
+      expect((await rowsOf(id)).payments).toBe(1);
+    }
+  });
+});
