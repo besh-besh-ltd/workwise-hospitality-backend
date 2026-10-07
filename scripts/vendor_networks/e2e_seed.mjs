@@ -125,6 +125,30 @@ const isoDate = (days) => new Date(Date.now() + days * 86400_000).toISOString().
 // Cleanup: the whole world, including rows the E2E run created on top of it.
 // ---------------------------------------------------------------------------
 
+/**
+ * After the seed orgs are gone, an owned login can only still appear in the network tables
+ * through ANOTHER org. Those rows are not ours to delete, and they would block deleting the
+ * login, so stop with a message that says which org holds it.
+ */
+async function assertNoForeignNetworkRows(t, userIds) {
+  const held = await t.any(
+    `SELECT 'entity' AS kind, org_id, vendor_id AS user_id FROM tbl_vendor_org_entities WHERE vendor_id = ANY($1::int[])
+     UNION ALL SELECT 'member', org_id, person_user_id FROM tbl_vendor_org_members WHERE person_user_id = ANY($1::int[])
+     UNION ALL SELECT 'member-entity', org_id, entity_vendor_id FROM tbl_vendor_org_members WHERE entity_vendor_id = ANY($1::int[])
+     UNION ALL SELECT 'seat', org_id, entity_vendor_id FROM tbl_vendor_network_seats WHERE entity_vendor_id = ANY($1::int[])
+     UNION ALL SELECT 'invite', org_id, target_vendor_id FROM tbl_vendor_org_link_invites WHERE target_vendor_id = ANY($1::int[])
+     UNION ALL SELECT 'assignment', org_id, assigned_vendor_id FROM tbl_vendor_routing_assignments WHERE assigned_vendor_id = ANY($1::int[])
+     UNION ALL SELECT 'org-creator', id, created_by FROM tbl_vendor_orgs WHERE created_by = ANY($1::int[])`,
+    [userIds]
+  );
+  if (held.length) {
+    const list = held.map((h) => `${h.kind} user ${h.user_id} in org ${h.org_id}`).join("; ");
+    throw new Error(
+      `seed-owned logins are still linked into non-seed orgs (${list}). Unlink them in that org, or rebuild the database.`
+    );
+  }
+}
+
 async function cleanup(t) {
   const [lo, hi] = RANGE;
   const inRange = (col) => `${col} BETWEEN ${lo} AND ${hi}`;
@@ -204,11 +228,10 @@ async function cleanup(t) {
   // Notifications and routing (by recipient / org / subject).
   await del(`DELETE FROM tbl_notifications WHERE recipient_user_id = ANY($1::int[]) OR sender_user_id = ANY($1::int[])`, [userIds]);
   await del(
-    `DELETE FROM tbl_vendor_routing_assignments
-      WHERE org_id = ANY($1::int[]) OR assigned_vendor_id = ANY($2::int[])
-         OR (subject_type = 'RFQ' AND subject_id = ANY($3::bigint[]))
-         OR (subject_type = 'ARC_HOTEL' AND subject_id = ANY($4::bigint[]))`,
-    [orgIds, userIds, rfqIds, contractIds]
+    // Bounded to the seed orgs: another org's assignments are that org's rows, even when
+    // they name an owned entity or a seed subject.
+    `DELETE FROM tbl_vendor_routing_assignments WHERE org_id = ANY($1::int[])`,
+    [orgIds]
   );
 
   // Purchase orders (RFQ awards and call-offs).
@@ -284,14 +307,29 @@ async function cleanup(t) {
   await del(`DELETE FROM tbl_arc_quote WHERE arc_id = ANY($1::bigint[])`, [arcIds]);
   await del(`DELETE FROM tbl_arc WHERE id = ANY($1::bigint[])`, [arcIds]);
 
-  // Vendor network (seats/members/invites/entities/coverage, then the org).
-  await del(`DELETE FROM tbl_vendor_network_seats WHERE org_id = ANY($1::int[]) OR entity_vendor_id = ANY($2::int[])`, [orgIds, userIds]);
-  // Coverage authored by the seed org's admins, or for an owned entity.
-  await del(`DELETE FROM tbl_vendor_coverage_rules WHERE entity_vendor_id = ANY($1::int[]) OR created_by = ANY($1::int[])`, [userIds]);
-  await del(`DELETE FROM tbl_vendor_org_members WHERE org_id = ANY($1::int[]) OR person_user_id = ANY($2::int[])`, [orgIds, userIds]);
-  await del(`DELETE FROM tbl_vendor_org_link_invites WHERE org_id = ANY($1::int[]) OR target_vendor_id = ANY($2::int[])`, [orgIds, userIds]);
-  await del(`DELETE FROM tbl_vendor_org_entities WHERE org_id = ANY($1::int[]) OR vendor_id = ANY($2::int[])`, [orgIds, userIds]);
+  // Vendor network. Every row is bounded to the SEED orgs: an owned entity or person that is
+  // also linked into another org keeps that org's rows (and the user delete below then refuses,
+  // see assertNoForeignNetworkRows).
+  //
+  // Coverage has no org_id. A rule goes when its entity is in a seed org and the entity is
+  // owned or the rule was authored by an owned (seed org admin) login, or when it belongs to an
+  // owned entity that sits in no other org. Runs BEFORE the entity rows go, since it reads them.
+  await del(
+    `DELETE FROM tbl_vendor_coverage_rules r
+      WHERE (r.entity_vendor_id = ANY($1::int[])
+             OR (r.created_by = ANY($1::int[])
+                 AND r.entity_vendor_id IN (SELECT vendor_id FROM tbl_vendor_org_entities WHERE org_id = ANY($2::int[]))))
+        AND (r.entity_vendor_id IN (SELECT vendor_id FROM tbl_vendor_org_entities WHERE org_id = ANY($2::int[]))
+             OR NOT EXISTS (SELECT 1 FROM tbl_vendor_org_entities e
+                             WHERE e.vendor_id = r.entity_vendor_id AND NOT (e.org_id = ANY($2::int[]))))`,
+    [userIds, orgIds]
+  );
+  await del(`DELETE FROM tbl_vendor_network_seats WHERE org_id = ANY($1::int[])`, [orgIds]);
+  await del(`DELETE FROM tbl_vendor_org_members WHERE org_id = ANY($1::int[])`, [orgIds]);
+  await del(`DELETE FROM tbl_vendor_org_link_invites WHERE org_id = ANY($1::int[])`, [orgIds]);
+  await del(`DELETE FROM tbl_vendor_org_entities WHERE org_id = ANY($1::int[])`, [orgIds]);
   await del(`DELETE FROM tbl_vendor_orgs WHERE id = ANY($1::int[])`, [orgIds]);
+  await assertNoForeignNetworkRows(t, userIds);
 
   // Vendor subscriptions and catalogue mappings.
   await del(`DELETE FROM tbl_vendor_hotel_category_subscription WHERE vendor_id = ANY($1::int[])`, [userIds]);

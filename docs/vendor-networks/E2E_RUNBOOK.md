@@ -57,7 +57,10 @@ routing assignments, POs, MRs, call-offs, notifications).
   re-seed removes them.
 - **Any other login linked into the seed org** loses only its org edges: entity, member,
   seat and invite rows (and coverage rules the seed org's admin authored). Its user,
-  company, subscriptions, mappings, contracts, POs and RFQs are never touched. If a run leaves rows the cleanup does not
+  company, subscriptions, mappings, contracts, POs and RFQs are never touched.
+- **Network rows of non-seed orgs are never deleted.** If an owned login is also linked into
+  another org, the seed stops, rolls back and names the org. Unlink it there, or rebuild the
+  database. If a run leaves rows the cleanup does not
 know about, the seed fails, rolls back, and says so. Rebuild the database with step 1.
 
 The seed prints every login and id. Rows that use the sequence (RFQ id, ARC id, contract id,

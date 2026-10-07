@@ -56,11 +56,19 @@ function handle(req, res) {
 
 // Loopback only, on both families: the SDK addresses S3 virtual-host style and
 // <bucket>.localhost resolves to ::1, while plain localhost may resolve to 127.0.0.1.
-const listeners = ["::1", "127.0.0.1"].map((host) => {
+// One family failing (IPv6 disabled, say) is logged and tolerated; the process exits
+// only if neither loopback address can be bound.
+const HOSTS = ["::1", "127.0.0.1"];
+const failures = [];
+const listeners = HOSTS.map((host) => {
   const listener = http.createServer(handle);
   listener.on("error", (err) => {
     console.error(`[e2e-aws-sink] cannot listen on [${host}]:${PORT}: ${err.message}`);
-    process.exit(1);
+    failures.push(host);
+    if (failures.length === HOSTS.length) {
+      console.error("[e2e-aws-sink] no loopback address could be bound; refusing to start without the AWS stand-in");
+      process.exit(1);
+    }
   });
   listener.listen({ port: PORT, host }, () => {
     console.log(`[e2e-aws-sink] AWS stand-in on [${host}]:${PORT}, objects under ${ROOT}`);
