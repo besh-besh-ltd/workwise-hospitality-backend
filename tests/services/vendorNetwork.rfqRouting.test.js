@@ -27,7 +27,7 @@ import {
   getSubjectHandler,
   revokeLiveAssignmentsForEntity,
 } from "../../app/services/vendorNetwork/routingEngine.js";
-import { rfqSubjectHandler } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
+import { rfqSubjectHandler, assertOrgMayQuote } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import { lockRoutingSubject, getAssignment, releaseAssignment } from "../../app/models/vendorRoutingModel.js";
 import {
@@ -615,6 +615,15 @@ describe("a linked entity's own direct invite (invited before it joined the org)
     const res = await createQuote(B, rfq);
     expect(res.status).toBe(403);
     expect(res.body.reason).toBe("ROUTING_REQUIRED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+
+  it("12g. a SUSPENDED entity with a direct invite is refused by the quote gate itself (403 NOT_ACTIVE), not only by the route's operate check", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE vendor_id = $1`, [C]);
+    await expect(db.tx((t) => assertOrgMayQuote(rfq.rfq_id, C, t))).rejects.toMatchObject({ http: 403, reason: "NOT_ACTIVE" });
+    const res = await createQuote(C, rfq);
+    expect(res.status).toBe(403);
     expect(await quotesOf(rfq.rfq_id)).toEqual([]);
   });
 

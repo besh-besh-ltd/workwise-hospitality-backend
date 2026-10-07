@@ -14,7 +14,8 @@
 //      another member holds ACCEPTED → 409 ROUTED_TO_MEMBER
 //   c) one quote per org: another entity of the org holds a non-regret quote
 //      → 409 ORG_ALREADY_QUOTED
-//   d) a vendor in no org: no-op (and, on the JWT path, no query: quoteGateApplies)
+//   d) a non-ACTIVE (INVITED/SUSPENDED) entity → 403 NOT_ACTIVE, before anything else
+//   e) a vendor in no org: no-op (and, on the JWT path, no query: quoteGateApplies)
 //
 // LOCK ORDER. Every check above and every hook that reads or changes "who may quote"
 // takes the transaction advisory lock RFQ_ORG_QUOTE_LOCK_NS(<orgId>:<rfqId>) and reads
@@ -273,6 +274,11 @@ export function quoteGateApplies(req) {
 export async function assertOrgMayQuote(rfqId, vendorId, t = db) {
   const self = await getOrgByEntity(vendorId, t);
   if (!self) return;
+  // Defence in depth (the routes' operate check refuses this first): only an ACTIVE
+  // entity quotes, whatever invite or assignment it holds.
+  if (self.entity_status !== "ACTIVE") {
+    throw new NetworkHttpError(403, "This network entity is not active", "NOT_ACTIVE");
+  }
   const orgId = self.org_id;
   await lockOrgQuote(t, orgId, rfqId);
   const state = await getOrgQuoteState(orgId, rfqId, vendorId, t);
