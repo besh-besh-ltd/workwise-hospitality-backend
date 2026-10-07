@@ -505,6 +505,21 @@ describe("buyer view", () => {
     expect(view.body.vendors.map((v) => [v.id, v.org_name])).toEqual([[B, "Org A Network"]]);
   });
 
+  it("7c. the buyer dashboard's no-response drill-down counts invited vendors without routed rows", async () => {
+    const rfq = await openRfq();
+    await db.none(`INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [
+      rfq.rfq_id,
+      IDS.hotels.A1,
+      BUYER,
+    ]);
+    expect((await assign(rfq.rfq_id, B)).status).toBe(201); // B holds a routed copy now
+    const res = await (await httpClient(BUYER)).get("/api/v1/dashboard-v2/no-response").query({ hotel_ids: String(IDS.hotels.A1) });
+    expect(res.status).toBe(200);
+    const row = res.body.data.active.find((r) => r.id === rfq.rfq_id);
+    expect(row).toBeTruthy();
+    expect(row.invited_vendor_count).toBe(3); // HQ, FHQ, NO; not B's routed copy
+  });
+
   it("8. the buyer finalizes the member's quote → the award (tbl_quote_finalization) names the member", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);

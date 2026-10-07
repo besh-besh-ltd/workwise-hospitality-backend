@@ -457,7 +457,7 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = []) {
           WHERE rhm0.rfq_id = r.id AND rhm0.hotel_id = ANY($4)
           ORDER BY rhm0.hotel_id
           LIMIT 1) AS hotel_name,
-       (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id)::int AS invited_vendor_count,
+       (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id AND rpv.routed_from_vendor_id IS NULL)::int AS invited_vendor_count,
        (SELECT COUNT(*) FROM tbl_quotes qr WHERE qr.rfq_id = r.id AND qr.is_regret = 1)::int AS regret_count,
        ${bidClosed('r')} AS is_expired
      FROM tbl_rfq r
