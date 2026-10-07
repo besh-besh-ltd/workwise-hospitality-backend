@@ -7,8 +7,11 @@
 //
 // Quoting (assertOrgMayQuote, called by rfqController before any quote write):
 //   a) a non-principal org entity quotes only while it holds the org's ACCEPTED assignment
+//      or its OWN direct invite (a tbl_rfq_product_vendors row with routed_from_vendor_id
+//      NULL: typically a legacy account invited before it was linked into the org)
 //      → else 403 ROUTING_REQUIRED
-//   b) the principal is blocked while a member holds ACCEPTED → 409 ROUTED_TO_MEMBER
+//   b) the principal, or an entity quoting on its own direct invite, is blocked while
+//      another member holds ACCEPTED → 409 ROUTED_TO_MEMBER
 //   c) one quote per org: another entity of the org holds a non-regret quote
 //      → 409 ORG_ALREADY_QUOTED
 //   d) a vendor in no org: no-op (and, on the JWT path, no query: quoteGateApplies)
@@ -75,14 +78,26 @@ function lockOrgQuote(t, orgId, rfqId) {
   ]);
 }
 
-/** The org's ACCEPTED assignee for the RFQ (or null) and whether another org entity quoted. */
+/** A non-principal ACTIVE entity of org `${org}` holds its own direct invite to RFQ `${rfq}`. */
+const MEMBER_DIRECTLY_INVITED = (rfq, org) => `EXISTS (
+  SELECT 1 FROM tbl_rfq_product_vendors d
+    JOIN tbl_vendor_org_entities de ON de.vendor_id = d.user_id AND de.org_id = ${org} AND de.status = 'ACTIVE'
+    JOIN tbl_vendor_orgs dorg ON dorg.id = de.org_id AND dorg.principal_vendor_id <> de.vendor_id
+   WHERE d.rfq_id = ${rfq} AND d.routed_from_vendor_id IS NULL)`;
+
+/**
+ * The org's ACCEPTED assignee for the RFQ (or null), whether another org entity quoted,
+ * and whether `vendorId` holds its own direct (non-routed) invite row on the RFQ.
+ */
 function getOrgQuoteState(orgId, rfqId, vendorId, t) {
   return t.one(
     `SELECT (SELECT a.assigned_vendor_id FROM tbl_vendor_routing_assignments a
               WHERE a.org_id = $1 AND a.subject_type = 'RFQ' AND a.subject_id = $2
                 AND COALESCE(a.hotel_id, 0) = 0 AND a.status = 'ACCEPTED'
               LIMIT 1) AS accepted_vendor_id,
-            ${ORG_QUOTED("$2", "$1", "$3::int")} AS sibling_quoted`,
+            ${ORG_QUOTED("$2", "$1", "$3::int")} AS sibling_quoted,
+            EXISTS (SELECT 1 FROM tbl_rfq_product_vendors p
+                     WHERE p.rfq_id = $2 AND p.user_id = $3 AND p.routed_from_vendor_id IS NULL) AS direct_invite`,
     [orgId, rfqId, vendorId]
   );
 }
@@ -187,7 +202,13 @@ async function describe(assignment, runner = db) {
   };
 }
 
-/** Open RFQs the org's principal is invited to, with no live assignment and no org quote yet. */
+/**
+ * Open RFQs the org's principal is invited to, with no live assignment and no org quote yet.
+ * An RFQ an ACTIVE member entity holds its own direct invite to is left out too: that
+ * entity quotes on it itself (assertOrgMayQuote), so it does not need routing, and
+ * routing it elsewhere would only lock that entity out (ROUTED_TO_MEMBER). The admin may
+ * still route it explicitly (validateSubject does not refuse it).
+ */
 async function listUnrouted(orgId, runner = db) {
   const rows = await runner.any(
     `SELECT r.id, r.rfq_no, r.title, r.hotel_id, r.bid_end_date, h.name AS hotel_name,
@@ -204,6 +225,7 @@ async function listUnrouted(orgId, runner = db) {
                WHERE a.org_id = o.id AND a.subject_type = 'RFQ' AND a.subject_id = r.id
                  AND a.status IN ('PENDING', 'ACCEPTED'))
         AND NOT ${ORG_QUOTED("r.id", "o.id")}
+        AND NOT ${MEMBER_DIRECTLY_INVITED("r.id", "o.id")}
       ORDER BY ${BID_END_TS("r")}, r.id
       LIMIT ${UNROUTED_LIMIT}`,
     [orgId]
@@ -256,15 +278,17 @@ export async function assertOrgMayQuote(rfqId, vendorId, t = db) {
   const state = await getOrgQuoteState(orgId, rfqId, vendorId, t);
   const accepted = state.accepted_vendor_id == null ? null : Number(state.accepted_vendor_id);
   const isPrincipal = Number(self.principal_vendor_id) === Number(vendorId);
+  // An entity quoting on its own direct invite stands where the principal does.
+  const quotesAsInvitee = isPrincipal || state.direct_invite;
 
-  if (!isPrincipal && accepted !== Number(vendorId)) {
+  if (!quotesAsInvitee && accepted !== Number(vendorId)) {
     throw new NetworkHttpError(
       403,
       "Your network admin has not routed this RFQ to you, or you have not accepted it yet",
       "ROUTING_REQUIRED"
     );
   }
-  if (isPrincipal && accepted != null) {
+  if (quotesAsInvitee && accepted != null && accepted !== Number(vendorId)) {
     throw new NetworkHttpError(409, "This RFQ is routed to a member of your network, who quotes for it", "ROUTED_TO_MEMBER");
   }
   if (state.sibling_quoted) {

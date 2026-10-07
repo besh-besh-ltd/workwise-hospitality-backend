@@ -538,6 +538,80 @@ describe("buyer view", () => {
   });
 });
 
+describe("a linked entity's own direct invite (invited before it joined the org)", () => {
+  // C holds a plain invite row (routed_from_vendor_id NULL) next to the principal's.
+  it("12a. the entity quotes and updates on its direct invite; the principal then gets 409 ORG_ALREADY_QUOTED", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+
+    const res = await createQuote(C, rfq);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: C, is_regret: 0 }]);
+
+    const quoteId = (await db.one(`SELECT id FROM tbl_quotes WHERE rfq_id = $1`, [rfq.rfq_id])).id;
+    const upd = await (await httpClient(C)).put(`/api/v1/rfq/quote/update/${quoteId}`).send(quoteBody(rfq, { price: 90 }));
+    expect(upd.status).toBe(200);
+    const { unit_price } = await db.one(`SELECT unit_price FROM tbl_quote_items WHERE quote_id = $1`, [quoteId]);
+    expect(Number(unit_price)).toBe(90);
+
+    const hq = await createQuote(HQ, rfq);
+    expect(hq.status).toBe(409);
+    expect(hq.body.reason).toBe("ORG_ALREADY_QUOTED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: C, is_regret: 0 }]);
+  });
+
+  it("12b. a regret on the direct invite is allowed (it writes a quote row)", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    const res = await createQuote(C, rfq, { regret: true });
+    expect(res.status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: C, is_regret: 1 }]);
+  });
+
+  it("12c. one quote per org still holds: the principal quoted first → the entity gets 409 ORG_ALREADY_QUOTED", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    expect((await createQuote(HQ, rfq)).status).toBe(200);
+    const res = await createQuote(C, rfq);
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("ORG_ALREADY_QUOTED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: HQ, is_regret: 0 }]);
+  });
+
+  it("12d. while the RFQ is routed to another member (ACCEPTED), the directly-invited entity gets 409 ROUTED_TO_MEMBER", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    await routeAndAccept(rfq.rfq_id, B);
+    const res = await createQuote(C, rfq);
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe("ROUTED_TO_MEMBER");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+
+  it("12e. a member holding only a routed copy (no direct invite, no assignment) is still refused (403 ROUTING_REQUIRED)", async () => {
+    const rfq = await openRfq();
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant, routed_from_vendor_id)
+       VALUES ($1, $2, $3, 0, $4)`,
+      [rfq.rfq_id, VARIANT, B, HQ]
+    );
+    const res = await createQuote(B, rfq);
+    expect(res.status).toBe(403);
+    expect(res.body.reason).toBe("ROUTING_REQUIRED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+  });
+
+  it("12f. the routing queue does not list an RFQ an ACTIVE member holds a direct invite to", async () => {
+    const direct = await openRfq({ invite: [HQ, C, FHQ] });
+    const free = await openRfq();
+    const items = await rfqSubjectHandler.listUnrouted(ORG_A, db);
+    const mine = items.filter((i) => rfqIds.includes(i.subjectId)).map((i) => i.subjectId);
+    expect(mine).toEqual([free.rfq_id]);
+    expect(mine).not.toContain(direct.rfq_id);
+    // a SUSPENDED member cannot quote: the RFQ needs routing again
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE vendor_id = $1`, [C]);
+    const after = (await rfqSubjectHandler.listUnrouted(ORG_A, db)).map((i) => i.subjectId);
+    expect(after).toEqual(expect.arrayContaining([direct.rfq_id, free.rfq_id]));
+  });
+});
+
 describe("isolation and back-compat", () => {
   it("9. sibling isolation: C cannot read or quote the RFQ routed to B", async () => {
     const rfq = await openRfq();
