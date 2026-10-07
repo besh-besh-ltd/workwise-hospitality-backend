@@ -10,9 +10,48 @@
 // `client` is a thin wrapper around supertest's request(app) that auto-attaches
 // Authorization + User-Agent headers from `loginAs()`.
 
+import http from "http";
 import request from "supertest";
 import { buildTestApp } from "../setup/app.js";
 import { loginAs } from "./auth.js";
+
+// Supertest given a bare Express app listens on an ephemeral port on ALL
+// addresses but sends requests to 127.0.0.1. On macOS another local process
+// (Chrome, puppeteer, another jest) may already hold that port on 127.0.0.1 and
+// answer instead -> intermittent 404 / "socket hang up". Bind our own server
+// to 127.0.0.1 explicitly so the port is guaranteed to be ours on that address.
+// One server per app instance, closed after the suite.
+const servers = new Map(); // app -> Promise<http.Server>
+
+// Registered at import time (hooks cannot be declared inside a running test).
+// Each jest test file gets its own module registry, so this runs once per file.
+if (typeof afterAll === "function") {
+  afterAll(async () => {
+    const pending = [...servers.values()];
+    servers.clear();
+    await Promise.all(
+      pending.map(async (p) => {
+        const server = await p;
+        server.closeAllConnections?.();
+        await new Promise((r) => server.close(() => r()));
+      })
+    );
+  });
+}
+
+function serverFor(app) {
+  if (!servers.has(app)) {
+    servers.set(
+      app,
+      new Promise((resolve, reject) => {
+        const server = http.createServer(app);
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve(server));
+      })
+    );
+  }
+  return servers.get(app);
+}
 
 /**
  * Returns a per-test supertest client bound to a fixture user.
@@ -21,10 +60,11 @@ import { loginAs } from "./auth.js";
  */
 export async function httpClient(userId = null, { ent } = {}) {
   const app = await buildTestApp();
+  const server = await serverFor(app);
   const headers = userId == null ? {} : (await loginAs(userId, { ent })).headers;
 
   const wrap = (method) => (path) => {
-    let req = request(app)[method](path);
+    let req = request(server)[method](path);
     for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
     return req;
   };
