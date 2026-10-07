@@ -9,6 +9,7 @@ import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
+import { collapsePickerRowsToPrincipals } from '../services/vendorNetwork/directInvites.js';
 import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 /**
@@ -2723,6 +2724,8 @@ WHERE NOT EXISTS (
   
           WHERE trp.rfq_id = $1
               AND trp.id = $2
+              -- Vendor Networks: the line's invited vendors, not a member's routed copy
+              AND trpv.routed_from_vendor_id IS NULL
               ${dynamicWhere}
             
           ORDER BY tu.name
@@ -7444,7 +7447,26 @@ LIMIT 2;
         params.push(excludeArray);
       }
 
-      return await db.any(q, params);
+      // Vendor Networks: a member entity is offered as its org's principal (the pooled
+      // rule: the invite goes to the principal), once, and excludeIds applies to it.
+      return await collapsePickerRowsToPrincipals(await db.any(q, params), {
+        idOf: (r) => r.id,
+        excludeIds: excludeArray,
+        principalRows: (ids) =>
+          db.any(
+            `SELECT U.id, U.name, U.email, U.mobile,
+                    (SELECT CL.address FROM tbl_company_location CL
+                      WHERE CL.company_id = U.company_id ORDER BY CL.id LIMIT 1) AS address,
+                    U.organization_name, C.company_name,
+                    CASE WHEN EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping BVM
+                                       WHERE BVM.vendor_id = U.id AND BVM.company_id = $2)
+                         THEN 1 ELSE 0 END AS is_linked_with_buyer
+               FROM tbl_users U
+               JOIN tbl_company C ON C.id = U.company_id
+              WHERE U.id = ANY($1::int[]) AND U.status = 1`,
+            [ids, companyId]
+          ),
+      });
     } catch (error) {
       throw error;
     }

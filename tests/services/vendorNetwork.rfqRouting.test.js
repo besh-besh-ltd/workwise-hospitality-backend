@@ -874,6 +874,52 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(to(hqEmail).map((m) => m.subject)).toEqual([`Update on RFQ #${rfq.rfq_no}`]);
   });
 
+  it("Task 22 fix 2: the Edit RFQ vendor picker offers the org's principal, not a member entity; excludeIds works on the principal", async () => {
+    // Only B (a member) holds the variant mapping: the pooled rule invites HQ.
+    await db.none(
+      `INSERT INTO tbl_product_variant_vendor_mapping
+         (product_variant_id, vendor_id, status, is_approved, created_by, created_at, updated_at)
+       VALUES ($1, $2, true, true, $2, now(), now())`,
+      [VARIANT_CAT, B]
+    );
+    await db.none(`INSERT INTO tbl_company_location (company_id, country_id, address) VALUES ($1, 1, 'B street'), ($2, 1, 'HQ street')`, [B, HQ]);
+    const pick = async (excludeIds) =>
+      (await httpClient(BUYER)).post("/api/v1/rfq/get-vendors-for-product").send({ productId: VARIANT_CAT, excludeIds });
+
+    const res = await pick([]);
+    expect(res.status).toBe(200);
+    const ids = res.body.data.map((v) => Number(v.id));
+    expect(ids).toContain(HQ);
+    expect(ids).not.toContain(B);
+    expect(ids.filter((id) => id === HQ)).toHaveLength(1);
+    const hq = res.body.data.find((v) => Number(v.id) === HQ);
+    expect(hq).toMatchObject({ name: `VN RFQ ${HQ}`, company_name: `VN RFQ ${HQ}` });
+
+    const excluded = (await pick([HQ])).body.data.map((v) => Number(v.id));
+    expect(excluded).not.toContain(HQ);
+    expect(excluded).not.toContain(B);
+  });
+
+  it("Task 22 fix 3: the create-wizard vendor list (get-draft-vendors) omits routed copies", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    const rp = await db.one(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`, [rfq.rfq_id, VARIANT]);
+    for (const v of [HQ, FHQ, NO, B]) {
+      await db.none(
+        `INSERT INTO tbl_product_variant_vendor_mapping
+           (product_variant_id, vendor_id, status, is_approved, created_by, created_at, updated_at)
+         VALUES ($1, $2, true, true, $2, now(), now())`,
+        [VARIANT, v]
+      );
+    }
+    const buyer = await httpClient(BUYER);
+
+    // GET /rfq/get-draft-vendors (the create wizard's list of a line's vendors)
+    const list = await buyer.post(`/api/v1/rfq/get-draft-vendors/${rfq.rfq_id}`).query({ rfqProductId: rp.id }).send({});
+    expect(list.status).toBe(200);
+    expect(list.body.data.map((v) => Number(v.user_id)).sort((x, y) => x - y)).toEqual([HQ, FHQ, NO].sort((x, y) => x - y));
+  });
+
   it("Task 22: POST /rfq/save-draft never deletes a routed copy nor adds the routed member as a direct invite", async () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);

@@ -10,6 +10,7 @@
 // holds any row on the line (direct or routed) is not invited again.
 
 import { mapToPrincipalIds } from "../../models/vendorNetworkModel.js";
+import { orgKeysFor } from "./orgKeySql.js";
 
 /**
  * The ids to INSERT as direct invite rows for one RFQ line, from the ids an edit asked
@@ -31,4 +32,46 @@ export async function directInviteIdsForLine(runner, { rfqId, productVariantId, 
   return ids.map(Number).filter((id) => !heldIds.has(id));
 }
 
-export default { directInviteIdsForLine };
+/**
+ * A vendor picker's rows with every ACTIVE/SUSPENDED org entity replaced by its org's
+ * principal (the pooled rule, orgKeysFor): a member is never offered for a direct invite,
+ * its org is, once, at the position of the org's first row. Rows of vendors in no org are
+ * untouched (duplicates included, as before). `excludeIds` is applied to the principals.
+ *
+ * `principalRows(ids)` loads the replacement rows for principal ids, in the picker's own
+ * row shape; `idOf(row)` reads a row's vendor id.
+ */
+export async function collapsePickerRowsToPrincipals(rows, { idOf, principalRows, excludeIds = [] }, runner) {
+  if (!rows?.length) return rows ?? [];
+  const keyOf = await orgKeysFor(rows.map(idOf), runner);
+  const excluded = new Set((excludeIds ?? []).map(Number));
+  const ownIds = new Set(rows.map((r) => Number(idOf(r))));
+  const missing = [...new Set(rows.map((r) => keyOf.get(Number(idOf(r)))))].filter(
+    (k) => k != null && !ownIds.has(k) && !excluded.has(k)
+  );
+  const principalById = new Map(
+    (missing.length ? await principalRows(missing) : []).map((r) => [Number(idOf(r)), r])
+  );
+
+  const out = [];
+  const placed = new Set();
+  for (const row of rows) {
+    const id = Number(idOf(row));
+    const key = keyOf.get(id) ?? id;
+    if (excluded.has(key)) continue;
+    if (key === id) {
+      out.push(row); // a vendor in no org, or a principal's own row: as before
+      continue;
+    }
+    // a member: its org is offered once, through the principal (its own row if listed)
+    if (ownIds.has(key) || placed.has(key)) continue;
+    const principal = principalById.get(key);
+    if (principal) {
+      out.push(principal);
+      placed.add(key);
+    }
+  }
+  return out;
+}
+
+export default { directInviteIdsForLine, collapsePickerRowsToPrincipals };

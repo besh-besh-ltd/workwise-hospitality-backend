@@ -3170,11 +3170,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             continue;
           }
 
-          // Vendor Networks: a routed copy follows its assignment, never this vendor list.
-          await rfqModel.delete(
-            'tbl_rfq_product_vendors',
-            { ...deletingCondition, $directInvitesOnly: true },
-            t,
+          // Direct invites outside the filtered list go. Vendor Networks: a routed copy
+          // follows its principal's row, as on refresh-vendors (hospitalityModel
+          // recomputeVendorsForRfq): it goes with it, unless its member already quoted
+          // on the RFQ (the buyer must still see who quoted).
+          const keepIds = deletingCondition['-user_ids'].map(Number);
+          await t.none(
+            `DELETE FROM tbl_rfq_product_vendors r
+              WHERE r.rfq_id = $1 AND r.product_variant_id = $2 AND r.variant = $3
+                AND (
+                  (r.routed_from_vendor_id IS NULL AND NOT (r.user_id = ANY($4::int[])))
+                  OR (r.routed_from_vendor_id IS NOT NULL
+                      AND NOT (r.routed_from_vendor_id = ANY($4::int[]))
+                      AND NOT EXISTS (SELECT 1 FROM tbl_quotes q
+                                       WHERE q.rfq_id = r.rfq_id AND q.created_by = r.user_id))
+                )`,
+            [rfq_id, product.product_variant_id, product.variant, keepIds]
           );
 
           // Step 1: Evaluate all checks in parallel
