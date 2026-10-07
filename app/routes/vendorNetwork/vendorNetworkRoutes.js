@@ -39,6 +39,7 @@ import {
   updateMember,
   resendMemberInvite,
   previewMemberInvite,
+  retiredPreviewMemberInvite,
   acceptMemberInvite,
 } from "../../controllers/vendorNetwork/memberController.js";
 import {
@@ -90,7 +91,9 @@ VendorNetworkRoutes.post("/members/:id/resend", ...vendor, resendMemberInvite);
 
 // Member invite accept page: PUBLIC (no session yet). The 256-bit emailed token is the credential.
 VendorNetworkRoutes.post("/member-invites/accept", acceptMemberInvite);
-VendorNetworkRoutes.get("/member-invites/:token", previewMemberInvite);
+VendorNetworkRoutes.post("/member-invites/preview", previewMemberInvite);
+// Retired (token in the path reaches access logs): always 410, the token is never read.
+VendorNetworkRoutes.get("/member-invites/:token", retiredPreviewMemberInvite);
 
 // Coverage rules (§6.1): static lookup paths before /coverage/:vendorId
 VendorNetworkRoutes.get("/coverage/lookup/states", ...vendor, lookupStates);

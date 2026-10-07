@@ -435,10 +435,14 @@ const isOpenInvite = (invite) =>
   Number(invite.is_deleted) === 0;
 const EXPIRED = "This invitation has expired. Ask your network admin to resend it.";
 
-/** GET /member-invites/:token (public): only what the accept page shows. */
+/**
+ * POST /member-invites/preview { token } (public): only what the accept page shows. The
+ * token travels in the body so the credential never lands in a URL (access logs, Referer).
+ */
 export async function previewMemberInvite(req, res) {
   try {
-    const raw = trimmed(req.params.token);
+    const raw = trimmed(req.body?.token);
+    if (!raw) return fail(res, 400, "token is required");
     const invite = TOKEN_RE.test(raw) ? await getMemberInviteByTokenHash(sha256(raw)) : null;
     if (!isOpenInvite(invite)) return fail(res, 410, GONE);
     return res.status(200).json({
@@ -454,6 +458,14 @@ export async function previewMemberInvite(req, res) {
   } catch (error) {
     return handleError(res, error, "previewMemberInvite");
   }
+}
+
+/**
+ * GET /member-invites/:token (public, retired): the token was in the path. Answers 410
+ * without reading or looking up the token; the accept page uses POST /member-invites/preview.
+ */
+export function retiredPreviewMemberInvite(_req, res) {
+  return fail(res, 410, GONE);
 }
 
 /** At least 8 characters with a letter and a digit. */
@@ -501,5 +513,6 @@ export default {
   updateMember,
   resendMemberInvite,
   previewMemberInvite,
+  retiredPreviewMemberInvite,
   acceptMemberInvite,
 };

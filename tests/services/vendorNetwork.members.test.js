@@ -150,6 +150,10 @@ async function accept(token, password = PASSWORD) {
   return (await publicApp()).post(`${BASE}/member-invites/accept`).send({ token, password });
 }
 
+async function preview(token) {
+  return (await publicApp()).post(`${BASE}/member-invites/preview`).send({ token });
+}
+
 async function login(email, password = PASSWORD) {
   return (await publicApp())
     .post("/api/v1/users/login?conform=true")
@@ -320,18 +324,29 @@ describe("rule 4: NETWORK_MAX_PERSONS caps non-DISABLED distinct persons (read a
 });
 
 describe("rule 5: accept (public)", () => {
-  it("previews the invite with only email, org, entity and expired", async () => {
+  it("previews the invite (POST, token in the body) with only email, org, entity and expired", async () => {
     await world();
     const { token } = await inviteNew("preview@example.com");
-    const res = await (await publicApp()).get(`${BASE}/member-invites/${token}`);
+    const res = await preview(token);
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ email: "preview@example.com", org_name: "VN People Org", entity_name: `VN ${BRANCH}`, expired: false });
 
-    expect((await (await publicApp()).get(`${BASE}/member-invites/${"0".repeat(64)}`)).status).toBe(410);
+    expect((await preview("0".repeat(64))).status).toBe(410);
+    expect((await (await publicApp()).post(`${BASE}/member-invites/preview`).send({})).status).toBe(400);
     await db.none(`UPDATE tbl_vendor_org_members SET invite_expires_at = now() - interval '1 minute' WHERE invite_token_hash = $1`, [sha256(token)]);
-    const expired = await (await publicApp()).get(`${BASE}/member-invites/${token}`);
+    const expired = await preview(token);
     expect(expired.status).toBe(200);
     expect(expired.body.data.expired).toBe(true);
+  });
+
+  it("the old GET /member-invites/:token answers 410 without reading the token, even for a live invite", async () => {
+    await world();
+    const { token } = await inviteNew("old-get@example.com");
+    const res = await (await publicApp()).get(`${BASE}/member-invites/${token}`);
+    expect(res.status).toBe(410);
+    expect(res.body.status).toBe(0);
+    expect(JSON.stringify(res.body)).not.toContain("old-get@example.com");
+    expect((await preview(token)).status).toBe(200); // the invite itself is untouched
   });
 
   it("sets a bcrypt password, activates the person and every INVITED membership; the person can log in", async () => {
@@ -387,7 +402,7 @@ describe("rule 5: accept edge cases", () => {
     await world();
     const { token, user } = await inviteNew("gone@example.com");
     await db.none(`UPDATE tbl_users SET is_deleted = 1 WHERE id = $1`, [user.id]);
-    expect((await (await publicApp()).get(`${BASE}/member-invites/${token}`)).status).toBe(410);
+    expect((await preview(token)).status).toBe(410);
     expect((await accept(token)).status).toBe(410);
 
     await db.none(`UPDATE tbl_users SET is_deleted = 0, status = 2 WHERE id = $1`, [user.id]);
