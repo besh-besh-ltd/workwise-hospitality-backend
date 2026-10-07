@@ -30,7 +30,10 @@ import {
 import { rfqSubjectHandler } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import { lockRoutingSubject, getAssignment, releaseAssignment } from "../../app/models/vendorRoutingModel.js";
-import { propagateRoutedCopies } from "../../app/services/vendorNetwork/subjects/rfqRoutedCopies.js";
+import {
+  propagateRoutedCopies,
+  propagateRoutedCopiesLocked,
+} from "../../app/services/vendorNetwork/subjects/rfqRoutedCopies.js";
 
 const HQ = 95951; // principal of ORG_A
 const B = 95952; // BRANCH of ORG_A
@@ -797,6 +800,43 @@ describe("routed copies follow the principal's invite (RFQ edits)", () => {
     expect(await rowsOf(rfq.rfq_id, B)).toEqual([]); // released: no copies, not even of the new line
     expect((await rowsOf(rfq.rfq_id, HQ)).map((r) => r.product_variant_id).sort((x, y) => x - y)).toEqual(
       [VARIANT, VARIANT_CAT].sort((x, y) => x - y)
+    );
+  });
+
+  it("a write path's propagate racing the engine's onAccepted catch-up adds no duplicate member row", async () => {
+    // The race (single-statement propagate): HQ's new row is committed; the engine's catch-up
+    // copies it to B while holding B's assignment FOR UPDATE; a concurrent propagate waits on
+    // that lock and, re-checking only the locked row, would insert B's copy a second time.
+    const rfq = await openRfq();
+    const id = await routeAndAccept(rfq.rfq_id);
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 0)`,
+      [rfq.rfq_id, VARIANT2, HQ]
+    );
+
+    let racer;
+    await db.tx(async (t1) => {
+      await lockRoutingSubject(t1, { orgId: ORG_A, subjectType: "RFQ", subjectId: rfq.rfq_id, hotelId: null });
+      await getAssignment(id, t1, { forUpdate: true });
+      expect(await propagateRoutedCopies(t1, rfq.rfq_id, { assignmentId: id })).toBe(1);
+
+      racer = propagateRoutedCopiesLocked(db, rfq.rfq_id);
+      for (let i = 0; ; i++) {
+        const waiting = await db.oneOrNone(
+          `SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query ILIKE '%tbl_vendor_routing_assignments%'
+            LIMIT 1`
+        );
+        if (waiting) break;
+        if (i > 200) throw new Error("the propagate never waited on the routing assignment lock");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    });
+
+    expect(await racer).toBe(0);
+    expect((await rowsOf(rfq.rfq_id, B)).map((r) => r.product_variant_id).sort((x, y) => x - y)).toEqual(
+      [VARIANT, VARIANT2].sort((x, y) => x - y)
     );
   });
 

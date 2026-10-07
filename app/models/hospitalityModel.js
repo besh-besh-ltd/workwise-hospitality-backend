@@ -2,7 +2,11 @@ import db, { pgp } from '../config/dbConn.js';
 import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
 import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
 import { resolveHotelLocationIds } from '../helper/hotelLocation.js';
-import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import {
+  lockLiveRfqAssignments,
+  propagateRoutedCopies,
+  propagateRoutedCopiesLocked,
+} from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -1392,7 +1396,10 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
   }
 
   // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
-  if (results.some((r) => r.added > 0)) await propagateRoutedCopies(ctx, rfq_id);
+  // Without a transaction nothing was held across the writes above: lock, then copy.
+  if (results.some((r) => r.added > 0)) {
+    await (txContext ? propagateRoutedCopies(ctx, rfq_id) : propagateRoutedCopiesLocked(db, rfq_id));
+  }
 
   return {
     recomputed: true,
@@ -1469,7 +1476,7 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
   }
 
   // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
-  if (!options.preview && totalAdded > 0) await propagateRoutedCopies(db, rfq_id);
+  if (!options.preview && totalAdded > 0) await propagateRoutedCopiesLocked(db, rfq_id);
 
   return { refreshed: true, products: results, productsWithNoVendors, totalAdded, uniqueVendorCount: uniqueVendorsAdded.size };
 },
@@ -2279,7 +2286,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
       [holderIds, rfqId, inviteeId]
     );
     // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
-    if (added.length) await propagateRoutedCopies(db, rfqId);
+    if (added.length) await propagateRoutedCopiesLocked(db, rfqId);
     return added;
   },
 

@@ -32,7 +32,8 @@ export function lockLiveRfqAssignments(runner, rfqId) {
  * Locks the live assignment rows FOR SHARE (re-checking their status after any wait), so
  * no copy is left behind for a member that was just released. A transaction that also
  * WRITES rpv rows before calling this must take lockLiveRfqAssignments first (see there);
- * a single-statement caller or an engine hook (whose rows are already its own) need not.
+ * a caller that holds nothing uses propagateRoutedCopiesLocked; an engine hook (whose rows
+ * are already its own) need not.
  * Returns the number of rows added.
  */
 export async function propagateRoutedCopies(runner, rfqId, { assignmentId = null } = {}) {
@@ -57,4 +58,20 @@ export async function propagateRoutedCopies(runner, rfqId, { assignmentId = null
   return res.rowCount;
 }
 
-export default { lockLiveRfqAssignments, propagateRoutedCopies };
+/**
+ * propagateRoutedCopies for a caller that wrote its tbl_rfq_product_vendors rows WITHOUT
+ * holding the live assignments first (autocommit writes, a non-transactional recompute).
+ * Runs in its own transaction (a savepoint when `runner` is already one): the assignments
+ * are locked in one statement and copied in the next, so the copy reads a snapshot taken
+ * after any engine transition (an onAccepted catch-up) that held them has committed. A
+ * single INSERT ... FOR SHARE that waits re-checks only the locked row and would copy a
+ * row that transition just copied a second time (rpv has no unique index).
+ */
+export function propagateRoutedCopiesLocked(runner, rfqId) {
+  return runner.tx(async (t) => {
+    await lockLiveRfqAssignments(t, rfqId);
+    return propagateRoutedCopies(t, rfqId);
+  });
+}
+
+export default { lockLiveRfqAssignments, propagateRoutedCopies, propagateRoutedCopiesLocked };
