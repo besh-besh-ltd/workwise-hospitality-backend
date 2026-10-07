@@ -54,8 +54,8 @@
     },
     {
       "name": "po-pricing",
-      "pattern": "tests/services/(po\\.|poTemplate|pricing|quote)",
-      "description": "Purchase orders, PO templates, the pricing engine, and quote submission/compare",
+      "pattern": "tests/services/(po\\.|poTemplate|pricing|quote|pdf\\.)",
+      "description": "Purchase orders, PO templates, the pricing engine, quote submission/compare, and every Chromium-rendered document (pdf.*)",
       "needsChromium": true,
       "$chromium": [
         "po.documentEndToEnd.test.js renders a real PO through the real Handlebars",
@@ -63,7 +63,10 @@
         "other eight deliberately skip. That test exists because PO document",
         "generation is now STRICT — a template that throws no longer means a stale",
         "PDF, it means the approval fails — and a stubbed renderer cannot catch a",
-        "broken template."
+        "broken template.",
+        "pdf.* suites live here for the same reason: they drive every migrated",
+        "document renderer (invoices, receipts, T&C, ARC quote/contract, call-off",
+        "PO) and the verify-payment email attachments through a real Chromium."
       ]
     },
     {
@@ -73,8 +76,8 @@
     },
     {
       "name": "platform",
-      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification)",
-      "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, and harness self-checks"
+      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification|platform\\.)",
+      "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, harness self-checks, and platform config (DB pool)"
     },
     {
       "name": "activity",

@@ -2,18 +2,11 @@
 // IMPORTANT: Import OTel instrument file at the very top
 import './otel-instrument.mjs';
 
-import express from 'express';
 import http from 'http';
 import dotenv from 'dotenv';
-import util from './app/util/index.js';
-import { consoleLogData, logError } from './app/helper/common.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { createApp } from './app/app.js';
 import { SocketConfig } from './app/util/socket.js';
-import db, { pgp } from './app/config/dbConn.js';
-const __filename = fileURLToPath(import.meta.url);
-
-const __dirname = path.dirname(__filename);
+import { pgp } from './app/config/dbConn.js';
 
 // env config
 dotenv.config();
@@ -23,27 +16,10 @@ import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifec
 import { logger } from './app/util/logger.js';
 
 
-// Initialize app
-const app = express();
-
-// Basic health check
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
-
-// Deep health check — verifies DB connectivity
-app.get('/api/health', async (req, res) => {
-  try {
-    await db.one('SELECT 1 AS alive');
-    res.status(200).json({ status: 'ok' });
-  } catch (err) {
-    res.status(503).json({ status: 'error', message: 'Database connection failed' });
-  }
-});
-
-
-app.use(express.static(__dirname));
-util(app);
+// Initialize app. Routes, middleware and the error handler live in
+// app/app.js. NOTE: there is intentionally no express.static mount: it used to
+// serve this directory, i.e. the backend source, to the internet.
+const app = createApp();
 
 rescheduleAllMilestoneReminders();
 rescheduleAllRfqPublishJobs();
@@ -56,13 +32,6 @@ startRfqStuckPublishWatchdog();
 startPoDocumentWatchdog();
 startArcAmendmentLifecycleCron();
 
-
-// Clean error handler
-app.use(function onError(err, req, res, next) {
-  logError('Unhandled error in global handler', err);
-  res.statusCode = 500;
-  res.json({ status: 3, message: 'An internal error has occurred. Please try again later.' });
-});
 
 // Create server
 const server = http.createServer(app);

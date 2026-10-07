@@ -108,13 +108,13 @@ describe("POST /rfq/list-view filters.mine", () => {
   it("the creator filter is applied in SQL, before the fetch cap", async () => {
     // Cap of 1: the newest RFQ in the caller's scope matching the tag is
     // someone else's. Filtering after the cap would return nothing of mine.
-    const newest = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true);
+    const newest = await rfqModel.getRfqListViewRows(1, CALLER, TAG, undefined);
     expect(newest.map((r) => Number(r.id))).toEqual([seeded.nullCompanyDraft]);
     await db.none(`UPDATE tbl_rfq SET "timestamp" = NOW() + INTERVAL '1 minute' WHERE id = $1`, [seeded.theirs]);
     try {
-      const all = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true);
+      const all = await rfqModel.getRfqListViewRows(1, CALLER, TAG, undefined);
       expect(all.map((r) => Number(r.id))).toEqual([seeded.theirs]);
-      const mine = await rfqModel.getAllBuyerRfq(1, 0, CALLER, null, "DESC", null, null, TAG, 0, undefined, undefined, true, true);
+      const mine = await rfqModel.getRfqListViewRows(1, CALLER, TAG, undefined, { mine: true });
       expect(mine).toHaveLength(1);
       expect(Number(mine[0].created_by)).toBe(CALLER);
     } finally {

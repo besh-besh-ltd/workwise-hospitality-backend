@@ -17,7 +17,7 @@ import { httpClient } from "../helpers/http.js";
 import { createDecryptMemo } from "../../app/helper/decryptMemo.js";
 
 const USER = IDS.users.a1_proc_buyer;
-const PROBE = "/api/v1/dashboard-v2/config";
+const PROBE = "/api/v1/users/me/departments";
 
 afterAll(async () => {
   await closeDb();

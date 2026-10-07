@@ -143,6 +143,7 @@ import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
 import { applyDelegations } from './approvalDelegationModel.js';
+import { notifyApprovalChanged } from '../services/approvalEvents.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -1814,6 +1815,24 @@ export async function getApprovalPolicies({ hospitality_company_ids, hospitality
  * @param {number|null} params.process_id - Process ID (optional)
  * @returns {Object|null} The most specific matching policy or null
  */
+// Master-policy specificity (department dimension removed). Shared by the
+// single lookup and the batched one below so the two cannot pick differently.
+const POLICY_SPECIFICITY_SCORE = `
+           CASE
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NULL THEN 3
+             WHEN p.process_id IS NULL AND p.hotel_id IS NOT NULL THEN 2
+             WHEN p.process_id IS NULL AND p.hotel_id IS NULL THEN 1
+             ELSE 0
+           END`;
+// $2 company, $3 hotel, $4 process — the entity-type predicate is the caller's.
+const MASTER_POLICY_MATCH = `
+      p.hospitality_company_id = $2
+      AND p.is_active = true
+      AND p.department_id IS NULL
+      AND (p.process_id = $4 OR p.process_id IS NULL)
+      AND (p.hotel_id = $3 OR p.hotel_id IS NULL)`;
+
 export async function findBestMatchingPolicy({ entity_type, hospitality_company_id, hotel_id = null, department_id = null, process_id = null }) {
   if (!entity_type || !hospitality_company_id) {
     throw new Error('entity_type and hospitality_company_id are required');
@@ -1822,26 +1841,52 @@ export async function findBestMatchingPolicy({ entity_type, hospitality_company_
   // Master policy lookup: only find policies with department_id IS NULL (master policies)
   // Simplified 4-level specificity (department dimension removed)
   const policies = await db.any(`
-    SELECT p.*,
-           CASE
-             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 4
-             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NULL THEN 3
-             WHEN p.process_id IS NULL AND p.hotel_id IS NOT NULL THEN 2
-             WHEN p.process_id IS NULL AND p.hotel_id IS NULL THEN 1
-             ELSE 0
-           END as specificity_score
+    SELECT p.*,${POLICY_SPECIFICITY_SCORE} as specificity_score
     FROM tbl_approval_policies p
     WHERE p.entity_type = $1
-      AND p.hospitality_company_id = $2
-      AND p.is_active = true
-      AND p.department_id IS NULL
-      AND (p.process_id = $4 OR p.process_id IS NULL)
-      AND (p.hotel_id = $3 OR p.hotel_id IS NULL)
+      AND ${MASTER_POLICY_MATCH}
     ORDER BY specificity_score DESC, p.created_at DESC
     LIMIT 1
   `, [entity_type, hospitality_company_id, hotel_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
+}
+
+/**
+ * findBestMatchingPolicy for several entity types at once, with each winning
+ * policy's steps (ordered by step_order) — ONE statement instead of 2 per
+ * entity type. Same match predicate and specificity ordering as the single
+ * lookup (shared constants above).
+ *
+ * @returns {Promise<Map<string, {policy: object, steps: object[]}>>} keyed by
+ *   entity_type; types with no matching policy are absent.
+ */
+export async function findBestMatchingPoliciesWithSteps(entityTypes, { hospitality_company_id, hotel_id = null, process_id = null }, t = db) {
+  const types = [...new Set((entityTypes || []).filter(Boolean))];
+  const out = new Map();
+  if (!types.length) return out;
+  if (!hospitality_company_id) {
+    throw new Error('entity_type and hospitality_company_id are required');
+  }
+  const rows = await t.any(`
+    WITH best AS (
+      SELECT DISTINCT ON (p.entity_type) p.*,${POLICY_SPECIFICITY_SCORE} as specificity_score
+      FROM tbl_approval_policies p
+      WHERE p.entity_type = ANY($1::text[])
+        AND ${MASTER_POLICY_MATCH}
+      ORDER BY p.entity_type, specificity_score DESC, p.created_at DESC
+    )
+    SELECT row_to_json(b.*) AS policy, row_to_json(s.*) AS step
+    FROM best b
+    LEFT JOIN tbl_approval_policy_steps s ON s.approval_policy_id = b.id
+    ORDER BY b.entity_type, s.step_order ASC, s.id ASC
+  `, [types, hospitality_company_id, hotel_id, process_id]);
+  for (const r of rows) {
+    const type = r.policy.entity_type;
+    if (!out.has(type)) out.set(type, { policy: r.policy, steps: [] });
+    if (r.step) out.get(type).steps.push(r.step);
+  }
+  return out;
 }
 
 /**
@@ -2151,12 +2196,19 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
+    // The three checks below are independent reads, so they are issued
+    // together rather than one round trip after another (the active-user read
+    // used to wait for the other two; it is now discarded when either fails,
+    // which yields the same result). Inside a transaction pg-promise queues
+    // them on the one connection, so this is safe for every caller.
+    const activeUser = () => t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
     if (department_id) {
       // Validate company/hotel access + user has role scope covering this
       // department AND process. Process filter is permissive when not provided
       // (process_id arg NULL = "any process applies" e.g. legacy paths).
-      const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      const hasDeptScope = await t.oneOrNone(`
+      const [hasCompanyAccess, hasDeptScope, user] = await Promise.all([
+        userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t),
+        t.oneOrNone(`
         SELECT 1 FROM tbl_user_role_scopes urs
         WHERE urs.user_id = $1
           AND urs.company_id = $2
@@ -2164,26 +2216,29 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
           AND (urs.department_id IS NULL OR urs.department_id = $4)
           AND ($5::int IS NULL OR urs.process_id IS NULL OR urs.process_id = $5)
         LIMIT 1
-      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id, process_id]);
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, department_id, process_id]),
+        activeUser(),
+      ]);
       if (hasCompanyAccess && hasDeptScope) {
-        const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     } else {
       // No department filter: just validate company/hotel access + process scope
-      const hasAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      const hasProcessScope = process_id == null
-        ? true
-        : !!(await t.oneOrNone(`
+      const [hasAccess, hasProcessScope, user] = await Promise.all([
+        userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t),
+        process_id == null
+          ? true
+          : t.oneOrNone(`
             SELECT 1 FROM tbl_user_role_scopes urs
             WHERE urs.user_id = $1
               AND urs.company_id = $2
               AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
               AND (urs.process_id IS NULL OR urs.process_id = $4)
             LIMIT 1
-          `, [step.approver_source_id, hospitality_company_id, hotel_id, process_id]));
+          `, [step.approver_source_id, hospitality_company_id, hotel_id, process_id]).then((r) => !!r),
+        activeUser(),
+      ]);
       if (hasAccess && hasProcessScope) {
-        const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
     }
@@ -2756,6 +2811,9 @@ export async function createApprovalInstance({
       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
       VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
     `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(instanceMetadata)]);
+    // Push `approval:changed` to its approvers once the outermost transaction
+    // commits (fire-and-forget; nothing is emitted if this rolls back).
+    notifyApprovalChanged({ instanceIds: instance.id }, t);
 
     // 6. (The all-steps-dropped case is refused before the INSERT above — see
     //     APPROVAL_POLICY_RESOLVES_TO_NOBODY. It can no longer reach here, and
@@ -3109,8 +3167,15 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
  * Get detailed approval instance information
  * Includes policy info, all steps, approvers, and action history
  */
-export async function getApprovalInstanceDetails(instance_id, user_id = null) {
-  const instance = await db.oneOrNone(`
+// ---------------------------------------------------------------------------
+// Approval instance detail — shared by the single-instance reader and its
+// batched twin. The SQL fragments and the output shaping live here ONCE so the
+// two readers cannot drift: the batched one exists for pages that render many
+// instances at a time (the RFQ lifecycle reads every RFQ / TECHNICAL /
+// NEGOTIATION_QUOTE / PO instance of an RFQ), where the per-instance, per-step
+// loop below cost 1 + 1 + steps + 1 round trips EACH.
+// ---------------------------------------------------------------------------
+const APPROVAL_INSTANCE_DETAIL_FROM = `
     SELECT
       i.*,
       p.entity_type as policy_entity_type,
@@ -3128,29 +3193,15 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
     LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
     LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
     LEFT JOIN tbl_department d ON i.department_id = d.id
-    LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
-    WHERE i.id = $1
-  `, [instance_id]);
+    LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id`;
 
-  if (!instance) throw new Error('Approval instance not found');
-
-  // Get all steps with approvers (include mid-flight tracking fields)
-  const steps = await db.any(`
+const APPROVAL_STEP_DETAIL_SELECT = `
     SELECT s.*, s.added_mid_flight, s.removed_mid_flight,
            ps.approval_type, ps.approver_source_type, ps.approver_source_id
     FROM tbl_approval_instance_steps s
-    LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
-    WHERE s.approval_instance_id = $1
-    ORDER BY s.step_order ASC
-  `, [instance_id]);
+    LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id`;
 
-  let canUserApprove = false;
-  let userCurrentStep = null;
-
-  for (const step of steps) {
-    // Get approvers for this step
-    const approvers = await db.any(`
-      SELECT
+const APPROVAL_STEP_APPROVER_COLUMNS = `
         sa.*,
         u.name as user_name,
         u.email as user_email,
@@ -3168,40 +3219,9 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
           WHERE ud.user_id = u.id
           ORDER BY ud.id DESC
           LIMIT 1
-        ) AS user_department
-      FROM tbl_approval_step_approvers sa
-      JOIN tbl_users u ON sa.approver_user_id = u.id
-      WHERE sa.approval_instance_step_id = $1
-    `, [step.id]);
+        ) AS user_department`;
 
-    step.approvers = approvers.map(ap => ({
-      user_id: ap.approver_user_id,
-      user_name: ap.user_name,
-      user_email: ap.user_email,
-      user_designation: ap.user_designation,
-      user_department: ap.user_department,
-      employee_code: ap.employee_code,
-      status: ap.status,
-      account_active: ap.account_active !== false,
-      acted_at: ap.acted_at,
-      comment: ap.comment,
-      added_mid_flight: ap.added_mid_flight || false,
-      removed_at: ap.removed_at || null,
-      removal_reason: ap.removal_reason || null
-    }));
-
-    // Check if current user can approve at this step
-    if (user_id && step.step_order === instance.current_step && instance.status === 'PENDING') {
-      const userApprover = approvers.find(ap => ap.approver_user_id === user_id && ap.status === 'PENDING');
-      if (userApprover) {
-        canUserApprove = true;
-        userCurrentStep = step.id;
-      }
-    }
-  }
-
-  // Get action history
-  const actionHistory = await db.any(`
+const APPROVAL_ACTION_HISTORY_SELECT = `
     SELECT
       a.id, a.approval_instance_id, a.approval_instance_step_id,
       a.approver_user_id, a.action, a.comment,
@@ -3209,10 +3229,43 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       u.name as actor_name,
       u.email as actor_email
     FROM tbl_approval_actions a
-    JOIN tbl_users u ON a.approver_user_id = u.id
-    WHERE a.approval_instance_id = $1
-    ORDER BY a.created_at ASC
-  `, [instance_id]);
+    JOIN tbl_users u ON a.approver_user_id = u.id`;
+
+// REMOVED / tombstoned approvers are deliberately KEPT (status, removed_at,
+// removal_reason): every consumer renders the removal, none may lose it.
+const mapStepApproverRow = (ap) => ({
+  user_id: ap.approver_user_id,
+  user_name: ap.user_name,
+  user_email: ap.user_email,
+  user_designation: ap.user_designation,
+  user_department: ap.user_department,
+  employee_code: ap.employee_code,
+  status: ap.status,
+  account_active: ap.account_active !== false,
+  acted_at: ap.acted_at,
+  comment: ap.comment,
+  added_mid_flight: ap.added_mid_flight || false,
+  removed_at: ap.removed_at || null,
+  removal_reason: ap.removal_reason || null
+});
+
+// Steps must already carry `.approvers` (mapped rows) and be ordered by
+// step_order. `approverRowsByStep` are the RAW rows, used for the can-approve
+// check exactly as the original loop did (strict === on the user id).
+function shapeApprovalInstanceDetails(instance, steps, approverRowsByStep, actionHistory, user_id) {
+  let canUserApprove = false;
+  let userCurrentStep = null;
+  for (const step of steps) {
+    // Check if current user can approve at this step
+    if (user_id && step.step_order === instance.current_step && instance.status === 'PENDING') {
+      const approvers = approverRowsByStep.get(step.id) || [];
+      const userApprover = approvers.find(ap => ap.approver_user_id === user_id && ap.status === 'PENDING');
+      if (userApprover) {
+        canUserApprove = true;
+        userCurrentStep = step.id;
+      }
+    }
+  }
 
   return {
     id: instance.id,
@@ -3266,6 +3319,129 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
     }))
   };
 }
+
+export async function getApprovalInstanceDetails(instance_id, user_id = null) {
+  const instance = await db.oneOrNone(`${APPROVAL_INSTANCE_DETAIL_FROM}
+    WHERE i.id = $1
+  `, [instance_id]);
+
+  if (!instance) throw new Error('Approval instance not found');
+
+  // Get all steps with approvers (include mid-flight tracking fields)
+  const steps = await db.any(`${APPROVAL_STEP_DETAIL_SELECT}
+    WHERE s.approval_instance_id = $1
+    ORDER BY s.step_order ASC
+  `, [instance_id]);
+
+  const approverRowsByStep = new Map();
+  for (const step of steps) {
+    // Get approvers for this step
+    const approvers = await db.any(`
+      SELECT ${APPROVAL_STEP_APPROVER_COLUMNS}
+      FROM tbl_approval_step_approvers sa
+      JOIN tbl_users u ON sa.approver_user_id = u.id
+      WHERE sa.approval_instance_step_id = $1
+    `, [step.id]);
+    approverRowsByStep.set(step.id, approvers);
+    step.approvers = approvers.map(mapStepApproverRow);
+  }
+
+  // Get action history
+  const actionHistory = await db.any(`${APPROVAL_ACTION_HISTORY_SELECT}
+    WHERE a.approval_instance_id = $1
+    ORDER BY a.created_at ASC
+  `, [instance_id]);
+
+  return shapeApprovalInstanceDetails(instance, steps, approverRowsByStep, actionHistory, user_id);
+}
+
+/**
+ * Batched getApprovalInstanceDetails: same output per instance, in 3 parallel
+ * statements for ANY number of instances (steps, approvers, action history),
+ * plus the instance read when only ids are given.
+ *
+ * Semantics match the single reader exactly:
+ *   - instances whose policy row is gone are omitted (the single reader throws
+ *     for them, and every batch caller already skipped rejected ones);
+ *   - REMOVED / tombstoned approvers are kept;
+ *   - can_user_approve / user_approval_step_id are computed per instance for
+ *     `user_id` against its CURRENT step only.
+ * Ordering is made deterministic where the single reader left ties to the
+ * planner (step_order ties → step id; equal action timestamps → action id;
+ * approvers within a step → approver row id, i.e. insertion order).
+ *
+ * @param {number[]} instanceIds
+ * @param {number|null} user_id
+ * @param {object} [t]
+ * @returns {Promise<Map<number, object>>} instance id → details
+ */
+export async function getApprovalInstanceDetailsBatch(instanceIds, user_id = null, t = db) {
+  const ids = [...new Set((instanceIds || []).map(Number).filter(Number.isInteger))];
+  if (!ids.length) return new Map();
+  const instances = await t.any(`${APPROVAL_INSTANCE_DETAIL_FROM}
+    WHERE i.id = ANY($1::int[])
+  `, [ids]);
+  return assembleApprovalInstanceDetails(instances, user_id, t);
+}
+
+/**
+ * Second half of getApprovalInstanceDetailsBatch, for callers that already
+ * selected the instance rows with APPROVAL_INSTANCE_DETAIL_FROM (exported as
+ * approvalInstanceDetailFrom) under their own WHERE — saves a round trip.
+ */
+export async function assembleApprovalInstanceDetails(instances, user_id = null, t = db) {
+  const out = new Map();
+  if (!instances?.length) return out;
+  const ids = instances.map(i => Number(i.id));
+  const [stepRows, approverRows, actionRows] = await Promise.all([
+    t.any(`${APPROVAL_STEP_DETAIL_SELECT}
+      WHERE s.approval_instance_id = ANY($1::int[])
+      ORDER BY s.approval_instance_id, s.step_order ASC, s.id ASC
+    `, [ids]),
+    t.any(`
+      SELECT ${APPROVAL_STEP_APPROVER_COLUMNS}
+      FROM tbl_approval_step_approvers sa
+      JOIN tbl_users u ON sa.approver_user_id = u.id
+      WHERE sa.approval_instance_step_id IN (
+        SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])
+      )
+      ORDER BY sa.approval_instance_step_id, sa.id
+    `, [ids]),
+    t.any(`${APPROVAL_ACTION_HISTORY_SELECT}
+      WHERE a.approval_instance_id = ANY($1::int[])
+      ORDER BY a.approval_instance_id, a.created_at ASC, a.id ASC
+    `, [ids]),
+  ]);
+
+  const approverRowsByStep = new Map();
+  for (const ap of approverRows) {
+    if (!approverRowsByStep.has(ap.approval_instance_step_id)) approverRowsByStep.set(ap.approval_instance_step_id, []);
+    approverRowsByStep.get(ap.approval_instance_step_id).push(ap);
+  }
+  const stepsByInstance = new Map();
+  for (const step of stepRows) {
+    step.approvers = (approverRowsByStep.get(step.id) || []).map(mapStepApproverRow);
+    if (!stepsByInstance.has(step.approval_instance_id)) stepsByInstance.set(step.approval_instance_id, []);
+    stepsByInstance.get(step.approval_instance_id).push(step);
+  }
+  const actionsByInstance = new Map();
+  for (const a of actionRows) {
+    if (!actionsByInstance.has(a.approval_instance_id)) actionsByInstance.set(a.approval_instance_id, []);
+    actionsByInstance.get(a.approval_instance_id).push(a);
+  }
+  for (const instance of instances) {
+    out.set(Number(instance.id), shapeApprovalInstanceDetails(
+      instance,
+      stepsByInstance.get(instance.id) || [],
+      approverRowsByStep,
+      actionsByInstance.get(instance.id) || [],
+      user_id
+    ));
+  }
+  return out;
+}
+
+export const approvalInstanceDetailFrom = APPROVAL_INSTANCE_DETAIL_FROM;
 
 /**
  * Get approval instances for an entity
@@ -3482,6 +3658,9 @@ export async function submitApprovalAction({
       SET status = $1, acted_at = NOW(), comment = $2
       WHERE approval_instance_step_id = $3 AND approver_user_id = $4
     `, [normalizedAction === 'APPROVE' ? 'APPROVED' : 'REJECTED', comment, stepId, approver_user_id]);
+    // Every outcome below (step advance, instance approve/reject) changes some
+    // approver's pending set — announced after commit, never inside it.
+    notifyApprovalChanged({ instanceIds: approval_instance_id }, t);
 
     // 7. Handle REJECT - immediately reject the entire instance
     if (normalizedAction === 'REJECT') {
@@ -3706,6 +3885,7 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       SET status = 'CANCELLED', completed_at = NOW()
       WHERE id = $1
     `, [instance_id]);
+    notifyApprovalChanged({ instanceIds: instance_id }, t);
 
     // Update all pending steps
     await t.none(`

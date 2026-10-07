@@ -41,7 +41,7 @@ const resolveScope = async (req, res) => {
   const cached = req.dashboardScope;
   const scope = cached && cached.key === selectedHotelIds.join(',')
     ? cached.scope
-    : await dashboardModel.resolveUserScope(user_id, selectedHotelIds);
+    : await dashboardModel.resolveUserScope(user_id, selectedHotelIds, req.user);
   if (!scope) {
     res.status(403).json({ status: 0, message: 'No hospitality access found for this user' }).end();
     return null;
@@ -78,7 +78,7 @@ const dashboardController = {
       if (Number(req.user.user_type) === VENDOR_USER_TYPE) {
         return res.status(403).json({ status: 0, message: 'Insufficient permissions' }).end();
       }
-      const scope = await dashboardModel.resolveUserScope(req.user.id, []);
+      const scope = await dashboardModel.resolveUserScope(req.user.id, [], req.user);
       const v3_enabled = scope ? await dashboardConfigModel.isV3Enabled(scope.buyer_company_id) : false;
       const data = { v3_enabled };
       if (v3_enabled) {

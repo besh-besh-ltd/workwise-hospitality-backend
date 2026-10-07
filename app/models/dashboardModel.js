@@ -169,14 +169,30 @@ function scopeFilter(user_id, alias, params, permissions = RFQ_SCOPE_PERMISSIONS
  *
  * If selectedHotelIds are provided, intersects with the allowed set.
  */
-async function resolveUserScope(user_id, selectedHotelIds = []) {
-  // Check user type
-  const userInfo = await db.oneOrNone(
-    // `id` is selected because the capability check below needs it: the
-    // capability lives on the user's granted role scopes, not on the row.
-    `SELECT id, user_type, company_id FROM tbl_users WHERE id = $1`,
-    [user_id]
-  );
+/**
+ * @param {object|null} knownUser - the already-loaded `req.user` row, when the
+ *   caller has one. The auth middleware SELECTs the whole tbl_users row before
+ *   any handler runs, so re-reading id/user_type/company_id here was a second
+ *   round trip for data already in hand — once per widget, ~30 per dashboard
+ *   load. The row is only trusted when its id matches `user_id`; anything else
+ *   falls back to the authoritative lookup, so a mismatched hand-off can never
+ *   widen scope. Scope stays derived from user_id, never from client input.
+ */
+async function resolveUserScope(user_id, selectedHotelIds = [], knownUser = null) {
+  const canUseKnownUser =
+    knownUser &&
+    Number(knownUser.id) === Number(user_id) &&
+    knownUser.user_type !== undefined &&
+    knownUser.company_id !== undefined;
+
+  const userInfo = canUseKnownUser
+    ? { id: knownUser.id, user_type: knownUser.user_type, company_id: knownUser.company_id }
+    : await db.oneOrNone(
+        // `id` is selected because the capability check below needs it: the
+        // capability lives on the user's granted role scopes, not on the row.
+        `SELECT id, user_type, company_id FROM tbl_users WHERE id = $1`,
+        [user_id]
+      );
 
   if (!userInfo) return null;
 

@@ -13,7 +13,7 @@ import { vendorCanSubmitForHotels, resolveArcVendorCoverage } from '../../helper
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import axios from 'axios';
 import crypto from 'crypto';
-import puppeteer from 'puppeteer';
+import { pdfRenderer } from '../../util/pdfRenderer.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -1907,15 +1907,7 @@ export async function downloadQuotePdf(req, res) {
     const html = renderVendorQuoteHtml({ arc, names: names || {}, vendor, quote, items, lines, tech });
 
     tmpPath = path.join(os.tmpdir(), `arc-quote-${arcId}-${vendorId}-${Date.now()}.pdf`);
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await page.pdf({ path: tmpPath, format: 'A4', printBackground: true, margin: { top: '12mm', bottom: '14mm', left: '12mm', right: '12mm' } });
-    await browser.close();
-    browser = null;
+    await pdfRenderer.renderToFile(html, tmpPath, { margin: { top: '12mm', bottom: '14mm', left: '12mm', right: '12mm' } });
 
     const pdfBuffer = fs.readFileSync(tmpPath);
     const safeVendor = String(vendor.name || 'vendor').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60) || 'vendor';

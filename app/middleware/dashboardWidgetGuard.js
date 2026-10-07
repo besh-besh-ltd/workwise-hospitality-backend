@@ -101,7 +101,7 @@ export async function dashboardWidgetGuard(req, res, next) {
     const selectedHotelIds = req.query.hotel_ids
       ? String(req.query.hotel_ids).split(',').map(Number).filter(Boolean)
       : [];
-    const scope = await dashboardModel.resolveUserScope(user.id, selectedHotelIds);
+    const scope = await dashboardModel.resolveUserScope(user.id, selectedHotelIds, user);
     // No hospitality access at all: the controller answers 403 itself.
     if (!scope) return next();
     req.dashboardScope = { key: selectedHotelIds.join(','), scope };

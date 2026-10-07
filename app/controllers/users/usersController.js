@@ -18,13 +18,14 @@ import s3Client from '../../config/s3config.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
+import { decryptClaim, encryptStable } from '../../helper/claimCrypto.js';
 import bcrypt from 'bcryptjs';
 import httpClient from '../../util/httpClient.js';
 import { logger } from '../../util/logger.js';
 import FormData from 'form-data';
 import Razorpay from 'razorpay';
 import Moment from 'moment';
-import puppeteer from 'puppeteer';
+import { pdfRenderer, NO_MARGIN } from '../../util/pdfRenderer.js';
 import fs from 'fs';
 import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
@@ -1598,7 +1599,7 @@ get_company_users: async (req, res, next) => {
             error++;
           }
         }
-        user = await userModel.getUserById(cryptr.decrypt(payload.sub));
+        user = await userModel.getUserById(decryptClaim(payload.sub));
       }
 
       if (user.length > 0 && error == 0) {
@@ -2821,7 +2822,9 @@ update_user_detail: async (req, res, next) => {
         user.hospitality_mappings = userMappings || [];
 
         // Add user_key for hospitality payments
-        user.user_key = cryptr.encrypt(user_id.toString());
+        // Stable per user: re-encrypting cost a 100k-round pbkdf2 per profile load,
+        // and any earlier ciphertext decrypts identically (see claimCrypto.js).
+        user.user_key = encryptStable(user_id.toString());
         
         // Check hospitality subscription status for vendors
         logger.debug({ user_type: user.user_type, is_hospitality: user.is_hospitality }, '[get_profile] user_type and is_hospitality');
@@ -3715,7 +3718,7 @@ publish_profile_reviews: async (req, res, next) => {
 
       let decryptedUserId;
       try {
-        decryptedUserId = parseInt(cryptr.decrypt(user_key), 10);
+        decryptedUserId = parseInt(decryptClaim(user_key), 10);
       } catch (error) {
         return res.status(400).json({
           status: 2,
@@ -4208,18 +4211,8 @@ publish_profile_reviews: async (req, res, next) => {
       const fileName = `invoice-hospitality-${payment.id}-${Date.now()}.pdf`;
       const outputPath = `${invoiceDir}/${fileName}`;
 
-      const browser = await puppeteer.launch({
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-      });
-      const page = await browser.newPage();
-      await page.setContent(htmlPdf, { waitUntil: 'networkidle0' });
-      await page.pdf({
-        path: outputPath,
-        format: 'A4',
-        printBackground: true
-      });
-      await browser.close();
+      // Shared Chromium (pdfRenderer); NO_MARGIN = the previous page.pdf output.
+      await pdfRenderer.renderToFile(htmlPdf, outputPath, { margin: NO_MARGIN });
 
       // Ensure invoice_file column exists, then update payment record
       try {

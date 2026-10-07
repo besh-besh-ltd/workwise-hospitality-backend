@@ -17,9 +17,10 @@ const origin = (app) => {
       'http://letsworkwise.com'
 
     ];
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Access-Control-Allow-Origin / -Credentials are owned by the cors()
+    // middleware (corsOptions.js). Setting '*' here would defeat the
+    // CORS_ORIGINS allowlist for every non-matching origin.
     res.setHeader('app_version', '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader(
       'Access-Control-Allow-Methods',
       'OPTIONS, GET, POST, PUT, PATCH, DELETE'

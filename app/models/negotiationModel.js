@@ -3761,18 +3761,6 @@ const negotiationModel = {
   },
 
   getApprovalBundleForRfq: async (rfqId, userId) => {
-    // 1. Get all rfq_product_ids and round_ids for this RFQ
-    // NEGOTIATION instances use round_id as entity_id; NEGOTIATION_QUOTE uses product_id
-    const [products, rounds] = await Promise.all([
-      db.any(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`, [rfqId]),
-      db.any(`SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqId])
-    ]);
-    const productIds = products.map(p => p.id);
-    const roundIds = rounds.map(r => r.id);
-    if (productIds.length === 0) {
-      return { negotiation_instances: {}, negotiation_quote_instances: {}, rounds_history: [] };
-    }
-
     // Lazy-heal stale APPROVED NEGOTIATION_QUOTE rows. handlePORejection
     // cancels these when the last vendor on a product is de-finalized, but
     // rejections that pre-date that fix left orphaned APPROVED rows behind,
@@ -3782,23 +3770,46 @@ const negotiationModel = {
     // a finalization row for the product — if none do, the approval has been
     // rolled back. Heal in-place before assembling the bundle so the modal
     // sees the corrected status.
-    await db.none(
-      `UPDATE tbl_approval_instances
-          SET status = 'CANCELLED', completed_at = NOW()
-        WHERE entity_type = 'NEGOTIATION_QUOTE'
-          AND status = 'APPROVED'
-          AND entity_id IN (
-            SELECT rp.id FROM tbl_rfq_products rp
-            WHERE rp.rfq_id = $1
-              AND NOT EXISTS (
-                SELECT 1 FROM tbl_quote_finalization qf
-                WHERE qf.rfq_id = rp.rfq_id
-                  AND qf.product_variant_id = rp.product_variant_id
-                  AND qf.variant = rp.variant
-              )
-          )`,
-      [rfqId]
-    );
+    //
+    // Cost on the read path (kept here deliberately; behaviour unchanged): it
+    // is ONE conditional UPDATE. When nothing is stale — the steady state — it
+    // matches zero rows, so it writes nothing (no tuples, no WAL, no row
+    // locks; only the table-level RowExclusiveLock every UPDATE takes) and
+    // costs one indexed probe of this RFQ's products. It never touches a
+    // PENDING instance, so it cannot change anybody's pending-approval set
+    // and emits no approval:changed event. It used to run as its own serial
+    // round trip between the id reads and the bundle reads; it does not depend
+    // on the id reads (with no products its subquery is empty and it is a
+    // no-op, which is why the early return below needs no guard), so it now
+    // shares their wave and still completes before any instance is read.
+    // 1. Get all rfq_product_ids and round_ids for this RFQ
+    // NEGOTIATION instances use round_id as entity_id; NEGOTIATION_QUOTE uses product_id
+    const [products, rounds] = await Promise.all([
+      db.any(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`, [rfqId]),
+      db.any(`SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqId]),
+      db.none(
+        `UPDATE tbl_approval_instances
+            SET status = 'CANCELLED', completed_at = NOW()
+          WHERE entity_type = 'NEGOTIATION_QUOTE'
+            AND status = 'APPROVED'
+            AND entity_id IN (
+              SELECT rp.id FROM tbl_rfq_products rp
+              WHERE rp.rfq_id = $1
+                AND NOT EXISTS (
+                  SELECT 1 FROM tbl_quote_finalization qf
+                  WHERE qf.rfq_id = rp.rfq_id
+                    AND qf.product_variant_id = rp.product_variant_id
+                    AND qf.variant = rp.variant
+                )
+            )`,
+        [rfqId]
+      ),
+    ]);
+    const productIds = products.map(p => p.id);
+    const roundIds = rounds.map(r => r.id);
+    if (productIds.length === 0) {
+      return { negotiation_instances: {}, negotiation_quote_instances: {}, rounds_history: [] };
+    }
 
     // Combine both ID sets for querying (NEGOTIATION uses roundIds, NEGOTIATION_QUOTE uses productIds)
     const allEntityIds = [...new Set([...productIds, ...roundIds])];
@@ -4225,6 +4236,58 @@ const negotiationModel = {
   },
 
   /**
+   * getVendorsForProductWithStatus for several products of one RFQ in ONE
+   * statement (GET /negotiation/rounds/:rfq_id called it once per product).
+   * Same columns, same predicate, same per-product ordering.
+   * @returns {Promise<Map<number, object[]>>} rfq_product_id → rows
+   */
+  getVendorsForProductsWithStatus: async (rfqId, rfqProductIds) => {
+    const ids = [...new Set((rfqProductIds || []).map(Number).filter(Number.isInteger))];
+    const out = new Map(ids.map((id) => [id, []]));
+    if (!ids.length) return out;
+    const rows = await db.any(
+      `SELECT
+         rp.id AS __rfq_product_id,
+         u.id,
+         u.name,
+         u.email,
+         u.organization_name,
+         c.company_name,
+         CASE WHEN active_nr.id IS NOT NULL THEN true ELSE false END AS in_active_round,
+         active_nr.id AS active_round_id,
+         active_nr.round_number AS active_round_number,
+         active_nr.status AS active_round_status
+       FROM tbl_rfq_products rp
+       JOIN tbl_rfq_product_vendors rpv
+         ON rpv.rfq_id = rp.rfq_id
+         AND rpv.product_variant_id = rp.product_variant_id
+         AND rpv.variant = rp.variant
+       JOIN tbl_users u ON u.id = rpv.user_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       LEFT JOIN LATERAL (
+         SELECT nr.id, nr.round_number, nr.status
+         FROM tbl_negotiation_rounds nr
+         WHERE nr.rfq_id = $2
+           AND ${coversProductSql('rp.id')}
+           AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+           AND (nr.status != 'ACTIVE' OR nr.end_date > NOW())
+           AND u.id = ANY(nr.vendor_ids)
+         ORDER BY nr.round_number DESC
+         LIMIT 1
+       ) active_nr ON true
+       WHERE rp.id = ANY($1::int[])
+         AND rp.rfq_id = $2
+       ORDER BY
+         rp.id,
+         CASE WHEN active_nr.id IS NOT NULL THEN 1 ELSE 0 END,
+         COALESCE(c.company_name, u.organization_name, u.name)`,
+      [ids, rfqId]
+    );
+    for (const { __rfq_product_id, ...row } of rows) out.get(Number(__rfq_product_id)).push(row);
+    return out;
+  },
+
+  /**
    * Distinct vendors across every product of an RFQ — used to validate the
    * vendor list of an RFQ-level (no product) negotiation entry.
    */
@@ -4246,6 +4309,31 @@ const negotiationModel = {
   /**
    * Get vendor details for a specific round (from vendor_ids array column)
    */
+  /**
+   * getVendorsForRound for many rounds in ONE statement (GET
+   * /negotiation/rounds/:rfq_id called it once per round). Same columns and
+   * per-round ordering; ties keep vendor_ids order.
+   * @returns {Promise<Map<number, object[]>>} round id → vendors
+   */
+  getVendorsForRounds: async (roundIds) => {
+    const ids = [...new Set((roundIds || []).map(Number).filter(Number.isInteger))];
+    const out = new Map(ids.map((id) => [id, []]));
+    if (!ids.length) return out;
+    const rows = await db.any(
+      `SELECT nr.id AS __round_id, u.id, u.name, u.email, u.organization_name, c.company_name
+       FROM tbl_negotiation_rounds nr
+       JOIN LATERAL unnest(nr.vendor_ids) WITH ORDINALITY AS v(vid, ord) ON true
+       JOIN tbl_users u ON u.id = v.vid
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE nr.id = ANY($1::int[])
+         AND nr.vendor_ids IS NOT NULL
+       ORDER BY nr.id, COALESCE(c.company_name, u.organization_name, u.name), v.ord`,
+      [ids]
+    );
+    for (const { __round_id, ...row } of rows) out.get(Number(__round_id)).push(row);
+    return out;
+  },
+
   getVendorsForRound: async (roundId) => {
     return db.any(
       `SELECT u.id, u.name, u.email, u.organization_name, c.company_name

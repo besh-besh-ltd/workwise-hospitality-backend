@@ -38,3 +38,33 @@ export function createDecryptMemo(decrypt, max = DEFAULT_DECRYPT_MEMO_SIZE) {
   memoDecrypt.clear = () => cache.clear();
   return memoDecrypt;
 }
+
+/**
+ * Bounded cache of ONE ciphertext per plaintext, for an encrypt whose output
+ * is salted (any earlier ciphertext still decrypts to the same plaintext).
+ * Keyed by the exact plaintext string; LRU-evicted like the decrypt memo.
+ * A failed encrypt throws and is not cached.
+ */
+export const DEFAULT_ENCRYPT_CACHE_SIZE = 5000;
+
+export function createEncryptCache(encrypt, max = DEFAULT_ENCRYPT_CACHE_SIZE) {
+  const cache = new Map();
+
+  const cachedEncrypt = (plaintext) => {
+    const key = String(plaintext);
+    if (cache.has(key)) {
+      const value = cache.get(key);
+      cache.delete(key);
+      cache.set(key, value);
+      return value;
+    }
+    const value = encrypt(key);
+    cache.set(key, value);
+    if (cache.size > max) cache.delete(cache.keys().next().value);
+    return value;
+  };
+
+  cachedEncrypt.size = () => cache.size;
+  cachedEncrypt.clear = () => cache.clear();
+  return cachedEncrypt;
+}

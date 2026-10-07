@@ -106,7 +106,12 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     throw new Error(`PO ${po_id} not found`);
   }
 
-  const supplier = await conn.oneOrNone(`
+  // Everything below needs only poData, and none of it needs another's result
+  // except the two company locations (which need the supplier). Issued
+  // together: on the plain pool that is ~5 fewer serial round trips; inside the
+  // approval transaction pg-promise queues them on the one connection, so the
+  // statements and their order of effect are unchanged.
+  const supplierP = conn.oneOrNone(`
     SELECT
       U.id,
       U.company_id,
@@ -123,12 +128,12 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     LIMIT 1
   `, [poData.finalized_vendor_id]);
 
-  const [buyerLocation, supplierLocation] = await Promise.all([
+  const locationsP = supplierP.then((supplier) => Promise.all([
     getLatestCompanyLocation(conn, poData.company_id),
     getLatestCompanyLocation(conn, supplier?.company_id)
-  ]);
+  ]));
 
-  const items = await conn.any(`
+  const itemsP = conn.any(`
     SELECT
       POP.id,
       POP.quote_id AS quote_item_id,
@@ -168,6 +173,28 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     ORDER BY POP.id
   `, [po_id]);
 
+  const paymentTermsP = poData.source_quote_id
+    ? conn.any(`
+        SELECT type, value, days, comment
+        FROM tbl_quotes_payment_terms
+        WHERE quote_id = $1
+        ORDER BY id
+      `, [poData.source_quote_id])
+    : Promise.resolve([]);
+
+  const rfqTermsP = conn.any(`
+    SELECT RT.id, RT.term_content
+    FROM tbl_rfq_terms_map RTM
+    JOIN tbl_rfq_terms RT ON RT.id = RTM.terms_id
+    WHERE RTM.rfq_id = $1
+    ORDER BY RTM.id
+  `, [poData.rfq_id]);
+
+  const approvalDataP = getApprovalDataForPO(po_id, poData, conn);
+
+  const [supplier, [buyerLocation, supplierLocation], items, paymentTermsList, rfqTerms, approvalData] =
+    await Promise.all([supplierP, locationsP, itemsP, paymentTermsP, rfqTermsP, approvalDataP]);
+
   const taxMode = resolvePOTaxMode(buyerLocation, supplierLocation);
   // Document-level global charges — primary source is the snapshot column on
   // tbl_rfq_purchase_order (populated by draftPO at PO creation time, so the
@@ -191,22 +218,6 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
   const buyerAddress = formatCompanyLocationDisplay(buyerLocation, poData.buyer_legacy_location);
   const supplierAddress = formatCompanyLocationDisplay(supplierLocation, supplier?.legacy_address);
 
-  const paymentTermsList = poData.source_quote_id
-    ? await conn.any(`
-        SELECT type, value, days, comment
-        FROM tbl_quotes_payment_terms
-        WHERE quote_id = $1
-        ORDER BY id
-      `, [poData.source_quote_id])
-    : [];
-
-  const rfqTerms = await conn.any(`
-    SELECT RT.id, RT.term_content
-    FROM tbl_rfq_terms_map RTM
-    JOIN tbl_rfq_terms RT ON RT.id = RTM.terms_id
-    WHERE RTM.rfq_id = $1
-    ORDER BY RTM.id
-  `, [poData.rfq_id]);
 
   // 6a. Parse the rfq.comment HTML and merge into rfqTerms.
   //  - Starts with list (no preceding text) → flatten each <li> as its own row
@@ -288,7 +299,6 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     }
   }
 
-  const approvalData = await getApprovalDataForPO(po_id, poData, conn);
 
   return {
     project_name: poData.project_name,
@@ -380,52 +390,38 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
     poApprovers: []
   };
 
-  // 1. Get RFQ creator
-  const rfqCreator = await conn.oneOrNone(`
+  // Round trips: this runs inside the PO approval transaction (the document is
+  // rendered under the approval's locks — PO-document atomicity), where every
+  // statement is a serial round trip. The approval history used to be read
+  // per row: one approvers query per approved TECHNICAL instance, and a
+  // product query + an approvers query per approved commercial instance. They
+  // are now two statements for any number of instances (approvers for ALL of
+  // them; products for ALL of them), issued after the four independent reads
+  // below. Output is unchanged (tests/services/poTemplate.dataBuilderBatch).
+  const [rfqCreator, rfqApproval, techInstances, commercialInstances] = await Promise.all([
+    // 1. Get RFQ creator
+    conn.oneOrNone(`
     SELECT U.name, R.created_by
     FROM tbl_rfq R
     JOIN tbl_users U ON U.id = R.created_by
     WHERE R.id = $1
-  `, [poData.rfq_id]);
-  if (rfqCreator) {
-    result.rfqCreatorName = rfqCreator.name;
-  }
+  `, [poData.rfq_id]),
 
-  // 2. Check if RFQ was auto-published or has an approval flow
-  const rfqApproval = await conn.oneOrNone(`
+    // 2. Check if RFQ was auto-published or has an approval flow
+    conn.oneOrNone(`
     SELECT AI.id, AI.status
     FROM tbl_approval_instances AI
     WHERE AI.entity_type IN ('RFQ', 'TENDER')
       AND AI.entity_id = $1
     ORDER BY AI.created_at DESC
     LIMIT 1
-  `, [poData.rfq_id]);
+  `, [poData.rfq_id]),
 
-  if (!rfqApproval) {
-    // No approval instance = auto-published
-    result.isAutoPublished = true;
-  } else {
-    // Get the final approver for RFQ publishing
-    const rfqFinalApprover = await conn.oneOrNone(`
-      SELECT U.name
-      FROM tbl_approval_actions AA
-      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
-      JOIN tbl_users U ON U.id = AA.approver_user_id
-      WHERE AIS.approval_instance_id = $1
-        AND AA.action = 'APPROVE'
-      ORDER BY AA.created_at DESC
-      LIMIT 1
-    `, [rfqApproval.id]);
-    if (rfqFinalApprover) {
-      result.rfqApproverName = rfqFinalApprover.name;
-    }
-  }
-
-  // 3. Get Technical Evaluations - all approved TECHNICAL instances for this RFQ
-  // Note: TECHNICAL instances store entity_id = round.id, not rfq_id.
-  // The rfq_id is in metadata->>'rfq_id'.
-  if (poData.rfq_id) {
-    const techInstances = await conn.any(`
+    // 3. Technical Evaluations - all approved TECHNICAL instances for this RFQ
+    // Note: TECHNICAL instances store entity_id = round.id, not rfq_id.
+    // The rfq_id is in metadata->>'rfq_id'.
+    poData.rfq_id
+      ? conn.any(`
       SELECT AI.id, AI.initiated_by,
              AI.metadata->>'product_name' AS product_name,
              U.name AS evaluator_name
@@ -435,30 +431,12 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
         AND AI.metadata->>'rfq_id' = $1::text
         AND AI.status = 'APPROVED'
       ORDER BY AI.created_at
-    `, [poData.rfq_id]);
+    `, [poData.rfq_id])
+      : Promise.resolve([]),
 
-    for (const inst of techInstances) {
-      const approvers = await conn.any(`
-        SELECT U.name
-        FROM tbl_approval_actions AA
-        JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
-        JOIN tbl_users U ON U.id = AA.approver_user_id
-        WHERE AIS.approval_instance_id = $1
-          AND AA.action = 'APPROVE'
-        ORDER BY AIS.step_order, AA.created_at
-      `, [inst.id]);
-
-      result.techEvaluations.push({
-        productName: inst.product_name || 'Unknown',
-        evaluatorName: inst.evaluator_name,
-        approvers: approvers.map(a => ({ name: a.name }))
-      });
-    }
-  }
-
-  // 4. Get Commercial/Negotiation - all approved instances for this RFQ
-  if (poData.rfq_id) {
-    const commercialInstances = await conn.any(`
+    // 4. Commercial/Negotiation - all approved instances for this RFQ
+    poData.rfq_id
+      ? conn.any(`
       SELECT AI.id, AI.initiated_by, AI.entity_type,
              AI.metadata->>'rfq_product_id' AS rfq_product_id,
              U.name AS evaluator_name
@@ -468,36 +446,86 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
         AND AI.metadata->>'rfq_id' = $1::text
         AND AI.status = 'APPROVED'
       ORDER BY AI.created_at
-    `, [poData.rfq_id]);
+    `, [poData.rfq_id])
+      : Promise.resolve([]),
+  ]);
 
-    const rawCommercial = [];
-    for (const inst of commercialInstances) {
-      // Resolve product name from rfq_product_id in metadata
-      let productName = 'Unknown';
-      if (inst.rfq_product_id) {
-        const product = await conn.oneOrNone(`
-          SELECT PV.name AS product_name
-          FROM tbl_rfq_products RP
-          JOIN tbl_product_variant PV ON PV.id = RP.product_variant_id
-          WHERE RP.id = $1
-        `, [inst.rfq_product_id]);
-        if (product) productName = product.product_name;
-      }
+  if (rfqCreator) {
+    result.rfqCreatorName = rfqCreator.name;
+  }
 
-      const approvers = await conn.any(`
-        SELECT U.name
+  const historyInstanceIds = [...techInstances, ...commercialInstances].map(inst => inst.id);
+  const productIds = [...new Set(commercialInstances.map(inst => inst.rfq_product_id).filter(Boolean))];
+
+  const [rfqFinalApprover, approverRows, productRows] = await Promise.all([
+    // Get the final approver for RFQ publishing
+    rfqApproval
+      ? conn.oneOrNone(`
+      SELECT U.name
+      FROM tbl_approval_actions AA
+      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+      JOIN tbl_users U ON U.id = AA.approver_user_id
+      WHERE AIS.approval_instance_id = $1
+        AND AA.action = 'APPROVE'
+      ORDER BY AA.created_at DESC
+      LIMIT 1
+    `, [rfqApproval.id])
+      : Promise.resolve(null),
+
+    // APPROVE actions of every TECHNICAL + commercial instance above, in each
+    // instance's own (step_order, created_at) order.
+    historyInstanceIds.length
+      ? conn.any(`
+        SELECT AIS.approval_instance_id, U.name
         FROM tbl_approval_actions AA
         JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
         JOIN tbl_users U ON U.id = AA.approver_user_id
-        WHERE AIS.approval_instance_id = $1
+        WHERE AIS.approval_instance_id = ANY($1::int[])
           AND AA.action = 'APPROVE'
-        ORDER BY AIS.step_order, AA.created_at
-      `, [inst.id]);
+        ORDER BY AIS.approval_instance_id, AIS.step_order, AA.created_at, AA.id
+      `, [historyInstanceIds])
+      : Promise.resolve([]),
 
+    // Resolve product names from rfq_product_id in metadata
+    productIds.length
+      ? conn.any(`
+          SELECT RP.id, PV.name AS product_name
+          FROM tbl_rfq_products RP
+          JOIN tbl_product_variant PV ON PV.id = RP.product_variant_id
+          WHERE RP.id = ANY($1::int[])
+        `, [productIds])
+      : Promise.resolve([]),
+  ]);
+
+  if (!rfqApproval) {
+    // No approval instance = auto-published
+    result.isAutoPublished = true;
+  } else if (rfqFinalApprover) {
+    result.rfqApproverName = rfqFinalApprover.name;
+  }
+
+  const approversByInstance = new Map();
+  for (const row of approverRows) {
+    if (!approversByInstance.has(row.approval_instance_id)) approversByInstance.set(row.approval_instance_id, []);
+    approversByInstance.get(row.approval_instance_id).push({ name: row.name });
+  }
+  const productNameById = new Map(productRows.map(p => [String(p.id), p.product_name]));
+
+  for (const inst of techInstances) {
+    result.techEvaluations.push({
+      productName: inst.product_name || 'Unknown',
+      evaluatorName: inst.evaluator_name,
+      approvers: approversByInstance.get(inst.id) || []
+    });
+  }
+
+  if (poData.rfq_id) {
+    const rawCommercial = [];
+    for (const inst of commercialInstances) {
       rawCommercial.push({
-        productName,
+        productName: (inst.rfq_product_id && productNameById.get(String(Number(inst.rfq_product_id)))) || 'Unknown',
         evaluatorName: inst.evaluator_name,
-        approvers: approvers.map(a => ({ name: a.name }))
+        approvers: approversByInstance.get(inst.id) || []
       });
     }
 
