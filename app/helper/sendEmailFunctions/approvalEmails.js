@@ -1,6 +1,6 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
-import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -88,10 +88,7 @@ export const sendRfqCreationNotification = async ({
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -265,10 +262,7 @@ export const sendApprovalStepNotification = async ({
           ${committeeNudgeHtml}
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${emailUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              ${ctaLabel}
-            </a>
+            ${emailButton(emailUrl, ctaLabel)}
           </div>
 
           ${approvalGuideHtml}
@@ -353,10 +347,7 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -445,10 +436,7 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View ${entityLabel}
-            </a>
+            ${emailButton(viewUrl, `View ${entityLabel}`)}
           </div>
 
           <p style="text-align:center; margin-top:30px;">
@@ -549,14 +537,8 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, tit
           ` : ''}
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${sendQuoteUrl}"
-               style="background-color:#059669; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
-              Submit Your Quote
-            </a>
-            <a href="${viewUrl}"
-               style="background-color:#6B7280; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              View Details
-            </a>
+            ${emailButton(sendQuoteUrl, 'Submit Your Quote', { bg: '#059669', inline: true })}
+            ${emailButton(viewUrl, 'View Details', { bg: '#6B7280', inline: true })}
           </div>
 
           <p style="margin-top:20px;">
