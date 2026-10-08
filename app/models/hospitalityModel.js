@@ -1205,8 +1205,12 @@ JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
       `
         DELETE FROM tbl_rfq_hotel_mappings
         WHERE rfq_id = $1
-        AND hotel_id NOT IN (
-          SELECT UNNEST($2::int[])
+        -- NOT EXISTS, never NOT IN: a single NULL in the incoming array would
+        -- make "hotel_id NOT IN (...)" evaluate to NULL for every row and this
+        -- DELETE would silently remove nothing, leaving stale hotel mappings.
+        AND NOT EXISTS (
+          SELECT 1 FROM UNNEST($2::int[]) AS incoming(hotel_id)
+          WHERE incoming.hotel_id = tbl_rfq_hotel_mappings.hotel_id
         )
       `,
       [rfq_id, incomingHotelIds]
@@ -1998,9 +2002,13 @@ getVendorHotelCategoryMappings: async (vendorId) => {
            SELECT sc.id FROM tbl_category sc
            WHERE sc.parent_id = ANY($2::int[])
          )
-         AND id NOT IN (
-           SELECT s2.id FROM tbl_vendor_hotel_category_subscription s2
-           WHERE s2.vendor_id = $1 AND s2.status = 'active'
+         -- NOT EXISTS, never NOT IN: s2.id is a primary key so there is no NULL
+         -- here today, but a NULL in that column would turn the predicate into
+         -- NULL for every row and silently delete nothing.
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_vendor_hotel_category_subscription s2
+           WHERE s2.id = tbl_vendor_hotel_category_subscription.id
+             AND s2.vendor_id = $1 AND s2.status = 'active'
              AND s2.item_type = 'subcategory'
              AND s2.item_id IN (SELECT sc2.id FROM tbl_category sc2 WHERE sc2.parent_id = ANY($2::int[]))
          )`,
@@ -2089,12 +2097,16 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         FROM tbl_vendor_hotel_category_subscription
         WHERE vendor_id = $1 AND item_type = 'category' AND status IN ('active', 'expired')
       ),
-      -- Products that have an approved PO (approved/sent/GRN/completed)
+      -- Products that have an approved PO (approved/sent/GRN/completed).
+      -- rfq_product_id is NULLABLE (legacy/manually-raised PO lines), so NULLs
+      -- are filtered out here as well as being handled by the NOT EXISTS
+      -- below: a NULL carries no information about which product is finalized.
       finalized_products AS (
         SELECT DISTINCT pop.rfq_product_id
         FROM tbl_purchase_order_product pop
         JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
         WHERE po.status IN ('approved', 'sent', 'GRN', 'completed')
+          AND pop.rfq_product_id IS NOT NULL
       )
       SELECT DISTINCT r.id AS rfq_id, r.rfq_no, r.title, r.is_tender,
              r.bid_end_date, r.created_by
@@ -2114,8 +2126,13 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         -- NULLIF makes an empty deadline EXCLUDE the RFQ (conservative: never
         -- auto-join a vendor to an RFQ that has no deadline).
         AND NULLIF(r.bid_end_date, '')::timestamp > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
-        -- Skip products that already have an approved PO
-        AND rp.id NOT IN (SELECT rfq_product_id FROM finalized_products)
+        -- Skip products that already have an approved PO.
+        -- NOT EXISTS, never NOT IN: "x NOT IN (... NULL ...)" evaluates to NULL
+        -- rather than TRUE, which silently dropped EVERY row for EVERY vendor
+        -- the moment one finalized PO line had a NULL rfq_product_id.
+        AND NOT EXISTS (
+          SELECT 1 FROM finalized_products fp WHERE fp.rfq_product_id = rp.id
+        )
         AND NOT EXISTS (
           SELECT 1 FROM tbl_rfq_product_vendors rpv
           WHERE rpv.rfq_id = r.id

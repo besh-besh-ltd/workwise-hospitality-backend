@@ -81,9 +81,13 @@ const STRANDED_SQL = `
   SELECT COUNT(DISTINCT user_id)::int AS n
     FROM perms
    WHERE resource = 'quote-compare' AND action = 'create'
-     AND user_id NOT IN (
-       SELECT user_id FROM perms
-        WHERE resource = 'awarding' AND action IN ('create','update')
+     -- NOT EXISTS, never NOT IN: one NULL user_id in the subquery would make
+     -- this predicate NULL for every row and silently report zero stranded
+     -- users, i.e. "nothing to do" on a diagnostic that exists to find work.
+     AND NOT EXISTS (
+       SELECT 1 FROM perms p2
+        WHERE p2.user_id = perms.user_id
+          AND p2.resource = 'awarding' AND p2.action IN ('create','update')
      )`;
 
 async function main() {
