@@ -275,21 +275,28 @@ async function flushEffects(effects) {
         assigned_vendor_id: a.assigned_vendor_id,
       };
       if (a.status === PENDING) {
+        // "Accept or decline it": the link goes where that can be done (Assigned to me),
+        // for every subject type, as the email does; never to the subject page itself.
         await notify({
           userIds: [a.assigned_vendor_id],
           type: "NETWORK_ROUTING_ASSIGNED",
           title: "New assignment",
           body: `${described.title} has been routed to you. Accept or decline it.`,
-          actionUrl: described.actionUrl || ASSIGNED_URL,
+          actionUrl: ASSIGNED_URL,
           data: { ...data, due_at: a.due_at },
         });
         await emailAssignee(a, described);
-      } else if (a.status === REVOKED) {
+      } else if (a.status === REVOKED || a.status === SUPERSEDED) {
+        // A superseded member (another entity accepted the reassigned item) is told
+        // exactly like a revoked one: it no longer holds the work.
         await notify({
           userIds: [a.assigned_vendor_id],
-          type: "NETWORK_ROUTING_REVOKED",
+          type: a.status === SUPERSEDED ? "NETWORK_ROUTING_SUPERSEDED" : "NETWORK_ROUTING_REVOKED",
           title: "Assignment withdrawn",
-          body: `${described.title} is no longer assigned to you.`,
+          body:
+            a.status === SUPERSEDED
+              ? `${described.title} has been reassigned and is no longer assigned to you.`
+              : `${described.title} is no longer assigned to you.`,
           actionUrl: ASSIGNED_URL,
           data,
         });

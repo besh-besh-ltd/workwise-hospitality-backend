@@ -204,7 +204,8 @@ describe("assign", () => {
     expect(calls).toEqual([["validate", 7001], ["pending", row.id]]);
 
     const [n] = await notes(B1, "NETWORK_ROUTING_ASSIGNED");
-    expect(n).toMatchObject({ category: "network", action_url: "/fake/rfq/7001" });
+    // Scope audit #3: the place to accept/decline, not the subject's own page.
+    expect(n).toMatchObject({ category: "network", action_url: "/dashboard/vendor/network/assigned" });
     expect(sent.map((m) => m.to).sort()).toEqual(["vn-95902@example.com", "vn-routing-member@example.com"]);
     expect(sent[0].subject).toContain("Fake RFQ 7001");
   });
@@ -347,6 +348,10 @@ describe("respond", () => {
     ]);
     expect(calls).toContainEqual(["released", a1.id, "SUPERSEDED", "ACCEPTED", "SUPERSEDED"]);
     expect(calls).toContainEqual(["accepted", a2.id, a1.id]);
+    // The superseded member is told, like a revoked one (scope audit #10).
+    const [sup] = await notes(B1, "NETWORK_ROUTING_SUPERSEDED");
+    expect(sup).toMatchObject({ category: "network", action_url: "/dashboard/vendor/network/assigned", title: "Assignment withdrawn" });
+    expect(await notes(B2, "NETWORK_ROUTING_SUPERSEDED")).toHaveLength(0);
   });
 
   it("4. decline needs a valid reason, and a note for OTHER (400); then DECLINED, principal notified", async () => {

@@ -1284,6 +1284,20 @@ describe("handler", () => {
     );
   });
 
+  it("the member's NETWORK_ROUTING_ASSIGNED for an RFQ links to Assigned to me, where it can accept or decline", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    expect(a.status).toBe(201);
+    const [n] = await db.any(
+      `SELECT action_url FROM tbl_notifications WHERE recipient_user_id = $1 AND type = 'NETWORK_ROUTING_ASSIGNED'`,
+      [B]
+    );
+    expect(n.action_url).toBe("/dashboard/vendor/network/assigned");
+    // The member's list still links each RFQ to its page (it may read it before accepting).
+    const mine = await (await httpClient(B)).get(`${BASE}/routing/assigned-to-me`);
+    expect(mine.body.data.find((r) => r.id === a.body.data.id).action_url).toBe(`/dashboard/vendor/inquiries-details?id=${rfq.rfq_id}`);
+  });
+
   it("describe: RFQ number and title, linking to the vendor RFQ page", async () => {
     const rfq = await openRfq();
     const d = await rfqSubjectHandler.describe({ subject_id: rfq.rfq_id }, db);
