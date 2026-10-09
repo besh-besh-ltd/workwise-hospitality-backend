@@ -337,6 +337,18 @@ export async function getVendorPan(vendorId, runner = db) {
   return row?.pan && row.pan.length === 10 ? row.pan : null;
 }
 
+/** The vendor's latest PAN document number (uppercased, trimmed), or null. */
+export async function getVendorPanDocument(vendorId, runner = db) {
+  const row = await runner.oneOrNone(
+    `SELECT upper(trim(d.document_number)) AS pan
+       FROM tbl_vendor_documents d
+      WHERE d.vendor_id = $1 AND d.document_type = 'pan' AND NULLIF(trim(d.document_number), '') IS NOT NULL
+      ORDER BY d.id DESC LIMIT 1`,
+    [vendorId]
+  );
+  return row?.pan ?? null;
+}
+
 /** Live (non-REMOVED) entity rows of an org, the principal included. */
 export async function countLiveEntities(orgId, runner = db) {
   const row = await runner.one(
@@ -912,6 +924,7 @@ export default {
   updateOrgSettings,
   listEntitiesWithSeats,
   countLiveEntities,
+  getVendorPanDocument,
   listMembers,
   getVendorPan,
   listVendorsByPan,

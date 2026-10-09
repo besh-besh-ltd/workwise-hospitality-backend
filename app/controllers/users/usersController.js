@@ -60,7 +60,7 @@ import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constant
 import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
 import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
 import { refuseGuestSession, isGuestSession, guestSessionRefusal } from '../../helper/guestSession.js';
-import { getOrgByEntity } from '../../models/vendorNetworkModel.js';
+import { getOrgByEntity, getVendorPanDocument } from '../../models/vendorNetworkModel.js';
 
 // A network entity created without a password is reached only through its people's
 // memberships (spec §4.2); a password reset would turn it into a direct login.
@@ -69,6 +69,52 @@ const ENTITY_LOGIN_DETAILS_REFUSAL = {
   status: 0,
   message: 'Entity login details can only be changed by the entity itself'
 };
+
+const NETWORK_GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
+const networkGstinLocked = (message) => ({
+  http: 409,
+  body: { status: 0, message, reason: 'NETWORK_GSTIN_LOCKED' },
+});
+
+/**
+ * What update-company-detail may do with `gstin` for an account that is a live entity of
+ * a vendor network (principal or member). Its GSTIN is locked: the principal's PAN (GSTIN
+ * chars 3-12) is what a BRANCH must share (POST /entities), and an entity's GSTIN is on
+ * its POs and decides call-off GST, so an org admin must not re-point it.
+ *
+ *  - nothing / null / '' sent             -> { write: false }   (a no-op, never a wipe)
+ *  - stored GSTIN present:
+ *      same value after trim+uppercase    -> { write: true, value: normalised }
+ *      anything else                      -> 409 NETWORK_GSTIN_LOCKED
+ *  - stored GSTIN NULL/empty (set-from-empty), a valid GSTIN sent:
+ *      the account has a PAN document and the GSTIN's PAN differs -> 409 NETWORK_GSTIN_LOCKED
+ *      otherwise                          -> { write: true, value: normalised }
+ *    (stricter than "PAN-doc match OR non-principal": a member with a PAN document must
+ *    match it too; a principal with no GSTIN and no PAN document can still set one, as at
+ *    registration, which is never verified either)
+ *  - set-from-empty with a malformed GSTIN -> 400 INVALID_GSTIN
+ * A vendor in no network never reaches this: its update is exactly as before.
+ */
+async function networkGstinWrite({ vendorId, companyId, sent }) {
+  const value = typeof sent === 'string' ? sent.trim().toUpperCase() : '';
+  if (!value) return { write: false };
+  const row = await db.oneOrNone('SELECT gstin FROM tbl_company WHERE id = $1', [companyId]);
+  const stored = String(row?.gstin ?? '').trim().toUpperCase();
+  if (stored) {
+    if (value === stored) return { write: true, value };
+    return {
+      refuse: networkGstinLocked('The GSTIN of an account in a vendor network cannot be changed. Contact Workwise support.'),
+    };
+  }
+  if (!NETWORK_GSTIN_RE.test(value)) {
+    return { refuse: { http: 400, body: { status: 0, message: 'gstin is not a valid GSTIN', reason: 'INVALID_GSTIN' } } };
+  }
+  const panDocument = await getVendorPanDocument(vendorId);
+  if (panDocument && value.slice(2, 12) !== panDocument) {
+    return { refuse: networkGstinLocked("This GSTIN does not carry your account's PAN. Contact Workwise support.") };
+  }
+  return { write: true, value };
+}
 
 /**
  * True when a profile save CHANGES the login identity (email or mobile) of `stored`.
@@ -1009,23 +1055,6 @@ const UsersController = {
     if (refuseGuestSession(req, res)) return;
     const { company_id } = req.user;
 
-    // A network entity's (principal's or member's) GSTIN is locked: the principal's PAN
-    // (GSTIN chars 3-12) is what a BRANCH must share (POST /entities), and an entity's
-    // GSTIN is printed on its POs and decides call-off GST. Changing it would let an org
-    // admin re-point HQ at another company's PAN and mint "branches" of it. A vendor in
-    // no network is unchanged. Re-sending the same GSTIN (any case/spacing) is no change.
-    const newGstin = typeof req.body?.gstin === 'string' ? req.body.gstin.trim().toUpperCase() : '';
-    if (newGstin && (await getOrgByEntity(Number(req.user.id)))) {
-      const stored = await db.oneOrNone('SELECT gstin FROM tbl_company WHERE id = $1', [company_id]);
-      if (newGstin !== String(stored?.gstin ?? '').trim().toUpperCase()) {
-        return res.status(409).json({
-          status: 0,
-          message: 'The GSTIN of an account in a vendor network cannot be changed. Contact Workwise support.',
-          reason: 'NETWORK_GSTIN_LOCKED',
-        });
-      }
-    }
-
     const user_id = req.user.id
     const reqData = req.body;
 
@@ -1042,6 +1071,19 @@ const UsersController = {
       cin: reqData?.cin,
     };
 
+
+    // Vendor Networks: a network entity's GSTIN is locked (networkGstinWrite).
+    const networkOrg = await getOrgByEntity(Number(req.user.id));
+    if (networkOrg) {
+      const decision = await networkGstinWrite({
+        vendorId: Number(req.user.id),
+        companyId: company_id,
+        sent: reqData?.gstin,
+      });
+      if (decision.refuse) return res.status(decision.refuse.http).json(decision.refuse.body);
+      if (decision.write) reqCompanyData.gstin = decision.value;
+      else delete reqCompanyData.gstin;
+    }
 
     await rfqModel.updateWhere(
       "tbl_company",

@@ -109,6 +109,8 @@ const assignmentActors = (vendorId) =>
     .any(`SELECT acted_by_user_id FROM tbl_vendor_routing_assignments WHERE assigned_vendor_id = $1 ORDER BY id`, [vendorId])
     .then((rows) => rows.map((r) => r.acted_by_user_id));
 
+const gstinOf = async (id) => (await db.one(`SELECT gstin FROM tbl_company WHERE id = $1`, [id])).gstin;
+
 const seatsOf = (vendorId) =>
   db.any(`SELECT * FROM tbl_vendor_network_seats WHERE entity_vendor_id = $1 ORDER BY id`, [vendorId]);
 
@@ -621,12 +623,11 @@ describe("vendor network org and entity API", () => {
     }
   });
 
-  it("6d. a network entity's GSTIN is locked (NETWORK_GSTIN_LOCKED), so the BRANCH PAN check cannot be re-pointed; no-org vendors unchanged", async () => {
+  it("6d. a network entity's GSTIN is locked (NETWORK_GSTIN_LOCKED), so the BRANCH PAN check cannot be re-pointed", async () => {
     await world();
     await seedPerson({ id: MEMBER_PERSON, email: "vn-gst-admin@example.com", name: "Gst Admin" });
     await addMember({ orgId: ORG, personId: MEMBER_PERSON, role: "ORG_ADMIN" });
     const VICTIM = "27VICTM1234V1Z5";
-    const gstinOf = async (id) => (await db.one(`SELECT gstin FROM tbl_company WHERE id = $1`, [id])).gstin;
 
     for (const client of [await httpClient(HQ), await httpClient(MEMBER_PERSON, { ent: HQ }), await httpClient(BRANCH)]) {
       const res = await client.put("/api/v1/users/update-company-detail").send({ company_name: "Renamed", gstin: VICTIM });
@@ -636,23 +637,74 @@ describe("vendor network org and entity API", () => {
     expect(await gstinOf(HQ)).toBe(HQ_GSTIN);
     expect(await gstinOf(BRANCH)).toBe(samePanGstin(BRANCH));
 
-    // The same GSTIN (any case / spacing) and no GSTIN at all are not changes: the form saves.
+    // The same GSTIN (any case / spacing) is not a change; it is written normalised.
     const same = await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ company_name: "HQ Ltd", gstin: ` ${HQ_GSTIN.toLowerCase()} ` });
     expect(same.status).toBe(200);
-    expect((await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ company_name: "HQ Ltd 2", gstin: null })).status).toBe(200);
-    expect(await db.one(`SELECT company_name FROM tbl_company WHERE id = $1`, [HQ])).toEqual({ company_name: "HQ Ltd 2" });
+    expect(await db.one(`SELECT company_name, gstin FROM tbl_company WHERE id = $1`, [HQ])).toEqual({ company_name: "HQ Ltd", gstin: HQ_GSTIN });
 
-    // So a branch of the victim's PAN is still refused.
+    // HQ still carries ITS OWN PAN, so a branch of the victim's PAN is refused by the PAN
+    // check (HQ's PAN ABCDE1234F != VICTM1234V), not by anything else.
     const { state_id } = await aStateWithCity();
     const branch = await (await httpClient(HQ)).post(`${BASE}/entities`).send({
       company_name: "Victim Branch", gstin: "27VICTM1234V2Z4", email: "vn-victim-branch@example.com", state_id, relationship: "BRANCH",
     });
-    expect(branch.body.reason).toBe("BRANCH_PAN_MISMATCH");
+    expect([branch.status, branch.body.reason]).toEqual([400, "BRANCH_PAN_MISMATCH"]);
+    const own = await (await httpClient(HQ)).post(`${BASE}/entities`).send({
+      company_name: "Own Branch", gstin: "27ABCDE1234F9Z1", email: "vn-own-branch@example.com", state_id, relationship: "BRANCH",
+    });
+    expect(own.status).toBe(201);
+  });
 
-    // A vendor in no network edits its GSTIN exactly as before.
-    const lone = await (await httpClient(LONE)).put("/api/v1/users/update-company-detail").send({ company_name: "Lone Ltd", gstin: "29LONEV1234L1Z1" });
-    expect(lone.status).toBe(200);
+  it("6e. null and '' are no-ops for a network entity: never a wipe, and the lock still holds afterwards", async () => {
+    await world();
+    for (const gstin of [null, "", "   "]) {
+      const res = await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ company_name: "HQ Ltd", gstin });
+      expect(res.status).toBe(200);
+      expect(await gstinOf(HQ)).toBe(HQ_GSTIN);
+    }
+    const omitted = await (await httpClient(BRANCH)).put("/api/v1/users/update-company-detail").send({ company_name: "Branch Ltd" });
+    expect(omitted.status).toBe(200);
+    expect(await gstinOf(BRANCH)).toBe(samePanGstin(BRANCH));
+    expect(await db.one(`SELECT company_name FROM tbl_company WHERE id = $1`, [BRANCH])).toEqual({ company_name: "Branch Ltd" });
+    // Still locked against a real change.
+    const changed = await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ gstin: "27ZZZZZ9999Z1Z5" });
+    expect([changed.status, changed.body.reason]).toEqual([409, "NETWORK_GSTIN_LOCKED"]);
+  });
+
+  it("6f. set-from-empty: a network entity with no GSTIN may set one; it must carry its PAN document's PAN when one exists", async () => {
+    await world();
+    // HQ (principal) has no GSTIN and no PAN document: it can set one, written normalised.
+    await db.none(`UPDATE tbl_company SET gstin = NULL WHERE id = $1`, [HQ]);
+    const set = await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ gstin: " 27abcde1234f1z5 " });
+    expect(set.status).toBe(200);
+    expect(await gstinOf(HQ)).toBe("27ABCDE1234F1Z5");
+    // ...and once set it is locked.
+    expect((await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ gstin: "27ABCDE1234F2Z4" })).body.reason).toBe("NETWORK_GSTIN_LOCKED");
+
+    // BRANCH has no GSTIN but a PAN document: only a GSTIN of that PAN is accepted.
+    await db.none(`UPDATE tbl_company SET gstin = '' WHERE id = $1`, [BRANCH]);
+    await db.none(`INSERT INTO tbl_vendor_documents (vendor_id, document_type, document_number) VALUES ($1, 'pan', 'abcde1234f')`, [BRANCH]);
+    const other = await (await httpClient(BRANCH)).put("/api/v1/users/update-company-detail").send({ gstin: "27ZZZZZ9999Z1Z5" });
+    expect([other.status, other.body.reason]).toEqual([409, "NETWORK_GSTIN_LOCKED"]);
+    expect(await gstinOf(BRANCH)).toBe("");
+    const malformed = await (await httpClient(BRANCH)).put("/api/v1/users/update-company-detail").send({ gstin: "NOT-A-GSTIN" });
+    expect([malformed.status, malformed.body.reason]).toEqual([400, "INVALID_GSTIN"]);
+    const match = await (await httpClient(BRANCH)).put("/api/v1/users/update-company-detail").send({ gstin: "09abcde1234f1z2" });
+    expect(match.status).toBe(200);
+    expect(await gstinOf(BRANCH)).toBe("09ABCDE1234F1Z2");
+  });
+
+  it("6g. a vendor in no network edits its GSTIN exactly as before: change, clear, anything", async () => {
+    await world();
+    const lone = await httpClient(LONE);
+    expect((await lone.put("/api/v1/users/update-company-detail").send({ company_name: "Lone Ltd", gstin: "29LONEV1234L1Z1" })).status).toBe(200);
     expect(await gstinOf(LONE)).toBe("29LONEV1234L1Z1");
+    expect((await lone.put("/api/v1/users/update-company-detail").send({ gstin: " free text " })).status).toBe(200);
+    expect(await gstinOf(LONE)).toBe("free text"); // trimmed only, unvalidated: as before
+    expect((await lone.put("/api/v1/users/update-company-detail").send({ gstin: "" })).status).toBe(200);
+    expect(await gstinOf(LONE)).toBe("");
+    expect((await lone.put("/api/v1/users/update-company-detail").send({ gstin: null })).status).toBe(200);
+    expect(await gstinOf(LONE)).toBeNull();
   });
 
   it("10. every :vendorId target must be an entity of the caller's org, else 404", async () => {
