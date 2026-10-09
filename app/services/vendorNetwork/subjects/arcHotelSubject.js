@@ -88,16 +88,18 @@ async function lockHotelRows(t, contractId, hotelId) {
 
 /**
  * Who a buyer should deal with for vendor `vendorId`: company name, GSTIN and a contact
- * (the entity's first ACTIVE ENTITY_MEMBER person of the org, else the entity login).
+ * (the entity's first ACTIVE ENTITY_MEMBER person of the org by name, else the entity
+ * login). The email is ALWAYS the entity login's: this goes to every buyer of the hotel,
+ * and a network person's own address is never disclosed to buyers (audit L3).
  */
 async function supplierCard(orgId, vendorId, runner) {
   return runner.oneOrNone(
     `SELECT u.id, COALESCE(NULLIF(TRIM(co.company_name), ''), u.name) AS entity_name, co.gstin,
-            COALESCE(p.name, u.name) AS contact_name, COALESCE(p.email, u.email) AS contact_email
+            COALESCE(p.name, u.name) AS contact_name, u.email AS contact_email
        FROM tbl_users u
        LEFT JOIN tbl_company co ON co.id = u.company_id
        LEFT JOIN LATERAL (
-         SELECT pu.name, pu.email
+         SELECT pu.name
            FROM tbl_vendor_org_members m
            JOIN tbl_users pu ON pu.id = m.person_user_id
           WHERE m.org_id = $1 AND m.entity_vendor_id = u.id

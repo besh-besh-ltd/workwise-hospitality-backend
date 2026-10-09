@@ -185,6 +185,19 @@ describe("vendor network org and entity API", () => {
     expect(res.status).toBe(200);
     expect(res.body.data.pan).toBe("ABCDE1234F");
     expect(res.body.data.suggestions.map((s) => s.vendor_id).sort()).toEqual([LONE, TARGET, SAME_PAN, SAME_PAN_DOC]);
+    // Audit M3: the PAN is self-declared, so another vendor's contact details are masked.
+    const samePan = res.body.data.suggestions.find((s) => s.vendor_id === SAME_PAN);
+    expect(samePan).toEqual({
+      vendor_id: SAME_PAN,
+      name: `VN ${SAME_PAN}`,
+      company_name: `VN ${SAME_PAN}`,
+      email: "v***@e***.com",
+      gstin: "29ABC*****1Z3",
+    });
+    expect(res.body.data.suggestions.find((s) => s.vendor_id === SAME_PAN_DOC).gstin).toBeNull();
+    const raw = JSON.stringify(res.body);
+    expect(raw).not.toContain(`vn-${SAME_PAN}@example.com`);
+    expect(raw).not.toContain("29ABCDE1234F1Z3");
 
     // Fallback: a principal with no GSTIN takes its PAN from the PAN document.
     await db.none(`UPDATE tbl_company SET gstin = NULL WHERE id = $1`, [HQ]);
@@ -367,6 +380,56 @@ describe("vendor network org and entity API", () => {
     expect((await post({ email: "vn-second@example.com" })).body.reason).toBe("GSTIN_EXISTS");
   });
 
+  it("6b. a BRANCH GSTIN must carry the principal's PAN; distributors and dealers need not", async () => {
+    await world();
+    const { state_id } = await aStateWithCity();
+    const admin = await httpClient(HQ);
+    const post = (body) =>
+      admin.post(`${BASE}/entities`).send({ company_name: "VN New", state_id, relationship: "BRANCH", ...body });
+
+    const foreign = await post({ gstin: "27ZZZZZ9999Z1Z5", email: "vn-foreign-pan@example.com" });
+    expect(foreign.status).toBe(400);
+    expect(foreign.body).toMatchObject({ status: 0, reason: "BRANCH_PAN_MISMATCH" });
+    expect(await db.oneOrNone(`SELECT 1 FROM tbl_users WHERE email = 'vn-foreign-pan@example.com'`)).toBeNull();
+
+    // A principal with no PAN at all cannot vouch for any branch.
+    await db.none(`UPDATE tbl_company SET gstin = NULL WHERE id = $1`, [HQ]);
+    expect((await post({ gstin: "27ABCDE1234F3Z1", email: "vn-nopan@example.com" })).body.reason).toBe("BRANCH_PAN_MISMATCH");
+    await db.none(`UPDATE tbl_company SET gstin = $2 WHERE id = $1`, [HQ, HQ_GSTIN]);
+
+    expect((await post({ gstin: "27ABCDE1234F3Z1", email: "vn-same-pan@example.com" })).status).toBe(201);
+    for (const [relationship, gstin] of [["DISTRIBUTOR", "29ZZZZZ9999Z1Z5"], ["DEALER", "30YYYYY8888Y1Z4"]]) {
+      const res = await post({ relationship, gstin, email: `vn-${relationship.toLowerCase()}@example.com` });
+      expect(res.status).toBe(201);
+    }
+  });
+
+  it("6c. POST /entities stops at NETWORK_MAX_ENTITIES live entities (principal included)", async () => {
+    await world(); // ORG = HQ + BRANCH
+    const { state_id } = await aStateWithCity();
+    const admin = await httpClient(HQ);
+    const saved = process.env.NETWORK_MAX_ENTITIES;
+    process.env.NETWORK_MAX_ENTITIES = "3";
+    try {
+      const post = (n) =>
+        admin.post(`${BASE}/entities`).send({
+          company_name: `VN Cap ${n}`, gstin: `27ABCDE1234F${n}Z1`, email: `vn-cap-${n}@example.com`, state_id, relationship: "BRANCH",
+        });
+      expect((await post(4)).status).toBe(201);
+      const over = await post(5);
+      expect(over.status).toBe(409);
+      expect(over.body.reason).toBe("ENTITY_LIMIT");
+      expect(await db.oneOrNone(`SELECT 1 FROM tbl_users WHERE email = 'vn-cap-5@example.com'`)).toBeNull();
+
+      // A removed entity frees its place.
+      await db.none(`UPDATE tbl_vendor_org_entities SET status = 'REMOVED', removed_at = now() WHERE vendor_id = $1`, [BRANCH]);
+      expect((await post(6)).status).toBe(201);
+    } finally {
+      if (saved === undefined) delete process.env.NETWORK_MAX_ENTITIES;
+      else process.env.NETWORK_MAX_ENTITIES = saved;
+    }
+  });
+
   it("7. suspend / reactivate: admin only, never the principal; suspending revokes live assignments", async () => {
     await world();
     await seedPerson({ id: MEMBER_PERSON, email: "vn-member-95611@example.com", name: "Mira Member" });
@@ -498,7 +561,7 @@ describe("vendor network org and entity API", () => {
     const admin = await httpClient(HQ);
     const created = await admin.post(`${BASE}/entities`).send({
       company_name: "VN Paid Branch",
-      gstin: "27PQRST6789K1Z2",
+      gstin: "27ABCDE1234F6Z2",
       email: "vn-paid-branch@example.com",
       state_id,
       relationship: "BRANCH",
@@ -552,7 +615,7 @@ describe("vendor network org and entity API", () => {
     const { state_id } = await aStateWithCity();
     const admin = await httpClient(HQ);
     const created = await admin.post(`${BASE}/entities`).send({
-      company_name: "VN Wrong Verify Branch", gstin: "27WRONG1234K1Z2", email: "vn-wrong-verify@example.com", state_id, relationship: "BRANCH",
+      company_name: "VN Wrong Verify Branch", gstin: "27ABCDE1234F7Z2", email: "vn-wrong-verify@example.com", state_id, relationship: "BRANCH",
     });
     expect(created.status).toBe(201);
     const seatId = created.body.data.seat.id;
@@ -641,8 +704,9 @@ describe("vendor network org and entity API", () => {
       await world();
       const { state_id } = await aStateWithCity();
       const admin = await httpClient(HQ);
+      // DISTRIBUTOR: these GSTINs carry other PANs (a BRANCH must share the principal's).
       const body = (gstin) => ({
-        company_name: "VN Twin", gstin, email: "vn-twin@example.com", state_id, relationship: "BRANCH",
+        company_name: "VN Twin", gstin, email: "vn-twin@example.com", state_id, relationship: "DISTRIBUTOR",
       });
       const results = await Promise.all([
         admin.post(`${BASE}/entities`).send(body("27TWINA1111A1Z1")),
@@ -716,7 +780,7 @@ describe("vendor network org and entity API", () => {
       const { state_id } = await aStateWithCity();
       const admin = await httpClient(HQ);
       const created = await admin.post(`${BASE}/entities`).send({
-        company_name: "VN Checkout Branch", gstin: "27CHKOU1234K1Z2", email: "vn-checkout@example.com", state_id, relationship: "BRANCH",
+        company_name: "VN Checkout Branch", gstin: "27ABCDE1234F8Z2", email: "vn-checkout@example.com", state_id, relationship: "BRANCH",
       });
       const vendorId = created.body.data.vendor_id;
       const seatId = created.body.data.seat.id;

@@ -319,6 +319,15 @@ export async function getVendorPan(vendorId, runner = db) {
   return row?.pan && row.pan.length === 10 ? row.pan : null;
 }
 
+/** Live (non-REMOVED) entity rows of an org, the principal included. */
+export async function countLiveEntities(orgId, runner = db) {
+  const row = await runner.one(
+    `SELECT count(*)::int AS n FROM tbl_vendor_org_entities WHERE org_id = $1 AND status <> 'REMOVED'`,
+    [orgId]
+  );
+  return row.n;
+}
+
 /** Active type-3 vendors (not `excludeVendorId`) sharing `pan` that are live in no org. */
 export function listVendorsByPan(pan, excludeVendorId, runner = db) {
   return runner.any(
@@ -875,6 +884,7 @@ export default {
   createOrgWithPrincipal,
   updateOrgSettings,
   listEntitiesWithSeats,
+  countLiveEntities,
   listMembers,
   getVendorPan,
   listVendorsByPan,

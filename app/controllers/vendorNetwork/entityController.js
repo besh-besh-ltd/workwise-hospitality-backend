@@ -27,6 +27,7 @@ import {
   ENTITY_STATUS,
   LINK_INVITE_STATUS,
   LINK_INVITE_TTL_DAYS,
+  maxNetworkEntities,
 } from "../../constants/vendorNetwork.js";
 import {
   getOrgByEntity,
@@ -48,6 +49,7 @@ import {
   updateEntity as updateEntityRow,
   listPersonsOnlyViaEntity,
   removeEntity,
+  countLiveEntities,
 } from "../../models/vendorNetworkModel.js";
 
 const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
@@ -120,7 +122,30 @@ async function targetEntity(req) {
   return entity;
 }
 
-/** GET /entities/suggestions: active no-org vendors sharing the principal's PAN. */
+/** `a***@d***.com`: first letter of the mailbox and of the domain, plus the TLD. */
+export function maskEmail(email) {
+  const text = typeof email === "string" ? email.trim() : "";
+  const at = text.lastIndexOf("@");
+  if (at < 1) return text ? "***" : null;
+  const domain = text.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  const host = dot > 0 ? domain.slice(0, dot) : domain;
+  const tld = dot > 0 ? domain.slice(dot) : "";
+  return `${text[0]}***@${host ? host[0] : ""}***${tld}`;
+}
+
+/** `27AAD*****1Z5`: state code + first 3 PAN letters, then the last 3 characters. */
+export function maskGstin(gstin) {
+  const text = typeof gstin === "string" ? gstin.trim().toUpperCase() : "";
+  if (!text) return null;
+  return text.length > 8 ? `${text.slice(0, 5)}*****${text.slice(-3)}` : "*****";
+}
+
+/**
+ * GET /entities/suggestions: active no-org vendors sharing the principal's PAN.
+ * The PAN is self-declared (registration never verifies the GSTIN), so a suggestion
+ * is only a hint: the name and company name, with the email and GSTIN masked.
+ */
 export async function suggestions(req, res) {
   try {
     const denied = requireOrgAdmin(req);
@@ -129,7 +154,14 @@ export async function suggestions(req, res) {
     const org = await getOrgById(req.user.network.org_id);
     const pan = await getVendorPan(org.principal_vendor_id);
     const rows = pan ? await listVendorsByPan(pan, org.principal_vendor_id) : [];
-    return res.status(200).json({ status: 1, message: "Suggestions", data: { pan, suggestions: rows } });
+    const masked = rows.map((r) => ({
+      vendor_id: r.vendor_id,
+      name: r.name,
+      company_name: r.company_name,
+      email: maskEmail(r.email),
+      gstin: maskGstin(r.gstin),
+    }));
+    return res.status(200).json({ status: 1, message: "Suggestions", data: { pan, suggestions: masked } });
   } catch (error) {
     return handleError(res, error, "suggestions");
   }
@@ -384,11 +416,34 @@ export async function createEntity(req, res) {
     if (!place.city_ok) return fail(res, 400, "city_id does not belong to state_id");
     const orgId = req.user.network.org_id;
     const personId = actingPersonId(req);
+
+    // A BRANCH is the same legal entity as the principal: its GSTIN must carry the
+    // principal's PAN (GSTIN characters 3-12). DISTRIBUTOR / DEALER are separate legal
+    // entities and keep format + uniqueness checks only.
+    if (input.relationship === ENTITY_RELATIONSHIP.BRANCH) {
+      const { principal_vendor_id: principalId } = await getOrgById(orgId);
+      const principalPan = await getVendorPan(principalId);
+      if (!principalPan || input.gstin.slice(2, 12) !== principalPan) {
+        return fail(
+          res,
+          400,
+          "A branch's GSTIN must carry your company's PAN. Add a different company as a distributor or dealer.",
+          "BRANCH_PAN_MISMATCH"
+        );
+      }
+    }
+
     const created = await db.tx(async (t) => {
       // tbl_users.email and tbl_company.gstin carry no unique index: serialise creates of the
       // same email / GSTIN and check under the locks, so a double-submit cannot duplicate.
       await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_email:' || lower($1)))`, [input.email]);
       await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_gstin:' || upper($1)))`, [input.gstin]);
+      // Per-org cap (NETWORK_MAX_ENTITIES), checked under an org lock so parallel creates
+      // cannot overshoot it.
+      await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_entities_org:' || $1))`, [orgId]);
+      if ((await countLiveEntities(orgId, t)) >= maxNetworkEntities()) {
+        throw new NetworkHttpError(409, "Your network has reached its limit of entities", "ENTITY_LIMIT");
+      }
       if (await findActiveVendorByGstin(input.gstin, t)) {
         throw new NetworkHttpError(
           409,

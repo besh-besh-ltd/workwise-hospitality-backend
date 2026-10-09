@@ -133,7 +133,7 @@ async function rules(runner, ...rows) {
 
 /** Committed RFQ at `hotel` with a tbl_rfq_product_vendors row for the principal: puts the hotel in ORG's preview set. */
 async function principalQuotedAt(hotel) {
-  const rfq = await makeRFQ(db, { createdBy: IDS.users.a1_proc_buyer, hotel, title: "VN cov preview" });
+  const rfq = await makeRFQ(db, { createdBy: IDS.users.a1_proc_buyer, hotel, title: "VN cov preview", status: 1, is_published: 1 });
   created.rfqIds.push(rfq.rfq_id);
   const variant = await db.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`);
   await db.none(
@@ -408,7 +408,7 @@ describe("resolveCoverageCandidates", () => {
 describe("coverage preview set", () => {
   it("is limited to hotels of the principal's RFQs and ARCs", async () => {
     await withTx(async (t) => {
-      const rfq = await makeRFQ(t, { createdBy: IDS.users.a1_proc_buyer, hotel: H_PUNE, title: "VN cov preview" });
+      const rfq = await makeRFQ(t, { createdBy: IDS.users.a1_proc_buyer, hotel: H_PUNE, title: "VN cov preview", status: 1, is_published: 1 });
       const variant = await t.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`);
       await t.none(
         `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 1)`,
@@ -458,6 +458,47 @@ describe("coverage preview set", () => {
       const hotelRule = (id) => [{ scope_type: "HOTEL", scope_id: id, mode: "INCLUDE", category_id: null }];
       expect((await findInvalidRuleTargets(hotelRule(H_NAGPUR), P, t)).hotelsOutsideNetwork).toBe(false);
       expect((await findInvalidRuleTargets(hotelRule(H_GOA), P, t)).hotelsOutsideNetwork).toBe(true);
+    });
+  });
+});
+
+describe("coverage preview set: published subjects only (audit L4)", () => {
+  it("never includes hotels of draft, pending, terminated or withdrawn RFQs, nor of draft ARCs", async () => {
+    await withTx(async (t) => {
+      const variant = await t.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`);
+      const invitedRfq = async (hotel, mappedHotel, { status, is_published }) => {
+        const rfq = await makeRFQ(t, { createdBy: IDS.users.a1_proc_buyer, hotel, title: "VN cov L4", status, is_published });
+        await t.none(
+          `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, $2, $3, 1)`,
+          [rfq.rfq_id, variant.id, P]
+        );
+        if (mappedHotel) {
+          await t.none(`INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [
+            rfq.rfq_id, mappedHotel, IDS.users.a1_proc_buyer,
+          ]);
+        }
+      };
+      await invitedRfq(H_PUNE, null, { status: 1, is_published: 1 }); // published: in
+      await invitedRfq(H_MUMBAI, H_NAGPUR, { status: 0, is_published: 0 }); // saved draft (saveRfqDraft writes rpv rows)
+      await invitedRfq(H_MUMBAI, null, { status: 3, is_published: 0 }); // pending approval
+      await invitedRfq(H_NAGPUR, null, { status: 2, is_published: 0 }); // terminated before publishing
+      await invitedRfq(H_MUMBAI, null, { status: 5, is_published: 0 }); // withdrawn
+      const { id: draftArc } = await t.one(
+        `INSERT INTO tbl_arc (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id, status, is_group, created_by)
+         VALUES ('ARC-VN-COV-L4', 'VN cov draft ARC', $1, $2, $3, $4, 'draft', true, $5) RETURNING id`,
+        [CAT, IDS.hospitality.A, H_GOA, IDS.departments.proc, BUYER_ADMIN]
+      );
+      await t.none(`INSERT INTO tbl_arc_hotel_mappings (arc_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [draftArc, H_GOA, BUYER_ADMIN]);
+      await t.none(`INSERT INTO tbl_arc_invitation (arc_id, vendor_id, status) VALUES ($1, $2, 'invited')`, [draftArc, P]);
+
+      const found = (await searchPreviewHotels({ principalVendorId: P, q: "" }, t)).map((h) => h.id);
+      expect(found).toEqual([H_PUNE]);
+      const hotelRule = (id) => [{ scope_type: "HOTEL", scope_id: id, mode: "INCLUDE", category_id: null }];
+      for (const hidden of [H_MUMBAI, H_NAGPUR, H_GOA]) {
+        expect((await findInvalidRuleTargets(hotelRule(hidden), P, t)).hotelsOutsideNetwork).toBe(true);
+      }
+      const preview = await previewCoveredHotels({ principalVendorId: P, entityVendorId: B1 }, t);
+      expect(preview.hotels_considered).toBe(1);
     });
   });
 });

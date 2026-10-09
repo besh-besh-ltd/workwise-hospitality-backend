@@ -78,6 +78,8 @@ export const SWEEP_CRON = "*/15 * * * *";
 
 export const seatFeeInr = () => Number(process.env.NETWORK_SEAT_FEE_INR ?? 0);
 export const maxNetworkPersons = () => Number(process.env.NETWORK_MAX_PERSONS ?? 25);
+/** Cap on live (non-REMOVED) entities per org, principal included, for POST /entities. */
+export const maxNetworkEntities = () => Number(process.env.NETWORK_MAX_ENTITIES ?? 200);
 
 /**
  * Today's calendar date in India (YYYY-MM-DD) at instant `date`. The single date source

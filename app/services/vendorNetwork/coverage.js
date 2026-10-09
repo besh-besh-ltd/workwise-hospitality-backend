@@ -106,27 +106,38 @@ export async function entityCoversHotel(entityVendorId, hotelId, categoryId = nu
 }
 
 /**
- * The preview hotel set of an org (spec simplification): live hotels of any RFQ
+ * The preview hotel set of an org (spec simplification): live hotels of any PUBLISHED RFQ
  * (tbl_rfq.hotel_id or tbl_rfq_hotel_mappings) the principal was invited to through
- * tbl_rfq_product_vendors, or of any ARC (lead hotel or tbl_arc_hotel_mappings) with a
- * tbl_arc_invitation for it. Lowest ids first, at most PREVIEW_HOTEL_CAP.
+ * tbl_rfq_product_vendors, or of any floated ARC (lead hotel or tbl_arc_hotel_mappings)
+ * with a tbl_arc_invitation for it. Lowest ids first, at most PREVIEW_HOTEL_CAP.
+ *
+ * Published only (audit L4): saveRfqDraft writes tbl_rfq_product_vendors rows for drafts,
+ * and a buyer's unpublished draft (or a terminated / withdrawn RFQ, is_published = 0) must
+ * never put its hotel names in front of a vendor. A deleted RFQ row is gone. An ARC
+ * still in 'draft' has invited no one yet.
  */
 const previewHotelIdsSql = (principalParam) => `
   SELECT h.id, h.name, h.city, h.state, h.state_id, h.city_id
     FROM tbl_hospitality_company_hotels h
    WHERE COALESCE(h.is_deleted, 0) = 0
      AND h.id IN (
-       SELECT r.hotel_id FROM tbl_rfq r
-        WHERE r.id IN (SELECT rfq_id FROM tbl_rfq_product_vendors WHERE user_id = ${principalParam})
+       WITH invited_rfqs AS (
+         SELECT r.id, r.hotel_id FROM tbl_rfq r
+          WHERE r.is_published = 1
+            AND r.id IN (SELECT rfq_id FROM tbl_rfq_product_vendors WHERE user_id = ${principalParam})
+       ),
+       invited_arcs AS (
+         SELECT a.id, a.hotel_id FROM tbl_arc a
+          WHERE a.status <> 'draft'
+            AND a.id IN (SELECT arc_id FROM tbl_arc_invitation WHERE vendor_id = ${principalParam})
+       )
+       SELECT hotel_id FROM invited_rfqs
        UNION
-       SELECT m.hotel_id FROM tbl_rfq_hotel_mappings m
-        WHERE m.rfq_id IN (SELECT rfq_id FROM tbl_rfq_product_vendors WHERE user_id = ${principalParam})
+       SELECT m.hotel_id FROM tbl_rfq_hotel_mappings m WHERE m.rfq_id IN (SELECT id FROM invited_rfqs)
        UNION
-       SELECT a.hotel_id FROM tbl_arc a
-        WHERE a.id IN (SELECT arc_id FROM tbl_arc_invitation WHERE vendor_id = ${principalParam})
+       SELECT hotel_id FROM invited_arcs
        UNION
-       SELECT am.hotel_id FROM tbl_arc_hotel_mappings am
-        WHERE am.arc_id IN (SELECT arc_id FROM tbl_arc_invitation WHERE vendor_id = ${principalParam}))
+       SELECT am.hotel_id FROM tbl_arc_hotel_mappings am WHERE am.arc_id IN (SELECT id FROM invited_arcs))
    ORDER BY h.id
    LIMIT ${PREVIEW_HOTEL_CAP + 1}`;
 

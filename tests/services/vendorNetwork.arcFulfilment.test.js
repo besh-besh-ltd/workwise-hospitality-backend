@@ -261,7 +261,7 @@ describe("assigning and accepting a hotel", () => {
     expect(await fulfilling(A1)).toEqual([null, null]);
   });
 
-  it("tells the ARC creator who now supplies H1, with GSTIN and the entity's contact", async () => {
+  it("tells the ARC creator who now supplies H1, with GSTIN and the entity's contact (entity login email)", async () => {
     await routeTo(B);
     const [n] = await notices(CREATOR);
     expect(n).toBeDefined();
@@ -271,8 +271,10 @@ describe("assigning and accepting a hotel", () => {
       entity_name: `VN ARC ${B}`,
       gstin: `27AAAAA${B}Z5`,
       contact_name: "Bina Branch",
-      contact_email: "vn-arc-member@example.com",
+      // Audit L3: the entity login's email, never the member person's.
+      contact_email: `vn-arc-${B}@example.com`,
     });
+    expect(JSON.stringify(n)).not.toContain("vn-arc-member@example.com");
     // The principal is told too, on its own contract page.
     const [p] = await notices(HQ);
     expect(p.action_url || p.additional_data).toBeTruthy();

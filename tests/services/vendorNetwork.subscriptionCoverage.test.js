@@ -226,7 +226,8 @@ describe("POST /entities inherits the principal's hospitality flag (D1)", () => 
       email: `vn-cov-branch-${n}@example.com`,
       state_id,
       city_id,
-      relationship: "BRANCH",
+      // DISTRIBUTOR: these GSTINs carry their own PANs (a BRANCH must share the principal's).
+      relationship: "DISTRIBUTOR",
     });
     expect(res.status).toBe(201);
     return res.body.data.vendor_id;
