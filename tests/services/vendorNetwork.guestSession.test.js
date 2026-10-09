@@ -382,3 +382,32 @@ describe("fix round 1: 18-digit tokens round-trip unchanged (int8 as a string en
     expect(near.status).toBe(400);
   });
 });
+
+describe("fix round 2: guests cannot sign, decline or clarify ARC contracts and addenda", () => {
+  const ARC = "/api/v1/arc-v2/vendor";
+  const routes = [
+    "/contracts/1/otp/request",
+    "/contracts/1/otp/verify",
+    "/contracts/1/clarification",
+    "/contracts/1/decline",
+    "/addendums/1/otp/request",
+    "/addendums/1/otp/verify",
+    "/addendums/1/decline",
+  ];
+
+  it("every ARC sign / decline / clarify route answers a guest 403 GUEST_SESSION", async () => {
+    const guest = await asGuest(HQ);
+    for (const route of routes) {
+      const res = await guest.post(`${ARC}${route}`).send({ otp: "123456", reason: "x", note: "x" });
+      expect([route, res.status, res.body.reason]).toEqual([route, 403, "GUEST_SESSION"]);
+    }
+  });
+
+  it("a normal vendor session is not refused as a guest (it reaches the handler)", async () => {
+    const client = await httpClient(HQ);
+    for (const route of routes) {
+      const res = await client.post(`${ARC}${route}`).send({});
+      expect(res.body.reason).not.toBe("GUEST_SESSION");
+    }
+  });
+});

@@ -1,3 +1,4 @@
+import { refuseGuestSessionMiddleware } from '../../helper/guestSession.js';
 import { Router } from 'express';
 import multer from 'multer';
 import passport from '../../middleware/passport.js';
@@ -68,9 +69,9 @@ r.get( '/amendments',                     passportSignIn, acl([3]), amendmentCon
 // Addendum re-signing — vendor signs the approved amendment's addendum before
 // its effects bind (sign-to-activate gate).
 r.get( '/addendums',                      passportSignIn, acl([3]), addendumController.listVendorAddendums);
-r.post('/addendums/:id/otp/request',      passportSignIn, acl([3]), addendumController.requestAddendumOtp);
-r.post('/addendums/:id/otp/verify',       passportSignIn, acl([3]), addendumController.verifyAddendumOtp);
-r.post('/addendums/:id/decline',          passportSignIn, acl([3]), addendumController.declineAddendum);
+r.post('/addendums/:id/otp/request',      passportSignIn, refuseGuestSessionMiddleware, acl([3]), addendumController.requestAddendumOtp);
+r.post('/addendums/:id/otp/verify',       passportSignIn, refuseGuestSessionMiddleware, acl([3]), addendumController.verifyAddendumOtp);
+r.post('/addendums/:id/decline',          passportSignIn, refuseGuestSessionMiddleware, acl([3]), addendumController.declineAddendum);
 
 // ARC Negotiation (vendor side).
 r.get( '/requests/:arcId/negotiation',             passportSignIn, acl([3]), negotiationController.listVendorRounds);
@@ -80,9 +81,9 @@ r.post('/negotiation/rounds/:roundId/quote',       passportSignIn, acl([3]), hos
 r.get( '/pending-acceptance',                       passportSignIn, acl([3]), contractController.getPendingAcceptance);
 r.get( '/active',                                   passportSignIn, acl([3]), contractController.getVendorActiveContracts);
 r.get( '/contracts/:contractId',                    passportSignIn, acl([3]), contractController.getContractDetail);
-r.post('/contracts/:contractId/otp/request',        passportSignIn, acl([3]), contractController.requestOtp);
-r.post('/contracts/:contractId/otp/verify',         passportSignIn, acl([3]), contractController.verifyOtp);
-r.post('/contracts/:contractId/clarification',      passportSignIn, acl([3]), contractController.requestClarification);
-r.post('/contracts/:contractId/decline',            passportSignIn, acl([3]), contractController.declineContract);
+r.post('/contracts/:contractId/otp/request',        passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.requestOtp);
+r.post('/contracts/:contractId/otp/verify',         passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.verifyOtp);
+r.post('/contracts/:contractId/clarification',      passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.requestClarification);
+r.post('/contracts/:contractId/decline',            passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.declineContract);
 
 export default r;
