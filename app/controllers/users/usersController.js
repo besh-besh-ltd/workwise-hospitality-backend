@@ -2307,11 +2307,17 @@ update_user_detail: async (req, res, next) => {
     // equal to the stored ones pass through and the name/company save proceeds.
     if (isActingForAnotherLogin(req)) {
       const norm = (v) => (v == null ? '' : String(v).trim());
+      // A mobile is compared by its national digits: the profile form always sends
+      // `${code}-${digits}` ('+91-9811100000', or '+91-' when empty) while stored values
+      // are bare digits or NULL. So '+91-9811100000' equals '9811100000', and '+91-'
+      // (or '') equals a NULL/empty stored mobile: unchanged, the save proceeds.
+      const nationalDigits = (v) => norm(v).replace(/^\+?\d{1,4}[-\s]/, '').replace(/\D/g, '');
       const emailChanged =
         reqData.email !== undefined &&
         norm(reqData.email).toLowerCase() !== norm(loggedInUser.email).toLowerCase();
       const mobileChanged =
-        reqData.mobile !== undefined && norm(reqData.mobile) !== norm(loggedInUser.mobile);
+        reqData.mobile !== undefined &&
+        nationalDigits(reqData.mobile) !== nationalDigits(loggedInUser.mobile);
       if (emailChanged || mobileChanged) {
         return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
       }

@@ -500,6 +500,40 @@ describe("identity writes while acting for another login (§4.2)", () => {
     expect(row).toEqual({ name: "Branch Renamed", email: "VN-Branch@Example.com", mobile: "9811100000" });
   });
 
+  it("an org admin acting as HQ saves the profile form: '+91-' mobile unchanged, then company fields (scope audit #1)", async () => {
+    await world();
+    await db.none(`UPDATE tbl_users SET mobile = '9811100000' WHERE id = $1`, [HQ]);
+    const client = await httpClient(ADMIN_PERSON, { ent: HQ });
+    // Exactly what editprofile.js sends: `${code}-${digits}`, then the company call.
+    const user = await client
+      .put("/api/v1/users/update-user-detail")
+      .send({ name: "HQ Renamed", email: `vn-${HQ}@example.com`, mobile: "+91-9811100000" });
+    expect(user.status).toBe(200);
+    const company = await client.put("/api/v1/users/update-company-detail").send({ company_name: "HQ Pvt Ltd" });
+    expect(company.status).toBe(200);
+    expect(await db.one(`SELECT name, mobile FROM tbl_users WHERE id = $1`, [HQ])).toEqual({ name: "HQ Renamed", mobile: "9811100000" });
+    expect((await db.one(`SELECT company_name FROM tbl_company WHERE id = $1`, [HQ])).company_name).toBe("HQ Pvt Ltd");
+
+    // An admin-created entity has no mobile: the form's empty '+91-' is no change either.
+    const nopw = await httpClient(ADMIN_PERSON, { ent: NOPW_BRANCH });
+    const empty = await nopw
+      .put("/api/v1/users/update-user-detail")
+      .send({ name: "Branch Renamed", email: `vn-${NOPW_BRANCH}@example.com`, mobile: "+91-" });
+    expect(empty.status).toBe(200);
+    expect((await db.one(`SELECT mobile FROM tbl_users WHERE id = $1`, [NOPW_BRANCH])).mobile).toBeNull();
+
+    // A real change by someone acting for another login is still refused.
+    const changed = await client
+      .put("/api/v1/users/update-user-detail")
+      .send({ email: `vn-${HQ}@example.com`, mobile: "+91-9999999999" });
+    expect(changed.status).toBe(403);
+    const filled = await nopw
+      .put("/api/v1/users/update-user-detail")
+      .send({ email: `vn-${NOPW_BRANCH}@example.com`, mobile: "+91-9811100000" });
+    expect(filled.status).toBe(403);
+    expect((await db.one(`SELECT mobile FROM tbl_users WHERE id = $1`, [HQ])).mobile).toBe("9811100000");
+  });
+
   it("a member cannot change the entity's email", async () => {
     await world();
     const client = await httpClient(MEMBER_PERSON, { ent: BRANCH });
