@@ -24,12 +24,17 @@ import {
 } from "../helpers/vendorNetworkSeed.js";
 
 const disconnected = [];
+const disconnectedEntities = [];
 jest.unstable_mockModule("../../app/util/socket.js", () => ({
   resolveSocketIdentity: async () => null,
   resolveSocketUserId: async () => null,
   resolveSocketUserRoom: async () => null,
   disconnectPersonSockets: (personId) => {
     disconnected.push(Number(personId));
+    return 0;
+  },
+  disconnectEntitySockets: (entityId) => {
+    disconnectedEntities.push(Number(entityId));
     return 0;
   },
   getIo: () => null,
@@ -105,6 +110,7 @@ const savedMax = process.env.NETWORK_MAX_PERSONS;
 beforeEach(() => {
   sent.length = 0;
   disconnected.length = 0;
+  disconnectedEntities.length = 0;
   delete process.env.NETWORK_MAX_PERSONS;
 });
 
@@ -419,6 +425,17 @@ describe("rule 5: accept edge cases", () => {
     expect((await (await httpClient(HQ)).delete(`${BASE}/entities/${BRANCH2}`)).status).toBe(200);
     expect((await membersOf(user.id))[0]).toMatchObject({ status: "DISABLED", invite_token_hash: null, invite_expires_at: null });
     expect((await accept(token)).status).toBe(410);
+  });
+
+  it("removing, suspending or leaving closes every socket still acting as that entity (audit L1)", async () => {
+    await world();
+    const admin = await httpClient(HQ);
+    expect((await admin.patch(`${BASE}/entities/${BRANCH2}`).send({ status: "SUSPENDED" })).status).toBe(200);
+    expect(disconnectedEntities).toEqual([BRANCH2]);
+    expect((await admin.delete(`${BASE}/entities/${BRANCH2}`)).status).toBe(200);
+    expect(disconnectedEntities).toEqual([BRANCH2, BRANCH2]);
+    expect((await (await httpClient(BRANCH)).post(`${BASE}/entities/self/leave`).send({})).status).toBe(200);
+    expect(disconnectedEntities).toEqual([BRANCH2, BRANCH2, BRANCH]);
   });
 });
 

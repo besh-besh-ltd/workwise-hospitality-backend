@@ -9,7 +9,7 @@ import crypto from "crypto";
 import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
 import { logger } from "../../util/logger.js";
-import { disconnectPersonSockets } from "../../util/socket.js";
+import { disconnectPersonSockets, disconnectEntitySockets } from "../../util/socket.js";
 import { dispatch as dispatchNotification } from "../../services/notificationService.js";
 import {
   refuseGuest,
@@ -93,8 +93,9 @@ async function notify({ userIds, type, title, body, senderUserId = null, actionU
 }
 
 /**
- * After an entity is suspended or removed (committed): revoke its live routing
- * assignments and close the sockets of persons who had no other access.
+ * After an entity is suspended, removed or leaves (committed): revoke its live routing
+ * assignments, close the sockets of persons who had no other access, and close every
+ * other socket acting as that entity.
  */
 async function afterEntityLosesAccess(vendorId, personIds, { orgId, actorUserId, reason }) {
   try {
@@ -108,6 +109,13 @@ async function afterEntityLosesAccess(vendorId, personIds, { orgId, actorUserId,
     } catch (err) {
       logger.warn({ err: err.message, personId }, "vendor-network socket disconnect failed");
     }
+  }
+  // Also every socket still acting AS the entity (admins and the principal switched into
+  // it are not in personIds: they keep other access, but not this entity's live feed).
+  try {
+    disconnectEntitySockets(vendorId);
+  } catch (err) {
+    logger.warn({ err: err.message, vendorId }, "vendor-network entity socket disconnect failed");
   }
 }
 

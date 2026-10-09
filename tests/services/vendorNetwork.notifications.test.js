@@ -14,7 +14,7 @@ jest.unstable_mockModule("web-push", () => ({
 
 const { db, closeDb } = await import("../setup/db.js");
 const { dispatch } = await import("../../app/services/notificationService.js");
-const { resolveSocketUserRoom, disconnectPersonSockets } = await import("../../app/util/socket.js");
+const { resolveSocketUserRoom, disconnectPersonSockets, disconnectEntitySockets } = await import("../../app/util/socket.js");
 const { httpClient } = await import("../helpers/http.js");
 const seed = await import("../helpers/vendorNetworkSeed.js");
 
@@ -171,6 +171,29 @@ describe("disconnectPersonSockets", () => {
 
   it("is a no-op without a server", () => {
     expect(disconnectPersonSockets(MEMBER_PERSON, null)).toBe(0);
+  });
+});
+
+describe("disconnectEntitySockets (audit L1)", () => {
+  const sock = (personId, actingEntityId) => ({ data: { personId, actingEntityId }, disconnect: jest.fn() });
+
+  it("closes sockets of other people acting as the entity, never the entity's own login or other entities", () => {
+    const adminAsBranch = sock(ADMIN_PERSON, BRANCH);
+    const memberAsBranch = sock(MEMBER_PERSON, BRANCH);
+    const branchItself = sock(BRANCH, BRANCH);
+    const adminAsOther = sock(ADMIN_PERSON, LONE);
+    const io = {
+      sockets: { sockets: new Map([["a", adminAsBranch], ["b", memberAsBranch], ["c", branchItself], ["d", adminAsOther]]) },
+    };
+    expect(disconnectEntitySockets(BRANCH, io)).toBe(2);
+    expect(adminAsBranch.disconnect).toHaveBeenCalledWith(true);
+    expect(memberAsBranch.disconnect).toHaveBeenCalledWith(true);
+    expect(branchItself.disconnect).not.toHaveBeenCalled();
+    expect(adminAsOther.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op without a server", () => {
+    expect(disconnectEntitySockets(BRANCH, null)).toBe(0);
   });
 });
 

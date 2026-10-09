@@ -101,6 +101,28 @@ export const disconnectPersonSockets = (personId, io = ioInstance) => {
   return closed;
 };
 
+/**
+ * Disconnects every socket that ACTS AS entity `entityVendorId` on behalf of another
+ * person: an ORG_ADMIN person or the principal switched into it, or a member person.
+ * Its room `user:<entity>` carries that entity's live notifications, so once the entity
+ * is suspended, removed or leaves, those sockets must stop receiving them; the client's
+ * reconnect re-runs the handshake, which refuses or re-resolves the room. The entity's
+ * own login (person = entity) keeps its socket: it is still itself. Returns how many closed.
+ */
+export const disconnectEntitySockets = (entityVendorId, io = ioInstance) => {
+  if (!io || entityVendorId == null) return 0;
+  const entity = Number(entityVendorId);
+  let closed = 0;
+  for (const socket of io.sockets?.sockets?.values?.() ?? []) {
+    const acting = Number(socket.data?.actingEntityId ?? socket.userId);
+    if (acting === entity && Number(socket.data?.personId) !== entity) {
+      socket.disconnect(true);
+      closed += 1;
+    }
+  }
+  return closed;
+};
+
 export const getIo = () => ioInstance;
 
 /**
@@ -160,8 +182,10 @@ export const SocketConfig = (SERVER) => {
       if (identity) {
         socket.userId = identity.userId;
         // The person behind the socket, so disconnectPersonSockets can find it.
-        if (socket.data) socket.data.personId = identity.personId;
-        else socket.data = { personId: identity.personId };
+        // ...and the entity it acts as, so disconnectEntitySockets can find it.
+        if (!socket.data) socket.data = {};
+        socket.data.personId = identity.personId;
+        socket.data.actingEntityId = identity.userId;
         socket.join(`user:${identity.userId}`);
       }
       next();
