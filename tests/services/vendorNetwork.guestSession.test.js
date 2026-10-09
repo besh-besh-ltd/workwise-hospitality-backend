@@ -5,12 +5,18 @@
 // Pattern B: committed fixtures (ids 95561..95569), removed in afterEach. Every call
 // is real HTTP with the real token minted by the real endpoint.
 
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import express from "express";
 import bcrypt from "bcryptjs";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { buildTestApp } from "../setup/app.js";
 import { boundRequest, httpClient } from "../helpers/http.js";
 import { makeRFQ } from "../factories/rfq.js";
+import noLogin from "../../app/middleware/noLogin.js";
+import { isGuestSession } from "../../app/helper/guestSession.js";
 import {
   seedVendorEntity,
   seedOrg,
@@ -118,7 +124,7 @@ async function asGuest(vendorId, rfqNo) {
   const agent = await boundRequest(await buildTestApp());
   // Synchronous: a supertest request is a thenable, so it must not be returned from an async fn.
   const call = (method) => (path) => agent[method](path).set({ Authorization: `Bearer ${token}`, "User-Agent": UA });
-  return { get: call("get"), post: call("post"), patch: call("patch"), delete: call("delete") };
+  return { get: call("get"), post: call("post"), put: call("put"), patch: call("patch"), delete: call("delete") };
 }
 
 const expectGuestRefusal = (res) => {
@@ -248,5 +254,131 @@ describe("a guest session keeps exactly what the emailed link was for", () => {
     expect(quote.status).toBe(200);
     const rows = await db.any(`SELECT created_by FROM tbl_quotes WHERE rfq_id = $1`, [rfq.rfq_id]);
     expect(rows.map((r) => r.created_by)).toEqual([HQ]);
+  });
+});
+
+describe("fix round 1: a guest session can never become a permanent login", () => {
+  it("update-user-detail: a guest changing the email or mobile is 403 and writes nothing; unchanged identity still saves", async () => {
+    await db.none(`UPDATE tbl_users SET mobile = '9811100000' WHERE id = ANY($1::int[])`, [[LONE, HQ]]);
+    for (const vendorId of [LONE, HQ]) {
+      const guest = await asGuest(vendorId);
+      const email = `vn-guest-${vendorId}@example.com`;
+      const takeover = await guest.put("/api/v1/users/update-user-detail").send({ name: "X", email: "attacker@example.com" });
+      expectGuestRefusal(takeover);
+      expectGuestRefusal(await guest.put("/api/v1/users/update-user-detail").send({ email, mobile: "+91-9000000001" }));
+      expect(await db.one(`SELECT name, email, mobile FROM tbl_users WHERE id = $1`, [vendorId])).toEqual({
+        name: `VN Guest ${vendorId}`,
+        email,
+        mobile: "9811100000",
+      });
+      // The quote flow's profile save (same identity, '+91-' formatted) is not a change.
+      const same = await guest.put("/api/v1/users/update-user-detail").send({ name: "Renamed", email: email.toUpperCase(), mobile: "+91-9811100000" });
+      expect(same.status).toBe(200);
+      await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1`, [vendorId]);
+    }
+    // A normal session's email change behaves exactly as before.
+    const own = await (await httpClient(LONE)).put("/api/v1/users/update-user-detail").send({ email: "Lone-New@Example.com", mobile: "9800000000" });
+    expect(own.status).toBe(200);
+    expect(await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [LONE])).toEqual({ email: "lone-new@example.com", mobile: "9800000000" });
+  });
+
+  it("update-company-detail is refused to a guest; nothing is written", async () => {
+    const guest = await asGuest(LONE);
+    expectGuestRefusal(await guest.put("/api/v1/users/update-company-detail").send({ company_name: "Hijacked", gstin: "27ZZZZZ9999Z1Z5" }));
+    expect((await db.one(`SELECT company_name, gstin FROM tbl_company WHERE id = $1`, [LONE]))).toEqual({ company_name: `VN Guest ${LONE}`, gstin: null });
+  });
+
+  it("contact / credential side routes refuse a guest before validating anything (SPOC, locations, push, profile image)", async () => {
+    const guest = await asGuest(LONE);
+    expectGuestRefusal(await guest.post("/api/v1/users/add-spoc").send({}));
+    expectGuestRefusal(await guest.put("/api/v1/users/update-spoc/1").send({}));
+    expectGuestRefusal(await guest.delete("/api/v1/users/delete-spoc/1"));
+    expectGuestRefusal(await guest.post("/api/v1/users/add-buyer-vendor-location").send({}));
+    expectGuestRefusal(await guest.put("/api/v1/users/update-buyer-vendor-location").send({}));
+    expectGuestRefusal(await guest.delete("/api/v1/users/delete-buyer-vendor-location/1"));
+    expectGuestRefusal(await guest.post("/api/v1/users/map-spoc-location").send({}));
+    expectGuestRefusal(await guest.post("/api/v1/users/notifications/push-subscribe").send({ endpoint: "https://push.example/x" }));
+    expectGuestRefusal(await guest.delete("/api/v1/users/notifications/push-subscribe").send({}));
+    expectGuestRefusal(await guest.post("/api/v1/users/update-profile-image").send({}));
+  });
+
+  it("routing respond is refused to the assignee entity's guest session", async () => {
+    const { id } = await db.one(
+      `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, assigned_vendor_id, status)
+       VALUES ($1, 'ARC_HOTEL', 1, $2, 'PENDING') RETURNING id`,
+      [ORG, BRANCH]
+    );
+    const guest = await asGuest(BRANCH);
+    expectGuestRefusal(await guest.post(`${BASE}/routing/${id}/respond`).send({ decision: "ACCEPT" }));
+    expect((await db.one(`SELECT status FROM tbl_vendor_routing_assignments WHERE id = $1`, [id])).status).toBe("PENDING");
+  });
+
+  it("refresh-token: refused to a guest and for any user_id but the caller's own; .env is never touched", async () => {
+    const envPath = path.resolve(process.cwd(), ".env");
+    const fingerprint = () =>
+      fs.existsSync(envPath) ? crypto.createHash("sha256").update(fs.readFileSync(envPath)).digest("hex") : "absent";
+    const before = fingerprint();
+
+    const guest = await asGuest(LONE);
+    expectGuestRefusal(await guest.post("/api/v1/users/refresh-token").send({ user_id: LONE }));
+    const other = await (await httpClient(LONE)).post("/api/v1/users/refresh-token").send({ user_id: HQ });
+    expect(other.status).toBe(403);
+    expect(other.body.status).toBe(0);
+    const missing = await (await httpClient(LONE)).post("/api/v1/users/refresh-token").send({});
+    expect(missing.status).toBe(403);
+
+    expect(fingerprint()).toBe(before);
+  });
+});
+
+describe("fix round 1: the ?token= path of vendorTokenOrJwt", () => {
+  /** The real middleware, echoing whether the request is a guest session. */
+  async function probe() {
+    const app = express();
+    app.set("trust proxy", 1);
+    app.get("/probe", noLogin.vendorTokenOrJwt, (req, res) => res.json({ id: req.user.id, guest: isGuestSession(req) }));
+    return boundRequest(app);
+  }
+
+  it("marks the request as a guest session (a JWT login is not one)", async () => {
+    const linkToken = "4" + String(LONE).padStart(17, "0");
+    await db.none(`INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no) VALUES ($1, $2, 1)`, [linkToken, LONE]);
+    const agent = await probe();
+    const viaLink = await agent.get(`/probe?token=${linkToken}`).set("X-Forwarded-For", "203.0.113.70");
+    expect(viaLink.status).toBe(200);
+    expect(viaLink.body).toEqual({ id: LONE, guest: true });
+
+    const client = await httpClient(LONE);
+    const viaJwt = await agent.get("/probe").set(client.headers);
+    expect(viaJwt.body).toEqual({ id: LONE, guest: false });
+  });
+
+  it("counts invalid tokens toward the same limit: 429 after 20 from one client; a malformed token is 400, not 500", async () => {
+    const res0 = await (await httpClient(null)).get("/api/v1/users/get-profile?token=abc").set("X-Forwarded-For", "203.0.113.71");
+    expect(res0.status).toBe(400);
+    const agent = (await httpClient(null));
+    for (let i = 1; i < 20; i++) {
+      const r = await agent.get(`/api/v1/users/get-profile?token=${100000000000000000n + BigInt(i)}`).set("X-Forwarded-For", "203.0.113.71");
+      expect(r.status).toBe(400);
+    }
+    expect((await agent.get("/api/v1/users/get-profile?token=100000000000000099").set("X-Forwarded-For", "203.0.113.71")).status).toBe(429);
+  });
+});
+
+describe("fix round 1: 18-digit tokens round-trip unchanged (int8 as a string end to end)", () => {
+  it("a token above Number.MAX_SAFE_INTEGER verifies to its own vendor and is stored exactly", async () => {
+    const token = "987654321987654321"; // > 2^53: a JS number would round it
+    expect(Number.isSafeInteger(Number(token))).toBe(false);
+    await db.none(`INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no) VALUES ($1, $2, 1)`, [token, LONE]);
+    const stored = await db.one(`SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1`, [LONE]);
+    expect(stored.token).toBe(token); // pg returns int8 as a string (no type parser for OID 20)
+
+    const agent = await boundRequest(await buildTestApp());
+    const res = await agent.post("/api/v1/users/verify-vendor-token").set({ "User-Agent": UA, "X-Forwarded-For": "203.0.113.80" }).send({ token });
+    expect(res.status).toBe(200);
+    expect(res.body.data.user.id).toBe(LONE);
+    // Its neighbours (what float rounding would produce) are not it.
+    const near = await agent.post("/api/v1/users/verify-vendor-token").set({ "User-Agent": UA, "X-Forwarded-For": "203.0.113.80" }).send({ token: "987654321987654320" });
+    expect(near.status).toBe(400);
   });
 });

@@ -10,6 +10,8 @@ import { buildTestApp } from "../setup/app.js";
 import { boundRequest } from "../helpers/http.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import { generateEmailLinkToken } from "../../app/helper/emailLinkToken.js";
+import { createFailedAttemptLimiter, clientKey } from "../../app/middleware/failedAttemptLimiter.js";
+import { trustProxySetting } from "../../app/util/trustProxy.js";
 import { seedVendorEntity, cleanupVendorNetworkFixtures } from "../helpers/vendorNetworkSeed.js";
 
 const V1 = 95571;
@@ -128,5 +130,71 @@ describe("POST /users/verify-vendor-token rate limit", () => {
     }
     for (let i = 0; i < 15; i++) expect((await verify(client, "x")).status).toBe(400);
     expect((await verify(client, "x")).status).toBe(429);
+  });
+});
+
+describe("fix round 1: limiter client key and memory bound", () => {
+  let agent;
+  beforeAll(async () => {
+    agent = await boundRequest(await buildTestApp());
+  });
+
+  it("the key is req.ip under 'trust proxy' (1 hop): a client-forged X-Forwarded-For prefix does not buy a new bucket", async () => {
+    // Behind one proxy the right-most hop is the address the proxy saw; the attacker
+    // controls only what is to its left.
+    for (let i = 0; i < 20; i++) {
+      const res = await agent
+        .post("/api/v1/users/verify-vendor-token")
+        .set({ "User-Agent": UA, "X-Forwarded-For": `198.51.100.${i}, 203.0.113.60` })
+        .send({ token: String(100000000000000000n + BigInt(i)) });
+      expect(res.status).toBe(400);
+    }
+    const blocked = await agent
+      .post("/api/v1/users/verify-vendor-token")
+      .set({ "User-Agent": UA, "X-Forwarded-For": "198.51.100.250, 203.0.113.60" })
+      .send({ token: "100000000000000077" });
+    expect(blocked.status).toBe(429);
+  });
+
+  it("TRUST_PROXY_HOPS: default 1 hop, 0 disables, N trusts N; junk falls back to 1", () => {
+    expect(trustProxySetting(undefined)).toBe(1);
+    expect(trustProxySetting("")).toBe(1);
+    expect(trustProxySetting("0")).toBe(false);
+    expect(trustProxySetting("2")).toBe(2);
+    expect(trustProxySetting("-3")).toBe(1);
+    expect(trustProxySetting("abc")).toBe(1);
+    expect(clientKey({ ip: "203.0.113.9", socket: { remoteAddress: "10.0.0.1" } })).toBe("203.0.113.9");
+  });
+
+  it("never tracks more than maxKeys clients: the oldest is evicted first", () => {
+    let t = 0;
+    const limiter = createFailedAttemptLimiter({ max: 2, windowMs: 1000, maxKeys: 3, now: () => t });
+    const req = (ip) => ({ ip });
+    for (const ip of ["a", "b", "c"]) {
+      limiter.recordFailure(req(ip));
+      limiter.recordFailure(req(ip));
+    }
+    expect(["a", "b", "c"].map((ip) => limiter.isBlocked(req(ip)))).toEqual([true, true, true]);
+    limiter.recordFailure(req("d")); // a 4th client: "a", the oldest, makes room
+    expect(limiter.size()).toBe(3);
+    expect(limiter.isBlocked(req("a"))).toBe(false);
+    expect(limiter.isBlocked(req("b"))).toBe(true);
+    expect(limiter.isBlocked(req("c"))).toBe(true);
+  });
+
+  it("prunes expired entries from the head on every failure, so memory follows live clients only", () => {
+    let t = 0;
+    const limiter = createFailedAttemptLimiter({ max: 5, windowMs: 1000, maxKeys: 100, now: () => t });
+    for (let i = 0; i < 50; i++) limiter.recordFailure({ ip: `old-${i}` });
+    expect(limiter.size()).toBe(50);
+    t = 1500; // every old window has ended
+    limiter.recordFailure({ ip: "fresh" });
+    expect(limiter.size()).toBe(1);
+  });
+
+  it("the default cap is 10,000 clients", () => {
+    const limiter = createFailedAttemptLimiter();
+    for (let i = 0; i < 10_050; i++) limiter.recordFailure({ ip: `10.${i >> 16}.${(i >> 8) & 255}.${i & 255}` });
+    expect(limiter.size()).toBe(10_000);
   });
 });

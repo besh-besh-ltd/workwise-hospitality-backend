@@ -1,45 +1,53 @@
 // A small in-memory, per-client-IP limiter on FAILED attempts (no dependency: the app
 // has no rate limiter, and express-rate-limit is not installed).
 //
-// Used by POST /users/verify-vendor-token: after `max` invalid tokens from one client
+// Used by the emailed-link token exchanges (POST /users/verify-vendor-token and the
+// `?token=` path of noLogin.vendorTokenOrJwt): after `max` invalid tokens from one client
 // within `windowMs`, every further attempt from it (valid or not) is answered 429 until
 // the window that started with its first failure ends. Only failures are counted, so
-// vendors opening their own links are never slowed down, even when many share one
-// office or proxy address; a brute-force run is nothing but failures.
+// vendors opening their own links are never slowed down; a brute-force run is nothing
+// but failures.
 //
-// LIMITS (by design, documented in the Task 23 report):
-//   - Per process. Each Node process (container, PM2 worker) keeps its own counts, so
-//     the effective ceiling is `max` x the number of processes. A shared store (Redis)
-//     is the follow-up if the backend is ever scaled out.
-//   - The client is the right-most X-Forwarded-For hop (the address our own reverse
-//     proxy saw) when the header is present, else the socket address. Behind exactly
-//     one proxy that is the real client. Without a proxy the header is caller-chosen,
-//     so rotating it evades the limit; the token itself (~60 random bits,
-//     helper/emailLinkToken.js) is the real defence, this is depth.
+// The client is `req.ip`, i.e. Express's answer under the app's 'trust proxy' setting
+// (app/util/trustProxy.js, env TRUST_PROXY_HOPS, default 1 hop). Behind one reverse proxy
+// that is the address the proxy saw; a client-supplied X-Forwarded-For prefix is ignored.
+//
+// LIMITS (documented in the Task 23 report and the runbook):
+//   - Per process: each Node process keeps its own counts (a shared store such as Redis is
+//     the follow-up if the backend is scaled out).
+//   - Bounded memory: at most `maxKeys` clients are tracked. Entries are kept in
+//     insertion order, which is also expiry order (every window is the same length), so
+//     expired entries are pruned from the head in amortised O(1), and when the cap is
+//     reached the oldest entry is evicted.
 
 const DEFAULT_MAX_FAILURES = 20;
 const DEFAULT_WINDOW_MS = 10 * 60 * 1000;
-const PRUNE_ABOVE = 10_000; // entries before expired ones are swept
+const DEFAULT_MAX_KEYS = 10_000;
 
-/** The client address used as the limiter key. */
+/** The client address used as the limiter key (see the header on 'trust proxy'). */
 export function clientKey(req) {
-  const xff = req.headers?.["x-forwarded-for"];
-  if (typeof xff === "string" && xff.trim()) {
-    const hops = xff.split(",").map((h) => h.trim()).filter(Boolean);
-    if (hops.length) return hops[hops.length - 1];
-  }
-  return req.socket?.remoteAddress || req.ip || "unknown";
+  return req.ip || req.socket?.remoteAddress || "unknown";
 }
 
 /**
- * @returns {{ isBlocked(req): boolean, recordFailure(req): void, reset(): void }}
+ * @returns {{ isBlocked(req): boolean, recordFailure(req): void, reset(): void, size(): number }}
  */
 export function createFailedAttemptLimiter({
   max = DEFAULT_MAX_FAILURES,
   windowMs = DEFAULT_WINDOW_MS,
+  maxKeys = DEFAULT_MAX_KEYS,
   now = () => Date.now(),
 } = {}) {
-  const failures = new Map(); // key -> { count, resetAt }
+  const failures = new Map(); // key -> { count, resetAt }, insertion order = expiry order
+
+  /** Drops expired entries from the head; stops at the first live one. */
+  const pruneExpired = () => {
+    const t = now();
+    for (const [key, entry] of failures) {
+      if (entry.resetAt > t) break;
+      failures.delete(key);
+    }
+  };
 
   const live = (key) => {
     const entry = failures.get(key);
@@ -50,33 +58,34 @@ export function createFailedAttemptLimiter({
     return entry ?? null;
   };
 
-  const prune = () => {
-    if (failures.size <= PRUNE_ABOVE) return;
-    const t = now();
-    for (const [key, entry] of failures) if (entry.resetAt <= t) failures.delete(key);
-  };
-
   return {
     isBlocked(req) {
       const entry = live(clientKey(req));
       return !!entry && entry.count >= max;
     },
     recordFailure(req) {
+      pruneExpired();
       const key = clientKey(req);
       const entry = live(key);
-      if (entry) entry.count += 1;
-      else {
-        prune();
-        failures.set(key, { count: 1, resetAt: now() + windowMs });
+      if (entry) {
+        entry.count += 1;
+        return;
       }
+      while (failures.size >= maxKeys) {
+        failures.delete(failures.keys().next().value); // evict the oldest
+      }
+      failures.set(key, { count: 1, resetAt: now() + windowMs });
     },
     reset() {
       failures.clear();
     },
+    size() {
+      return failures.size;
+    },
   };
 }
 
-/** The verify-vendor-token limiter: 20 failures per 10 minutes per client, per process. */
+/** The emailed-link token limiter: 20 failures per 10 minutes per client, per process. */
 export const verifyVendorTokenLimiter = createFailedAttemptLimiter();
 
 export const TOO_MANY_ATTEMPTS = {

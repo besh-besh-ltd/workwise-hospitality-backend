@@ -20,6 +20,7 @@ import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { requireCompanyAdmin } from '../../middleware/companyAdmin.js';
 import { verifyVendorTokenLimiter, TOO_MANY_ATTEMPTS } from '../../middleware/failedAttemptLimiter.js';
+import { refuseGuestSessionMiddleware } from '../../helper/guestSession.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -216,11 +217,13 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/notifications/push-subscribe',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   userNotificationController.pushSubscribe
 );
 UsersRoutes.delete(
   '/notifications/push-subscribe',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   userNotificationController.pushUnsubscribe
 );
 UsersRoutes.get(
@@ -341,6 +344,7 @@ UsersRoutes.put(
 UsersRoutes.post(
   '/update-profile-image',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   schema_posts.add_user_profile_image,
   UsersController.update_profile_image
 );
@@ -479,6 +483,7 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/add-buyer-vendor-location',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   // acl([2,8,3]),
   vendorController.addVendorLocation //utilising same controller as defined in admin routes.
 );
@@ -490,13 +495,15 @@ UsersRoutes.get(
 )
 UsersRoutes.delete(
   '/delete-buyer-vendor-location/:id',
-  passportSignIn, 
+  passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23) 
   // acl([2,8,3]),
   vendorController.deleteVendorLocation   //utilising same controller as defined in admin routes.
 )
 UsersRoutes.post(
   '/map-spoc-location',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   // acl([2,8,3]),
   vendorController.mapSpocToLocation 
 )
@@ -504,6 +511,7 @@ UsersRoutes.post(
 UsersRoutes.put(
   '/update-buyer-vendor-location',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   // acl([2,8,3]),
   vendorController.updateVendorLocation //utilising same controller as defined in admin routes.
 )
@@ -537,6 +545,7 @@ UsersRoutes.post(
 UsersRoutes.post(
   '/add-spoc',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   validateBody(schemas.user_spoc),
   vendorController.authorizeAddSpocTarget,
   vendorController.addSpoc
@@ -546,6 +555,7 @@ UsersRoutes.post(
 UsersRoutes.put(
   '/update-spoc/:spoc_id',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   validateBody(schemas.user_spoc),
   validateDbBody.spoc_id_exists,
   (req, res, next) => {
@@ -559,6 +569,7 @@ UsersRoutes.put(
 UsersRoutes.delete(
   '/delete-spoc/:spoc_id',
   passportSignIn,
+  refuseGuestSessionMiddleware, // emailed-link sessions: RFQ only (Task 23)
   validateDbBody.spoc_id_exists,
   (req, res, next) => {
     // Set vendor ID parameter for vendor controller

@@ -59,7 +59,8 @@ import { memberEntityOrg } from '../../services/vendorNetwork/subscriptionCovera
 import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constants/vendorNetwork.js';
 import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
 import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
-import { refuseGuestSession } from '../../helper/guestSession.js';
+import { refuseGuestSession, isGuestSession, guestSessionRefusal } from '../../helper/guestSession.js';
+import { getOrgByEntity } from '../../models/vendorNetworkModel.js';
 
 // A network entity created without a password is reached only through its people's
 // memberships (spec §4.2); a password reset would turn it into a direct login.
@@ -68,6 +69,22 @@ const ENTITY_LOGIN_DETAILS_REFUSAL = {
   status: 0,
   message: 'Entity login details can only be changed by the entity itself'
 };
+
+/**
+ * True when a profile save CHANGES the login identity (email or mobile) of `stored`.
+ * The profile form re-sends both every time, so equal values are no change: email
+ * case-insensitively; mobile by its national digits (the form sends `${code}-${digits}`,
+ * '+91-9811100000' or '+91-' when empty, while stored values are bare digits or NULL).
+ */
+function loginIdentityChanged(reqData, stored) {
+  const norm = (v) => (v == null ? '' : String(v).trim());
+  const nationalDigits = (v) => norm(v).replace(/^\+?\d{1,4}[-\s]/, '').replace(/\D/g, '');
+  const emailChanged =
+    reqData.email !== undefined && norm(reqData.email).toLowerCase() !== norm(stored.email).toLowerCase();
+  const mobileChanged =
+    reqData.mobile !== undefined && nationalDigits(reqData.mobile) !== nationalDigits(stored.mobile);
+  return emailChanged || mobileChanged;
+}
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -988,7 +1005,26 @@ const UsersController = {
  */
   update_company_detail: async (req, res, next) => {
   try {
+    // An emailed-link guest session never edits the company record (GSTIN, name...).
+    if (refuseGuestSession(req, res)) return;
     const { company_id } = req.user;
+
+    // A network entity's (principal's or member's) GSTIN is locked: the principal's PAN
+    // (GSTIN chars 3-12) is what a BRANCH must share (POST /entities), and an entity's
+    // GSTIN is printed on its POs and decides call-off GST. Changing it would let an org
+    // admin re-point HQ at another company's PAN and mint "branches" of it. A vendor in
+    // no network is unchanged. Re-sending the same GSTIN (any case/spacing) is no change.
+    const newGstin = typeof req.body?.gstin === 'string' ? req.body.gstin.trim().toUpperCase() : '';
+    if (newGstin && (await getOrgByEntity(Number(req.user.id)))) {
+      const stored = await db.oneOrNone('SELECT gstin FROM tbl_company WHERE id = $1', [company_id]);
+      if (newGstin !== String(stored?.gstin ?? '').trim().toUpperCase()) {
+        return res.status(409).json({
+          status: 0,
+          message: 'The GSTIN of an account in a vendor network cannot be changed. Contact Workwise support.',
+          reason: 'NETWORK_GSTIN_LOCKED',
+        });
+      }
+    }
 
     const user_id = req.user.id
     const reqData = req.body;
@@ -1873,6 +1909,14 @@ get_company_users: async (req, res, next) => {
   },
   refresh_token: async (req, res, next) => {
     try {
+      // PRE-EXISTING P0 SURFACE (see PRE_PR_REPORT): this rewrites the JWT secret in .env
+      // and mints a one-year token. Until the user decides its fate it is at least
+      // limited to a normal session minting for ITSELF: never a guest link session, and
+      // never another user's id.
+      if (refuseGuestSession(req, res)) return;
+      if (String(req.body?.user_id ?? '') !== String(req.user?.id ?? '')) {
+        return res.status(403).json({ status: 0, message: 'You can only refresh your own session' });
+      }
       const { user_id } = req.body;
       const userData = await userModel.user_profile_detail(user_id);
       // console.log('userData--', userData);
@@ -2305,22 +2349,14 @@ update_user_detail: async (req, res, next) => {
     // email and mobile are its login identity, so only the entity itself may
     // CHANGE them (spec §4.2). The profile form always re-sends both, so values
     // equal to the stored ones pass through and the name/company save proceeds.
-    if (isActingForAnotherLogin(req)) {
-      const norm = (v) => (v == null ? '' : String(v).trim());
-      // A mobile is compared by its national digits: the profile form always sends
-      // `${code}-${digits}` ('+91-9811100000', or '+91-' when empty) while stored values
-      // are bare digits or NULL. So '+91-9811100000' equals '9811100000', and '+91-'
-      // (or '') equals a NULL/empty stored mobile: unchanged, the save proceeds.
-      const nationalDigits = (v) => norm(v).replace(/^\+?\d{1,4}[-\s]/, '').replace(/\D/g, '');
-      const emailChanged =
-        reqData.email !== undefined &&
-        norm(reqData.email).toLowerCase() !== norm(loggedInUser.email).toLowerCase();
-      const mobileChanged =
-        reqData.mobile !== undefined &&
-        nationalDigits(reqData.mobile) !== nationalDigits(loggedInUser.mobile);
-      if (emailChanged || mobileChanged) {
-        return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
-      }
+    // An emailed-link guest session (whoever holds the link) may never change the
+    // account's login identity: a new email + forgot-password OTP would turn a
+    // 30-minute RFQ link into a permanent login. Same comparison as below.
+    if (isGuestSession(req) && loginIdentityChanged(reqData, loggedInUser)) {
+      return res.status(403).json(guestSessionRefusal());
+    }
+    if (isActingForAnotherLogin(req) && loginIdentityChanged(reqData, loggedInUser)) {
+      return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
     }
 
     /* ---- SNAPSHOT OLD STATE for approval impact analysis ----

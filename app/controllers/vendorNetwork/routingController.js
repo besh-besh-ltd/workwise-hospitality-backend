@@ -15,6 +15,7 @@ import db from "../../config/dbConn.js";
 import Config from "../../config/app.config.js";
 import { logger } from "../../util/logger.js";
 import {
+  refuseGuest,
   requireNetwork,
   requireOrgAdmin,
   actingPersonId,
@@ -273,7 +274,8 @@ export async function assignedToMe(req, res) {
 /** POST /routing/:id/respond { decision, reason?, note? } */
 export async function respondToAssignment(req, res) {
   try {
-    const denied = requireNetwork(req);
+    // An emailed-link guest session cannot accept or decline network work (Task 23).
+    const denied = refuseGuest(req) ?? requireNetwork(req);
     if (denied) return res.status(denied.http).json(denied.body);
     const id = parseId(req.params.id);
     if (!id) throw new NetworkHttpError(404, "Assignment not found");

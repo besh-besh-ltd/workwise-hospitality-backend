@@ -37,4 +37,17 @@ export function refuseGuestSession(req, res) {
   return true;
 }
 
-export default { markGuestSession, isGuestSession, guestSessionRefusal, refuseGuestSession, GUEST_SESSION_REASON };
+/** Route middleware form of refuseGuestSession (mount after passportSignIn). */
+export function refuseGuestSessionMiddleware(req, res, next) {
+  if (refuseGuestSession(req, res)) return;
+  next();
+}
+
+export default {
+  markGuestSession,
+  isGuestSession,
+  guestSessionRefusal,
+  refuseGuestSession,
+  refuseGuestSessionMiddleware,
+  GUEST_SESSION_REASON,
+};
