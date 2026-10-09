@@ -1,9 +1,13 @@
--- Reverts 20261006100000_vendor_networks.sql.
--- Any tbl_vendor_payments row with payment_type = 'network_seat' must be removed first or the restored CHECK fails.
--- Left behind on purpose (pre-existing tables, no network column): the passwordless entity
--- accounts created by the org admin (tbl_users user_type 3) and the network persons
--- (tbl_users user_type 11). Pre-network code ignores type 11; the entity accounts become
--- ordinary standalone vendors.
+-- Reverts 20261006100000_vendor_networks.sql. Idempotent: safe to re-run.
+-- Left behind on purpose (pre-existing table, no network column): the passwordless entity
+-- accounts created by the org admin (tbl_users user_type 3). They become ordinary
+-- standalone vendors.
+
+-- 0. Network persons (tbl_users user_type 11) are deactivated, not deleted (they are
+--    referenced as actors). Pre-network code does NOT ignore them: the admin console's
+--    old gate admits user_type NOT IN (2,3,4), so a live type-11 login would reach it.
+UPDATE tbl_users SET status = 0, is_deleted = 1
+ WHERE user_type = 11 AND (status IS DISTINCT FROM 0 OR is_deleted IS DISTINCT FROM 1);
 
 -- 1. Routed RFQ invite copies. Without routed_from_vendor_id, pre-network code would read
 --    each copy as a real invite (counted, emailed, shown to the member). A copy whose
@@ -29,6 +33,7 @@ END $$;
 UPDATE tbl_arc_contract_line_hotel SET fulfilling_vendor_id = NULL, updated_at = CURRENT_TIMESTAMP
  WHERE fulfilling_vendor_id IS NOT NULL;
 
+-- The row-audit triggers go with their tables (DROP TABLE drops them); nothing else to undo.
 DROP FUNCTION IF EXISTS vn_backfill_hotel_location_ids();
 DROP TABLE IF EXISTS tbl_vendor_network_seats;
 DROP TABLE IF EXISTS tbl_vendor_routing_assignments; -- also drops ix_vn_assign_org_one_pending / _one_accepted
@@ -41,6 +46,11 @@ DROP TABLE IF EXISTS tbl_vendor_orgs;
 ALTER TABLE tbl_rfq_product_vendors DROP COLUMN IF EXISTS routed_from_vendor_id;
 ALTER TABLE tbl_hospitality_company_hotels DROP COLUMN IF EXISTS city_id, DROP COLUMN IF EXISTS state_id;
 
+-- Seat payments go before the CHECK is restored: one 'network_seat' row would make the
+-- ADD CONSTRAINT fail after the DROP had run, half-applying the swap. (Seat rows that
+-- referenced them were dropped with tbl_vendor_network_seats above; any other reference
+-- is ON DELETE SET NULL.)
+DELETE FROM tbl_vendor_payments WHERE payment_type = 'network_seat';
 ALTER TABLE tbl_vendor_payments DROP CONSTRAINT IF EXISTS tbl_vendor_payments_payment_type_check;
 ALTER TABLE tbl_vendor_payments ADD CONSTRAINT tbl_vendor_payments_payment_type_check
   CHECK (payment_type IN ('hospitality','tender'));

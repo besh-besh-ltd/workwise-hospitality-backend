@@ -166,3 +166,31 @@ LANGUAGE sql AS $fn$
 $fn$;
 
 SELECT vn_backfill_hotel_location_ids();
+
+-- Row-level audit (spec §10.10): every admin action on the network tables (suspend,
+-- reactivate, remove, org and member PATCHes, invite cancel, coverage edits) is recorded
+-- with the PERSON who did it. log_changes_direct() (20260829090000_audit_row_changes)
+-- reads app.actor_id, which the request context sets to the person acting for an entity
+-- (requestContext resolveActor, spec §4.3). Named <table>_audit like every audited table.
+-- Skipped where that function does not exist; re-running drops and recreates.
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  IF to_regprocedure('public.log_changes_direct()') IS NULL THEN
+    RETURN;
+  END IF;
+  FOREACH t IN ARRAY ARRAY[
+    'tbl_vendor_orgs',
+    'tbl_vendor_org_entities',
+    'tbl_vendor_org_members',
+    'tbl_vendor_org_link_invites',
+    'tbl_vendor_coverage_rules'
+  ] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', t || '_audit', t);
+    EXECUTE format(
+      'CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON public.%I '
+      'FOR EACH ROW EXECUTE FUNCTION public.log_changes_direct()',
+      t || '_audit', t);
+  END LOOP;
+END $$;

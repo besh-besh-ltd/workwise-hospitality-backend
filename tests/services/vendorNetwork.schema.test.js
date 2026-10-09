@@ -17,6 +17,15 @@ const NEW_TABLES = {
   tbl_vendor_network_seats: ["id", "org_id", "entity_vendor_id", "fee_amount", "start_date", "end_date", "status", "payment_id"],
 };
 
+// The network tables with a log_changes_direct row-audit trigger (spec §10.10), sorted.
+const AUDITED = [
+  "tbl_vendor_coverage_rules",
+  "tbl_vendor_org_entities",
+  "tbl_vendor_org_link_invites",
+  "tbl_vendor_org_members",
+  "tbl_vendor_orgs",
+];
+
 // Each violation runs in its own savepoint so the outer transaction survives.
 const rejects = (t, sql, params, re = /unique|check/i) =>
   expect(t.tx((s) => s.none(sql, params))).rejects.toThrow(re);
@@ -264,7 +273,23 @@ describe("vendor network schema", () => {
         [lineId, IDS.hotels.A1, IDS.hotels.A2]
       );
 
+      // F4: a network person, a paid seat payment and an unrelated payment.
+      await seedPerson({ id: 95004, email: "vn-down-person@test.local", name: "VN Down Person", runner: t });
+      await t.none(
+        `INSERT INTO tbl_vendor_payments (vendor_id, amount, payment_type) VALUES (95001, 500, 'network_seat'), (95001, 700, 'hospitality')`
+      );
+
       await t.multi(sql("20261006100000_vendor_networks.down.sql"));
+      // Idempotent: a second run is a no-op, never an error.
+      await t.multi(sql("20261006100000_vendor_networks.down.sql"));
+
+      // Type-11 persons can no longer log in anywhere (the old admin gate admits NOT IN (2,3,4)).
+      expect(await t.one(`SELECT status, is_deleted FROM tbl_users WHERE id = 95004`)).toEqual({ status: 0, is_deleted: 1 });
+      // Seat payments are gone, so the restored CHECK applied; other payments stay.
+      expect((await t.any(`SELECT payment_type FROM tbl_vendor_payments WHERE vendor_id = 95001`)).map((r) => r.payment_type)).toEqual(["hospitality"]);
+      await expect(
+        t.tx((s2) => s2.none(`INSERT INTO tbl_vendor_payments (vendor_id, amount, payment_type) VALUES (95001, 1, 'network_seat')`))
+      ).rejects.toThrow(/check/i);
 
       const invites = await t.any(
         `SELECT user_id FROM tbl_rfq_product_vendors WHERE rfq_id = $1 ORDER BY user_id`,
@@ -287,6 +312,13 @@ describe("vendor network schema", () => {
       for (const table of Object.keys(NEW_TABLES)) {
         expect((await t.one(`SELECT to_regclass($1) AS r`, [`public.${table}`])).r).not.toBeNull();
       }
+      // F5: the row-audit triggers come back with the tables, exactly once each.
+      const triggers = await t.any(
+        `SELECT c.relname AS tbl, t.tgname AS trg FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+          WHERE NOT t.tgisinternal AND t.tgfoid = 'public.log_changes_direct'::regproc AND c.relname LIKE 'tbl_vendor_%'
+          ORDER BY 1`
+      );
+      expect(triggers.map((r) => [r.tbl, r.trg])).toEqual(AUDITED.map((x) => [x, `${x}_audit`]));
       const back = await t.any(
         `SELECT user_id, routed_from_vendor_id FROM tbl_rfq_product_vendors WHERE rfq_id = $1 ORDER BY user_id`,
         [rfq_id]

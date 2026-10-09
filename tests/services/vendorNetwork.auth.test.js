@@ -301,6 +301,22 @@ describe("POST /vendor-network/switch-entity", () => {
 });
 
 describe("audit attribution (§4.3, §10.10)", () => {
+  it("suspending an entity records the PERSON who did it in the row audit (scope audit #7)", async () => {
+    await world();
+    const before = (await db.one(`SELECT COALESCE(max(id), 0) AS id FROM tbl_audit_row_changes`)).id;
+    const entityRow = await db.one(`SELECT id FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [BRANCH]);
+    // An ORG_ADMIN person acting (by default) as the principal HQ.
+    const res = await (await httpClient(ADMIN_PERSON)).patch(`/api/v1/vendor-network/entities/${BRANCH}`).send({ status: "SUSPENDED" });
+    expect(res.status).toBe(200);
+    const rows = await db.any(
+      `SELECT operation, actor_user_id, old_data->>'status' AS old_status, new_data->>'status' AS new_status
+         FROM tbl_audit_row_changes
+        WHERE id > $1 AND table_name = 'tbl_vendor_org_entities' AND record_id = $2`,
+      [before, entityRow.id]
+    );
+    expect(rows).toEqual([{ operation: "UPDATE", actor_user_id: ADMIN_PERSON, old_status: "ACTIVE", new_status: "SUSPENDED" }]);
+  });
+
   it("resolveActor names the person acting for an entity", async () => {
     await world();
     const person = await db.one(`SELECT * FROM tbl_users WHERE id = $1`, [ADMIN_PERSON]);
