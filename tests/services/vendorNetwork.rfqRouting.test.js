@@ -555,6 +555,9 @@ describe("buyer view", () => {
     expect((await createQuote(B, rfq)).status).toBe(200);
     // HQ's org answered through B: FHQ and NO are the only silent invitees.
     expect(await queueRow()).toMatchObject({ total_vendor_count: 3, silent_vendor_count: 2 });
+    // A vendor in no network is its own key: its quote counts exactly as before.
+    expect((await createQuote(NO, rfq)).status).toBe(200);
+    expect(await queueRow()).toMatchObject({ total_vendor_count: 3, silent_vendor_count: 1 });
   });
 
   it("7f. the pending-approval list's total_vendors counts orgs, not routed copies", async () => {

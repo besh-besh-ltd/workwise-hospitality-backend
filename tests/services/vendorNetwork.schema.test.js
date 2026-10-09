@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { db, withTx } from "../setup/db.js";
+import { db, withTx, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../fixtures/vendors.js";
 import { makeRFQ } from "../factories/rfq.js";
@@ -25,6 +25,10 @@ const AUDITED = [
   "tbl_vendor_org_members",
   "tbl_vendor_orgs",
 ];
+
+// Release the harness pool so teardown's DROP DATABASE does not kill idle clients mid-log
+// ("Cannot log after tests are done").
+afterAll(closeDb);
 
 // Each violation runs in its own savepoint so the outer transaction survives.
 const rejects = (t, sql, params, re = /unique|check/i) =>

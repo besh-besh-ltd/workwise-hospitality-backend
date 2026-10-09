@@ -178,6 +178,7 @@ DECLARE
   t TEXT;
 BEGIN
   IF to_regprocedure('public.log_changes_direct()') IS NULL THEN
+    RAISE NOTICE 'vendor_networks: public.log_changes_direct() not found; network tables get NO row-audit triggers (apply 20260829090000_audit_row_changes first, then re-run this migration)';
     RETURN;
   END IF;
   FOREACH t IN ARRAY ARRAY[
