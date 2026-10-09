@@ -114,6 +114,13 @@ export async function dashboardPos(req, res) {
       }
     }
     const status = typeof req.query?.status === "string" && req.query.status.trim() ? req.query.status.trim() : null;
+    // Only statuses the vendor's own PO pages show; anything else (draft, pending_approval,
+    // rejected, cancelled, junk) is a 400, never an empty-but-valid answer. Blank = all.
+    const rawStatus = req.query?.status;
+    const malformed = rawStatus !== undefined && typeof rawStatus !== "string";
+    if (malformed || (status !== null && !dashboardModel.isVendorVisiblePoStatus(status))) {
+      throw new NetworkHttpError(400, "Unknown or unavailable PO status");
+    }
 
     const { total, rows } = await dashboardModel.listPos(orgId, { entityVendorId, status, limit, offset });
     return res.status(200).json({

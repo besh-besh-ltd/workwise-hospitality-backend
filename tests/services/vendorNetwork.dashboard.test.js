@@ -134,7 +134,8 @@ describe("GET /dashboard/summary", () => {
     await po(B, { status: "approved" });
     await po(B, { status: "sent" });
     await po(B, { status: "completed" });
-    await po(C, { status: "pending_approval" });
+    await po(C, { status: "pending_approval" }); // buyer-internal: never reaches the network
+    await po(C, { status: "acceptance_pending" });
     await po(R, { status: "approved" }); // removed entity: counted in the PO status totals only
     await po(FB, { status: "approved" }); // another org: never counted
     await assignment(B, A2, "ACCEPTED");
@@ -152,9 +153,9 @@ describe("GET /dashboard/summary", () => {
     expect(byId[B]).toMatchObject({ name: `VN Dash ${B}`, relationship: "BRANCH", status: "ACTIVE", live_assignments: 1, open_pos: 2 });
     expect(byId[B].seat).toMatchObject({ status: "active" });
     expect(byId[B].seat.end_date).toBeTruthy();
-    expect(byId[C]).toMatchObject({ live_assignments: 1, open_pos: 1 });
+    expect(byId[C]).toMatchObject({ live_assignments: 1, open_pos: 1 }); // acceptance_pending only
     expect(routing).toEqual({ unrouted: 1, pending: 1, declined_7d: 1, timed_out_7d: 1 });
-    expect(pos.by_status).toEqual({ approved: 2, sent: 1, completed: 1, pending_approval: 1 });
+    expect(pos.by_status).toEqual({ approved: 2, sent: 1, completed: 1, acceptance_pending: 1 });
   });
 
   it("runs a bounded number of queries however many entities the org has", async () => {
@@ -232,6 +233,32 @@ describe("GET /dashboard/pos", () => {
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=${FHQ}`)).status).toBe(404);
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=99999999`)).status).toBe(404);
     expect((await admin.get(`${BASE}/pos?entity_vendor_id=abc`)).status).toBe(400);
+  });
+
+  it("never shows POs the buyer has not released to the vendor (draft, pending_approval, rejected, cancelled)", async () => {
+    const visible = await po(B, { status: "acceptance_pending" });
+    for (const status of ["draft", "pending_approval", "rejected", "cancelled"]) await po(B, { status });
+    await po(HQ, { status: "pending_approval" });
+    const admin = await httpClient(HQ);
+
+    const all = await admin.get(`${BASE}/pos`);
+    expect(all.status).toBe(200);
+    expect(all.body.data.items.map((i) => i.id)).toEqual([visible.id]);
+    expect(all.body.data.total).toBe(1);
+
+    const summary = await admin.get(`${BASE}/summary`);
+    expect(Object.keys(summary.body.data.pos.by_status)).toEqual(["acceptance_pending"]);
+    expect(summary.body.data.entities.find((e) => e.vendor_id === B).open_pos).toBe(1);
+
+    for (const status of ["pending_approval", "draft", "rejected", "cancelled", "bogus"]) {
+      const res = await admin.get(`${BASE}/pos?status=${status}`);
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe(0);
+    }
+    expect((await admin.get(`${BASE}/pos?status=a&status=b`)).status).toBe(400);
+    expect((await admin.get(`${BASE}/pos?status=`)).status).toBe(200); // blank = all
+    const ok = await admin.get(`${BASE}/pos?status=acceptance_pending`);
+    expect(ok.body.data.items.map((i) => i.id)).toEqual([visible.id]);
   });
 
   it("still lists a removed entity's POs when filtered to it", async () => {

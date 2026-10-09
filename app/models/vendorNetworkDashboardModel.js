@@ -6,6 +6,7 @@
 
 import db from "../config/dbConn.js";
 import { effectiveSupplierExpr } from "../services/vendorNetwork/fulfilmentSql.js";
+import { VENDOR_VISIBLE_STATUSES } from "./poVendorModel.js";
 
 const PO_ENTITY_STATUSES = ["ACTIVE", "SUSPENDED", "REMOVED"];
 // Statuses after which a PO needs no further action.
@@ -16,7 +17,13 @@ const CLOSED_PO_STATUSES = ["draft", "rejected", "rejected_by_vendor", "cancelle
 // was created inside that row's membership period: a re-link makes a new row, so each
 // period counts and a PO from before linking or after leaving never shows. The principal's
 // POs are unbounded. A NULL linked_at falls back to the row's created_at.
-const orgPo = `EXISTS (
+//
+// Only statuses the vendor's own PO pages show (poVendorModel VENDOR_VISIBLE_STATUSES):
+// a buyer's draft, pending_approval, rejected or cancelled PO never reaches the vendor,
+// so it never reaches the vendor's network either. The list is a code constant of
+// plain identifiers, inlined as literals.
+const VISIBLE_PO_SQL = VENDOR_VISIBLE_STATUSES.map((st) => `'${st}'`).join(", ");
+const orgPo = `po.status::text IN (${VISIBLE_PO_SQL}) AND EXISTS (
   SELECT 1 FROM tbl_vendor_org_entities pe
    WHERE pe.org_id = $1 AND pe.vendor_id = po.finalized_vendor_id AND pe.status = ANY($2::text[])
      AND (pe.relationship = 'PRINCIPAL'
@@ -81,6 +88,9 @@ export async function poCountsByStatus(orgId, runner = db) {
 }
 
 /** One page of the org's POs (newest first), optionally of one entity / one status. */
+/** True when `status` is one a vendor may see (the only values GET /dashboard/pos accepts). */
+export const isVendorVisiblePoStatus = (status) => VENDOR_VISIBLE_STATUSES.includes(status);
+
 export async function listPos(orgId, { entityVendorId = null, status = null, limit, offset }, runner = db) {
   const where = `${orgPo}
         AND ($3::int IS NULL OR po.finalized_vendor_id = $3)
@@ -163,6 +173,7 @@ export function listContractHotelFulfilment(orgId, contractIds, runner = db) {
 }
 
 export default {
+  isVendorVisiblePoStatus,
   isPoEntity,
   liveAssignmentCounts,
   openPoCounts,
