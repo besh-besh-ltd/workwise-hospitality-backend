@@ -7088,7 +7088,8 @@ LIMIT 2;
           ) AS "quotes",
           ARRAY(
             SELECT json_build_object(
-              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              -- Vendor Networks: an org is one invitee (a member's routed copy is its principal's invite).
+              'total_vendors', COUNT(DISTINCT COALESCE(TRPV.routed_from_vendor_id, TRPV.user_id)),
               'quote_received',
               (
                 SELECT COUNT(*) FROM (
@@ -17494,8 +17495,14 @@ ORDER BY tq.timestamp DESC;
 
     // Get selected vendors for this RFQ product so consumers can show the full roster,
     // including vendors who have not started responding yet.
+    // Vendor Networks (spec §6.3): one row per org. A principal's invite and its member's
+    // routed copy are one invitee (org key = routed_from_vendor_id, else the user); the row
+    // shown is the one that quoted, else the principal's own invite. A vendor in no
+    // network is its own key: the roster is unchanged.
     const selectedVendors = await dbContext.any(
-      `SELECT
+      `SELECT rfq_product_vendor_id, vendor_id, vendor_name, vendor_email, company_name, has_submitted_quote
+         FROM (
+       SELECT DISTINCT ON (COALESCE(rpv.routed_from_vendor_id, rpv.user_id))
           rpv.id AS rfq_product_vendor_id,
           rpv.user_id AS vendor_id,
           tu.name AS vendor_name,
@@ -17518,7 +17525,12 @@ ORDER BY tq.timestamp DESC;
          AND rpv.product_variant_id = $2
          AND COALESCE(rpv.variant, 0) = COALESCE($3, 0)
          AND tu.status = 1
-       ORDER BY rpv.id ASC`,
+       ORDER BY COALESCE(rpv.routed_from_vendor_id, rpv.user_id),
+                has_submitted_quote DESC,                -- the row that quoted first
+                (rpv.routed_from_vendor_id IS NOT NULL), -- then the principal's own invite
+                rpv.id
+         ) per_org
+       ORDER BY rfq_product_vendor_id ASC`,
       [techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
 

@@ -29,6 +29,7 @@ import {
 } from "../../app/services/vendorNetwork/routingEngine.js";
 import { rfqSubjectHandler, assertOrgMayQuote } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
 import rfqModel from "../../app/models/rfqModel.js";
+import dashboardModel from "../../app/models/dashboardModel.js";
 import { lockRoutingSubject, getAssignment, releaseAssignment } from "../../app/models/vendorRoutingModel.js";
 import {
   propagateRoutedCopies,
@@ -537,6 +538,73 @@ describe("buyer view", () => {
     const clientRow = clients.data.find((r) => r.rfq_id === rfq.rfq_id);
     expect(clientRow).toBeTruthy();
     expect(Number(clientRow.total_vendors)).toBe(3);
+  });
+
+  it("7e. the buyer's no-response queue counts orgs: a member's quote answers for its principal", async () => {
+    const rfq = await openRfq();
+    await db.none(`INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3)`, [
+      rfq.rfq_id, IDS.hotels.A1, BUYER,
+    ]);
+    const { company_id } = await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [BUYER]);
+    const queueRow = async () =>
+      (await dashboardModel.getMyNoResponseRfqsData(company_id, BUYER, [IDS.hotels.A1])).items.find((i) => i.id === rfq.rfq_id);
+
+    expect(await queueRow()).toMatchObject({ total_vendor_count: 3, silent_vendor_count: 3 });
+    await routeAndAccept(rfq.rfq_id); // B holds a routed copy of HQ's invite
+    expect(await queueRow()).toMatchObject({ total_vendor_count: 3, silent_vendor_count: 3 });
+    expect((await createQuote(B, rfq)).status).toBe(200);
+    // HQ's org answered through B: FHQ and NO are the only silent invitees.
+    expect(await queueRow()).toMatchObject({ total_vendor_count: 3, silent_vendor_count: 2 });
+  });
+
+  it("7f. the pending-approval list's total_vendors counts orgs, not routed copies", async () => {
+    const rfq = await openRfq();
+    await routeAndAccept(rfq.rfq_id);
+    expect((await createQuote(B, rfq)).status).toBe(200);
+    const hcId = IDS.hospitality.A;
+    const policy = await db.one(`SELECT id FROM tbl_approval_policies ORDER BY id LIMIT 1`);
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances (entity_type, entity_id, approval_policy_id, status, current_step, hospitality_company_id, hotel_id, initiated_by)
+       VALUES ('RFQ', $1, $2, 'PENDING', 1, $3, $4, $5) RETURNING id`,
+      [rfq.rfq_id, policy.id, hcId, IDS.hotels.A1, BUYER]
+    );
+    const step = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order) VALUES ($1, 1) RETURNING id`,
+      [inst.id]
+    );
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status) VALUES ($1, $2, 'PENDING')`,
+      [step.id, BUYER]
+    );
+    const list = await rfqModel.getPendingApprovalRfqs(10, 0, BUYER, null, "DESC", null, null, String(rfq.rfq_no), null, null);
+    const row = list.find((r) => r.id === rfq.rfq_id);
+    expect(row).toBeTruthy();
+    const vendors = typeof row.vendors === "string" ? JSON.parse(row.vendors) : row.vendors;
+    expect(Number(vendors[0].total_vendors)).toBe(3); // HQ (with B's copy), FHQ, NO
+  });
+
+  it("7g. the tech-eval roster lists each org once: the member that quoted stands in for its principal", async () => {
+    const rfq = await openRfq();
+    const rp = await db.one(`SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`, [rfq.rfq_id]);
+    const te = await db.one(
+      `INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score) VALUES ($1, $2, 50) RETURNING id`,
+      [rfq.rfq_id, rp.id]
+    );
+    try {
+      const roster = async () => (await rfqModel.getTechEvalStatusByProductId(rp.id)).vendors.selected;
+      expect((await roster()).map((v) => v.vendor_id)).toEqual([HQ, FHQ, NO]);
+
+      await routeAndAccept(rfq.rfq_id); // B's routed copy, not yet quoted: HQ still stands for the org
+      expect((await roster()).map((v) => v.vendor_id)).toEqual([HQ, FHQ, NO]);
+
+      expect((await createQuote(B, rfq)).status).toBe(200);
+      const after = await roster();
+      expect(after).toHaveLength(3); // never HQ "invited but silent" next to B
+      expect(after.map((v) => v.vendor_id).sort()).toEqual([B, FHQ, NO].sort());
+      expect(after.find((v) => v.vendor_id === B).has_submitted_quote).toBe(true);
+    } finally {
+      await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = $1`, [te.id]);
+    }
   });
 
   it("8. the buyer finalizes the member's quote → the award (tbl_quote_finalization) names the member", async () => {
