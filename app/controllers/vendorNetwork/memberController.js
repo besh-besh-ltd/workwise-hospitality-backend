@@ -90,7 +90,7 @@ function newInviteToken() {
 async function sendInviteEmail({ email, name, orgName, entityName, rawToken }) {
   try {
     const base = (process.env.FRONT_BASE_URL || DEFAULT_FRONT_BASE_URL).replace(/\/+$/, "");
-    const link = `${base}/vendor/network/accept-invite?token=${rawToken}`;
+    const link = `${base}/vendor/network/accept-invite#token=${rawToken}`;
     const where = entityName ? `${escapeHtml(entityName)} in ${escapeHtml(orgName)}` : escapeHtml(orgName);
     const html = generateEmailTemplate(
       `<h5>Hello ${escapeHtml(name)}</h5>`,

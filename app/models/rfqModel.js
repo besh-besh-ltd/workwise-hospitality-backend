@@ -40,6 +40,7 @@ import {
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
+import { generateEmailLinkToken } from '../helper/emailLinkToken.js';
 
 
 // A bare (optionally schema-qualified) SQL identifier. Table names reaching
@@ -54,13 +55,8 @@ const SQL_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$
 // condition cannot simply be parameterized in place.
 const SQL_BREAKOUT_RE = /;|--|\/\*|\*\/|\0/;
 
-const generateReminderTokenValue = () => {
-  const timestamp = Date.now().toString();
-  const randomSegment = Math.floor(Math.random() * 1_000_000)
-    .toString()
-    .padStart(6, '0');
-  return parseInt((timestamp + randomSegment).slice(0, 16), 10);
-};
+// Emailed-link token for ensureVendorTokens: unguessable (helper/emailLinkToken.js).
+const generateReminderTokenValue = () => generateEmailLinkToken();
 
 /**
  * "Now" and "today" for bid-window purposes, pinned to IST.
@@ -10504,12 +10500,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
   insertVendorRfqToken: async (vendorId, rfqNumber) => {
-    // Function to generate a unique token as BIGINT
-    const generateUniqueToken = () => {
-      const timestamp = Date.now(); // Current timestamp in milliseconds
-      const randomNumber = Math.floor(Math.random() * 1000000); // 6-digit random number
-      return parseInt((timestamp + randomNumber).toString().substring(0, 16)); // Ensure it's a BIGINT
-    };
+    // An unguessable 18-digit BIGINT (helper/emailLinkToken.js); the loop below
+    // retries on the (astronomically unlikely) unique-index collision.
+    const generateUniqueToken = generateEmailLinkToken;
 
     let token;
     let insertedData;
@@ -10554,11 +10547,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     const ids = [...new Set((vendorIds || []).map(Number).filter(Number.isInteger))];
     const out = new Map();
     if (!ids.length) return out;
-    const generateUniqueToken = () => {
-      const timestamp = Date.now();
-      const randomNumber = Math.floor(Math.random() * 1000000);
-      return parseInt((timestamp + randomNumber).toString().substring(0, 16));
-    };
+    const generateUniqueToken = generateEmailLinkToken;
     for (let attempt = 0; attempt < 5; attempt++) {
       const seen = new Set();
       const rows = ids.map((vendor_id) => {

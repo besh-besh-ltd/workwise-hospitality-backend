@@ -8,8 +8,17 @@
 //   if (denied) return res.status(denied.http).json(denied.body);
 
 import { NETWORK_ROLE } from "../../constants/vendorNetwork.js";
+import { isGuestSession, guestSessionRefusal } from "../../helper/guestSession.js";
 
 const deny = (message) => ({ http: 403, body: { status: 0, message } });
+
+/**
+ * An emailed-link guest session (helper/guestSession.js) never gets network or account
+ * power: 403 { reason: 'GUEST_SESSION' }. It keeps RFQ view / quote / regret only.
+ */
+export function refuseGuest(req) {
+  return isGuestSession(req) ? { http: 403, body: guestSessionRefusal() } : null;
+}
 
 /** The caller acts inside a vendor network. */
 export function requireNetwork(req) {
@@ -18,6 +27,8 @@ export function requireNetwork(req) {
 
 /** The caller is an ORG_ADMIN of the network it is acting in. */
 export function requireOrgAdmin(req) {
+  const guest = refuseGuest(req);
+  if (guest) return guest;
   return req.user?.network?.role === NETWORK_ROLE.ORG_ADMIN ? null : deny("Network admin access required");
 }
 
@@ -58,6 +69,7 @@ export function sendIfNetworkError(res, err) {
 }
 
 export default {
+  refuseGuest,
   requireNetwork,
   requireOrgAdmin,
   actingPersonId,

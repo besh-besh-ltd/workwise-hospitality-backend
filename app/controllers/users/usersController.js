@@ -59,6 +59,7 @@ import { memberEntityOrg } from '../../services/vendorNetwork/subscriptionCovera
 import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constants/vendorNetwork.js';
 import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
 import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
+import { refuseGuestSession } from '../../helper/guestSession.js';
 
 // A network entity created without a password is reached only through its people's
 // memberships (spec §4.2); a password reset would turn it into a direct login.
@@ -2986,6 +2987,9 @@ update_user_detail: async (req, res, next) => {
   },
   change_password: async (req, res, next) => {
     try {
+      // An emailed-link guest session (anyone holding the link) can never set a
+      // password: that would turn a 30-minute RFQ link into a permanent login.
+      if (refuseGuestSession(req, res)) return;
       // "My password": a person acting for a network entity changes their OWN
       // login, never the entity's (that would hand them a direct entity login
       // that outlives their membership). Everyone else is unchanged.

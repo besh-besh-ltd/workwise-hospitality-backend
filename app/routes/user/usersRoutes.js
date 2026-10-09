@@ -19,6 +19,7 @@ import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { requireCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { verifyVendorTokenLimiter, TOO_MANY_ATTEMPTS } from '../../middleware/failedAttemptLimiter.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -35,18 +36,31 @@ UsersRoutes.post(
 
 // Verify a vendor email-link token and return a short-lived JWT
 // so the vendor gets a normal session without manual login.
+//
+// Rate limited: 20 invalid tokens per client per 10 minutes, then 429 for the rest
+// of the window (per process; see middleware/failedAttemptLimiter.js).
 UsersRoutes.post('/verify-vendor-token', async (req, res) => {
   try {
-    const { token } = req.body;
+    if (verifyVendorTokenLimiter.isBlocked(req)) {
+      return res.status(429).json(TOO_MANY_ATTEMPTS);
+    }
+    const { token } = req.body ?? {};
     if (!token) {
+      verifyVendorTokenLimiter.recordFailure(req);
       return res.status(400).json({ status: 0, message: 'Token is required' });
     }
-
-    const tokenData = await db.oneOrNone(
-      'SELECT vendor_id FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
-      [token]
-    );
+    // The column is a BIGINT: anything but digits can never match (and would make
+    // Postgres raise instead of answering "no such token").
+    const tokenText = String(token).trim();
+    const isBigint = /^\d{1,19}$/.test(tokenText) && BigInt(tokenText) <= 9223372036854775807n;
+    const tokenData = isBigint
+      ? await db.oneOrNone(
+          'SELECT vendor_id FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1::bigint',
+          [tokenText]
+        )
+      : null;
     if (!tokenData) {
+      verifyVendorTokenLimiter.recordFailure(req);
       return res.status(400).json({ status: 0, message: 'Invalid or expired token' });
     }
 

@@ -130,7 +130,7 @@ async function mailTo(to) {
 }
 
 const tokenIn = (mail) => {
-  const m = /accept-invite\?token=([0-9a-f]+)/.exec(mail?.html ?? "");
+  const m = /accept-invite#token=([0-9a-f]+)/.exec(mail?.html ?? "");
   return m ? m[1] : null;
 };
 
@@ -236,7 +236,9 @@ describe("rule 2: a new email creates an INVITED type-11 person and emails a has
     expect(hours).toBeLessThanOrEqual(72);
 
     const mail = await mailTo("new.person@example.com");
-    expect(mail.html).toContain(`/vendor/network/accept-invite?token=${token}`);
+    // Fragment, not query string: the token never reaches the FE host's access logs.
+    expect(mail.html).toContain(`/vendor/network/accept-invite#token=${token}`);
+    expect(mail.html).not.toContain("?token=");
     expect(JSON.stringify(res.body)).not.toContain(token);
     expect(res.body.data).toMatchObject({ id: m.id, person_user_id: user.id, status: "INVITED" });
   });

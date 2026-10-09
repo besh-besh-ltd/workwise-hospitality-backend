@@ -9,6 +9,7 @@ import { encryptStable } from "../../helper/claimCrypto.js";
 import db from "../../config/dbConn.js";
 import { resolveActingContext } from "../../services/vendorNetwork/actingContext.js";
 import {
+  refuseGuest,
   requireNetwork,
   requireOrgAdmin,
   actingPersonId,
@@ -44,7 +45,9 @@ function parseVendorId(value) {
  */
 export async function switchEntity(req, res) {
   try {
-    const denied = requireNetwork(req);
+    // A guest (emailed-link) token is refused outright, so a switch can never mint a
+    // normal token from it and drop its `guest` claim.
+    const denied = refuseGuest(req) ?? requireNetwork(req);
     if (denied) return res.status(denied.http).json(denied.body);
 
     const target = parseVendorId(req.body?.entity_vendor_id);
@@ -108,6 +111,8 @@ function parseOrgName(value) {
  */
 export async function createOrg(req, res) {
   try {
+    const guest = refuseGuest(req);
+    if (guest) return res.status(guest.http).json(guest.body);
     if (req.user.network) return fail(res, 409, "You already belong to a network");
     if (Number(req.user.status) !== 1) return fail(res, 403, "Your account is not active");
     const name = parseOrgName(req.body?.name);

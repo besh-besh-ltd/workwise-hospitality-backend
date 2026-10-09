@@ -11,6 +11,7 @@ import { logger } from '../util/logger.js';
 // Claim decryption only (never the auth decision) — see app/helper/claimCrypto.js.
 import { decryptClaim } from '../helper/claimCrypto.js';
 import { resolveFromTokenPayload } from '../services/vendorNetwork/actingContext.js';
+import { markGuestSession } from '../helper/guestSession.js';
 import {
   VENDOR_MEMBER_USER_TYPE,
   NETWORK_MANAGED_MESSAGE
@@ -234,12 +235,13 @@ passport.use(
           return done(null, false, { message: 'Unauthorized' });
         }
         // A vendor in no network gets exactly today's object: no `network` key at all.
-        return done(
-          null,
+        const authed =
           ctx.network === undefined
             ? ctx.entityRow
-            : { ...ctx.entityRow, network: ctx.network }
-        );
+            : { ...ctx.entityRow, network: ctx.network };
+        // Emailed-link token: RFQ view/quote/regret only (helper/guestSession.js).
+        if (payload.guest) markGuestSession(authed);
+        return done(null, authed);
       } catch (error) {
         logger.error('passport error');
         done(error, false);

@@ -12,6 +12,7 @@ import { logger } from "../../util/logger.js";
 import { disconnectPersonSockets } from "../../util/socket.js";
 import { dispatch as dispatchNotification } from "../../services/notificationService.js";
 import {
+  refuseGuest,
   requireNetwork,
   requireOrgAdmin,
   actingPersonId,
@@ -249,6 +250,8 @@ async function respondableInvite(req, t) {
 /** POST /link-invites/:id/accept (target entity, acting as itself) */
 export async function acceptLinkInvite(req, res) {
   try {
+    const guest = refuseGuest(req);
+    if (guest) return res.status(guest.http).json(guest.body);
     const result = await db.tx(async (t) => {
       const { invite, expired } = await respondableInvite(req, t);
       if (expired) return { expired: true };
@@ -302,6 +305,8 @@ export async function acceptLinkInvite(req, res) {
 /** POST /link-invites/:id/decline (target entity, acting as itself) */
 export async function declineLinkInvite(req, res) {
   try {
+    const guest = refuseGuest(req);
+    if (guest) return res.status(guest.http).json(guest.body);
     const result = await db.tx(async (t) => {
       const { invite, expired } = await respondableInvite(req, t);
       if (expired) return { expired: true };
@@ -490,7 +495,7 @@ export async function deleteEntity(req, res) {
 /** POST /entities/self/leave: a member entity, on its own login, leaves the network. */
 export async function leaveNetwork(req, res) {
   try {
-    const denied = requireNetwork(req);
+    const denied = refuseGuest(req) ?? requireNetwork(req);
     if (denied) return res.status(denied.http).json(denied.body);
     if (isActingForAnotherLogin(req)) return fail(res, 403, "Only the entity's own login can leave the network");
     if (req.user.network.is_principal) return fail(res, 400, "The principal cannot leave its own network");
