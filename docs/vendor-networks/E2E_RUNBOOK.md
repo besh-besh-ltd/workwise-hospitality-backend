@@ -234,12 +234,17 @@ Decided, not bugs. Check against these before filing one.
   or buyer until the invite is disabled, and the invitee gets Workwise-branded mail naming
   the inviting org. The invite expires after 72h but the row stays.
 - **Emailed-link (guest) sessions are RFQ-only.** A session from `verify-vendor-token`
-  can view, quote and regret on the RFQ; every network/account route (and
-  change-password) answers 403 `{reason: 'GUEST_SESSION'}`. Log in normally to manage a
+  can view, quote and regret on the RFQ; every network/account route, change-password,
+  company details, SPOCs/locations, push subscription, profile image, refresh-token and
+  any email/mobile change answer 403 `{reason: 'GUEST_SESSION'}`. Log in normally to manage a
   network.
-- **`verify-vendor-token` is rate-limited** in memory, per process: 20 invalid tokens per
-  client per 10 minutes, then 429 for the rest of the window. The client is the right-most
-  `X-Forwarded-For` hop, else the socket address. Valid tokens are never counted.
+- **Emailed-link tokens are rate-limited** (`POST /users/verify-vendor-token` and `?token=`
+  on vendor routes, one shared counter) in memory, per process: 20 invalid tokens per
+  client per 10 minutes, then 429 for the rest of the window; at most 10,000 clients are
+  tracked (oldest evicted). The client is `req.ip` under Express `trust proxy`, set from
+  `TRUST_PROXY_HOPS` (default 1 hop; `0` when no reverse proxy). Valid tokens never count.
+- **A network entity's GSTIN cannot be changed** from the profile (409
+  `NETWORK_GSTIN_LOCKED`); a vendor in no network edits it as before.
 - **Entity cap.** `POST /entities` stops at `NETWORK_MAX_ENTITIES` live entities per org
   (default 200, principal included): 409 `ENTITY_LIMIT`.
 - **Branch PAN.** A BRANCH created with `POST /entities` must have a GSTIN carrying the
