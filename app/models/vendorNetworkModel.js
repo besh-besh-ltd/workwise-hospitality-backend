@@ -269,7 +269,7 @@ export function updateOrgSettings(orgId, { name, routing_mode, routing_timeout_h
  *
  * seat_status: the current seat's status ('active' wins over 'pending'); when the entity
  * has no current seat but an earlier one ran out (its FY ended, or it was marked
- * expired), 'EXPIRED' with that seat; NULL when it never had one (or only cancelled
+ * expired), 'expired' with that seat; NULL when it never had one (or only cancelled
  * ones). seat_valid_until is the shown seat's end date as 'YYYY-MM-DD'. Whether an expired seat matters
  * depends on the fee: at 0 it blocks nothing (the FE shows "Included", see seat_fee_inr).
  */
@@ -278,7 +278,7 @@ export function listEntitiesWithSeats(orgId, runner = db, today = istDate()) {
     `SELECT e.vendor_id, e.relationship, e.status, e.preference_rank, e.linked_at,
             u.name, u.email, u.status AS user_status,
             s.id AS seat_id,
-            CASE WHEN s.id IS NULL THEN NULL WHEN s.is_current THEN s.status ELSE 'EXPIRED' END AS seat_status,
+            CASE WHEN s.id IS NULL THEN NULL WHEN s.is_current THEN s.status ELSE 'expired' END AS seat_status,
             s.end_date AS seat_end_date, s.end_date::text AS seat_valid_until, s.fee_amount AS seat_fee_amount
        FROM tbl_vendor_org_entities e
        JOIN tbl_users u ON u.id = e.vendor_id
@@ -430,12 +430,13 @@ export async function setLinkInviteStatus(inviteId, status, runner = db) {
 /**
  * PENDING, unexpired invites addressed to a vendor, newest first, with the inviting
  * principal's company name and GSTIN (the inviter's own identity, which the invitee
- * needs to judge consent; nothing else of the principal is returned).
+ * needs to judge consent; nothing else of the principal is returned). Each is NULL when
+ * the principal's company has none: never a substitute such as the login name.
  */
 export function listIncomingLinkInvites(targetVendorId, runner = db) {
   return runner.any(
     `SELECT i.id, i.org_id, o.name AS org_name, i.relationship, i.status, i.expires_at, i.created_at,
-            COALESCE(NULLIF(TRIM(pc.company_name), ''), pu.name) AS principal_company_name,
+            NULLIF(TRIM(pc.company_name), '') AS principal_company_name,
             NULLIF(TRIM(pc.gstin), '') AS principal_gstin
        FROM tbl_vendor_org_link_invites i
        JOIN tbl_vendor_orgs o ON o.id = i.org_id

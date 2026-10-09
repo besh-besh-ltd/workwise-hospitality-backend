@@ -547,7 +547,7 @@ describe("vendor network org and entity API", () => {
     ]);
   });
 
-  it("9b. seat renewal at fee 0: a seat whose FY ended blocks nothing, and is shown as EXPIRED with seat_fee_inr", async () => {
+  it("9b. seat renewal at fee 0: a seat whose FY ended blocks nothing, and is shown as expired with seat_fee_inr", async () => {
     await world();
     // BRANCH's only seat ended last FY (31 March), still marked 'active'.
     await db.none(
@@ -561,13 +561,13 @@ describe("vendor network org and entity API", () => {
     expect(got.status).toBe(200);
     expect(got.body.data.seat_fee_inr).toBe(0);
     const branch = got.body.data.entities.find((e) => e.vendor_id === BRANCH);
-    expect(branch).toMatchObject({ seat_status: "EXPIRED", seat_valid_until: "2025-03-31" });
+    expect(branch).toMatchObject({ seat_status: "expired", seat_valid_until: "2025-03-31" });
     expect(got.body.data.entities.find((e) => e.vendor_id === HQ)).toMatchObject({ seat_status: null, seat_valid_until: null });
 
     const summary = await admin.get(`${BASE}/dashboard/summary`);
     expect(summary.body.data.seat_fee_inr).toBe(0);
     expect(summary.body.data.entities.find((e) => e.vendor_id === BRANCH).seat).toMatchObject({
-      status: "EXPIRED",
+      status: "expired",
       valid_until: "2025-03-31",
     });
 
@@ -587,6 +587,72 @@ describe("vendor network org and entity API", () => {
     const renewed = (await admin.get(`${BASE}/org`)).body.data.entities.find((e) => e.vendor_id === BRANCH);
     expect(renewed.seat_status).toBe("active");
     expect(await entityCanOperate(BRANCH)).toEqual({ ok: true });
+  });
+
+  it("4b. incoming invites: principal_company_name is the company's own name or null, never a fallback", async () => {
+    await world();
+    await db.none(`UPDATE tbl_company SET company_name = NULL WHERE id = $1`, [HQ]);
+    const { body } = await invite({ target_vendor_id: TARGET, relationship: "DEALER" });
+    const [row] = (await (await httpClient(TARGET)).get(`${BASE}/link-invites/incoming`)).body.data;
+    expect(row.id).toBe(body.data.id);
+    expect(row.principal_company_name).toBeNull();
+    expect(row.principal_gstin).toBe(HQ_GSTIN);
+    await db.none(`UPDATE tbl_company SET company_name = '   ', gstin = NULL WHERE id = $1`, [HQ]);
+    const [blank] = (await (await httpClient(TARGET)).get(`${BASE}/link-invites/incoming`)).body.data;
+    expect([blank.principal_company_name, blank.principal_gstin]).toEqual([null, null]);
+  });
+
+  it("4c. accepting a link invite respects NETWORK_MAX_ENTITIES; the invite stays PENDING", async () => {
+    await world(); // ORG = HQ + BRANCH
+    const id = (await invite({ target_vendor_id: TARGET, relationship: "DEALER" })).body.data.id;
+    const saved = process.env.NETWORK_MAX_ENTITIES;
+    process.env.NETWORK_MAX_ENTITIES = "2";
+    try {
+      const res = await (await httpClient(TARGET)).post(`${BASE}/link-invites/${id}/accept`);
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe("ENTITY_LIMIT");
+      expect(await db.oneOrNone(`SELECT 1 FROM tbl_vendor_org_entities WHERE vendor_id = $1`, [TARGET])).toBeNull();
+      expect((await db.one(`SELECT status FROM tbl_vendor_org_link_invites WHERE id = $1`, [id])).status).toBe("PENDING");
+      process.env.NETWORK_MAX_ENTITIES = "3";
+      expect((await (await httpClient(TARGET)).post(`${BASE}/link-invites/${id}/accept`)).status).toBe(200);
+    } finally {
+      if (saved === undefined) delete process.env.NETWORK_MAX_ENTITIES;
+      else process.env.NETWORK_MAX_ENTITIES = saved;
+    }
+  });
+
+  it("6d. a network entity's GSTIN is locked (NETWORK_GSTIN_LOCKED), so the BRANCH PAN check cannot be re-pointed; no-org vendors unchanged", async () => {
+    await world();
+    await seedPerson({ id: MEMBER_PERSON, email: "vn-gst-admin@example.com", name: "Gst Admin" });
+    await addMember({ orgId: ORG, personId: MEMBER_PERSON, role: "ORG_ADMIN" });
+    const VICTIM = "27VICTM1234V1Z5";
+    const gstinOf = async (id) => (await db.one(`SELECT gstin FROM tbl_company WHERE id = $1`, [id])).gstin;
+
+    for (const client of [await httpClient(HQ), await httpClient(MEMBER_PERSON, { ent: HQ }), await httpClient(BRANCH)]) {
+      const res = await client.put("/api/v1/users/update-company-detail").send({ company_name: "Renamed", gstin: VICTIM });
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe("NETWORK_GSTIN_LOCKED");
+    }
+    expect(await gstinOf(HQ)).toBe(HQ_GSTIN);
+    expect(await gstinOf(BRANCH)).toBe(samePanGstin(BRANCH));
+
+    // The same GSTIN (any case / spacing) and no GSTIN at all are not changes: the form saves.
+    const same = await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ company_name: "HQ Ltd", gstin: ` ${HQ_GSTIN.toLowerCase()} ` });
+    expect(same.status).toBe(200);
+    expect((await (await httpClient(HQ)).put("/api/v1/users/update-company-detail").send({ company_name: "HQ Ltd 2", gstin: null })).status).toBe(200);
+    expect(await db.one(`SELECT company_name FROM tbl_company WHERE id = $1`, [HQ])).toEqual({ company_name: "HQ Ltd 2" });
+
+    // So a branch of the victim's PAN is still refused.
+    const { state_id } = await aStateWithCity();
+    const branch = await (await httpClient(HQ)).post(`${BASE}/entities`).send({
+      company_name: "Victim Branch", gstin: "27VICTM1234V2Z4", email: "vn-victim-branch@example.com", state_id, relationship: "BRANCH",
+    });
+    expect(branch.body.reason).toBe("BRANCH_PAN_MISMATCH");
+
+    // A vendor in no network edits its GSTIN exactly as before.
+    const lone = await (await httpClient(LONE)).put("/api/v1/users/update-company-detail").send({ company_name: "Lone Ltd", gstin: "29LONEV1234L1Z1" });
+    expect(lone.status).toBe(200);
+    expect(await gstinOf(LONE)).toBe("29LONEV1234L1Z1");
   });
 
   it("10. every :vendorId target must be an entity of the caller's org, else 404", async () => {

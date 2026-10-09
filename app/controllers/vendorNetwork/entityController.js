@@ -296,6 +296,12 @@ export async function acceptLinkInvite(req, res) {
       const { invite, expired } = await respondableInvite(req, t);
       if (expired) return { expired: true };
 
+      // The per-org entity cap (NETWORK_MAX_ENTITIES), under the same org lock as
+      // POST /entities so a create and an accept cannot overshoot it together.
+      await lockOrgEntities(t, invite.org_id);
+      if ((await countLiveEntities(invite.org_id, t)) >= maxNetworkEntities()) {
+        throw new NetworkHttpError(409, "This network has reached its limit of entities", "ENTITY_LIMIT");
+      }
       // Re-checked under the invite lock; the live-vendor unique index is the backstop.
       if (await isPrincipalOfAnyOrg(req.user.id, t)) {
         throw new NetworkHttpError(409, "You run your own network and cannot join another", "IS_PRINCIPAL");
@@ -391,6 +397,9 @@ export async function cancelLinkInvite(req, res) {
   }
 }
 
+/** Serialises the entity-cap check of one org (POST /entities and link-invite accept). */
+const lockOrgEntities = (t, orgId) => t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_entities_org:' || $1))`, [orgId]);
+
 /** Validated POST /entities input, or a 400 refusal. */
 function parseNewEntity(body = {}) {
   const companyName = trimmed(body.company_name);
@@ -448,7 +457,7 @@ export async function createEntity(req, res) {
       await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_gstin:' || upper($1)))`, [input.gstin]);
       // Per-org cap (NETWORK_MAX_ENTITIES), checked under an org lock so parallel creates
       // cannot overshoot it.
-      await t.one(`SELECT pg_advisory_xact_lock(hashtext('vn_entities_org:' || $1))`, [orgId]);
+      await lockOrgEntities(t, orgId);
       if ((await countLiveEntities(orgId, t)) >= maxNetworkEntities()) {
         throw new NetworkHttpError(409, "Your network has reached its limit of entities", "ENTITY_LIMIT");
       }
