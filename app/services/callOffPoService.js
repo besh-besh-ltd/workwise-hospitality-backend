@@ -5,8 +5,9 @@ import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
-import pricingEngine from './pricingEngine.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
+import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
+import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
 
 // Phase 2 — run the pricing engine for a contract line at a given quantity.
 // Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
@@ -17,20 +18,10 @@ import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 // no double-tax).
 function computeLineEngineOut(pricingResult, quantity) {
   const { unit_rate, gst_pct, charges } = pricingResult;
-  const canonicalCharges = normalizeArcCharges(charges);
-  return pricingEngine.calculateLineTotal({
-    unit_price:    Number(unit_rate || 0),
-    quantity:      Number(quantity || 0),
-    tax:           Number(gst_pct || 0),
-    tax_mode:      'percentage',
-    other_charges: canonicalCharges.map((c) => ({
-      name:        c.name ?? null,
-      amount:      Number(c.amount ?? 0),
-      amount_mode: (c.amount_mode === 'percentage' || c.amount_mode === '%') ? 'percentage' : 'absolute',
-      tax:         (c.tax !== null && c.tax !== undefined && c.tax !== '') ? Number(c.tax) : null,
-      tax_mode:    (c.tax_mode === 'percentage' || c.tax_mode === '%') ? 'percentage' : 'absolute',
-    })),
-  });
+  // The one engine mapping shared with the call-off document and PO detail tax split
+  // (helper/arc_v2/callOffLineTax.js), so their taxable value + tax rows add up to the
+  // total_price stored here.
+  return computeCallOffLine({ unit_price: unit_rate, quantity, tax: gst_pct, other_charges: charges });
 }
 
 // Per-unit landed price (qty=1) — base + per-unit charges + taxes. Display/back-compat
@@ -71,6 +62,23 @@ function computeAllInUnitPrice(pricingResult) {
  */
 
 /**
+ * FOR UPDATE on the requisition hotel's tbl_arc_contract_line_hotel rows for the
+ * MR's contract lines, ascending id. Taken before any tbl_arc_contract_line lock.
+ */
+async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
+  if (hotelId == null) return;
+  await runner.any(
+    `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
+      WHERE clh.hotel_id = $2
+        AND clh.arc_contract_line_id IN
+            (SELECT arc_contract_line_id FROM tbl_material_requisition_item WHERE mr_id = $1)
+      ORDER BY clh.id
+        FOR UPDATE`,
+    [mrId, hotelId]
+  );
+}
+
+/**
  * Resolve and group MR items into vendor-contract buckets for PO creation.
  * Returns: [{ arc_contract_id, vendor_id, hospitality_company_id, items: [ {mr_item, pricing} ], total_value }]
  */
@@ -85,9 +93,15 @@ async function buildCallOffBuckets(mrId, txContext) {
     [mrId]
   );
   // GROUP rate contract: each line's ledger row for the requisition's hotel.
-  // The supplier is that row's fulfilling vendor when one is set (vendor
-  // distributor networks), else the contract vendor — always the contract
-  // vendor today, so one PO per contract as before.
+  // The supplier is that row's fulfilling vendor when one is set (a vendor
+  // network member that accepted the hotel) and still ACTIVE in the contract
+  // vendor's network, else the contract vendor.
+  //
+  // Lock the hotel's ledger rows FIRST, in id order (the lock order of
+  // services/vendorNetwork/subjects/arcHotelSubject.js): a fulfilment change
+  // committing meanwhile is then waited for and read, never half-seen, and the
+  // two paths cannot deadlock.
+  await lockMrHotelLedgerRows(runner, mrId, mr?.hotel_id ?? null);
   const items = await runner.any(
     `SELECT mi.id          AS mr_item_id,
             mi.product_variant_id,
@@ -95,7 +109,9 @@ async function buildCallOffBuckets(mrId, txContext) {
             mi.uom,
             mi.arc_contract_id,
             mi.arc_contract_line_id,
-            COALESCE(clh.fulfilling_vendor_id, c.vendor_id) AS vendor_id,
+            -- The fulfilling entity counts only while it is ACTIVE in the contract
+            -- vendor's network (the same rule as the MR line picker).
+            ${effectiveSupplierExpr('clh.fulfilling_vendor_id', 'c.vendor_id')} AS vendor_id,
             c.arc_id,
             clh.id         AS hotel_line_id
        FROM tbl_material_requisition_item mi
@@ -407,6 +423,8 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
   ))?.arc_id;
 
   const mrHotel = (await runner.oneOrNone(`SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]))?.hotel_id;
+  // Same lock order as the release: the hotel's ledger rows (id order), then lines.
+  await lockMrHotelLedgerRows(runner, mrId, mrHotel ?? null);
   for (const link of links) {
     await runner.none(
       `UPDATE tbl_arc_contract_line

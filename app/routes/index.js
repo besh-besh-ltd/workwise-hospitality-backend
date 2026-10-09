@@ -23,6 +23,7 @@ import PricingRoutes from './pricing/pricingRoutes.js';
 import UnitsRoutes from './units/unitsRoutes.js';
 import ReportsRoutes from './reports/reportsRoutes.js';
 import ActivityRoutes from './activity/activityRoutes.js';
+import VendorNetworkRoutes from './vendorNetwork/vendorNetworkRoutes.js';
 
 const v1 = Router();
 
@@ -48,5 +49,6 @@ v1.use('/pricing', PricingRoutes);
 v1.use('/units', UnitsRoutes);
 v1.use('/reports', ReportsRoutes);
 v1.use('/activity', ActivityRoutes);
+v1.use('/vendor-network', VendorNetworkRoutes);
 
 export default v1;

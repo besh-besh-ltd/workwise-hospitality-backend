@@ -61,6 +61,17 @@ export const resolveActor = (req = {}) => {
     };
   }
 
+  // A person acting for a vendor network entity (spec §4.3): the decision is
+  // the person's, the business row is the entity's. Label reads "Person (Entity)".
+  const network = user.network;
+  if (network?.actor_user_id && Number(network.actor_user_id) !== Number(user.id)) {
+    return {
+      actorType: ACTOR_TYPES.VENDOR,
+      actorUserId: Number(network.actor_user_id),
+      actorLabel: `${network.actor_name || `User #${network.actor_user_id}`} (${labelFor(user)})`,
+    };
+  }
+
   // Vendors reach the app both through a normal login and through an emailed
   // link (vendorTokenOrJwt, which sets req.is_verified = false). Both are the
   // same vendor doing the same thing; the trail should not invent two actors.

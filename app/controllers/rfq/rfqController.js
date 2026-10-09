@@ -84,6 +84,13 @@ import { buildNegotiationMetrics } from '../../services/quoteComparisonMetrics.j
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
+import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
+import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
+import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
+
+/** A Vendor Networks quote-gate refusal as its HTTP answer body. */
+const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
 
 // "Pending for me" grouping precedence. An approval is the most specific and
 // most blocking claim on this user; a response is personal and usually blocks
@@ -2634,6 +2641,11 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   };
 
   await db.tx(async (t) => {
+    // Vendor Networks lock order (rfqSubject.js header), as refresh-vendors
+    // (hospitalityModel.recomputeVendorsForRfq): the RFQ's live routing assignments
+    // FOR SHARE before any tbl_rfq_product_vendors write below (product deletes,
+    // vendor-filter deletes incl. routed copies, addable inserts). No rows → no-op.
+    if (rfq_id) await lockLiveRfqAssignments(t, rfq_id);
     rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
     if(rfqDetail)
       rfqDetail = rfqDetail[0]
@@ -3163,10 +3175,22 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
             continue;
           }
 
-          await rfqModel.delete(
-            'tbl_rfq_product_vendors',
-            deletingCondition,
-            t,
+          // Direct invites outside the filtered list go. Vendor Networks: a routed copy
+          // follows its principal's row, as on refresh-vendors (hospitalityModel
+          // recomputeVendorsForRfq): it goes with it, unless its member already quoted
+          // on the RFQ (the buyer must still see who quoted).
+          const keepIds = deletingCondition['-user_ids'].map(Number);
+          await t.none(
+            `DELETE FROM tbl_rfq_product_vendors r
+              WHERE r.rfq_id = $1 AND r.product_variant_id = $2 AND r.variant = $3
+                AND (
+                  (r.routed_from_vendor_id IS NULL AND NOT (r.user_id = ANY($4::int[])))
+                  OR (r.routed_from_vendor_id IS NOT NULL
+                      AND NOT (r.routed_from_vendor_id = ANY($4::int[]))
+                      AND NOT EXISTS (SELECT 1 FROM tbl_quotes q
+                                       WHERE q.rfq_id = r.rfq_id AND q.created_by = r.user_id))
+                )`,
+            [rfq_id, product.product_variant_id, product.variant, keepIds]
           );
 
           // Step 1: Evaluate all checks in parallel
@@ -3247,9 +3271,13 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
         const addable = updatableVendors[rfqProductId]?.addable ?? [];
         const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
 
-        // Insert new vendors
-        if (!hasGlobalOrLocalFilters && addable.length > 0) {
-          const addableData = addable.map((vendor) => ({
+        // Insert new vendors. Vendor Networks: a routed member is never invited
+        // directly (it becomes its principal); a vendor already on the line is skipped.
+        const addableIds = hasGlobalOrLocalFilters
+          ? []
+          : await directInviteIdsForLine(t, { rfqId: rfq_id, productVariantId: productId, variant }, addable);
+        if (addableIds.length > 0) {
+          const addableData = addableIds.map((vendor) => ({
             rfq_id,
             product_variant_id: productId,
             user_id: vendor,
@@ -3280,7 +3308,9 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
               rfq_id,
               product_variant_id: productId,
               user_id: vendor,
-              variant
+              variant,
+              // Vendor Networks: a routed copy follows its assignment, never this list.
+              $directInvitesOnly: true
             };
 
             await rfqModel.delete(
@@ -4757,12 +4787,12 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
 
           // Ensure replacement vendor has a product-vendor record (needed for UI display)
           if (!newVendor.rfq_product_vendor_id) {
-            await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING`,
-              [techEval.rfq_id, techEval.product_variant_id, techEval.variant || 0, newVendor.vendor_id]
-            );
+            await rfqModel.addTechEvalReplacementVendorRow(t, {
+              rfqId: techEval.rfq_id,
+              productVariantId: techEval.product_variant_id,
+              variant: techEval.variant,
+              vendorId: newVendor.vendor_id,
+            });
           }
 
           // Create empty vendor response records for new vendor (skips if already exist)
@@ -4954,6 +4984,15 @@ const formatChangeValue = (v) => {
  *     vendor concerned (handled separately by NEW_PRODUCT / REMOVED_VENDOR
  *     emails, not in this map)
  */
+/**
+ * Vendor Networks: the members holding a routed copy (on this RFQ line) of a vendor in
+ * `directIds`. `line` is a getFullRfqForEdit product; its `routed_vendors` lists them.
+ */
+const routedCopyHolders = (line, directIds) =>
+  (line?.routed_vendors || [])
+    .filter((r) => directIds.has(Number(r.routed_from_vendor_id)))
+    .map((r) => Number(r.user_id));
+
 const buildPerVendorChangedDetails = (diff) => {
   const map = new Map(); // vendorId -> string[]
   const push = (vendorId, line) => {
@@ -4999,12 +5038,14 @@ const buildPerVendorChangedDetails = (diff) => {
     if (lines.length === 0) continue;
 
     // These changes are visible to vendors that remain on the product after
-    // the edit. Existing vendors = current vendors - removed + added.
+    // the edit. Existing vendors = current vendors - removed + added, plus the
+    // network members holding a routed copy of one of them (Vendor Networks).
     const vendorsAfter = new Set(
       (u.current.vendors || []).map((v) => Number(v.user_id))
     );
     for (const removedId of u.vendors.removed) vendorsAfter.delete(Number(removedId));
     for (const addedId of u.vendors.added) vendorsAfter.add(Number(addedId));
+    for (const id of routedCopyHolders(u.current, vendorsAfter)) vendorsAfter.add(id);
 
     for (const v of vendorsAfter) for (const line of lines) push(v, line);
   }
@@ -5098,7 +5139,10 @@ const sendVendorEditNotifications = async (rfq_id, userId, diff) => {
   // ── Bucket 2: REMOVED_VENDOR ───────────────────────────────────────────
   const removedVendorIds = new Set();
   for (const r of diff.products.removed) {
-    for (const v of (r.current.vendors || [])) removedVendorIds.add(Number(v.user_id));
+    const direct = new Set((r.current.vendors || []).map((v) => Number(v.user_id)));
+    for (const v of direct) removedVendorIds.add(v);
+    // Vendor Networks: members routed this line lose it with their principal.
+    for (const v of routedCopyHolders(r.current, direct)) removedVendorIds.add(v);
   }
   for (const u of diff.products.updated) {
     for (const v of u.vendors.removed.map(Number)) removedVendorIds.add(v);
@@ -5537,6 +5581,55 @@ const negFieldAllowed = (allowed, field) => {
   if (field === 'comment') return allowed.has('comments');
   if (field === 'comments') return allowed.has('comment');
   return false;
+};
+
+/**
+ * Caller binding for the product-level tech-evaluation reads
+ * (get-clauses-of-product, get-tech-evaluation-result, get-deviation-previews).
+ * Resolves the product to its RFQ, then:
+ *  - a vendor is bound to itself (a different vendor id -> 403, a missing one
+ *    -> self) and must be mapped to that RFQ;
+ *  - anyone else must be able to read the parent RFQ (assertCanReadParentRfq).
+ * Sends the error response and returns null when refused; otherwise returns
+ * { vendorId } (null when a buyer named none).
+ */
+const authorizeProductTechEvalRead = async (req, res, rfqProductId, requestedVendorId) => {
+  const caller = req.user;
+  const productId = Number(rfqProductId);
+  if (!Number.isInteger(productId)) {
+    res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
+    return null;
+  }
+  const row = await db.oneOrNone('SELECT rfq_id FROM tbl_rfq_products WHERE id = $1', [productId]);
+  const rfqId = row?.rfq_id ?? null;
+
+  if (Number(caller.user_type) === 3) {
+    if (requestedVendorId != null && Number(requestedVendorId) !== Number(caller.id)) {
+      res.status(403).json({
+        status: 0,
+        message: 'You can only view your own technical evaluation data.'
+      });
+      return null;
+    }
+    if (!rfqId || !(await userModel.user_rfq_access_review(rfqId, caller.id, 3))) {
+      res.status(403).json({ status: 0, message: 'You are not invited to this RFQ.' });
+      return null;
+    }
+    return { vendorId: Number(caller.id) };
+  }
+
+  if (rfqId) {
+    try {
+      await assertCanReadParentRfq(caller.id, rfqId);
+    } catch (e) {
+      if (e instanceof AuthorizationError) {
+        sendScopeError(res, e);
+        return null;
+      }
+      throw e;
+    }
+  }
+  return { vendorId: requestedVendorId ?? null };
 };
 
 const rfqController = {
@@ -7804,6 +7897,14 @@ const rfqController = {
         });
       }
 
+      // Vendor Networks: an org entity in the list is invited as its principal (a routed
+      // member is never a direct invitee); a vendor already on the line is skipped.
+      vendorIds = await directInviteIdsForLine(
+        db,
+        { rfqId: rfq_id, productVariantId: product.variant_id, variant },
+        vendorIds
+      );
+
       if (vendorIds.length > 0) {
         const vendorPromises = vendorIds.map(async (vendor) => {
           const vendorData = {
@@ -7816,6 +7917,8 @@ const rfqController = {
         });
 
         await Promise.all(vendorPromises);
+        // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+        await propagateRoutedCopiesLocked(db, rfq_id);
       }
 
       res.status(200).json({
@@ -9830,6 +9933,18 @@ const rfqController = {
         // failing COMMIT unreportable. The markers resolve the callback normally,
         // so exactly the same work commits as before.
         const quoteOutcome = await db.tx(async (t) => {
+          // Vendor Networks (spec §6.3): routing and one quote per org, checked under
+          // the org-quote lock as this transaction's first statement, before any write
+          // (regrets included). No query for a JWT vendor in no org.
+          if (quoteGateApplies(req)) {
+            try {
+              await assertOrgMayQuote(rfq_id, user.id, t);
+            } catch (err) {
+              if (err instanceof NetworkHttpError) return deferJson(err.http, networkRefusalBody(err));
+              throw err;
+            }
+          }
+
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -15162,6 +15277,19 @@ sendFollowUpEmails: async (req, res) => {
         });
       }
 
+      // Vendor Networks (spec §6.3): a member keeps quoting only while it holds the
+      // ACCEPTED assignment; the principal not while a member does; one quote per org.
+      // This route writes outside a transaction, so the check runs in its own one
+      // (after any in-flight routing transition of the org+RFQ has committed).
+      if (quoteGateApplies(req)) {
+        try {
+          await db.tx((t) => assertOrgMayQuote(quoteExists[0].rfq_id, user.id, t));
+        } catch (err) {
+          if (err instanceof NetworkHttpError) return res.status(err.http).json(networkRefusalBody(err));
+          throw err;
+        }
+      }
+
       // Get RFQ details to check dates
       const rfqDetails = await rfqModel.getRFQDetails(quoteExists[0].rfq_id);
       if (!rfqDetails || rfqDetails.length === 0) {
@@ -16884,7 +17012,10 @@ getClauses: async (req, res) => {
         return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
       }
 
-      const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);
+      const scope = await authorizeProductTechEvalRead(req, res, rfq_product_id, user_id ?? null);
+      if (!scope) return;
+
+      const result = await rfqModel.getDeviationPreviews(rfq_product_id, scope.vendorId || null);
       res.status(200).json({ status: 1, data: result });
     } catch (error) {
       logError('Error in getDeviationPreviews', error);
@@ -16903,6 +17034,44 @@ getClauses: async (req, res) => {
           status: 0,
           message: 'Invalid input. Please provide at least one vendor response'
         });
+      }
+
+      // Responses are written as the authenticated vendor, never as a
+      // vendor_id named in the body. A foreign vendor_id is rejected (not
+      // rewritten) so the attempt is visible, and the batch writes nothing.
+      const callerId = Number(req.user.id);
+      if (Number(req.user.user_type) !== 3) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only vendors can submit technical evaluation responses.'
+        });
+      }
+      if (data.some((r) => r.vendor_id != null && Number(r.vendor_id) !== callerId)) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You can only submit your own technical evaluation responses.'
+        });
+      }
+      for (const r of data) r.vendor_id = callerId;
+
+      // Every clause must belong to an RFQ this vendor is mapped to.
+      const clauseIds = [...new Set(data.map((r) => Number(r.clause_id)))];
+      const clauseRfqs = await rfqModel.getTechEvalClauseRfqIds(clauseIds);
+      const foundClauseIds = new Set(clauseRfqs.map((row) => Number(row.clause_id)));
+      const missingClauseId = clauseIds.find((id) => !foundClauseIds.has(id));
+      if (missingClauseId !== undefined) {
+        return res.status(400).json({
+          status: 0,
+          message: `Clause ID ${missingClauseId} does not exist.`
+        });
+      }
+      for (const rfqId of new Set(clauseRfqs.map((row) => Number(row.rfq_id)))) {
+        if (!(await userModel.user_rfq_access_review(rfqId, callerId, 3))) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You are not invited to this RFQ.'
+          });
+        }
       }
 
       // Enforce: Tech evaluation responses cannot be updated after quote submission deadline.
@@ -17119,8 +17288,38 @@ getClauses: async (req, res) => {
   },
   getVendorResponses: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, vendor_id } = req.body;
+      const { rfq_id, rfq_product_id } = req.body;
+      let { vendor_id } = req.body;
       // console.log("API Input: ", req.body);
+
+      // A vendor reads only its own answers, on an RFQ it is mapped to.
+      // A buyer reads a vendor's answers only inside its RBAC scope for the
+      // RFQ (the buyer technical-evaluation screen). The model looks the
+      // evaluation up by (rfq_id, rfq_product_id), so authorising rfq_id
+      // also binds the product.
+      if (Number(req.user.user_type) === 3) {
+        const callerId = Number(req.user.id);
+        if (vendor_id != null && Number(vendor_id) !== callerId) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You can only view your own technical evaluation responses.'
+          });
+        }
+        vendor_id = callerId;
+        if (rfq_id && !(await userModel.user_rfq_access_review(rfq_id, callerId, 3))) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You are not invited to this RFQ.'
+          });
+        }
+      } else if (rfq_id) {
+        try {
+          await assertCanReadParentRfq(req.user.id, rfq_id);
+        } catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
 
       // Validate input
       if (!rfq_id || !rfq_product_id || !vendor_id) {
@@ -17187,9 +17386,12 @@ getClauses: async (req, res) => {
     try {
       const { rfq_product_id, vendor_id = null } = req.body;
 
+      const scope = await authorizeProductTechEvalRead(req, res, rfq_product_id, vendor_id);
+      if (!scope) return;
+
       const result = await rfqModel.getClausesOfProduct(
         rfq_product_id,
-        vendor_id
+        scope.vendorId
       );
 
       res.status(200).json(result).end();
@@ -17205,10 +17407,18 @@ getClauses: async (req, res) => {
 
   getTechEvaluationResult: async (req, res) => {
     try {
-      const { rfq_product_id, vendor_id } = req.body;
+      const { rfq_product_id, vendor_id: requestedVendorId } = req.body;
 
-      // Validate input
-      if (!rfq_product_id || !vendor_id) {
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Please provide RFQ ID and RFQ product ID'
+        });
+      }
+      const scope = await authorizeProductTechEvalRead(req, res, rfq_product_id, requestedVendorId ?? null);
+      if (!scope) return;
+      const vendor_id = scope.vendorId;
+      if (!vendor_id) {
         return res.status(400).json({
           status: 0,
           message: 'Invalid input. Please provide RFQ ID and RFQ product ID'
@@ -17830,6 +18040,18 @@ getClauses: async (req, res) => {
       const files = req.files || [];
       const user = req.user;
 
+      // Raising a clarification freezes quoting for every vendor on the RFQ,
+      // so only a vendor mapped to this RFQ may do it. The route lets
+      // header-less callers through (noLogin.customer_auth).
+      if (!user) {
+        return res.status(401).json({ status: 0, message: 'Authentication required' });
+      }
+      if (Number(user.user_type) !== 3) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only vendors can raise a clarification'
+        });
+      }
       // Fetch RFQ details
       const rfq = await db.oneOrNone(
         `SELECT id, is_tender, tender_publish_date, vendor_clarification_date, created_by, rfq_no, status, is_published
@@ -17841,6 +18063,18 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: 'RFQ not found'
+        });
+      }
+
+      // Invited vendors only.
+      const mapped = await db.oneOrNone(
+        `SELECT 1 FROM tbl_rfq_product_vendors WHERE rfq_id = $1 AND user_id = $2 LIMIT 1`,
+        [Number(rfq_id), user.id]
+      );
+      if (!mapped) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not invited to this RFQ'
         });
       }
 

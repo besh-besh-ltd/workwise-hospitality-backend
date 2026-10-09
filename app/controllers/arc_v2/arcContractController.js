@@ -16,6 +16,8 @@ import crypto from 'crypto';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
+import { fulfilmentHotelIds, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
+import { supplierDetailsFor } from '../../helper/gstState.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -242,7 +244,7 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
     <div class="party">
       <div class="role">Purchaser</div>
       <div class="nm">${esc(buyerOrg)}</div>
-      <div class="meta">${ctx.hotel_name ? esc(ctx.hotel_name) + '<br/>' : ''}${buyerCity ? esc(buyerCity) + '<br/>' : ''}Authorised signatory: <strong>${esc(buyerPoc)}</strong>${ctx.buyer_designation ? ', ' + esc(ctx.buyer_designation) : ''}<br/>GSTIN: N/A</div>
+      <div class="meta">${ctx.hotel_name ? esc(ctx.hotel_name) + '<br/>' : ''}${buyerCity ? esc(buyerCity) + '<br/>' : ''}Authorised signatory: <strong>${esc(buyerPoc)}</strong>${ctx.buyer_designation ? ', ' + esc(ctx.buyer_designation) : ''}<br/>GSTIN: ${esc(ctx.purchaser_gstin || 'N/A')}</div>
     </div>
     <div class="party">
       <div class="role">Supplier</div>
@@ -354,6 +356,23 @@ export async function generateContractPdf(ctx, vendor, lines, contractId, { sign
   }
 }
 
+/**
+ * The Supplier party of a contract document: the contract vendor's login name and
+ * email (as before), and its GSTIN. The GSTIN is the one it quoted under
+ * (tbl_arc_quote.gstin_used), else its registered one (gstState.supplierDetailsFor:
+ * tbl_company.gstin, then the 'gst' vendor document). Null when none is known; the
+ * template then prints "N/A".
+ * @param {{ arc_id, vendor_id, vendor_name, vendor_email }} contract
+ */
+export async function loadContractVendorParty(contract, runner = db) {
+  const quoted = await runner.oneOrNone(
+    `SELECT NULLIF(trim(gstin_used), '') AS gstin FROM tbl_arc_quote WHERE arc_id = $1 AND vendor_id = $2`,
+    [contract.arc_id, contract.vendor_id]
+  );
+  const gstin = quoted?.gstin || (await supplierDetailsFor(contract.vendor_id, runner))?.gstin || null;
+  return { name: contract.vendor_name, email: contract.vendor_email, gstin };
+}
+
 // Fetch the ARC + buyer scope a contract document needs (one query per ARC).
 export async function loadContractDocContext(arcId, runner = db) {
   return runner.oneOrNone(
@@ -363,6 +382,8 @@ export async function loadContractDocContext(arcId, runner = db) {
             cat.title AS category_title,
             h.name AS hotel_name, h.city AS hotel_city, h.state AS hotel_state,
             hc.name AS company_name,
+            -- Purchaser GSTIN on the contract: the lead hotel's, else its company's.
+            COALESCE(NULLIF(trim(h.gst), ''), NULLIF(trim(hc.gst), '')) AS purchaser_gstin,
             u.name AS buyer_name, u.designation AS buyer_designation, u.email AS buyer_email
        FROM tbl_arc a
        LEFT JOIN tbl_category cat ON cat.id = a.category_id
@@ -503,7 +524,8 @@ export async function generateContractPdfsForArc(arcId) {
       if (c.document_s3_url) continue; // already rendered
       try {
         const lines = await arcContractModel.listLines(c.id);
-        const { url, hash } = await generateContractPdf(ctx, { name: c.vendor_name, email: c.vendor_email }, lines, c.id, { signed: false });
+        const vendor = await loadContractVendorParty(c);
+        const { url, hash } = await generateContractPdf(ctx, vendor, lines, c.id, { signed: false });
         await arcContractModel.setDocument(c.id, { url, hash });
         logger.info({ contractId: c.id, url }, '[arcContract] draft PDF generated');
       } catch (perErr) {
@@ -535,7 +557,7 @@ export async function getVendorActiveContracts(req, res) {
     const vendorId = req.user?.id;
     // Approved-and-live plus the archive: the page's tabs filter between
     // active / expiring / expired client-side.
-    const contracts = await arcContractModel.listForVendor(vendorId, ['active','expiring_soon','expired']);
+    const contracts = await arcContractModel.listForVendor(vendorId, ['active','expiring_soon','expired'], null, { includeFulfilment: true });
     return ok(res, { contracts });
   } catch (err) {
     logger.error({ err }, '[contractController.getVendorActiveContracts]');
@@ -543,52 +565,85 @@ export async function getVendorActiveContracts(req, res) {
   }
 }
 
+// ARC context the detail page's hero/doc sections need: term, category, BU,
+// escalation, eligibility, and the buyer contact (creator). lead_hotel_id is read
+// for the member view's filtering and never returned.
+const ARC_CONTEXT_SQL = `
+  SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
+         a.contract_start_at, a.contract_end_at,
+         a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
+         a.escalation_clause_json, a.eligibility_type,
+         cat.title AS category_title,
+         h.name    AS hotel_name, h.city AS hotel_city,
+         hc.name   AS company_name,
+         -- Purchaser GSTIN, as the contract document prints it (loadContractDocContext):
+         -- the lead hotel's, else its company's.
+         COALESCE(NULLIF(trim(h.gst), ''), NULLIF(trim(hc.gst), '')) AS purchaser_gstin,
+         NULLIF(trim(hc.gst), '') AS company_gstin,
+         u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation,
+         a.hotel_id AS lead_hotel_id
+    FROM tbl_arc a
+    LEFT JOIN tbl_category cat ON cat.id = a.category_id
+    LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+    LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+    LEFT JOIN tbl_users u ON u.id = a.created_by
+   WHERE a.id = $1`;
+
+/** { arc, leadHotelId } for a contract page; arc is null when the ARC is gone. */
+async function loadArcContext(arcId) {
+  const row = await db.oneOrNone(ARC_CONTEXT_SQL, [arcId]);
+  if (!row) return { arc: null, leadHotelId: null };
+  const { lead_hotel_id: lead, company_gstin: companyGstin, ...arc } = row;
+  return { arc, leadHotelId: lead == null ? null : Number(lead), companyGstin };
+}
+
+/**
+ * Call-off POs issued against a contract, newest first. A fulfilment member passes
+ * hotelIds + vendorId: only its own POs at its hotels.
+ */
+function listContractCallOffs(contractId, { hotelIds = null, vendorId = null } = {}) {
+  return db.any(
+    `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
+            po.po_number, po.status AS po_status, po.total_value,
+            cl.arc_item_id, pv.name AS variant_name, ai.uom
+       FROM tbl_arc_callof_po cp
+       JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
+       JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+       LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
+       LEFT JOIN tbl_material_requisition mr ON mr.id = cp.mr_id
+      WHERE cp.arc_contract_id = $1
+        AND ($2::int[] IS NULL OR mr.hotel_id = ANY($2::int[]))
+        AND ($3::int IS NULL OR po.finalized_vendor_id = $3)
+      ORDER BY cp.released_at DESC`,
+    [contractId, hotelIds, vendorId]
+  );
+}
+
+// A fulfilment member may read a contract that is live, being signed, or expired —
+// not one declined, terminated or never issued.
+const MEMBER_VIEWABLE_STATUSES = new Set([...ROUTABLE_CONTRACT_STATUSES, 'expired']);
+
 export async function getContractDetail(req, res) {
   try {
     const id = Number(req.params.contractId);
     const vendorUserId = req.user?.id;
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
-    // Tenant guard — a vendor can only read their own contract.
+    // Tenant guard — a vendor reads its own contract, or (Vendor Networks) the hotels of
+    // it that it fulfils as a member entity of the contract vendor's network.
     if (Number(contract.vendor_id) !== Number(vendorUserId)) {
-      return bad(res, 403, 'Not the contracted vendor');
+      const memberHotelIds = MEMBER_VIEWABLE_STATUSES.has(contract.status)
+        ? await fulfilmentHotelIds(id, contract.vendor_id, vendorUserId)
+        : [];
+      if (!memberHotelIds.length) return bad(res, 403, 'Not the contracted vendor');
+      return ok(res, await fulfilmentMemberContractView(contract, vendorUserId, memberHotelIds));
     }
 
-    const [lines, arcInfo, callOffs, amendments] = await Promise.all([
+    const [lines, { arc: arcInfo }, callOffs, amendments] = await Promise.all([
       arcContractModel.listLines(id),
-      // ARC context the detail page's hero/doc sections need: term, category,
-      // BU, escalation, eligibility, and the buyer contact (creator).
-      db.oneOrNone(
-        `SELECT a.id AS arc_id, a.arc_number, a.title, a.status AS arc_status, a.is_group,
-                a.contract_start_at, a.contract_end_at,
-                a.payment_terms_expected, a.delivery_expected, a.penalty_clause,
-                a.escalation_clause_json, a.eligibility_type,
-                cat.title AS category_title,
-                h.name    AS hotel_name, h.city AS hotel_city,
-                hc.name   AS company_name,
-                u.name    AS buyer_name, u.email AS buyer_email, u.designation AS buyer_designation
-           FROM tbl_arc a
-           LEFT JOIN tbl_category cat ON cat.id = a.category_id
-           LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
-           LEFT JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
-           LEFT JOIN tbl_users u ON u.id = a.created_by
-          WHERE a.id = $1`,
-        [contract.arc_id]
-      ),
-      // Call-off POs issued against this contract.
-      db.any(
-        `SELECT cp.id AS call_off_id, cp.po_id, cp.quantity, cp.price_applied, cp.released_at,
-                po.po_number, po.status AS po_status, po.total_value,
-                cl.arc_item_id, pv.name AS variant_name, ai.uom
-           FROM tbl_arc_callof_po cp
-           JOIN tbl_arc_contract_line cl ON cl.id = cp.arc_contract_line_id
-           JOIN tbl_arc_item ai ON ai.id = cl.arc_item_id
-           LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
-           LEFT JOIN tbl_rfq_purchase_order po ON po.id = cp.po_id
-          WHERE cp.arc_contract_id = $1
-          ORDER BY cp.released_at DESC`,
-        [id]
-      ),
+      loadArcContext(contract.arc_id),
+      listContractCallOffs(id),
       // The vendor's amendment requests on this contract (any status), with
       // buyer-side edit history joined. Shaped through vendorView below so
       // approver identities reduce to numbered levels before leaving the API.
@@ -637,8 +692,10 @@ export async function getContractDetail(req, res) {
       hotels = ledger.hotels;
       for (const line of lines) line.hotels = ledger.byLine[String(line.id)] || [];
     }
+    // The Supplier GSTIN exactly as the contract document prints it (quoted, else registered).
+    const { gstin: vendorGstin } = await loadContractVendorParty(contract);
     return ok(res, {
-      contract, lines, arc: arcInfo, callOffs,
+      contract: { ...contract, vendor_gstin: vendorGstin }, lines, arc: arcInfo, callOffs,
       amendments: amendments.map(arcAmendmentModel.vendorView),
       clarifications,
       hotels,
@@ -647,6 +704,70 @@ export async function getContractDetail(req, res) {
     logger.error({ err }, '[contractController.getContractDetail]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
+}
+
+const sumQty = (rows, key) => rows.reduce((s, r) => s + Number(r[key] || 0), 0);
+const AMENDMENT_LINE_FIELDS = ['amendment_id', 'amendment_type', 'amendment_effective_from', 'amendment_effective_to'];
+
+/**
+ * Read-only contract view for a fulfilment member (spec §6.4, §10.9). Everything about
+ * hotels it does not fulfil is withheld: other hotels' ledger rows and quantities, line
+ * totals (replaced by its hotels' sums), the contract PDF (it carries every hotel's
+ * annexure), the lead hotel when it is not one of its hotels, the principal's
+ * amendments and clarifications (and the amendment fields on lines), and call-offs
+ * that are not its own POs for its hotels. Each of its hotel rows carries that hotel's
+ * rate: a live price amendment, else the hotel's override, else the contract rate (the
+ * precedence of arcPricingResolver); the line's effective rate is that rate when all
+ * its hotels share one.
+ */
+async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) {
+  const id = Number(contract.id);
+  const [allLines, { arc, leadHotelId, companyGstin }, ledger, callOffs, supplier] = await Promise.all([
+    arcContractModel.listLines(id),
+    loadArcContext(contract.arc_id),
+    arcHotelModel.listContractHotels(id, null, { hotelIds, withOverrides: true }),
+    listContractCallOffs(id, { hotelIds, vendorId: memberVendorId }),
+    // The contract holder (the principal) as the contract document names it.
+    loadContractVendorParty(contract),
+  ]);
+  const lines = [];
+  for (const line of allLines) {
+    const ledgerRows = ledger.byLine[String(line.id)] || [];
+    if (!ledgerRows.length) continue;
+    const amendedRate = line.amendment_type === 'price' ? Number(line.effective_unit_rate) : null;
+    const hotels = ledgerRows.map((h) => ({
+      ...h,
+      effective_unit_rate: amendedRate ?? h.unit_rate_override ?? Number(line.unit_rate),
+    }));
+    const rates = new Set(hotels.map((h) => h.effective_unit_rate));
+    const committed = sumQty(hotels, 'committed_qty');
+    const view = {
+      ...line,
+      committed_qty: committed,
+      consumed_qty: sumQty(hotels, 'consumed_qty'),
+      effective_committed_qty: committed,
+      effective_unit_rate: rates.size === 1 ? [...rates][0] : null,
+      hotels,
+    };
+    for (const f of AMENDMENT_LINE_FIELDS) delete view[f];
+    lines.push(view);
+  }
+  if (arc && !hotelIds.includes(leadHotelId)) {
+    arc.hotel_name = null;
+    arc.hotel_city = null;
+    // The lead hotel's GSTIN is withheld with its name: the buyer company's stands in.
+    arc.purchaser_gstin = companyGstin ?? null;
+  }
+  return {
+    contract: { ...contract, vendor_gstin: supplier.gstin, document_s3_url: null, document_hash: null },
+    lines,
+    arc,
+    callOffs,
+    amendments: [],
+    clarifications: [],
+    hotels: ledger.hotels,
+    viewer_role: 'fulfilment_member',
+  };
 }
 
 export async function requestOtp(req, res) {
@@ -700,7 +821,8 @@ export async function verifyOtp(req, res) {
       try {
         const ctx = await loadContractDocContext(contract.arc_id);
         const lines = await arcContractModel.listLines(id);
-        const pdf = await generateContractPdf(ctx, { name: contract.vendor_name, email: contract.vendor_email }, lines, id, { signed: true, signedAt });
+        const vendor = await loadContractVendorParty(contract);
+        const pdf = await generateContractPdf(ctx, vendor, lines, id, { signed: true, signedAt });
         documentHash = pdf.hash;
         documentUrl = pdf.url;
       } catch (pdfErr) {
@@ -1095,9 +1217,27 @@ export async function getActiveSummary(req, res) {
       consumption: await arcContractModel.consumptionForContract(c.id),
     })));
     // GROUP rate contract: how each covered hotel is using it (PRD §8 step 8).
-    const group = arc.is_group
-      ? { hotels: await arcHotelModel.listArcHotels(arc), ...(await arcHotelModel.hotelUsageForArc(arc)) }
-      : {};
+    // Each hotel row also says who supplies it on each live contract (Vendor Networks
+    // §6.4): a network member entity that accepted the hotel, else the contract vendor.
+    let group = {};
+    if (arc.is_group) {
+      const [hotels, usage, fulfilment] = await Promise.all([
+        arcHotelModel.listArcHotels(arc),
+        arcHotelModel.hotelUsageForArc(arc),
+        arcHotelModel.hotelFulfilmentForArc(arcId, [...MEMBER_VIEWABLE_STATUSES]),
+      ]);
+      const hotel_usage = usage.hotel_usage.map((h) => ({
+        ...h,
+        fulfilled_by: fulfilment
+          .filter((f) => f.hotel_id === Number(h.hotel_id))
+          .map((f) => ({
+            contract_id: f.contract_id,
+            fulfilling_vendor_id: f.fulfilling_vendor_id,
+            fulfilling_name: f.fulfilling_name,
+          })),
+      }));
+      group = { hotels, ...usage, hotel_usage };
+    }
     return ok(res, { arc: enrichedArc || arc, contracts: summary, events, callOffs, amendments, addendums, ...group });
   } catch (err) {
     logger.error({ err }, '[contractController.getActiveSummary]');

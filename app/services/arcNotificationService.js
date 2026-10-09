@@ -56,6 +56,9 @@ const AUDIENCE = Object.freeze({
   // hotel the contract covers — they are the ones who order against it. Empty
   // for a single-hotel ARC, so its audiences are unchanged.
   COVERED_HOTEL_BUYERS: 'covered_hotel_buyers',
+  // Requisition staff (mr.create) at payload.hotelId only, and only when the ARC covers
+  // that hotel: news about one hotel's supply never reaches another hotel's staff.
+  EVENT_HOTEL_BUYERS: 'event_hotel_buyers',
 });
 
 // Audiences whose members are vendors; every other audience is buyer-side.
@@ -384,6 +387,23 @@ const EVENT_CONFIG = {
     vendorFacing: false,
     title:        'Rate contract active',
     body:         (arc) => `The rate contract ${arc.title} (${arc.arc_number}) is now active.`,
+    url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
+  },
+
+  // Vendor Networks (spec §6.4): who now delivers to and bills ONE covered hotel.
+  // payload: { hotelId, hotelName, vendorId (the contract vendor, EVENT_VENDOR),
+  //            fulfillingVendorId, entityName, gstin, contactName, contactEmail }
+  [ARC_EVENT_TYPES.CONTRACT_FULFILMENT_ASSIGNED]: {
+    audiences:    [AUDIENCE.CREATOR, AUDIENCE.EVENT_HOTEL_BUYERS, AUDIENCE.EVENT_VENDOR],
+    emailAudiences: [AUDIENCE.CREATOR, AUDIENCE.EVENT_HOTEL_BUYERS],
+    email:        true,
+    vendorFacing: false,
+    title:        'Rate contract supplier for a hotel changed',
+    body:         (arc, p = {}) => {
+      const gstin = p.gstin ? ` (GSTIN ${p.gstin})` : '';
+      const contact = [p.contactName, p.contactEmail].filter(Boolean).join(', ');
+      return `${p.hotelName || 'A covered hotel'} is now supplied under ${arc.title} (${arc.arc_number}) by ${p.entityName || 'the contract vendor'}${gstin}. Call-off orders released from now on go to them.${contact ? ` Contact: ${contact}.` : ''}`;
+    },
     url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
@@ -745,6 +765,16 @@ async function resolveOneAudience(audience, arc, payload) {
         const hotelIds = await arcHotelModel.arcHotelIds(arc);
         const users = await rbacModel.getUsersWithModuleActionsForHotels(
           hotelIds, 'mr', ['create'], arc.department_id
+        );
+        return tag(users);
+      }
+      case AUDIENCE.EVENT_HOTEL_BUYERS: {
+        const hotelId = Number(payload?.hotelId);
+        if (!hotelId) return [];
+        const covered = await arcHotelModel.arcHotelIds(arc);
+        if (!covered.includes(hotelId)) return [];
+        const users = await rbacModel.getUsersWithModuleActionsForHotels(
+          [hotelId], 'mr', ['create'], arc.department_id
         );
         return tag(users);
       }

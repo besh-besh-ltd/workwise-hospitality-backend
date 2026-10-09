@@ -54,6 +54,83 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
+import { profileNetworkFor } from '../../services/vendorNetwork/actingContext.js';
+import { memberEntityOrg } from '../../services/vendorNetwork/subscriptionCoverage.js';
+import { VENDOR_MEMBER_USER_TYPE, NETWORK_MANAGED_MESSAGE } from '../../constants/vendorNetwork.js';
+import { isNetworkManagedLogin } from '../../models/vendorNetworkModel.js';
+import { actingPersonId, isActingForAnotherLogin } from '../../services/vendorNetwork/guards.js';
+import { refuseGuestSession, isGuestSession, guestSessionRefusal } from '../../helper/guestSession.js';
+import { getOrgByEntity, getVendorPanDocument } from '../../models/vendorNetworkModel.js';
+
+// A network entity created without a password is reached only through its people's
+// memberships (spec §4.2); a password reset would turn it into a direct login.
+const NETWORK_MANAGED_REFUSAL = { status: 0, message: NETWORK_MANAGED_MESSAGE };
+const ENTITY_LOGIN_DETAILS_REFUSAL = {
+  status: 0,
+  message: 'Entity login details can only be changed by the entity itself'
+};
+
+const NETWORK_GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
+const networkGstinLocked = (message) => ({
+  http: 409,
+  body: { status: 0, message, reason: 'NETWORK_GSTIN_LOCKED' },
+});
+
+/**
+ * What update-company-detail may do with `gstin` for an account that is a live entity of
+ * a vendor network (principal or member). Its GSTIN is locked: the principal's PAN (GSTIN
+ * chars 3-12) is what a BRANCH must share (POST /entities), and an entity's GSTIN is on
+ * its POs and decides call-off GST, so an org admin must not re-point it.
+ *
+ *  - nothing / null / '' sent             -> { write: false }   (a no-op, never a wipe)
+ *  - stored GSTIN present:
+ *      same value after trim+uppercase    -> { write: true, value: normalised }
+ *      anything else                      -> 409 NETWORK_GSTIN_LOCKED
+ *  - stored GSTIN NULL/empty (set-from-empty), a valid GSTIN sent:
+ *      the account has a PAN document and the GSTIN's PAN differs -> 409 NETWORK_GSTIN_LOCKED
+ *      otherwise                          -> { write: true, value: normalised }
+ *    (stricter than "PAN-doc match OR non-principal": a member with a PAN document must
+ *    match it too; a principal with no GSTIN and no PAN document can still set one, as at
+ *    registration, which is never verified either)
+ *  - set-from-empty with a malformed GSTIN -> 400 INVALID_GSTIN
+ * A vendor in no network never reaches this: its update is exactly as before.
+ */
+async function networkGstinWrite({ vendorId, companyId, sent }) {
+  const value = typeof sent === 'string' ? sent.trim().toUpperCase() : '';
+  if (!value) return { write: false };
+  const row = await db.oneOrNone('SELECT gstin FROM tbl_company WHERE id = $1', [companyId]);
+  const stored = String(row?.gstin ?? '').trim().toUpperCase();
+  if (stored) {
+    if (value === stored) return { write: true, value };
+    return {
+      refuse: networkGstinLocked('The GSTIN of an account in a vendor network cannot be changed. Contact Workwise support.'),
+    };
+  }
+  if (!NETWORK_GSTIN_RE.test(value)) {
+    return { refuse: { http: 400, body: { status: 0, message: 'gstin is not a valid GSTIN', reason: 'INVALID_GSTIN' } } };
+  }
+  const panDocument = await getVendorPanDocument(vendorId);
+  if (panDocument && value.slice(2, 12) !== panDocument) {
+    return { refuse: networkGstinLocked("This GSTIN does not carry your account's PAN. Contact Workwise support.") };
+  }
+  return { write: true, value };
+}
+
+/**
+ * True when a profile save CHANGES the login identity (email or mobile) of `stored`.
+ * The profile form re-sends both every time, so equal values are no change: email
+ * case-insensitively; mobile by its national digits (the form sends `${code}-${digits}`,
+ * '+91-9811100000' or '+91-' when empty, while stored values are bare digits or NULL).
+ */
+function loginIdentityChanged(reqData, stored) {
+  const norm = (v) => (v == null ? '' : String(v).trim());
+  const nationalDigits = (v) => norm(v).replace(/^\+?\d{1,4}[-\s]/, '').replace(/\D/g, '');
+  const emailChanged =
+    reqData.email !== undefined && norm(reqData.email).toLowerCase() !== norm(stored.email).toLowerCase();
+  const mobileChanged =
+    reqData.mobile !== undefined && nationalDigits(reqData.mobile) !== nationalDigits(stored.mobile);
+  return emailChanged || mobileChanged;
+}
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -974,6 +1051,8 @@ const UsersController = {
  */
   update_company_detail: async (req, res, next) => {
   try {
+    // An emailed-link guest session never edits the company record (GSTIN, name...).
+    if (refuseGuestSession(req, res)) return;
     const { company_id } = req.user;
 
     const user_id = req.user.id
@@ -992,6 +1071,19 @@ const UsersController = {
       cin: reqData?.cin,
     };
 
+
+    // Vendor Networks: a network entity's GSTIN is locked (networkGstinWrite).
+    const networkOrg = await getOrgByEntity(Number(req.user.id));
+    if (networkOrg) {
+      const decision = await networkGstinWrite({
+        vendorId: Number(req.user.id),
+        companyId: company_id,
+        sent: reqData?.gstin,
+      });
+      if (decision.refuse) return res.status(decision.refuse.http).json(decision.refuse.body);
+      if (decision.write) reqCompanyData.gstin = decision.value;
+      else delete reqCompanyData.gstin;
+    }
 
     await rfqModel.updateWhere(
       "tbl_company",
@@ -1638,8 +1730,12 @@ get_company_users: async (req, res, next) => {
       if (req.user.err_msg && req.user.err_msg != '') {
         err_msg = req.user.err_msg;
       }
+      // A network person (user_type 11) has no subscription of its own; it never
+      // takes the hospitality payment branch.
       const isHospitalityPending =
-        req.user && req.user.login_status === 'hospitality_pending';
+        req.user &&
+        req.user.login_status === 'hospitality_pending' &&
+        Number(req.user.user_type) !== VENDOR_MEMBER_USER_TYPE;
       if (isHospitalityPending) {
         // Re-check if vendor has already completed hospitality payment.
         // If payment is done, approve vendor and proceed with normal login.
@@ -1806,7 +1902,10 @@ get_company_users: async (req, res, next) => {
               token,
               user_detail,
               oldDevice: oldDevice,
-              user_key: cryptr.encrypt(req.user.id),
+              // A network person holds no subscription; user_key is for paying one.
+              ...(Number(req.user.user_type) === VENDOR_MEMBER_USER_TYPE
+                ? {}
+                : { user_key: cryptr.encrypt(req.user.id) }),
               message: 'Login success'
             })
             .end();
@@ -1852,6 +1951,14 @@ get_company_users: async (req, res, next) => {
   },
   refresh_token: async (req, res, next) => {
     try {
+      // PRE-EXISTING P0 SURFACE (see PRE_PR_REPORT): this rewrites the JWT secret in .env
+      // and mints a one-year token. Until the user decides its fate it is at least
+      // limited to a normal session minting for ITSELF: never a guest link session, and
+      // never another user's id.
+      if (refuseGuestSession(req, res)) return;
+      if (String(req.body?.user_id ?? '') !== String(req.user?.id ?? '')) {
+        return res.status(403).json({ status: 0, message: 'You can only refresh your own session' });
+      }
       const { user_id } = req.body;
       const userData = await userModel.user_profile_detail(user_id);
       // console.log('userData--', userData);
@@ -2068,6 +2175,9 @@ get_company_users: async (req, res, next) => {
       } else if (email) {
         user_detail = await userModel.getUserAuthEmail(email);
       }
+      if (email && user_detail.length > 0 && (await isNetworkManagedLogin(user_detail[0].id))) {
+        return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+      }
       if (email && user_detail.length > 0) {
         // console.log('user_detail--', user_detail[0].name);
         // return false;
@@ -2171,6 +2281,12 @@ get_company_users: async (req, res, next) => {
       let { otp, password } = req.body;
 
       let user_dtls = await userModel.user_detail_otp_exists(otp);
+      // The update below writes every row holding this OTP, so refuse if any is managed.
+      for (const row of user_dtls) {
+        if (await isNetworkManagedLogin(row.id)) {
+          return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+        }
+      }
       // console.log('userDetail-->', user_dtls);
       user_dtls = Object.assign({}, ...user_dtls);
       logger.debug({ data: user_dtls }, 'forgot_password_otp_authenticate user_dtls');
@@ -2269,6 +2385,20 @@ update_user_detail: async (req, res, next) => {
         status: false,
         message: "Only company administrators can update other users"
       });
+    }
+
+    // A person acting for a network entity edits that entity's row here; its
+    // email and mobile are its login identity, so only the entity itself may
+    // CHANGE them (spec §4.2). The profile form always re-sends both, so values
+    // equal to the stored ones pass through and the name/company save proceeds.
+    // An emailed-link guest session (whoever holds the link) may never change the
+    // account's login identity: a new email + forgot-password OTP would turn a
+    // 30-minute RFQ link into a permanent login. Same comparison as below.
+    if (isGuestSession(req) && loginIdentityChanged(reqData, loggedInUser)) {
+      return res.status(403).json(guestSessionRefusal());
+    }
+    if (isActingForAnotherLogin(req) && loginIdentityChanged(reqData, loggedInUser)) {
+      return res.status(403).json(ENTITY_LOGIN_DETAILS_REFUSAL);
     }
 
     /* ---- SNAPSHOT OLD STATE for approval impact analysis ----
@@ -2553,8 +2683,11 @@ update_user_detail: async (req, res, next) => {
     };
 
     if (reqData.name !== undefined) updateData.name = reqData.name.trim();
-    if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
-    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
+    // A network actor's email/mobile were verified unchanged above; leave the
+    // stored values exactly as they are (no re-casing, no NULL -> '').
+    const keepsLoginIdentity = isActingForAnotherLogin(req);
+    if (reqData.email !== undefined && !keepsLoginIdentity) updateData.email = reqData.email.trim().toLowerCase();
+    if (reqData.mobile !== undefined && !keepsLoginIdentity) updateData.mobile = reqData.mobile.trim();
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
 
     // Handle hospitality employee fields
@@ -2574,8 +2707,8 @@ update_user_detail: async (req, res, next) => {
 
     const whereClause =
       isAdmin && targetUserId !== loggedInUser.id
-        ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
-        : `id = ${targetUserId}`;
+        ? { where: 'id = $1 AND company_id = $2', values: [targetUserId, loggedInUser.company_id] }
+        : { where: 'id = $1', values: [targetUserId] };
 
     await rfqModel.updateWhere("tbl_users", updateData, whereClause);
 
@@ -2815,6 +2948,10 @@ update_user_detail: async (req, res, next) => {
         user.vendor_approve = vendor_arr;
         user.spoc = spoc;
 
+        // Vendor Networks (spec §4.1): who is acting, for which entity, and where
+        // they may switch to. null for a vendor in no network and for non-vendors.
+        user.network = await profileNetworkFor(req.user);
+
         // Fetch user-to-company/hotel mappings
         // includeHotelRows: expand company-level mappings into individual hotel rows
         // so frontend hotel filters/dropdowns show all accessible hotels
@@ -2934,7 +3071,13 @@ update_user_detail: async (req, res, next) => {
   },
   change_password: async (req, res, next) => {
     try {
-      var user_id = req.user.id;
+      // An emailed-link guest session (anyone holding the link) can never set a
+      // password: that would turn a 30-minute RFQ link into a permanent login.
+      if (refuseGuestSession(req, res)) return;
+      // "My password": a person acting for a network entity changes their OWN
+      // login, never the entity's (that would hand them a direct entity login
+      // that outlives their membership). Everyone else is unchanged.
+      var user_id = actingPersonId(req);
       let { password } = req.body;
       // console.log('user_id--->', user_id);
       // return false;
@@ -3006,6 +3149,9 @@ update_user_detail: async (req, res, next) => {
           let user_details = await userModel.user_email_exist(email);
           // console.log('user_details123--->', user_details);
           //  return false;
+          if (user_details.length > 0 && (await isNetworkManagedLogin(user_details[0].id))) {
+            return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
+          }
           if (user_details.length > 0) {
             // console.log('Case 1');
             let oldDevice = user_details[0].user_agent
@@ -3738,6 +3884,17 @@ publish_profile_reviews: async (req, res, next) => {
         return res.status(400).json({
           status: 2,
           message: 'Only vendors can purchase hospitality subscriptions'
+        });
+      }
+      // Vendor Networks (spec §5.2): a non-principal entity's subscription is its
+      // network's, bought by the principal. This path is keyed on user_key, not a JWT,
+      // so the JWT routes' NETWORK_MEMBER guard cannot see it: check the entity itself.
+      const memberOf = await memberEntityOrg(decryptedUserId);
+      if (memberOf) {
+        return res.status(403).json({
+          status: 0,
+          message: `Your subscription is covered by ${memberOf.org_name}. Ask your network admin to change it.`,
+          reason: 'NETWORK_MEMBER'
         });
       }
       // Only block if vendor already has an active (non-expired) subscription

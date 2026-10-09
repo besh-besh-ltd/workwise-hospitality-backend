@@ -3,6 +3,7 @@ import pushSubscriptionModel from '../../models/pushSubscriptionModel.js';
 import { getVapidPublicKey } from '../../services/notificationService.js';
 import { logError } from '../../helper/common.js';
 import Config from '../../config/app.config.js';
+import { actingPersonId } from '../../services/vendorNetwork/guards.js';
 
 const PAGE_LIMIT = 20;
 
@@ -13,7 +14,9 @@ const userNotificationController = {
 
   pushSubscribe: async (req, res) => {
     try {
-      const userId = req.user && req.user.id;
+      // Keyed to the PERSON: a network member's device belongs to them, and the
+      // entity's pushes reach it through the delegate fan-out in dispatch().
+      const userId = req.user && actingPersonId(req);
       if (!userId) return res.status(401).json({ status: 3, message: 'Unauthorized' });
 
       const sub = req.body && (req.body.subscription || req.body);
@@ -44,7 +47,7 @@ const userNotificationController = {
 
   pushUnsubscribe: async (req, res) => {
     try {
-      const userId = req.user && req.user.id;
+      const userId = req.user && actingPersonId(req);
       if (!userId) return res.status(401).json({ status: 3, message: 'Unauthorized' });
 
       const endpoint = req.body && req.body.endpoint;

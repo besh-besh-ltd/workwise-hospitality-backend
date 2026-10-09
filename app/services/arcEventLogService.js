@@ -74,6 +74,9 @@ export const ARC_EVENT_TYPES = Object.freeze({
   CONTRACT_SIGNED: 'contract_signed',
   CONTRACT_DECLINED: 'contract_declined',
   CONTRACT_ACTIVE: 'contract_active',
+  // Vendor Networks: a covered hotel's supplier changed (a member entity accepted it, or
+  // it returned to the contract vendor). Notification only; never written to the log.
+  CONTRACT_FULFILMENT_ASSIGNED: 'contract_fulfilment_assigned',
   // Vendor contract clarification loop (pre-signature dispute → CE re-edit → re-award)
   CLARIFICATION_REQUESTED: 'contract_clarification_requested',
   CLARIFICATION_REVISED: 'contract_clarification_revised',

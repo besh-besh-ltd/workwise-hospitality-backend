@@ -23,9 +23,12 @@ const TEST_USER_AGENT = "jest-test-agent";
  * `tbl_users.user_agent` to the canonical test value so passport's user-agent
  * comparison succeeds.
  *
+ * `ent` (Vendor Networks, spec §4.1): when given, adds the encrypted acting-
+ * entity claim exactly as production's switch-entity does.
+ *
  * Returns { token, headers, userAgent }.
  */
-export async function loginAs(userId) {
+export async function loginAs(userId, { ent } = {}) {
   if (!Number.isInteger(userId)) {
     throw new Error(`loginAs: userId must be an integer (got ${userId})`);
   }
@@ -50,6 +53,7 @@ export async function loginAs(userId) {
       session: "",
       user: true,
       ag: cryptr.encrypt(TEST_USER_AGENT),
+      ...(ent !== undefined && ent !== null ? { ent: cryptr.encrypt(String(ent)) } : {}),
       iat: now,
       exp: now + 60 * 60,
     },
@@ -115,8 +119,8 @@ export async function loginAsInternalStaff(userId) {
  * Give a fixture user a user_type the admin console will accept, returning the
  * previous value so a suite can put it back.
  *
- * adminModel scopes every lookup with `user_type NOT IN (2,3,4)`. Fixture users
- * carry user_type NULL, and `NULL NOT IN (2,3,4)` evaluates to NULL rather than
+ * adminModel scopes every lookup with `user_type NOT IN (2,3,4,11)`. Fixture users
+ * carry user_type NULL, and `NULL NOT IN (2,3,4,11)` evaluates to NULL rather than
  * true — so an un-stamped fixture user is invisible to every admin query, and a
  * token signed by loginAsInternalStaff above will authenticate against nothing.
  */

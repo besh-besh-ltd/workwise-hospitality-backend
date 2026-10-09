@@ -115,8 +115,8 @@ PORoutes.post('/regenerate/:po_id', passportSignIn, noAcl([3]), regeneratePO);
 PORoutes.post('/upload-pdf/:po_id', passportSignIn, noAcl([3]), poUploadMiddleware, uploadPODocument);
 PORoutes.post('/updateGST/:po_id', passportSignIn, noAcl([3]), updateGST);
 PORoutes.post('/updateHSN/:po_id', passportSignIn, noAcl([3]), updateHSNForProduct);
-PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, raiseInvoice);
-PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, markDispatched);
+PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, raiseInvoice);
+PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, markDispatched);
 PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([3]), addSiteRepresentative);
 PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), markGRN);
 

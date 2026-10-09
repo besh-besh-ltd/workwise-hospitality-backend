@@ -34,6 +34,8 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome } from '../../services/notificationLinks.js';
+import { NETWORK_ROLE } from '../../constants/vendorNetwork.js';
+import { networkSubscriptionCoverage } from '../../services/vendorNetwork/subscriptionCoverage.js';
 
 /**
  * Of the given business-unit ids, which belong to the caller's buyer company?
@@ -2947,6 +2949,7 @@ const HospitalityController = {
 
       const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
+      const coveredByNetwork = await networkSubscriptionCoverage(req.user);
 
       // Separate current (active/non-expired), expired, and pending subscriptions.
       // Unpaid self-registration rows stay in pending state; only paid or admin-assigned
@@ -3016,7 +3019,11 @@ const HospitalityController = {
           } : null,
           is_expired: isExpired,
           has_pending: pendingSubs.length > 0,
-          can_renew: canRenew
+          can_renew: canRenew,
+          // Vendor Networks (spec §5.1/§5.2): a member entity is covered by its network's
+          // subscription plus its own seat. The key is absent for a vendor in no network
+          // and for the principal, whose response stays exactly as before.
+          ...(coveredByNetwork ? { covered_by_network: coveredByNetwork } : {})
         }
       });
     } catch (error) {
@@ -3212,6 +3219,16 @@ const HospitalityController = {
 
       const payment = vendorPayment[0];
       const userId = payment.vendor_id;
+
+      // A Vendor Networks seat order completes only through
+      // POST /vendor-network/seats/verify-payment (it activates the seats). Marking it
+      // 'success' here would activate nothing and release the open-checkout lock.
+      if (payment.payment_type === 'network_seat') {
+        return res.status(400).json({
+          status: 2,
+          message: 'This payment is for network seats; verify it from the network entities page'
+        });
+      }
 
       // Mark payment as successful
       await db.none(
@@ -3445,6 +3462,7 @@ const HospitalityController = {
       const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
       const history = await hospitalityModel.getVendorPaymentHistory(vendorId, { limit: 50 });
+      const coveredByNetwork = await networkSubscriptionCoverage(req.user);
 
       // A subscription row is "valid to surface" when it is either linked to
       // a successful payment OR admin-assigned (payment_id IS NULL — only
@@ -3598,7 +3616,9 @@ const HospitalityController = {
             can_modify: canModify,
             can_renew: canRenew,
             blocked_reason: blockedReason
-          }
+          },
+          // Vendor Networks: see getVendorSubscriptionStatus. Absent outside a network.
+          ...(coveredByNetwork ? { covered_by_network: coveredByNetwork } : {})
         }
       });
     } catch (error) {
@@ -4266,6 +4286,13 @@ const HospitalityController = {
       const vendorId = req.user.id;
       const { rfq_ids } = req.body;
 
+      // Vendor Networks: joining enrols the org PRINCIPAL and emails buyers, so inside
+      // a network only the admin acting as HQ may do it. No-org vendors: unchanged.
+      const network = req.user.network;
+      if (network && !(network.role === NETWORK_ROLE.ORG_ADMIN && network.is_principal)) {
+        return res.status(403).json({ status: 0, message: 'Only the network admin acting as HQ can join open RFQs' });
+      }
+
       if (!Array.isArray(rfq_ids) || rfq_ids.length === 0) {
         return res.status(400).json({ status: 0, message: 'rfq_ids must be a non-empty array' });
       }
@@ -4275,9 +4302,15 @@ const HospitalityController = {
         return res.status(400).json({ status: 0, message: 'No valid RFQ IDs provided' });
       }
 
-      // Batch-fetch: vendor details + all open RFQs in one go
+      // Vendor Networks (spec §5.2): the invite, its token and its email go to the
+      // vendor's org principal; the org's pooled variant mappings decide the products.
+      // In no org the invitee is the vendor itself. Resolved once for all RFQs.
+      const scope = await hospitalityModel.rfqInviteScope(vendorId);
+      const { inviteeId } = scope;
+
+      // Batch-fetch: invitee details + all open RFQs in one go
       const [vendorUser, openRfqs] = await Promise.all([
-        db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [vendorId]),
+        db.oneOrNone(`SELECT id, name, email FROM tbl_users WHERE id = $1`, [inviteeId]),
         db.any(
           // NULLIF guard mirrors hospitalityModel.getMatchingOpenRfqsForVendor:
           // bid_end_date is TEXT and can be '' (empty string, not NULL). An
@@ -4302,7 +4335,7 @@ const HospitalityController = {
 
       // Insert vendor into all RFQs in parallel
       const insertResults = await Promise.all(
-        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id))
+        openRfqs.map(rfq => hospitalityModel.addVendorToRfq(vendorId, rfq.id, scope))
       );
 
       // Collect joined RFQs and product variant IDs
@@ -4332,7 +4365,7 @@ const HospitalityController = {
         ),
         db.any(`SELECT id, name, email FROM tbl_users WHERE id = ANY($1::int[])`, [creatorIds]),
         ...joinedRfqs.map(j =>
-          rfqModel.insertVendorRfqToken(vendorId, j.rfq.rfq_no).catch(() => null)
+          rfqModel.insertVendorRfqToken(inviteeId, j.rfq.rfq_no).catch(() => null)
         )
       ]);
 

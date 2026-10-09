@@ -2,6 +2,7 @@ import userModel from '../models/userModel.js';
 import hospitalityModel from '../models/hospitalityModel.js';
 import Config from '../config/app.config.js';
 import { logError } from '../helper/common.js';
+import { entityCanOperate } from '../services/vendorNetwork/actingContext.js';
 
 /**
  * Middleware to check if user's company is hospitality
@@ -123,12 +124,36 @@ const attachHospitalityContext = () => {
   };
 };
 
+const settle = (promise) => promise.then((value) => ({ value }), (err) => ({ err }));
+
+const OPERATE_REFUSALS = {
+  NOT_ACTIVE: { status: 0, message: 'This network entity is suspended', code: 'NOT_ACTIVE' },
+  NO_SEAT: { status: 0, message: 'Network seat required for this entity', code: 'NO_SEAT' },
+};
+
 /**
- * Middleware to block hospitality vendors with expired/no subscription.
- * Non-hospitality vendors and non-vendor users pass through unaffected.
- * Use after passportSignIn on endpoints that require active subscription.
+ * Whether this request must check that its entity may operate (Vendor Networks spec
+ * §5.1). jwtUsr resolved the acting entity's network on THIS request, so a JWT vendor
+ * with no `network` is in no org and one acting as the principal needs no seat:
+ * neither costs a query. A non-principal acting entity, and (when `tokenPath`) an
+ * emailed-link token vendor (vendorTokenOrJwt, is_verified === false, network never
+ * resolved), pay one query.
  */
-const requireActiveSubscription = async (req, res, next) => {
+const needsOperateCheck = (req, { tokenPath }) => {
+  const network = req.user.network;
+  if (network) return !network.is_principal;
+  return tokenPath && req.is_verified === false;
+};
+
+/** 403 body for an entityCanOperate refusal (NOT_ACTIVE when suspended, else NO_SEAT). */
+const operateRefusal = (reason) => OPERATE_REFUSALS[reason] ?? OPERATE_REFUSALS.NO_SEAT;
+
+/**
+ * Builds the subscription gate. With `seatGate`, a vendor entity that may not operate
+ * in its network (Vendor Networks spec §5.1: a member entity without an active seat,
+ * or not ACTIVE) is refused too; principals and vendors in no org always pass it.
+ */
+const subscriptionGate = ({ seatGate }) => async (req, res, next) => {
   try {
     if (!req.user || !req.user.id) {
       return next(); // Let auth middleware handle this
@@ -154,14 +179,25 @@ const requireActiveSubscription = async (req, res, next) => {
     }
 
     // Independent reads: the subscription check is only CONSULTED for a
-    // hospitality vendor, but issuing both together saves a serial round trip
+    // hospitality vendor, but issuing the reads together saves serial round trips
     // on every vendor request (non-hospitality vendors are the legacy minority).
-    // A failure of the subscription read only matters if it is consulted, as
-    // before — so it is settled here and re-thrown below only when needed.
-    const [companyDetails, subscription] = await Promise.all([
+    // A failure of a read only matters if it is consulted, as before — so each is
+    // settled here and re-thrown below only when needed.
+    // hasValidPaidSubscription counts the subscriptions of the vendor's whole
+    // network (spec §5.2) inside its own statement.
+    const [companyDetails, subscription, operate] = await Promise.all([
       userModel.getCompanyDetail(userId),
-      hospitalityModel.hasValidPaidSubscription(userId).then((ok) => ({ ok }), (err) => ({ err })),
+      settle(hospitalityModel.hasValidPaidSubscription(userId)),
+      seatGate && needsOperateCheck(req, { tokenPath: true }) ? settle(entityCanOperate(userId)) : null,
     ]);
+
+    // The network operate check applies to every networked vendor, hospitality or
+    // not; a vendor in no org never reaches it.
+    if (operate) {
+      if (operate.err) throw operate.err;
+      if (!operate.value.ok) return res.status(403).json(operateRefusal(operate.value.reason));
+    }
+
     if (!companyDetails || companyDetails.length === 0) {
       return next();
     }
@@ -176,15 +212,15 @@ const requireActiveSubscription = async (req, res, next) => {
     }
 
     if (subscription.err) throw subscription.err;
-    if (subscription.ok) {
-      return next();
+    if (!subscription.value) {
+      return res.status(403).json({
+        status: 0,
+        message: 'Your subscription has expired. Please renew to continue.',
+        subscription_expired: true
+      });
     }
 
-    return res.status(403).json({
-      status: 0,
-      message: 'Your subscription has expired. Please renew to continue.',
-      subscription_expired: true
-    });
+    return next();
   } catch (error) {
     logError(error);
     return res.status(400).json({
@@ -192,6 +228,56 @@ const requireActiveSubscription = async (req, res, next) => {
       message: Config.errorText.value
     });
   }
+};
+
+/**
+ * Middleware to block hospitality vendors with expired/no subscription, and network
+ * entities that may not operate (no active seat).
+ * Non-hospitality vendors and non-vendor users pass through unaffected.
+ * Use after passportSignIn on endpoints that require active subscription.
+ */
+const requireActiveSubscription = subscriptionGate({ seatGate: true });
+
+/**
+ * The subscription check WITHOUT the seat gate, for actions on POs already addressed
+ * to the vendor (dispatch, invoice). Spec §5.1: those stay actionable when an
+ * entity's seat lapses, so buyers are never stranded.
+ */
+const requireActiveSubscriptionForIssuedPo = subscriptionGate({ seatGate: false });
+
+/**
+ * Only the Vendor Networks operate check (spec §5.1), for vendor actions outside the
+ * subscription gate (ARC quote and technical-envelope submission). A non-principal
+ * org entity must be ACTIVE with a live seat: else 403 NOT_ACTIVE / NO_SEAT. Vendors
+ * in no org and principals pass with no query. Use after passportSignIn.
+ */
+const requireNetworkEntityCanOperate = async (req, res, next) => {
+  try {
+    if (!req.user?.id || !needsOperateCheck(req, { tokenPath: false })) return next();
+    const operate = await entityCanOperate(req.user.id);
+    if (!operate.ok) return res.status(403).json(operateRefusal(operate.reason));
+    return next();
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({ status: 3, message: Config.errorText.value });
+  }
+};
+
+/**
+ * Vendor Networks (spec §5.2): the org's subscription is bought and changed by the
+ * principal. A request acting as a non-principal entity (a member's own login, a
+ * person acting for it, or the admin switched into it) may not renew, preview,
+ * modify or extend a subscription for that entity: 403 reason NETWORK_MEMBER.
+ * Vendors in no network and the principal pass with no query.
+ */
+const refuseNetworkMemberSubscriptionChange = (req, res, next) => {
+  const network = req.user?.network;
+  if (!network || network.is_principal) return next();
+  return res.status(403).json({
+    status: 0,
+    message: `Your subscription is covered by ${network.org_name}. Ask your network admin to change it.`,
+    reason: 'NETWORK_MEMBER',
+  });
 };
 
 /**
@@ -218,6 +304,9 @@ export default {
   requireHospitality,
   attachHospitalityContext,
   requireActiveSubscription,
+  requireActiveSubscriptionForIssuedPo,
   requireActiveSubscriptionIfAuthenticated,
+  requireNetworkEntityCanOperate,
+  refuseNetworkMemberSubscriptionChange,
 };
 

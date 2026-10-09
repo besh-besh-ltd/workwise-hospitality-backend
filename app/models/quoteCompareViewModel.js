@@ -620,6 +620,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
           short: initialsOf(name),
           tech: tech.tech,
           tech_score: tech.tech_score,
+          // Vendor Networks (spec §6.3): the entity's network, null when it has none.
+          org_name: vd.org_name ?? null,
         });
       }
     }
@@ -2128,7 +2130,9 @@ async function countDistinctQuoters(rfqId) {
 async function countInvitedVendors(rfqId) {
   try {
     const r = await db.oneOrNone(
-      `SELECT COUNT(DISTINCT user_id)::int AS cnt FROM tbl_rfq_product_vendors WHERE rfq_id = $1`,
+      // a network's routed copy (spec §6.3) is not another invited vendor
+      `SELECT COUNT(DISTINCT user_id)::int AS cnt FROM tbl_rfq_product_vendors
+        WHERE rfq_id = $1 AND routed_from_vendor_id IS NULL`,
       [rfqId]
     );
     return r ? Number(r.cnt) : 0;

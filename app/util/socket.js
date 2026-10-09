@@ -4,6 +4,7 @@ import Config from '../config/app.config.js';
 import { decryptClaim } from '../helper/claimCrypto.js';
 import { logger } from './logger.js';
 import db from '../config/dbConn.js';
+import { resolveFromTokenPayload } from '../services/vendorNetwork/actingContext.js';
 
 let ioInstance = null;
 
@@ -36,6 +37,90 @@ const resolveUserIdFromPayload = (payload) => {
     if (Number.isInteger(n) && n > 0) return n;
   }
   return null;
+};
+
+/**
+ * The user id whose room a verified token's socket joins, or null to join nothing.
+ *
+ * Vendor Networks (spec §4.4): notifications are addressed to the acting ENTITY,
+ * so a person (user_type 11) or a networked vendor joins `user:<actingEntityId>`,
+ * resolved by the same resolver jwtUsr runs (a foreign or tampered `ent`, a
+ * revoked membership -> null). Buyers, admins, unknown ids and vendors in no
+ * network keep the plain decrypted `sub`.
+ */
+export const resolveSocketIdentity = async (payload) => {
+  const uid = resolveUserIdFromPayload(payload);
+  if (!uid) return null;
+
+  const user = await db.oneOrNone(
+    `SELECT * FROM tbl_users WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+    [uid]
+  );
+  if (!user) return { userId: uid, personId: uid };
+
+  const ctx = await resolveFromTokenPayload(user, payload);
+  return ctx ? { userId: Number(ctx.entityRow.id), personId: uid } : null;
+};
+
+/** The acting user id only (see resolveSocketIdentity). */
+export const resolveSocketUserId = async (payload) =>
+  (await resolveSocketIdentity(payload))?.userId ?? null;
+
+/** `user:<id>` for a login token (verified here), or null when it must join nothing. */
+export const resolveSocketUserRoom = async (token) => {
+  if (!token) return null;
+  let payload;
+  try {
+    payload = jwt.verify(token, Config.jwt.secret);
+  } catch (_) {
+    return null;
+  }
+  const id = await resolveSocketUserId(payload);
+  return id ? `user:${id}` : null;
+};
+
+/**
+ * Disconnects every socket opened by `personId` (the token's `sub`), whichever
+ * entity room it joined.
+ *
+ * Rooms are fixed at handshake, so a person whose membership is disabled or
+ * whose entity is removed would keep receiving that entity's live events until
+ * the tab reconnects. Call this right after such a change (Task 5: member
+ * disable / entity removal); the client's reconnect then re-runs the handshake,
+ * which refuses or re-resolves the room. Returns how many sockets were closed.
+ */
+export const disconnectPersonSockets = (personId, io = ioInstance) => {
+  if (!io || personId == null) return 0;
+  let closed = 0;
+  for (const socket of io.sockets?.sockets?.values?.() ?? []) {
+    if (Number(socket.data?.personId) === Number(personId)) {
+      socket.disconnect(true);
+      closed += 1;
+    }
+  }
+  return closed;
+};
+
+/**
+ * Disconnects every socket that ACTS AS entity `entityVendorId` on behalf of another
+ * person: an ORG_ADMIN person or the principal switched into it, or a member person.
+ * Its room `user:<entity>` carries that entity's live notifications, so once the entity
+ * is suspended, removed or leaves, those sockets must stop receiving them; the client's
+ * reconnect re-runs the handshake, which refuses or re-resolves the room. The entity's
+ * own login (person = entity) keeps its socket: it is still itself. Returns how many closed.
+ */
+export const disconnectEntitySockets = (entityVendorId, io = ioInstance) => {
+  if (!io || entityVendorId == null) return 0;
+  const entity = Number(entityVendorId);
+  let closed = 0;
+  for (const socket of io.sockets?.sockets?.values?.() ?? []) {
+    const acting = Number(socket.data?.actingEntityId ?? socket.userId);
+    if (acting === entity && Number(socket.data?.personId) !== entity) {
+      socket.disconnect(true);
+      closed += 1;
+    }
+  }
+  return closed;
 };
 
 export const getIo = () => ioInstance;
@@ -86,12 +171,22 @@ export const SocketConfig = (SERVER) => {
 
     if (!token) return next();
 
-    jwt.verify(token, Config.jwt.secret, (err, payload) => {
+    jwt.verify(token, Config.jwt.secret, async (err, payload) => {
       if (err || !payload) return next();
-      const uid = resolveUserIdFromPayload(payload);
-      if (uid) {
-        socket.userId = uid;
-        socket.join(`user:${uid}`);
+      let identity = null;
+      try {
+        identity = await resolveSocketIdentity(payload);
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Socket identity resolution failed');
+      }
+      if (identity) {
+        socket.userId = identity.userId;
+        // The person behind the socket, so disconnectPersonSockets can find it.
+        // ...and the entity it acts as, so disconnectEntitySockets can find it.
+        if (!socket.data) socket.data = {};
+        socket.data.personId = identity.personId;
+        socket.data.actingEntityId = identity.userId;
+        socket.join(`user:${identity.userId}`);
       }
       next();
     });

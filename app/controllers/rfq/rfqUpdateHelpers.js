@@ -18,6 +18,9 @@ import {
   isEntityChangeMaterial,
   isTimestampField
 } from './rfqEditableFields.js';
+import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
+import { lockLiveRfqAssignments, propagateRoutedCopies } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
+import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 1. assertEditAllowed
@@ -556,6 +559,13 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
     }
   }
 
+  // Vendor Networks lock order (rfqSubject.js header): the RFQ's live routing assignments
+  // FOR SHARE before any tbl_rfq_product_vendors write below, as the engine does.
+  const touchesVendors =
+    productDiff.removed.length || productDiff.added.length ||
+    productDiff.updated.some((u) => u.vendors.added.length);
+  if (touchesVendors) await lockLiveRfqAssignments(t, rfqId);
+
   // ── Removed products ────────────────────────────────────────────────────
   for (const r of productDiff.removed) {
     const label = r.current.product_name || `product ${r.id}`;
@@ -669,6 +679,9 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
       if (hotelIds.length > 0) {
         // Inline copy of hospitalityModel.getEligibleVendorsForVariant so
         // the read participates in the same transaction as the inserts.
+        // Vendor Networks (spec §5.2): pooled per org like the original — the
+        // mapping and the hotel subscription may come from any counting entity of
+        // the org, and the principal is the one invited (orgKeySql.js).
         const eligibleRows = await t.any(
           `WITH variant_vendors AS (
              SELECT DISTINCT vendor_id
@@ -677,22 +690,43 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
                AND status = true
                AND is_approved = true
            ),
-           eligible_hotel_vendors AS (
-             SELECT DISTINCT s.vendor_id
+           mapped_keys AS (
+             SELECT DISTINCT org_key
+             FROM (${orgKeySelect('SELECT vendor_id FROM variant_vendors')}) mk
+             WHERE mk.counts
+           ),
+           candidate_keys AS (
+             SELECT ck.vendor_id, ck.org_key
+             FROM (${orgKeySelect(`SELECT vendor_id FROM variant_vendors
+                                   UNION
+                                   ${orgEntitiesOfKeys('SELECT org_key FROM mapped_keys')}`)}) ck
+             WHERE ck.counts
+               AND ck.org_key IN (SELECT org_key FROM mapped_keys)
+           ),
+           eligible_hotel_keys AS (
+             SELECT DISTINCT ck.org_key
              FROM tbl_vendor_hotel_category_subscription s
-             JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+             JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
              WHERE s.item_type = 'hotel'
                AND s.item_id = ANY ($2)
                AND s.status IN ('active', 'expired')
            )
-           SELECT vv.vendor_id
-           FROM variant_vendors vv
-           JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id`,
+           SELECT mk.org_key AS vendor_id
+           FROM mapped_keys mk
+           JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key
+           WHERE ${keyIsInvitable('mk.org_key')}`,
           [sp.product_variant_id, hotelIds]
         );
         resolvedVendorIds = eligibleRows.map((r) => Number(r.vendor_id)).filter((n) => !Number.isNaN(n));
       }
     }
+
+    // Vendor Networks: a routed member is never invited directly (its principal is).
+    resolvedVendorIds = await directInviteIdsForLine(
+      t,
+      { rfqId, productVariantId: sp.product_variant_id, variant: nextVariant },
+      resolvedVendorIds
+    );
 
     const productLabel = sp.product_name || `product ${inserted.id}`;
     for (const userId of resolvedVendorIds) {
@@ -838,8 +872,16 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
       });
     }
 
-    // Vendors
-    for (const userId of u.vendors.added) {
+    // Vendors. Vendor Networks: a routed member re-sent by the client is never invited
+    // directly; it becomes its principal, who is usually invited already.
+    const addedVendorIds = await directInviteIdsForLine(
+      t,
+      { rfqId, productVariantId: u.current.product_variant_id, variant: u.current.variant },
+      u.vendors.added
+    );
+    // The notifications read u.vendors.added after this: email only who was invited.
+    u.vendors.added = addedVendorIds;
+    for (const userId of addedVendorIds) {
       await t.none(
         `INSERT INTO tbl_rfq_product_vendors
            (rfq_id, product_variant_id, variant, user_id)
@@ -869,6 +911,12 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
         is_material: true
       });
     }
+  }
+
+  // Vendor Networks (spec §6.3): members routed this RFQ get copies of any rows just
+  // added for their principal (new products, added vendors). One statement.
+  if (touchesVendors) {
+    await propagateRoutedCopies(t, rfqId);
   }
 
   return history;

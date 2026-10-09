@@ -9,6 +9,8 @@ import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
+import { collapsePickerRowsToPrincipals } from '../services/vendorNetwork/directInvites.js';
+import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 /**
  * "You are an approver on this RFQ, so you may read it."
@@ -38,6 +40,7 @@ import {
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
+import { generateEmailLinkToken } from '../helper/emailLinkToken.js';
 
 
 // A bare (optionally schema-qualified) SQL identifier. Table names reaching
@@ -52,13 +55,8 @@ const SQL_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$
 // condition cannot simply be parameterized in place.
 const SQL_BREAKOUT_RE = /;|--|\/\*|\*\/|\0/;
 
-const generateReminderTokenValue = () => {
-  const timestamp = Date.now().toString();
-  const randomSegment = Math.floor(Math.random() * 1_000_000)
-    .toString()
-    .padStart(6, '0');
-  return parseInt((timestamp + randomSegment).slice(0, 16), 10);
-};
+// Emailed-link token for ensureVendorTokens: unguessable (helper/emailLinkToken.js).
+const generateReminderTokenValue = () => generateEmailLinkToken();
 
 /**
  * "Now" and "today" for bid-window purposes, pinned to IST.
@@ -1145,6 +1143,7 @@ WHERE NOT EXISTS (
     let specsByKey = {};
     let filesByProduct = {};
     let vendorsByKey = {};
+    let routedVendorsByKey = {};
     let techEvalByProduct = {};
 
     if (productRows.length > 0) {
@@ -1165,7 +1164,7 @@ WHERE NOT EXISTS (
           [productIds]
         ),
         db_con.any(
-          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id,
+          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id, rpv.routed_from_vendor_id,
                   u.name, u.email
            FROM tbl_rfq_product_vendors rpv
            LEFT JOIN tbl_users u ON u.id = rpv.user_id
@@ -1216,9 +1215,21 @@ WHERE NOT EXISTS (
         if (bucket) filesByProduct[f.rfq_product_id][bucket].push(f.file_url);
       }
 
-      // Vendors keyed by product_variant_id+variant
+      // Vendors keyed by product_variant_id+variant. Vendor Networks: `vendors` is the
+      // direct invites (the edit diffs only those); a member's routed copies are kept
+      // apart as `routed_vendors` (the edit emails reach them; they are never diffed).
       for (const v of vendorRows) {
         const k = `${v.product_variant_id}:${v.variant}`;
+        if (v.routed_from_vendor_id != null) {
+          if (!routedVendorsByKey[k]) routedVendorsByKey[k] = [];
+          routedVendorsByKey[k].push({
+            user_id: v.user_id,
+            routed_from_vendor_id: v.routed_from_vendor_id,
+            name: v.name,
+            email: v.email
+          });
+          continue;
+        }
         if (!vendorsByKey[k]) vendorsByKey[k] = [];
         vendorsByKey[k].push({
           user_id: v.user_id,
@@ -1247,6 +1258,7 @@ WHERE NOT EXISTS (
           datasheet_file: []
         },
         vendors: vendorsByKey[key] || [],
+        routed_vendors: routedVendorsByKey[key] || [],
         tech_eval_clauses: techEvalByProduct[p.id] || []
       };
     });
@@ -1302,6 +1314,9 @@ WHERE NOT EXISTS (
           `user_id IN (${value.map(() => `$${index++}`).join(', ')})`
         );
         conditionValues.push(...value);
+      } else if (key === '$directInvitesOnly' && value === true) {
+        // tbl_rfq_product_vendors only: leave Vendor Networks routed copies alone.
+        conditionClauses.push('routed_from_vendor_id IS NULL');
       } else if (key === '-user_ids' && (value?.length ?? []) > 0) {
         conditionClauses.push(
           `user_id NOT IN (${value.map(() => `$${index++}`).join(', ')})`
@@ -2437,6 +2452,14 @@ WHERE NOT EXISTS (
         throw new Error('Buyer not found or no company associated');
       const companyId = buyer.company_id;
 
+      // Every value is a bind parameter (pg-promise $n), never spliced into the SQL.
+      // $1 draftId, $2 rfqProductId, $3 vendor_name (as before); the rest are appended.
+      const params = [draftId, rfqProductId, filters?.vendor_name];
+      const bind = (value) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
+
       let {
         vendor_approved_by,
         state,
@@ -2467,11 +2490,11 @@ WHERE NOT EXISTS (
         const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
 
         if (turnOver.from > 0 && turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from} AND ${turnOver.to}`;
+          turnoverCondition += `${turnoverField} BETWEEN ${bind(turnOver.from)} AND ${bind(turnOver.to)}`;
         } else if (turnOver.from > 0) {
-          turnoverCondition += `${turnoverField} >= ${turnOver.from}`;
+          turnoverCondition += `${turnoverField} >= ${bind(turnOver.from)}`;
         } else if (turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} <= ${turnOver.to}`;
+          turnoverCondition += `${turnoverField} <= ${bind(turnOver.to)}`;
         }
 
         turnoverCondition += ')';
@@ -2536,7 +2559,7 @@ WHERE NOT EXISTS (
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
           LEFT JOIN tbl_quote_finalization qf 
-            ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+            ON qf.vendor_id = tu.id AND qf.created_by = ${bind(buyerId)}
         `;
       }
 
@@ -2546,30 +2569,28 @@ WHERE NOT EXISTS (
             SELECT DISTINCT rpv.user_id
             FROM tbl_rfq_product_vendors rpv
             JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
-            WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+            WHERE rfq.created_by = ${bind(buyerId)} AND rfq.is_published = 1
           ) rfqv ON rfqv.user_id = tu.id
         `;
       }
 
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
-        dynamicWhere += ` AND tcl.city_id::int IN (${city.join(',')})`;
+        dynamicWhere += ` AND tcl.city_id::int IN (${bind(city)}:csv)`;
       } else if (typeof city == 'string' || typeof city == 'number') {
-        dynamicWhere += ` AND tcl.city_id = '${city}'`;
+        dynamicWhere += ` AND tcl.city_id = ${bind(String(city))}`;
       }
 
       if (state && Array.isArray(state) && state.length > 0) {
-        dynamicWhere += ` AND tcl.state_id::int IN (${state.join(',')})`;
+        dynamicWhere += ` AND tcl.state_id::int IN (${bind(state)}:csv)`;
       } else if (typeof state == 'string' || typeof state == 'number') {
-        dynamicWhere += ` AND tcl.state_id = '${state}'`;
+        dynamicWhere += ` AND tcl.state_id = ${bind(String(state))}`;
       }
 
       if (country && Array.isArray(country) && country.length > 0) {
-        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${country.join(
-          ','
-        )})`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${bind(country)}:csv)`;
       } else if (typeof country == 'string' || typeof country == 'number') {
-        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = '${country}'`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = ${bind(String(country))}`;
       }
 
       if (turnoverCondition) {
@@ -2581,9 +2602,7 @@ WHERE NOT EXISTS (
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendor_type
-              .map((type) => `'${type.toLowerCase()}'`)
-              .join(',')})
+            WHERE TRIM(nb) IN (${bind(vendor_type.map((type) => String(type).toLowerCase()))}:csv)
           )
         `;
       } else if (
@@ -2594,7 +2613,7 @@ WHERE NOT EXISTS (
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN ('${vendor_type}')
+            WHERE TRIM(nb) IN (${bind(String(vendor_type))})
           )
         `;
       }
@@ -2608,14 +2627,12 @@ WHERE NOT EXISTS (
         Array.isArray(vendor_approved_by) &&
         vendor_approved_by.length > 0
       ) {
-        dynamicWhere += ` AND vum.vendor_approve_id IN (${vendor_approved_by.join(
-          ','
-        )})`;
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${bind(vendor_approved_by)}:csv)`;
       } else if (
         typeof vendor_approved_by == 'string' ||
         typeof vendor_approved_by == 'number'
       ) {
-        dynamicWhere += ` AND vum.vendor_approve_id IN ('${vendor_approved_by}')`;
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${bind(String(vendor_approved_by))})`;
       }
 
       if (vendor_info === 'is_private') {
@@ -2642,7 +2659,7 @@ WHERE NOT EXISTS (
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) IN (${productMakes.map(pm => `'${pm.toLowerCase()}'`).join(', ')})
+            AND LOWER(pvmm.make_name) IN (${bind(productMakes.map((pm) => String(pm).toLowerCase()))}:csv)
           )
         `;
       } else if (
@@ -2654,7 +2671,7 @@ WHERE NOT EXISTS (
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) = '${String(productMakes).toLowerCase()}'
+            AND LOWER(pvmm.make_name) = ${bind(String(productMakes).toLowerCase())}
           )
         `;
       }
@@ -2697,7 +2714,7 @@ WHERE NOT EXISTS (
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_company_location tcl ON tu.company_id = tcl.company_id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
-              ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
+              ON tu.id = bvm.vendor_id AND bvm.company_id = ${bind(companyId)}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
           JOIN tbl_company tc ON tu.company_id = tc.id
 
@@ -2705,6 +2722,8 @@ WHERE NOT EXISTS (
   
           WHERE trp.rfq_id = $1
               AND trp.id = $2
+              -- Vendor Networks: the line's invited vendors, not a member's routed copy
+              AND trpv.routed_from_vendor_id IS NULL
               ${dynamicWhere}
             
           ORDER BY tu.name
@@ -2712,7 +2731,7 @@ WHERE NOT EXISTS (
 
       logger.debug({ data: q }, 'GET DRAFT VENDORS query');
 
-      return db.any(q, [draftId, rfqProductId, vendor_name]);
+      return db.any(q, params);
     } catch (error) {
       logError('getDraftProductVendors failed', error);
       throw error;
@@ -3439,7 +3458,19 @@ LIMIT 1;`;
                   FROM tbl_users U
                   JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
-                )
+                )${
+                  // Vendor Networks (spec §6.3): buyers see which network a vendor
+                  // entity belongs to. Vendor callers' payload is unchanged.
+                  user_type != 3
+                    ? `,
+             'org_name', (
+                  SELECT VN_O.name
+                  FROM tbl_vendor_org_entities VN_E
+                  JOIN tbl_vendor_orgs VN_O ON VN_O.id = VN_E.org_id
+                  WHERE VN_E.vendor_id = RFQ_P_V.user_id AND VN_E.status <> 'REMOVED'
+                )`
+                    : ''
+                }
 
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
@@ -3447,7 +3478,12 @@ LIMIT 1;`;
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
-              AND U.status = 1
+              AND U.status = 1${
+                // Vendor Networks (spec §6.3): a buyer sees the invited vendors (the
+                // principal, labelled via org_name), not a member's routed copy.
+                user_type != 3 ? `
+              AND RFQ_P_V.routed_from_vendor_id IS NULL` : ''
+              }
           ) AS vendor_details
           `
             : ''
@@ -3463,6 +3499,8 @@ LIMIT 1;`;
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
               AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
+              -- a network's routed copy is not another invited vendor (spec §6.3)
+              AND RFQ_P_V.routed_from_vendor_id IS NULL
         ) AS vendors_count
         ,(
             SELECT COUNT(DISTINCT TQ.created_by)
@@ -4316,7 +4354,8 @@ LIMIT 2;
           ) AS "quotes",
           ARRAY(
             SELECT json_build_object(
-              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+              'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL),
               'quote_received',
               (
                 SELECT COUNT(*) FROM (
@@ -4878,7 +4917,8 @@ LIMIT 2;
         ) AS has_tech_unstartable_product,
         ARRAY(
           SELECT json_build_object(
-            'total_vendors', COUNT(DISTINCT TRPV.user_id),
+            -- invited vendors: a network's routed copy (spec §6.3) is not another vendor
+            'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL),
             'quote_received',
             (
               SELECT COUNT(*) FROM (
@@ -5736,7 +5776,7 @@ LIMIT 2;
           SELECT te.id AS tech_eval_id, te.tbl_rfq_product_id AS product_id,
             COALESCE(pv.name, 'Product ' || te.tbl_rfq_product_id) AS product_name,
             te.minimum_passing_score, te.current_round,
-            (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = $1 AND rpv.product_variant_id = rp.product_variant_id AND COALESCE(rpv.variant::text, '0') = COALESCE(rp.variant::text, '0')) AS total_vendors
+            (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = $1 AND rpv.product_variant_id = rp.product_variant_id AND COALESCE(rpv.variant::text, '0') = COALESCE(rp.variant::text, '0') AND rpv.routed_from_vendor_id IS NULL) AS total_vendors
           FROM tbl_rfq_product_tech_evaluation te
           LEFT JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
           LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
@@ -5850,17 +5890,30 @@ LIMIT 2;
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO data query failed`); return []; }),
 
         db.one(`
-          WITH assigned_products AS (
+          -- Vendor Networks (spec §6.3): a member's routed copy belongs to its principal's
+          -- invite. Each invited user maps to its org key (the principal it was routed
+          -- from, else itself), invites and quotes roll up per key, so an org is invited
+          -- once and is not "remaining" after its member quoted. A vendor in no network
+          -- maps to itself: results are unchanged.
+          WITH vendor_keys AS (
+            SELECT rpv.user_id, COALESCE(MAX(rpv.routed_from_vendor_id), rpv.user_id) AS org_key
+            FROM tbl_rfq_product_vendors rpv
+            WHERE rpv.rfq_id = $1
+            GROUP BY rpv.user_id
+          ),
+          assigned_products AS (
             SELECT DISTINCT
-              rpv.user_id,
+              vk.org_key AS user_id,
               rpv.product_variant_id,
               COALESCE(rpv.variant::text, '0') AS variant_key
             FROM tbl_rfq_product_vendors rpv
+            JOIN vendor_keys vk ON vk.user_id = rpv.user_id
             WHERE rpv.rfq_id = $1
           ),
           vendor_regrets AS (
-            SELECT DISTINCT q.created_by AS user_id
+            SELECT DISTINCT vk.org_key AS user_id
             FROM tbl_quotes q
+            JOIN vendor_keys vk ON vk.user_id = q.created_by
             WHERE q.rfq_id = $1
               AND q.is_regret = 1
           ),
@@ -5887,9 +5940,11 @@ LIMIT 2;
                 AND COALESCE(qi.unit_price, 0) > 0
               ) AS has_commercial_submission
             FROM assigned_products ap
+            LEFT JOIN vendor_keys vq
+              ON vq.org_key = ap.user_id
             LEFT JOIN tbl_quotes q
               ON q.rfq_id = $1
-             AND q.created_by = ap.user_id
+             AND q.created_by = vq.user_id
              AND COALESCE(q.is_regret, 0) != 1
             LEFT JOIN tbl_quote_items qi
               ON qi.quote_id = q.id
@@ -7033,7 +7088,8 @@ LIMIT 2;
           ) AS "quotes",
           ARRAY(
             SELECT json_build_object(
-              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              -- Vendor Networks: an org is one invitee (a member's routed copy is its principal's invite).
+              'total_vendors', COUNT(DISTINCT COALESCE(TRPV.routed_from_vendor_id, TRPV.user_id)),
               'quote_received',
               (
                 SELECT COUNT(*) FROM (
@@ -7332,6 +7388,16 @@ LIMIT 2;
         throw new Error('Buyer not found or no company associated');
       const companyId = buyer.company_id;
 
+      // Every value is a bind parameter (pg-promise $n), never spliced into the SQL.
+      const params = [productId];
+      const bind = (value) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
+      const excludeParam = excludeArray && excludeArray.length > 0 ? bind(excludeArray) : null;
+      const searchParam = searchTerm ? bind(searchTerm) : null;
+      const companyParam = bind(companyId);
+
       let q = `
       SELECT 
       DISTINCT
@@ -7344,7 +7410,7 @@ LIMIT 2;
         C.company_name,
         ${
           searchTerm
-            ? `similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') AS similarity_score,`
+            ? `similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) AS similarity_score,`
             : ''
         }
         CASE
@@ -7357,24 +7423,24 @@ LIMIT 2;
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
         JOIN tbl_company_location CL ON C.id = CL.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyParam}
   
         WHERE PVVM.product_variant_id = $1
         AND U.status = 1
         AND (PVVM.is_approved OR BVM.vendor_id IS NOT NULL)
         AND (C.is_private = 0 OR (C.is_private = 1 AND BVM.vendor_id IS NOT NULL))
         ${
-          excludeArray && excludeArray.length > 0
-            ? ` AND U.id NOT IN ($2:csv)`
+          excludeParam
+            ? ` AND U.id NOT IN (${excludeParam}:csv)`
             : ``
         }
         ${
           searchTerm
             ? `
           AND (
-            to_tsvector('english', COALESCE(C.company_name, U.organization_name)) @@ plainto_tsquery('english', '${searchTerm}')
-            OR (char_length('${searchTerm}') = 1 AND similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') > 0)
-            OR (char_length('${searchTerm}') > 1 AND similarity(COALESCE(C.company_name, U.organization_name), '${searchTerm}') > 0.1)
+            to_tsvector('english', COALESCE(C.company_name, U.organization_name)) @@ plainto_tsquery('english', ${searchParam})
+            OR (char_length(${searchParam}) = 1 AND similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) > 0)
+            OR (char_length(${searchParam}) > 1 AND similarity(COALESCE(C.company_name, U.organization_name), ${searchParam}) > 0.1)
           )
         `
             : ''
@@ -7385,12 +7451,33 @@ LIMIT 2;
         } is_linked_with_buyer DESC, C.company_name;
       `;
 
-      const params = [productId];
-      if (excludeArray && excludeArray.length > 0) {
-        params.push(excludeArray);
-      }
-
-      return await db.any(q, params);
+      // Vendor Networks: a member entity is offered as its org's principal (the pooled
+      // rule: the invite goes to the principal), once, and excludeIds applies to it.
+      return await collapsePickerRowsToPrincipals(await db.any(q, params), {
+        idOf: (r) => r.id,
+        excludeIds: excludeArray,
+        principalRows: (ids) =>
+          db.any(
+            `SELECT U.id, U.name, U.email, U.mobile,
+                    (SELECT CL.address FROM tbl_company_location CL
+                      WHERE CL.company_id = U.company_id ORDER BY CL.id LIMIT 1) AS address,
+                    U.organization_name, C.company_name,
+                    CASE WHEN EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping BVM
+                                       WHERE BVM.vendor_id = U.id AND BVM.company_id = $2)
+                         THEN 1 ELSE 0 END AS is_linked_with_buyer
+               FROM tbl_users U
+               JOIN tbl_company C ON C.id = U.company_id
+              WHERE U.id = ANY($1::int[])
+                -- the main query's liveness and visibility, applied to the principal
+                -- itself (keyIsInvitable: a live login); not visible → its members
+                -- are not offered either
+                AND U.status = 1 AND COALESCE(U.is_deleted, 0) = 0
+                AND (C.is_private = 0
+                     OR EXISTS (SELECT 1 FROM tbl_buyer_private_vendors_mapping BVM
+                                 WHERE BVM.vendor_id = U.id AND BVM.company_id = $2))`,
+            [ids, companyId]
+          ),
+      });
     } catch (error) {
       throw error;
     }
@@ -8165,6 +8252,13 @@ LIMIT 2;
                       'mobile', TU.mobile,
                       -- 'address', TCL3.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
+                      -- Vendor Networks (spec §6.3): the network the quoting entity belongs to
+                      'org_name', (
+                        SELECT VN_O.name
+                        FROM tbl_vendor_org_entities VN_E
+                        JOIN tbl_vendor_orgs VN_O ON VN_O.id = VN_E.org_id
+                        WHERE VN_E.vendor_id = TU.id AND VN_E.status <> 'REMOVED'
+                      ),
                       'rfq_product_vendor_id', (
                         SELECT rpv.id
                         FROM tbl_rfq_product_vendors rpv
@@ -10407,12 +10501,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
   insertVendorRfqToken: async (vendorId, rfqNumber) => {
-    // Function to generate a unique token as BIGINT
-    const generateUniqueToken = () => {
-      const timestamp = Date.now(); // Current timestamp in milliseconds
-      const randomNumber = Math.floor(Math.random() * 1000000); // 6-digit random number
-      return parseInt((timestamp + randomNumber).toString().substring(0, 16)); // Ensure it's a BIGINT
-    };
+    // An unguessable 18-digit BIGINT (helper/emailLinkToken.js); the loop below
+    // retries on the (astronomically unlikely) unique-index collision.
+    const generateUniqueToken = generateEmailLinkToken;
 
     let token;
     let insertedData;
@@ -10457,11 +10548,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     const ids = [...new Set((vendorIds || []).map(Number).filter(Number.isInteger))];
     const out = new Map();
     if (!ids.length) return out;
-    const generateUniqueToken = () => {
-      const timestamp = Date.now();
-      const randomNumber = Math.floor(Math.random() * 1000000);
-      return parseInt((timestamp + randomNumber).toString().substring(0, 16));
-    };
+    const generateUniqueToken = generateEmailLinkToken;
     for (let attempt = 0; attempt < 5; attempt++) {
       const seen = new Set();
       const rows = ids.map((vendor_id) => {
@@ -11072,7 +11159,8 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           (
             SELECT json_build_object(
               'quotes_received', COUNT(DISTINCT TQ.created_by),
-              'total_vendors', COUNT(DISTINCT TRPV.user_id)
+              -- a network member's routed copy is not another invited vendor
+              'total_vendors', COUNT(DISTINCT TRPV.user_id) FILTER (WHERE TRPV.routed_from_vendor_id IS NULL)
             )
             FROM tbl_quotes TQ
             RIGHT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
@@ -11137,7 +11225,9 @@ getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter 
   // Base query
   const baseQuery = `
     WITH vendors AS (
-      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type, COUNT(DISTINCT trpv.user_id) AS total_vendors
+      -- a network member's routed copy is not another invited vendor
+      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type,
+             COUNT(DISTINCT trpv.user_id) FILTER (WHERE trpv.routed_from_vendor_id IS NULL) AS total_vendors
       FROM tbl_rfq tr
       LEFT JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = tr.id
       GROUP BY tr.id
@@ -12793,6 +12883,23 @@ ORDER BY m.created_at;
     return await db.any(query, params);
   },
 
+  /**
+   * Resolve each tech-eval clause to the RFQ that owns it
+   * (clause -> tech evaluation -> rfq_product -> rfq).
+   * Returns one { clause_id, rfq_id } row per clause that exists; ids with no
+   * row do not exist.
+   */
+  getTechEvalClauseRfqIds: async (clauseIds) => {
+    return db.any(
+      `SELECT DISTINCT c.id AS clause_id, rp.rfq_id
+         FROM tbl_rfq_product_tech_evaluation_clauses c
+         JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+         JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+        WHERE c.id = ANY($1::int[])`,
+      [clauseIds]
+    );
+  },
+
   addVendorResponse: async (responses) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
@@ -12833,106 +12940,143 @@ ORDER BY m.created_at;
       VALUES ($1, $2, NOW());
     `;
 
-    return new Promise((resolve, reject) => {
-      // Iterate over each vendor response
-      const promises = responses.map(async (response) => {
-        const { vendor_id, clause_id, vendor_response, file_url } = response;
+    // The disagree reason lives in the per-clause chat thread (that is where
+    // the buyer's technical-evaluation screen and getDeviationPreviews read
+    // it), addressed to the RFQ creator exactly as the vendor chat drawer does.
+    const getClauseRfqOwnerQuery = `
+      SELECT r.created_by
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+      JOIN tbl_rfq r ON r.id = te.rfq_id
+      WHERE c.id = $1;
+    `;
 
-        // Validate clause existence
-        const clauseResult = await db.query(validateClauseQuery, [clause_id]);
-        // console.log("Clause validation result =", clauseResult);
-        if (!clauseResult[0].clause_exists) {
-          throw {
-            status: 0,
-            message: `Clause ID ${clause_id} does not exist.`
-          };
-        }
+    const getLatestCommentQuery = `
+      SELECT sender_id, text FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
+      ORDER BY timestamp DESC, id DESC
+      LIMIT 1;
+    `;
 
-        // Validate vendor existence
-        const vendorResult = await db.query(validateVendorQuery, [vendor_id]);
-        // console.log("Vendor validation result =", vendorResult);
-        if (!vendorResult[0].vendor_exists) {
-          reject({
-            status: 0,
-            message: `Vendor ID ${vendor_id} does not exist.`
-          });
-          return;
-        }
+    const insertDeviationCommentQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments
+      (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, timestamp)
+      VALUES ($1, $2, $3, $4, NOW());
+    `;
 
-        // Check if Vendor Response already exists
-        const existingResponse = await db.query(getExistingResponseQuery, [
-          clause_id,
-          vendor_id
-        ]);
+    try {
+      // One transaction for the whole request: a failure on any element rolls
+      // back every response, file and deviation comment written before it.
+      const results = await db.tx(async (t) => {
+        const out = [];
+        for (const response of responses) {
+          const { vendor_id, clause_id, vendor_response, file_url, deviation_text } = response;
 
-        let responseId;
-
-        if (existingResponse.length > 0 && existingResponse[0].id) {
-          // UPDATE existing response
-          const existingId = existingResponse[0].id;
-
-          // Update the response text
-          await db.query(updateVendorResponseQuery, [vendor_response, existingId]);
-          responseId = existingId;
-
-          // Only delete existing files if new files are provided
-          // If file_url is empty/null, keep existing files unchanged
-          if (file_url && file_url.length > 0) {
-            await db.query(deleteExistingFilesQuery, [existingId]);
+          const clauseResult = await t.query(validateClauseQuery, [clause_id]);
+          if (!clauseResult[0].clause_exists) {
+            throw {
+              status: 0,
+              message: `Clause ID ${clause_id} does not exist.`
+            };
           }
-        } else {
-          // INSERT new response
-          const insertResponseResult = await db.query(insertVendorResponseQuery, [
-            vendor_id,
+
+          const vendorResult = await t.query(validateVendorQuery, [vendor_id]);
+          if (!vendorResult[0].vendor_exists) {
+            throw {
+              status: 0,
+              message: `Vendor ID ${vendor_id} does not exist.`
+            };
+          }
+
+          const existingResponse = await t.query(getExistingResponseQuery, [
             clause_id,
-            vendor_response
+            vendor_id
           ]);
-          responseId = insertResponseResult[0].id;
-        }
 
-        // Insert associated files if provided
-        if (file_url && file_url.length > 0) {
-          for (const url of file_url) {
-            await db
-              .query(insertFileQuery, [responseId, url])
-              .catch((fileError) => {
-                logError(`Error adding file: ${url}`, fileError);
-                reject({
-                  status: 0,
-                  message:
-                    'Failed to add files associated with the vendor response.',
-                  error: fileError.message
-                });
-                return;
-              });
+          let responseId;
+
+          if (existingResponse.length > 0 && existingResponse[0].id) {
+            const existingId = existingResponse[0].id;
+            await t.query(updateVendorResponseQuery, [vendor_response, existingId]);
+            responseId = existingId;
+
+            // Only delete existing files if new files are provided
+            // If file_url is empty/null, keep existing files unchanged
+            if (file_url && file_url.length > 0) {
+              await t.query(deleteExistingFilesQuery, [existingId]);
+            }
+          } else {
+            const insertResponseResult = await t.query(insertVendorResponseQuery, [
+              vendor_id,
+              clause_id,
+              vendor_response
+            ]);
+            responseId = insertResponseResult[0].id;
           }
-        }
 
-        return {
-          status: 1,
-          message: 'Vendor response and files successfully added.',
-          response_id: responseId
-        };
+          if (file_url && file_url.length > 0) {
+            for (const url of file_url) {
+              await t.query(insertFileQuery, [responseId, url]);
+            }
+          }
+
+          // Persist the disagree reason to the clause chat. Skipped only when
+          // the LATEST message on the clause (from anyone) is this vendor's
+          // identical reason (re-submit); a buyer reply in between means the
+          // reason is posted again.
+          const reason =
+            vendor_response === 'I Dont Agree' && typeof deviation_text === 'string'
+              ? deviation_text.trim()
+              : '';
+          if (reason) {
+            const latest = await t.query(getLatestCommentQuery, [clause_id]);
+            const isRepeat =
+              latest.length > 0 &&
+              Number(latest[0].sender_id) === Number(vendor_id) &&
+              String(latest[0].text || '').trim() === reason;
+            if (!isRepeat) {
+              const owner = await t.query(getClauseRfqOwnerQuery, [clause_id]);
+              if (owner.length > 0 && owner[0].created_by) {
+                await t.query(insertDeviationCommentQuery, [
+                  clause_id,
+                  vendor_id,
+                  owner[0].created_by,
+                  reason
+                ]);
+              } else {
+                logger.warn(
+                  { clause_id },
+                  'addVendorResponse: no RFQ owner for clause; deviation comment skipped'
+                );
+              }
+            }
+          }
+
+          out.push({
+            status: 1,
+            message: 'Vendor response and files successfully added.',
+            response_id: responseId
+          });
+        }
+        return out;
       });
 
-      // Wait for all vendor responses to be processed
-      Promise.all(promises)
-        .then((results) => {
-          resolve({
-            status: 1,
-            message: 'All vendor responses successfully added.',
-            results: results
-          });
-        })
-        .catch((error) => {
-          logError('Error in addVendorResponses', error);
-          reject({
-            status: 0,
-            message: 'Error adding vendor responses or associated files.',
-            error: error.message
-          });
-        });
-    });
+      return {
+        status: 1,
+        message: 'All vendor responses successfully added.',
+        results
+      };
+    } catch (error) {
+      logError('Error in addVendorResponses', error);
+      if (error && error.status === 0 && /^Vendor ID .* does not exist\.$/.test(error.message || '')) {
+        throw { status: 0, message: error.message };
+      }
+      throw {
+        status: 0,
+        message: 'Error adding vendor responses or associated files.',
+        error: error.message
+      };
+    }
   },
 
   addtechEvaluationClearedVendors: (
@@ -16433,6 +16577,22 @@ ORDER BY tq.timestamp DESC;
   },
 
   /**
+   * Gives a tech-eval replacement vendor its invite row for the product (it needs one for
+   * the UI), and network members routed this RFQ their copy of it (Vendor Networks §6.3).
+   * Live routing assignments are locked first (the lock order of rfqSubject.js).
+   */
+  addTechEvalReplacementVendorRow: async (t, { rfqId, productVariantId, variant, vendorId }) => {
+    await lockLiveRfqAssignments(t, rfqId);
+    await t.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING`,
+      [rfqId, productVariantId, variant || 0, vendorId]
+    );
+    await propagateRoutedCopies(t, rfqId);
+  },
+
+  /**
    * Replace a vendor in technical evaluation with the next vendor in line
    * @param {number} rfq_id - RFQ ID
    * @param {number} rfq_product_id - RFQ Product ID
@@ -17335,8 +17495,14 @@ ORDER BY tq.timestamp DESC;
 
     // Get selected vendors for this RFQ product so consumers can show the full roster,
     // including vendors who have not started responding yet.
+    // Vendor Networks (spec §6.3): one row per org. A principal's invite and its member's
+    // routed copy are one invitee (org key = routed_from_vendor_id, else the user); the row
+    // shown is the one that quoted, else the principal's own invite. A vendor in no
+    // network is its own key: the roster is unchanged.
     const selectedVendors = await dbContext.any(
-      `SELECT
+      `SELECT rfq_product_vendor_id, vendor_id, vendor_name, vendor_email, company_name, has_submitted_quote
+         FROM (
+       SELECT DISTINCT ON (COALESCE(rpv.routed_from_vendor_id, rpv.user_id))
           rpv.id AS rfq_product_vendor_id,
           rpv.user_id AS vendor_id,
           tu.name AS vendor_name,
@@ -17359,7 +17525,12 @@ ORDER BY tq.timestamp DESC;
          AND rpv.product_variant_id = $2
          AND COALESCE(rpv.variant, 0) = COALESCE($3, 0)
          AND tu.status = 1
-       ORDER BY rpv.id ASC`,
+       ORDER BY COALESCE(rpv.routed_from_vendor_id, rpv.user_id),
+                has_submitted_quote DESC,                -- the row that quoted first
+                (rpv.routed_from_vendor_id IS NOT NULL), -- then the principal's own invite
+                rpv.id
+         ) per_org
+       ORDER BY rfq_product_vendor_id ASC`,
       [techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
 

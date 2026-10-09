@@ -11,6 +11,7 @@ import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
 import { vendorCanSubmitForHotels, resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
+import { orgKeysFor } from '../../services/vendorNetwork/orgKeySql.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
@@ -561,8 +562,14 @@ export async function getRequestDetail(req, res) {
         it.hotel_qtys = (split[String(it.id)] || []).filter((q) => invited.has(q.hotel_id));
         it.indicative_qty = it.hotel_qtys.reduce((sum, q) => sum + q.indicative_qty, 0);
       }
-      const coverage = await resolveArcVendorCoverage({ category_id: arc.category_id, hotel_ids: invitedHotelIds });
-      const mine = coverage.find((v) => Number(v.id) === Number(vendorId));
+      // Coverage rows are keyed by org principal (Vendor Networks, pooled); a branch
+      // invited before it was linked reads its org's row.
+      const [coverage, orgKeys] = await Promise.all([
+        resolveArcVendorCoverage({ category_id: arc.category_id, hotel_ids: invitedHotelIds }),
+        orgKeysFor([vendorId]),
+      ]);
+      const myKey = orgKeys.get(Number(vendorId)) ?? Number(vendorId);
+      const mine = coverage.find((v) => Number(v.id) === myKey);
       renewal_needed_hotel_ids = mine ? mine.renewal_needed_hotel_ids : invitedHotelIds;
     }
     return ok(res, {
