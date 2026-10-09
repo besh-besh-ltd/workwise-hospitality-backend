@@ -16,7 +16,7 @@ import {
   sendIfNetworkError,
 } from "../../services/vendorNetwork/guards.js";
 import { createSeatPaymentOrder, verifySeatPayment } from "../../services/vendorNetwork/seats.js";
-import { ROUTING_MODE } from "../../constants/vendorNetwork.js";
+import { ROUTING_MODE, seatFeeInr } from "../../constants/vendorNetwork.js";
 import {
   createOrgWithPrincipal,
   getOrgById,
@@ -161,6 +161,9 @@ export async function getOrg(req, res) {
         entities,
         members,
         link_invites: invites,
+        // The per-seat fee (NETWORK_SEAT_FEE_INR). At 0 an expired seat blocks nothing,
+        // so the FE shows "Included" rather than "Seat expired".
+        seat_fee_inr: seatFeeInr(),
       },
     });
   } catch (error) {

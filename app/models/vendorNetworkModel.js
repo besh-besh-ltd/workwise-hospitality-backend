@@ -263,19 +263,37 @@ export function updateOrgSettings(orgId, { name, routing_mode, routing_timeout_h
   );
 }
 
-/** Live entities with their login and current seat (active wins over pending), principal first. */
+/**
+ * Live entities with their login and seat, principal first. DISPLAY ONLY: no gate reads
+ * this (gates use getOperateState / entityCanOperate).
+ *
+ * seat_status: the current seat's status ('active' wins over 'pending'); when the entity
+ * has no current seat but an earlier one ran out (its FY ended, or it was marked
+ * expired), 'EXPIRED' with that seat; NULL when it never had one (or only cancelled
+ * ones). seat_valid_until is the shown seat's end date as 'YYYY-MM-DD'. Whether an expired seat matters
+ * depends on the fee: at 0 it blocks nothing (the FE shows "Included", see seat_fee_inr).
+ */
 export function listEntitiesWithSeats(orgId, runner = db, today = istDate()) {
   return runner.any(
     `SELECT e.vendor_id, e.relationship, e.status, e.preference_rank, e.linked_at,
             u.name, u.email, u.status AS user_status,
-            s.id AS seat_id, s.status AS seat_status, s.end_date AS seat_end_date, s.fee_amount AS seat_fee_amount
+            s.id AS seat_id,
+            CASE WHEN s.id IS NULL THEN NULL WHEN s.is_current THEN s.status ELSE 'EXPIRED' END AS seat_status,
+            s.end_date AS seat_end_date, s.end_date::text AS seat_valid_until, s.fee_amount AS seat_fee_amount
        FROM tbl_vendor_org_entities e
        JOIN tbl_users u ON u.id = e.vendor_id
        LEFT JOIN LATERAL (
-         SELECT id, status, end_date, fee_amount FROM tbl_vendor_network_seats
+         SELECT id, status, end_date, fee_amount,
+                (status IN ('active', 'pending') AND end_date >= $2::date) AS is_current
+           FROM tbl_vendor_network_seats
           WHERE org_id = e.org_id AND entity_vendor_id = e.vendor_id
-            AND status IN ('active', 'pending') AND end_date >= $2::date
-          ORDER BY (status = 'active') DESC, end_date DESC
+            AND (
+              (status IN ('active', 'pending') AND end_date >= $2::date)
+              OR status = 'expired'
+              OR (status = 'active' AND end_date < $2::date)
+            )
+          ORDER BY (status IN ('active', 'pending') AND end_date >= $2::date) DESC,
+                   (status = 'active') DESC, end_date DESC, id DESC
           LIMIT 1
        ) s ON true
       WHERE e.org_id = $1 AND e.status <> 'REMOVED'
@@ -409,12 +427,20 @@ export async function setLinkInviteStatus(inviteId, status, runner = db) {
   return result.rowCount === 1;
 }
 
-/** PENDING, unexpired invites addressed to a vendor, newest first. */
+/**
+ * PENDING, unexpired invites addressed to a vendor, newest first, with the inviting
+ * principal's company name and GSTIN (the inviter's own identity, which the invitee
+ * needs to judge consent; nothing else of the principal is returned).
+ */
 export function listIncomingLinkInvites(targetVendorId, runner = db) {
   return runner.any(
-    `SELECT i.id, i.org_id, o.name AS org_name, i.relationship, i.status, i.expires_at, i.created_at
+    `SELECT i.id, i.org_id, o.name AS org_name, i.relationship, i.status, i.expires_at, i.created_at,
+            COALESCE(NULLIF(TRIM(pc.company_name), ''), pu.name) AS principal_company_name,
+            NULLIF(TRIM(pc.gstin), '') AS principal_gstin
        FROM tbl_vendor_org_link_invites i
        JOIN tbl_vendor_orgs o ON o.id = i.org_id
+       JOIN tbl_users pu ON pu.id = o.principal_vendor_id
+       LEFT JOIN tbl_company pc ON pc.id = pu.company_id
       WHERE i.target_vendor_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()
       ORDER BY i.created_at DESC, i.id DESC`,
     [targetVendorId]

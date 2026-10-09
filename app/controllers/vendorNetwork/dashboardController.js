@@ -13,6 +13,7 @@ import { logger } from "../../util/logger.js";
 import { requireOrgAdmin, NetworkHttpError, sendIfNetworkError } from "../../services/vendorNetwork/guards.js";
 import { registeredSubjects } from "../../services/vendorNetwork/routingEngine.js";
 import { getOrgById, listEntitiesWithSeats } from "../../models/vendorNetworkModel.js";
+import { seatFeeInr } from "../../constants/vendorNetwork.js";
 import dashboardModel from "../../models/vendorNetworkDashboardModel.js";
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -79,7 +80,9 @@ export async function dashboardSummary(req, res) {
           name: e.name,
           relationship: e.relationship,
           status: e.status,
-          seat: e.seat_status ? { status: e.seat_status, end_date: e.seat_end_date } : null,
+          seat: e.seat_status
+            ? { status: e.seat_status, end_date: e.seat_end_date, valid_until: e.seat_valid_until }
+            : null,
           live_assignments: live.get(Number(e.vendor_id)) ?? 0,
           open_pos: open.get(Number(e.vendor_id)) ?? 0,
         })),
@@ -90,6 +93,7 @@ export async function dashboardSummary(req, res) {
           timed_out_7d: assignments.timed_out_7d,
         },
         pos: { by_status: byStatus },
+        seat_fee_inr: seatFeeInr(),
       },
     });
   } catch (error) {

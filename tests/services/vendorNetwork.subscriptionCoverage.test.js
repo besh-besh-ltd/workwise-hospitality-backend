@@ -113,6 +113,7 @@ describe("subscription-status / summary for a network member (D1)", () => {
       seat_valid_until: fyEnd(),
       seat_expired_on: null,
       covered: true,
+      seat_fee_inr: 0,
     };
 
     // The member's own login and a person acting for it see the same thing.
@@ -168,6 +169,7 @@ describe("subscription-status / summary for a network member (D1)", () => {
       seat_expired_on: yesterday,
       subscription_active: true,
       covered: false,
+      seat_fee_inr: 500,
     });
 
     const gated = await client.get("/api/v1/rfq/get-rfqs?page=1&limit=10&tech_eval=false");

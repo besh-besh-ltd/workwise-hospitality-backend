@@ -24,6 +24,7 @@ import { getNetworkSubscriptionStanding, getOrgByEntity } from "../../models/ven
  *   seat_valid_until,              // 'YYYY-MM-DD' | null
  *   seat_expired_on,               // last seat end date when the seat is not active, else null
  *   covered,                       // ACTIVE entity AND subscription_active AND seat_active
+ *   seat_fee_inr,                  // the per-seat fee; at 0 an expired seat blocks nothing
  * }
  */
 export async function networkSubscriptionCoverage(user, runner = db) {
@@ -53,6 +54,7 @@ export async function networkSubscriptionCoverage(user, runner = db) {
     seat_valid_until: seatValidUntil,
     seat_expired_on: seatActive ? null : standing.last_seat_end ?? null,
     covered: standing.entity_status === ENTITY_STATUS.ACTIVE && subscriptionActive && seatActive,
+    seat_fee_inr: seatFeeInr(),
   };
 }
 

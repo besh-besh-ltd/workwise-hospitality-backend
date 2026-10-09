@@ -277,6 +277,12 @@ describe("vendor network org and entity API", () => {
     const incoming = await (await httpClient(TARGET)).get(`${BASE}/link-invites/incoming`);
     expect(incoming.body.data.map((i) => i.id)).toEqual([id]);
     expect(incoming.body.data[0]).toMatchObject({ org_name: "VN Org", relationship: "DEALER" });
+    // Consent needs the inviter's identity: its principal's company name and GSTIN, and
+    // nothing else of the principal (Task 24 dialog).
+    expect(incoming.body.data[0]).toMatchObject({ principal_company_name: `VN ${HQ}`, principal_gstin: HQ_GSTIN });
+    expect(Object.keys(incoming.body.data[0]).sort()).toEqual(
+      ["created_at", "expires_at", "id", "org_id", "org_name", "principal_company_name", "principal_gstin", "relationship", "status"]
+    );
     expect((await (await httpClient(LONE)).get(`${BASE}/link-invites/incoming`)).body.data).toEqual([]);
 
     // Someone else cannot accept it.
@@ -539,6 +545,48 @@ describe("vendor network org and entity API", () => {
       [HQ, null],
       [BRANCH, "active"],
     ]);
+  });
+
+  it("9b. seat renewal at fee 0: a seat whose FY ended blocks nothing, and is shown as EXPIRED with seat_fee_inr", async () => {
+    await world();
+    // BRANCH's only seat ended last FY (31 March), still marked 'active'.
+    await db.none(
+      `UPDATE tbl_vendor_network_seats SET start_date = DATE '2024-04-01', end_date = DATE '2025-03-31' WHERE entity_vendor_id = $1`,
+      [BRANCH]
+    );
+    expect(await entityCanOperate(BRANCH)).toEqual({ ok: true });
+    const admin = await httpClient(HQ);
+
+    const got = await admin.get(`${BASE}/org`);
+    expect(got.status).toBe(200);
+    expect(got.body.data.seat_fee_inr).toBe(0);
+    const branch = got.body.data.entities.find((e) => e.vendor_id === BRANCH);
+    expect(branch).toMatchObject({ seat_status: "EXPIRED", seat_valid_until: "2025-03-31" });
+    expect(got.body.data.entities.find((e) => e.vendor_id === HQ)).toMatchObject({ seat_status: null, seat_valid_until: null });
+
+    const summary = await admin.get(`${BASE}/dashboard/summary`);
+    expect(summary.body.data.seat_fee_inr).toBe(0);
+    expect(summary.body.data.entities.find((e) => e.vendor_id === BRANCH).seat).toMatchObject({
+      status: "EXPIRED",
+      valid_until: "2025-03-31",
+    });
+
+    // Assignable at fee 0 (the gate is entityCanOperate, never this list).
+    const a = await liveAssignment(ORG, BRANCH, 77);
+    expect(a.id).toBeTruthy();
+
+    // With a fee the same seat blocks (NO_SEAT); a current seat wins over the expired one.
+    process.env.NETWORK_SEAT_FEE_INR = "500";
+    expect(await entityCanOperate(BRANCH)).toEqual({ ok: false, reason: "NO_SEAT" });
+    expect((await admin.get(`${BASE}/org`)).body.data.seat_fee_inr).toBe(500);
+    await db.none(
+      `INSERT INTO tbl_vendor_network_seats (org_id, entity_vendor_id, fee_amount, start_date, end_date, status)
+       VALUES ($1, $2, 500, CURRENT_DATE, CURRENT_DATE + 30, 'active')`,
+      [ORG, BRANCH]
+    );
+    const renewed = (await admin.get(`${BASE}/org`)).body.data.entities.find((e) => e.vendor_id === BRANCH);
+    expect(renewed.seat_status).toBe("active");
+    expect(await entityCanOperate(BRANCH)).toEqual({ ok: true });
   });
 
   it("10. every :vendorId target must be an entity of the caller's org, else 404", async () => {
