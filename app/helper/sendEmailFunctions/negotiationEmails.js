@@ -1,6 +1,6 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
-import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import { buyerQuoteComparison, buyerRfqList, toAbsoluteUrl, vendorRfqDetail, vendorRfqList } from "../../services/notificationLinks.js";
@@ -763,10 +763,7 @@ export const sendNegotiationRoundVendorNotification = async ({
           </p>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${viewUrl}"
-               style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-              Submit Quote
-            </a>
+            ${emailButton(viewUrl, 'Submit Quote')}
           </div>
 
           <p style="text-align:center; margin-top:30px;">

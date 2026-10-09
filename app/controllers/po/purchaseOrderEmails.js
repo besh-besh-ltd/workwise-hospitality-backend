@@ -2,7 +2,7 @@ import config from "../../config/app.config.js";
 import db from "../../config/dbConn.js";
 import { sendMail, logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
-import { generateEmailTemplate } from "../../helper/notificationEmailLayout.js";
+import { generateEmailTemplate, emailButton } from "../../helper/notificationEmailLayout.js";
 import userModel from "../../models/userModel.js";
 import vendorModel from "../../models/vendorModel.js";
 import rbacModel from "../../models/rbacModel.js";
@@ -83,10 +83,9 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
                 Please ensure the necessary actions are taken to proceed the Purchase Order.
             </p>
 
-            <a href="${emailUrl}"
-            style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600; margin: 20px auto;">
-            View Purchase Order
-            </a>
+            <div style="text-align:center; margin:20px 0;">
+            ${emailButton(emailUrl, 'View Purchase Order')}
+            </div>
 
             <p style="text-align:center; margin-top: 30px;">
             Thank you for staying proactive.<br/>
@@ -284,10 +283,7 @@ export const sendPOAcceptanceRequestToVendor = async (purchaseOrder, rfqDetails)
         </div>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${reviewUrl}"
-             style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-            Review Purchase Order
-          </a>
+          ${emailButton(reviewUrl, 'Review Purchase Order')}
         </div>
 
         <p style="text-align:center; margin-top: 30px;">
@@ -514,10 +510,7 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
         </div>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${reviewUrl}"
-             style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-            Review Purchase Order
-          </a>
+          ${emailButton(reviewUrl, 'Review Purchase Order')}
         </div>
 
         <p style="text-align:center; margin-top: 30px;">
