@@ -220,3 +220,29 @@ login '{"employee_code":"E2EBUY01","password":"E2e@12345"}'                     
     so IGST 18%: ₹54,000 + ₹9,720 = ₹63,720.
   - A call-off where either state is unknown keeps the single "GST" line.
 - **Fresh start.** Re-run the seed. If that fails, run step 1 and then the seed.
+
+## 7. Accepted behaviours and limits (pre-release audit, 2026-10-09)
+
+Decided, not bugs. Check against these before filing one.
+
+- **An ENTITY_MEMBER on the principal can sign (audit L2).** A person added as
+  ENTITY_MEMBER of the principal entity acts as the principal, so it can sign, OTP-verify
+  and decline ARC contracts and accept addenda. Granting that membership grants signing
+  authority; admins should give it only to people who may sign for the company.
+- **A member invite claims an unregistered email (audit L5).** Inviting a person creates
+  an INVITED type-11 login for that email, so the same email cannot register as a vendor
+  or buyer until the invite is disabled, and the invitee gets Workwise-branded mail naming
+  the inviting org. The invite expires after 72h but the row stays.
+- **Emailed-link (guest) sessions are RFQ-only.** A session from `verify-vendor-token`
+  can view, quote and regret on the RFQ; every network/account route (and
+  change-password) answers 403 `{reason: 'GUEST_SESSION'}`. Log in normally to manage a
+  network.
+- **`verify-vendor-token` is rate-limited** in memory, per process: 20 invalid tokens per
+  client per 10 minutes, then 429 for the rest of the window. The client is the right-most
+  `X-Forwarded-For` hop, else the socket address. Valid tokens are never counted.
+- **Entity cap.** `POST /entities` stops at `NETWORK_MAX_ENTITIES` live entities per org
+  (default 200, principal included): 409 `ENTITY_LIMIT`.
+- **Branch PAN.** A BRANCH created with `POST /entities` must have a GSTIN carrying the
+  principal's PAN (characters 3-12): 400 `BRANCH_PAN_MISMATCH`. Distributors and dealers
+  are separate legal entities and are not checked.
+- **Member-invite links** carry the token in the fragment: `/vendor/network/accept-invite#token=…`.
