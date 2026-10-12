@@ -792,6 +792,23 @@ describe("Task 25: a member reviews the contract before it accepts", () => {
     expect((await viewAs(FB)).status).toBe(403);
   });
 
+  it("a SUPERSEDED assignment grants nothing; the member that superseded it reads the contract", async () => {
+    const first = await routeTo(B);
+    expect((await viewAs(B)).status).toBe(200);
+    await routeTo(C);
+    expect((await assignmentRow(first)).status).toBe("SUPERSEDED");
+    expect((await viewAs(B)).status).toBe(403);
+    expect((await viewAs(C)).status).toBe(200);
+  });
+
+  it("a REMOVED entity with a PENDING assignment sees nothing", async () => {
+    const pending = (await assignHotel(B)).body.data;
+    // Removed in place (the entity API would also revoke the row): the entity check alone refuses.
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'REMOVED' WHERE org_id = $1 AND vendor_id = $2`, [ORG, B]);
+    expect((await assignmentRow(pending.id)).status).toBe("PENDING");
+    expect((await viewAs(B)).status).toBe(403);
+  });
+
   it("a suspended entity with a PENDING assignment sees nothing", async () => {
     const pending = (await assignHotel(B)).body.data;
     // Suspended in place (the entity API would also revoke the row): the entity check alone refuses.

@@ -15,6 +15,8 @@ import { IDS } from "../fixtures/ids.js";
 import { buildTestApp } from "../setup/app.js";
 import { boundRequest, httpClient } from "../helpers/http.js";
 import { makeRFQ } from "../factories/rfq.js";
+import { TEST_CATEGORIES } from "../fixtures/vendors.js";
+import { deleteArcs } from "../helpers/arcGroupSeed.js";
 import noLogin from "../../app/middleware/noLogin.js";
 import { isGuestSession } from "../../app/helper/guestSession.js";
 import {
@@ -409,5 +411,80 @@ describe("fix round 2: guests cannot sign, decline or clarify ARC contracts and 
       const res = await client.post(`${ARC}${route}`).send({});
       expect(res.body.reason).not.toBe("GUEST_SESSION");
     }
+  });
+});
+
+// Task 25 fix round 2: an emailed-link guest session reads no rate contract. The guest
+// token is minted only from an emailed RFQ link; no ARC link carries one, so the contract
+// detail route refuses guests outright: the contract holder, and a member entity that a
+// contract hotel is offered to (PENDING) or that fulfils one (ACCEPTED).
+describe("Task 25 fix round 2: a guest session reads no rate contract", () => {
+  const CONTRACT = (id) => `/api/v1/arc-v2/vendor/contracts/${id}`;
+  let arcId;
+  let contractId;
+
+  beforeEach(async () => {
+    const variant = (await db.one(`SELECT id FROM tbl_product_variant ORDER BY id ASC LIMIT 1`)).id;
+    arcId = Number(
+      (
+        await db.one(
+          `INSERT INTO tbl_arc (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id,
+                                status, is_group, contract_start_at, contract_end_at, created_by)
+           VALUES ('ARC-VN-GUEST-' || floor(random() * 1e9)::text, 'Guest linen', $1, $2, $3, $4,
+                   'contract_active', true, NOW() - INTERVAL '1 day', NOW() + INTERVAL '300 days', $5)
+           RETURNING id`,
+          [TEST_CATEGORIES.beverages, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, BUYER]
+        )
+      ).id
+    );
+    const item = await db.one(
+      `INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom) VALUES ($1, $2, 100, 'pcs') RETURNING id`,
+      [arcId, variant]
+    );
+    contractId = Number(
+      (await db.one(`INSERT INTO tbl_arc_contract (arc_id, vendor_id, status, signed_by_vendor_at) VALUES ($1, $2, 'active', NOW()) RETURNING id`, [arcId, HQ])).id
+    );
+    const line = await db.one(
+      `INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty) VALUES ($1, $2, 90, 5, 100) RETURNING id`,
+      [contractId, item.id]
+    );
+    await db.none(
+      `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty) VALUES ($1, $2, 60), ($1, $3, 40)`,
+      [line.id, IDS.hotels.A1, IDS.hotels.A2]
+    );
+  });
+
+  afterEach(async () => {
+    await deleteArcs([arcId]);
+    await db.none(`DELETE FROM tbl_arc_item WHERE arc_id = $1`, [arcId]);
+    await db.none(`DELETE FROM tbl_arc WHERE id = $1`, [arcId]);
+  });
+
+  const offerHotelTo = (vendorId, status = "PENDING") =>
+    db.none(
+      `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status, due_at)
+       VALUES ($1, 'ARC_HOTEL', $2, $3, $4, $5, now() + interval '1 day')`,
+      [ORG, contractId, IDS.hotels.A2, vendorId, status]
+    );
+
+  it("a member's guest session cannot read a contract hotel offered to it (PENDING); its normal session can", async () => {
+    await offerHotelTo(BRANCH);
+    const normal = await (await httpClient(BRANCH)).get(CONTRACT(contractId));
+    expect(normal.status).toBe(200);
+    expect(normal.body.data.viewer_role).toBe("fulfilment_member");
+    expectGuestRefusal(await (await asGuest(BRANCH)).get(CONTRACT(contractId)));
+  });
+
+  it("nor one it fulfils (ACCEPTED)", async () => {
+    await offerHotelTo(BRANCH, "ACCEPTED");
+    expect((await (await httpClient(BRANCH)).get(CONTRACT(contractId))).status).toBe(200);
+    expectGuestRefusal(await (await asGuest(BRANCH)).get(CONTRACT(contractId)));
+  });
+
+  it("the contract holder's guest session cannot read its own contract; its normal session can", async () => {
+    const normal = await (await httpClient(HQ)).get(CONTRACT(contractId));
+    expect(normal.status).toBe(200);
+    expect(normal.body.data).not.toHaveProperty("viewer_role");
+    expectGuestRefusal(await (await asGuest(HQ)).get(CONTRACT(contractId)));
   });
 });

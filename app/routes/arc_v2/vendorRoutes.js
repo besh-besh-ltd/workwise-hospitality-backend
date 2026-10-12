@@ -80,7 +80,9 @@ r.post('/negotiation/rounds/:roundId/quote',       passportSignIn, acl([3]), hos
 // Contract acceptance + active list.
 r.get( '/pending-acceptance',                       passportSignIn, acl([3]), contractController.getPendingAcceptance);
 r.get( '/active',                                   passportSignIn, acl([3]), contractController.getVendorActiveContracts);
-r.get( '/contracts/:contractId',                    passportSignIn, acl([3]), contractController.getContractDetail);
+// Emailed-link guest sessions only open the RFQ (no ARC link carries a guest token): the
+// contract holder's and a fulfilment member's read are both refused (Task 25).
+r.get( '/contracts/:contractId',                    passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.getContractDetail);
 r.post('/contracts/:contractId/otp/request',        passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.requestOtp);
 r.post('/contracts/:contractId/otp/verify',         passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.verifyOtp);
 r.post('/contracts/:contractId/clarification',      passportSignIn, refuseGuestSessionMiddleware, acl([3]), contractController.requestClarification);
