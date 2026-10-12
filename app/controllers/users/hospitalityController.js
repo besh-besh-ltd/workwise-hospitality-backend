@@ -1620,6 +1620,38 @@ const HospitalityController = {
 
       logger.info(`[DeleteMapping] user=${userId} company=${companyId} hotel=${hotelId} type=${mappingType} — removed ${removedScopeCount} role scopes`);
 
+      // For the activity trail. Once this request is done there is no mapping
+      // row left to say which unit the user was removed from, and the user's
+      // other mappings would name the wrong one — so the validated unit and
+      // both names are handed over here, and only on this path, after the
+      // removal committed. The warning path above returns 200 without
+      // removing anything and deliberately sets nothing.
+      try {
+        const unitHotelId = mappingType === 1 ? hotelId : null;
+        const labels = await db.oneOrNone(
+          `SELECT COALESCE(NULLIF(TRIM(u.name), ''), u.email) AS user_label,
+                  COALESCE(h.name, c.name) AS unit_label
+             FROM tbl_users u
+             LEFT JOIN tbl_hospitality_companies c ON c.id = $2
+             LEFT JOIN tbl_hospitality_company_hotels h ON h.id = $3
+            WHERE u.id = $1`,
+          [userId, companyId, unitHotelId]
+        );
+        res.locals.activityDetail = {
+          scope: { hospitalityCompanyId: companyId, hotelId: unitHotelId, entityLabel: labels?.user_label || null },
+          user_label: labels?.user_label || null,
+          unit_label: labels?.unit_label || null,
+          removed_role_scopes: removedScopeCount,
+        };
+      } catch (labelErr) {
+        // Naming the event must never fail the removal it describes.
+        logError('Could not label the mapping removal for the activity trail', labelErr);
+        res.locals.activityDetail = {
+          scope: { hospitalityCompanyId: companyId, hotelId: mappingType === 1 ? hotelId : null },
+          removed_role_scopes: removedScopeCount,
+        };
+      }
+
       // Propagate: remove user from pending instances in this scope
       try {
         const propResult = await db.tx(async t => {
