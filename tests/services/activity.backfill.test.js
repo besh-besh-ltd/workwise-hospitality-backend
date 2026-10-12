@@ -198,9 +198,12 @@ describe("backfill queries", () => {
   it("scopes every projected row to a company", async () => {
     await runAll();
     // A row with no company could never be shown to anybody. The queries drop
-    // those rather than writing rows that only grow the table.
+    // those rather than writing rows that only grow the table. A company-wide
+    // row (a workflow, a role — see admin_actions) names its buyer company
+    // instead of a hospitality company; one that names neither is the bug.
     const unscoped = await db.any(
-      "SELECT id FROM tbl_activity_events WHERE hospitality_company_id IS NULL"
+      `SELECT id FROM tbl_activity_events
+        WHERE hospitality_company_id IS NULL AND buyer_company_id IS NULL`
     );
     expect(unscoped).toEqual([]);
   });
