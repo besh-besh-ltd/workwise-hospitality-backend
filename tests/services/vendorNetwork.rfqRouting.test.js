@@ -27,7 +27,7 @@ import {
   getSubjectHandler,
   revokeLiveAssignmentsForEntity,
 } from "../../app/services/vendorNetwork/routingEngine.js";
-import { rfqSubjectHandler, assertOrgMayQuote } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
+import { rfqSubjectHandler, assertOrgMayQuote, assertOrgMayClarify } from "../../app/services/vendorNetwork/subjects/rfqSubject.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import dashboardModel from "../../app/models/dashboardModel.js";
 import { lockRoutingSubject, getAssignment, releaseAssignment } from "../../app/models/vendorRoutingModel.js";
@@ -154,6 +154,15 @@ async function cleanupRfqs() {
   await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id BETWEEN 95951 AND 95969`);
   await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_change_history WHERE rfq_id = ANY($1::int[])`, [ids]);
+  const clar = `SELECT id FROM tbl_rfq_clarifications WHERE rfq_id = ANY($1::int[])`;
+  await db.none(
+    `DELETE FROM tbl_rfq_clarification_message_files WHERE message_id IN
+       (SELECT id FROM tbl_rfq_clarification_messages WHERE clarification_id IN (${clar}))`,
+    [ids]
+  );
+  await db.none(`DELETE FROM tbl_rfq_clarification_messages WHERE clarification_id IN (${clar})`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_clarification_files WHERE clarification_id IN (${clar})`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_clarifications WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = ANY($1::int[])`, [ids]);
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids]);
@@ -1421,5 +1430,91 @@ describe("Task 25 B3: a PENDING member reviews the RFQ before it accepts", () =>
     const after = await createQuote(B, rfq);
     expect(after.status).toBe(200);
     expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: B, is_regret: 0 }]);
+  });
+});
+
+// Task 25 fix round 1: the RFQ page tells a member it must accept before it acts, and a
+// PENDING member may read the RFQ's clarifications but not raise one (raising pauses
+// quoting for every vendor on the RFQ), exactly as it may not quote.
+describe("Task 25 fix round 1: a PENDING member is told to accept, and may not raise a clarification", () => {
+  const RAISE = "/api/v1/rfq/clarification/raise";
+  const raise = async (userId, rfqId) =>
+    (await httpClient(userId)).post(RAISE).send({ rfq_id: rfqId, subject: "Delivery", question: "Can delivery be split?" });
+  const clarificationsOf = (rfqId) =>
+    db.any(`SELECT raised_by FROM tbl_rfq_clarifications WHERE rfq_id = $1 ORDER BY id`, [rfqId]);
+  const openClarificationWindow = (rfqId) =>
+    db.none(`UPDATE tbl_rfq SET vendor_clarification_date = $2 WHERE id = $1`, [rfqId, istString(24 * HOUR)]);
+
+  it("the RFQ detail carries the member's own assignment: PENDING, then ACCEPTED; null for the principal; absent outside a network", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    expect(a.status).toBe(201);
+    const row = await assignment(a.body.data.id);
+
+    const pending = await vendorGet(B, rfq.rfq_id);
+    expect(pending.status).toBe(200);
+    expect(pending.body.data.network_assignment).toEqual({
+      id: a.body.data.id,
+      status: "PENDING",
+      due_at: new Date(row.due_at).toISOString(),
+      principal_name: `VN RFQ ${HQ}`,
+    });
+    // The person acting for B gets the same.
+    expect((await vendorGet(MP, rfq.rfq_id)).body.data.network_assignment.id).toBe(a.body.data.id);
+
+    expect((await respond(B, a.body.data.id, { decision: "ACCEPT" })).status).toBe(200);
+    expect((await vendorGet(B, rfq.rfq_id)).body.data.network_assignment).toMatchObject({ id: a.body.data.id, status: "ACCEPTED" });
+
+    const hq = await vendorGet(HQ, rfq.rfq_id);
+    expect(hq.body.data.id).toBe(rfq.rfq_id);
+    expect(hq.body.data.network_assignment).toBeNull();
+    // A vendor in no network: the payload is as before.
+    const no = await vendorGet(NO, rfq.rfq_id);
+    expect(no.body.data.id).toBe(rfq.rfq_id);
+    expect(no.body.data).not.toHaveProperty("network_assignment");
+  });
+
+  it("a PENDING member reads clarifications but may not raise one (403 ROUTING_REQUIRED) until it accepts", async () => {
+    const rfq = await openRfq();
+    await openClarificationWindow(rfq.rfq_id);
+    const a = await assign(rfq.rfq_id, B);
+
+    expect((await (await httpClient(B)).get(`/api/v1/rfq/clarifications/${rfq.rfq_id}`)).status).toBe(200);
+    const refused = await raise(B, rfq.rfq_id);
+    expect(refused.status).toBe(403);
+    expect(refused.body).toEqual({
+      status: 0,
+      message: "Your network admin has not routed this RFQ to you, or you have not accepted it yet",
+      reason: "ROUTING_REQUIRED",
+    });
+    expect((await raise(MP, rfq.rfq_id)).body.reason).toBe("ROUTING_REQUIRED");
+    expect(await clarificationsOf(rfq.rfq_id)).toEqual([]);
+
+    expect((await respond(B, a.body.data.id, { decision: "ACCEPT" })).status).toBe(200);
+    const raised = await raise(B, rfq.rfq_id);
+    expect(raised.status).toBe(200);
+    expect(await clarificationsOf(rfq.rfq_id)).toEqual([{ raised_by: B }]);
+  });
+
+  it("the principal, an entity on its own direct invite and a vendor in no network still raise clarifications", async () => {
+    for (const [vendor, invite] of [[HQ, [HQ, FHQ]], [C, [HQ, C, FHQ]], [NO, [HQ, NO]]]) {
+      const rfq = await openRfq({ invite });
+      await openClarificationWindow(rfq.rfq_id);
+      const res = await raise(vendor, rfq.rfq_id);
+      expect([vendor, res.status]).toEqual([vendor, 200]);
+      expect(await clarificationsOf(rfq.rfq_id)).toEqual([{ raised_by: vendor }]);
+    }
+  });
+
+  it("a SUSPENDED entity with a direct invite may not raise one (403 NOT_ACTIVE)", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    await openClarificationWindow(rfq.rfq_id);
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE org_id = $1 AND vendor_id = $2`, [ORG_A, C]);
+    const res = await raise(C, rfq.rfq_id);
+    // Sign-in refuses a suspended entity first; assertOrgMayClarify's own check is defence in depth.
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ status: 0, code: "NOT_ACTIVE" });
+    await expect(assertOrgMayClarify(rfq.rfq_id, C)).rejects.toMatchObject({ http: 403, reason: "NOT_ACTIVE" });
+    expect(await clarificationsOf(rfq.rfq_id)).toEqual([]);
   });
 });

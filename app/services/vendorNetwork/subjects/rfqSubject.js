@@ -302,4 +302,50 @@ export async function assertOrgMayQuote(rfqId, vendorId, t = db) {
   }
 }
 
-export default { rfqSubjectHandler, quoteGateApplies, assertOrgMayQuote };
+/**
+ * Throws NetworkHttpError when `vendorId` may not raise a clarification on `rfqId`.
+ * Raising one pauses quoting for every vendor on the RFQ, so it follows the quote gate's
+ * rules (a) and (d): only an ACTIVE entity, and a non-principal one only while it holds
+ * the org's ACCEPTED assignment or its own direct invite. A PENDING member reads the
+ * RFQ's clarifications but raises one only once it accepts. A vendor in no org: no-op.
+ */
+export async function assertOrgMayClarify(rfqId, vendorId, t = db) {
+  const self = await getOrgByEntity(vendorId, t);
+  if (!self) return;
+  if (self.entity_status !== "ACTIVE") {
+    throw new NetworkHttpError(403, "This network entity is not active", "NOT_ACTIVE");
+  }
+  if (Number(self.principal_vendor_id) === Number(vendorId)) return;
+  const state = await getOrgQuoteState(self.org_id, rfqId, vendorId, t);
+  if (state.direct_invite || Number(state.accepted_vendor_id) === Number(vendorId)) return;
+  throw new NetworkHttpError(
+    403,
+    "Your network admin has not routed this RFQ to you, or you have not accepted it yet",
+    "ROUTING_REQUIRED"
+  );
+}
+
+/**
+ * The acting member entity's own live routing assignment on RFQ `rfqId` in its org, for the
+ * vendor RFQ pages: { id, status: 'PENDING'|'ACCEPTED', due_at, principal_name } or null.
+ * The pages ask a PENDING member to accept before it quotes, regrets or raises a
+ * clarification (the gates above refuse it).
+ */
+export async function memberRfqAssignment(rfqId, vendorId, orgId, runner = db) {
+  const row = await runner.oneOrNone(
+    `SELECT a.id, a.status, a.due_at,
+            COALESCE(NULLIF(TRIM(pc.company_name), ''), pu.name) AS principal_name
+       FROM tbl_vendor_routing_assignments a
+       JOIN tbl_vendor_orgs o ON o.id = a.org_id
+       JOIN tbl_users pu ON pu.id = o.principal_vendor_id
+       LEFT JOIN tbl_company pc ON pc.id = pu.company_id
+      WHERE a.org_id = $1 AND a.subject_type = 'RFQ' AND a.subject_id = $2 AND a.assigned_vendor_id = $3
+        AND a.status IN ('PENDING', 'ACCEPTED')
+      ORDER BY (a.status = 'ACCEPTED') DESC, a.id DESC
+      LIMIT 1`,
+    [orgId, rfqId, vendorId]
+  );
+  return row ? { id: Number(row.id), status: row.status, due_at: row.due_at, principal_name: row.principal_name } : null;
+}
+
+export default { rfqSubjectHandler, quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssignment };

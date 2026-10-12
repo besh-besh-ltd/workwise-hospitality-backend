@@ -84,7 +84,7 @@ import { buildNegotiationMetrics } from '../../services/quoteComparisonMetrics.j
 import { deriveScope as deriveQcScope } from '../po/poDashboardController.js';
 import { deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { getPersonalPendingForRFQs } from '../../models/rfq/rfqPendingPersonal.js';
-import { quoteGateApplies, assertOrgMayQuote } from '../../services/vendorNetwork/subjects/rfqSubject.js';
+import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssignment } from '../../services/vendorNetwork/subjects/rfqSubject.js';
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
@@ -8704,6 +8704,15 @@ const rfqController = {
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
         rfqData.has_paid_tender_fees = rfqData.vendor_payment_status === 'success';
         delete rfqData.vendor_payment_status;
+      }
+
+      // Vendor Networks: a member entity sees its own routing assignment on the RFQ, so
+      // the vendor pages ask a PENDING member to accept before it quotes. Scope is the
+      // acting entity and its org from req.user; a vendor in no network gets no key.
+      if (rfqData?.id && req.user.user_type == 3 && req.user.network) {
+        rfqData.network_assignment = req.user.network.is_principal
+          ? null
+          : await memberRfqAssignment(rfqData.id, req.user.id, req.user.network.org_id);
       }
 
       res
@@ -18076,6 +18085,16 @@ getClauses: async (req, res) => {
           status: 0,
           message: 'You are not invited to this RFQ'
         });
+      }
+      // Vendor Networks: a routed member raises one only once it has accepted the RFQ
+      // (raising pauses quoting for every vendor), as it quotes only then.
+      if (quoteGateApplies(req)) {
+        try {
+          await assertOrgMayClarify(Number(rfq_id), user.id);
+        } catch (err) {
+          if (err instanceof NetworkHttpError) return res.status(err.http).json(networkRefusalBody(err));
+          throw err;
+        }
       }
 
       // Validate clarification period — anchored to IST, not to the Node
