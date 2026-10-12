@@ -1378,3 +1378,48 @@ describe("handler", () => {
     });
   });
 });
+
+// Task 25 B3: "View RFQ" on Assigned to me opens /dashboard/vendor/inquiries-details?id=…
+// for a PENDING member. That page loads the RFQ (getRfqById, no vendor list), its
+// clarifications and its negotiation rounds; each must answer the member the way it
+// answers the invited principal, while quoting stays refused until it accepts.
+describe("Task 25 B3: a PENDING member reviews the RFQ before it accepts", () => {
+  const pageCalls = async (userId, rfqId) => {
+    const client = await httpClient(userId);
+    return Promise.all([
+      client.get(`/api/v1/rfq/getRfqById/${rfqId}?includeVendors=false`),
+      client.get(`/api/v1/rfq/clarifications/${rfqId}`),
+      client.get(`/api/v1/negotiation/rounds/${rfqId}/active-all`),
+    ]);
+  };
+
+  it("loads everything the vendor RFQ page loads, read-only, and quotes once it accepts", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    expect(a.status).toBe(201);
+
+    const [rfqRes, clarRes, roundsRes] = await pageCalls(B, rfq.rfq_id);
+    const [hqRfq, hqClar, hqRounds] = await pageCalls(HQ, rfq.rfq_id);
+    expect([rfqRes.status, clarRes.status, roundsRes.status]).toEqual([200, 200, 200]);
+    expect(rfqRes.body.data.id).toBe(rfq.rfq_id);
+    expect(rfqRes.body.data.rfq_no).toBe(rfq.rfq_no);
+    // The same RFQ products, clarification state and rounds as the invited principal.
+    const products = (body) => (body.data.products || []).map((p) => Number(p.product_variant_id ?? p.id)).sort();
+    expect(products(rfqRes.body)).toEqual(products(hqRfq.body));
+    expect(products(rfqRes.body).length).toBeGreaterThan(0);
+    expect(clarRes.body.status).toBe(hqClar.body.status);
+    expect(roundsRes.body.data).toEqual(hqRounds.body.data);
+
+    // Read-only until it accepts: no quote, no regret.
+    const quote = await createQuote(B, rfq);
+    expect(quote.status).toBe(403);
+    expect(quote.body.reason).toBe("ROUTING_REQUIRED");
+    expect((await createQuote(B, rfq, { regret: true })).body.reason).toBe("ROUTING_REQUIRED");
+    expect(await quotesOf(rfq.rfq_id)).toEqual([]);
+
+    expect((await respond(B, a.body.data.id, { decision: "ACCEPT" })).status).toBe(200);
+    const after = await createQuote(B, rfq);
+    expect(after.status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: B, is_regret: 0 }]);
+  });
+});
