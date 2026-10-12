@@ -21,8 +21,10 @@ import noLogin from "../../app/middleware/noLogin.js";
 import { isGuestSession } from "../../app/helper/guestSession.js";
 import {
   seedVendorEntity,
+  seedPerson,
   seedOrg,
   addEntity,
+  addMember,
   cleanupVendorNetworkFixtures,
 } from "../helpers/vendorNetworkSeed.js";
 
@@ -486,5 +488,76 @@ describe("Task 25 fix round 2: a guest session reads no rate contract", () => {
     expect(normal.status).toBe(200);
     expect(normal.body.data).not.toHaveProperty("viewer_role");
     expectGuestRefusal(await (await asGuest(HQ)).get(CONTRACT(contractId)));
+  });
+});
+
+// Task 26: the emailed-link guest session (minted from an RFQ email, for that RFQ only)
+// reaches no vendor ARC endpoint, read or write: the vendor ARC router refuses it once,
+// before any route, and the vendor's amendment request (mounted under /arc-v2/amendments)
+// refuses it too. No ARC email or notification link carries a guest token. A normal
+// vendor session and a network member person's session are unaffected.
+describe("Task 26: a guest session reaches no vendor ARC endpoint", () => {
+  const ARC = "/api/v1/arc-v2/vendor";
+  const MEMBER = 95564; // type-11 ENTITY_MEMBER person of BRANCH
+  const READS = ["/dashboard", "/requests", "/active", "/pending-acceptance", "/amendments", "/addendums"];
+  // The four writes the review named, plus the vendor's amendment request.
+  const WRITES = [
+    `${ARC}/quote/accept-terms`,
+    `${ARC}/quote/submit`,
+    `${ARC}/tech-envelope/submit`,
+    `${ARC}/negotiation/rounds/1/quote`,
+    "/api/v1/arc-v2/amendments/request",
+  ];
+
+  it("every read answers a guest 403 GUEST_SESSION; the vendor's own session reads them", async () => {
+    const guest = await asGuest(HQ);
+    const client = await httpClient(HQ);
+    for (const route of [...READS, "/requests/1", "/requests/1/negotiation", "/quote/1/history"]) {
+      const res = await guest.get(`${ARC}${route}`);
+      expect([route, res.status, res.body.reason]).toEqual([route, 403, "GUEST_SESSION"]);
+    }
+    for (const route of READS) {
+      const res = await client.get(`${ARC}${route}`);
+      expect([route, res.status, res.body.status]).toEqual([route, 200, 1]);
+    }
+  });
+
+  it("the four quote / envelope / negotiation writes and the amendment request refuse a guest and write nothing", async () => {
+    const guest = await asGuest(HQ);
+    const before = await db.one(
+      `SELECT (SELECT COUNT(*) FROM tbl_arc_quote WHERE vendor_id = $1)::int AS quotes,
+              (SELECT COUNT(*) FROM tbl_arc_amendment WHERE requested_by = $1)::int AS amendments`,
+      [HQ]
+    );
+    for (const route of WRITES) {
+      const res = await guest.post(route).send({ arc_id: 1, arcId: 1, arc_contract_id: 1, lines: [], items: [] });
+      expect([route, res.status, res.body.reason]).toEqual([route, 403, "GUEST_SESSION"]);
+    }
+    expect(
+      await db.one(
+        `SELECT (SELECT COUNT(*) FROM tbl_arc_quote WHERE vendor_id = $1)::int AS quotes,
+                (SELECT COUNT(*) FROM tbl_arc_amendment WHERE requested_by = $1)::int AS amendments`,
+        [HQ]
+      )
+    ).toEqual(before);
+  });
+
+  it("a normal vendor session reaches every one of those write handlers (no guest refusal)", async () => {
+    const client = await httpClient(HQ);
+    for (const route of WRITES) {
+      const res = await client.post(route).send({});
+      expect([route, res.body.reason]).not.toEqual([route, "GUEST_SESSION"]);
+      expect([route, res.status]).not.toEqual([route, 401]);
+    }
+  });
+
+  it("a network member person acting for its entity reads the vendor ARC pages", async () => {
+    await seedPerson({ id: MEMBER, email: `vn-guest-${MEMBER}@example.com`, name: "Guest Test Member" });
+    await addMember({ orgId: ORG, personId: MEMBER, entityVendorId: BRANCH, role: "ENTITY_MEMBER" });
+    const member = await httpClient(MEMBER);
+    for (const route of ["/active", "/requests"]) {
+      const res = await member.get(`${ARC}${route}`);
+      expect([route, res.status]).toEqual([route, 200]);
+    }
   });
 });
