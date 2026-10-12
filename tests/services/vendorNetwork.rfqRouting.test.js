@@ -1518,3 +1518,37 @@ describe("Task 25 fix round 1: a PENDING member is told to accept, and may not r
     expect(await clarificationsOf(rfq.rfq_id)).toEqual([]);
   });
 });
+
+// Task 25 fix round 2: the RFQ detail's network_assignment says "accept before you act"
+// only when the member really cannot act yet. An entity on its own direct invite quotes as
+// itself (assertOrgMayQuote), so a PENDING routing of it must not block it; a PENDING row
+// past its reply deadline grants nothing (respond would time it out), as on the contract.
+describe("Task 25 fix round 2: network_assignment only when the member must accept first", () => {
+  it("an entity on its own direct invite that is also routed gets null, and quotes as itself", async () => {
+    const rfq = await openRfq({ invite: [HQ, C, FHQ] });
+    const a = await assign(rfq.rfq_id, C);
+    expect(a.status).toBe(201);
+    expect((await assignment(a.body.data.id)).status).toBe("PENDING");
+
+    const get = await vendorGet(C, rfq.rfq_id);
+    expect(get.body.data.id).toBe(rfq.rfq_id);
+    expect(get.body.data.network_assignment).toBeNull();
+    // What the payload promises holds: the quote is accepted.
+    const res = await createQuote(C, rfq);
+    expect(res.status).toBe(200);
+    expect(await quotesOf(rfq.rfq_id)).toEqual([{ created_by: C, is_regret: 0 }]);
+  });
+
+  it("a PENDING row past its due_at is not returned (not yet swept); an ACCEPTED one past it still is", async () => {
+    const rfq = await openRfq();
+    const a = await assign(rfq.rfq_id, B);
+    await db.none(`UPDATE tbl_vendor_routing_assignments SET due_at = now() - interval '1 minute' WHERE id = $1`, [a.body.data.id]);
+    expect((await assignment(a.body.data.id)).status).toBe("PENDING");
+    expect((await vendorGet(B, rfq.rfq_id)).body.data.network_assignment).toBeNull();
+
+    const rfq2 = await openRfq();
+    const id2 = await routeAndAccept(rfq2.rfq_id);
+    await db.none(`UPDATE tbl_vendor_routing_assignments SET due_at = now() - interval '1 minute' WHERE id = $1`, [id2]);
+    expect((await vendorGet(B, rfq2.rfq_id)).body.data.network_assignment).toMatchObject({ id: id2, status: "ACCEPTED" });
+  });
+});

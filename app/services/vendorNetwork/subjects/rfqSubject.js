@@ -329,7 +329,9 @@ export async function assertOrgMayClarify(rfqId, vendorId, t = db) {
  * The acting member entity's own live routing assignment on RFQ `rfqId` in its org, for the
  * vendor RFQ pages: { id, status: 'PENDING'|'ACCEPTED', due_at, principal_name } or null.
  * The pages ask a PENDING member to accept before it quotes, regrets or raises a
- * clarification (the gates above refuse it).
+ * clarification (the gates above refuse it), so a row that does not stop it is left out:
+ * an entity on its own direct invite acts as itself whatever its routing (null), and a
+ * PENDING row past its due_at grants nothing (respond would time it out; the sweep will).
  */
 export async function memberRfqAssignment(rfqId, vendorId, orgId, runner = db) {
   const row = await runner.oneOrNone(
@@ -340,7 +342,10 @@ export async function memberRfqAssignment(rfqId, vendorId, orgId, runner = db) {
        JOIN tbl_users pu ON pu.id = o.principal_vendor_id
        LEFT JOIN tbl_company pc ON pc.id = pu.company_id
       WHERE a.org_id = $1 AND a.subject_type = 'RFQ' AND a.subject_id = $2 AND a.assigned_vendor_id = $3
-        AND a.status IN ('PENDING', 'ACCEPTED')
+        AND (a.status = 'ACCEPTED' OR (a.status = 'PENDING' AND (a.due_at IS NULL OR a.due_at > now())))
+        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_product_vendors d
+                         WHERE d.rfq_id = a.subject_id AND d.user_id = a.assigned_vendor_id
+                           AND d.routed_from_vendor_id IS NULL)
       ORDER BY (a.status = 'ACCEPTED') DESC, a.id DESC
       LIMIT 1`,
     [orgId, rfqId, vendorId]
