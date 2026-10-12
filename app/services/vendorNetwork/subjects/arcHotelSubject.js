@@ -40,7 +40,7 @@ import { ARC_EVENT_TYPES } from "../../arcEventLogService.js";
 import { arcVendorContract } from "../../notificationLinks.js";
 import { ASSIGNMENT_STATUS, SUBJECT_TYPE } from "../../../constants/vendorNetwork.js";
 
-const { ACCEPTED, SUPERSEDED } = ASSIGNMENT_STATUS;
+const { ACCEPTED, PENDING, SUPERSEDED } = ASSIGNMENT_STATUS;
 /** Contract statuses whose hotels may be routed (signing is not blocked by routing). */
 export const ROUTABLE_CONTRACT_STATUSES = Object.freeze([
   "awaiting_acceptance",
@@ -239,8 +239,10 @@ async function describe(assignment, runner = db) {
   const base = r ? `Rate contract ${r.arc_number}${r.title ? ` · ${r.title}` : ""}` : `Rate contract #${assignment.subject_id}`;
   return {
     title: r?.hotel_name ? `${base} · ${r.hotel_name}` : base,
-    // The member may open the contract only once it holds the ACCEPTED assignment.
-    actionUrl: assignment.status === ACCEPTED ? arcVendorContract(assignment.subject_id) : null,
+    // The member reads the contract while its assignment is live: PENDING (to review it
+    // before accepting) or ACCEPTED.
+    actionUrl:
+      assignment.status === ACCEPTED || assignment.status === PENDING ? arcVendorContract(assignment.subject_id) : null,
   };
 }
 
@@ -339,23 +341,34 @@ registerSubject(SUBJECT_TYPE.ARC_HOTEL, arcHotelSubjectHandler);
 // --- member contract access -------------------------------------------------------------
 
 /**
- * The hotels of contract `contractId` that `vendorId` fulfils: its ACCEPTED ARC_HOTEL
- * assignments in the org whose principal is the contract vendor, while it is still an
- * ACTIVE entity of that org. Empty for anyone else (the principal included).
+ * The ARC_HOTEL assignments by which `vendorId` may read contract `contractId`, one per
+ * hotel: its ACCEPTED ones and, with includePending, the PENDING ones still inside their
+ * reply window (a member reviews the contract before it accepts). Only in the org whose
+ * principal is the contract vendor, and only while `vendorId` is an ACTIVE entity of it.
+ * DECLINED, TIMED_OUT, REVOKED and SUPERSEDED rows never count. Empty for anyone else
+ * (the principal included).
+ * @returns {Promise<Array<{ hotel_id: number, assignment_id: number, status: string, due_at: Date|null }>>}
  */
-export async function fulfilmentHotelIds(contractId, contractVendorId, vendorId, runner = db) {
+export async function fulfilmentAssignments(contractId, contractVendorId, vendorId, { includePending = false } = {}, runner = db) {
   const rows = await runner.any(
-    `SELECT a.hotel_id
+    `SELECT DISTINCT ON (a.hotel_id) a.hotel_id, a.id AS assignment_id, a.status, a.due_at
        FROM tbl_vendor_routing_assignments a
        JOIN tbl_vendor_orgs o ON o.id = a.org_id AND o.principal_vendor_id = $2
        JOIN tbl_vendor_org_entities e
          ON e.org_id = a.org_id AND e.vendor_id = a.assigned_vendor_id AND e.status = 'ACTIVE'
       WHERE a.subject_type = 'ARC_HOTEL' AND a.subject_id = $1 AND a.assigned_vendor_id = $3
-        AND a.status = 'ACCEPTED' AND a.hotel_id IS NOT NULL
-      ORDER BY a.hotel_id`,
-    [contractId, contractVendorId, vendorId]
+        AND a.hotel_id IS NOT NULL
+        AND (a.status = 'ACCEPTED'
+             OR ($4 AND a.status = 'PENDING' AND (a.due_at IS NULL OR a.due_at > now())))
+      ORDER BY a.hotel_id, (a.status = 'ACCEPTED') DESC, a.id DESC`,
+    [contractId, contractVendorId, vendorId, includePending === true]
   );
-  return rows.map((r) => Number(r.hotel_id));
+  return rows.map((r) => ({
+    hotel_id: Number(r.hotel_id),
+    assignment_id: Number(r.assignment_id),
+    status: r.status,
+    due_at: r.due_at,
+  }));
 }
 
-export default { arcHotelSubjectHandler, fulfilmentHotelIds, ROUTABLE_CONTRACT_STATUSES };
+export default { arcHotelSubjectHandler, fulfilmentAssignments, ROUTABLE_CONTRACT_STATUSES };

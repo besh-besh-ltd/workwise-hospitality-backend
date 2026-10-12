@@ -16,7 +16,7 @@ import crypto from 'crypto';
 import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
-import { fulfilmentHotelIds, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
+import { fulfilmentAssignments, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
 import { supplierDetailsFor } from '../../helper/gstState.js';
 import fs from 'fs';
 import os from 'os';
@@ -631,13 +631,14 @@ export async function getContractDetail(req, res) {
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     // Tenant guard — a vendor reads its own contract, or (Vendor Networks) the hotels of
-    // it that it fulfils as a member entity of the contract vendor's network.
+    // it that it fulfils as a member entity of the contract vendor's network, or has been
+    // asked to fulfil (a PENDING assignment: it reviews the contract before accepting).
     if (Number(contract.vendor_id) !== Number(vendorUserId)) {
-      const memberHotelIds = MEMBER_VIEWABLE_STATUSES.has(contract.status)
-        ? await fulfilmentHotelIds(id, contract.vendor_id, vendorUserId)
+      const assignments = MEMBER_VIEWABLE_STATUSES.has(contract.status)
+        ? await fulfilmentAssignments(id, contract.vendor_id, vendorUserId, { includePending: true })
         : [];
-      if (!memberHotelIds.length) return bad(res, 403, 'Not the contracted vendor');
-      return ok(res, await fulfilmentMemberContractView(contract, vendorUserId, memberHotelIds));
+      if (!assignments.length) return bad(res, 403, 'Not the contracted vendor');
+      return ok(res, await fulfilmentMemberContractView(contract, vendorUserId, assignments));
     }
 
     const [lines, { arc: arcInfo }, callOffs, amendments] = await Promise.all([
@@ -718,10 +719,17 @@ const AMENDMENT_LINE_FIELDS = ['amendment_id', 'amendment_type', 'amendment_effe
  * that are not its own POs for its hotels. Each of its hotel rows carries that hotel's
  * rate: a live price amendment, else the hotel's override, else the contract rate (the
  * precedence of arcPricingResolver); the line's effective rate is that rate when all
- * its hotels share one.
+ * its hotels share one. Each of its hotels also carries the assignment that grants it
+ * (assignment_status PENDING | ACCEPTED, assignment_id, due_at), and
+ * pending_assignment_ids lists the PENDING ones among them: a member reviews a contract
+ * before it accepts, so the view is the same either way. The ARC's commercial clause
+ * sources (payment, delivery, penalty, escalation) come through `arc` unchanged.
+ * @param assignments fulfilmentAssignments(…, { includePending: true }), non-empty
  */
-async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) {
+async function fulfilmentMemberContractView(contract, memberVendorId, assignments) {
   const id = Number(contract.id);
+  const hotelIds = assignments.map((a) => a.hotel_id);
+  const assignmentOf = new Map(assignments.map((a) => [a.hotel_id, a]));
   const [allLines, { arc, leadHotelId, companyGstin }, ledger, callOffs, supplier] = await Promise.all([
     arcContractModel.listLines(id),
     loadArcContext(contract.arc_id),
@@ -758,6 +766,10 @@ async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) 
     // The lead hotel's GSTIN is withheld with its name: the buyer company's stands in.
     arc.purchaser_gstin = companyGstin ?? null;
   }
+  const hotels = ledger.hotels.map((h) => {
+    const a = assignmentOf.get(h.hotel_id);
+    return { ...h, assignment_status: a.status, assignment_id: a.assignment_id, due_at: a.due_at };
+  });
   return {
     contract: { ...contract, vendor_gstin: supplier.gstin, document_s3_url: null, document_hash: null },
     lines,
@@ -765,7 +777,8 @@ async function fulfilmentMemberContractView(contract, memberVendorId, hotelIds) 
     callOffs,
     amendments: [],
     clarifications: [],
-    hotels: ledger.hotels,
+    hotels,
+    pending_assignment_ids: hotels.filter((h) => h.assignment_status === 'PENDING').map((h) => h.assignment_id),
     viewer_role: 'fulfilment_member',
   };
 }

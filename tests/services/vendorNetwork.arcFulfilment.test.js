@@ -698,3 +698,157 @@ describe("the buyer's view of who supplies each hotel", () => {
     expect(map[H1]).toEqual([]);
   });
 });
+
+// Task 25: a branch reviews the contract before it accepts a hotel. A PENDING assignment
+// opens the same read-only member view as an ACCEPTED one, each hotel carrying its
+// assignment, plus the clause sources the holder accepted at signing.
+describe("Task 25: a member reviews the contract before it accepts", () => {
+  const FB = 95977; // an ACTIVE seated branch of the foreign org
+  const viewAs = async (vendorId) => (await httpClient(vendorId)).get(`${ARC_V}/vendor/contracts/${contractId}`);
+  const iso = (d) => new Date(d).toISOString();
+  const assignmentRow = (id) => db.one(`SELECT * FROM tbl_vendor_routing_assignments WHERE id = $1`, [id]);
+
+  it("a PENDING member reads the contract scoped to the pending hotel, with its assignment", async () => {
+    const pending = (await assignHotel(B)).body.data;
+    const res = await viewAs(B);
+    expect(res.status).toBe(200);
+    const d = res.body.data;
+    expect(d.viewer_role).toBe("fulfilment_member");
+    expect(d.hotels).toHaveLength(1);
+    expect(d.hotels[0]).toMatchObject({ hotel_id: H1, assignment_status: "PENDING", assignment_id: pending.id });
+    expect(iso(d.hotels[0].due_at)).toBe(iso((await assignmentRow(pending.id)).due_at));
+    expect(d.pending_assignment_ids).toEqual([pending.id]);
+    expect(d.lines).toHaveLength(2);
+    for (const line of d.lines) {
+      expect(line.hotels.map((h) => h.hotel_id)).toEqual([H1]);
+      expect(Number(line.committed_qty)).toBe(350);
+    }
+    // Every member redaction holds while pending.
+    expect(d.callOffs).toEqual([]);
+    expect(d.amendments).toEqual([]);
+    expect(d.clarifications).toEqual([]);
+    expect(d.contract.document_s3_url).toBeNull();
+    expect(d.contract.document_hash).toBeNull();
+    expect(d.arc.hotel_name).toBeNull(); // the lead hotel (A1) is not B's
+    // Reading is all it may do: nothing to sign or decline, and the hotel is still HQ's.
+    const b = await httpClient(B);
+    expect((await b.post(`${ARC_V}/vendor/contracts/${contractId}/otp/request`).send({})).status).toBe(403);
+    expect((await b.post(`${ARC_V}/vendor/contracts/${contractId}/decline`).send({ reason: "x" })).status).toBe(403);
+    expect(await fulfilling(H1)).toEqual([null, null]);
+  });
+
+  it("a member with a PENDING hotel and an ACCEPTED hotel sees both, each with its own assignment", async () => {
+    const acceptedId = await routeTo(B, H1);
+    const pending = (await assignHotel(B, { hotelId: H2 })).body.data;
+    const res = await viewAs(B);
+    expect(res.status).toBe(200);
+    const d = res.body.data;
+    const byHotel = Object.fromEntries(d.hotels.map((h) => [h.hotel_id, h]));
+    expect(Object.keys(byHotel).map(Number).sort()).toEqual([H1, H2].sort());
+    expect(byHotel[H1]).toMatchObject({ assignment_status: "ACCEPTED", assignment_id: acceptedId });
+    expect(byHotel[H2]).toMatchObject({ assignment_status: "PENDING", assignment_id: pending.id });
+    expect(d.pending_assignment_ids).toEqual([pending.id]);
+    for (const line of d.lines) expect(Number(line.committed_qty)).toBe(350 + 250);
+  });
+
+  it("a fully accepted member has no pending ids", async () => {
+    const id = await routeTo(B);
+    const d = (await viewAs(B)).body.data;
+    expect(d.hotels).toEqual([expect.objectContaining({ hotel_id: H1, assignment_status: "ACCEPTED", assignment_id: id })]);
+    expect(d.pending_assignment_ids).toEqual([]);
+  });
+
+  it("a declined, revoked or timed-out assignment grants nothing", async () => {
+    const declined = (await assignHotel(B)).body.data;
+    const dec = await (await httpClient(B)).post(`${BASE}/routing/${declined.id}/respond`).send({ decision: "DECLINE", reason: "NO_STOCK" });
+    expect(dec.status).toBe(200);
+    expect((await viewAs(B)).status).toBe(403);
+
+    const revoked = (await assignHotel(B)).body.data;
+    expect((await viewAs(B)).status).toBe(200);
+    expect((await (await httpClient(HQ)).post(`${BASE}/routing/${revoked.id}/revoke`)).status).toBe(200);
+    expect((await viewAs(B)).status).toBe(403);
+
+    const late = (await assignHotel(B)).body.data;
+    await db.none(`UPDATE tbl_vendor_routing_assignments SET due_at = now() - interval '1 minute' WHERE id = $1`, [late.id]);
+    // Past its reply deadline it grants nothing, even before the sweep has timed it out.
+    expect((await assignmentRow(late.id)).status).toBe("PENDING");
+    expect((await viewAs(B)).status).toBe(403);
+    await runVendorRoutingSweepTick(new Date());
+    expect((await assignmentRow(late.id)).status).toBe("TIMED_OUT");
+    expect((await viewAs(B)).status).toBe(403);
+  });
+
+  it("another org's entity holding a PENDING row on HQ's contract sees nothing", async () => {
+    await seedVendorEntity({ id: FB, companyId: FB, name: `VN ARC ${FB}`, email: `vn-arc-${FB}@example.com` });
+    await addEntity({ orgId: F_ORG, vendorId: FB });
+    // The engine refuses to route another principal's contract, so the row is written directly:
+    // the org of the assignment must be the contract holder's.
+    await db.none(
+      `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status, due_at)
+       VALUES ($1, 'ARC_HOTEL', $2, $3, $4, 'PENDING', now() + interval '1 day')`,
+      [F_ORG, contractId, H1, FB]
+    );
+    expect((await viewAs(FB)).status).toBe(403);
+  });
+
+  it("a suspended entity with a PENDING assignment sees nothing", async () => {
+    const pending = (await assignHotel(B)).body.data;
+    // Suspended in place (the entity API would also revoke the row): the entity check alone refuses.
+    await db.none(`UPDATE tbl_vendor_org_entities SET status = 'SUSPENDED' WHERE org_id = $1 AND vendor_id = $2`, [ORG, B]);
+    expect((await assignmentRow(pending.id)).status).toBe("PENDING");
+    expect((await viewAs(B)).status).toBe(403);
+  });
+
+  it("the Active Contracts list stays ACCEPTED-only", async () => {
+    await assignHotel(B);
+    const pendingList = await (await httpClient(B)).get(`${ARC_V}/vendor/active`);
+    expect(pendingList.status).toBe(200);
+    expect(pendingList.body.data.contracts.filter((r) => Number(r.id) === contractId)).toEqual([]);
+  });
+
+  it("Assigned to me links a PENDING contract hotel to the contract page", async () => {
+    const pending = (await assignHotel(B)).body.data;
+    const mine = await (await httpClient(B)).get(`${BASE}/routing/assigned-to-me`);
+    expect(mine.status).toBe(200);
+    expect(mine.body.data.find((r) => r.id === pending.id).action_url).toBe(`/dashboard/vendor/rate-contracts/${contractId}`);
+  });
+
+  it("returns the commercial clause sources the holder accepted, pending or accepted, without the holder's disputes", async () => {
+    await db.none(
+      `UPDATE tbl_arc
+          SET payment_terms_expected = 'Net 45', delivery_expected = 'Within 7 days of the PO',
+              penalty_clause = '1% of the PO value per week of delay',
+              escalation_clause_json = '{"type":"index","cap_pct":5}'::jsonb
+        WHERE id = $1`,
+      [arcId]
+    );
+    // The holder disputes a term on the contract (a pre-signature clarification).
+    const item = await db.one(`SELECT arc_item_id FROM tbl_arc_contract_line WHERE id = $1`, [lineIds[0]]);
+    await db.none(
+      `INSERT INTO tbl_arc_contract_clarification (arc_id, arc_contract_id, arc_item_id, vendor_id, field, round, vendor_comment, old_value, status, raised_by)
+       VALUES ($1, $2, $3, $4, 'payment_terms', 1, 'Net 60 please', '"Net 45"'::jsonb, 'open', $4)`,
+      [arcId, contractId, item.arc_item_id, HQ]
+    );
+    const CLAUSE_SOURCES = ["payment_terms_expected", "delivery_expected", "penalty_clause", "escalation_clause_json"];
+    const holder = (await viewAs(HQ)).body.data;
+    expect(holder.clarifications).toHaveLength(1);
+    const expected = Object.fromEntries(CLAUSE_SOURCES.map((k) => [k, holder.arc[k]]));
+    expect(expected).toEqual({
+      payment_terms_expected: "Net 45",
+      delivery_expected: "Within 7 days of the PO",
+      penalty_clause: "1% of the PO value per week of delay",
+      escalation_clause_json: { type: "index", cap_pct: 5 },
+    });
+
+    const pending = (await assignHotel(B)).body.data;
+    const asPending = (await viewAs(B)).body.data;
+    expect(Object.fromEntries(CLAUSE_SOURCES.map((k) => [k, asPending.arc[k]]))).toEqual(expected);
+    expect(asPending.clarifications).toEqual([]);
+
+    expect((await accept(B, pending.id)).status).toBe(200);
+    const asAccepted = (await viewAs(B)).body.data;
+    expect(Object.fromEntries(CLAUSE_SOURCES.map((k) => [k, asAccepted.arc[k]]))).toEqual(expected);
+    expect(asAccepted.clarifications).toEqual([]);
+  });
+});
