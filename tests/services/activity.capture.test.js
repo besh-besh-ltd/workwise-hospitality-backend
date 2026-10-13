@@ -187,17 +187,19 @@ describe("activity capture", () => {
     // Whether the catalogue covers a route has nothing to do with whether a
     // particular call succeeded, and counting only successes would hide
     // exactly the routes that usually fail validation.
+    //
+    // (This used to probe map-projects, which is now catalogued. A sourcing
+    // route is used instead: the admin routers are held to full coverage by
+    // activity.routeCoverage, so no uncatalogued admin route is left to probe.)
     resetUncataloguedRoutes();
-    const client = await httpClient(ADMIN);
+    const anonymous = await httpClient(null);
 
-    const res = await client
-      .post(`/api/v1/hospitality/company/${COMPANY_ID}/map-projects`)
-      .send({ project_ids: [] });
+    const res = await anonymous.post(`/api/v1/rfq/list-view`).send({});
     expect(res.status).toBeGreaterThanOrEqual(400);
 
     await new Promise((r) => setTimeout(r, 400));
     const gaps = getUncataloguedRoutes();
-    expect(gaps.some((g) => g.route.includes("map-projects"))).toBe(true);
+    expect(gaps.some((g) => g.route.includes("/rfq/list-view"))).toBe(true);
   });
 
   it("does not report a route the registry does name", async () => {
@@ -245,10 +247,23 @@ describe("what does NOT belong in the feed", () => {
     ).toHaveLength(0);
   });
 
-  it("still counts the unnamed route as a registry gap", async () => {
+  it("still counts an unnamed route as a registry gap", async () => {
     // Suppressing the row must not suppress the reporting: an event that
     // genuinely should be in the feed is found by this counter, and silencing
     // it would be how a real omission goes unnoticed forever.
+    resetUncataloguedRoutes();
+    const client = await httpClient(ADMIN);
+    await client.post("/api/v1/rfq/list-view").send({});
+
+    await new Promise((r) => setTimeout(r, 400));
+    const gaps = getUncataloguedRoutes().map((g) => g.route);
+    expect(gaps.some((g) => g.includes("/rfq/list-view"))).toBe(true);
+  });
+
+  it("does not report a route explicitly listed as not an event", async () => {
+    // /rbac/me/permissions/bulk is a query on every page load. It is on the
+    // NOT_AN_EVENT list, so it is neither recorded nor reported — a gap report
+    // full of known non-events would hide the real ones.
     resetUncataloguedRoutes();
     const client = await httpClient(ADMIN);
     const res = await client
@@ -258,7 +273,7 @@ describe("what does NOT belong in the feed", () => {
 
     await new Promise((r) => setTimeout(r, 400));
     const gaps = getUncataloguedRoutes().map((g) => g.route);
-    expect(gaps.some((g) => g.includes("/rbac/me/permissions/bulk"))).toBe(true);
+    expect(gaps.some((g) => g.includes("/rbac/me/permissions/bulk"))).toBe(false);
   });
 
   it("still records a named event", async () => {

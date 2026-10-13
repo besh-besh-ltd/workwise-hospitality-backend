@@ -49,6 +49,14 @@ const SCOPE = {
   entity: (type) => ({ via: 'entity', type }),
   params: (companyKey, hotelKey) => ({ via: 'params', companyKey, hotelKey }),
   actor: () => ({ via: 'actor' }),
+  // What the controller validated and handed over on res.locals.activityDetail
+  // — the only source for a fact that no longer exists once the request is
+  // done, like the business unit a user was just removed from.
+  detail: () => ({ via: 'detail' }),
+  // The acting user's own buyer company, as a company-wide event. For things
+  // that belong to the company as a whole, where filing them under whichever
+  // unit the actor happens to be mapped to would be wrong.
+  buyer: () => ({ via: 'actorBuyer' }),
 };
 
 const e = (def) => def;
@@ -325,11 +333,24 @@ export const EVENTS = [
     summary: (c) =>
       `${c.actor} gave ${(c.body?.user_ids || []).length || 'some'} user(s) access to ${c.entityLabel || 'the company'}`,
   }),
+  // The unit the user was removed from no longer has a mapping row to look up
+  // once the request is done, and the user's remaining mappings would name the
+  // wrong unit — so the controller captures both names before deleting and
+  // hands them over. It does so only when the removal actually happens: the
+  // same route answers 200 with an approval-impact warning and changes
+  // nothing, and that must not read as a removal.
   e({
     method: 'DELETE', path: '/hospitality/user/:user_id/mapping', key: 'user_mapping_removed',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} removed a user's access to a business unit`,
+    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.detail(), requireDetail: true,
+    summary: (c) => {
+      const who = c.detail?.user_label || "a user";
+      const unit = c.detail?.unit_label || 'a business unit';
+      const roles = c.detail?.removed_role_scopes
+        ? ` (and ${c.detail.removed_role_scopes} role assignment${c.detail.removed_role_scopes === 1 ? '' : 's'} there)`
+        : '';
+      return `${c.actor} removed ${who} from ${unit}${roles}`;
+    },
   }),
   e({
     method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/send-credentials',
@@ -338,6 +359,43 @@ export const EVENTS = [
     entity: { type: 'HOTEL', id: P('hotel_id') },
     scope: [SCOPE.entity('HOTEL'), SCOPE.params('company_id', 'hotel_id')],
     summary: (c) => `${c.actor} sent login credentials to users at ${c.entityLabel || 'a business unit'}`,
+  }),
+
+  // The buyer company's own profile (name, GSTIN, head-office address). Not
+  // any one hospitality company's, so it is a company-wide event, labelled
+  // with the company's name. Vendors use the same route for their own profile;
+  // a vendor's company has no administrator to show it to, so those resolve
+  // to nothing and are counted as unscoped rather than written.
+  e({
+    method: 'PUT', path: '/users/update-company-detail', key: 'company_details_updated',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    scope: SCOPE.buyer(), labelFromBuyer: true,
+    summary: (c) => `${c.actor} updated the company details for ${c.entityLabel || 'the company'}`,
+  }),
+  e({
+    method: 'POST', path: '/hospitality/company/:company_id/map-projects', key: 'projects_mapped_to_unit',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    entity: { type: 'COMPANY', id: P('company_id') },
+    scope: [SCOPE.entity('COMPANY'), SCOPE.params('company_id')],
+    summary: (c) => {
+      const n = (c.body?.project_ids || []).length;
+      const what = n ? `${n} project${n === 1 ? '' : 's'}` : 'projects';
+      const where = c.body?.hotel_id ? `a business unit of ${c.entityLabel || 'the company'}` : (c.entityLabel || 'the company');
+      return `${c.actor} linked ${what} to ${where}`;
+    },
+  }),
+  e({
+    method: 'DELETE', path: '/hospitality/project/:project_id/mapping', key: 'project_mapping_removed',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    entity: { type: 'PROJECT', id: P('project_id') }, scope: SCOPE.entity('PROJECT'),
+    // Placed by the controller's detail, not the body: the body's company is
+    // checked against the caller but its unit is not, so a unit id belonging
+    // to another tenant would have been filed (and named, through the
+    // business-unit filter) in this company's trail. The controller hands over
+    // only a unit where a mapping was actually removed.
+    requireDetail: true,
+    summary: (c) =>
+      `${c.actor} unlinked the project ${c.entityLabel ? `"${c.entityLabel}"` : `#${c.entityId}`} from a business unit`,
   }),
 
   // ── People and access ───────────────────────────────────────────────────
@@ -363,35 +421,50 @@ export const EVENTS = [
     // meant an administrator with no hospitality mapping of their own — the
     // platform account that moved RFQ 536263's step-2 approver on 15 Sep —
     // resolved to no company, and every one of their edits was dropped.
-    entity: { type: 'USER', id: B('user_id') }, scope: SCOPE.entity('USER'),
+    // With no user_id the controller edits the caller's own account, so the
+    // subject is the caller (`orActor`) — otherwise a self-edit was filed as
+    // "changed a user's approval roles", naming nobody.
+    entity: { type: 'USER', id: { ...B('user_id'), orActor: true } }, scope: SCOPE.entity('USER'),
     // This endpoint multiplexes profile edits, role grants, department moves
     // and activation. When the save changed approval roles the controller
     // hands over the exact diff, and the sentence says who gained and lost what.
     summary: (c) => {
-      const whose = c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
+      const self = c.entityId != null && c.actorUserId != null && Number(c.entityId) === Number(c.actorUserId);
+      const whose = self ? 'their own' : c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
       const changes = roleScopeChangePhrase(c.detail?.role_scopes);
-      return changes
-        ? `${c.actor} changed ${whose} approval roles — ${changes}`
-        : `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
+      if (changes) return `${c.actor} changed ${whose} approval roles — ${changes}`;
+      if (self) return `${c.actor} updated their own account`;
+      return `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
     },
   }),
   e({
     method: 'POST', path: '/users/:user_id/send-password-reset', key: 'password_reset_sent',
     category: CATEGORIES.PEOPLE, severity: 'critical',
-    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} sent a password reset to a user`,
+    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `${c.actor} sent a password reset to ${c.entityLabel || 'a user'}`,
+  }),
+  // Roles belong to the buyer company as a whole — they are company-wide
+  // events. The response carries the new role's id as data.role_id, not
+  // data.id; extracting the wrong path left every creation with no entity.
+  // A person changing their own password. Self-service, but the first thing a
+  // security review asks about an account suspected of misuse.
+  e({
+    method: 'POST', path: '/users/change-password', key: 'password_changed',
+    category: CATEGORIES.PEOPLE, severity: 'notable',
+    summary: (c) => `${c.actor} changed their password`,
   }),
   e({
     method: 'POST', path: '/rbac/roles', key: 'role_created',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'ROLE', id: R() }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} created the role "${c.body?.title || 'a new role'}"`,
+    entity: { type: 'ROLE', id: R('data.role_id') }, scope: SCOPE.entity('ROLE'),
+    summary: (c) => `${c.actor} created the role "${c.entityLabel || c.body?.title || 'a new role'}"`,
   }),
   e({
     method: 'PUT', path: '/rbac/roles/:roleId', key: 'role_updated',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'ROLE', id: P('roleId') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} changed what the role "${c.body?.title || `#${c.entityId}`}" can do`,
+    entity: { type: 'ROLE', id: P('roleId') }, scope: SCOPE.entity('ROLE'),
+    summary: (c) =>
+      `${c.actor} changed what the role "${c.entityLabel || c.body?.title || `#${c.entityId}`}" can do`,
   }),
 
   // ── Approval configuration ──────────────────────────────────────────────
@@ -408,17 +481,63 @@ export const EVENTS = [
     entity: { type: 'APPROVAL_POLICY', id: P('id') }, scope: SCOPE.entity('APPROVAL_POLICY'),
     summary: (c) => `${c.actor} deleted an approval policy`,
   }),
+  // Approval workflows are buyer-company-wide (tbl_approval_processes.company_id
+  // is the tbl_company id). Deletion is soft, so a deleted one is still named.
   e({
     method: 'POST', path: '/general/hospitality/approval/processes', key: 'approval_process_created',
     category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable',
-    entity: { type: 'APPROVAL_PROCESS', id: R() }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} created the approval workflow "${c.body?.name || 'a new workflow'}"`,
+    entity: { type: 'APPROVAL_PROCESS', id: R() }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) =>
+      `${c.actor} created the approval workflow "${c.entityLabel || c.body?.name || 'a new workflow'}"`,
+  }),
+  e({
+    method: 'PUT', path: '/general/hospitality/approval/processes/:id', key: 'approval_process_updated',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable',
+    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) => {
+      const name = c.entityLabel || 'an approval workflow';
+      if (c.body?.is_active === false) return `${c.actor} switched off the approval workflow "${name}"`;
+      if (c.body?.is_active === true && Object.keys(c.body).length === 1) {
+        return `${c.actor} switched on the approval workflow "${name}"`;
+      }
+      return `${c.actor} edited the approval workflow "${name}"`;
+    },
   }),
   e({
     method: 'DELETE', path: '/general/hospitality/approval/processes/:id', key: 'approval_process_deleted',
     category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical',
-    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} deleted an approval workflow`,
+    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) => `${c.actor} deleted the approval workflow "${c.entityLabel || `#${c.entityId}`}"`,
+  }),
+
+  // The legacy approval hierarchy (pre-policy engine). Its tables are empty on
+  // production (checked 2026-10-12) and the policy engine replaced it, but the
+  // routes are still mounted, so any use of them is recorded rather than
+  // silent. Company-wide: a hierarchy belongs to the buyer company.
+  e({
+    method: 'POST', path: '/general/hierarchy', key: 'approval_hierarchy_created',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} created a legacy approval hierarchy${c.body?.type ? ` (${c.body.type})` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/general/hierarchy', key: 'approval_hierarchy_updated',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} changed a legacy approval hierarchy${c.body?.type ? ` (${c.body.type})` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/general/hierarchy/:id', key: 'approval_hierarchy_deleted',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} deleted legacy approval hierarchy #${c.params?.id}`,
+  }),
+  e({
+    method: 'POST', path: '/general/mapHierarchyToProject', key: 'approval_hierarchy_mapped',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} attached a legacy approval hierarchy to project #${c.body?.project_id ?? '?'}`,
+  }),
+  e({
+    method: 'POST', path: '/general/setDefaultHierarchy', key: 'approval_hierarchy_default_set',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} made a legacy approval hierarchy the company default`,
   }),
 
   // ── Approval decisions (the generic engine) ─────────────────────────────
@@ -493,16 +612,17 @@ export const EVENTS = [
     method: 'POST', path: '/general/hospitality/approval/delegations',
     key: 'approval_delegation_created',
     category: CATEGORIES.APPROVALS, severity: 'notable',
-    entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.actor(),
+    entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.entity('APPROVAL_DELEGATION'),
     summary: (c) =>
-      `${c.actor} arranged for someone to cover approvals until ${onDate(c.body?.ends_at)}`,
+      `${c.actor} arranged for ${c.entityLabel || 'someone to cover approvals'} until ${onDate(c.body?.ends_at)}`,
   }),
   e({
     method: 'DELETE', path: '/general/hospitality/approval/delegations/:id',
     key: 'approval_delegation_revoked',
     category: CATEGORIES.APPROVALS, severity: 'notable',
-    entity: { type: 'APPROVAL_DELEGATION', id: P('id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} ended an approval cover arrangement early`,
+    entity: { type: 'APPROVAL_DELEGATION', id: P('id') }, scope: SCOPE.entity('APPROVAL_DELEGATION'),
+    summary: (c) =>
+      `${c.actor} ended ${c.entityLabel ? `the arrangement for ${c.entityLabel}` : 'an approval cover arrangement'} early`,
   }),
 
   // Changing who authorises spend on a live item, with a mandatory reason.
@@ -518,6 +638,40 @@ export const EVENTS = [
       `${c.actor} moved an approval on ${c.entityLabel || 'an item'} to a different approver — ${c.body?.reason || 'no reason given'}`,
   }),
 
+  // ── Billing ─────────────────────────────────────────────────────────────
+  e({
+    method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/send-payment-link',
+    key: 'payment_link_sent',
+    category: CATEGORIES.BILLING, severity: 'notable',
+    entity: { type: 'HOTEL', id: P('hotel_id') },
+    scope: [SCOPE.entity('HOTEL'), SCOPE.params('company_id', 'hotel_id')],
+    summary: (c) => `${c.actor} sent a subscription payment link for ${c.entityLabel || 'a business unit'}`,
+  }),
+  e({
+    method: 'POST', path: '/hospitality/company/send-batch-payment-links', key: 'payment_links_sent',
+    category: CATEGORIES.BILLING, severity: 'notable',
+    entity: { type: 'COMPANY', id: B('company_id') },
+    // Validated against the caller's buyer company before any link is sent.
+    scope: SCOPE.entity('COMPANY'),
+    summary: (c) => {
+      const n = (c.body?.hotel_ids || []).length;
+      return `${c.actor} sent subscription payment links for ${n || 'several'} business unit${n === 1 ? '' : 's'} of ${c.entityLabel || 'the company'}`;
+    },
+  }),
+
+  // ── Vendors ─────────────────────────────────────────────────────────────
+  e({
+    method: 'POST', path: '/users/buyer-private-vendor', key: 'private_vendor_added',
+    category: CATEGORIES.VENDORS, severity: 'notable',
+    summary: (c) =>
+      `${c.actor} added ${c.body?.vendorName || 'a vendor'} to the company's ${Number(c.body?.is_private) === 1 ? 'private' : 'approved'} vendor list`,
+  }),
+  e({
+    method: 'POST', path: '/users/buyer-excel-add-vendor', key: 'vendors_uploaded',
+    category: CATEGORIES.VENDORS, severity: 'notable',
+    summary: (c) => `${c.actor} added vendors to the company's vendor list from a spreadsheet`,
+  }),
+
   // ── Workwise's own staff, in the internal console ───────────────────────
   //
   // The only entries here that are GETs. For a client's own people the trail
@@ -525,9 +679,11 @@ export const EVENTS = [
   // account, looking is the thing worth recording, because "who at Workwise
   // can see our data" is the first question a client's security review asks.
   //
-  // Unnamed internal routes are still recorded — the middleware files anything
-  // by Workwise staff under this category — so this list makes the sentences
-  // read properly rather than deciding what is captured.
+  // A staff event is placed only by what it touched — never by the staff
+  // account's own company — so an internal route that should reach a
+  // customer's trail needs an entry here naming its entity. An unnamed one
+  // can only be placed by a controller's validated detail, and otherwise lands
+  // nowhere rather than in the wrong client's feed.
   //
   // Routes that name no single customer (a list of every buyer, the companies
   // list) resolve to no company and so appear in nobody's feed. That is a
@@ -609,5 +765,83 @@ const norm = (m, p) => `${m.toUpperCase()} ${p}`;
 const BY_ROUTE = new Map(EVENTS.map((ev) => [norm(ev.method, ev.path), ev]));
 
 export const lookupEvent = (method, path) => BY_ROUTE.get(norm(method, path)) || null;
+
+/**
+ * Mutating routes under the company-administration routers that are known NOT
+ * to be events, so they are neither recorded nor reported as gaps.
+ *
+ * Each one is here on purpose. The route-coverage test fails for any mutating
+ * admin route that is in neither list, which is what stops a new admin
+ * endpoint going unlogged by default.
+ */
+export const NOT_AN_EVENT = [
+  // Queries that use POST for their body. Several fire on every page load.
+  'POST /rbac/me/permissions/bulk',
+  'POST /users/get-dashboard-data',
+  'POST /users/dashboard-search-vendor',
+
+  // Signing in, registering and recovering an account. Sign-ins are already in
+  // the trail from tbl_login_log; the rest happen before there is an account
+  // or a company to file them under.
+  'POST /users/login',
+  'POST /users/social-login',
+  'POST /users/refresh-token',
+  'POST /users/forgot-password-otp-send',
+  'POST /users/forgot-password-otp-authenticate',
+  'POST /users/registration-otp-send',
+  'POST /users/registration-otp-verify',
+  'POST /users/user-registration',
+  'POST /users/company-registration',
+  'POST /users/registration-upload',
+  'POST /users/verify-vendor-token',
+  'POST /users/book-demo',
+
+  // Read receipts and push subscriptions: per-person inbox state.
+  'POST /users/notifications/subscribe',
+  'POST /users/notifications/push-subscribe',
+  'DELETE /users/notifications/push-subscribe',
+  'POST /users/notifications/read-notification/:notification_id',
+  'POST /users/notifications/mark-read/:id',
+  'POST /users/notifications/mark-unread/:id',
+  'POST /users/notifications/mark-all-read',
+  'POST /users/notifications/mark-delivered',
+  'POST /users/notifications/dismiss/:id',
+
+  // File plumbing. The upload is a step inside an action (an RFQ, a quote, a
+  // profile); the action is what gets recorded.
+  'POST /users/upload-file',
+  'POST /users/delete-file',
+  'POST /users/update-profile-image',
+  'POST /users/upload-payment-terms',
+
+  // A vendor's own profile, contacts and subscription — the vendor's business,
+  // not a buyer company's, and no buyer administrator's trail to file it in.
+  'POST /users/add-buyer-vendor-location',
+  'PUT /users/update-buyer-vendor-location',
+  'DELETE /users/delete-buyer-vendor-location/:id',
+  'POST /users/add-spoc',
+  'PUT /users/update-spoc/:spoc_id',
+  'DELETE /users/delete-spoc/:spoc_id',
+  'POST /users/map-spoc-location',
+  'POST /users/create-vendor-review',
+  'POST /users/publish-profile-reviews',
+  'POST /users/enhance-vendor-profile',
+  'POST /hospitality/vendor/join-open-rfqs',
+  'POST /hospitality/vendor/subscription/preview',
+  'POST /hospitality/vendor/subscription/modify',
+  'POST /hospitality/vendor/subscription/extend',
+
+  // Payment-gateway callbacks and the public pay-by-link pages (no session):
+  // the admin action is sending the link, which is catalogued above.
+  'POST /hospitality/subscription-payment',
+  'POST /hospitality/renew-subscription',
+  'POST /hospitality/verify-payment',
+  'POST /hospitality/hotel-payment/create-order',
+  'POST /hospitality/hotel-payment/verify',
+];
+
+const NOT_AN_EVENT_SET = new Set(NOT_AN_EVENT);
+
+export const isNotAnEvent = (method, path) => NOT_AN_EVENT_SET.has(norm(method, path));
 
 export const REGISTRY_SIZE = EVENTS.length;
