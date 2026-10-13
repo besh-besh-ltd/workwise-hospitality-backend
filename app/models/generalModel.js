@@ -54,6 +54,12 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // instances and 0 material requisitions, so this repoints a latent trap and
   // moves no live approval.
   'MR': 'mr',
+  // PR (purchase requisition) resolves against its own 'pr' resource. The
+  // seeded 'PR Approver' system role holds pr.read + pr.approve
+  // (20261013100000_pr_permissions.sql). PR is also the one entity type with
+  // engine-level rules of its own — amount-gated steps and separation of
+  // duties — see app/services/approval/approvalEntityRules.js.
+  'PR': 'pr',
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
@@ -145,6 +151,15 @@ import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
 import { applyDelegations } from './approvalDelegationModel.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import {
+  excludesInitiator,
+  filterInitiator,
+  stepAppliesAtAmount,
+  toPaise,
+  formatPaise,
+  toMoneyString,
+  sodResolveOptions,
+} from '../services/approval/approvalEntityRules.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -2051,17 +2066,33 @@ export async function insertPolicySteps(steps, approval_policy_id, t = null) {
         throw new Error(`Step ${i + 1}: Invalid decision_rule. Must be ALL or ANY`);
       }
 
+      // Optional value threshold ("only when the amount is ≥ ₹X"). Honoured by
+      // the engine for AMOUNT_GATED entity types only (approvalEntityRules.js);
+      // upsertApprovalPolicy nulls it for every other type before it gets here.
+      // Validated again here because this is the write: never a float, never
+      // negative, at most 2 decimals — stored canonically ('25000.00').
+      let minAmount = null;
+      try {
+        minAmount = toMoneyString(step.min_amount);
+      } catch {
+        throw new Error(`Step ${i + 1}: min_amount must be an amount in rupees with at most 2 decimals`);
+      }
+      if (minAmount !== null && toPaise(minAmount) < 0n) {
+        throw new Error(`Step ${i + 1}: min_amount cannot be negative`);
+      }
+
       const r = await tx.one(`
         INSERT INTO tbl_approval_policy_steps
-        (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
-        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id, min_amount)
+        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
         [
           approval_policy_id,
           step.step_order || (i + 1),
           step.approval_type || 'STANDARD',
           step.decision_rule || 'ANY',
           step.approver_source_type,
-          step.approver_source_id
+          step.approver_source_id,
+          minAmount
         ]
       );
       results.push(r);
@@ -2193,7 +2224,11 @@ export async function policyStepApproverEligibility(
   return { eligible: true, reason: null, resource };
 }
 
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
+// `options.neverDelegateTo` (separation of duties, see sodResolveOptions in
+// approvalEntityRules.js): a user id delegation must never substitute IN. When a
+// resolved approver's delegate is that user, the approver keeps the step. Every
+// caller that does not pass it gets exactly the previous behaviour.
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null, { neverDelegateTo = null } = {}) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
@@ -2304,7 +2339,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
   // a newly-added step is making a new assignment; simulateApproverImpact and
   // willBeFinalApprover are asking who would be asked, and an answer that
   // ignored cover would disagree with what actually happens.
-  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t);
+  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t, { neverDelegateTo });
 
   return finalApprovers;
 }
@@ -2400,6 +2435,26 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
  * @param {number|null} params.approval_policy_id - Specific policy to use (optional, auto-detected if not provided)
  * @param {number} params.initiated_by - User ID who initiated the approval
  * @param {Object} params.metadata - Additional metadata to store with the instance
+ * @param {string|number|null} params.amount - The entity's value. Stored as
+ *   `metadata.amount` (2-decimal string) when given; for AMOUNT_GATED entity
+ *   types (PR) a policy step whose min_amount exceeds it is not created and is
+ *   recorded in `metadata.approval_diagnostics.skipped_steps` as
+ *   `{ step_order, reason: 'below_threshold', min_amount }`. Unknown (null) =
+ *   every step applies.
+ * @param {boolean} params.strictSteps - Fail closed: an applicable step that
+ *   resolves to nobody (before the separation-of-duties filter) throws
+ *   `{ code: 'APPROVAL_STEP_UNRESOLVED', httpStatus: 422, step_order }` instead
+ *   of being dropped.
+ *
+ * Separation of duties (SOD_EXCLUDE_INITIATOR entity types, i.e. PR): the
+ * initiator is removed from every step, is never inserted as an approver and is
+ * never auto-approved; a step that resolved only to them is skipped and recorded
+ * as `{ step_order, reason: 'sod_self' }`; if no step is left the call throws
+ * `{ code: 'APPROVAL_NO_INDEPENDENT_APPROVER', httpStatus: 422 }` before any row
+ * is written. Every other entity type behaves exactly as before.
+ *
+ * @param {Object} [txArg] - Same as `params.txContext`, accepted positionally
+ *   too: `createApprovalInstance(params, t)`.
  */
 export async function createApprovalInstance({
   entity_type,
@@ -2411,8 +2466,10 @@ export async function createApprovalInstance({
   approval_policy_id = null,
   initiated_by,
   metadata = {},
+  amount = null,
+  strictSteps = false,
   txContext = null  // Optional transaction context for participating in outer transaction
-}) {
+}, txArg = null) {
   if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
     throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
   }
@@ -2440,6 +2497,20 @@ export async function createApprovalInstance({
     err.httpStatus = 400;
     throw err;
   }
+
+  // Normalised once, before any read: thresholds compare in paise and the
+  // instance records exactly the value they were compared against.
+  let amountText = null;
+  try {
+    amountText = toMoneyString(amount);
+  } catch {
+    const err = new Error(`Approval amount '${amount}' is not an amount in rupees with at most 2 decimals`);
+    err.code = 'APPROVAL_INVALID_AMOUNT';
+    err.httpStatus = 400;
+    throw err;
+  }
+  const sod = excludesInitiator(entity_type);
+  const resolveOptions = sodResolveOptions(entity_type, initiated_by);
 
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
@@ -2554,7 +2625,45 @@ export async function createApprovalInstance({
     // All entities are department-scoped. The department_id is always used for filtering.
     const resolveDeptId = department_id;
 
+    // strictSteps: an applicable step that resolves to nobody — whichever of
+    // the three ways below — is refused rather than dropped.
+    const unresolvedStepError = (policyStep, reason) => Object.assign(
+      new Error(
+        `Approval step ${policyStep.step_order} resolves to no approver in this scope (${reason}), ` +
+        `so this ${entity_type} cannot be submitted. Fix the approval policy in Settings → Approvals.`
+      ),
+      {
+        code: 'APPROVAL_STEP_UNRESOLVED',
+        httpStatus: 422,
+        step_order: policyStep.step_order,
+        reason,
+        approver_source_type: policyStep.approver_source_type,
+        approver_source_id: policyStep.approver_source_id,
+      }
+    );
+
+    // Value thresholds (AMOUNT_GATED entity types only — for every other type
+    // stepAppliesAtAmount is always true and this keeps every step). A step
+    // that does not apply at this amount is not an approval level for this
+    // entity at all, so it never consumes a step number — the same way the
+    // drops below do not.
+    const applicableSteps = [];
     for (const policyStep of policySteps) {
+      if (stepAppliesAtAmount(entity_type, policyStep, amountText)) {
+        applicableSteps.push(policyStep);
+        continue;
+      }
+      skippedSteps.push({
+        policy_step_id: policyStep.id,
+        step_order: policyStep.step_order,
+        approver_source_type: policyStep.approver_source_type,
+        approver_source_id: policyStep.approver_source_id,
+        reason: 'below_threshold',
+        min_amount: formatPaise(toPaise(policyStep.min_amount)),
+      });
+    }
+
+    for (const policyStep of applicableSteps) {
       // For ROLE-based steps, skip if the role lacks BOTH read AND approve permissions
       // for this entity type. A role with only `approve` cannot meaningfully act since
       // it has no access to view the entity.
@@ -2574,6 +2683,7 @@ export async function createApprovalInstance({
           } else {
             reason = 'ROLE_LACKS_READ_AND_APPROVE';
           }
+          if (strictSteps) throw unresolvedStepError(policyStep, reason);
           skippedSteps.push({
             policy_step_id: policyStep.id,
             step_order: policyStep.step_order,
@@ -2624,6 +2734,7 @@ export async function createApprovalInstance({
         const qualified = eligible;
 
         if (!qualified) {
+          if (strictSteps) throw unresolvedStepError(policyStep, 'USER_LACKS_READ_AND_APPROVE');
           skippedSteps.push({
             policy_step_id: policyStep.id,
             step_order: policyStep.step_order,
@@ -2638,11 +2749,13 @@ export async function createApprovalInstance({
       }
 
       // Resolve approvers for this step (pass process_id so the user's process
-      // scope is honored when picking who qualifies).
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
+      // scope is honored when picking who qualifies). resolveOptions is a no-op
+      // except under separation of duties (see sodResolveOptions).
+      const resolvedApproverIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id, resolveOptions);
 
       // Skip step if no approvers were resolved at all
-      if (approverUserIds.length === 0) {
+      if (resolvedApproverIds.length === 0) {
+        if (strictSteps) throw unresolvedStepError(policyStep, 'NO_APPROVERS_RESOLVED');
         skippedSteps.push({
           policy_step_id: policyStep.id,
           step_order: policyStep.step_order,
@@ -2653,13 +2766,31 @@ export async function createApprovalInstance({
         continue;
       }
 
+      // Separation of duties: the initiator is never one of the approvers.
+      // filterInitiator returns the list untouched for every other entity type.
+      const approverUserIds = filterInitiator(entity_type, resolvedApproverIds, initiated_by);
+      if (approverUserIds.length === 0) {
+        // Resolved to the initiator and nobody else. Not a misconfiguration —
+        // the level simply has nobody independent to ask — so it is skipped
+        // (even under strictSteps) and recorded; if no level is left at all,
+        // APPROVAL_NO_INDEPENDENT_APPROVER below refuses the whole instance.
+        skippedSteps.push({
+          policy_step_id: policyStep.id,
+          step_order: policyStep.step_order,
+          approver_source_type: policyStep.approver_source_type,
+          approver_source_id: policyStep.approver_source_id,
+          reason: 'sod_self'
+        });
+        continue;
+      }
+
       stepNumber++; // Increment sequential step number
 
       resolvedSteps.push({
         policyStep,
         approverUserIds,
         stepOrder: stepNumber,
-        isInitiatorInStep: approverUserIds.includes(initiated_by)
+        isInitiatorInStep: !sod && approverUserIds.includes(initiated_by)
       });
     }
 
@@ -2675,8 +2806,32 @@ export async function createApprovalInstance({
       recorded_at: new Date().toISOString()
     };
     const instanceMetadata = { ...(metadata || {}) };
+    if (amountText !== null) {
+      instanceMetadata.amount = amountText;
+    }
     if (skippedSteps.length > 0) {
       instanceMetadata.approval_diagnostics = diagnostics;
+    }
+
+    // Separation of duties, fail-closed: nobody independent of the initiator
+    // is left to approve (every level resolved only to them, fell below the
+    // value threshold, or both). Refused before the instance INSERT below, so
+    // no row is written — the same shape as APPROVAL_POLICY_RESOLVES_TO_NOBODY,
+    // but with the cause the caller can actually explain to the requester.
+    if (sod && resolvedSteps.length === 0) {
+      logger.warn(
+        `[ApprovalEngine] REFUSED ${entity_type}/${entity_id}: no approver independent of initiator ` +
+        `${initiated_by} under policy ${policy.id}. Skipped: ${JSON.stringify(skippedSteps)}`
+      );
+      const err = new Error(
+        `Nobody other than the person who raised this ${entity_type} can approve it under ` +
+        `approval policy ${policy.id}, so it cannot be submitted yet. Add an approval step ` +
+        `with an independent approver in Settings → Approvals.`
+      );
+      err.code = 'APPROVAL_NO_INDEPENDENT_APPROVER';
+      err.httpStatus = 422;
+      err.diagnostics = diagnostics;
+      throw err;
     }
 
     // EVERY step was dropped. Refuse — do not create the instance.
@@ -2832,9 +2987,11 @@ export async function createApprovalInstance({
         VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
       `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
 
-      // Insert approvers for this step
+      // Insert approvers for this step. Under separation of duties the
+      // initiator was filtered out above; `!sod` keeps this auto-approval
+      // unreachable for those entity types even if that ever regressed.
       for (const userId of approverUserIds) {
-        if (userId === initiated_by) {
+        if (!sod && userId === initiated_by) {
           // Initiator: insert as already APPROVED with no comment
           await t.none(`
             INSERT INTO tbl_approval_step_approvers
@@ -3003,10 +3160,11 @@ export async function createApprovalInstance({
   };
 
   // If transaction context provided, use it; otherwise create new transaction
-  if (txContext) {
-    return typeof txContext.tx === 'function'
-      ? txContext.tx(executor)
-      : executor(txContext);
+  const outerTx = txContext || txArg;
+  if (outerTx) {
+    return typeof outerTx.tx === 'function'
+      ? outerTx.tx(executor)
+      : executor(outerTx);
   }
   return db.tx(executor);
 }
@@ -3044,6 +3202,11 @@ export async function findBestMatchingPolicyTx({ entity_type, hospitality_compan
 // Passing `null` matches process-agnostic policies only (no cross-process
 // fall-through).
 export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null) {
+  // The question is asked by the would-be initiator ("will submitting this
+  // auto-approve?"). Under separation of duties the initiator is never an
+  // approver and is never auto-recorded as approving, so the answer is no.
+  if (excludesInitiator(entity_type)) return false;
+
   const t = txContext || db;
 
   // Find the best matching master policy — process-scoped.

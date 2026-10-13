@@ -24,6 +24,12 @@ import {
 } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
 import { notifyApprovalChanged } from './approvalEvents.js';
+import {
+  filterInitiator,
+  stepAppliesAtAmount,
+  sodResolveOptions,
+  toPaise,
+} from './approval/approvalEntityRules.js';
 import { logError } from '../helper/common.js';
 import {
   sendPolicyChangeNotification,
@@ -211,6 +217,7 @@ function buildChangedScopeFilterSql(changedScopes, changedDeptIds, params) {
 const IDENTIFIER_KEYS_BY_ENTITY = {
   PO: ['po_number', 'po_no'],
   MR: ['mr_number', 'mr_no'],
+  PR: ['pr_number'],
   RFQ: ['rfq_number', 'rfq_no'],
   TENDER: ['tender_number', 'rfq_number', 'rfq_no'],
   TECHNICAL: ['rfq_number', 'rfq_no'],
@@ -287,8 +294,13 @@ export function computePolicyStepDiff(oldSteps, newSteps) {
       const sourceChanged = old.approver_source_type !== nw.approver_source_type ||
                             String(old.approver_source_id) !== String(nw.approver_source_id);
       const ruleChanged = (old.decision_rule || 'ANY') !== (nw.decision_rule || 'ANY');
+      // Value threshold (PR). Compared as paise so '1000' and '1000.00' — a
+      // request body vs the NUMERIC(18,2) column — are the same threshold.
+      // Absent and null are both "no threshold". For every other entity type
+      // both sides are always null, so this never fires for them.
+      const minAmountChanged = toPaise(old.min_amount ?? null) !== toPaise(nw.min_amount ?? null);
 
-      if (sourceChanged || ruleChanged) {
+      if (sourceChanged || ruleChanged || minAmountChanged) {
         diffs.push({
           type: 'STEP_MODIFIED',
           step_order: order,
@@ -296,6 +308,7 @@ export function computePolicyStepDiff(oldSteps, newSteps) {
           newStep: nw,
           sourceChanged,
           ruleChanged,
+          minAmountChanged,
           oldRule: old.decision_rule || 'ANY',
           newRule: nw.decision_rule || 'ANY'
         });
@@ -963,11 +976,19 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
         );
       }
 
-      // Resolve NEW approvers (from new policy step definition)
+      // Resolve NEW approvers (from new policy step definition). Under
+      // separation of duties the initiator is never (re-)installed — neither
+      // directly nor as somebody's delegate; for other entity types both
+      // sodResolveOptions and filterInitiator are no-ops.
       const newResolvedIds = modEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
+        ? filterInitiator(
+            instance.entity_type,
+            await resolveApprovers(
+              d.newStep, instance.hospitality_company_id, instance.hotel_id,
+              resolveDeptId, t, null, instance.process_id || null,
+              sodResolveOptions(instance.entity_type, instance.initiated_by)
+            ),
+            instance.initiated_by
           )
         : [];
 
@@ -1116,6 +1137,23 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
   // that is a larger change than this defect and is left out on purpose.
   let renumberOffset = 0;
   for (const d of additions) {
+    // A value-gated step (PR) that does not apply at this instance's amount is
+    // not an approval level for it — exactly as createApprovalInstance would
+    // not have created it. Nothing is inserted or shifted, so the offset does
+    // not move. Recorded on the result only when it happens, so the change
+    // summary of every other entity type is unchanged.
+    if (!stepAppliesAtAmount(instance.entity_type, d.newStep, instance.metadata?.amount ?? null)) {
+      logger.info(`[PropagateAdd] instance ${instance.id}: added policy step_order=${d.step_order} (min_amount ${d.newStep.min_amount}) does not apply at amount ${instance.metadata?.amount} — not added`);
+      if (!result.stepsNotApplicable) result.stepsNotApplicable = [];
+      result.stepsNotApplicable.push({
+        step_order: d.step_order,
+        policy_step_id: d.newStep.id ?? null,
+        reason: 'below_threshold',
+        min_amount: d.newStep.min_amount ?? null,
+      });
+      continue;
+    }
+
     const insertPosition = d.step_order + renumberOffset;
     const currentStep = instance.current_step;
 
@@ -1174,10 +1212,18 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
         );
       }
 
+      // Separation of duties: never the initiator (see STEP_MODIFIED above).
+      // A step left with nobody else takes the BLOCKED branch below — it
+      // stalls until somebody independent holds the role.
       const newResolvedIds = addEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
+        ? filterInitiator(
+            instance.entity_type,
+            await resolveApprovers(
+              d.newStep, instance.hospitality_company_id, instance.hotel_id,
+              resolveDeptId, t, null, instance.process_id || null,
+              sodResolveOptions(instance.entity_type, instance.initiated_by)
+            ),
+            instance.initiated_by
           )
         : [];
 
@@ -1969,10 +2015,17 @@ export async function revalidateApproverMembership({
     // process scope was narrowed away from this instance's process is
     // correctly excluded from the resolved set (and therefore marked REMOVED
     // below).
+    // Separation of duties: the initiator never "still qualifies" (no-op for
+    // other entity types).
     const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
-    const resolvedIds = await resolveApprovers(
-      policyStep, row.hospitality_company_id, row.hotel_id,
-      resolveDeptId, t, null, row.process_id || null
+    const resolvedIds = filterInitiator(
+      row.entity_type,
+      await resolveApprovers(
+        policyStep, row.hospitality_company_id, row.hotel_id,
+        resolveDeptId, t, null, row.process_id || null,
+        sodResolveOptions(row.entity_type, row.initiated_by)
+      ),
+      row.initiated_by
     );
 
     if (!resolvedIds.includes(userId)) {
@@ -2108,10 +2161,17 @@ export async function revalidateApproverMembership({
 
       // Re-resolve all approvers for this step to confirm user should be
       // included (process-scope-aware via row.process_id).
+      // Separation of duties: a requester who gains the step's role is still
+      // never added to their own instance (no-op for other entity types).
       const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
-      const resolvedIds = await resolveApprovers(
-        policyStep, row.hospitality_company_id, row.hotel_id,
-        resolveDeptId, t, null, row.process_id || null
+      const resolvedIds = filterInitiator(
+        row.entity_type,
+        await resolveApprovers(
+          policyStep, row.hospitality_company_id, row.hotel_id,
+          resolveDeptId, t, null, row.process_id || null,
+          sodResolveOptions(row.entity_type, row.initiated_by)
+        ),
+        row.initiated_by
       );
 
       if (resolvedIds.includes(userId)) {

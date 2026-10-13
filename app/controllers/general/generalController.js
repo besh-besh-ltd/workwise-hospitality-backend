@@ -61,6 +61,12 @@ import {
   listReassignmentCandidates,
   reassignApprover
 } from '../../models/approvalOversightModel.js';
+import {
+  AMOUNT_GATED,
+  excludesInitiator,
+  toPaise,
+  formatPaise
+} from '../../services/approval/approvalEntityRules.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -771,6 +777,55 @@ function unqualifiableRoleStepsResponse(entityType, offenders) {
   };
 }
 
+/**
+ * Validate and canonicalise each step's `min_amount` ("only when the value is
+ * ≥ ₹X") for a policy of `entityType`.
+ *
+ * Thresholds are a rule of AMOUNT_GATED entity types (PR) only. For every other
+ * type the field is dropped to NULL exactly as it was ignored before this
+ * column existed, so no non-PR request changes meaning — and nothing the engine
+ * would never read is stored. For PR: absent/null/'' = no threshold; otherwise
+ * a non-negative rupee amount with at most 2 decimals, stored as '25000.00'.
+ *
+ * @returns {{ steps: Array } | { error: Object }} error is a 400 body
+ */
+function normaliseStepMinAmounts(steps, entityType) {
+  if (!Array.isArray(steps)) return { steps };
+  const gated = AMOUNT_GATED.has(String(entityType || '').toUpperCase());
+  const out = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step || typeof step !== 'object' || !Object.prototype.hasOwnProperty.call(step, 'min_amount')) {
+      out.push(step);
+      continue;
+    }
+    if (!gated) {
+      out.push({ ...step, min_amount: null });
+      continue;
+    }
+    const label = `Step ${step.step_order || i + 1}`;
+    let paise;
+    try {
+      paise = toPaise(step.min_amount);
+    } catch {
+      return {
+        error: {
+          status: 3,
+          code: 'INVALID_MIN_AMOUNT',
+          message: `${label}: the minimum value must be an amount in rupees with at most 2 decimals`
+        }
+      };
+    }
+    if (paise !== null && paise < 0n) {
+      return {
+        error: { status: 3, code: 'INVALID_MIN_AMOUNT', message: `${label}: the minimum value cannot be negative` }
+      };
+    }
+    out.push({ ...step, min_amount: formatPaise(paise) });
+  }
+  return { steps: out };
+}
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -786,10 +841,12 @@ const hospitalityApprovalController = {
         process_id,
         is_active,
         is_master,
-        steps,
+        steps: requestedSteps,
         id,
         confirmed_approval_impact
       } = req.body;
+      // Re-bound once min_amount is validated against the effective entity type.
+      let steps = requestedSteps;
       const created_by = req.user?.id;
 
       if (!created_by) {
@@ -802,7 +859,10 @@ const hospitalityApprovalController = {
       // publish/eval time. Force process_id = NULL for every ARC entity type
       // server-side, regardless of what the client sent.
       const isArcEntity = typeof entity_type === 'string' && (entity_type === 'ARC' || entity_type.startsWith('ARC_'));
-      const effectiveProcessId = isArcEntity ? null : process_id;
+      // PR is process-free for the same reason: a requisition carries no
+      // process, so a PR policy saved with one could never be matched.
+      const isProcessFreeEntity = isArcEntity || entity_type === 'PR';
+      const effectiveProcessId = isProcessFreeEntity ? null : process_id;
 
       let policy;
       let propagationResult = null;
@@ -861,6 +921,12 @@ const hospitalityApprovalController = {
           const stored = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
           const effectiveEntityType = entity_type !== undefined ? entity_type : stored?.entity_type;
           const entityTypeChanged = entity_type !== undefined && stored?.entity_type !== undefined && entity_type !== stored.entity_type;
+
+          // min_amount before anything compares or writes steps (the PHASE 2
+          // diff and PHASE 3 insert both read the normalised list).
+          const normalised = normaliseStepMinAmounts(steps, effectiveEntityType);
+          if (normalised.error) return res.status(400).json(normalised.error);
+          steps = normalised.steps;
 
           const stepsToValidate = selectRoleStepsToValidate(oldSteps, steps, { revalidateAll: entityTypeChanged });
 
@@ -949,9 +1015,9 @@ const hospitalityApprovalController = {
           if (department_id !== undefined) patch.department_id = department_id;
           if (is_active !== undefined) patch.is_active = is_active;
           if (is_master !== undefined) patch.is_master = is_master;
-          // ARC stays process-free by design: force NULL whenever the entity
-          // type says ARC, otherwise only touch process_id if it was sent.
-          if (isArcEntity) patch.process_id = null;
+          // ARC (and PR) stay process-free by design: force NULL whenever the
+          // entity type says so, otherwise only touch process_id if it was sent.
+          if (isProcessFreeEntity) patch.process_id = null;
           else if (process_id !== undefined) patch.process_id = effectiveProcessId;
 
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);
@@ -1019,10 +1085,15 @@ const hospitalityApprovalController = {
         // v2 stage types so the admin wizard can create per-stage ARC policies,
         // and the GROUP rate contract workflow (ARC_GROUP*), which governs ARCs
         // covering several hotels — see helper/arc_v2/arcPolicy.js.
+        //
+        // MR and PR (material / purchase requisitions) were missing: both are
+        // in ENTITY_APPROVE_RESOURCE_MAP, so their policies could be matched
+        // but never created from the admin screen.
         const validEntityTypes = [
           'RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE',
           'ARC_TECH', 'ARC_NEGOTIATION', 'ARC_COMMITTEE', 'ARC_AMENDMENT', 'ARC_PUBLISH',
           'ARC_GROUP', 'ARC_GROUP_TECH', 'ARC_GROUP_NEGOTIATION', 'ARC_GROUP_COMMITTEE', 'ARC_GROUP_AMENDMENT',
+          'MR', 'PR',
         ];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({
@@ -1030,6 +1101,10 @@ const hospitalityApprovalController = {
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
+
+        const normalised = normaliseStepMinAmounts(steps, entity_type);
+        if (normalised.error) return res.status(400).json(normalised.error);
+        steps = normalised.steps;
 
         // Every step of a brand-new policy is a new step, so all of them are
         // validated here (see the PHASE 1b note on the update branch for why the
@@ -1185,6 +1260,20 @@ const hospitalityApprovalController = {
         return res.status(400).json({
           status: 3,
           message: 'entity_type, entity_id, and hospitality_company_id are required'
+        });
+      }
+
+      // A purchase requisition's approval is started only by the PR workflow,
+      // which supplies the server-computed value (thresholds), runs strict
+      // step resolution and moves the PR's own status in the same transaction.
+      // Through this generic door an approval could be opened for any PR id —
+      // bypassing technical review, blocking the real submit, and (once
+      // approved) driving the PR's post-approval handler.
+      if (String(entity_type).toUpperCase() === 'PR') {
+        return res.status(400).json({
+          status: 3,
+          code: 'APPROVAL_ENTITY_HAS_OWN_WORKFLOW',
+          message: 'Purchase requisitions are submitted for approval from the requisition itself.'
         });
       }
 
@@ -1652,13 +1741,19 @@ const hospitalityApprovalController = {
 
       // Pass the instance's own scope so each candidate is judged by the rule
       // the approval engine itself uses, not merely "is in this company".
-      const data = await listReassignmentCandidates(instance.hospitality_company_id, {
+      const candidates = await listReassignmentCandidates(instance.hospitality_company_id, {
         hotelId: instance.hotel_id || null,
         search: req.query.search || null,
         entityType: instance.entity_type,
         departmentId: instance.department_id || null,
         processId: instance.process_id || null,
       });
+      // Separation of duties: the person who raised it can never be handed it.
+      const data = excludesInitiator(instance.entity_type)
+        ? candidates.map((c) => (Number(c.id) === Number(instance.initiated_by)
+          ? { ...c, eligible: false, ineligible_reason: 'initiator' }
+          : c))
+        : candidates;
       return res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -1718,6 +1813,16 @@ const hospitalityApprovalController = {
           status: 0,
           code: 'NOT_AN_APPROVER',
           message: 'That person is not currently an approver on this step',
+        });
+      }
+
+      // Separation of duties (PR): the engine never installs the initiator as
+      // an approver of their own request, so neither may an administrator.
+      if (excludesInitiator(instance.entity_type) && toUserId === Number(instance.initiated_by)) {
+        return res.status(400).json({
+          status: 3,
+          code: 'NOT_ELIGIBLE',
+          message: 'The person who raised this request cannot approve it',
         });
       }
 

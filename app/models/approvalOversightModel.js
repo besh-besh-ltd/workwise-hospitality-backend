@@ -211,7 +211,7 @@ export async function listStuckApprovals(
 /** The instance a reassignment targets, with everything the guard needs. */
 export async function getStuckInstance(instanceId) {
   return db.oneOrNone(
-    `SELECT ai.id, ai.status, ai.entity_type, ai.entity_id,
+    `SELECT ai.id, ai.status, ai.entity_type, ai.entity_id, ai.initiated_by,
             ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id,
             s.id AS step_id, s.step_order, s.status AS step_status
        FROM tbl_approval_instances ai

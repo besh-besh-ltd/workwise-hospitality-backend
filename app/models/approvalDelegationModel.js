@@ -58,8 +58,14 @@ export async function activeDelegationsFor(userIds, at = null) {
  *     approver stays. A step that resolves to nobody makes the whole instance
  *     throw APPROVAL_POLICY_RESOLVES_TO_NOBODY, so a bad delegation would stop
  *     a purchase order being raised at all.
+ *
+ * `neverDelegateTo` (separation of duties): the one person cover may not land
+ * on — the initiator of an instance whose initiator can never approve it (see
+ * sodResolveOptions in services/approval/approvalEntityRules.js). Such a
+ * delegate is "ineligible" in exactly the sense above, so the original
+ * approver stays. Omitted (every non-SoD caller): unchanged behaviour.
  */
-export async function applyDelegations(userIds, hospitalityCompanyId, t = db) {
+export async function applyDelegations(userIds, hospitalityCompanyId, t = db, { neverDelegateTo = null } = {}) {
   if (!userIds?.length) return userIds;
 
   let delegations;
@@ -78,6 +84,15 @@ export async function applyDelegations(userIds, hospitalityCompanyId, t = db) {
   for (const userId of userIds) {
     const delegation = delegations.get(userId);
     if (!delegation) {
+      out.push(userId);
+      continue;
+    }
+
+    if (neverDelegateTo != null && Number(delegation.delegate_user_id) === Number(neverDelegateTo)) {
+      logger.info(
+        { delegation_id: delegation.id, delegator: userId, delegate: delegation.delegate_user_id },
+        'Delegation not applied: the delegate initiated this approval and may not approve it'
+      );
       out.push(userId);
       continue;
     }
