@@ -10,10 +10,12 @@
 //   cleanupPrs                    PR rows + their approval instances
 //   mapCategory / unmapAll        category → reviewing-department routing rows
 //   istDate                       an IST calendar date, computed by Postgres
+//   approvedPr                    an APPROVED PR, made entirely through the API
 
 import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { grantRoleScope } from "./roleScope.js";
+import { httpClient } from "./http.js";
 
 const PR_ROLE_TITLES = ["PR Requester", "PR Technical Reviewer", "PR Approver", "PR Buyer"];
 const roleIdCache = new Map();
@@ -220,4 +222,71 @@ export async function mapCategory(companyId, categoryId, departmentId) {
 /** Remove every review-routing mapping of a company. */
 export async function unmapAll(companyId) {
   await db.none(`DELETE FROM tbl_pr_review_category_map WHERE hospitality_company_id = $1`, [companyId]);
+}
+
+// ---------------------------------------------------------------------------
+// Approved PRs (the buyer pool's input)
+// ---------------------------------------------------------------------------
+const clientCache = new Map();
+async function clientFor(userId) {
+  if (!clientCache.has(userId)) clientCache.set(userId, await httpClient(userId));
+  return clientCache.get(userId);
+}
+
+/**
+ * An APPROVED PR, made the way users make one — entirely through the API:
+ *   1. `requesterId` creates a draft of `lines` (POST /api/v1/pr; each line in
+ *      the create payload's shape) at (companyId, hotelId, departmentId);
+ *   2. a fresh hotel-level PR policy whose only step is USER `approverId` — the
+ *      newest, most specific policy for the hotel, so it is the one submit
+ *      matches;
+ *   3. the requester submits. No review: the caller keeps the company's review
+ *      routing empty for these categories (unmapAll) — a PR that lands in
+ *      in_review throws here;
+ *   4. the approver approves through POST /general/hospitality/approval/action.
+ * The policy is then deactivated (dropPrPolicies deletes it later).
+ *
+ * The caller grants the roles (PR Requester on the cell, PR Approver for the
+ * approver), sets their user_type to 2, and deletes the PR with cleanupPrs.
+ * `header` overrides the draft header (title, urgency, required_by_date…).
+ * @returns {Promise<{id: number, pr_number: string, line_ids: number[], instance_id: number}>}
+ *   line_ids in line order.
+ */
+export async function approvedPr(lines, {
+  requesterId = IDS.users.a1_eng_buyer,
+  approverId = IDS.users.a1_proc_commApp,
+  companyId = IDS.hospitality.A,
+  hotelId = IDS.hotels.A1,
+  departmentId = IDS.departments.eng,
+  ...header
+} = {}) {
+  const requester = await clientFor(requesterId);
+  const approver = await clientFor(approverId);
+  const created = await requester.post("/api/v1/pr")
+    .send(await draftBody({ hotel_id: hotelId, department_id: departmentId, ...header, lines }));
+  if (created.status !== 200) throw new Error(`approvedPr: create ${created.status} ${JSON.stringify(created.body)}`);
+  const { id, pr_number } = created.body.data;
+
+  const policyId = await makePrPolicy({ companyId, hotelId, steps: [{ source: "USER", id: approverId }] });
+  try {
+    const submitted = await requester.post(`/api/v1/pr/${id}/submit`).send({});
+    if (submitted.status !== 200 || submitted.body.data?.pr?.status !== "pending_approval") {
+      throw new Error(`approvedPr: submit ${submitted.status} ${JSON.stringify(submitted.body?.data?.pr?.status ?? submitted.body)}`);
+    }
+    const row = await db.one(`SELECT approval_instance_id FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    const approved = await approver.post("/api/v1/general/hospitality/approval/action")
+      .send({ approval_instance_id: row.approval_instance_id, action: "APPROVE", comment: "ok" });
+    const after = await db.one(`SELECT status FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    if (approved.status !== 200 || after.status !== "approved") {
+      throw new Error(`approvedPr: approve ${approved.status} → PR ${after.status} ${JSON.stringify(approved.body)}`);
+    }
+    const lineIds = await db.map(
+      `SELECT id FROM tbl_purchase_requisition_line WHERE pr_id = $1 ORDER BY line_no`, [id], (r) => Number(r.id));
+    return { id, pr_number, line_ids: lineIds, instance_id: Number(row.approval_instance_id) };
+  } catch (err) {
+    await cleanupPrs([id]); // the caller never learns the id of a PR that failed half-way
+    throw err;
+  } finally {
+    await db.none(`UPDATE tbl_approval_policies SET is_active = false WHERE id = $1`, [policyId]);
+  }
 }

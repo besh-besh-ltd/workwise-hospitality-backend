@@ -32,6 +32,10 @@ PrRoutes.post('/routing-preview',    passportSignIn, acl([2, 8]), prController.r
 // Technical reviewer's queue (static path: before /:id).
 PrRoutes.get( '/review-queue',       passportSignIn, acl([2, 8]), prController.reviewQueue);
 
+// Buyer pool + buyers picker (static paths: before /:id). pr.convert on the hotel.
+PrRoutes.get( '/pool',               passportSignIn, acl([2, 8]), prController.pool);
+PrRoutes.get( '/buyers',             passportSignIn, acl([2, 8]), prController.buyers);
+
 // Company admin: category → reviewing-department map. Gated by the company
 // admin capability (requireCompanyAdmin — admits legacy user_type 7 as well as
 // a buyer holding company.admin, so no acl([2, 8]) here); the administered
@@ -63,6 +67,14 @@ PrRoutes.post(  '/:id(\\d+)/attachments',                                      p
 PrRoutes.delete('/:id(\\d+)/attachments/:attId(\\d+)',                         passportSignIn, acl([2, 8]), prController.removeAttachment);
 PrRoutes.post(  '/:id(\\d+)/reviews/:reviewId(\\d+)/complete',                 passportSignIn, acl([2, 8]), prController.completeReview);
 PrRoutes.post(  '/:id(\\d+)/reviews/:reviewId(\\d+)/send-back',                passportSignIn, acl([2, 8]), prController.sendBackReview);
+
+// Buyer pool actions: assign, map, catalog request, close (pr.convert on the
+// PR's hotel); cancel a line (the requester of an approved PR).
+PrRoutes.post('/:id(\\d+)/assign',                                 passportSignIn, acl([2, 8]), prController.assign);
+PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/map',              passportSignIn, acl([2, 8]), prController.mapLine);
+PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/catalog-request',  passportSignIn, acl([2, 8]), prController.catalogRequest);
+PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/close',            passportSignIn, acl([2, 8]), prController.closeLine);
+PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/cancel',           passportSignIn, acl([2, 8]), prController.cancelLine);
 
 // Fallback for any /pr path no route above matched — a non-numeric id, an
 // unknown sub-path. It is a SEPARATE router mounted after PrRoutes

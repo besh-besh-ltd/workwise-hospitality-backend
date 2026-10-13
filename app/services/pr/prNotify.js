@@ -8,11 +8,13 @@
 //   - de-duplicates recipients and never includes the actor;
 //   - writes the in-app row through notificationService.dispatch
 //     (category 'pr', data {pr_id}, a link to the PR detail);
-//   - also emails the action-required events (review task, returned, approved).
+//   - also emails the action-required events (review task, returned, approved,
+//     assigned).
 //
-// Task 6 implements the approval-path events; Task 11 completes the matrix
-// (notifyAssigned, notifyConverted, notifyLineClosed, notifyLineCancelled,
-// notifyCatalogResolved, notifyComment) under these names.
+// Task 6 implements the approval-path events, Task 8 the buyer pool's
+// (notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested);
+// Task 11 completes the matrix (notifyConverted, notifyCatalogResolved,
+// notifyComment) under these names.
 //
 // `pr` is a PR row (at least id, pr_number, title, raised_by,
 // hospitality_company_id, hotel_id).
@@ -183,4 +185,120 @@ export async function notifyRejected({ pr, actorId, comment }) {
   });
 }
 
-export default { notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected };
+// ---------------------------------------------------------------------------
+// Buyer pool (Task 8)
+// ---------------------------------------------------------------------------
+
+const lineLabel = (line) => `line ${line.line_no}${line.free_text_name ? ` (${line.free_text_name})` : ''}`;
+
+/**
+ * Assigned to a buyer: the assignee gets the task (in-app + email) unless they
+ * took it themselves; the requester learns who handles it ("Handled by …").
+ * @param {{pr, assigneeId: number, assigneeName: string, actorId}} p
+ */
+export async function notifyAssigned({ pr, assigneeId, assigneeName, actorId }) {
+  await safely('notifyAssigned', pr, async () => {
+    const assignee = audience([assigneeId], actorId);
+    const requester = audience([pr.raised_by], actorId).filter((id) => !assignee.includes(id) && id !== Number(assigneeId));
+    const title = `Assigned to you: ${pr.pr_number}`;
+    await inApp(pr, assignee, actorId, {
+      type: 'pr_assigned', title, body: `${label(pr)} is assigned to you in the purchase queue.`,
+    });
+    await email(pr, assignee, {
+      subject: title,
+      intro: `Purchase requisition <strong>${escapeHtml(label(pr))}</strong> is assigned to you in the purchase queue.`,
+      details: [['Requisition', pr.pr_number], ['Title', pr.title]],
+      cta: 'Open requisition',
+    });
+    await inApp(pr, requester, actorId, {
+      type: 'pr_assigned',
+      title: `Handled by ${assigneeName}: ${pr.pr_number}`,
+      body: `${assigneeName} from the purchase team is handling your purchase requisition ${label(pr)}.`,
+    });
+  });
+}
+
+/**
+ * A buyer closed a line: the requester, in-app, with the reason.
+ * @param {{pr, line: {line_no, free_text_name?}, reason: string, actorId}} p
+ */
+export async function notifyLineClosed({ pr, line, reason, actorId }) {
+  await safely('notifyLineClosed', pr, async () => {
+    await inApp(pr, audience([pr.raised_by], actorId), actorId, {
+      type: 'pr_line_closed',
+      title: `Line closed: ${pr.pr_number}`,
+      body: `The purchase team closed ${lineLabel(line)} of ${label(pr)} — "${reason}"`,
+    });
+  });
+}
+
+/**
+ * The requester cancelled a line: the assigned buyer (if any), in-app.
+ * @param {{pr, line: {line_no, free_text_name?}, reason: string, actorId}} p
+ */
+export async function notifyLineCancelled({ pr, line, reason, actorId }) {
+  await safely('notifyLineCancelled', pr, async () => {
+    await inApp(pr, audience([pr.assigned_buyer_id], actorId), actorId, {
+      type: 'pr_line_cancelled',
+      title: `Line cancelled: ${pr.pr_number}`,
+      body: `The requester cancelled ${lineLabel(line)} of ${label(pr)} — "${reason}"`,
+    });
+  });
+}
+
+const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+
+/**
+ * A buyer asked the platform team for a catalog item. notificationService has
+ * no platform-admin channel: the admin-panel queue of open requests is the
+ * primary channel, and when PR_CATALOG_REQUEST_EMAIL (comma-separated
+ * addresses, read at call time) is set, each address also gets an email.
+ * Unset → an info log, nothing else; the request never fails because of it.
+ * @param {{pr, line: {line_no, free_text_name}, request: {id, requested_name, description}, actorId}} p
+ */
+export async function notifyCatalogRequested({ pr, line, request, actorId }) {
+  await safely('notifyCatalogRequested', pr, async () => {
+    const to = [...new Set(String(process.env.PR_CATALOG_REQUEST_EMAIL || '')
+      .split(',').map((a) => a.trim()).filter((a) => EMAIL_RE.test(a)))];
+    if (!to.length) {
+      logger.info({ prId: pr.id, requestId: request.id },
+        '[prNotify] PR_CATALOG_REQUEST_EMAIL not set — the catalog request waits in the admin-panel queue');
+      return;
+    }
+    const ctx = await db.oneOrNone(
+      `SELECT hc.name AS company_name, h.name AS hotel_name, cat.title AS category_title, u.name AS requested_by_name
+         FROM tbl_purchase_requisition p
+         LEFT JOIN tbl_hospitality_companies hc ON hc.id = p.hospitality_company_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+         LEFT JOIN tbl_category cat ON cat.id = $2
+         LEFT JOIN tbl_users u ON u.id = $3
+        WHERE p.id = $1`,
+      [pr.id, request.category_id ?? null, actorId ?? null]);
+    const adminUrl = (process.env.ADMIN_BASE_URL || 'https://admin.hospitality.letsworkwise.com').replace(/\/+$/, '');
+    const rows = [
+      ['Requested item', request.requested_name], ['Description', request.description],
+      ['Category', ctx?.category_title], ['Company', ctx?.company_name], ['Hotel', ctx?.hotel_name],
+      ['Requisition', `${pr.pr_number}, line ${line.line_no}`], ['Requested by', ctx?.requested_by_name],
+    ].filter(([, v]) => v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => `<li style="padding:4px 0;"><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`)
+      .join('');
+    const html = generateEmailTemplate(
+      '<h2>New catalog request</h2>',
+      `<div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+         <p>A buyer could not find this item in the catalog and asked for it to be added.
+            Fulfil or reject it from the Catalog requests queue in the admin panel.</p>
+         <ul style="list-style:none; padding-left:0; margin-top:16px;">${rows}</ul>
+         <div style="text-align:center; margin-top:24px;">${emailButton(adminUrl, 'Open admin panel')}</div>
+       </div>`);
+    const subject = `Catalog request: ${request.requested_name} (${pr.pr_number})`;
+    for (const address of to) {
+      sendMail({ from: config.webmasterMail, to: address, subject, html })
+        .catch((err) => logger.error({ err, prId: pr.id, requestId: request.id }, '[prNotify] catalog request email failed'));
+    }
+  });
+}
+
+export default {
+  notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected,
+  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested,
+};

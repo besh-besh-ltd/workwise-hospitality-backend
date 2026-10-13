@@ -14,7 +14,8 @@ import {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
   POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
-  IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL,
+  IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL, HOTEL_BUYERS_SQL, IS_HOTEL_BUYER_SQL,
+  POOL_AGE_DAYS_SQL, POOL_AGE_BAND_SQL,
 } from '../../services/pr/prConstants.js';
 import { readableScopeSql } from '../../services/pr/prAccess.js';
 
@@ -944,13 +945,37 @@ export async function kpis(user, superAdmin = false, t = db) {
 }
 
 /**
- * Open PRs (same company, last 30 days, not terminal, an ACTIVE line whose
- * effective variant is `variantId`) and live RFQs containing the variant.
- * `readable` for PRs is the one list/point-read predicate; RFQ readability is
- * decided by the caller (it needs the rfq.read scope check). Titles are only
- * selected for readable rows — never leaked to others. Drafts are excluded (an
- * unsubmitted draft is private). tbl_rfq has no created_at: "timestamp" is naive UTC
- * and is rewritten on edit, so RFQs report last_activity_at, not a creation time.
+ * THE duplicate-request rule, written once for the duplicate hints
+ * (GET /pr/duplicates) and the pool's duplicate_count, so the count on a pool
+ * row is exactly what the hint lists (minus the row's own PR):
+ *   a PR   of the company, created in the last 30 days, not a draft (R11: an
+ *          unsubmitted draft is private) and not rejected / cancelled, with an
+ *          ACTIVE line whose effective variant is `variant`;
+ *   an RFQ of the company, not closed / withdrawn, active in the last 30 days
+ *          (R13: tbl_rfq has no created_at — "timestamp" is naive UTC and is
+ *          rewritten on edit, so it is LAST ACTIVITY), containing `variant`.
+ * `p` / `r` are the PR / RFQ aliases; `company` and `variant` are SQL
+ * expressions (columns or $n).
+ */
+const DUPLICATE_PR_SQL = (p, company, variant) => `(
+  ${p}.hospitality_company_id = ${company}
+  AND ${p}.status NOT IN ('draft', 'rejected', 'cancelled')
+  AND ${p}.created_at >= NOW() - INTERVAL '30 days'
+  AND EXISTS (SELECT 1 FROM tbl_purchase_requisition_line _dup_l
+               WHERE _dup_l.pr_id = ${p}.id AND _dup_l.status = 'active'
+                 AND COALESCE(_dup_l.product_variant_id, _dup_l.mapped_variant_id) = ${variant}))`;
+const DUPLICATE_RFQ_SQL = (r, company, variant) => `(
+  ${r}.hospitality_company_id = ${company}
+  AND ${r}.status NOT IN (2, 5)
+  AND (${r}."timestamp" AT TIME ZONE 'UTC') >= NOW() - INTERVAL '30 days'
+  AND EXISTS (SELECT 1 FROM tbl_rfq_products _dup_rp WHERE _dup_rp.rfq_id = ${r}.id AND _dup_rp.product_variant_id = ${variant}))`;
+
+/**
+ * Open PRs and live RFQs for `variantId` in the company (DUPLICATE_PR_SQL /
+ * DUPLICATE_RFQ_SQL). `readable` for PRs is the one list/point-read predicate;
+ * RFQ readability is decided by the caller (it needs the rfq.read scope check).
+ * Titles are only selected for readable rows — never leaked to others. RFQs
+ * report last_activity_at, not a creation time.
  */
 export async function duplicates(user, { companyId, variantId }, superAdmin = false, t = db) {
   const readable = superAdmin ? 'TRUE' : readableScopeSql(user.id, 'p', 3).clause;
@@ -961,12 +986,7 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
        FROM tbl_purchase_requisition p
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
        LEFT JOIN tbl_department d ON d.id = p.department_id
-      WHERE p.hospitality_company_id = $1
-        AND p.status <> 'rejected' AND p.status <> 'cancelled' AND p.status <> 'draft'
-        AND p.created_at >= NOW() - INTERVAL '30 days'
-        AND EXISTS (SELECT 1 FROM tbl_purchase_requisition_line l
-                     WHERE l.pr_id = p.id AND l.status = 'active'
-                       AND COALESCE(l.product_variant_id, l.mapped_variant_id) = $2)
+      WHERE ${DUPLICATE_PR_SQL('p', '$1', '$2')}
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT 50`,
     [companyId, variantId, user.id]);
@@ -977,14 +997,208 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
        FROM tbl_rfq r
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
        LEFT JOIN tbl_department d ON d.id = r.department_id
-      WHERE r.hospitality_company_id = $1
-        AND r.status NOT IN (2, 5)
-        AND (r."timestamp" AT TIME ZONE 'UTC') >= NOW() - INTERVAL '30 days'
-        AND EXISTS (SELECT 1 FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id AND rp.product_variant_id = $2)
+      WHERE ${DUPLICATE_RFQ_SQL('r', '$1', '$2')}
       ORDER BY (r."timestamp" AT TIME ZONE 'UTC') DESC, r.id DESC
       LIMIT 50`,
     [companyId, variantId]);
   return { prs, rfqs };
+}
+
+// ---------------------------------------------------------------------------
+// Buyer pool (spec §9): the pool list, the hotel's buyers, line state and the
+// buyer / requester line writes. prPool.js decides who may act; every write
+// here runs inside its transaction, under the PR row lock (lockPr).
+// ---------------------------------------------------------------------------
+
+/** Pool rows: urgent first, then need-by date, then approval time (ties: PR, line). `b` = row alias. */
+const POOL_ORDER = (b) => `CASE ${b}.urgency WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+  ${b}.required_by_date, ${b}.approved_at, ${b}.pr_id, ${b}.line_no`;
+
+/** WHERE: the PR's hotel is one the user (bound at `userParam`) holds pr.convert on — hasPerm's axis rules. */
+const POOL_SCOPE_SQL = (p, userParam) => `EXISTS (
+  SELECT 1 FROM (${prGrantRowsSql(userParam, 'convert')}) _pool_g
+   WHERE _pool_g.company_id = ${p}.hospitality_company_id
+     AND (_pool_g.hotel_id IS NULL OR _pool_g.hotel_id = ${p}.hotel_id))`;
+
+/** Hotels whose pool the user may work (pr.convert on any department there), by name. [] = none. */
+export async function poolHotels(userId, t = db) {
+  return t.map(
+    `SELECT DISTINCT h.id, h.name
+       FROM (${prGrantRowsSql('$1', 'convert')}) g
+       JOIN tbl_hospitality_company_hotels h
+         ON h.hospitality_company_id = g.company_id
+        AND (g.hotel_id IS NULL OR g.hotel_id = h.id)
+      WHERE COALESCE(h.is_deleted, 0) = 0
+      ORDER BY h.name, h.id`,
+    [userId], (r) => ({ id: Number(r.id), name: r.name }));
+}
+
+/**
+ * GET /pr/pool: ACTIVE lines of APPROVED PRs whose derived progress
+ * (LINE_PROGRESS_SQL — never re-derived here) is one of `progress`, at hotels
+ * where the user holds pr.convert. filters:
+ *   { hotelId, departmentId, categoryId, progress: string[], assigned: 'me'|'unassigned'|'any',
+ *     q, page, pageSize }
+ * @returns {Promise<{rows: object[], total: number}>}
+ */
+export async function pool(userId, filters, t = db) {
+  const params = [userId];
+  const bind = (v) => { params.push(v); return `$${params.length}`; };
+  const conds = [`p.status = 'approved'`, `l.status = 'active'`, POOL_SCOPE_SQL('p', '$1')];
+  if (filters.hotelId) conds.push(`p.hotel_id = ${bind(filters.hotelId)}`);
+  if (filters.departmentId) conds.push(`p.department_id = ${bind(filters.departmentId)}`);
+  if (filters.categoryId) conds.push(`l.category_id = ${bind(filters.categoryId)}`);
+  if (filters.assigned === 'me') conds.push('p.assigned_buyer_id = $1');
+  else if (filters.assigned === 'unassigned') conds.push('p.assigned_buyer_id IS NULL');
+  if (filters.q) {
+    const n = bind(likePattern(filters.q));
+    conds.push(`(p.pr_number ILIKE ${n} OR p.title ILIKE ${n} OR l.free_text_name ILIKE ${n} OR EXISTS (
+      SELECT 1 FROM tbl_product_variant qpv LEFT JOIN tbl_product qprod ON qprod.id = qpv.product_id
+       WHERE qpv.id = COALESCE(l.product_variant_id, l.mapped_variant_id)
+         AND (qpv.name ILIKE ${n} OR qprod.name ILIKE ${n})))`);
+  }
+  const progress = bind(filters.progress?.length ? filters.progress : [...POOL_PROGRESSES]);
+  const base = `
+    SELECT b.* FROM (
+      SELECT l.id AS line_id, l.pr_id, l.line_no, p.urgency, p.required_by_date, p.approved_at,
+             ${LINE_PROGRESS_SQL('l', 'p')} AS progress
+        FROM tbl_purchase_requisition p
+        JOIN tbl_purchase_requisition_line l ON l.pr_id = p.id
+       WHERE ${conds.join(' AND ')}) b
+     WHERE b.progress = ANY(${progress}::text[])`;
+
+  return t.task(async (c) => {
+    const total = Number((await c.one(`SELECT count(*) AS n FROM (${base}) x`, params)).n);
+    const limit = bind(filters.pageSize);
+    const offset = bind((filters.page - 1) * filters.pageSize);
+    const rows = await c.any(
+      `WITH pg AS (${base} ORDER BY ${POOL_ORDER('b')} LIMIT ${limit} OFFSET ${offset})
+       SELECT pg.line_id, pg.pr_id, p.pr_number, p.title AS pr_title,
+              p.hotel_id, h.name AS hotel_name, p.department_id, d.title AS department_title,
+              l.line_no, l.line_kind, COALESCE(ev.name, l.free_text_name) AS item_name, l.free_text_name,
+              ev.id AS effective_variant_id, l.category_id, cat.title AS category_title,
+              l.quantity, l.uom, l.estimated_unit_price, ROUND(l.quantity * l.estimated_unit_price, 2) AS line_value,
+              to_char(p.required_by_date, 'YYYY-MM-DD') AS required_by_date, p.urgency, p.approved_at,
+              ${POOL_AGE_DAYS_SQL('p')} AS age_days, ${POOL_AGE_BAND_SQL('p')} AS age_band,
+              p.assigned_buyer_id, bu.name AS assigned_buyer_name, pg.progress,
+              CASE WHEN ev.id IS NULL THEN 0 ELSE
+                (SELECT count(*)::int FROM tbl_purchase_requisition dp
+                  WHERE dp.id <> p.id AND ${DUPLICATE_PR_SQL('dp', 'p.hospitality_company_id', 'ev.id')})
+                + (SELECT count(*)::int FROM tbl_rfq dr
+                    WHERE ${DUPLICATE_RFQ_SQL('dr', 'p.hospitality_company_id', 'ev.id')})
+              END AS duplicate_count,
+              (SELECT count(*)::int FROM tbl_pr_line_clause cl WHERE cl.pr_line_id = l.id) AS clause_count,
+              (SELECT count(*)::int FROM tbl_pr_attachment a WHERE a.pr_line_id = l.id) AS attachment_count,
+              (SELECT cr.id FROM tbl_pr_catalog_request cr
+                WHERE cr.pr_line_id = l.id AND cr.status = 'open') AS open_catalog_request_id
+         FROM pg
+         JOIN tbl_purchase_requisition_line l ON l.id = pg.line_id
+         JOIN tbl_purchase_requisition p ON p.id = pg.pr_id
+         LEFT JOIN tbl_product_variant ev ON ev.id = COALESCE(l.product_variant_id, l.mapped_variant_id)
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+         LEFT JOIN tbl_department d ON d.id = p.department_id
+         LEFT JOIN tbl_category cat ON cat.id = l.category_id
+         LEFT JOIN tbl_users bu ON bu.id = p.assigned_buyer_id
+        ORDER BY ${POOL_ORDER('pg')}`,
+      params);
+    return { rows, total };
+  });
+}
+
+/** The hotel's buyers (HOTEL_BUYERS_SQL): `[{id, name}]` by name. */
+export async function buyersForHotel({ companyId, hotelId }, t = db) {
+  return t.map(HOTEL_BUYERS_SQL('$1', '$2'), [companyId, hotelId], (r) => ({ id: Number(r.id), name: r.name }));
+}
+
+/** Is `userId` one of the hotel's buyers (IS_HOTEL_BUYER_SQL — the GET /pr/buyers predicate)? */
+export async function isHotelBuyer(userId, { companyId, hotelId }, t = db) {
+  const row = await t.one(`SELECT ${IS_HOTEL_BUYER_SQL('$1', '$2', '$3')} AS ok`, [userId, companyId, hotelId]);
+  return row.ok === true;
+}
+
+/** Assign the PR to `buyerId`, stamped now. Returns the PR row. */
+export async function setAssignedBuyer(t, prId, buyerId) {
+  return t.one(
+    `UPDATE tbl_purchase_requisition p
+        SET assigned_buyer_id = $2, assigned_at = NOW(), updated_at = NOW()
+      WHERE p.id = $1
+     RETURNING ${PR_SELECT('p')}`,
+    [prId, buyerId]);
+}
+
+/** A user's display name, or null. */
+export async function userName(userId, t = db) {
+  const row = await t.oneOrNone(`SELECT name FROM tbl_users WHERE id = $1`, [userId]);
+  return row ? row.name : null;
+}
+
+// What every line action decides on: stored state, mapping, whether a live
+// RFQ link exists (LIVE_LINK_EXISTS — the derived-progress rule) and the open
+// catalog request, if any.
+const LINE_STATE_SELECT = `
+  SELECT l.id, l.pr_id, l.line_no, l.line_kind, l.status, l.free_text_name, l.category_id,
+         l.product_variant_id, l.mapped_variant_id,
+         ${LIVE_LINK_EXISTS('l')} AS has_live_link,
+         (SELECT cr.id FROM tbl_pr_catalog_request cr
+           WHERE cr.pr_line_id = l.id AND cr.status = 'open') AS open_catalog_request_id
+    FROM tbl_purchase_requisition_line l`;
+
+/** Row-lock one line of this PR (inside the PR lock) and read its state. null if not this PR's line. */
+export async function lockLineState(t, prId, lineId) {
+  return t.oneOrNone(`${LINE_STATE_SELECT} WHERE l.id = $1 AND l.pr_id = $2 FOR UPDATE OF l`, [lineId, prId]);
+}
+
+/** Every line's state (no lock), in line order — for capabilities. */
+export async function lineStates(prId, t = db) {
+  return t.any(`${LINE_STATE_SELECT} WHERE l.pr_id = $1 ORDER BY l.line_no`, [prId]);
+}
+
+/** A line's derived progress right now (LINE_PROGRESS_SQL). */
+export async function lineProgress(lineId, t = db) {
+  const row = await t.oneOrNone(
+    `SELECT ${LINE_PROGRESS_SQL('l', 'p')} AS progress
+       FROM tbl_purchase_requisition_line l JOIN tbl_purchase_requisition p ON p.id = l.pr_id
+      WHERE l.id = $1`, [lineId]);
+  return row ? row.progress : null;
+}
+
+/** Map a free-text line to a catalog variant (re-mapping overwrites). */
+export async function setLineMapping(t, lineId, { variantId, userId }) {
+  await t.none(
+    `UPDATE tbl_purchase_requisition_line
+        SET mapped_variant_id = $2, mapped_by = $3, mapped_at = NOW(), updated_at = NOW()
+      WHERE id = $1`,
+    [lineId, variantId, userId]);
+}
+
+/** The line's OPEN catalog request → fulfilled with `variantId`. Returns its id, or null when none was open. */
+export async function fulfilOpenCatalogRequest(t, lineId, { variantId, resolvedBy, note }) {
+  const row = await t.oneOrNone(
+    `UPDATE tbl_pr_catalog_request
+        SET status = 'fulfilled', resolved_variant_id = $2, resolved_by = $3, resolved_at = NOW(), resolution_note = $4
+      WHERE pr_line_id = $1 AND status = 'open'
+     RETURNING id`,
+    [lineId, variantId, resolvedBy, note]);
+  return row ? Number(row.id) : null;
+}
+
+/** Open a catalog request for a line (uq_pr_catreq_open_per_line: at most one open per line). */
+export async function insertCatalogRequest(t, { companyId, lineId, requestedName, description, categoryId, requestedBy }) {
+  return t.one(
+    `INSERT INTO tbl_pr_catalog_request
+       (hospitality_company_id, pr_line_id, requested_name, description, category_id, status, requested_by)
+     VALUES ($1, $2, $3, $4, $5, 'open', $6)
+     RETURNING id, pr_line_id, requested_name, description, category_id, status, requested_by, requested_at`,
+    [companyId, lineId, requestedName, description, categoryId, requestedBy]);
+}
+
+/** End a line: 'closed' (buyer) or 'cancelled' (requester), with the reason, who and when. */
+export async function endLine(t, lineId, { status, reason, userId }) {
+  await t.none(
+    `UPDATE tbl_purchase_requisition_line
+        SET status = $2, close_reason = $3, closed_by = $4, closed_at = NOW(), updated_at = NOW()
+      WHERE id = $1`,
+    [lineId, status, reason, userId]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,4 +1292,6 @@ export default {
   insertClause, clauseOfLine, deleteClause, insertAttachment, attachmentOfPr, deleteAttachment, reviewQueue,
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
+  poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
+  setLineMapping, fulfilOpenCatalogRequest, insertCatalogRequest, endLine,
 };

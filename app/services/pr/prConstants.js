@@ -38,6 +38,8 @@ export const MAX_LEN = Object.freeze({
   // clause_text = the RFQ add-clause limit (rfqValidation.addClause), so a
   // converted clause always fits; file_name = tbl_pr_attachment VARCHAR(300).
   clause_text: 2000, file_name: 300, file_url: 2000,
+  // Catalog requests: requested_name = tbl_pr_catalog_request VARCHAR(300).
+  requested_name: 300, description: 4000,
 });
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,24 @@ export const HEADER_PROGRESSES = Object.freeze([
 ]);
 /** Line progresses that mean "waiting for the purchase team to pick it up". */
 export const POOL_PROGRESSES = Object.freeze(['in_pool', 'needs_mapping', 'awaiting_catalog']);
+
+// ---------------------------------------------------------------------------
+// Buyer pool (spec §9): age since approval
+// ---------------------------------------------------------------------------
+/** Age bands of a pool line (whole IST days since approval): ok < AMBER, amber < RED, red ≥ RED. */
+export const POOL_AGE_AMBER_DAYS = 3;
+export const POOL_AGE_RED_DAYS = 7;
+/**
+ * Whole IST calendar days since PR `p` was approved (0 on the day itself),
+ * independent of the Postgres session timezone. Never negative.
+ */
+export const POOL_AGE_DAYS_SQL = (p) =>
+  `GREATEST(0, ${IST_TODAY_SQL} - (${p}.approved_at AT TIME ZONE 'Asia/Kolkata')::date)`;
+/** The band of POOL_AGE_DAYS_SQL as 'ok' | 'amber' | 'red'. */
+export const POOL_AGE_BAND_SQL = (p) => `CASE
+  WHEN ${POOL_AGE_DAYS_SQL(p)} >= ${POOL_AGE_RED_DAYS} THEN 'red'
+  WHEN ${POOL_AGE_DAYS_SQL(p)} >= ${POOL_AGE_AMBER_DAYS} THEN 'amber'
+  ELSE 'ok' END`;
 export const NO_REVIEWER_LABEL = 'No eligible reviewer — contact your admin';
 export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
 
@@ -252,6 +272,18 @@ export const HOTEL_BUYERS_SQL = (companyParam, hotelParam) => {
   return `SELECT DISTINCT _rx_u.id, _rx_u.name, _rx_u.email
     ${holderMatchSql('convert', `${companyParam}::int`, `${hotelParam}::int`, null)}
    ORDER BY _rx_u.name, _rx_u.id`;
+};
+
+/**
+ * Is the user bound at `userParam` one of the hotel's buyers — the very
+ * predicate of HOTEL_BUYERS_SQL, narrowed to one user? So the assign target a
+ * buyer may pick (GET /pr/buyers) and the one POST /pr/:id/assign accepts can
+ * never disagree. Arguments are $n placeholders.
+ */
+export const IS_HOTEL_BUYER_SQL = (userParam, companyParam, hotelParam) => {
+  [userParam, companyParam, hotelParam].forEach((p) => assertPlaceholder('IS_HOTEL_BUYER_SQL', p));
+  return `EXISTS (SELECT 1 ${holderMatchSql('convert', `${companyParam}::int`, `${hotelParam}::int`, null)}
+     AND _rx_u.id = ${userParam}::int)`;
 };
 
 /** The in_review label when departments have no evaluator. Single source for SQL and JS callers. */

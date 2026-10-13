@@ -25,11 +25,12 @@ import { userCanReadEntity } from '../../services/authorizationService.js';
 import { describeVariants, contractCoverage, guardCatalogLines } from '../../services/pr/prCatalog.js';
 import { previewRouting } from '../../services/pr/prRouting.js';
 import * as prWorkflow from '../../services/pr/prWorkflow.js';
+import * as prPool from '../../services/pr/prPool.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { formatPaise } from '../../services/approval/approvalEntityRules.js';
 import {
   PR_TYPES, URGENCIES, PR_STATUSES, HEADER_PROGRESSES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
-  QTY_RE, PRICE_RE, PRICE_MAX_INT_DIGITS, TOTAL_MAX_PAISE, MAX_LEN,
+  QTY_RE, PRICE_RE, PRICE_MAX_INT_DIGITS, TOTAL_MAX_PAISE, MAX_LEN, POOL_PROGRESSES,
 } from '../../services/pr/prConstants.js';
 
 const ok = (res, data, message = 'success') => res.status(200).json({ status: 1, message, data });
@@ -273,6 +274,9 @@ async function capabilitiesFor(user, pr) {
     // an open review, else null — the gate every reviewer endpoint applies
     // (prWorkflow.reviewRights / prModel.eligibleReviews).
     review: await prWorkflow.reviewRights(pr, user),
+    // Lines the requester may cancel now (approved PR, active, not sourced) —
+    // the cancel-line endpoint's own rule (prPool.lineBlocker). [] otherwise.
+    can_cancel_lines: await prPool.cancellableLineIds(pr, user),
   };
 }
 
@@ -935,6 +939,146 @@ export async function savedRoutingPreview(req, res) {
       return previewRouting({ ...cellOf(pr), requesterId: Number(pr.raised_by), ...inputs }, t);
     });
     return ok(res, out);
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Buyer pool (Task 8, spec §9): the pool, the buyers picker, assignment,
+// mapping, catalog requests, closing (buyer) and cancelling (requester) a
+// line. Who may act is decided in prPool under the PR row lock; scope comes
+// from req.user and the PR row only.
+// ---------------------------------------------------------------------------
+const POOL_DEFAULT_PAGE_SIZE = 50;
+const POOL_MAX_PAGE_SIZE = 200;
+const POOL_ASSIGNED = ['me', 'unassigned', 'any'];
+
+/**
+ * GET /v1/pr/pool?hotel_id=&department_id=&category_id=&progress=&assigned=me|unassigned|any&q=&page=&page_size=
+ * Lines of approved PRs waiting for the purchase team, at the hotels where the
+ * caller holds pr.convert (403 when there are none). `progress` is one value or
+ * a comma-separated / repeated list of in_pool | needs_mapping | awaiting_catalog
+ * (default: all three). Filters only ever narrow that scope.
+ * → { rows, total, page, page_size, hotels: [{id, name}] } (hotels = the caller's pool hotels).
+ */
+export async function pool(req, res) {
+  try {
+    const hotels = await prModel.poolHotels(req.user.id);
+    if (!hotels.length) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.convert'));
+
+    const qs = req.query || {};
+    const errors = [];
+    const one = (v) => (Array.isArray(v) ? v[0] : v);
+    const idFilter = (field) => {
+      const raw = one(qs[field]);
+      if (raw === undefined || raw === null || raw === '') return null;
+      const n = posInt(raw);
+      if (!n) errors.push({ field, message: `Invalid ${field}` });
+      return n;
+    };
+    const rawProgress = (Array.isArray(qs.progress) ? qs.progress : [qs.progress]).filter((v) => v !== undefined);
+    const progress = [...new Set(rawProgress
+      .flatMap((v) => (typeof v === 'string' ? v.split(',') : [null]))
+      .map((v) => (v === null ? null : v.trim())).filter((v) => v !== ''))];
+    if (progress.some((v) => !POOL_PROGRESSES.includes(v))) {
+      errors.push({ field: 'progress', message: `progress must be among ${POOL_PROGRESSES.join(', ')}` });
+    }
+    const assigned = text(one(qs.assigned)) || 'any';
+    if (!POOL_ASSIGNED.includes(assigned)) errors.push({ field: 'assigned', message: 'assigned must be me, unassigned or any' });
+    const filters = {
+      hotelId: idFilter('hotel_id'),
+      departmentId: idFilter('department_id'),
+      categoryId: idFilter('category_id'),
+      progress,
+      assigned,
+      q: text(one(qs.q)).slice(0, 100),
+      page: 1,
+      pageSize: POOL_DEFAULT_PAGE_SIZE,
+    };
+    if (qs.page !== undefined && qs.page !== '') {
+      const n = posInt(one(qs.page));
+      if (!n) errors.push({ field: 'page', message: 'Invalid page' }); else filters.page = n;
+    }
+    if (qs.page_size !== undefined && qs.page_size !== '') {
+      const n = posInt(one(qs.page_size));
+      if (!n) errors.push({ field: 'page_size', message: 'Invalid page_size' });
+      else filters.pageSize = Math.min(n, POOL_MAX_PAGE_SIZE);
+    }
+    if (errors.length) throw prError(PR_ERR.VALIDATION, 'Invalid query', errors);
+
+    const { rows, total } = await prModel.pool(req.user.id, filters);
+    return ok(res, { rows, total, page: filters.page, page_size: filters.pageSize, hotels });
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** GET /v1/pr/buyers?hotel_id= — the hotel's buyers [{id, name}], for a caller who works its pool. */
+export async function buyers(req, res) {
+  try {
+    const hotelId = posInt(req.query.hotel_id);
+    if (!hotelId) throw prError(PR_ERR.VALIDATION, 'Missing parameters', [{ field: 'hotel_id', message: 'hotel_id is required' }]);
+    const hotel = await prModel.hotelCell(hotelId);
+    if (!hotel) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.convert'));
+    const scope = { companyId: Number(hotel.hospitality_company_id), hotelId };
+    await assertPerm(req.user.id, 'pr.convert', scope);
+    return ok(res, await prModel.buyersForHotel(scope));
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/assign {buyer_id} — a buyer of the PR's hotel assigns an approved PR to one of its buyers. */
+export async function assign(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    return ok(res, await prPool.assign(id, req.user, req.body), 'Assigned');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/lines/:lineId/map {variant_id} — a buyer maps a free-text line to a catalog item. */
+export async function mapLine(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    return ok(res, await prPool.mapLine(id, posInt(req.params.lineId), req.user, req.body), 'Line mapped');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/lines/:lineId/catalog-request {requested_name?, description?} — a buyer asks for a catalog item. */
+export async function catalogRequest(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    return ok(res, await prPool.requestCatalogItem(id, posInt(req.params.lineId), req.user, req.body), 'Catalog item requested');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/lines/:lineId/close {reason} — a buyer closes a pool line. */
+export async function closeLine(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    return ok(res, await prPool.closeLine(id, posInt(req.params.lineId), req.user, req.body?.reason), 'Line closed');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/lines/:lineId/cancel {reason} — the requester cancels a line of their approved PR. */
+export async function cancelLine(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    return ok(res, await prPool.cancelLine(id, posInt(req.params.lineId), req.user, req.body?.reason), 'Line cancelled');
   } catch (err) {
     return sendPrError(res, err, logger);
   }

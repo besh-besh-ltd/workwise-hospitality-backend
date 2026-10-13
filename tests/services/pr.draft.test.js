@@ -265,6 +265,7 @@ describe("PR drafts — read access", () => {
     expect(d.comments).toEqual([]);
     expect(d.capabilities).toEqual({
       can_edit: true, can_submit: true, can_withdraw: false, can_cancel: true, can_copy: true, approval: null, review: null,
+      can_cancel_lines: [],
     });
   });
 
@@ -293,6 +294,7 @@ describe("PR drafts — read access", () => {
     expect(peer.status).toBe(200);
     expect(peer.body.data.capabilities).toEqual({
       can_edit: false, can_submit: false, can_withdraw: false, can_cancel: false, can_copy: false, approval: null, review: null,
+      can_cancel_lines: [],
     });
 
     // pr.read on another department of the same hotel → still 404.
@@ -597,6 +599,7 @@ describe("PR drafts — update, cancel, copy", () => {
     const detail = await reqC.get(`/api/v1/pr/${id}`);
     expect(detail.body.data.capabilities).toEqual({
       can_edit: false, can_submit: false, can_withdraw: false, can_cancel: false, can_copy: true, approval: null, review: null,
+      can_cancel_lines: [],
     });
   });
 
