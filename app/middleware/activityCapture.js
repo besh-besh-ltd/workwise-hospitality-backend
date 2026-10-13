@@ -1,13 +1,15 @@
 import { logger } from '../util/logger.js';
 import { getRequestContext } from '../util/requestContext.js';
 import { resolveActor, ACTOR_TYPES } from './requestContext.js';
-import { lookupEvent, CATEGORIES } from '../services/activity/eventRegistry.js';
+import { lookupEvent, isNotAnEvent, CATEGORIES } from '../services/activity/eventRegistry.js';
 import {
   recordActivityEvent,
   resolveEntityScope,
   resolveUserScope,
+  resolveBuyerScope,
+  companiesVisibleTo,
 } from '../models/activityModel.js';
-import { emitToCompany } from '../util/socket.js';
+import { emitToCompany, emitToCompanies } from '../util/socket.js';
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -33,7 +35,7 @@ export const resetUncataloguedRoutes = () => uncatalogued.clear();
 const dig = (obj, path) =>
   path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
 
-const extractEntityId = (spec, { req, responseBody }) => {
+const extractEntityId = (spec, { req, responseBody, actorUserId }) => {
   if (!spec) return null;
   const source =
     spec.from === 'params' ? req.params
@@ -41,7 +43,9 @@ const extractEntityId = (spec, { req, responseBody }) => {
       : spec.from === 'response' ? responseBody
       : null;
   const raw = source ? dig(source, spec.path) : null;
-  if (raw == null || raw === '') return null;
+  // `orActor`: the route acts on the caller when the field is absent — a
+  // self-edit — so the subject is the caller, not "nobody".
+  if (raw == null || raw === '') return spec.orActor && actorUserId ? Number(actorUserId) : null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 };
@@ -54,26 +58,54 @@ const extractEntityId = (spec, { req, responseBody }) => {
  * security work concluded they are not trustworthy for scoping, and a trail
  * you can point at another company by editing a header is not an audit trail.
  */
-const resolveScope = async (definition, { req, entityId, actorUserId }) => {
+const resolveScope = async (definition, { req, res, entityId, actorUserId, isStaff = false }) => {
+  const detailScope = res?.locals?.activityDetail?.scope || null;
+  const declared = [].concat(definition?.scope || []);
+  // An entry that names the controller's detail explicitly gets it first; a
+  // generic entry gets it after its own strategies. Either way it is the
+  // controller's validated view of what was touched, never a header.
   const strategies = []
-    .concat(definition?.scope || [])
+    .concat(declared)
     .concat(definition?.bodyScope ? [{ via: 'body', ...definition.bodyScope }] : [])
-    // Always last: an event about an account rather than about work still has
-    // to land somewhere, and the acting user's company is the honest answer.
-    .concat([{ via: 'actor' }]);
+    .concat(declared.some((s) => s.via === 'detail') ? [] : [{ via: 'detail' }])
+    // An event about an account rather than about work still has to land
+    // somewhere: first the acting user's own unit, then — for a company
+    // administrator, who usually has no unit — their buyer company, as a
+    // company-wide event. Before that last step existed, every such event was
+    // dropped.
+    //
+    // Never for Workwise's own staff. Their accounts belong to a buyer company
+    // of their own (production's 150 and 402 do), so an unnamed console read
+    // that names no customer — a list of every buyer — would be filed in that
+    // one client's trail as "Workwise looked at your data". A staff event is
+    // placed only by what it touched; one that touched no single customer
+    // belongs in nobody's feed, as the registry has always said.
+    .concat([{ via: 'actor' }, { via: 'actorBuyer' }]);
+
+  // A label found by a strategy that could not place the event (a user with
+  // no mapping yet, say) is still the right name for the sentence.
+  let label = null;
+  let entityBuyer = null;
 
   for (const scope of strategies) {
     if (scope.via === 'entity' && entityId) {
       const row = await resolveEntityScope(scope.type, entityId);
+      if (row?.label && !label) label = row.label;
       if (row?.hospitality_company_id) {
         return {
           hospitalityCompanyId: row.hospitality_company_id,
           hotelId: row.hotel_id ?? null,
+          buyerCompanyId: row.buyer_company_id ?? null,
           // Only the entity lookup knows what the thing is called, which is
           // what makes a feed line read as "Company A" rather than "#10001".
           entityLabel: row.label ?? null,
         };
       }
+      // The entity belongs to a buyer company as a whole (a role, a
+      // workflow), or to a person not yet placed in a unit. Remembered rather
+      // than returned: a later, more specific strategy (the controller's
+      // detail) may still place it in a unit.
+      if (row?.buyer_company_id && !entityBuyer) entityBuyer = row.buyer_company_id;
     }
 
     if (scope.via === 'params' || scope.via === 'body') {
@@ -84,18 +116,51 @@ const resolveScope = async (definition, { req, entityId, actorUserId }) => {
         return {
           hospitalityCompanyId: companyId,
           hotelId: Number.isFinite(hotelId) ? hotelId : null,
-          entityLabel: null,
+          buyerCompanyId: null,
+          entityLabel: label,
         };
       }
     }
 
+    if (scope.via === 'detail' && detailScope?.hospitalityCompanyId) {
+      return {
+        hospitalityCompanyId: Number(detailScope.hospitalityCompanyId),
+        hotelId: detailScope.hotelId != null ? Number(detailScope.hotelId) : null,
+        buyerCompanyId: null,
+        entityLabel: detailScope.entityLabel ?? label,
+      };
+    }
+
     if (scope.via === 'actor') {
+      if (entityBuyer) {
+        // The entity already said which company it belongs to. Filing it
+        // under wherever the actor happens to be mapped would be wrong.
+        return { hospitalityCompanyId: null, hotelId: null, buyerCompanyId: entityBuyer, entityLabel: label };
+      }
+      if (isStaff) continue;
       const row = await resolveUserScope(actorUserId);
       if (row?.hospitality_company_id) {
         return {
           hospitalityCompanyId: row.hospitality_company_id,
           hotelId: row.hotel_id ?? null,
-          entityLabel: null,
+          buyerCompanyId: null,
+          entityLabel: label,
+        };
+      }
+    }
+
+    if (scope.via === 'actorBuyer') {
+      if (isStaff) continue;
+      const row = await resolveBuyerScope(actorUserId);
+      if (row?.buyer_company_id) {
+        return {
+          hospitalityCompanyId: null,
+          hotelId: null,
+          buyerCompanyId: row.buyer_company_id,
+          // For an event about the company itself (its profile), the
+          // company's name is the right label; otherwise keep what the entity
+          // lookup found.
+          entityLabel: label ?? (definition?.labelFromBuyer ? row.label : null),
         };
       }
     }
@@ -112,18 +177,41 @@ const routePattern = (req) => {
 };
 
 /**
+ * Each gap is logged once per process, not once per request. The counter
+ * still counts every occurrence; the log line is what makes a gap visible in
+ * the log pipeline (and so in alerting) rather than only to someone who
+ * thinks to call the coverage endpoint before the process restarts.
+ */
+const warnedGaps = new Set();
+
+const warnGapOnce = (key, method, route, reason) => {
+  if (warnedGaps.has(key)) return;
+  warnedGaps.add(key);
+  logger.warn({ route, method, reason }, 'Activity trail gap: event not recorded');
+};
+
+/** For tests: forget which gaps have already been logged. */
+export const resetGapWarnings = () => warnedGaps.clear();
+
+/**
  * Notes a mutating route the registry does not name.
  *
  * Counted for every attempt, successful or not: whether the catalogue covers a
  * route has nothing to do with whether a particular call happened to succeed.
  * Counting only successes would hide any route that usually fails validation,
  * which is exactly the sort of route a newcomer adds and forgets to name.
+ *
+ * Routes on the NOT_AN_EVENT list (notification read-receipts, uploads, auth
+ * flows) are known not to be events and are neither counted nor logged — a
+ * gap report full of them would hide the real ones.
  */
 const noteUncatalogued = (req, suffix = '') => {
   const pattern = routePattern(req);
   if (!pattern) return;
+  if (!suffix && isNotAnEvent(req.method, pattern)) return;
   const key = `${req.method} ${pattern}${suffix}`;
   uncatalogued.set(key, (uncatalogued.get(key) || 0) + 1);
+  warnGapOnce(key, req.method, pattern, suffix ? 'unscoped' : 'uncatalogued');
 };
 
 const captureEvent = async (req, res, responseBody) => {
@@ -153,15 +241,28 @@ const captureEvent = async (req, res, responseBody) => {
   // missing event gets found and named.
   //
   // Workwise's own staff are the exception: for them the record that a request
-  // happened at all is the point, so an unnamed internal route still lands.
+  // happened at all is the point, so an unnamed internal route is still
+  // considered — but only placed where it touched a customer (see
+  // resolveScope); one that names no customer lands nowhere.
   if (!definition && actor.actorType !== ACTOR_TYPES.WORKWISE_STAFF) return;
   const ctx = getRequestContext();
-  const entityId = extractEntityId(definition?.entity?.id, { req, responseBody });
+  const entityId = extractEntityId(definition?.entity?.id, {
+    req,
+    responseBody,
+    actorUserId: actor.actorUserId,
+  });
+
+  // Some routes answer 200 without doing anything — a pre-flight warning, a
+  // confirmation prompt. Those entries are recorded only when the controller
+  // says the thing actually happened, by handing over its detail.
+  if (definition?.requireDetail && !res.locals?.activityDetail) return;
 
   const scope = await resolveScope(definition, {
     req,
+    res,
     entityId,
     actorUserId: actor.actorUserId,
+    isStaff: actor.actorType === ACTOR_TYPES.WORKWISE_STAFF,
   });
 
   // Without a company the row could never be shown to anybody, so writing it
@@ -170,7 +271,7 @@ const captureEvent = async (req, res, responseBody) => {
   // cross-company by nature (a list of every buyer), and those genuinely do
   // not belong to one client's trail; counting them would report a permanent
   // gap that no registry entry could ever close.
-  if (!scope?.hospitalityCompanyId) {
+  if (!scope?.hospitalityCompanyId && !scope?.buyerCompanyId) {
     if (MUTATING.has(req.method)) noteUncatalogued(req, ' (unscoped)');
     return;
   }
@@ -178,6 +279,7 @@ const captureEvent = async (req, res, responseBody) => {
   const summaryContext = {
     actor: actor.actorLabel,
     actorType: actor.actorType,
+    actorUserId: actor.actorUserId,
     entityId,
     entityLabel: scope.entityLabel,
     body: req.body || {},
@@ -221,6 +323,7 @@ const captureEvent = async (req, res, responseBody) => {
     actorLabel: actor.actorLabel,
     hospitalityCompanyId: scope.hospitalityCompanyId,
     hotelId: scope.hotelId,
+    buyerCompanyId: scope.buyerCompanyId,
     entityType: definition?.entity?.type || null,
     entityId,
     entityLabel: scope.entityLabel,
@@ -239,10 +342,16 @@ const captureEvent = async (req, res, responseBody) => {
   // so a duplicated or out-of-order delivery cannot corrupt the feed. Same
   // contract as notification:new, which is what the client already knows.
   if (eventId) {
-    emitToCompany(scope.hospitalityCompanyId, 'activity:new', {
-      id: eventId,
-      severity: definition?.severity || 'routine',
-    });
+    const payload = { id: eventId, severity: definition?.severity || 'routine' };
+    if (scope.hospitalityCompanyId) {
+      emitToCompany(scope.hospitalityCompanyId, 'activity:new', payload);
+    } else {
+      // A company-wide event is shown to every administrator of the buyer
+      // company, and the socket rooms are per hospitality company — so every
+      // room under that buyer company is told, in ONE emit: an admin's socket
+      // is in all of them, and room-by-room emits reached it once per room.
+      emitToCompanies(await companiesVisibleTo(scope.buyerCompanyId), 'activity:new', payload);
+    }
   }
 };
 
