@@ -137,7 +137,7 @@ tbl_pr_attachment       (id, pr_id FK CASCADE, pr_line_id NULL FK CASCADE, kind 
 tbl_pr_review_category_map (id, hospitality_company_id, category_id, department_id, created_by, created_at,
                             UNIQUE (hospitality_company_id, category_id))
 tbl_pr_review           (id, pr_id FK CASCADE, revision, department_id, status CHECK (pending|completed|sent_back|superseded),
-                         acted_by, acted_at, note, auto_completed BOOL, created_at,
+                         acted_by, acted_at, note, self_reviewed BOOL, created_at,
                          UNIQUE (pr_id, revision, department_id))
 tbl_pr_review_line      (review_id FK CASCADE, pr_line_id FK CASCADE, PRIMARY KEY (review_id, pr_line_id))
 tbl_pr_line_rfq         (id, pr_line_id FK CASCADE, rfq_id FK → tbl_rfq CASCADE, rfq_product_id FK → tbl_rfq_products CASCADE,
