@@ -89,6 +89,11 @@
       "description": "Reports module: catalogue entitlement, tenant scope, workbook structure and spend reconciliation"
     },
     {
+      "name": "pr",
+      "pattern": "tests/services/pr\\.",
+      "description": "Purchase Requisitions: drafts, review, approval, buyer pool, conversion, catalog requests"
+    },
+    {
       "name": "arc-core",
       "pattern": "tests/services/arc_v2/arc\\.",
       "split": 2,
