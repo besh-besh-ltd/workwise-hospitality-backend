@@ -35,7 +35,7 @@ export const resetUncataloguedRoutes = () => uncatalogued.clear();
 const dig = (obj, path) =>
   path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
 
-const extractEntityId = (spec, { req, responseBody }) => {
+const extractEntityId = (spec, { req, responseBody, actorUserId }) => {
   if (!spec) return null;
   const source =
     spec.from === 'params' ? req.params
@@ -43,7 +43,9 @@ const extractEntityId = (spec, { req, responseBody }) => {
       : spec.from === 'response' ? responseBody
       : null;
   const raw = source ? dig(source, spec.path) : null;
-  if (raw == null || raw === '') return null;
+  // `orActor`: the route acts on the caller when the field is absent — a
+  // self-edit — so the subject is the caller, not "nobody".
+  if (raw == null || raw === '') return spec.orActor && actorUserId ? Number(actorUserId) : null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 };
@@ -56,7 +58,7 @@ const extractEntityId = (spec, { req, responseBody }) => {
  * security work concluded they are not trustworthy for scoping, and a trail
  * you can point at another company by editing a header is not an audit trail.
  */
-const resolveScope = async (definition, { req, res, entityId, actorUserId }) => {
+const resolveScope = async (definition, { req, res, entityId, actorUserId, isStaff = false }) => {
   const detailScope = res?.locals?.activityDetail?.scope || null;
   const declared = [].concat(definition?.scope || []);
   // An entry that names the controller's detail explicitly gets it first; a
@@ -71,6 +73,13 @@ const resolveScope = async (definition, { req, res, entityId, actorUserId }) => 
     // administrator, who usually has no unit — their buyer company, as a
     // company-wide event. Before that last step existed, every such event was
     // dropped.
+    //
+    // Never for Workwise's own staff. Their accounts belong to a buyer company
+    // of their own (production's 150 and 402 do), so an unnamed console read
+    // that names no customer — a list of every buyer — would be filed in that
+    // one client's trail as "Workwise looked at your data". A staff event is
+    // placed only by what it touched; one that touched no single customer
+    // belongs in nobody's feed, as the registry has always said.
     .concat([{ via: 'actor' }, { via: 'actorBuyer' }]);
 
   // A label found by a strategy that could not place the event (a user with
@@ -128,6 +137,7 @@ const resolveScope = async (definition, { req, res, entityId, actorUserId }) => 
         // under wherever the actor happens to be mapped would be wrong.
         return { hospitalityCompanyId: null, hotelId: null, buyerCompanyId: entityBuyer, entityLabel: label };
       }
+      if (isStaff) continue;
       const row = await resolveUserScope(actorUserId);
       if (row?.hospitality_company_id) {
         return {
@@ -140,6 +150,7 @@ const resolveScope = async (definition, { req, res, entityId, actorUserId }) => 
     }
 
     if (scope.via === 'actorBuyer') {
+      if (isStaff) continue;
       const row = await resolveBuyerScope(actorUserId);
       if (row?.buyer_company_id) {
         return {
@@ -230,10 +241,16 @@ const captureEvent = async (req, res, responseBody) => {
   // missing event gets found and named.
   //
   // Workwise's own staff are the exception: for them the record that a request
-  // happened at all is the point, so an unnamed internal route still lands.
+  // happened at all is the point, so an unnamed internal route is still
+  // considered — but only placed where it touched a customer (see
+  // resolveScope); one that names no customer lands nowhere.
   if (!definition && actor.actorType !== ACTOR_TYPES.WORKWISE_STAFF) return;
   const ctx = getRequestContext();
-  const entityId = extractEntityId(definition?.entity?.id, { req, responseBody });
+  const entityId = extractEntityId(definition?.entity?.id, {
+    req,
+    responseBody,
+    actorUserId: actor.actorUserId,
+  });
 
   // Some routes answer 200 without doing anything — a pre-flight warning, a
   // confirmation prompt. Those entries are recorded only when the controller
@@ -245,6 +262,7 @@ const captureEvent = async (req, res, responseBody) => {
     res,
     entityId,
     actorUserId: actor.actorUserId,
+    isStaff: actor.actorType === ACTOR_TYPES.WORKWISE_STAFF,
   });
 
   // Without a company the row could never be shown to anybody, so writing it
@@ -261,6 +279,7 @@ const captureEvent = async (req, res, responseBody) => {
   const summaryContext = {
     actor: actor.actorLabel,
     actorType: actor.actorType,
+    actorUserId: actor.actorUserId,
     entityId,
     entityLabel: scope.entityLabel,
     body: req.body || {},

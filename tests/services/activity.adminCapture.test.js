@@ -71,8 +71,10 @@ const cleanUp = async () => {
   await db.none(`DELETE FROM tbl_role_permissions WHERE role_id IN (SELECT id FROM tbl_roles WHERE created_by = $1)`, [ADMIN]);
   await db.none(`DELETE FROM tbl_roles WHERE created_by = $1`, [ADMIN]);
   await db.none(`DELETE FROM tbl_approval_processes WHERE created_by = $1`, [ADMIN]);
-  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1`, [TARGET]);
+  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id IN ($1, $2)`, [TARGET, ADMIN]);
   await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [TARGET]);
+  await db.none(`DELETE FROM tbl_hospitality_project_mappings WHERE created_by = $1`, [ADMIN]);
+  await db.none(`DELETE FROM tbl_projects WHERE description = 'activity capture probe'`);
 };
 
 beforeAll(async () => {
@@ -279,6 +281,87 @@ describe("company-wide administration", () => {
     expect(changes.status).toBe(200);
     const tables = changes.body.data.changes.map((c) => c.table_name);
     expect(tables).toContain("tbl_company");
+  });
+});
+
+describe("unlinking a project from a business unit", () => {
+  const ROUTE = "/hospitality/project/:project_id/mapping";
+
+  const linkedProject = async () => {
+    const { id } = await db.one(
+      `INSERT INTO tbl_projects (name, description, location, user_id, status, budget)
+       VALUES ('Lobby Refit', 'activity capture probe', 'nowhere', $1, 1, 1000)
+       RETURNING id`,
+      [ADMIN]
+    );
+    await db.none(
+      `INSERT INTO tbl_hospitality_project_mappings
+         (project_id, hospitality_company_id, hospitality_hotel_id, mapping_type, created_by)
+       VALUES ($1, $2, $3, 1, $4)`,
+      [id, HOSPITALITY_A, HOTEL_A1, ADMIN]
+    );
+    return id;
+  };
+
+  it("is recorded at the unit the project was unlinked from", async () => {
+    const projectId = await linkedProject();
+    const since = new Date().toISOString();
+    const client = await httpClient(ADMIN);
+    const res = await client.delete(`/api/v1/hospitality/project/${projectId}/mapping`).send({
+      company_id: HOSPITALITY_A, mapping_type: 1, hotel_id: HOTEL_A1,
+    });
+    expect(res.status).toBe(200);
+
+    const event = await waitForEvent(since, ROUTE);
+    expect(event).not.toBeNull();
+    expect(event.event_key).toBe("project_mapping_removed");
+    expect(event.hospitality_company_id).toBe(HOSPITALITY_A);
+    expect(event.hotel_id).toBe(HOTEL_A1);
+    expect(event.summary).toContain('"Lobby Refit"');
+  });
+
+  it("never files another tenant's business unit named in the request body", async () => {
+    // The company is checked against the caller; the unit was not. Naming
+    // company B's unit used to put that unit's id — and so its name, through
+    // the business-unit filter — into company A's trail.
+    const projectId = await linkedProject();
+    const since = new Date().toISOString();
+    const client = await httpClient(ADMIN);
+    const res = await client.delete(`/api/v1/hospitality/project/${projectId}/mapping`).send({
+      company_id: HOSPITALITY_A, mapping_type: 1, hotel_id: IDS.hotels.B1,
+    });
+    expect(res.status).toBe(200);
+
+    const events = await settledEvents(since, ROUTE);
+    expect(events.filter((e) => e.hotel_id === IDS.hotels.B1)).toEqual([]);
+    // Nothing matched that unit, so nothing was unlinked — and nothing is
+    // written up as an unlink either.
+    expect(events).toEqual([]);
+    const still = await db.oneOrNone(
+      `SELECT 1 FROM tbl_hospitality_project_mappings WHERE project_id = $1 AND hospitality_hotel_id = $2`,
+      [projectId, HOTEL_A1]
+    );
+    expect(still).not.toBeNull();
+  });
+});
+
+describe("an administrator editing their own account", () => {
+  it("names them, rather than 'a user', when the request carries no user_id", async () => {
+    const client = await httpClient(ADMIN);
+    const since = new Date().toISOString();
+    const res = await client.put("/api/v1/users/update-user-detail").send({
+      roles: [{ role_id: 13, company_id: HOSPITALITY_A, hotel_id: HOTEL_A1 }],
+      confirmed_approval_impact: true,
+    });
+    expect(res.status).toBe(200);
+
+    const event = await waitForEvent(since, "/users/update-user-detail");
+    expect(event).not.toBeNull();
+    expect(event.event_key).toBe("user_updated");
+    expect(event.entity_type).toBe("USER");
+    expect(Number(event.entity_id)).toBe(ADMIN);
+    expect(event.buyer_company_id).toBe(BUYER_A);
+    expect(event.summary).toMatch(/^Platform Admin A changed their own approval roles — added /);
   });
 });
 

@@ -1494,12 +1494,24 @@ const HospitalityController = {
         });
       }
 
-      await hospitalityModel.deleteProjectMappings(
+      const removed = await hospitalityModel.deleteProjectMappings(
         projectId,
         companyId,
         mappingType,
         hotelId
       );
+
+      // For the activity trail: where the project was unlinked from, as
+      // validated here — the company was checked against the caller above, and
+      // a unit counts only because a mapping at that unit, under that company,
+      // was actually deleted. A unit id from the body that matched nothing (or
+      // belongs to another tenant) is never handed over, and an unlink that
+      // removed nothing is not recorded at all.
+      if (removed?.rowCount > 0) {
+        res.locals.activityDetail = {
+          scope: { hospitalityCompanyId: companyId, hotelId: mappingType === 1 ? hotelId : null },
+        };
+      }
 
       // Remove team members that were added via this hospitality context
       const contextUsers = await hospitalityModel.getMappedUserIds(

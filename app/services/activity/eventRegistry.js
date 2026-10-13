@@ -388,10 +388,12 @@ export const EVENTS = [
     method: 'DELETE', path: '/hospitality/project/:project_id/mapping', key: 'project_mapping_removed',
     category: CATEGORIES.ORGANISATION, severity: 'notable',
     entity: { type: 'PROJECT', id: P('project_id') }, scope: SCOPE.entity('PROJECT'),
-    // The controller checks this company belongs to the caller's buyer
-    // company before it deletes anything, and only a successful request is
-    // recorded, so the body names a company the caller administers.
-    bodyScope: { companyKey: 'company_id', hotelKey: 'hotel_id' },
+    // Placed by the controller's detail, not the body: the body's company is
+    // checked against the caller but its unit is not, so a unit id belonging
+    // to another tenant would have been filed (and named, through the
+    // business-unit filter) in this company's trail. The controller hands over
+    // only a unit where a mapping was actually removed.
+    requireDetail: true,
     summary: (c) =>
       `${c.actor} unlinked the project ${c.entityLabel ? `"${c.entityLabel}"` : `#${c.entityId}`} from a business unit`,
   }),
@@ -419,16 +421,20 @@ export const EVENTS = [
     // meant an administrator with no hospitality mapping of their own — the
     // platform account that moved RFQ 536263's step-2 approver on 15 Sep —
     // resolved to no company, and every one of their edits was dropped.
-    entity: { type: 'USER', id: B('user_id') }, scope: SCOPE.entity('USER'),
+    // With no user_id the controller edits the caller's own account, so the
+    // subject is the caller (`orActor`) — otherwise a self-edit was filed as
+    // "changed a user's approval roles", naming nobody.
+    entity: { type: 'USER', id: { ...B('user_id'), orActor: true } }, scope: SCOPE.entity('USER'),
     // This endpoint multiplexes profile edits, role grants, department moves
     // and activation. When the save changed approval roles the controller
     // hands over the exact diff, and the sentence says who gained and lost what.
     summary: (c) => {
-      const whose = c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
+      const self = c.entityId != null && c.actorUserId != null && Number(c.entityId) === Number(c.actorUserId);
+      const whose = self ? 'their own' : c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
       const changes = roleScopeChangePhrase(c.detail?.role_scopes);
-      return changes
-        ? `${c.actor} changed ${whose} approval roles — ${changes}`
-        : `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
+      if (changes) return `${c.actor} changed ${whose} approval roles — ${changes}`;
+      if (self) return `${c.actor} updated their own account`;
+      return `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
     },
   }),
   e({
@@ -673,9 +679,11 @@ export const EVENTS = [
   // account, looking is the thing worth recording, because "who at Workwise
   // can see our data" is the first question a client's security review asks.
   //
-  // Unnamed internal routes are still recorded — the middleware files anything
-  // by Workwise staff under this category — so this list makes the sentences
-  // read properly rather than deciding what is captured.
+  // A staff event is placed only by what it touched — never by the staff
+  // account's own company — so an internal route that should reach a
+  // customer's trail needs an entry here naming its entity. An unnamed one
+  // can only be placed by a controller's validated detail, and otherwise lands
+  // nowhere rather than in the wrong client's feed.
   //
   // Routes that name no single customer (a list of every buyer, the companies
   // list) resolve to no company and so appear in nobody's feed. That is a
