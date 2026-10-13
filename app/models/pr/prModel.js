@@ -1182,6 +1182,20 @@ export async function fulfilOpenCatalogRequest(t, lineId, { variantId, resolvedB
   return row ? Number(row.id) : null;
 }
 
+/**
+ * The line's OPEN catalog request → rejected with `note` (the line ended, so
+ * nobody needs the item any more — R21). Returns its id, or null when none was open.
+ */
+export async function rejectOpenCatalogRequest(t, lineId, { resolvedBy, note }) {
+  const row = await t.oneOrNone(
+    `UPDATE tbl_pr_catalog_request
+        SET status = 'rejected', resolved_by = $2, resolved_at = NOW(), resolution_note = $3
+      WHERE pr_line_id = $1 AND status = 'open'
+     RETURNING id`,
+    [lineId, resolvedBy, note]);
+  return row ? Number(row.id) : null;
+}
+
 /** Open a catalog request for a line (uq_pr_catreq_open_per_line: at most one open per line). */
 export async function insertCatalogRequest(t, { companyId, lineId, requestedName, description, categoryId, requestedBy }) {
   return t.one(
@@ -1293,5 +1307,5 @@ export default {
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
-  setLineMapping, fulfilOpenCatalogRequest, insertCatalogRequest, endLine,
+  setLineMapping, fulfilOpenCatalogRequest, rejectOpenCatalogRequest, insertCatalogRequest, endLine,
 };

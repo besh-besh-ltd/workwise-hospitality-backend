@@ -8,6 +8,7 @@
 //                       for the platform team (admin-panel queue + email).
 //   closeLine           a buyer ends a line (reason required).
 //   cancelLine          the requester withdraws a line they no longer need.
+//                       Ending a line rejects its open catalog request (R21).
 //
 // The header state machine (submit → review → approval) lives in prWorkflow;
 // this module only acts on APPROVED PRs, whose lines wait in the pool.
@@ -95,6 +96,34 @@ export function lineBlocker(pr, line) {
   if (line.status !== 'active') return 'not_active';
   if (line.has_live_link === true) return 'already_sourced';
   return null;
+}
+
+// What an ended line's open catalog request is rejected with (R21).
+const ENDED_LINE_NOTE = {
+  line_closed: 'Line closed — no longer needed',
+  line_cancelled: 'Line cancelled — no longer needed',
+};
+
+/**
+ * End a line (closed / cancelled) inside the caller's transaction, under the
+ * locks: the line row, its event, and — when a catalog request was still open
+ * for it — that request rejected by the actor (R21: nobody needs the item any
+ * more, so it must not sit in the platform team's queue) with its own event.
+ */
+async function endLineTx(t, pr, line, user, { status, reason }) {
+  const why = status === 'closed' ? 'line_closed' : 'line_cancelled';
+  await prModel.endLine(t, line.id, { status, reason, userId: user.id });
+  const rejected = await prModel.rejectOpenCatalogRequest(t, line.id, { resolvedBy: user.id, note: ENDED_LINE_NOTE[why] });
+  await record(t, {
+    prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: why,
+    payload: { line_no: Number(line.line_no), reason, ...(rejected ? { rejected_catalog_request_id: rejected } : {}) },
+  });
+  if (rejected) {
+    await record(t, {
+      prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: 'catalog_rejected',
+      payload: { request_id: rejected, reason: why, note: ENDED_LINE_NOTE[why] },
+    });
+  }
 }
 
 /** A required reason (trimmed, ≤ MAX_LEN.reason) or a 422. */
@@ -307,7 +336,8 @@ export async function requestCatalogItem(prId, lineId, user, body) {
 
 /**
  * POST /pr/:id/lines/:lineId/close {reason}. A buyer ends an active, unsourced
- * line of an approved PR (e.g. bought locally); the requester is told.
+ * line of an approved PR (e.g. bought locally); an open catalog request for it
+ * is rejected "Line closed — no longer needed" (R21); the requester is told.
  * @returns {Promise<{line_id, status: 'closed', progress}>}
  */
 export async function closeLine(prId, lineId, user, rawReason) {
@@ -317,11 +347,7 @@ export async function closeLine(prId, lineId, user, rawReason) {
     const blocked = lineBlocker(pr, line);
     if (blocked) throw lineConflict(pr, line, blocked);
     const reason = requiredReason(rawReason, 'close');
-    await prModel.endLine(t, line.id, { status: 'closed', reason, userId: user.id });
-    await record(t, {
-      prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: 'line_closed',
-      payload: { line_no: Number(line.line_no), reason },
-    });
+    await endLineTx(t, pr, line, user, { status: 'closed', reason });
     return { pr, line, reason };
   });
   await notifyLineClosed({ pr: out.pr, line: out.line, reason: out.reason, actorId: user.id });
@@ -331,7 +357,8 @@ export async function closeLine(prId, lineId, user, rawReason) {
 /**
  * POST /pr/:id/lines/:lineId/cancel {reason}. The requester withdraws an
  * active line of their approved PR before it is sourced (ownership only, like
- * cancelling the PR — R10); everyone else gets 404. The assigned buyer is told.
+ * cancelling the PR — R10); everyone else gets 404. An open catalog request for
+ * it is rejected "Line cancelled — no longer needed" (R21). The assigned buyer is told.
  * @returns {Promise<{line_id, status: 'cancelled', progress}>}
  */
 export async function cancelLine(prId, lineId, user, rawReason) {
@@ -342,11 +369,7 @@ export async function cancelLine(prId, lineId, user, rawReason) {
     const blocked = lineBlocker(pr, line);
     if (blocked) throw lineConflict(pr, line, blocked);
     const reason = requiredReason(rawReason, 'cancel');
-    await prModel.endLine(t, line.id, { status: 'cancelled', reason, userId: user.id });
-    await record(t, {
-      prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: 'line_cancelled',
-      payload: { line_no: Number(line.line_no), reason },
-    });
+    await endLineTx(t, pr, line, user, { status: 'cancelled', reason });
     return { pr, line, reason };
   });
   await notifyLineCancelled({ pr: out.pr, line: out.line, reason: out.reason, actorId: user.id });

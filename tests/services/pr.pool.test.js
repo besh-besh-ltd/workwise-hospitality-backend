@@ -118,13 +118,18 @@ const recipientsOf = async (prId, type) =>
   [...new Set((await prNotifications(prId, type)).map((n) => Number(n.recipient_user_id)))].sort((a, b) => a - b);
 const sorted = (ids) => [...ids].sort((a, b) => a - b);
 
-/** Usable variants other than V, highest id first (so they differ from every other suite's picks). */
+/**
+ * Usable variants other than V whose product has a category (so the catalog
+ * search lists them), highest id first (so they differ from other suites' picks).
+ */
 async function otherUsableVariants(n) {
   return db.map(
     `SELECT pv.id, pv.name
        FROM tbl_product_variant pv JOIN tbl_product p ON p.id = pv.product_id
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
         AND pv.id <> $1
+        AND EXISTS (SELECT 1 FROM tbl_product_categories pc JOIN tbl_category c ON c.id = pc.category_id
+                     WHERE pc.product_id = p.id)
       ORDER BY pv.id DESC LIMIT $2`, [V.variant_id, n], (r) => ({ variant_id: Number(r.id), variant_name: r.name }));
 }
 
@@ -551,6 +556,41 @@ describe("PR pool — map a free-text line", () => {
       });
       expect((await lineRow(freeId)).mapped_variant_id).toBe(V.variant_id);
     });
+
+    it("search-items (R20): a pure PR Buyer of the hotel searches the catalog, on-contract flagged for the PR's department", async () => {
+      const search = (client, hotelId, departmentId, q = K.variant_name) => client.get(
+        `/api/v1/pr/search-items?hotel_id=${hotelId}&department_id=${departmentId}&limit=50&q=${encodeURIComponent(q)}`);
+      const hitOf = (res) => res.body.data.items.find((i) => i.variant_id === K.variant_id);
+
+      // BUY holds pr.convert at A1 and no pr.create anywhere.
+      const eng = await search(buyC, A1, ENG);
+      expect(eng.status).toBe(200);
+      expect(hitOf(eng)).toMatchObject({
+        variant_id: K.variant_id, on_contract: true, arc_number: "ARC-TEST-PR-POOL", arc_contract_id: contractId,
+      });
+      // The flag is for the department passed: the contract is (A1, eng) only.
+      const proc = await search(buyC, A1, PROC);
+      expect(proc.status).toBe(200);
+      expect(hitOf(proc)).toMatchObject({ on_contract: false, arc_number: null });
+
+      // The department must be a real one (the buyer passes the PR's).
+      const unknownDept = await search(buyC, A1, 999999);
+      expect(unknownDept.status).toBe(422);
+      expect(unknownDept.body.code).toBe("PR_VALIDATION");
+      expect((await buyC.get(`/api/v1/pr/search-items?hotel_id=${A1}&q=ab`)).status).toBe(422);
+
+      // pr.convert at A2 only does not open A1's catalog search; nor does another company's hotel.
+      const otherHotel = await search(buy2C, A1, ENG);
+      expect(otherHotel.status).toBe(403);
+      expect(otherHotel.body.code).toBe("PR_FORBIDDEN");
+      expect((await search(buyC, B1, ENG)).status).toBe(403);
+
+      // The requester path is unchanged: pr.create on the cell, else 403.
+      const asReq = await search(reqC, A1, ENG);
+      expect(asReq.status).toBe(200);
+      expect(hitOf(asReq)).toMatchObject({ on_contract: true });
+      expect((await search(reqC, A1, PROC)).status).toBe(403);
+    });
   });
 });
 
@@ -671,6 +711,8 @@ describe("PR pool — close line (buyer)", () => {
       event_type: "line_closed", actor_id: BUY, pr_line_id: lineId, payload: { line_no: 1, reason: "Bought locally" },
     });
     expect(await recipientsOf(pr.id, "pr_line_closed")).toEqual([REQ]);
+    // No catalog request was open: nothing else happened.
+    expect((await eventsOf(pr.id)).map((e) => e.event_type)).not.toContain("catalog_rejected");
 
     const again = await closeLine(buyC, pr.id, lineId, "again");
     expect(again.status).toBe(409);
@@ -701,6 +743,7 @@ describe("PR pool — cancel line (requester)", () => {
       event_type: "line_cancelled", actor_id: REQ, pr_line_id: lineId, payload: { line_no: 1, reason: "Not needed any more" },
     });
     expect(await recipientsOf(pr.id, "pr_line_cancelled")).toEqual([BUY3]);
+    expect((await eventsOf(pr.id)).map((e) => e.event_type)).not.toContain("catalog_rejected");
     // The PR itself stays approved.
     expect((await db.one(`SELECT status FROM tbl_purchase_requisition WHERE id = $1`, [pr.id])).status).toBe("approved");
 
@@ -723,6 +766,53 @@ describe("PR pool — cancel line (requester)", () => {
     expect(res.status).toBe(409);
     expect(res.body.details).toMatchObject({ reason: "not_approved" });
     expect((await detail(draft.body.data.id)).body.data.capabilities.can_cancel_lines).toEqual([]);
+  });
+});
+
+describe("PR pool — ending a line withdraws its open catalog request (R21)", () => {
+  it("close: the open request is rejected 'Line closed — no longer needed' by the buyer, in the same change", async () => {
+    const pr = await approved([freeLine({ free_text_name: "Close me gadget" })], { title: "pool-close-catreq" });
+    const lineId = pr.line_ids[0];
+    expect((await requestCatalog(buyC, pr.id, lineId, { requested_name: "Close me gadget" })).status).toBe(200);
+
+    expect((await closeLine(buy3C, pr.id, lineId, "Bought locally")).status).toBe(200);
+    const [req] = await catalogRequests(lineId);
+    expect(req).toMatchObject({
+      status: "rejected", resolution_note: "Line closed — no longer needed", resolved_by: BUY3, resolved_variant_id: null,
+    });
+    expect(req.resolved_at).not.toBeNull();
+    const events = (await eventsOf(pr.id)).slice(-2);
+    expect(events.map((e) => e.event_type)).toEqual(["line_closed", "catalog_rejected"]);
+    expect(events[1]).toMatchObject({
+      actor_id: BUY3, pr_line_id: lineId,
+      payload: { request_id: req.id, reason: "line_closed", note: "Line closed — no longer needed" },
+    });
+    expect((await lineOf(await detail(pr.id), lineId)).progress).toBe("closed");
+  });
+
+  it("cancel: the open request is rejected 'Line cancelled — no longer needed' by the requester", async () => {
+    const pr = await approved([freeLine({ free_text_name: "Cancel me gadget" })], { title: "pool-cancel-catreq" });
+    const lineId = pr.line_ids[0];
+    expect((await requestCatalog(buyC, pr.id, lineId, {})).status).toBe(200);
+
+    expect((await cancelLine(reqC, pr.id, lineId, "Not needed")).status).toBe(200);
+    const [req] = await catalogRequests(lineId);
+    expect(req).toMatchObject({ status: "rejected", resolution_note: "Line cancelled — no longer needed", resolved_by: REQ });
+    expect(req.resolved_at).not.toBeNull();
+    expect(await lastEvent(pr.id)).toMatchObject({
+      event_type: "catalog_rejected", actor_id: REQ, pr_line_id: lineId,
+      payload: { request_id: req.id, reason: "line_cancelled", note: "Line cancelled — no longer needed" },
+    });
+  });
+
+  it("a request that is no longer open (fulfilled by a mapping) is left as it is", async () => {
+    const pr = await approved([freeLine({ free_text_name: "Mapped then closed" })], { title: "pool-close-fulfilled" });
+    const lineId = pr.line_ids[0];
+    expect((await requestCatalog(buyC, pr.id, lineId, {})).status).toBe(200);
+    expect((await mapLine(buyC, pr.id, lineId, W.variant_id)).status).toBe(200);
+    expect((await closeLine(buyC, pr.id, lineId, "Done")).status).toBe(200);
+    expect((await catalogRequests(lineId)).map((r) => r.status)).toEqual(["fulfilled"]);
+    expect((await eventsOf(pr.id)).map((e) => e.event_type)).not.toContain("catalog_rejected");
   });
 });
 

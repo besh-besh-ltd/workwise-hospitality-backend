@@ -645,13 +645,44 @@ export async function formDepartments(req, res) {
 }
 
 /**
+ * The catalog search's (company, hotel, department), R20. Two callers:
+ *   - a requester picking lines: pr.create on that cell (unchanged);
+ *   - a buyer mapping a free-text line: pr.convert on the hotel (any
+ *     department — the pool is per hotel). The department (the PR's, sent by
+ *     the FE) only decides which contracts flag on_contract, so it must be a
+ *     real department (else 422).
+ * The company always comes from the hotel row; anyone else → 403.
+ */
+async function authorizeSearchCell(req) {
+  const hotelId = posInt(req.query.hotel_id);
+  const departmentId = posInt(req.query.department_id);
+  const errors = [];
+  if (!hotelId) errors.push({ field: 'hotel_id', message: 'hotel_id is required' });
+  if (!departmentId) errors.push({ field: 'department_id', message: 'department_id is required' });
+  if (errors.length) throw prError(PR_ERR.VALIDATION, 'Missing parameters', errors);
+  const hotel = await prModel.hotelCell(hotelId);
+  const refused = () => prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.create'), { permission: 'pr.create' });
+  if (!hotel) throw refused();
+  const cell = { companyId: Number(hotel.hospitality_company_id), hotelId, departmentId };
+  if (await hasPerm(req.user.id, 'pr.create', cell)) return cell;
+  if (await hasPerm(req.user.id, 'pr.convert', { ...cell, departmentId: null })) {
+    if (!(await prModel.departmentExists(departmentId))) {
+      throw prError(PR_ERR.VALIDATION, 'Unknown department', [{ field: 'department_id', message: 'Unknown department' }]);
+    }
+    return cell;
+  }
+  throw refused();
+}
+
+/**
  * GET /v1/pr/search-items?hotel_id=&department_id=&q= — usable catalog
- * variants for the line picker, flagged when on a rate contract for the cell
- * (the FE blocks those with "raise an MR instead"; save refuses them too).
+ * variants for the line picker (requester) and the mapping dialog (buyer),
+ * flagged when on a rate contract for the cell (the FE blocks those with
+ * "raise an MR instead"; save and map refuse them too).
  */
 export async function searchItems(req, res) {
   try {
-    const cell = await authorizeCreateCell(req, { requireDepartment: true });
+    const cell = await authorizeSearchCell(req);
     const q = text(req.query.q).slice(0, 100);
     if (q.length < 2) return ok(res, { items: [] });
     const limit = Math.min(Math.max(posInt(req.query.limit) || 25, 1), 50);
