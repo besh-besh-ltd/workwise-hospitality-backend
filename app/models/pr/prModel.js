@@ -13,7 +13,9 @@ import db from '../../config/dbConn.js';
 import {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
+  POOL_PROGRESSES, NO_REVIEWER_LABEL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
 } from '../../services/pr/prConstants.js';
+import { readableScopeSql } from '../../services/pr/prAccess.js';
 
 // Line progress + PR value fragments live in prConstants; re-exported here as
 // the model's public SQL surface (lists, detail, pool, KPIs).
@@ -426,8 +428,261 @@ export async function searchCategories({ q = '', limit = 50 }, t = db) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Listing, KPIs, duplicate hints (spec §4.2 derived progress, §8)
+// ---------------------------------------------------------------------------
+const sqlList = (arr) => arr.map((v) => `'${v}'`).join(', ');
+
+/**
+ * Header progress from the PR's line progress (spec §4.2). Lateral join that
+ * exposes hp.header_progress; `p` = PR alias (must already be in FROM).
+ *   not approved / no live line      → NULL
+ *   nothing left to source or order  → completed (some closed) | ordered (all ordered)
+ *   some ordered, others not done    → partly_ordered
+ *   sourcing + pool                  → partly_in_sourcing
+ *   only sourcing                    → in_sourcing
+ *   only pool                        → in_queue
+ * Cancelled lines are ignored; closed lines are terminal.
+ */
+const HEADER_PROGRESS_JOIN = (p) => `LEFT JOIN LATERAL (
+  SELECT CASE
+           WHEN ${p}.status <> 'approved' OR c.live = 0 THEN NULL
+           WHEN c.pool + c.src = 0 THEN CASE WHEN c.closed > 0 THEN 'completed' ELSE 'ordered' END
+           WHEN c.ord > 0 THEN 'partly_ordered'
+           WHEN c.src > 0 AND c.pool > 0 THEN 'partly_in_sourcing'
+           WHEN c.src > 0 THEN 'in_sourcing'
+           ELSE 'in_queue' END AS header_progress
+    FROM (SELECT count(*) FILTER (WHERE x.prog <> 'cancelled') AS live,
+                 count(*) FILTER (WHERE x.prog IN (${sqlList(POOL_PROGRESSES)})) AS pool,
+                 count(*) FILTER (WHERE x.prog = 'in_sourcing') AS src,
+                 count(*) FILTER (WHERE x.prog = 'ordered') AS ord,
+                 count(*) FILTER (WHERE x.prog = 'closed') AS closed
+            FROM (SELECT ${LINE_PROGRESS_SQL('l', p)} AS prog
+                    FROM tbl_purchase_requisition_line l WHERE l.pr_id = ${p}.id) x) c
+) hp ON true`;
+
+/** Who holds the PR right now, as the label shown in the list. `p` = PR alias. */
+const NOW_WITH_SQL = (p) => `CASE ${p}.status
+  WHEN 'draft' THEN 'You'
+  WHEN 'returned' THEN 'You'
+  WHEN 'approved' THEN COALESCE(
+    (SELECT bu.name FROM tbl_users bu WHERE bu.id = ${p}.assigned_buyer_id), 'Purchase team')
+  WHEN 'in_review' THEN (
+    SELECT CASE
+             WHEN count(*) = 0 THEN 'Technical review'
+             WHEN count(*) FILTER (WHERE NOT z.elig) > 0
+               THEN '${NO_REVIEWER_LABEL} (' || string_agg(z.title, ', ' ORDER BY z.title) FILTER (WHERE NOT z.elig) || ')'
+             ELSE 'Technical review: ' || string_agg(z.title, ', ' ORDER BY z.title) END
+      FROM (SELECT d.title, ${REVIEWER_EXISTS_SQL(p, 'rv')} AS elig
+              FROM tbl_pr_review rv JOIN tbl_department d ON d.id = rv.department_id
+             WHERE rv.pr_id = ${p}.id AND rv.revision = ${p}.revision AND rv.status = 'pending') z)
+  WHEN 'pending_approval' THEN COALESCE((
+    SELECT CASE WHEN a.n = 0 THEN '${NO_APPROVER_LABEL}'
+                ELSE 'Approval step ' || a.step_order || ': ' || array_to_string(a.names[1:3], ', ')
+                     || CASE WHEN a.n > 3 THEN ' +' || (a.n - 3) ELSE '' END END
+      FROM (SELECT ai.current_step AS step_order, count(asa.id) AS n,
+                   array_agg(u.name ORDER BY asa.id) FILTER (WHERE asa.id IS NOT NULL) AS names
+              FROM tbl_approval_instances ai
+              LEFT JOIN tbl_approval_instance_steps st
+                     ON st.approval_instance_id = ai.id AND st.step_order = ai.current_step AND st.status = 'PENDING'
+              LEFT JOIN tbl_approval_step_approvers asa
+                     ON asa.approval_instance_step_id = st.id AND asa.status = 'PENDING' AND asa.removed_at IS NULL
+              LEFT JOIN tbl_users u ON u.id = asa.approver_user_id
+             WHERE ai.id = ${p}.approval_instance_id AND ai.entity_type = 'PR' AND ai.entity_id = ${p}.id
+             GROUP BY ai.current_step) a), '${NO_APPROVER_LABEL}')
+  ELSE NULL END`;
+
+/**
+ * WHERE fragment over PR alias p: readable scope (skipped for super admin, who
+ * canReadPr() admits everywhere), the tab and the free-text search. $1 = user.
+ */
+function scopeWhere(user, { tab, q }, superAdmin) {
+  const params = [user.id];
+  const conds = [];
+  if (tab === 'mine') conds.push('p.raised_by = $1');
+  else if (!superAdmin) conds.push(readableScopeSql(user.id, 'p', 1).clause);
+  if (q) {
+    params.push(likePattern(q));
+    const n = `$${params.length}`;
+    conds.push(`(p.pr_number ILIKE ${n} OR p.title ILIKE ${n} OR EXISTS (
+      SELECT 1 FROM tbl_purchase_requisition_line ql
+        LEFT JOIN tbl_product_variant qpv ON qpv.id = COALESCE(ql.product_variant_id, ql.mapped_variant_id)
+        LEFT JOIN tbl_product qprod ON qprod.id = qpv.product_id
+       WHERE ql.pr_id = p.id
+         AND (ql.free_text_name ILIKE ${n} OR qpv.name ILIKE ${n} OR qprod.name ILIKE ${n})))`);
+  }
+  return { conds, params };
+}
+
+/**
+ * Paginated PR list + facet counts. `user` = req.user (scope is derived from it).
+ * filters: { tab, status, hotelId, departmentId, prType, urgency, progress, q, page, pageSize }
+ * Facets are over the tab+q+scope set only, so they never change with the
+ * facet filters (MrAllPage semantics).
+ */
+export async function list(user, filters, superAdmin = false, t = db) {
+  const { tab, q, page, pageSize } = filters;
+  const base = scopeWhere(user, { tab, q }, superAdmin);
+  const params = [...base.params];
+  const conds = [...base.conds];
+  const bind = (v) => { params.push(v); return `$${params.length}`; };
+  if (filters.status) conds.push(`p.status = ${bind(filters.status)}`);
+  if (filters.hotelId) conds.push(`p.hotel_id = ${bind(filters.hotelId)}`);
+  if (filters.departmentId) conds.push(`p.department_id = ${bind(filters.departmentId)}`);
+  if (filters.prType) conds.push(`p.pr_type = ${bind(filters.prType)}`);
+  if (filters.urgency) conds.push(`p.urgency = ${bind(filters.urgency)}`);
+  if (filters.progress) conds.push(`hp.header_progress = ${bind(filters.progress)}`);
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const innerJoin = filters.progress ? HEADER_PROGRESS_JOIN('p') : '';
+
+  return t.task(async (c) => {
+    const total = Number((await c.one(
+      `SELECT count(*) AS n FROM tbl_purchase_requisition p ${innerJoin} ${where}`, params)).n);
+
+    const limit = bind(pageSize);
+    const offset = bind((page - 1) * pageSize);
+    const rows = await c.any(
+      `SELECT p.id, p.pr_number, p.title, p.status, hp.header_progress,
+              h.name AS hotel_name, d.title AS department_name, ru.name AS raised_by_name,
+              CASE WHEN p.status IN ('draft','returned') THEN ${estimateTotalSql('p')} ELSE p.estimated_total END
+                AS estimated_total,
+              (SELECT count(*)::int FROM tbl_purchase_requisition_line lc
+                WHERE lc.pr_id = p.id AND lc.status = 'active') AS line_count,
+              to_char(p.required_by_date, 'YYYY-MM-DD') AS required_by_date,
+              p.urgency, p.pr_type, p.submitted_at, p.approved_at, p.created_at,
+              ${NOW_WITH_SQL('p')} AS now_with
+         FROM (SELECT p.* FROM tbl_purchase_requisition p ${innerJoin} ${where}
+                ORDER BY p.created_at DESC, p.id DESC LIMIT ${limit} OFFSET ${offset}) p
+         ${HEADER_PROGRESS_JOIN('p')}
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+         LEFT JOIN tbl_department d ON d.id = p.department_id
+         LEFT JOIN tbl_users ru ON ru.id = p.raised_by
+        ORDER BY p.created_at DESC, p.id DESC`,
+      params);
+
+    const fw = base.conds.length ? `WHERE ${base.conds.join(' AND ')}` : '';
+    const facetRows = await c.any(
+      `WITH s AS (SELECT p.status, p.hotel_id, p.department_id, p.pr_type, p.urgency
+                    FROM tbl_purchase_requisition p ${fw})
+       SELECT 'status' AS k, status::text AS v, count(*)::int AS n FROM s GROUP BY status
+       UNION ALL SELECT 'hotel', hotel_id::text, count(*)::int FROM s GROUP BY hotel_id
+       UNION ALL SELECT 'department', department_id::text, count(*)::int FROM s GROUP BY department_id
+       UNION ALL SELECT 'pr_type', pr_type::text, count(*)::int FROM s GROUP BY pr_type
+       UNION ALL SELECT 'urgency', urgency::text, count(*)::int FROM s GROUP BY urgency`,
+      base.params);
+    const facets = { status: {}, hotel: {}, department: {}, pr_type: {}, urgency: {} };
+    for (const f of facetRows) facets[f.k][f.v] = f.n;
+
+    const labels = { hotel: {}, department: {} };
+    const hotelIds = Object.keys(facets.hotel).map(Number);
+    if (hotelIds.length) {
+      for (const r of await c.any(`SELECT id, name FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[])`, [hotelIds])) {
+        labels.hotel[r.id] = r.name;
+      }
+    }
+    const deptIds = Object.keys(facets.department).map(Number);
+    if (deptIds.length) {
+      for (const r of await c.any(`SELECT id, title FROM tbl_department WHERE id = ANY($1::int[])`, [deptIds])) {
+        labels.department[r.id] = r.title;
+      }
+    }
+    return { rows, total, facets, facet_labels: labels };
+  });
+}
+
+/**
+ * Dashboard counters for the readable set.
+ *   open               drafts + in review + pending approval + returned
+ *   awaiting_me        pending reviews I am eligible for + PRs whose CURRENT approval
+ *                      step has a PENDING row of mine + returned PRs I raised
+ *   in_purchase_queue  approved PRs with at least one line waiting for the purchase team
+ *   avg_days_to_approval  mean(approved_at - submitted_at) days, 1 decimal, approved in last 90 days
+ */
+export async function kpis(user, superAdmin = false, t = db) {
+  const scope = superAdmin ? 'TRUE' : readableScopeSql(user.id, 'p', 1).clause;
+  const row = await t.one(
+    `SELECT
+       count(*) FILTER (WHERE p.status IN ('draft','in_review','pending_approval','returned'))::int AS open,
+       count(*) FILTER (WHERE p.status = 'approved' AND EXISTS (
+         SELECT 1 FROM tbl_purchase_requisition_line l
+          WHERE l.pr_id = p.id AND ${LINE_PROGRESS_SQL('l', 'p')} IN (${sqlList(POOL_PROGRESSES)})))::int AS in_purchase_queue,
+       ROUND(AVG(EXTRACT(EPOCH FROM (p.approved_at - p.submitted_at)) / 86400.0)
+             FILTER (WHERE p.status = 'approved' AND p.approved_at >= NOW() - INTERVAL '90 days'
+                       AND p.submitted_at IS NOT NULL)::numeric, 1) AS avg_days_to_approval
+       FROM tbl_purchase_requisition p
+      WHERE ${scope}`,
+    [user.id]);
+  const awaiting = await t.one(
+    `SELECT count(*)::int AS n FROM tbl_purchase_requisition p
+      WHERE (p.status = 'returned' AND p.raised_by = $1)
+         OR (p.status = 'in_review' AND EXISTS (
+              SELECT 1 FROM tbl_pr_review rv
+               WHERE rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
+                 AND EXISTS (SELECT 1 FROM (${prGrantRowsSql('$1', 'evaluate')}) g
+                              WHERE g.company_id = p.hospitality_company_id
+                                AND (g.hotel_id IS NULL OR g.hotel_id = p.hotel_id)
+                                AND (g.department_id IS NULL OR g.department_id = rv.department_id))))
+         OR (p.status = 'pending_approval' AND EXISTS (
+              SELECT 1 FROM tbl_approval_instances ai
+                JOIN tbl_approval_instance_steps st
+                  ON st.approval_instance_id = ai.id AND st.step_order = ai.current_step AND st.status = 'PENDING'
+                JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = st.id
+               WHERE ai.id = p.approval_instance_id AND ai.entity_type = 'PR' AND ai.entity_id = p.id
+                 AND ai.status = 'PENDING'
+                 AND asa.approver_user_id = $1 AND asa.status = 'PENDING' AND asa.removed_at IS NULL))`,
+    [user.id]);
+  return {
+    open: row.open,
+    awaiting_me: awaiting.n,
+    in_purchase_queue: row.in_purchase_queue,
+    avg_days_to_approval: row.avg_days_to_approval === null ? null : Number(row.avg_days_to_approval),
+  };
+}
+
+/**
+ * Open PRs (same company, last 30 days, not terminal, an ACTIVE line whose
+ * effective variant is `variantId`) and live RFQs containing the variant.
+ * `readable` for PRs is the one list/point-read predicate; RFQ readability is
+ * decided by the caller (it needs the rfq.read scope check). Titles are only
+ * selected for readable rows — never leaked to others.
+ */
+export async function duplicates(user, { companyId, variantId }, superAdmin = false, t = db) {
+  const readable = superAdmin ? 'TRUE' : readableScopeSql(user.id, 'p', 3).clause;
+  const prs = await t.any(
+    `SELECT p.id, p.pr_number AS number, h.name AS hotel_name, d.title AS department_name, p.created_at,
+            CASE WHEN ${readable} THEN p.title END AS title,
+            (${readable}) AS readable
+       FROM tbl_purchase_requisition p
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+       LEFT JOIN tbl_department d ON d.id = p.department_id
+      WHERE p.hospitality_company_id = $1
+        AND p.status <> 'rejected' AND p.status <> 'cancelled'
+        AND p.created_at >= NOW() - INTERVAL '30 days'
+        AND EXISTS (SELECT 1 FROM tbl_purchase_requisition_line l
+                     WHERE l.pr_id = p.id AND l.status = 'active'
+                       AND COALESCE(l.product_variant_id, l.mapped_variant_id) = $2)
+      ORDER BY p.created_at DESC, p.id DESC
+      LIMIT 50`,
+    [companyId, variantId, user.id]);
+  const rfqs = await t.any(
+    `SELECT r.id, r.rfq_no AS number, r.title, r."timestamp" AS created_at, r.created_by,
+            r.hospitality_company_id, r.hotel_id, r.department_id, r.process_id,
+            h.name AS hotel_name, d.title AS department_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+       LEFT JOIN tbl_department d ON d.id = r.department_id
+      WHERE r.hospitality_company_id = $1
+        AND r.status NOT IN (2, 5)
+        AND r."timestamp" >= NOW() - INTERVAL '30 days'
+        AND EXISTS (SELECT 1 FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id AND rp.product_variant_id = $2)
+      ORDER BY r."timestamp" DESC, r.id DESC
+      LIMIT 50`,
+    [companyId, variantId]);
+  return { prs, rfqs };
+}
+
 export default {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
-  hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
+  list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
 };

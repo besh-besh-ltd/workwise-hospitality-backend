@@ -18,10 +18,11 @@ import { logger } from '../../util/logger.js';
 import * as prModel from '../../models/pr/prModel.js';
 import { PR_ERR, prError, sendPrError } from '../../services/pr/prErrors.js';
 import { record } from '../../services/pr/prEvents.js';
-import { hasPerm, assertPerm, canReadPr, forbiddenMessage } from '../../services/pr/prAccess.js';
+import { hasPerm, assertPerm, canReadPr, forbiddenMessage, isSuperAdmin } from '../../services/pr/prAccess.js';
+import { userCanReadEntity } from '../../services/authorizationService.js';
 import { describeVariants, contractCoverage } from '../../services/pr/prCatalog.js';
 import {
-  PR_TYPES, URGENCIES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
+  PR_TYPES, URGENCIES, PR_STATUSES, HEADER_PROGRESSES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
   QTY_RE, PRICE_RE, PRICE_MAX_INT_DIGITS, TOTAL_MAX_PAISE, MAX_LEN,
 } from '../../services/pr/prConstants.js';
 
@@ -510,6 +511,126 @@ export async function categories(req, res) {
   try {
     const q = text(req.query.q).slice(0, 100);
     return ok(res, { categories: await prModel.searchCategories({ q, limit: 50 }) });
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// List, KPIs, duplicate hints (Task 4)
+// ---------------------------------------------------------------------------
+const MAX_PAGE_SIZE = 100;
+const DEFAULT_PAGE_SIZE = 20;
+
+/**
+ * GET /v1/pr?tab=mine|all&status=&hotel_id=&department_id=&pr_type=&urgency=&progress=&q=&page=&page_size=
+ * Scope is derived from req.user only (mine = raised_by me; all = the same
+ * predicate GET /:id uses; super admin = everything, as canReadPr).
+ */
+export async function list(req, res) {
+  try {
+    const qs = req.query || {};
+    const errors = [];
+    const one = (v) => (Array.isArray(v) ? v[0] : v);
+    const tab = text(one(qs.tab)) || 'mine';
+    if (tab !== 'mine' && tab !== 'all') errors.push({ field: 'tab', message: 'tab must be mine or all' });
+    const enumFilter = (field, allowed, key = field) => {
+      const v = text(one(qs[key]));
+      if (!v) return null;
+      if (!allowed.includes(v)) { errors.push({ field, message: `Invalid ${field}` }); return null; }
+      return v;
+    };
+    const idFilter = (field) => {
+      const raw = one(qs[field]);
+      if (raw === undefined || raw === null || raw === '') return null;
+      const n = posInt(raw);
+      if (!n) errors.push({ field, message: `Invalid ${field}` });
+      return n;
+    };
+    const filters = {
+      tab,
+      status: enumFilter('status', PR_STATUSES),
+      hotelId: idFilter('hotel_id'),
+      departmentId: idFilter('department_id'),
+      prType: enumFilter('pr_type', PR_TYPES),
+      urgency: enumFilter('urgency', URGENCIES),
+      progress: enumFilter('progress', HEADER_PROGRESSES),
+      q: text(one(qs.q)).slice(0, 100),
+      page: 1,
+      pageSize: DEFAULT_PAGE_SIZE,
+    };
+    if (qs.page !== undefined && qs.page !== '') {
+      const n = posInt(one(qs.page));
+      if (!n) errors.push({ field: 'page', message: 'Invalid page' }); else filters.page = n;
+    }
+    if (qs.page_size !== undefined && qs.page_size !== '') {
+      const n = posInt(one(qs.page_size));
+      if (!n) errors.push({ field: 'page_size', message: 'Invalid page_size' });
+      else filters.pageSize = Math.min(n, MAX_PAGE_SIZE);
+    }
+    if (errors.length) throw prError(PR_ERR.VALIDATION, 'Invalid query', errors);
+    return ok(res, await prModel.list(req.user, filters, isSuperAdmin(req.user)));
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** GET /v1/pr/kpis — counters over the caller's readable set. */
+export async function kpis(req, res) {
+  try {
+    return ok(res, await prModel.kpis(req.user, isSuperAdmin(req.user)));
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/**
+ * GET /v1/pr/duplicates?hotel_id=&variant_id= — similar open PRs / RFQs in the
+ * caller's company. The company comes from the hotel, and only holders of a PR
+ * permission on that hotel may ask. Items the caller cannot read are listed
+ * (that is the point of the hint) but without a title.
+ */
+export async function duplicates(req, res) {
+  try {
+    const hotelId = posInt(req.query.hotel_id);
+    const variantId = posInt(req.query.variant_id);
+    const errors = [];
+    if (!hotelId) errors.push({ field: 'hotel_id', message: 'hotel_id is required' });
+    if (!variantId) errors.push({ field: 'variant_id', message: 'variant_id is required' });
+    if (errors.length) throw prError(PR_ERR.VALIDATION, 'Missing parameters', errors);
+
+    const hotel = await prModel.hotelCell(hotelId);
+    const superAdmin = isSuperAdmin(req.user);
+    if (!hotel) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.read'));
+    const companyId = Number(hotel.hospitality_company_id);
+    if (!superAdmin) {
+      const cell = { companyId, hotelId, departmentId: null };
+      const allowed = (await hasPerm(req.user.id, 'pr.create', cell))
+        || (await hasPerm(req.user.id, 'pr.read', cell))
+        || (await hasPerm(req.user.id, 'pr.convert', cell));
+      if (!allowed) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.read'));
+    }
+
+    const { prs, rfqs } = await prModel.duplicates(req.user, { companyId, variantId }, superAdmin);
+    const items = prs.map((r) => {
+      const item = {
+        kind: 'pr', id: Number(r.id), number: r.number, hotel_name: r.hotel_name,
+        department_name: r.department_name, created_at: r.created_at, readable: r.readable === true,
+      };
+      if (item.readable) item.title = r.title;
+      return item;
+    });
+    for (const r of rfqs) {
+      const readable = superAdmin || Number(r.created_by) === Number(req.user.id)
+        || (await userCanReadEntity(req.user.id, 'rfq', r));
+      const item = {
+        kind: 'rfq', id: Number(r.id), number: r.number, hotel_name: r.hotel_name,
+        department_name: r.department_name, created_at: r.created_at, readable,
+      };
+      if (readable) item.title = r.title;
+      items.push(item);
+    }
+    return ok(res, { count: items.length, items });
   } catch (err) {
     return sendPrError(res, err, logger);
   }

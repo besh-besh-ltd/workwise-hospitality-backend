@@ -121,3 +121,31 @@ export const estimateTotalSql = (p) => `(
   SELECT COALESCE(SUM(ROUND(_et_l.quantity * _et_l.estimated_unit_price, 2)), 0::numeric(18,2))
     FROM tbl_purchase_requisition_line _et_l
    WHERE _et_l.pr_id = ${p}.id AND _et_l.status = 'active')`;
+
+// ---------------------------------------------------------------------------
+// Review / approval "who holds it" fragments (lists and KPIs)
+// ---------------------------------------------------------------------------
+export const HEADER_PROGRESSES = Object.freeze([
+  'in_queue', 'partly_in_sourcing', 'in_sourcing', 'partly_ordered', 'ordered', 'completed',
+]);
+/** Line progresses that mean "waiting for the purchase team to pick it up". */
+export const POOL_PROGRESSES = Object.freeze(['in_pool', 'needs_mapping', 'awaiting_catalog']);
+export const NO_REVIEWER_LABEL = 'No eligible reviewer — contact your admin';
+export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
+
+/**
+ * Is there ANY user who may review PR `p`'s department `rv` (a tbl_pr_review
+ * alias)? Same axis semantics as prGrantRowsSql / assertUserHasScope with the
+ * review's department as the entity department: company exact, hotel and
+ * department exact-or-wildcard, process wildcard-only.
+ */
+export const REVIEWER_EXISTS_SQL = (p, rv) => `EXISTS (
+  SELECT 1
+    FROM tbl_user_role_scopes _rx_urs
+    JOIN tbl_role_permissions _rx_rp ON _rx_rp.role_id = _rx_urs.role_id
+    JOIN tbl_permissions _rx_perm ON _rx_perm.id = _rx_rp.permission_id
+   WHERE _rx_urs.company_id = ${p}.hospitality_company_id
+     AND (_rx_urs.hotel_id IS NULL OR _rx_urs.hotel_id = ${p}.hotel_id)
+     AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${rv}.department_id)
+     AND _rx_urs.process_id IS NULL
+     AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = 'evaluate')`;

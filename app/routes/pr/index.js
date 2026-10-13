@@ -19,6 +19,11 @@ PrRoutes.get( '/form/departments',   passportSignIn, acl([2, 8]), prController.f
 PrRoutes.get( '/search-items',       passportSignIn, acl([2, 8]), prController.searchItems);
 PrRoutes.get( '/categories',         passportSignIn, acl([2, 8]), prController.categories);
 
+// Listing, KPIs, duplicate hints (static paths: before /:id).
+PrRoutes.get( '/',                   passportSignIn, acl([2, 8]), prController.list);
+PrRoutes.get( '/kpis',               passportSignIn, acl([2, 8]), prController.kpis);
+PrRoutes.get( '/duplicates',         passportSignIn, acl([2, 8]), prController.duplicates);
+
 // Drafts.
 PrRoutes.post('/',                   passportSignIn, acl([2, 8]), prController.create);
 PrRoutes.get( '/:id(\\d+)',          passportSignIn, acl([2, 8]), prController.getById);
