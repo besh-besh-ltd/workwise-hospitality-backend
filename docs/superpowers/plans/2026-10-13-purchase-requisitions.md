@@ -838,7 +838,7 @@ export const LINE_PROGRESS_SQL = (l, p) => `CASE
   1. tx, `lockPr`, requester only, status ∈ {draft, returned} else 409.
   2. Re-validates every active line (usable variant, contract coverage, category exists), otherwise 422 with line details.
   3. `revision += 1`; `estimated_total` = server Σ; `submitted_at = now()`; `returned_note = NULL`.
-  4. **Review groups exist** → Task 7 (`startReview`). **None** → `startApproval`.
+  4. **Review groups exist** → `startReview(t, pr, groups)`. Its contract is written out under Task 7, but **this task implements it** (insert reviews, status `in_review`, `PR_NO_REVIEWER` fail-closed, approval pre-check); Task 7 adds the reviewer actions. **None** → `startApproval`.
   5. Returns the detail. If auto-approved (should not happen for PR, but handle it), call `dispatchPostApprovalAction` after commit, as `mrController.js:436` does.
 - `prWorkflow.withdraw(prId, user)`: requester only; status ∈ {in_review, pending_approval} else 409. Cancels the PENDING instance (`cancelApprovalInstance(id, user.id, 'Withdrawn by requester', { t })`); pending reviews → `superseded`; status `draft`; event `withdrawn`.
 - `prWorkflow.approverSendBack(prId, user, note)`:
@@ -883,7 +883,7 @@ export const LINE_PROGRESS_SQL = (l, p) => `CASE
 - Test: `tests/services/pr.review.test.js`
 
 **Interfaces:**
-- `startReview(t, pr, groups)`:
+- `startReview(t, pr, groups)` (implemented in Task 6; Task 7 tests exercise it end to end):
   - For each group, `resolveReviewers` returns no one → throw `PR_NO_REVIEWER` with `details:{department_id, department_title}`.
   - Also call `previewApproval` up front and throw its first problem, so a reviewer never works on a PR whose approval is already known to be broken.
   - Insert `tbl_pr_review(pending)` + `tbl_pr_review_line`; status `in_review`; events `review_created` per group.
