@@ -18,6 +18,9 @@
 import db from '../../config/dbConn.js';
 import { assertUserHasScope, isAuthorizationError } from '../authorizationService.js';
 import { PR_ERR, prError } from './prErrors.js';
+import { prGrantRowsSql } from './prConstants.js';
+
+export { prGrantRowsSql };
 
 const SUPER_ADMIN = 8;
 export const isSuperAdmin = (user) => Number(user?.user_type) === SUPER_ADMIN;
@@ -43,11 +46,20 @@ export async function hasPerm(userId, perm, { companyId, hotelId = null, departm
   }
 }
 
+// What a refusal says, per permission — the FE shows it as is.
+const FORBIDDEN_MESSAGE = {
+  'pr.create': 'You do not have access to raise purchase requisitions for this hotel/department',
+  'pr.read': 'You do not have access to purchase requisitions for this hotel/department',
+  'pr.evaluate': 'You are not a technical reviewer for this department',
+  'pr.approve': 'You are not an approver for purchase requisitions of this hotel/department',
+  'pr.convert': 'You do not have access to work the purchase queue for this hotel',
+};
+export const forbiddenMessage = (perm) =>
+  FORBIDDEN_MESSAGE[perm] || `You do not have the ${perm} permission for this hotel/department`;
+
 export async function assertPerm(userId, perm, cell, t = db) {
   if (!(await hasPerm(userId, perm, cell, t))) {
-    throw prError(PR_ERR.FORBIDDEN, 'You do not have access to raise purchase requisitions for this hotel/department', {
-      permission: perm,
-    });
+    throw prError(PR_ERR.FORBIDDEN, forbiddenMessage(perm), { permission: perm });
   }
 }
 
@@ -63,8 +75,9 @@ const RESERVED_ALIASES = new Set(['_pr_urs', '_pr_rp', '_pr_perm', '_pr_rv', '_p
  *   pr.convert  on (company, hotel, any department)            — the buyer pool
  *   pr.evaluate on (company, hotel, d) for any d the PR was routed to for
  *               review, in any revision                        — reviewers
- *   a non-removed approver row on any 'PR' approval instance of this PR
- *               (every revision, so a past approver keeps the history)
+ *   a non-removed approver row on the PR's CURRENT approval instance
+ *               (alias.approval_instance_id). Approvers of an earlier,
+ *               cancelled instance need pr.read like anyone else.
  *
  * Super admin (user_type 8) is NOT expressed here — callers skip the clause for
  * them (canReadPr returns true before reaching SQL).
@@ -107,7 +120,8 @@ export function readableScopeSql(userId, alias = 'p', paramOffset = 1) {
         FROM tbl_approval_instances _pr_ai
         JOIN tbl_approval_instance_steps _pr_ais ON _pr_ais.approval_instance_id = _pr_ai.id
         JOIN tbl_approval_step_approvers _pr_asa ON _pr_asa.approval_instance_step_id = _pr_ais.id
-       WHERE _pr_ai.entity_type = 'PR'
+       WHERE _pr_ai.id = ${alias}.approval_instance_id
+         AND _pr_ai.entity_type = 'PR'
          AND _pr_ai.entity_id = ${alias}.id
          AND _pr_asa.approver_user_id = ${u}
          AND _pr_asa.removed_at IS NULL
@@ -133,22 +147,4 @@ export async function canReadPr(user, pr, t = db) {
   return row.ok === true;
 }
 
-/**
- * Scope rows of `$userParam` that grant pr.<action> and can apply to a PR
- * (process wildcard). Columns: company_id, hotel_id, department_id.
- * Used by the create-form pickers so they offer exactly what assertPerm admits.
- */
-export const prGrantRowsSql = (userParam, action) => {
-  if (!/^[a-z]+$/.test(action)) throw new Error(`prGrantRowsSql: invalid action '${action}'`);
-  return `
-    SELECT _g_urs.company_id, _g_urs.hotel_id, _g_urs.department_id
-      FROM tbl_user_role_scopes _g_urs
-      JOIN tbl_role_permissions _g_rp ON _g_rp.role_id = _g_urs.role_id
-      JOIN tbl_permissions _g_perm ON _g_perm.id = _g_rp.permission_id
-     WHERE _g_urs.user_id = ${userParam}
-       AND _g_urs.process_id IS NULL
-       AND _g_perm.resource::text = 'pr'
-       AND _g_perm.action::text = '${action}'`;
-};
-
-export default { hasPerm, assertPerm, canReadPr, readableScopeSql, prGrantRowsSql, isSuperAdmin };
+export default { hasPerm, assertPerm, forbiddenMessage, canReadPr, readableScopeSql, prGrantRowsSql, isSuperAdmin };

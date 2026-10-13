@@ -16,21 +16,9 @@
 
 import db from '../../config/dbConn.js';
 import { contractedVariantPredicateSql } from '../../models/mr/mrModel.js';
+import { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL } from './prConstants.js';
 
-// Aliases: pv = tbl_product_variant, p = tbl_product. Copied from
-// rfqModel.searchProduct (matched_variants) — keep the two in step.
-export const USABLE_VARIANT_SQL =
-  'p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1';
-
-// The category a product is filed under for PR purposes: its lowest category id
-// that exists in tbl_category. `productIdExpr` is a SQL expression.
-export const FIRST_CATEGORY_SQL = (productIdExpr) => `(
-  SELECT _fc_pc.category_id
-    FROM tbl_product_categories _fc_pc
-    JOIN tbl_category _fc_cat ON _fc_cat.id = _fc_pc.category_id
-   WHERE _fc_pc.product_id = ${productIdExpr}
-   ORDER BY _fc_pc.category_id
-   LIMIT 1)`;
+export { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL };
 
 const toIds = (ids) => [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
 

@@ -17,6 +17,7 @@ import { IDS } from "../fixtures/ids.js";
 import {
   grantPr, revokeAllPr, draftBody, firstUsableVariant, cleanupPrs, makePrPolicy, dropPrPolicies, istDate,
 } from "../helpers/prFixtures.js";
+import { forbiddenMessage } from "../../app/services/pr/prAccess.js";
 
 const A = IDS.hospitality.A;
 const A1 = IDS.hotels.A1;
@@ -112,6 +113,10 @@ describe("PR drafts — create", () => {
     const asOther = await createAs(otherC, await draftBody({ title }));
     expect(asOther.status).toBe(403);
     expect(asOther.body).toMatchObject({ status: 0, code: "PR_FORBIDDEN" });
+    expect(asOther.body.message).toMatch(/raise purchase requisitions/);
+    // The refusal names what was refused, per permission.
+    expect(forbiddenMessage("pr.convert")).toMatch(/purchase queue/);
+    expect(forbiddenMessage("pr.evaluate")).toMatch(/technical reviewer/);
 
     const wrongDept = await createPr(await draftBody({ title, department_id: PROC }));
     expect(wrongDept.status).toBe(403);
@@ -182,6 +187,18 @@ describe("PR drafts — create", () => {
     expect(many.status).toBe(422);
     expect(fieldsOf(many)).toEqual(expect.arrayContaining(["title", "uom"]));
     expect(many.body.details.find((d) => d.field === "uom").line_no).toBe(1);
+
+    // The Σ of line values must fit estimated_total NUMERIC(18,2) (9,999,999,999,999,999.99).
+    const overflow = await createPr({ ...base, lines: [{ ...cat, quantity: "100.001", estimated_unit_price: "99999999999999.99" }] });
+    expect(overflow.status).toBe(422);
+    expect(overflow.body.details).toEqual([expect.objectContaining({ field: "lines" })]);
+    const twoLines = await createPr({ ...base, lines: [
+      { ...cat, quantity: "60", estimated_unit_price: "99999999999999.99" },
+      { ...cat, quantity: "40.001", estimated_unit_price: "99999999999999.99" }] });
+    expect(twoLines.status).toBe(422);
+    expect(fieldsOf(twoLines)).toEqual(["lines"]);
+    const atMax = await createPr({ ...base, lines: [{ ...cat, quantity: "100", estimated_unit_price: "99999999999999.99" }] });
+    expect(atMax.status).toBe(200); // 9,999,999,999,999,999.00 fits
 
     // Boundaries that must pass: today's IST date; the largest price.
     const ok = await createPr({ ...base, required_by_date: await istDate(0), lines: [{ ...cat, estimated_unit_price: "99999999999999.99" }] });
@@ -260,11 +277,12 @@ describe("PR drafts — read access", () => {
     const missing = await reqC.get(`/api/v1/pr/999999999`);
     expect(missing.status).toBe(404);
     expect(missing.body.code).toBe("PR_NOT_FOUND");
-    // `:id` is digits-only, so a non-numeric id matches no PR route at all
-    // (the app's unknown-route handler answers 405).
-    const garbage = await reqC.get(`/api/v1/pr/abc`);
-    expect([404, 405]).toContain(garbage.status);
-    expect(garbage.body.data).toBeUndefined();
+    // A non-numeric id matches no PR route; the PR fallback answers in the PR contract.
+    for (const res of [await reqC.get(`/api/v1/pr/abc`), await reqC.put(`/api/v1/pr/abc`).send({}),
+                       await reqC.post(`/api/v1/pr/abc/cancel`).send({ reason: "x" })]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ status: 0, code: "PR_NOT_FOUND" });
+    }
   });
 
   it("get.access: pr.read is cell-scoped; pr.convert covers the hotel; reviewer/approver/super admin read", async () => {
@@ -304,23 +322,43 @@ describe("PR drafts — read access", () => {
     await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [reviewer]);
     expect((await asOther()).status).toBe(404);
 
-    // Named as a step approver on the PR's approval instance → reads; a removed approver row does not.
+    // Approver read: a non-removed approver row on the PR's CURRENT approval instance (approval_instance_id).
     const policyId = await makePrPolicy({ hotelId: A1, steps: [{ source: "USER", id: OTHER }] });
-    const inst = await db.one(
-      `INSERT INTO tbl_approval_instances (entity_type, entity_id, approval_policy_id, status, current_step,
-                                           hospitality_company_id, hotel_id, department_id, initiated_by)
-       VALUES ('PR', $1, $2, 'PENDING', 1, $3, $4, $5, $6) RETURNING id`, [prId, policyId, A, A1, ENG, REQ]);
-    const step = await db.one(
-      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order) VALUES ($1, 1) RETURNING id`, [inst.id]);
-    const approver = await db.one(
-      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id) VALUES ($1, $2) RETURNING id`,
-      [step.id, OTHER]);
+    const instIds = [];
+    const addInstance = async (approverId) => {
+      const inst = await db.one(
+        `INSERT INTO tbl_approval_instances (entity_type, entity_id, approval_policy_id, status, current_step,
+                                             hospitality_company_id, hotel_id, department_id, initiated_by)
+         VALUES ('PR', $1, $2, 'PENDING', 1, $3, $4, $5, $6) RETURNING id`, [prId, policyId, A, A1, ENG, REQ]);
+      instIds.push(inst.id);
+      const step = await db.one(
+        `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order) VALUES ($1, 1) RETURNING id`, [inst.id]);
+      const row = await db.one(
+        `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id) VALUES ($1, $2) RETURNING id`,
+        [step.id, approverId]);
+      return { instId: inst.id, approverRowId: row.id };
+    };
+    const setCurrent = (instId) =>
+      db.none(`UPDATE tbl_purchase_requisition SET approval_instance_id = $2 WHERE id = $1`, [prId, instId]);
     try {
+      const first = await addInstance(OTHER);
+      expect((await asOther()).status).toBe(404); // an instance of this PR, but not its current one
+      await setCurrent(first.instId);
       expect((await asOther()).status).toBe(200);
-      await db.none(`UPDATE tbl_approval_step_approvers SET removed_at = NOW(), status = 'REMOVED' WHERE id = $1`, [approver.id]);
+      await db.none(`UPDATE tbl_approval_step_approvers SET removed_at = NOW(), status = 'REMOVED' WHERE id = $1`, [first.approverRowId]);
+      expect((await asOther()).status).toBe(404);
+      await db.none(`UPDATE tbl_approval_step_approvers SET removed_at = NULL, status = 'PENDING' WHERE id = $1`, [first.approverRowId]);
+      expect((await asOther()).status).toBe(200);
+
+      // Withdraw + resubmit: the first instance is cancelled and a new one becomes current.
+      // The previous instance's approver loses read.
+      await db.none(`UPDATE tbl_approval_instances SET status = 'CANCELLED' WHERE id = $1`, [first.instId]);
+      const second = await addInstance(REQ2);
+      await setCurrent(second.instId);
       expect((await asOther()).status).toBe(404);
     } finally {
-      await db.none(`DELETE FROM tbl_approval_instances WHERE id = $1`, [inst.id]);
+      await setCurrent(null);
+      await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [instIds]);
     }
 
     // A PR Buyer of ANOTHER company never reads it.
@@ -343,7 +381,7 @@ describe("PR drafts — read access", () => {
 });
 
 describe("PR drafts — update, cancel, copy", () => {
-  it("update.replace: replaces the lines (line_no restarts at 1) and records a header diff", async () => {
+  it("update.replace: lines sent without ids replace the old ones (line_no restarts at 1); header diff recorded", async () => {
     const created = await createPr();
     const id = created.body.data.id;
     const before = await linesOf(id);
@@ -358,7 +396,7 @@ describe("PR drafts — update, cancel, copy", () => {
     const after = await linesOf(id);
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ line_no: 1, line_kind: "free_text", free_text_name: "Relay socket", quantity: "3.000", uom: "pcs" });
-    expect(before.map((l) => l.id)).not.toContain(after[0].id);
+    expect(before.map((l) => l.id)).not.toContain(after[0].id); // no id sent → a new line
     expect((await prRow(id)).title).toBe("Chiller spares (revised)");
 
     const events = await eventsOf(id);
@@ -366,7 +404,122 @@ describe("PR drafts — update, cancel, copy", () => {
     const updated = events[1];
     expect(updated.actor_id).toBe(REQ);
     expect(updated.payload.changed).toEqual({ title: { from: "Chiller spares", to: "Chiller spares (revised)" } });
-    expect(updated.payload.lines).toEqual({ before: 2, after: 1 });
+    expect(updated.payload.lines).toEqual({ before: 2, after: 1, kept: 0, added: 1, removed: 2 });
+  });
+
+  // Seed reviewer-style work on a line: one clause + one line attachment.
+  const addClauseAndAttachment = async (prId, lineId) => {
+    await db.none(`INSERT INTO tbl_pr_line_clause (pr_line_id, clause_text, added_by) VALUES ($1, 'IP54 rated', $2)`, [lineId, REQ]);
+    await db.none(
+      `INSERT INTO tbl_pr_attachment (pr_id, pr_line_id, kind, file_url, file_name, uploaded_by)
+       VALUES ($1, $2, 'datasheet', 'https://example.test/ds.pdf', 'ds.pdf', $3)`, [prId, lineId, REQ]);
+  };
+  const workOn = async (lineId) => ({
+    clauses: (await db.one(`SELECT COUNT(*)::int AS c FROM tbl_pr_line_clause WHERE pr_line_id = $1`, [lineId])).c,
+    attachments: (await db.one(`SELECT COUNT(*)::int AS c FROM tbl_pr_attachment WHERE pr_line_id = $1`, [lineId])).c,
+  });
+  // The PUT body that re-sends the saved lines with their ids (as the FE edit form does).
+  const resend = (base, saved, patches = {}) => base.lines.map((l, i) => ({ ...l, id: saved[i].id, ...(patches[i] || {}) }));
+
+  it("update keeps line identity: a line sent with its id keeps its clauses and attachments; reorder renumbers", async () => {
+    const base = await draftBody();
+    const id = (await createPr(base)).body.data.id;
+    const saved = await linesOf(id);
+    await addClauseAndAttachment(id, saved[0].id);
+
+    // Edit the catalog line's quantity and swap the two lines' order.
+    const lines = resend(base, saved, { 0: { quantity: "7.5" } });
+    const res = await reqC.put(`/api/v1/pr/${id}`).send({ ...base, lines: [lines[1], lines[0]] });
+    expect(res.status).toBe(200);
+
+    const after = await linesOf(id);
+    expect(after.map((l) => [l.id, l.line_no])).toEqual([[saved[1].id, 1], [saved[0].id, 2]]);
+    expect(after[1]).toMatchObject({ id: saved[0].id, quantity: "7.500", category_id: saved[0].category_id });
+    expect(await workOn(saved[0].id)).toEqual({ clauses: 1, attachments: 1 });
+    const updated = (await eventsOf(id)).pop();
+    expect(updated.payload.lines).toEqual({ before: 2, after: 2, kept: 2, added: 0, removed: 0 });
+  });
+
+  it("update of a returned PR works and keeps the reviewer's clause", async () => {
+    const base = await draftBody();
+    const id = (await createPr(base)).body.data.id;
+    const saved = await linesOf(id);
+    await addClauseAndAttachment(id, saved[1].id);
+    await db.none(
+      `UPDATE tbl_purchase_requisition SET status = 'returned', revision = 1, returned_note = 'Fix qty' WHERE id = $1`, [id]);
+
+    const res = await reqC.put(`/api/v1/pr/${id}`).send({ ...base, lines: resend(base, saved, { 1: { quantity: "6" } }) });
+    expect(res.status).toBe(200);
+    const after = await linesOf(id);
+    expect(after.map((l) => l.id)).toEqual(saved.map((l) => l.id));
+    expect(after[1].quantity).toBe("6.000");
+    expect(await workOn(saved[1].id)).toEqual({ clauses: 1, attachments: 1 });
+    expect(await prRow(id)).toMatchObject({ status: "returned", revision: 1 });
+    expect((await eventsOf(id)).pop()).toMatchObject({ event_type: "updated", revision: 1 });
+  });
+
+  it("update refuses a line id that is not one of this PR's lines → 422 PR_VALIDATION, nothing changes", async () => {
+    const base = await draftBody();
+    const id = (await createPr(base)).body.data.id;
+    const otherPrId = (await createPr(base)).body.data.id;
+    const foreignLine = (await linesOf(otherPrId))[0];
+    const saved = await linesOf(id);
+
+    const res = await reqC.put(`/api/v1/pr/${id}`).send({
+      ...base, title: "should not save", lines: [{ ...base.lines[0], id: foreignLine.id }, { ...base.lines[1], id: saved[1].id }],
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("PR_VALIDATION");
+    expect(res.body.details).toEqual([expect.objectContaining({ field: "id", line_no: 1 })]);
+    expect(await linesOf(id)).toEqual(saved);
+    expect(await linesOf(otherPrId)).toHaveLength(2);
+    expect((await prRow(id)).title).toBe("Chiller spares");
+
+    // The same line twice, and an id on create, are refused too.
+    const dup = await reqC.put(`/api/v1/pr/${id}`).send({ ...base, lines: [{ ...base.lines[0], id: saved[0].id }, { ...base.lines[0], id: saved[0].id }] });
+    expect(dup.status).toBe(422);
+    expect(dup.body.details).toEqual([expect.objectContaining({ field: "id", line_no: 2 })]);
+    const onCreate = await createPr({ ...base, lines: [{ ...base.lines[0], id: saved[0].id }] });
+    expect(onCreate.status).toBe(422);
+    expect(fieldsOf(onCreate)).toEqual(["id"]);
+  });
+
+  it("update deletes a line left out of the body (with its clauses) and renumbers the rest", async () => {
+    const base = await draftBody();
+    const id = (await createPr(base)).body.data.id;
+    const saved = await linesOf(id);
+    await addClauseAndAttachment(id, saved[0].id);
+
+    const res = await reqC.put(`/api/v1/pr/${id}`).send({ ...base, lines: [{ ...base.lines[1], id: saved[1].id }] });
+    expect(res.status).toBe(200);
+    const after = await linesOf(id);
+    expect(after.map((l) => [l.id, l.line_no])).toEqual([[saved[1].id, 1]]);
+    expect(await workOn(saved[0].id)).toEqual({ clauses: 0, attachments: 0 });
+    expect((await eventsOf(id)).pop().payload.lines).toEqual({ before: 2, after: 1, kept: 1, added: 0, removed: 1 });
+  });
+
+  it("update re-derives the category when a kept catalog line changes variant, keeping its clauses", async () => {
+    const v = await firstUsableVariant();
+    const other = await db.one(
+      `SELECT pv.id AS variant_id, cat.category_id
+         FROM tbl_product_variant pv JOIN tbl_product p ON p.id = pv.product_id
+         CROSS JOIN LATERAL (SELECT pc.category_id FROM tbl_product_categories pc JOIN tbl_category c ON c.id = pc.category_id
+                              WHERE pc.product_id = p.id ORDER BY pc.category_id LIMIT 1) cat
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
+          AND cat.category_id <> $1
+        ORDER BY pv.id LIMIT 1`, [v.category_id]);
+    const base = await draftBody();
+    const id = (await createPr(base)).body.data.id;
+    const saved = await linesOf(id);
+    await addClauseAndAttachment(id, saved[0].id);
+
+    const res = await reqC.put(`/api/v1/pr/${id}`).send({
+      ...base, lines: resend(base, saved, { 0: { product_variant_id: other.variant_id, category_id: v.category_id } }),
+    });
+    expect(res.status).toBe(200);
+    const [line] = await linesOf(id);
+    expect(line).toMatchObject({ id: saved[0].id, product_variant_id: other.variant_id, category_id: Number(other.category_id) });
+    expect(await workOn(saved[0].id)).toEqual({ clauses: 1, attachments: 1 });
   });
 
   it("update.after-submit: a draft submitted from another tab → 409 PR_STATE_CONFLICT, nothing changes", async () => {
@@ -524,6 +677,21 @@ describe("PR form pickers", () => {
     expect(none.body.data.hotels).toEqual([]);
   });
 
+  it("form pickers: a grant with department NULL lists every department at the hotel", async () => {
+    const g = await grantPr(OTHER, "PR Requester", { departmentId: null });
+    try {
+      const hotels = await otherC.get(`/api/v1/pr/form/hotels`);
+      expect(hotels.body.data.hotels.map((h) => h.id)).toEqual([A1]);
+      const depts = await otherC.get(`/api/v1/pr/form/departments?hotel_id=${A1}`);
+      expect(depts.status).toBe(200);
+      const all = await db.map(`SELECT id, title FROM tbl_department ORDER BY title, id`, [], (r) => ({ id: r.id, title: r.title }));
+      expect(depts.body.data.departments).toEqual(all);
+      expect((await otherC.get(`/api/v1/pr/form/departments?hotel_id=${IDS.hotels.A2}`)).status).toBe(403);
+    } finally {
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [g]);
+    }
+  });
+
   it("categories: active, non-deleted categories {id, title, parent_id}, at most 50", async () => {
     const all = await xcoC.get(`/api/v1/pr/categories?q=`);
     expect(all.status).toBe(200);
@@ -536,7 +704,7 @@ describe("PR form pickers", () => {
     expect(rows.every((r) => active.has(r.id))).toBe(true);
 
     const target = await db.one(`SELECT id, title FROM tbl_category WHERE status = 1 AND is_deleted = 0 ORDER BY id LIMIT 1`);
-    const q = encodeURIComponent(target.title.slice(0, 5));
+    const q = encodeURIComponent(target.title); // the full title, so the row cannot fall outside the 50-row limit
     const hit = await reqC.get(`/api/v1/pr/categories?q=${q}`);
     expect(hit.body.data.categories.map((c) => c.id)).toContain(target.id);
 
@@ -559,7 +727,7 @@ describe("PR catalog guards — contracts and item search", () => {
   });
 
   it("search-items: usable variants with their category, not on contract; cell-gated", async () => {
-    const res = await search(v.variant_name.slice(0, 6));
+    const res = await search(v.variant_name); // the full name, so the row cannot fall outside the LIMIT
     expect(res.status).toBe(200);
     const hit = res.body.data.items.find((i) => i.variant_id === v.variant_id);
     expect(hit).toMatchObject({
@@ -626,7 +794,7 @@ describe("PR catalog guards — contracts and item search", () => {
     });
 
     it("search-items flags the contracted variant with its ARC number", async () => {
-      const res = await search(v.variant_name.slice(0, 6));
+      const res = await search(v.variant_name);
       expect(res.status).toBe(200);
       const hit = res.body.data.items.find((i) => i.variant_id === v.variant_id);
       expect(hit).toMatchObject({ on_contract: true, arc_number: "ARC-TEST-PR-1", arc_contract_id: contractId });

@@ -18,24 +18,15 @@ import { logger } from '../../util/logger.js';
 import * as prModel from '../../models/pr/prModel.js';
 import { PR_ERR, prError, sendPrError } from '../../services/pr/prErrors.js';
 import { record } from '../../services/pr/prEvents.js';
-import { hasPerm, assertPerm, canReadPr } from '../../services/pr/prAccess.js';
+import { hasPerm, assertPerm, canReadPr, forbiddenMessage } from '../../services/pr/prAccess.js';
 import { describeVariants, contractCoverage } from '../../services/pr/prCatalog.js';
+import {
+  PR_TYPES, URGENCIES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
+  QTY_RE, PRICE_RE, PRICE_MAX_INT_DIGITS, TOTAL_MAX_PAISE, MAX_LEN,
+} from '../../services/pr/prConstants.js';
 
 const ok = (res, data, message = 'success') => res.status(200).json({ status: 1, message, data });
 
-const PR_TYPES = ['goods', 'service', 'capex'];
-const URGENCIES = ['low', 'normal', 'urgent'];
-export const EDITABLE_STATUSES = ['draft', 'returned'];
-export const WITHDRAWABLE_STATUSES = ['in_review', 'pending_approval'];
-const MAX_LINES = 200;
-const QTY_RE = /^\d{1,15}(\.\d{1,3})?$/;            // NUMERIC(18,3)
-const PRICE_RE = /^\d{1,16}(\.\d{1,2})?$/;          // NUMERIC(18,2)
-const PRICE_MAX_INT_DIGITS = 14;                    // ≤ 99,999,999,999,999.99
-const TOTAL_MAX_PAISE = 999999999999999999n;        // Σ must fit estimated_total NUMERIC(18,2)
-const MAX_LEN = {
-  title: 200, justification: 4000, delivery_location: 1000, free_text_name: 300, uom: 50,
-  specification: 20000, suggested_vendor_note: 2000, reason: 2000,
-};
 const INT4_MAX = 2147483647;
 
 // ---------------------------------------------------------------------------
@@ -116,10 +107,21 @@ export function validateDraftBody(body, { istToday }) {
     err('lines', `A requisition can have at most ${MAX_LINES} lines`);
   } else {
     let totalPaise = 0n;
+    const seenIds = new Set();
     b.lines.forEach((raw, i) => {
       const line_no = i + 1;
       const r = raw && typeof raw === 'object' ? raw : {};
       const lerr = (field, message) => err(field, message, { line_no });
+
+      // An existing line keeps its identity (and its clauses/attachments) by
+      // sending its `id`; whether the id belongs to THIS PR is checked later.
+      let id = null;
+      if (r.id !== undefined && r.id !== null && r.id !== '') {
+        id = posInt(r.id);
+        if (!id) lerr('id', 'Invalid line id');
+        else if (seenIds.has(id)) lerr('id', 'The same line appears twice');
+        else seenIds.add(id);
+      }
 
       const hasVariant = r.product_variant_id !== undefined && r.product_variant_id !== null && r.product_variant_id !== '';
       const freeText = text(r.free_text_name);
@@ -167,7 +169,7 @@ export function validateDraftBody(body, { istToday }) {
       if (qtyOk && priceOk) totalPaise += (toScaled(quantity, 3) * toScaled(price, 2) + 500n) / 1000n;
 
       lines.push({
-        line_no, line_kind, product_variant_id, category_id,
+        id, line_no, line_kind, product_variant_id, category_id,
         free_text_name: line_kind === 'free_text' ? freeText : null,
         quantity, uom, estimated_unit_price: price, specification, suggested_vendor_note,
       });
@@ -231,21 +233,25 @@ async function resolveCatalogLines(t, cell, lines) {
  * Shared by create and update: validate, authorize the chosen cell with
  * pr.create, then run the catalog guards. Authorization precedes field errors
  * so a caller without access learns nothing about the payload's validity.
+ * `existingLineIds`: the PR's current line ids (empty on create) — a body line
+ * may only carry one of these.
  */
-async function prepareDraft(t, userId, body) {
+async function prepareDraft(t, userId, body, { existingLineIds = new Set() } = {}) {
   const v = validateDraftBody(body, { istToday: await prModel.istToday(t) });
   if (v.errors.some((e) => e.field === 'hotel_id' || e.field === 'department_id')) {
     throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', v.errors);
   }
   const hotel = await prModel.hotelCell(v.header.hotel_id, t);
-  if (!hotel) {
-    throw prError(PR_ERR.FORBIDDEN, 'You do not have access to raise purchase requisitions for this hotel/department');
-  }
+  if (!hotel) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.create'));
   const cell = {
     companyId: Number(hotel.hospitality_company_id), hotelId: v.header.hotel_id, departmentId: v.header.department_id,
   };
   await assertPerm(userId, 'pr.create', cell, t);
-  if (v.errors.length) throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', v.errors);
+  const foreignIds = v.lines
+    .filter((l) => l.id && !existingLineIds.has(l.id))
+    .map((l) => ({ field: 'id', line_no: l.line_no, message: 'This line does not belong to this requisition' }));
+  const errors = [...v.errors, ...foreignIds];
+  if (errors.length) throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', errors);
   if (!(await prModel.departmentExists(cell.departmentId, t))) {
     throw prError(PR_ERR.VALIDATION, 'Unknown department', [{ field: 'department_id', message: 'Unknown department' }]);
   }
@@ -315,7 +321,12 @@ export async function create(req, res) {
   }
 }
 
-/** PUT /v1/pr/:id — replace a draft/returned PR (header + every line). Requester only. */
+/**
+ * PUT /v1/pr/:id — replace a draft/returned PR's header and lines. Requester
+ * only. Lines sent with their `id` are updated in place (clauses, attachments
+ * and review links survive); lines without one are added; lines left out are
+ * deleted.
+ */
 export async function update(req, res) {
   try {
     const userId = req.user.id;
@@ -330,15 +341,18 @@ export async function update(req, res) {
       const body = { ...(req.body && typeof req.body === 'object' ? req.body : {}) };
       if (body.hotel_id === undefined || body.hotel_id === null) body.hotel_id = pr.hotel_id;
       if (body.department_id === undefined || body.department_id === null) body.department_id = pr.department_id;
-      const { cell, header, lines } = await prepareDraft(t, userId, body);
+      const existingLineIds = new Set(await prModel.lineIds(id, t));
+      const { cell, header, lines } = await prepareDraft(t, userId, body, { existingLineIds });
 
       const patch = headerRow(cell, header);
-      const before = await t.one(`SELECT COUNT(*)::int AS c FROM tbl_purchase_requisition_line WHERE pr_id = $1`, [id]);
       await prModel.updateHeader(t, id, patch);
-      await prModel.replaceLines(t, id, lines);
+      const r = await prModel.replaceLines(t, id, lines);
       await record(t, {
         prId: id, revision: pr.revision, actorId: userId, type: 'updated',
-        payload: { changed: headerDiff(pr, patch), lines: { before: before.c, after: lines.length } },
+        payload: {
+          changed: headerDiff(pr, patch),
+          lines: { before: existingLineIds.size, after: lines.length, kept: r.kept, added: r.added, removed: r.removed },
+        },
       });
       return { id, pr_number: pr.pr_number };
     });
@@ -442,7 +456,7 @@ async function authorizeCreateCell(req, { requireDepartment }) {
     hotelId,
     departmentId: requireDepartment ? departmentId : null,
   };
-  if (!hotel) throw prError(PR_ERR.FORBIDDEN, 'You do not have access to this hotel/department');
+  if (!hotel) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.create'));
   await assertPerm(req.user.id, 'pr.create', cell);
   return cell;
 }

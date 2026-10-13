@@ -2,62 +2,27 @@
 //
 // Raw, parameterised SQL only. Authorization lives in services/pr/prAccess.js
 // and is applied by the controller BEFORE any of these run; nothing here trusts
-// a client-supplied tenant id.
+// a client-supplied tenant id. Shared SQL fragments and constants come from the
+// leaf module services/pr/prConstants.js (no business logic is imported here).
 //
 // Dates: required_by_date is a DATE. node-pg would parse it into a JS Date at
 // the server's local midnight, which serialises as the PREVIOUS day in UTC for
 // IST. Every read returns it as 'YYYY-MM-DD' text instead.
 
 import db from '../../config/dbConn.js';
-import { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL } from '../../services/pr/prCatalog.js';
-import { prGrantRowsSql } from '../../services/pr/prAccess.js';
+import {
+  LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
+  IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
+} from '../../services/pr/prConstants.js';
 
-// ---------------------------------------------------------------------------
-// Derived line progress — single source of truth (spec §4.2). `l` = line alias, `p` = PR alias.
-// Live link = RFQ product still exists (FK cascade) AND (RFQ not closed/withdrawn OR a live PO exists for it).
-// ---------------------------------------------------------------------------
-export const LIVE_PO_EXISTS = (lk) => `EXISTS (
-  SELECT 1 FROM tbl_rfq_purchase_order po_l
-    JOIN tbl_purchase_order_product pop_l ON pop_l.purchase_order_id = po_l.id
-   WHERE po_l.rfq_id = ${lk}.rfq_id AND pop_l.rfq_product_id = ${lk}.rfq_product_id
-     AND po_l.status NOT IN ('rejected','rejected_by_vendor','cancelled','draft'))`;
-export const LIVE_LINK_EXISTS = (l) => `EXISTS (
-  SELECT 1 FROM tbl_pr_line_rfq lk JOIN tbl_rfq r ON r.id = lk.rfq_id
-   WHERE lk.pr_line_id = ${l}.id AND (r.status NOT IN (2,5) OR ${LIVE_PO_EXISTS('lk')}))`;
-export const LINE_PROGRESS_SQL = (l, p) => `CASE
-  WHEN ${l}.status = 'cancelled' THEN 'cancelled'
-  WHEN ${l}.status = 'closed' THEN 'closed'
-  WHEN ${p}.status <> 'approved' THEN 'pending'
-  WHEN EXISTS (SELECT 1 FROM tbl_pr_line_rfq lk WHERE lk.pr_line_id = ${l}.id AND ${LIVE_PO_EXISTS('lk')}) THEN 'ordered'
-  WHEN ${LIVE_LINK_EXISTS(l)} THEN 'in_sourcing'
-  WHEN ${l}.line_kind = 'free_text' AND ${l}.mapped_variant_id IS NULL
-       AND EXISTS (SELECT 1 FROM tbl_pr_catalog_request cr WHERE cr.pr_line_id = ${l}.id AND cr.status = 'open') THEN 'awaiting_catalog'
-  WHEN ${l}.line_kind = 'free_text' AND ${l}.mapped_variant_id IS NULL THEN 'needs_mapping'
-  ELSE 'in_pool' END`;
+// Line progress + PR value fragments live in prConstants; re-exported here as
+// the model's public SQL surface (lists, detail, pool, KPIs).
+export { LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql };
 
-/**
- * Σ ROUND(quantity × estimated_unit_price, 2) over the PR's ACTIVE lines, as an
- * exact NUMERIC with 2 decimals (0.00 when there are none). `p` = PR alias.
- * The only formula for a PR's value: submit stores it, lists/detail show it live.
- */
-export const estimateTotalSql = (p) => `(
-  SELECT COALESCE(SUM(ROUND(_et_l.quantity * _et_l.estimated_unit_price, 2)), 0::numeric(18,2))
-    FROM tbl_purchase_requisition_line _et_l
-   WHERE _et_l.pr_id = ${p}.id AND _et_l.status = 'active')`;
-
-// Every column of tbl_purchase_requisition, with the DATE as text.
-const PR_COLUMN_NAMES = [
-  'id', 'pr_number', 'title', 'pr_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id',
-  'urgency', 'required_by_date', 'justification', 'delivery_location', 'status', 'revision', 'estimated_total',
-  'raised_by', 'submitted_at', 'approved_at', 'approval_instance_id', 'assigned_buyer_id', 'assigned_at',
-  'returned_note', 'cancelled_reason', 'created_at', 'updated_at',
-];
-const PR_COLUMNS = (a, { except = [] } = {}) => PR_COLUMN_NAMES
-  .filter((c) => !except.includes(c))
-  .map((c) => (c === 'required_by_date' ? `to_char(${a}.required_by_date, 'YYYY-MM-DD') AS required_by_date` : `${a}.${c}`))
-  .join(', ');
-
-const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
+// Every column of the PR row, with required_by_date re-selected as text. The
+// later column of the same name wins in node-pg's row object (pg/lib/result.js
+// parseRow assigns fields in order), so `p.*` stays the single column list.
+const PR_SELECT = (a) => `${a}.*, to_char(${a}.required_by_date, 'YYYY-MM-DD') AS required_by_date`;
 
 // Header columns a caller may write through insertPr/updateHeader.
 const WRITABLE_HEADER = [
@@ -68,7 +33,7 @@ const WRITABLE_HEADER = [
 
 /** Today's calendar date in IST, 'YYYY-MM-DD' (session-timezone independent). */
 export async function istToday(t = db) {
-  const row = await t.one(`SELECT to_char(${IST_TODAY}, 'YYYY-MM-DD') AS d`);
+  const row = await t.one(`SELECT to_char(${IST_TODAY_SQL}, 'YYYY-MM-DD') AS d`);
   return row.d;
 }
 
@@ -93,7 +58,7 @@ export async function insertPr(t, header) {
   return t.one(
     `INSERT INTO tbl_purchase_requisition AS p (${cols.join(', ')})
      VALUES (${placeholders.join(', ')})
-     RETURNING ${PR_COLUMNS('p')}`,
+     RETURNING ${PR_SELECT('p')}`,
     vals
   );
 }
@@ -104,21 +69,34 @@ export async function updateHeader(t, prId, patch) {
   const sets = keys.map((k, i) => `${k} = $${i + 2}`);
   sets.push('updated_at = NOW()');
   return t.one(
-    `UPDATE tbl_purchase_requisition p SET ${sets.join(', ')} WHERE p.id = $1 RETURNING ${PR_COLUMNS('p')}`,
+    `UPDATE tbl_purchase_requisition p SET ${sets.join(', ')} WHERE p.id = $1 RETURNING ${PR_SELECT('p')}`,
     [prId, ...keys.map((k) => patch[k])]
   );
 }
 
+/** Ids of the PR's current lines. */
+export async function lineIds(prId, t = db) {
+  return t.map(`SELECT id FROM tbl_purchase_requisition_line WHERE pr_id = $1`, [prId], (r) => Number(r.id));
+}
+
+const LINE_RECORD = `line_no int, line_kind text, product_variant_id int, free_text_name text, category_id int,
+              quantity text, uom text, estimated_unit_price text, specification text, suggested_vendor_note text`;
+
 /**
- * Replace every line of a PR (DELETE + INSERT, same transaction). Lines are
- * numbered 1..n in the given order. Money/quantities travel as strings and are
- * cast to NUMERIC in SQL, never through a JS float.
- * Deleting a line cascades its clauses, line attachments and review links.
+ * Make the PR's lines exactly `lines`, in that order, PRESERVING LINE IDENTITY:
+ *   - a line carrying `id` is updated in place, so its clauses, attachments and
+ *     review links survive (the caller must have verified the id is one of this
+ *     PR's lines — see lineIds; a stray id is refused here as a programming error);
+ *   - a line without `id` is inserted;
+ *   - a current line absent from `lines` is deleted, cascading its clauses,
+ *     line attachments and review links.
+ * Lines are renumbered 1..n in the given order. Quantities and money travel as
+ * strings and are cast to NUMERIC in SQL, never through a JS float.
+ * @returns {Promise<{kept: number, added: number, removed: number}>}
  */
 export async function replaceLines(t, prId, lines) {
-  await t.none(`DELETE FROM tbl_purchase_requisition_line WHERE pr_id = $1`, [prId]);
-  if (!lines.length) return [];
   const rows = lines.map((l, i) => ({
+    id: l.id ?? null,
     line_no: i + 1,
     line_kind: l.line_kind,
     product_variant_id: l.product_variant_id ?? null,
@@ -130,28 +108,58 @@ export async function replaceLines(t, prId, lines) {
     specification: l.specification ?? null,
     suggested_vendor_note: l.suggested_vendor_note ?? null,
   }));
-  return t.any(
-    `INSERT INTO tbl_purchase_requisition_line
-       (pr_id, line_no, line_kind, product_variant_id, free_text_name, category_id,
-        quantity, uom, estimated_unit_price, specification, suggested_vendor_note)
-     SELECT $1, x.line_no, x.line_kind, x.product_variant_id, x.free_text_name, x.category_id,
-            x.quantity::numeric, x.uom, x.estimated_unit_price::numeric, x.specification, x.suggested_vendor_note
-       FROM jsonb_to_recordset($2::jsonb) AS x(
-              line_no int, line_kind text, product_variant_id int, free_text_name text, category_id int,
-              quantity text, uom text, estimated_unit_price text, specification text, suggested_vendor_note text)
-      ORDER BY x.line_no
-     RETURNING id, line_no`,
-    [prId, JSON.stringify(rows)]
-  );
+  const kept = rows.filter((r) => r.id != null);
+  const added = rows.filter((r) => r.id == null);
+
+  const removed = await t.result(
+    `DELETE FROM tbl_purchase_requisition_line WHERE pr_id = $1 AND NOT (id = ANY($2::int[]))`,
+    [prId, kept.map((r) => r.id)]);
+
+  if (kept.length) {
+    // Park the survivors on negative numbers first: UNIQUE (pr_id, line_no) is
+    // checked row by row, so a reorder (1 ↔ 2) would collide mid-statement.
+    await t.none(`UPDATE tbl_purchase_requisition_line SET line_no = -line_no WHERE pr_id = $1`, [prId]);
+    const updated = await t.result(
+      `UPDATE tbl_purchase_requisition_line l
+          SET line_no = x.line_no, line_kind = x.line_kind,
+              product_variant_id = x.product_variant_id, free_text_name = x.free_text_name,
+              category_id = x.category_id, quantity = x.quantity::numeric, uom = x.uom,
+              estimated_unit_price = x.estimated_unit_price::numeric,
+              specification = x.specification, suggested_vendor_note = x.suggested_vendor_note,
+              mapped_variant_id = CASE WHEN x.line_kind = 'catalog' THEN NULL ELSE l.mapped_variant_id END,
+              mapped_by         = CASE WHEN x.line_kind = 'catalog' THEN NULL ELSE l.mapped_by END,
+              mapped_at         = CASE WHEN x.line_kind = 'catalog' THEN NULL ELSE l.mapped_at END,
+              updated_at = NOW()
+         FROM jsonb_to_recordset($2::jsonb) AS x(id int, ${LINE_RECORD})
+        WHERE l.pr_id = $1 AND l.id = x.id`,
+      [prId, JSON.stringify(kept)]);
+    if (updated.rowCount !== kept.length) {
+      throw new Error(`replaceLines: ${kept.length - updated.rowCount} line id(s) do not belong to PR ${prId}`);
+    }
+  }
+
+  if (added.length) {
+    await t.none(
+      `INSERT INTO tbl_purchase_requisition_line
+         (pr_id, line_no, line_kind, product_variant_id, free_text_name, category_id,
+          quantity, uom, estimated_unit_price, specification, suggested_vendor_note)
+       SELECT $1, x.line_no, x.line_kind, x.product_variant_id, x.free_text_name, x.category_id,
+              x.quantity::numeric, x.uom, x.estimated_unit_price::numeric, x.specification, x.suggested_vendor_note
+         FROM jsonb_to_recordset($2::jsonb) AS x(${LINE_RECORD})
+        ORDER BY x.line_no`,
+      [prId, JSON.stringify(added)]);
+  }
+
+  return { kept: kept.length, added: added.length, removed: removed.rowCount };
 }
 
 /** Row-lock a PR for a state change. null if it does not exist. */
 export async function lockPr(t, prId) {
-  return t.oneOrNone(`SELECT ${PR_COLUMNS('p')} FROM tbl_purchase_requisition p WHERE p.id = $1 FOR UPDATE`, [prId]);
+  return t.oneOrNone(`SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = $1 FOR UPDATE`, [prId]);
 }
 
 export async function getPrRow(prId, t = db) {
-  return t.oneOrNone(`SELECT ${PR_COLUMNS('p')} FROM tbl_purchase_requisition p WHERE p.id = $1`, [prId]);
+  return t.oneOrNone(`SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = $1`, [prId]);
 }
 
 /**
@@ -166,10 +174,10 @@ export async function copyPr(t, srcId, { prNumber, raisedBy }) {
        (pr_number, title, pr_type, hospitality_company_id, hotel_id, department_id, process_id, urgency,
         required_by_date, justification, delivery_location, raised_by)
      SELECT $2, s.title, s.pr_type, s.hospitality_company_id, s.hotel_id, s.department_id, s.process_id, s.urgency,
-            GREATEST(s.required_by_date, ${IST_TODAY}), s.justification, s.delivery_location, $3
+            GREATEST(s.required_by_date, ${IST_TODAY_SQL}), s.justification, s.delivery_location, $3
        FROM tbl_purchase_requisition s
       WHERE s.id = $1
-     RETURNING ${PR_COLUMNS('p')}`,
+     RETURNING ${PR_SELECT('p')}`,
     [srcId, prNumber, raisedBy]
   );
   await t.none(
@@ -195,7 +203,7 @@ export async function copyPr(t, srcId, { prNumber, raisedBy }) {
 export async function getDetail(prId, t = db) {
   return t.task(async (c) => {
     const pr = await c.oneOrNone(
-      `SELECT ${PR_COLUMNS('p', { except: ['estimated_total'] })},
+      `SELECT ${PR_SELECT('p')},
               CASE WHEN p.status IN ('draft','returned') THEN ${estimateTotalSql('p')} ELSE p.estimated_total END
                 AS estimated_total,
               h.name AS hotel_name, d.title AS department_name,
@@ -420,6 +428,6 @@ export async function searchCategories({ q = '', limit = 50 }, t = db) {
 
 export default {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
-  istToday, nextPrNumber, insertPr, updateHeader, replaceLines, lockPr, getPrRow, copyPr, getDetail,
+  istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
   hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
 };
