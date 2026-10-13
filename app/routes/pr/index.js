@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
+import { requireCompanyAdmin } from '../../middleware/companyAdmin.js';
 import * as prController from '../../controllers/pr/prController.js';
+import * as prAdminController from '../../controllers/pr/prAdminController.js';
 
 const PrRoutes = Router();
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
@@ -24,12 +26,24 @@ PrRoutes.get( '/',                   passportSignIn, acl([2, 8]), prController.l
 PrRoutes.get( '/kpis',               passportSignIn, acl([2, 8]), prController.kpis);
 PrRoutes.get( '/duplicates',         passportSignIn, acl([2, 8]), prController.duplicates);
 
+// Routing preview of an unsaved PR (static path: before /:id).
+PrRoutes.post('/routing-preview',    passportSignIn, acl([2, 8]), prController.routingPreview);
+
+// Company admin: category → reviewing-department map. Gated by the company
+// admin capability (requireCompanyAdmin — admits legacy user_type 7 as well as
+// a buyer holding company.admin, so no acl([2, 8]) here); the administered
+// company is derived from the admin's account in the controller.
+PrRoutes.get(   '/admin/review-routing',              passportSignIn, requireCompanyAdmin, prAdminController.listReviewRouting);
+PrRoutes.post(  '/admin/review-routing',              passportSignIn, requireCompanyAdmin, prAdminController.saveReviewRouting);
+PrRoutes.delete('/admin/review-routing/:mapId(\\d+)', passportSignIn, requireCompanyAdmin, prAdminController.deleteReviewRouting);
+
 // Drafts.
 PrRoutes.post('/',                   passportSignIn, acl([2, 8]), prController.create);
 PrRoutes.get( '/:id(\\d+)',          passportSignIn, acl([2, 8]), prController.getById);
 PrRoutes.put( '/:id(\\d+)',          passportSignIn, acl([2, 8]), prController.update);
 PrRoutes.post('/:id(\\d+)/cancel',   passportSignIn, acl([2, 8]), prController.cancel);
 PrRoutes.post('/:id(\\d+)/copy',     passportSignIn, acl([2, 8]), prController.copy);
+PrRoutes.get( '/:id(\\d+)/routing-preview', passportSignIn, acl([2, 8]), prController.savedRoutingPreview);
 
 // Fallback for any /pr path no route above matched — a non-numeric id, an
 // unknown sub-path. It is a SEPARATE router mounted after PrRoutes

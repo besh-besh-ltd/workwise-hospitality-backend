@@ -689,8 +689,91 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
   return { prs, rfqs };
 }
 
+// ---------------------------------------------------------------------------
+// Review routing (spec §6.1): the routing inputs of a saved PR, and the
+// company admin's category → reviewing-department map.
+// ---------------------------------------------------------------------------
+
+/**
+ * What submit would route: the PR's ACTIVE lines (with their stored, server-
+ * derived category) and their live value Σ ROUND(qty × price, 2) as a
+ * 2-decimal string. null when the PR does not exist.
+ */
+export async function routingInputs(prId, t = db) {
+  return t.task(async (c) => {
+    const head = await c.oneOrNone(
+      `SELECT (${estimateTotalSql('p')})::text AS amount FROM tbl_purchase_requisition p WHERE p.id = $1`, [prId]);
+    if (!head) return null;
+    const lines = await c.any(
+      `SELECT l.id, l.line_no, l.category_id
+         FROM tbl_purchase_requisition_line l
+        WHERE l.pr_id = $1 AND l.status = 'active'
+        ORDER BY l.line_no`,
+      [prId]);
+    return {
+      amount: head.amount,
+      lines: lines.map((l) => ({ id: Number(l.id), line_no: Number(l.line_no), category_id: Number(l.category_id) })),
+    };
+  });
+}
+
+/** Hospitality companies the user administers: those of their own buyer company (tbl_users.company_id). */
+export async function administeredCompanyIds(buyerCompanyId, t = db) {
+  if (!buyerCompanyId) return [];
+  return t.map(
+    `SELECT id FROM tbl_hospitality_companies
+      WHERE buyer_company_id = $1 AND COALESCE(is_deleted, 0) = 0
+      ORDER BY id`,
+    [buyerCompanyId], (r) => Number(r.id));
+}
+
+const REVIEW_ROUTE_SELECT = `
+  SELECT m.id, m.hospitality_company_id, m.category_id, c.title AS category_title, pc.title AS parent_title,
+         m.department_id, d.title AS department_title, m.created_by, u.name AS created_by_name, m.created_at
+    FROM tbl_pr_review_category_map m
+    JOIN tbl_category c ON c.id = m.category_id
+    LEFT JOIN tbl_category pc ON pc.id = NULLIF(c.parent_id, 0)
+    JOIN tbl_department d ON d.id = m.department_id
+    LEFT JOIN tbl_users u ON u.id = m.created_by`;
+
+/** The routing map of these companies, by category title. */
+export async function listReviewRouting(companyIds, t = db) {
+  return t.any(`${REVIEW_ROUTE_SELECT}
+    WHERE m.hospitality_company_id = ANY($1::int[])
+    ORDER BY c.title, m.id`, [companyIds]);
+}
+
+/**
+ * Set the reviewing department of a category for one company (upsert on
+ * (company, category): an existing row keeps its id). created_by/created_at
+ * record who set the mapping as it now stands, and when.
+ * @returns {Promise<object>} the row in listReviewRouting's shape, plus `created`.
+ */
+export async function upsertReviewRouting(t, { companyId, categoryId, departmentId, userId }) {
+  const row = await t.one(
+    `INSERT INTO tbl_pr_review_category_map AS m (hospitality_company_id, category_id, department_id, created_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (hospitality_company_id, category_id)
+     DO UPDATE SET department_id = EXCLUDED.department_id, created_by = EXCLUDED.created_by, created_at = NOW()
+     RETURNING m.id, (xmax = 0) AS created`,
+    [companyId, categoryId, departmentId, userId]);
+  const out = await t.one(`${REVIEW_ROUTE_SELECT} WHERE m.id = $1`, [row.id]);
+  return { ...out, created: row.created === true };
+}
+
+/** Delete a mapping only if it belongs to one of `companyIds`. Returns the deleted id or null. */
+export async function deleteReviewRouting(t, { mapId, companyIds }) {
+  const row = await t.oneOrNone(
+    `DELETE FROM tbl_pr_review_category_map
+      WHERE id = $1 AND hospitality_company_id = ANY($2::int[])
+      RETURNING id`,
+    [mapId, companyIds]);
+  return row ? Number(row.id) : null;
+}
+
 export default {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
+  routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
 };

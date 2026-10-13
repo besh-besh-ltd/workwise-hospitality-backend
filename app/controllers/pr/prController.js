@@ -21,6 +21,8 @@ import { record } from '../../services/pr/prEvents.js';
 import { hasPerm, assertPerm, canReadPr, forbiddenMessage, isSuperAdmin } from '../../services/pr/prAccess.js';
 import { userCanReadEntity } from '../../services/authorizationService.js';
 import { describeVariants, contractCoverage } from '../../services/pr/prCatalog.js';
+import { previewRouting } from '../../services/pr/prRouting.js';
+import { formatPaise } from '../../services/approval/approvalEntityRules.js';
 import {
   PR_TYPES, URGENCIES, PR_STATUSES, HEADER_PROGRESSES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
   QTY_RE, PRICE_RE, PRICE_MAX_INT_DIGITS, TOTAL_MAX_PAISE, MAX_LEN,
@@ -54,6 +56,27 @@ function isIsoDate(s) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
+// Line money/quantity rules, shared by every endpoint that accepts lines
+// (draft create/replace, routing preview). Values stay strings end to end.
+const QTY_MESSAGE = 'Quantity must be a positive number with at most 3 decimals';
+const PRICE_MESSAGE = 'Estimated unit price must be a positive amount with at most 2 decimals (max 99,999,999,999,999.99)';
+/** A valid quantity (NUMERIC(18,3), > 0) as its canonical text, else null. */
+function parseQuantity(v) {
+  const q = decimalText(v);
+  return q != null && QTY_RE.test(q) && hasNonZeroDigit(q) ? q : null;
+}
+/** A valid estimated unit price (NUMERIC(18,2), > 0, ≤ 14 integer digits) as text, else null. */
+function parseUnitPrice(v) {
+  const p = decimalText(v);
+  return p != null && PRICE_RE.test(p) && hasNonZeroDigit(p)
+    && p.split('.')[0].replace(/^0+/, '').length <= PRICE_MAX_INT_DIGITS ? p : null;
+}
+/**
+ * Line value ROUND(qty × price, 2) in paise: qty has 3 decimals, price 2 → 5;
+ * half-up back to paise (values are positive, so this equals Postgres ROUND).
+ */
+const lineValuePaise = (quantity, price) => (toScaled(quantity, 3) * toScaled(price, 2) + 500n) / 1000n;
+
 const notFound = () => prError(PR_ERR.NOT_FOUND, 'Purchase requisition not found');
 const cellOf = (pr) => ({
   companyId: Number(pr.hospitality_company_id), hotelId: Number(pr.hotel_id), departmentId: Number(pr.department_id),
@@ -143,16 +166,13 @@ export function validateDraftBody(body, { istToday }) {
         if (!category_id) lerr('category_id', 'Choose a category for a free-text line');
       }
 
-      const quantity = decimalText(r.quantity);
-      const qtyOk = quantity != null && QTY_RE.test(quantity) && hasNonZeroDigit(quantity);
-      if (!qtyOk) lerr('quantity', 'Quantity must be a positive number with at most 3 decimals');
+      const validQty = parseQuantity(r.quantity);
+      const quantity = validQty ?? decimalText(r.quantity);
+      if (!validQty) lerr('quantity', QTY_MESSAGE);
 
-      const price = decimalText(r.estimated_unit_price);
-      const priceOk = price != null && PRICE_RE.test(price) && hasNonZeroDigit(price)
-        && price.split('.')[0].replace(/^0+/, '').length <= PRICE_MAX_INT_DIGITS;
-      if (!priceOk) {
-        lerr('estimated_unit_price', 'Estimated unit price must be a positive amount with at most 2 decimals (max 99,999,999,999,999.99)');
-      }
+      const validPrice = parseUnitPrice(r.estimated_unit_price);
+      const price = validPrice ?? decimalText(r.estimated_unit_price);
+      if (!validPrice) lerr('estimated_unit_price', PRICE_MESSAGE);
 
       const uom = text(r.uom);
       if (!uom) lerr('uom', 'Unit is required');
@@ -165,9 +185,7 @@ export function validateDraftBody(body, { istToday }) {
         lerr('suggested_vendor_note', `Must be at most ${MAX_LEN.suggested_vendor_note} characters`);
       }
 
-      // Line value = ROUND(qty × price, 2): qty has 3 decimals, price 2 → 5;
-      // half-up back to paise (values are positive, so this equals Postgres ROUND).
-      if (qtyOk && priceOk) totalPaise += (toScaled(quantity, 3) * toScaled(price, 2) + 500n) / 1000n;
+      if (validQty && validPrice) totalPaise += lineValuePaise(validQty, validPrice);
 
       lines.push({
         id, line_no, line_kind, product_variant_id, category_id,
@@ -632,6 +650,141 @@ export async function duplicates(req, res) {
     }));
     items.push(...rfqItems);
     return ok(res, { count: items.length, items });
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Routing preview (Task 5): who reviews which lines, who approves, and what
+// would block submit — computed by prRouting.previewRouting, the function
+// submit uses, so the preview and the refusal can never disagree.
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a preview body: the cell, and lines identified by product_variant_id
+ * (catalog; category derived server-side) or category_id (free text), each with
+ * quantity and estimated unit price under the draft rules. Client totals and
+ * any other field are ignored.
+ * @returns {{ hotelId, departmentId, lines: Array<{line_no, product_variant_id, category_id, quantity, price}>,
+ *             cellErrors, errors, totalPaise }}
+ */
+function validatePreviewBody(body) {
+  const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const cellErrors = [];
+  const hotelId = posInt(b.hotel_id);
+  if (!hotelId) cellErrors.push({ field: 'hotel_id', message: 'Choose a hotel' });
+  const departmentId = posInt(b.department_id);
+  if (!departmentId) cellErrors.push({ field: 'department_id', message: 'Choose a department' });
+
+  const errors = [];
+  const lines = [];
+  let totalPaise = 0n;
+  if (b.lines !== undefined && !Array.isArray(b.lines)) {
+    errors.push({ field: 'lines', message: 'lines must be a list' });
+  } else if ((b.lines || []).length > MAX_LINES) {
+    errors.push({ field: 'lines', message: `A requisition can have at most ${MAX_LINES} lines` });
+  } else {
+    (b.lines || []).forEach((raw, i) => {
+      const line_no = i + 1;
+      const r = raw && typeof raw === 'object' ? raw : {};
+      const lerr = (field, message) => errors.push({ field, message, line_no });
+      const hasVariant = r.product_variant_id !== undefined && r.product_variant_id !== null && r.product_variant_id !== '';
+      const product_variant_id = hasVariant ? posInt(r.product_variant_id) : null;
+      const category_id = hasVariant ? null : posInt(r.category_id);
+      if (hasVariant && !product_variant_id) lerr('product_variant_id', 'Invalid catalog item');
+      if (!hasVariant && !category_id) lerr('category_id', 'Pick a catalog item or choose a category');
+      const quantity = parseQuantity(r.quantity);
+      if (!quantity) lerr('quantity', QTY_MESSAGE);
+      const price = parseUnitPrice(r.estimated_unit_price);
+      if (!price) lerr('estimated_unit_price', PRICE_MESSAGE);
+      if (quantity && price) totalPaise += lineValuePaise(quantity, price);
+      lines.push({ line_no, product_variant_id, category_id, quantity, price });
+    });
+    if (totalPaise > TOTAL_MAX_PAISE) errors.push({ field: 'lines', message: 'The estimated total of this requisition is too large' });
+  }
+  return { hotelId, departmentId, lines, cellErrors, errors, totalPaise };
+}
+
+/**
+ * Server-derive each line's category: a catalog line takes its product's
+ * category (an unknown, unusable or uncategorised variant is a validation
+ * error — the preview never routes a line save would refuse); a free-text
+ * line's category must be active.
+ */
+async function previewLineCategories(t, lines) {
+  const catalog = lines.filter((l) => l.product_variant_id);
+  const freeText = lines.filter((l) => !l.product_variant_id);
+  const variants = await describeVariants(catalog.map((l) => l.product_variant_id), t);
+  const categories = await prModel.activeCategoryIds(freeText.map((l) => l.category_id), t);
+  const errors = [];
+  const out = lines.map((l) => {
+    if (l.product_variant_id) {
+      const v = variants.get(l.product_variant_id);
+      if (!v || !v.usable || v.category_id == null) {
+        errors.push({
+          field: 'product_variant_id', line_no: l.line_no,
+          message: v ? 'This catalog item can no longer be requested' : 'This catalog item does not exist',
+        });
+        return null;
+      }
+      return { line_no: l.line_no, category_id: v.category_id };
+    }
+    if (!categories.has(l.category_id)) {
+      errors.push({ field: 'category_id', line_no: l.line_no, message: 'This category does not exist or is inactive' });
+      return null;
+    }
+    return { line_no: l.line_no, category_id: l.category_id };
+  });
+  if (errors.length) throw prError(PR_ERR.VALIDATION, 'Some lines reference items or categories that cannot be requested', errors);
+  return out;
+}
+
+/**
+ * POST /v1/pr/routing-preview {hotel_id, department_id, lines} — the routing an
+ * unsaved PR would get, for the caller as requester. Needs pr.create on the
+ * cell; the amount is computed here (client totals ignored).
+ */
+export async function routingPreview(req, res) {
+  try {
+    const userId = req.user.id;
+    const v = validatePreviewBody(req.body);
+    if (v.cellErrors.length) throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', [...v.cellErrors, ...v.errors]);
+    const out = await db.task(async (t) => {
+      const hotel = await prModel.hotelCell(v.hotelId, t);
+      if (!hotel) throw prError(PR_ERR.FORBIDDEN, forbiddenMessage('pr.create'));
+      const cell = { companyId: Number(hotel.hospitality_company_id), hotelId: v.hotelId, departmentId: v.departmentId };
+      await assertPerm(userId, 'pr.create', cell, t);
+      if (v.errors.length) throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', v.errors);
+      if (!(await prModel.departmentExists(cell.departmentId, t))) {
+        throw prError(PR_ERR.VALIDATION, 'Unknown department', [{ field: 'department_id', message: 'Unknown department' }]);
+      }
+      const lines = await previewLineCategories(t, v.lines);
+      return previewRouting({ ...cell, requesterId: userId, amount: formatPaise(v.totalPaise), lines }, t);
+    });
+    return ok(res, out);
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/**
+ * GET /v1/pr/:id/routing-preview — the routing a saved PR would get if
+ * submitted now: its active lines and live total, with separation of duties
+ * evaluated against its requester (not the viewer). Anyone who may read the
+ * PR; everyone else gets 404.
+ */
+export async function savedRoutingPreview(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    const out = await db.task(async (t) => {
+      const pr = id ? await prModel.getPrRow(id, t) : null;
+      if (!pr || !(await canReadPr(req.user, pr, t))) throw notFound();
+      const inputs = await prModel.routingInputs(id, t);
+      if (!inputs) throw notFound();
+      return previewRouting({ ...cellOf(pr), requesterId: Number(pr.raised_by), ...inputs }, t);
+    });
+    return ok(res, out);
   } catch (err) {
     return sendPrError(res, err, logger);
   }

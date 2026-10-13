@@ -134,21 +134,58 @@ export const NO_REVIEWER_LABEL = 'No eligible reviewer — contact your admin';
 export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
 
 /**
- * Is there ANY user who may review PR `p`'s department `rv` (a tbl_pr_review
- * alias)? Same axis semantics as prGrantRowsSql / assertUserHasScope with the
- * review's department as the entity department: company exact, hotel and
- * department exact-or-wildcard, process wildcard-only.
+ * THE eligible-reviewer predicate (spec §6.2), written once and read in both
+ * directions — REVIEWER_EXISTS_SQL ("is anyone eligible?", lists / now_with)
+ * and REVIEWERS_SQL ("who is eligible?", the routing preview and submit's
+ * fail-closed check) — so a list can never say "No eligible reviewer" while
+ * submit finds one, or the reverse.
+ *
+ * A user (alias _rx_u) is an eligible reviewer for (company, hotel, department) when:
+ *   - they hold pr.evaluate through a scope row with the axis semantics of
+ *     prGrantRowsSql / assertUserHasScope, the reviewing department being the
+ *     entity department: company exact, hotel and department exact-or-wildcard,
+ *     process wildcard-only (PR.process_id is NULL);
+ *   - the account is active (status 1, not deleted);
+ *   - they are mapped to the company in tbl_hospitality_user_mappings at
+ *     company level or at that hotel — the rule resolveApprovers applies to
+ *     ROLE/DEPARTMENT approvers.
+ * `company`, `hotel`, `department` are SQL expressions (columns or $n).
  */
-export const REVIEWER_EXISTS_SQL = (p, rv) => `EXISTS (
-  SELECT 1
-    FROM tbl_user_role_scopes _rx_urs
+const reviewerMatchSql = (company, hotel, department) => `
+    FROM tbl_users _rx_u
+    JOIN tbl_user_role_scopes _rx_urs ON _rx_urs.user_id = _rx_u.id
     JOIN tbl_role_permissions _rx_rp ON _rx_rp.role_id = _rx_urs.role_id
     JOIN tbl_permissions _rx_perm ON _rx_perm.id = _rx_rp.permission_id
-   WHERE _rx_urs.company_id = ${p}.hospitality_company_id
-     AND (_rx_urs.hotel_id IS NULL OR _rx_urs.hotel_id = ${p}.hotel_id)
-     AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${rv}.department_id)
+   WHERE _rx_urs.company_id = ${company}
+     AND (_rx_urs.hotel_id IS NULL OR _rx_urs.hotel_id = ${hotel})
+     AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${department})
      AND _rx_urs.process_id IS NULL
-     AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = 'evaluate')`;
+     AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = 'evaluate'
+     AND _rx_u.status = 1 AND COALESCE(_rx_u.is_deleted, 0) = 0
+     AND EXISTS (
+       SELECT 1 FROM tbl_hospitality_user_mappings _rx_hum
+        WHERE _rx_hum.user_id = _rx_u.id
+          AND _rx_hum.hospitality_company_id = ${company}
+          AND (_rx_hum.hospitality_hotel_id = ${hotel}
+               OR (_rx_hum.mapping_type = 0 AND _rx_hum.hospitality_hotel_id IS NULL)))`;
+
+/**
+ * Is there ANY eligible reviewer for PR `p`'s review `rv` (a tbl_pr_review
+ * alias)? See reviewerMatchSql.
+ */
+export const REVIEWER_EXISTS_SQL = (p, rv) =>
+  `EXISTS (SELECT 1 ${reviewerMatchSql(`${p}.hospitality_company_id`, `${p}.hotel_id`, `${rv}.department_id`)})`;
+
+/**
+ * Every eligible reviewer for (company, hotel, department) — `{id, name}` rows
+ * ordered by name. Arguments are $n placeholders. See reviewerMatchSql.
+ */
+export const REVIEWERS_SQL = (companyParam, hotelParam, departmentParam) => {
+  [companyParam, hotelParam, departmentParam].forEach((p) => assertPlaceholder('REVIEWERS_SQL', p));
+  return `SELECT DISTINCT _rx_u.id, _rx_u.name
+    ${reviewerMatchSql(`${companyParam}::int`, `${hotelParam}::int`, `${departmentParam}::int`)}
+   ORDER BY _rx_u.name, _rx_u.id`;
+};
 
 /** The in_review label when departments have no evaluator. Single source for SQL and JS callers. */
 export const noReviewerLabel = (deptTitles) => `${NO_REVIEWER_LABEL} (${deptTitles.join(', ')})`;
