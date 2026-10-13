@@ -4216,14 +4216,23 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
 }
 
 /**
- * Cancel a pending approval instance
+ * Cancel a pending approval instance.
+ *
+ * Default (no 4th argument): runs in its own transaction and notifies the
+ * approvers who still held it once that commits — unchanged for every caller.
+ *
+ * `{ t }`: joins the caller's transaction instead (as a savepoint, `t.tx`), so
+ * the cancellation commits or rolls back with the caller's own writes (the PR
+ * withdraw / send-back flip the PR in the same transaction). Nothing is sent
+ * then: the result carries a `notify()` thunk the caller runs AFTER its commit
+ * (never throws, like the default path).
  */
-export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null) {
+export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null, { t: outerT = null } = {}) {
   // Approvers still holding this as a live task need to be told it is moot.
   // Without it the item sits in "pending for me" forever, and the only call
   // site that notified was closeRFQ — the ARC publish-withdrawal, the generic
   // cancel endpoint and the four sendback cascades all went silent.
-  const outcome = await db.tx(async t => {
+  const work = async t => {
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
       WHERE id = $1
@@ -4232,7 +4241,10 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
 
     if (!instance) throw new Error('Approval instance not found');
     if (instance.status !== 'PENDING') {
-      throw new Error(`Cannot cancel instance with status: ${instance.status}`);
+      throw Object.assign(new Error(`Cannot cancel instance with status: ${instance.status}`), {
+        code: 'APPROVAL_INSTANCE_NOT_PENDING',
+        instance_status: instance.status,
+      });
     }
 
     // Update instance
@@ -4278,7 +4290,18 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       __instance: instance,
       __approvers: pendingApprovers.map(a => Number(a.id)).filter(Boolean),
     };
-  });
+  };
+
+  if (outerT) {
+    const outcome = await outerT.tx(work);
+    return {
+      status: outcome.status,
+      message: outcome.message,
+      notify: () => notifyApprovalCancelled(outcome, cancelled_by, reason),
+    };
+  }
+
+  const outcome = await db.tx(work);
 
   await notifyApprovalCancelled(outcome, cancelled_by, reason);
 
@@ -4300,7 +4323,7 @@ async function notifyApprovalCancelled(outcome, cancelledBy, reason) {
     const metadata = instance.metadata || {};
     const label = entityLabel(instance.entity_type);
     const identifier =
-      metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
+      metadata.rfq_no || metadata.po_number || metadata.mr_number || metadata.pr_number || instance.entity_id;
 
     const { dispatch } = await import('../services/notificationService.js');
     await dispatch({

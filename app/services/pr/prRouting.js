@@ -275,6 +275,15 @@ export async function previewApproval({ companyId, hotelId, departmentId, amount
 // Whole preview
 // ---------------------------------------------------------------------------
 
+/** The PR_NO_REVIEWER problem for a review group nobody can review — shared with submit (prWorkflow.startReview). */
+export const noReviewerProblem = (group) => ({
+  code: 'PR_NO_REVIEWER',
+  message: `No one can technically review the ${group.department_title} lines for this hotel — `
+    + 'ask your admin to grant the PR Technical Reviewer role',
+  department_id: group.department_id,
+  department_title: group.department_title,
+});
+
 /**
  * Review groups with their reviewers, the approval chain, and every blocking
  * problem in the order submit meets them: review groups without a reviewer
@@ -292,13 +301,7 @@ export async function previewRouting({ companyId, hotelId, departmentId, request
   const reviews = [];
   for (const g of groups) {
     const reviewers = await resolveReviewers({ companyId, hotelId, departmentId: g.department_id }, t);
-    const problem = reviewers.length ? null : {
-      code: 'PR_NO_REVIEWER',
-      message: `No one can technically review the ${g.department_title} lines for this hotel — `
-        + 'ask your admin to grant the PR Technical Reviewer role',
-      department_id: g.department_id,
-      department_title: g.department_title,
-    };
+    const problem = reviewers.length ? null : noReviewerProblem(g);
     reviews.push({ ...g, reviewers, problem });
   }
   const approval = await previewApproval({ companyId, hotelId, departmentId, amount, requesterId }, t);
@@ -312,5 +315,5 @@ export async function previewRouting({ companyId, hotelId, departmentId, request
 
 export default {
   REVIEW_PARENT_LEVELS, reviewDepartmentsFor, resolveReviewDepartment, computeReviewGroups, resolveReviewers,
-  previewApproval, previewRouting,
+  previewApproval, previewRouting, noReviewerProblem,
 };

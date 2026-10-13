@@ -11,12 +11,17 @@
  * buyerPoApproval fell back) under a subject naming the RFQ number. For a PO
  * the identifier is the PO number and the link carries the PO id — the
  * instance's entity_id IS the PO id, so it backs up a missing metadata.po_id.
+ *
+ * PR instances carry no RFQ fields at all: the identifier is the PR number and
+ * the link carries the PR id (entity_id IS the PR id).
  */
 export const approvalStepEmailContext = (entityType, entityId, metadata) => {
   const isPo = entityType === 'PO';
-  const entityIdentifier = (isPo && metadata?.po_number)
+  const isPr = entityType === 'PR';
+  const entityIdentifier = (isPo && metadata?.po_number) || (isPr && metadata?.pr_number)
     || metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entityId}`;
   const extraContext = { rfq_id: metadata?.rfq_id || entityId, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' };
   if (isPo) extraContext.po_id = metadata?.po_id || entityId;
+  if (isPr) extraContext.pr_id = metadata?.pr_id || entityId;
   return { entityIdentifier, extraContext };
 };

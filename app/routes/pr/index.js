@@ -43,6 +43,12 @@ PrRoutes.get( '/:id(\\d+)',          passportSignIn, acl([2, 8]), prController.g
 PrRoutes.put( '/:id(\\d+)',          passportSignIn, acl([2, 8]), prController.update);
 PrRoutes.post('/:id(\\d+)/cancel',   passportSignIn, acl([2, 8]), prController.cancel);
 PrRoutes.post('/:id(\\d+)/copy',     passportSignIn, acl([2, 8]), prController.copy);
+
+// Workflow: submit / withdraw (requester), send back (current-step approver).
+// Approve / Reject go through the generic POST /general/hospitality/approval/action.
+PrRoutes.post('/:id(\\d+)/submit',    passportSignIn, acl([2, 8]), prController.submit);
+PrRoutes.post('/:id(\\d+)/withdraw',  passportSignIn, acl([2, 8]), prController.withdraw);
+PrRoutes.post('/:id(\\d+)/send-back', passportSignIn, acl([2, 8]), prController.sendBack);
 PrRoutes.get( '/:id(\\d+)/routing-preview', passportSignIn, acl([2, 8]), prController.savedRoutingPreview);
 
 // Fallback for any /pr path no route above matched — a non-numeric id, an

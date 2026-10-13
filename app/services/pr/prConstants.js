@@ -32,7 +32,7 @@ export const PRICE_MAX_INT_DIGITS = 14;                  // ≤ 99,999,999,999,9
 export const TOTAL_MAX_PAISE = 999999999999999999n;      // Σ must fit estimated_total NUMERIC(18,2)
 export const MAX_LEN = Object.freeze({
   title: 200, justification: 4000, delivery_location: 1000, free_text_name: 300, uom: 50,
-  specification: 20000, suggested_vendor_note: 2000, reason: 2000,
+  specification: 20000, suggested_vendor_note: 2000, reason: 2000, note: 2000,
 });
 
 const PLACEHOLDER_RE = /^\$\d+$/;
@@ -140,7 +140,9 @@ export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
  * fail-closed check) — so a list can never say "No eligible reviewer" while
  * submit finds one, or the reverse.
  *
- * A user (alias _rx_u) is an eligible reviewer for (company, hotel, department) when:
+ * holderMatchSql(action, …) is that predicate for any pr.<action>; the
+ * reviewer predicate is holderMatchSql('evaluate', …). A user (alias _rx_u) is
+ * an eligible reviewer for (company, hotel, department) when:
  *   - they hold pr.evaluate through a scope row with the axis semantics of
  *     prGrantRowsSql / assertUserHasScope, the reviewing department being the
  *     entity department: company exact, hotel and department exact-or-wildcard,
@@ -149,18 +151,20 @@ export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
  *   - they are mapped to the company in tbl_hospitality_user_mappings at
  *     company level or at that hotel — the rule resolveApprovers applies to
  *     ROLE/DEPARTMENT approvers.
- * `company`, `hotel`, `department` are SQL expressions (columns or $n).
+ * `company`, `hotel`, `department` are SQL expressions (columns or $n);
+ * `department` null = a grant on any department qualifies. `action` is a
+ * developer constant (never user input).
  */
-const reviewerMatchSql = (company, hotel, department) => `
+const holderMatchSql = (action, company, hotel, department) => `
     FROM tbl_users _rx_u
     JOIN tbl_user_role_scopes _rx_urs ON _rx_urs.user_id = _rx_u.id
     JOIN tbl_role_permissions _rx_rp ON _rx_rp.role_id = _rx_urs.role_id
     JOIN tbl_permissions _rx_perm ON _rx_perm.id = _rx_rp.permission_id
    WHERE _rx_urs.company_id = ${company}
      AND (_rx_urs.hotel_id IS NULL OR _rx_urs.hotel_id = ${hotel})
-     AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${department})
+     ${department === null ? '' : `AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${department})`}
      AND _rx_urs.process_id IS NULL
-     AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = 'evaluate'
+     AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = '${action}'
      AND _rx_u.status = 1 AND COALESCE(_rx_u.is_deleted, 0) = 0
      AND EXISTS (
        SELECT 1 FROM tbl_hospitality_user_mappings _rx_hum
@@ -168,6 +172,7 @@ const reviewerMatchSql = (company, hotel, department) => `
           AND _rx_hum.hospitality_company_id = ${company}
           AND (_rx_hum.hospitality_hotel_id = ${hotel}
                OR (_rx_hum.mapping_type = 0 AND _rx_hum.hospitality_hotel_id IS NULL)))`;
+const reviewerMatchSql = (company, hotel, department) => holderMatchSql('evaluate', company, hotel, department);
 
 /**
  * Is there ANY eligible reviewer for PR `p`'s review `rv` (a tbl_pr_review
@@ -184,6 +189,20 @@ export const REVIEWERS_SQL = (companyParam, hotelParam, departmentParam) => {
   [companyParam, hotelParam, departmentParam].forEach((p) => assertPlaceholder('REVIEWERS_SQL', p));
   return `SELECT DISTINCT _rx_u.id, _rx_u.name
     ${reviewerMatchSql(`${companyParam}::int`, `${hotelParam}::int`, `${departmentParam}::int`)}
+   ORDER BY _rx_u.name, _rx_u.id`;
+};
+
+/**
+ * The hotel's buyers — every active user holding pr.convert for (company,
+ * hotel) on ANY department (the pool is per hotel), mapped to the company at
+ * company level or at that hotel. Same axis and account rules as the reviewer
+ * predicate above. `{id, name, email}` rows ordered by name. Arguments are $n
+ * placeholders.
+ */
+export const HOTEL_BUYERS_SQL = (companyParam, hotelParam) => {
+  [companyParam, hotelParam].forEach((p) => assertPlaceholder('HOTEL_BUYERS_SQL', p));
+  return `SELECT DISTINCT _rx_u.id, _rx_u.name, _rx_u.email
+    ${holderMatchSql('convert', `${companyParam}::int`, `${hotelParam}::int`, null)}
    ORDER BY _rx_u.name, _rx_u.id`;
 };
 

@@ -160,6 +160,137 @@ export async function lockPr(t, prId) {
   return t.oneOrNone(`SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = $1 FOR UPDATE`, [prId]);
 }
 
+// ---------------------------------------------------------------------------
+// Workflow writes (submit / review start / approval outcome) — prWorkflow.js
+// owns the transitions; these are its statements. Every caller holds the PR
+// row lock (lockPr) in the same transaction.
+// ---------------------------------------------------------------------------
+
+/** The PR's ACTIVE lines as submit re-validates and routes them, in line order. */
+export async function activeLines(prId, t = db) {
+  const rows = await t.any(
+    `SELECT id, line_no, line_kind, product_variant_id, category_id
+       FROM tbl_purchase_requisition_line
+      WHERE pr_id = $1 AND status = 'active'
+      ORDER BY line_no`,
+    [prId]);
+  return rows.map((r) => ({
+    id: Number(r.id),
+    line_no: Number(r.line_no),
+    line_kind: r.line_kind,
+    product_variant_id: r.product_variant_id == null ? null : Number(r.product_variant_id),
+    category_id: Number(r.category_id),
+  }));
+}
+
+/** Re-file lines under a new category: `changes` = [{id, category_id}] of this PR's lines. */
+export async function setLineCategories(t, prId, changes) {
+  if (!changes.length) return;
+  await t.none(
+    `UPDATE tbl_purchase_requisition_line l
+        SET category_id = x.category_id, updated_at = NOW()
+       FROM jsonb_to_recordset($2::jsonb) AS x(id int, category_id int)
+      WHERE l.pr_id = $1 AND l.id = x.id`,
+    [prId, JSON.stringify(changes)]);
+}
+
+/**
+ * Open a new revision: revision + 1, estimated_total = the server Σ over active
+ * lines (estimateTotalSql — never a client value), submitted_at = now, and the
+ * previous send-back note cleared.
+ */
+export async function markSubmitted(t, prId) {
+  return t.one(
+    `UPDATE tbl_purchase_requisition p
+        SET revision = p.revision + 1,
+            estimated_total = ${estimateTotalSql('p')},
+            submitted_at = NOW(),
+            returned_note = NULL,
+            updated_at = NOW()
+      WHERE p.id = $1
+     RETURNING ${PR_SELECT('p')}`,
+    [prId]);
+}
+
+/** pending_approval → approved, stamped now. */
+export async function markApproved(t, prId) {
+  return t.one(
+    `UPDATE tbl_purchase_requisition p
+        SET status = 'approved', approved_at = NOW(), updated_at = NOW()
+      WHERE p.id = $1
+     RETURNING ${PR_SELECT('p')}`,
+    [prId]);
+}
+
+/** One pending review of `revision` for a reviewing department, with its lines. Returns the review id. */
+export async function insertReview(t, { prId, revision, departmentId, lineIds }) {
+  const row = await t.one(
+    `INSERT INTO tbl_pr_review (pr_id, revision, department_id, status)
+     VALUES ($1, $2, $3, 'pending') RETURNING id`,
+    [prId, revision, departmentId]);
+  await t.none(
+    `INSERT INTO tbl_pr_review_line (review_id, pr_line_id)
+     SELECT $1, x FROM unnest($2::int[]) AS x`,
+    [row.id, lineIds]);
+  return Number(row.id);
+}
+
+/** Every still-pending review of `revision` → superseded. Returns their ids, ascending. */
+export async function supersedePendingReviews(t, prId, revision) {
+  const ids = await t.map(
+    `UPDATE tbl_pr_review SET status = 'superseded'
+      WHERE pr_id = $1 AND revision = $2 AND status = 'pending'
+     RETURNING id`,
+    [prId, revision], (r) => Number(r.id));
+  return ids.sort((a, b) => a - b);
+}
+
+/** Each step of an approval instance with its (non-removed) approver ids, in step order. */
+export async function instanceStepSummary(t, instanceId) {
+  const rows = await t.any(
+    `SELECT st.step_order, st.source_policy_step_order AS policy_step_order,
+            COALESCE(array_agg(asa.approver_user_id ORDER BY asa.approver_user_id)
+                     FILTER (WHERE asa.id IS NOT NULL AND asa.removed_at IS NULL), '{}') AS approver_ids
+       FROM tbl_approval_instance_steps st
+       LEFT JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = st.id
+      WHERE st.approval_instance_id = $1
+      GROUP BY st.id, st.step_order, st.source_policy_step_order
+      ORDER BY st.step_order`,
+    [instanceId]);
+  return rows.map((r) => ({
+    step_order: Number(r.step_order),
+    policy_step_order: r.policy_step_order == null ? null : Number(r.policy_step_order),
+    approver_ids: (r.approver_ids || []).map(Number),
+  }));
+}
+
+/**
+ * Where the PR's approval instance stands, from `userId`'s side: the instance
+ * status, its current step, and whether the user is a PENDING, non-removed
+ * approver on that step. null when the instance is not this PR's.
+ * Pass `lock` (inside a tx) to row-lock the instance first, so the answer
+ * holds until commit (submitApprovalAction locks the same row).
+ */
+export async function approvalPosition(t, { prId, instanceId, userId, lock = false }) {
+  if (lock) {
+    const locked = await t.oneOrNone(
+      `SELECT id FROM tbl_approval_instances WHERE id = $1 AND entity_type = 'PR' AND entity_id = $2 FOR UPDATE`,
+      [instanceId, prId]);
+    if (!locked) return null;
+  }
+  return t.oneOrNone(
+    `SELECT ai.id AS instance_id, ai.status AS instance_status, ai.current_step,
+            st.id AS step_id, st.status AS step_status,
+            EXISTS (SELECT 1 FROM tbl_approval_step_approvers asa
+                     WHERE asa.approval_instance_step_id = st.id AND asa.approver_user_id = $3
+                       AND asa.status = 'PENDING' AND asa.removed_at IS NULL) AS is_pending_approver
+       FROM tbl_approval_instances ai
+       LEFT JOIN tbl_approval_instance_steps st
+              ON st.approval_instance_id = ai.id AND st.step_order = ai.current_step
+      WHERE ai.id = $1 AND ai.entity_type = 'PR' AND ai.entity_id = $2`,
+    [instanceId, prId, userId]);
+}
+
 export async function getPrRow(prId, t = db) {
   return t.oneOrNone(`SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = $1`, [prId]);
 }
@@ -198,6 +329,8 @@ export async function copyPr(t, srcId, { prNumber, raisedBy }) {
 /**
  * Everything the detail page renders.
  * @returns {Promise<{pr, lines, attachments, reviews, events, comments}|null>}
+ *   pr.now_with is the list's "who holds it" label (NOW_WITH_SQL), including
+ *   the "No eligible reviewer / approver — contact your admin" states;
  *   lines[] carry clauses[], attachments[], progress and links[] (RFQ + POs);
  *   top-level attachments[] are the PR-level ones (no line).
  *   pr.estimated_total is the live Σ for draft/returned, else the value stored at submit.
@@ -209,7 +342,8 @@ export async function getDetail(prId, t = db) {
               CASE WHEN p.status IN ('draft','returned') THEN ${estimateTotalSql('p')} ELSE p.estimated_total END
                 AS estimated_total,
               h.name AS hotel_name, d.title AS department_name,
-              ru.name AS raised_by_name, bu.name AS assigned_buyer_name
+              ru.name AS raised_by_name, bu.name AS assigned_buyer_name,
+              ${NOW_WITH_SQL('p')} AS now_with
          FROM tbl_purchase_requisition p
          LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
          LEFT JOIN tbl_department d ON d.id = p.department_id
@@ -774,6 +908,8 @@ export async function deleteReviewRouting(t, { mapId, companyIds }) {
 export default {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
+  activeLines, setLineCategories, markSubmitted, markApproved, insertReview, supersedePendingReviews,
+  instanceStepSummary, approvalPosition,
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
 };

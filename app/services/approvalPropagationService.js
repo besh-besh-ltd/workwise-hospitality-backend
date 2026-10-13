@@ -532,6 +532,9 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
       ARC_COMMITTEE:     { APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval) },
       ARC_AMENDMENT:     { APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval) },
       MR:                { APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval) },
+      // Idempotent and fail-closed: it acts only on an APPROVED instance that is
+      // still its PR's current one, with the PR still pending_approval.
+      PR:                { APPROVED: () => import('../controllers/pr/prController.js').then(m => m.handlePrPostApproval) },
       NEGOTIATION:       { APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval) },
       NEGOTIATION_QUOTE: { APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval) },
     };

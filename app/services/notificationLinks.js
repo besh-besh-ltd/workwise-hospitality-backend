@@ -198,6 +198,12 @@ export const buyerMrDetail = (mrId) =>
 export const buyerMrList = ({ tab } = {}) =>
   withQuery('/dashboard/buyer/material-requisitions/all', { tab });
 
+// ─── Purchase requisitions ───────────────────────────────────────────────────
+
+/** The PR detail page — every PR notification and the PR approval step land here. */
+export const buyerPrDetail = (prId) =>
+  isPositiveId(prId) ? `/dashboard/buyer/purchase-requisitions/${enc(prId)}` : null;
+
 // ─── Negotiation (RFQ) ───────────────────────────────────────────────────────
 
 export const buyerNegotiationRound = (rfqId) =>
@@ -247,6 +253,7 @@ export const ENTITY_LABELS = Object.freeze({
   NEGOTIATION_QUOTE: 'Vendor Finalization',
   PO:                'Purchase Order',
   MR:                'Material Requisition',
+  PR:                'Purchase Requisition',
   ARC:               'Rate Contract',
   ARC_PUBLISH:       'Rate Contract Publication',
   ARC_TECH:          'Rate Contract Technical Evaluation',
@@ -311,6 +318,11 @@ export const approvalActionUrl = (entityType, entityId, ctx = {}, opts = {}) => 
 
     case 'MR':
       return buyerMrDetail(ctx?.mr_id || entityId) || buyerMrList({ tab: 'for_me' });
+
+    case 'PR':
+      // The instance's entity_id IS the PR id; approve / reject / send back all
+      // live on the PR detail page.
+      return buyerPrDetail(ctx?.pr_id || entityId);
 
     // ── ARC family ──────────────────────────────────────────────────────────
     // Every one of these previously fell through to a bare `/dashboard`.
@@ -383,6 +395,7 @@ export default {
   arcVendorAmendments,
   buyerMrDetail,
   buyerMrList,
+  buyerPrDetail,
   buyerNegotiationRound,
   buyerNegotiationApprove,
   queryThread,

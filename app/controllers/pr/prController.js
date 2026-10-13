@@ -20,8 +20,10 @@ import { PR_ERR, prError, sendPrError } from '../../services/pr/prErrors.js';
 import { record } from '../../services/pr/prEvents.js';
 import { hasPerm, assertPerm, canReadPr, forbiddenMessage, isSuperAdmin } from '../../services/pr/prAccess.js';
 import { userCanReadEntity } from '../../services/authorizationService.js';
-import { describeVariants, contractCoverage } from '../../services/pr/prCatalog.js';
+import { describeVariants, contractCoverage, guardCatalogLines } from '../../services/pr/prCatalog.js';
 import { previewRouting } from '../../services/pr/prRouting.js';
+import * as prWorkflow from '../../services/pr/prWorkflow.js';
+import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { formatPaise } from '../../services/approval/approvalEntityRules.js';
 import {
   PR_TYPES, URGENCIES, PR_STATUSES, HEADER_PROGRESSES, EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LINES,
@@ -204,51 +206,6 @@ export function validateDraftBody(body, { istToday }) {
 }
 
 /**
- * Catalog guards for validated lines, in severity order (each code lists every
- * offending line): unknown variant/category → PR_VALIDATION; variant the RFQ
- * wizard would refuse → PR_VARIANT_NOT_USABLE; variant on a live rate contract
- * for the cell → PR_LINE_ON_CONTRACT. Returns the lines with each catalog
- * line's category_id derived from its product.
- */
-async function resolveCatalogLines(t, cell, lines) {
-  const catalog = lines.filter((l) => l.line_kind === 'catalog');
-  const freeText = lines.filter((l) => l.line_kind === 'free_text');
-  const variants = await describeVariants(catalog.map((l) => l.product_variant_id), t);
-  const categories = await prModel.activeCategoryIds(freeText.map((l) => l.category_id), t);
-
-  const unknown = [
-    ...catalog.filter((l) => !variants.has(l.product_variant_id))
-      .map((l) => ({ field: 'product_variant_id', line_no: l.line_no, message: 'This catalog item does not exist' })),
-    ...freeText.filter((l) => !categories.has(l.category_id))
-      .map((l) => ({ field: 'category_id', line_no: l.line_no, message: 'This category does not exist or is inactive' })),
-  ].sort((a, b) => a.line_no - b.line_no);
-  if (unknown.length) throw prError(PR_ERR.VALIDATION, 'Some lines reference items or categories that do not exist', unknown);
-
-  const unusable = catalog
-    .filter((l) => !variants.get(l.product_variant_id).usable || variants.get(l.product_variant_id).category_id == null)
-    .map((l) => {
-      const v = variants.get(l.product_variant_id);
-      return { line_no: l.line_no, product_variant_id: l.product_variant_id, variant_name: v.name, reason: v.usable ? 'no_category' : 'not_usable' };
-    });
-  if (unusable.length) throw prError(PR_ERR.VARIANT_NOT_USABLE, 'Some catalog items can no longer be requested', unusable);
-
-  const coverage = await contractCoverage({
-    hotelId: cell.hotelId, departmentId: cell.departmentId, variantIds: catalog.map((l) => l.product_variant_id),
-  }, t);
-  const onContract = catalog.filter((l) => coverage.has(l.product_variant_id)).map((l) => ({
-    line_no: l.line_no,
-    product_variant_id: l.product_variant_id,
-    variant_name: variants.get(l.product_variant_id).name,
-    ...coverage.get(l.product_variant_id),
-  }));
-  if (onContract.length) {
-    throw prError(PR_ERR.LINE_ON_CONTRACT, 'These items are on a rate contract for this hotel and department — raise an MR instead', onContract);
-  }
-
-  return lines.map((l) => (l.line_kind === 'catalog' ? { ...l, category_id: variants.get(l.product_variant_id).category_id } : l));
-}
-
-/**
  * Shared by create and update: validate, authorize the chosen cell with
  * pr.create, then run the catalog guards. Authorization precedes field errors
  * so a caller without access learns nothing about the payload's validity.
@@ -274,7 +231,7 @@ async function prepareDraft(t, userId, body, { existingLineIds = new Set() } = {
   if (!(await prModel.departmentExists(cell.departmentId, t))) {
     throw prError(PR_ERR.VALIDATION, 'Unknown department', [{ field: 'department_id', message: 'Unknown department' }]);
   }
-  const lines = await resolveCatalogLines(t, cell, v.lines);
+  const lines = await guardCatalogLines(t, cell, v.lines);
   return { cell, header: v.header, lines };
 }
 
@@ -301,18 +258,68 @@ function headerDiff(before, after) {
   return changed;
 }
 
-/** Booleans the FE renders actions from. Later tasks add review/approve/convert keys. */
+/**
+ * The caller's side of the PR's live approval: null unless the PR is
+ * pending_approval on an instance; otherwise the instance, its current step and
+ * whether the caller may decide it — a PENDING, non-removed approver of the
+ * current step who is not the requester (the engine and send-back apply the
+ * same rule).
+ */
+async function approvalCapability(user, pr) {
+  if (pr.status !== 'pending_approval' || !pr.approval_instance_id) return null;
+  const pos = await prModel.approvalPosition(db, {
+    prId: Number(pr.id), instanceId: Number(pr.approval_instance_id), userId: user.id,
+  });
+  if (!pos) return null;
+  const mayDecide = !isRequester(user, pr) && pos.instance_status === 'PENDING'
+    && pos.step_status === 'PENDING' && pos.is_pending_approver === true;
+  return {
+    instance_id: Number(pos.instance_id),
+    current_step_id: pos.step_id == null ? null : Number(pos.step_id),
+    can_approve: mayDecide,
+    can_send_back: mayDecide,
+  };
+}
+
+/** Booleans the FE renders actions from. Later tasks add review/convert keys. */
 async function capabilitiesFor(user, pr) {
   const requester = isRequester(user, pr);
   const mayCreate = requester && (await hasPerm(user.id, 'pr.create', cellOf(pr)));
   const editable = EDITABLE_STATUSES.includes(pr.status);
   return {
     can_edit: mayCreate && editable,
+    // Same gate as submit: the requester, pr.create on the PR's cell, draft/returned.
     can_submit: mayCreate && editable,
     can_withdraw: requester && WITHDRAWABLE_STATUSES.includes(pr.status),
     can_cancel: requester && editable,
     can_copy: mayCreate,
+    approval: await approvalCapability(user, pr),
   };
+}
+
+/**
+ * The engine's view of the PR's current (or last) approval instance — steps,
+ * approvers, action history, skipped-step diagnostics and can_user_approve —
+ * the shape the MR detail renders its chain from. null when there is none.
+ */
+async function approvalDetail(user, pr) {
+  if (!pr.approval_instance_id) return null;
+  try {
+    const a = await getApprovalInstanceDetails(Number(pr.approval_instance_id), user.id);
+    return a && a.entity_type === 'PR' && Number(a.entity_id) === Number(pr.id) ? a : null;
+  } catch (err) {
+    logger.warn({ err, prId: pr.id }, '[PR] approval detail unavailable');
+    return null;
+  }
+}
+
+/** GET /pr/:id's payload: the detail, the caller's capabilities and the approval chain (else 404). */
+async function detailPayload(user, id) {
+  const pr = await prModel.getPrRow(id);
+  if (!pr || !(await canReadPr(user, pr))) throw notFound();
+  const detail = await prModel.getDetail(id);
+  if (!detail) throw notFound();
+  return { ...detail, capabilities: await capabilitiesFor(user, pr), approval: await approvalDetail(user, pr) };
 }
 
 // ---------------------------------------------------------------------------
@@ -381,19 +388,67 @@ export async function update(req, res) {
   }
 }
 
-/** GET /v1/pr/:id — detail + capabilities, for anyone who may read the PR (else 404). */
+/** GET /v1/pr/:id — detail + capabilities + approval chain, for anyone who may read the PR (else 404). */
 export async function getById(req, res) {
   try {
     const id = posInt(req.params.id);
-    const pr = id ? await prModel.getPrRow(id) : null;
-    if (!pr || !(await canReadPr(req.user, pr))) throw notFound();
-    const detail = await prModel.getDetail(id);
-    if (!detail) throw notFound();
-    return ok(res, { ...detail, capabilities: await capabilitiesFor(req.user, pr) });
+    if (!id) throw notFound();
+    return ok(res, await detailPayload(req.user, id));
   } catch (err) {
     return sendPrError(res, err, logger);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Submit, withdraw, approver send-back (Task 6). The transitions live in
+// services/pr/prWorkflow.js; each answers with the fresh detail after commit.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /v1/pr/:id/submit — draft/returned → in_review | pending_approval.
+ * Requester only, with pr.create on the PR's cell. Any body is ignored (the
+ * total is recomputed server-side).
+ */
+export async function submit(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.submit(id, req.user);
+    const message = out.status === 'in_review' ? 'Submitted for technical review' : 'Submitted for approval';
+    return ok(res, await detailPayload(req.user, id), message);
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/withdraw — in_review | pending_approval → draft. Requester only. */
+export async function withdraw(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    await prWorkflow.withdraw(id, req.user);
+    return ok(res, await detailPayload(req.user, id), 'Purchase requisition withdrawn');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/send-back {note} — pending_approval → returned. A pending approver of the current step. */
+export async function sendBack(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    await prWorkflow.approverSendBack(id, req.user, req.body?.note);
+    return ok(res, await detailPayload(req.user, id), 'Sent back to the requester');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+// The approval engine's terminal-outcome hooks for entity_type 'PR'. The
+// registries (approvalActionService, approvalPropagationService) lazy-load them
+// from this controller, as they do for every other entity type.
+export const { handlePrPostApproval, handlePrRejection } = prWorkflow;
 
 /** POST /v1/pr/:id/cancel {reason} — draft/returned → cancelled (terminal). Requester only. */
 export async function cancel(req, res) {

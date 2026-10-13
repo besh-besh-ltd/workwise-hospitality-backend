@@ -11,12 +11,17 @@
 //       the very predicate behind the MR item picker — so "blocked on PR" and
 //       "offered by MR" can never disagree.
 //
-// Used at save (create/update), and again at submit / map / convert by later
+//   guardCatalogLines
+//       All of the above for a PR's lines, as one refusal per severity.
+//
+// Used at save (create/update), at submit, and again at map / convert by later
 // tasks: the catalog can change between draft and use.
 
 import db from '../../config/dbConn.js';
 import { contractedVariantPredicateSql } from '../../models/mr/mrModel.js';
+import { activeCategoryIds } from '../../models/pr/prModel.js';
 import { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL } from './prConstants.js';
+import { PR_ERR, prError } from './prErrors.js';
 
 export { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL };
 
@@ -87,4 +92,56 @@ export async function contractCoverage({ hotelId, departmentId, variantIds }, t 
   return out;
 }
 
-export default { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, describeVariants, isUsableVariant, variantCategoryId, contractCoverage };
+/**
+ * Catalog guards for a PR's lines, in severity order (each code lists every
+ * offending line): unknown variant/category → PR_VALIDATION; variant the RFQ
+ * wizard would refuse → PR_VARIANT_NOT_USABLE; variant on a live rate contract
+ * for the cell → PR_LINE_ON_CONTRACT. Run at save (create/update) and again at
+ * submit — the catalog can change in between.
+ *
+ * @param {object} t
+ * @param {{hotelId: number, departmentId: number}} cell
+ * @param {Array<{line_no, line_kind, product_variant_id, category_id}>} lines
+ * @returns the lines, each catalog line's category_id = its product's category now.
+ */
+export async function guardCatalogLines(t, cell, lines) {
+  const catalog = lines.filter((l) => l.line_kind === 'catalog');
+  const freeText = lines.filter((l) => l.line_kind === 'free_text');
+  const variants = await describeVariants(catalog.map((l) => l.product_variant_id), t);
+  const categories = await activeCategoryIds(freeText.map((l) => l.category_id), t);
+
+  const unknown = [
+    ...catalog.filter((l) => !variants.has(l.product_variant_id))
+      .map((l) => ({ field: 'product_variant_id', line_no: l.line_no, message: 'This catalog item does not exist' })),
+    ...freeText.filter((l) => !categories.has(l.category_id))
+      .map((l) => ({ field: 'category_id', line_no: l.line_no, message: 'This category does not exist or is inactive' })),
+  ].sort((a, b) => a.line_no - b.line_no);
+  if (unknown.length) throw prError(PR_ERR.VALIDATION, 'Some lines reference items or categories that do not exist', unknown);
+
+  const unusable = catalog
+    .filter((l) => !variants.get(l.product_variant_id).usable || variants.get(l.product_variant_id).category_id == null)
+    .map((l) => {
+      const v = variants.get(l.product_variant_id);
+      return { line_no: l.line_no, product_variant_id: l.product_variant_id, variant_name: v.name, reason: v.usable ? 'no_category' : 'not_usable' };
+    });
+  if (unusable.length) throw prError(PR_ERR.VARIANT_NOT_USABLE, 'Some catalog items can no longer be requested', unusable);
+
+  const coverage = await contractCoverage({
+    hotelId: cell.hotelId, departmentId: cell.departmentId, variantIds: catalog.map((l) => l.product_variant_id),
+  }, t);
+  const onContract = catalog.filter((l) => coverage.has(l.product_variant_id)).map((l) => ({
+    line_no: l.line_no,
+    product_variant_id: l.product_variant_id,
+    variant_name: variants.get(l.product_variant_id).name,
+    ...coverage.get(l.product_variant_id),
+  }));
+  if (onContract.length) {
+    throw prError(PR_ERR.LINE_ON_CONTRACT, 'These items are on a rate contract for this hotel and department — raise an MR instead', onContract);
+  }
+
+  return lines.map((l) => (l.line_kind === 'catalog' ? { ...l, category_id: variants.get(l.product_variant_id).category_id } : l));
+}
+
+export default {
+  USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, describeVariants, isUsableVariant, variantCategoryId, contractCoverage, guardCatalogLines,
+};
