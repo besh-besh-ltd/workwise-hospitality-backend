@@ -160,6 +160,7 @@ import {
   toMoneyString,
   sodResolveOptions,
   MAX_MONEY_PAISE,
+  isPinnedToSubmission,
 } from '../services/approval/approvalEntityRules.js';
 
 const generalModel = {
@@ -2829,6 +2830,7 @@ export async function createApprovalInstance({
   // instance records exactly the value they were compared against.
   const amountText = normaliseApprovalAmount(amount);
   const sod = excludesInitiator(entity_type);
+  const pinned = isPinnedToSubmission(entity_type);
 
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
@@ -3115,11 +3117,26 @@ export async function createApprovalInstance({
     for (const resolvedStep of resolvedSteps) {
       const { policyStep, approverUserIds, stepOrder, isInitiatorInStep } = resolvedStep;
 
-      const instanceStep = await t.one(`
-        INSERT INTO tbl_approval_instance_steps
-        (approval_instance_id, step_order, decision_rule, status, policy_step_id)
-        VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
-      `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
+      // PINNED entity types (PR) also record WHERE the step came from. A policy
+      // save deletes and re-inserts every policy step (the FK nulls
+      // policy_step_id), and these instances are never re-pointed (they skip
+      // propagation), so this snapshot is what membership revalidation resolves
+      // them against — never the live policy, never by position. Every other
+      // entity type writes exactly the row it always did.
+      const instanceStep = pinned
+        ? await t.one(`
+            INSERT INTO tbl_approval_instance_steps
+            (approval_instance_id, step_order, decision_rule, status, policy_step_id,
+             source_approver_type, source_approver_id, source_policy_step_order, source_min_amount)
+            VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8) RETURNING *
+          `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id,
+              policyStep.approver_source_type, policyStep.approver_source_id,
+              policyStep.step_order, policyStep.min_amount ?? null])
+        : await t.one(`
+            INSERT INTO tbl_approval_instance_steps
+            (approval_instance_id, step_order, decision_rule, status, policy_step_id)
+            VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
+          `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
 
       // Insert approvers for this step. Under separation of duties the
       // initiator was filtered out above; `!sod` keeps this auto-approval
@@ -3904,6 +3921,35 @@ export async function submitApprovalAction({
     // If step_id was provided, validate it matches the current step
     if (approval_instance_step_id && approval_instance_step_id !== currentStep.id) {
       throw new Error('Provided step is not the current pending step');
+    }
+
+    // 2b. Separation of duties (PR), defence in depth: an APPROVE only counts
+    // while the step's source ROLE can still approve this entity type. The
+    // reconcilers already block such a step and refuse to refill it; this
+    // refuses an approver row that reached it any other way. Source = the
+    // creation snapshot (pinned types), else the still-linked policy step.
+    if (normalizedAction === 'APPROVE' && excludesInitiator(instance.entity_type)) {
+      let sourceType = currentStep.source_approver_type || null;
+      let sourceId = currentStep.source_approver_id || null;
+      if (!sourceType && currentStep.policy_step_id) {
+        const linked = await t.oneOrNone(
+          'SELECT approver_source_type, approver_source_id FROM tbl_approval_policy_steps WHERE id = $1',
+          [currentStep.policy_step_id]
+        );
+        sourceType = linked?.approver_source_type || null;
+        sourceId = linked?.approver_source_id || null;
+      }
+      if (sourceType === 'ROLE') {
+        const resource = ENTITY_APPROVE_RESOURCE_MAP[instance.entity_type] || String(instance.entity_type).toLowerCase();
+        if (!(await roleHasReadAndApprovePermission(sourceId, resource, t))) {
+          const err = new Error(
+            `This approval level's role no longer holds ${resource}.read and ${resource}.approve, so it cannot be approved until that is restored`
+          );
+          err.code = 'APPROVAL_SOURCE_INELIGIBLE';
+          err.httpStatus = 403;
+          throw err;
+        }
+      }
     }
 
     const stepId = approval_instance_step_id || currentStep.id;

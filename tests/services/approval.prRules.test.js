@@ -791,6 +791,127 @@ describe("PR approval — mid-flight changes", () => {
     }
   });
 
+  it("pinned.snapshot: after a policy re-save, revalidation resolves PR steps from the creation snapshot, never by position", async () => {
+    // Reviewer probe (fix round 2, #1): policy [USER A1, ROLE "PR Approver" ≥₹50k,
+    // ROLE fixture], ₹10k PR → instance [A1, holders of the fixture role].
+    await makeApprovable([A1, A3]); // fixture role held by A1 and A3
+    const policyId = await seedPolicy([
+      { type: "USER", id: A1 },
+      { type: "ROLE", id: PR_APPROVER_ROLE, min: "50000.00" },
+      { type: "ROLE", id: PR_FIXTURE_ROLE },
+    ]);
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "10000.00" });
+    let s = await stateOf(entityId);
+    expect(s.steps.map((st) => [st.step_order, st.policy_step_order])).toEqual([[1, 1], [2, 3]]);
+    expect(activeApproversOf(s, 2)).toEqual([A1, A3].sort((a, b) => a - b));
+
+    // Re-save the policy with IDENTICAL steps: delete + re-insert nulls every
+    // instance step's policy_step_id (and propagation leaves pinned PRs alone).
+    const admin = await httpClient(ADMIN);
+    const resave = await admin.post(POLICIES_URL).send({
+      id: policyId, entity_type: "PR", hotel_id: HOTEL, is_active: true,
+      steps: [
+        { step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1 },
+        { step_order: 2, decision_rule: "ANY", approver_source_type: "ROLE", approver_source_id: PR_APPROVER_ROLE, min_amount: "50000.00" },
+        { step_order: 3, decision_rule: "ANY", approver_source_type: "ROLE", approver_source_id: PR_FIXTURE_ROLE },
+      ],
+    });
+    expect(resave.status).toBe(200);
+    s = await stateOf(entityId);
+    expect(s.steps.map((st) => st.policy_step_order)).toEqual([null, null]); // links gone
+
+    // A2 is granted "PR Approver" — the ₹50k-only role. Position 2 of the
+    // policy is that role, but instance step 2 is the fixture-role step.
+    track.scopeIds.push(
+      await grantRoleScope(db, { userId: A2, roleId: PR_APPROVER_ROLE, companyId: HC, hotelId: HOTEL, departmentId: DEPT })
+    );
+    await revalidate({
+      userId: A2,
+      changeType: "scope_added",
+      changedScopes: [fixtureScope({ role_id: PR_APPROVER_ROLE })],
+      changedRoleIds: [PR_APPROVER_ROLE],
+    });
+    s = await stateOf(entityId);
+    expect(everOnInstance(s, A2)).toBe(false);
+
+    // The other direction: A3 loses the fixture role. Simulation and the
+    // reconciler must both find step 2 by its snapshot and remove A3 there.
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2`, [A3, PR_FIXTURE_ROLE]);
+    const sim = await simulateApproverImpact(A3, "scope_removed", { companyId: HC, changedScopes: [fixtureScope()] });
+    expect(sim.affectedInstances.filter((r) => Number(r.instance_id) === Number(s.inst.id)).map((r) => r.step_order)).toEqual([2]);
+    await revalidate({ userId: A3, changeType: "scope_removed", changedScopes: [fixtureScope()] });
+    s = await stateOf(entityId);
+    expect(approverRow(s, 2, A3).status).toBe("REMOVED");
+    expect(activeApproversOf(s, 2)).toEqual([A1]);
+    expect(s.inst.status).toBe("PENDING");
+
+    // The snapshot itself, written at creation.
+    const snap = await db.any(
+      `SELECT step_order, source_approver_type, source_approver_id, source_policy_step_order, source_min_amount
+         FROM tbl_approval_instance_steps WHERE approval_instance_id = $1 ORDER BY step_order`,
+      [s.inst.id]
+    );
+    expect(snap).toEqual([
+      { step_order: 1, source_approver_type: "USER", source_approver_id: A1, source_policy_step_order: 1, source_min_amount: null },
+      { step_order: 2, source_approver_type: "ROLE", source_approver_id: PR_FIXTURE_ROLE, source_policy_step_order: 3, source_min_amount: null },
+    ]);
+  });
+
+  it("sod.stripped-role-cannot-refill: a role without pr.approve can never put an approver back on a blocked PR step", async () => {
+    // Reviewer probe (fix round 2, #2).
+    await makeApprovable([A1]); // fixture role held by A1 only
+    await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }]);
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "1000.00" });
+    let s = await stateOf(entityId);
+    const stepId = s.steps[0].id;
+
+    await db.none(
+      `DELETE FROM tbl_role_permissions rp USING tbl_permissions p
+        WHERE rp.role_id = $1 AND rp.permission_id = p.id
+          AND p.resource::text = 'pr' AND p.action::text = 'approve'`,
+      [PR_FIXTURE_ROLE]
+    );
+    try {
+      await db.tx((t) => revalidateRolePermissionChange({ roleId: PR_FIXTURE_ROLE, changedBy: ADMIN, txContext: t }));
+      s = await stateOf(entityId);
+      expect(s.steps[0].status).toBe("PENDING");
+      expect(activeApproversOf(s, 1)).toEqual([]); // blocked
+
+      // A2 is granted the (still-stripped) role: revalidation must not refill the step.
+      track.scopeIds.push(
+        await grantRoleScope(db, { userId: A2, roleId: PR_FIXTURE_ROLE, companyId: HC, hotelId: HOTEL, departmentId: DEPT })
+      );
+      await revalidate({
+        userId: A2,
+        changeType: "scope_added",
+        changedScopes: [fixtureScope()],
+        changedRoleIds: [PR_FIXTURE_ROLE],
+      });
+      s = await stateOf(entityId);
+      expect(everOnInstance(s, A2)).toBe(false);
+      expect(activeApproversOf(s, 1)).toEqual([]);
+
+      // Defence in depth: a PENDING row for A2 written by any other path still
+      // cannot approve through a role that cannot approve PRs.
+      await db.none(
+        `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+         VALUES ($1, $2, 'PENDING')`,
+        [stepId, A2]
+      );
+      await expect(
+        submitApprovalAction({ approval_instance_id: s.inst.id, approver_user_id: A2, action: "APPROVE" })
+      ).rejects.toMatchObject({ code: "APPROVAL_SOURCE_INELIGIBLE" });
+      s = await stateOf(entityId);
+      expect(s.inst.status).toBe("PENDING");
+      expect(s.steps[0].status).toBe("PENDING");
+      expect(s.actions.filter((a) => a.action === "APPROVE")).toEqual([]);
+    } finally {
+      await makeApprovable([A1]); // restores the role's read+approve for later tests
+    }
+  });
+
   it("propagation.min_amount-diff: a min_amount change is a step modification (compared in paise)", () => {
     const base = { step_order: 1, approver_source_type: "USER", approver_source_id: A1, decision_rule: "ANY" };
 

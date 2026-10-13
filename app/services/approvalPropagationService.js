@@ -123,21 +123,56 @@ const SKIP_PUBLISHED_RFQ_SQL = `
  * policy has fewer steps than the instance) and callers must decide explicitly
  * what to do about it rather than letting a join quietly drop the row.
  *
+ * ── PINNED ENTITY TYPES (PR) ──
+ * Instances of PINNED_TO_SUBMISSION types are never re-pointed by policy
+ * propagation, so after the first policy save their `policy_step_id` is NULL
+ * for good and rule (2) would match by POSITION — and a PR's positions are
+ * routinely shifted by value-threshold / separation-of-duties drops. Their
+ * steps instead carry the source snapshotted at creation
+ * (`ais.source_approver_type` / `source_approver_id`), which is the ONLY
+ * answer for them: rule (0) below, reported as `matched_by_id = true`. A
+ * pinned step without a snapshot is UNRESOLVABLE (no row) — never resolved
+ * against the live policy. Every other entity type has NULL snapshot columns
+ * and resolves through rules (1)/(2) exactly as before.
+ *
  * Assumes the calling SQL aliases the instance table `ai` and instance steps `ais`.
  */
+// Pinned entity types as a SQL array literal. Built from the code constant —
+// never from input — and checked to be bare identifiers, so it is inlined.
+const PINNED_TYPES_SQL = (() => {
+  const types = [...PINNED_TO_SUBMISSION];
+  if (!types.length || !types.every((ty) => /^[A-Z_]+$/.test(ty))) {
+    throw new Error('PINNED_TO_SUBMISSION must hold bare upper-case entity-type identifiers');
+  }
+  return `ARRAY[${types.map((ty) => `'${ty}'`).join(', ')}]::text[]`;
+})();
+
 const POLICY_STEP_RESOLUTION_SQL = `
   LEFT JOIN LATERAL (
-    SELECT
-      p.id                AS matched_policy_step_id,
-      p.approver_source_type,
-      p.approver_source_id,
-      (p.id IS NOT DISTINCT FROM ais.policy_step_id) AS matched_by_id
-    FROM tbl_approval_policy_steps p
-    WHERE p.approval_policy_id = ai.approval_policy_id
-      AND (p.id = ais.policy_step_id OR p.step_order = ais.step_order)
-    ORDER BY (p.id IS NOT DISTINCT FROM ais.policy_step_id) DESC,
-             p.step_order ASC, p.id ASC
-    LIMIT 1
+    SELECT src.matched_policy_step_id, src.approver_source_type,
+           src.approver_source_id, src.matched_by_id
+      FROM (
+        -- (0) pinned step: the creation-time snapshot is authoritative
+        SELECT ais.policy_step_id         AS matched_policy_step_id,
+               ais.source_approver_type   AS approver_source_type,
+               ais.source_approver_id     AS approver_source_id,
+               TRUE                       AS matched_by_id,
+               0 AS precedence, 0 AS policy_step_order, 0 AS policy_step_row_id
+         WHERE ais.source_approver_type IS NOT NULL
+        UNION ALL
+        -- (1) live link, (2) ordinal fallback — non-pinned entity types only
+        SELECT p.id, p.approver_source_type, p.approver_source_id,
+               (p.id IS NOT DISTINCT FROM ais.policy_step_id),
+               CASE WHEN p.id IS NOT DISTINCT FROM ais.policy_step_id THEN 1 ELSE 2 END,
+               p.step_order, p.id
+          FROM tbl_approval_policy_steps p
+         WHERE ais.source_approver_type IS NULL
+           AND ai.entity_type <> ALL(${PINNED_TYPES_SQL})
+           AND p.approval_policy_id = ai.approval_policy_id
+           AND (p.id = ais.policy_step_id OR p.step_order = ais.step_order)
+      ) src
+     ORDER BY src.precedence ASC, src.policy_step_order ASC, src.policy_step_row_id ASC
+     LIMIT 1
   ) ps ON TRUE`;
 
 /**
@@ -2217,6 +2252,34 @@ export async function revalidateApproverMembership({
       // not interchangeable. If the add path should be gated, the right fix is
       // to gate applyDiffToInstance at the point steps are created, not to
       // filter their approvers afterwards.
+      //
+      // ── EXCEPT pinned / separation-of-duties entity types (PR) ──
+      // None of the reasons above applies to them: applyDiffToInstance never
+      // touches a pinned instance, so every one of their steps was built
+      // through the creation gate. And for them an unchecked add is not an
+      // under/over-population trade-off but a bypass — a step BLOCKED because
+      // its role lost <resource>.approve (retireIneligibleRoleStep) would be
+      // refilled by the next person granted that same, still-stripped role,
+      // who could then approve the level alone. So the step's (snapshot)
+      // source must pass the very gate creation applies —
+      // policyStepApproverEligibility — before anyone is added to it.
+      if (isPinnedToSubmission(row.entity_type) || excludesInitiator(row.entity_type)) {
+        const { eligible, reason, resource } = await policyStepApproverEligibility(
+          { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id },
+          row.entity_type,
+          {
+            hospitality_company_id: row.hospitality_company_id,
+            hotel_id: row.hotel_id,
+            department_id: row.department_id,
+            process_id: row.process_id || null,
+          },
+          t
+        );
+        if (!eligible) {
+          logger.warn(`[Revalidate] instance ${row.instance_id} step ${row.step_id}: source ${row.approver_source_type}/${row.approver_source_id} cannot approve ${row.entity_type} (${reason}, resource '${resource}') — user ${userId} NOT added; the step stays blocked`);
+          continue;
+        }
+      }
 
       // Lock the instance
       await t.oneOrNone('SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE', [row.instance_id]);
