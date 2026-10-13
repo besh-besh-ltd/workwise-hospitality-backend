@@ -1964,10 +1964,10 @@ export async function getApprovalPolicyTenant(policy_id) {
   );
 }
 
-/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+/** @returns {Promise<{id:number, hospitality_company_id:number|null, entity_type:string}|null>} */
 export async function getApprovalInstanceTenant(instance_id) {
   return db.oneOrNone(
-    `SELECT id, hospitality_company_id FROM tbl_approval_instances WHERE id = $1`,
+    `SELECT id, hospitality_company_id, entity_type FROM tbl_approval_instances WHERE id = $1`,
     [instance_id]
   );
 }
@@ -3832,6 +3832,65 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
  *   caller supplies a transaction, nothing has committed yet, so it is the
  *   caller's job to send it after their commit.
  */
+/**
+ * May `userId` still decide on `instance` at all — the actor-scope half of
+ * submitApprovalAction's gate (step 4), exported so every other decision door
+ * applies the very same rule:
+ *   - hospitality access: a company-level mapping, or a hotel-level one for
+ *     the instance's hotel (userHasHospitalityAccess);
+ *   - when the instance is department-scoped, a role scope row covering
+ *     (company, hotel, department) — any role (the step's own eligibility is
+ *     approvalStepSourceCanApprove's question).
+ * An approver row alone is not enough: rows are not revalidated when a user is
+ * unmapped or a USER-source approver loses their scope.
+ * @param {number} userId
+ * @param {{hospitality_company_id, hotel_id, department_id}} instance
+ * @returns {Promise<boolean>}
+ */
+export async function approvalActorInScope(userId, instance, t = db) {
+  const hasHospAccess = await userHasHospitalityAccess(userId, instance.hospitality_company_id, instance.hotel_id, t);
+  if (!hasHospAccess) return false;
+  // All entities are department-scoped — validate user has role scope covering this department
+  if (instance.department_id) {
+    const hasDeptScope = await t.oneOrNone(`
+      SELECT 1 FROM tbl_user_role_scopes urs
+      WHERE urs.user_id = $1
+        AND urs.company_id = $2
+        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+        AND (urs.department_id IS NULL OR urs.department_id = $4)
+      LIMIT 1
+    `, [userId, instance.hospitality_company_id, instance.hotel_id, instance.department_id]);
+    if (!hasDeptScope) return false;
+  }
+  return true;
+}
+
+/**
+ * Can an APPROVE count on `step` as far as its SOURCE is concerned? Only
+ * separation-of-duties entity types (PR) are gated: a ROLE-source step whose
+ * role no longer holds <resource>.read + <resource>.approve cannot be approved
+ * (it can still be rejected / sent back). Source = the creation snapshot
+ * (pinned types), else the still-linked policy step. Every other entity type,
+ * and every non-ROLE source, is `{ ok: true }` without a query.
+ * @returns {Promise<{ok: boolean, resource?: string}>}
+ */
+export async function approvalStepSourceCanApprove(instance, step, t = db) {
+  if (!excludesInitiator(instance.entity_type)) return { ok: true };
+  let sourceType = step.source_approver_type || null;
+  let sourceId = step.source_approver_id || null;
+  if (!sourceType && step.policy_step_id) {
+    const linked = await t.oneOrNone(
+      'SELECT approver_source_type, approver_source_id FROM tbl_approval_policy_steps WHERE id = $1',
+      [step.policy_step_id]
+    );
+    sourceType = linked?.approver_source_type || null;
+    sourceId = linked?.approver_source_id || null;
+  }
+  if (sourceType !== 'ROLE') return { ok: true };
+  const resource = ENTITY_APPROVE_RESOURCE_MAP[instance.entity_type] || String(instance.entity_type).toLowerCase();
+  return { ok: await roleHasReadAndApprovePermission(sourceId, resource, t), resource };
+}
+
 export async function submitApprovalAction({
   approval_instance_id,
   approval_instance_step_id,
@@ -3928,27 +3987,16 @@ export async function submitApprovalAction({
     // reconcilers already block such a step and refuse to refill it; this
     // refuses an approver row that reached it any other way. Source = the
     // creation snapshot (pinned types), else the still-linked policy step.
-    if (normalizedAction === 'APPROVE' && excludesInitiator(instance.entity_type)) {
-      let sourceType = currentStep.source_approver_type || null;
-      let sourceId = currentStep.source_approver_id || null;
-      if (!sourceType && currentStep.policy_step_id) {
-        const linked = await t.oneOrNone(
-          'SELECT approver_source_type, approver_source_id FROM tbl_approval_policy_steps WHERE id = $1',
-          [currentStep.policy_step_id]
+    // (approvalStepSourceCanApprove — shared with the PR detail's can_approve.)
+    if (normalizedAction === 'APPROVE') {
+      const source = await approvalStepSourceCanApprove(instance, currentStep, t);
+      if (!source.ok) {
+        const err = new Error(
+          `This approval level's role no longer holds ${source.resource}.read and ${source.resource}.approve, so it cannot be approved until that is restored`
         );
-        sourceType = linked?.approver_source_type || null;
-        sourceId = linked?.approver_source_id || null;
-      }
-      if (sourceType === 'ROLE') {
-        const resource = ENTITY_APPROVE_RESOURCE_MAP[instance.entity_type] || String(instance.entity_type).toLowerCase();
-        if (!(await roleHasReadAndApprovePermission(sourceId, resource, t))) {
-          const err = new Error(
-            `This approval level's role no longer holds ${resource}.read and ${resource}.approve, so it cannot be approved until that is restored`
-          );
-          err.code = 'APPROVAL_SOURCE_INELIGIBLE';
-          err.httpStatus = 403;
-          throw err;
-        }
+        err.code = 'APPROVAL_SOURCE_INELIGIBLE';
+        err.httpStatus = 403;
+        throw err;
       }
     }
 
@@ -3981,25 +4029,11 @@ export async function submitApprovalAction({
       throw new Error(`User has already acted on this step with status: ${approverRecord.status}`);
     }
 
-    // 4. Validate user belongs to the policy scope
-    // Check hospitality access
-    const hasHospAccess = await userHasHospitalityAccess(approver_user_id, instance.hospitality_company_id, instance.hotel_id, t);
-    if (!hasHospAccess) {
+    // 4. Validate user belongs to the policy scope (hospitality access, then a
+    // role scope covering the instance's department — approvalActorInScope,
+    // shared with the PR send-back gate and the PR detail's capabilities).
+    if (!(await approvalActorInScope(approver_user_id, instance, t))) {
       throw new Error('User does not belong to the approval policy scope');
-    }
-    // All entities are department-scoped — validate user has role scope covering this department
-    if (instance.department_id) {
-      const hasDeptScope = await t.oneOrNone(`
-        SELECT 1 FROM tbl_user_role_scopes urs
-        WHERE urs.user_id = $1
-          AND urs.company_id = $2
-          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
-          AND (urs.department_id IS NULL OR urs.department_id = $4)
-        LIMIT 1
-      `, [approver_user_id, instance.hospitality_company_id, instance.hotel_id, instance.department_id]);
-      if (!hasDeptScope) {
-        throw new Error('User does not belong to the approval policy scope');
-      }
     }
 
     // 5. Record the action in audit log
@@ -4627,10 +4661,14 @@ export async function recordLifecycleEvent({
     throw new Error('entity_type, entity_id, stage, action, and performed_by are required');
   }
 
-  // Validate entity_type is in enum
+  // Only the lifecycle_entity_type enum's values have a lifecycle trail. Any
+  // other type (MR, PR, the ARC v2 stage types…) keeps its own audit trail
+  // (PR: tbl_pr_event), so the engine's generic APPROVED/REJECT call is skipped
+  // quietly rather than thrown and logged as an error on every decision.
   const validTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC'];
   if (!validTypes.includes(entity_type)) {
-    throw new Error(`Invalid entity_type. Must be one of: ${validTypes.join(', ')}`);
+    logger.debug({ entity_type, entity_id, stage, action }, '[lifecycle] entity type has no lifecycle trail — skipped');
+    return null;
   }
 
   const dbContext = txContext || db;

@@ -26,7 +26,7 @@ import {
   mapCategory, unmapAll, prRoleId,
 } from "../helpers/prFixtures.js";
 import { handlePrPostApproval } from "../../app/controllers/pr/prController.js";
-import { cancelApprovalInstance } from "../../app/models/generalModel.js";
+import { cancelApprovalInstance, recordLifecycleEvent, submitApprovalAction } from "../../app/models/generalModel.js";
 import { approvalStepEmailContext } from "../../app/helper/approvalEmailContext.js";
 import { approvalActionUrl, buyerPrDetail, entityLabel } from "../../app/services/notificationLinks.js";
 import { NO_APPROVER_LABEL } from "../../app/services/pr/prConstants.js";
@@ -45,6 +45,7 @@ const PERSONAS = [REQ, AP1, AP2, BUY, RV];
 const ACTION = "/api/v1/general/hospitality/approval/action";
 const PENDING = "/api/v1/general/hospitality/approval/pending";
 const DASH_PENDING = "/api/v1/dashboard-v2/pending-approvals";
+const GENERIC_CANCEL = "/api/v1/general/hospitality/approval/cancel";
 
 const prIds = [];
 const roleIds = [];
@@ -100,6 +101,12 @@ const prNotifications = (prId) => db.any(
     WHERE category = 'pr' AND additional_data->>'pr_id' = $1::text ORDER BY id`, [prId]);
 const recipientsOf = async (prId, type) =>
   [...new Set((await prNotifications(prId)).filter((n) => !type || n.type === type).map((n) => n.recipient_user_id))].sort();
+
+/** The engine's generic outcome notices ("Approved: … / Rejected: …") sent for a PR instance. */
+const genericOutcomeNotices = (prId) => db.any(
+  `SELECT recipient_user_id, type FROM tbl_notifications
+    WHERE type IN ('approval_approved', 'approval_rejected')
+      AND additional_data->>'entity_type' = 'PR' AND additional_data->>'entity_id' = $1::text`, [prId]);
 
 async function submitted(price = "1000.00") {
   const pr = await createPr(price);
@@ -232,6 +239,10 @@ describe("PR submit → approval chain", () => {
     expect(row.approved_at).not.toBeNull();
     const events = await eventsOf(pr.id);
     expect(events[events.length - 1]).toMatchObject({ event_type: "approved", actor_id: AP1, revision: 1 });
+    // The engine's lifecycle trail has no PR type: its call is skipped quietly (tbl_pr_event is PR's trail).
+    await expect(recordLifecycleEvent({
+      entity_type: "PR", entity_id: pr.id, stage: "APPROVED", action: "APPROVE", performed_by: AP1,
+    })).resolves.toBeNull();
 
     // The buyer the notice went to can open it; nothing is left to decide.
     const asBuyer = await detail(pr.id, buyC);
@@ -246,10 +257,7 @@ describe("PR submit → approval chain", () => {
     for (const n of approvedNotes) expect(n.action_url).toBe(url);
     expect(notes.some((n) => n.recipient_user_id === AP1)).toBe(false);
     // The engine's generic "Approved: …" is not sent on top of the PR's own.
-    const generic = await db.any(
-      `SELECT id FROM tbl_notifications WHERE recipient_user_id = $1 AND type = 'approval_approved'
-          AND additional_data->>'entity_type' = 'PR' AND additional_data->>'entity_id' = $2::text`, [REQ, pr.id]);
-    expect(generic).toEqual([]);
+    expect(await genericOutcomeNotices(pr.id)).toEqual([]);
   });
 
   it("two-step-above-threshold: 1,00,000.00 → AP1 then AP2; now_with names AP2 between the steps", async () => {
@@ -283,6 +291,8 @@ describe("PR submit → approval chain", () => {
       event_type: "rejected", actor_id: AP1, payload: { instance_id: pr.instanceId, comment: "Not in budget" },
     });
     expect(await recipientsOf(pr.id, "pr_rejected")).toEqual([REQ]);
+    // …and not the engine's generic "Rejected: …" as well.
+    expect(await genericOutcomeNotices(pr.id)).toEqual([]);
 
     const again = await submit(pr.id);
     expect(again.status).toBe(409);
@@ -433,6 +443,94 @@ describe("PR submit → approval chain", () => {
     expect((await withdraw(pr.id)).status).toBe(200);
     expect((await prRow(pr.id)).status).toBe("draft");
   });
+
+  it("submit.recategorised: a catalog line whose product category moved is re-filed, and the event says so", async () => {
+    const pr = await createPr("1000.00");
+    const [line] = await db.any(`SELECT id, category_id FROM tbl_purchase_requisition_line WHERE pr_id = $1`, [pr.id]);
+    expect(line.category_id).toBe(variant.category_id);
+    // As if the product had been filed under another category when the draft was saved.
+    const other = await db.one(
+      `SELECT id FROM tbl_category WHERE status = 1 AND is_deleted = 0 AND id <> $1 ORDER BY id LIMIT 1`, [variant.category_id]);
+    await db.none(`UPDATE tbl_purchase_requisition_line SET category_id = $2 WHERE id = $1`, [line.id, other.id]);
+
+    expect((await submit(pr.id)).status).toBe(200);
+    expect((await db.one(`SELECT category_id FROM tbl_purchase_requisition_line WHERE id = $1`, [line.id])).category_id)
+      .toBe(variant.category_id);
+    const submittedEvent = (await eventsOf(pr.id)).find((e) => e.event_type === "submitted");
+    expect(submittedEvent.payload.recategorised_lines).toEqual([{ line_id: line.id, from: other.id, to: variant.category_id }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Who may decide — the engine's decision gate everywhere
+// ---------------------------------------------------------------------------
+describe("PR decision gate (approve / reject / send back)", () => {
+  const rightsOf = async (prId, client) => (await detail(prId, client)).body.data.capabilities.approval;
+
+  it("an approver row alone is not enough: AP1 without a covering role scope can neither approve nor send back", async () => {
+    const pr = await submitted("1000.00");
+    expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: true, can_send_back: true });
+
+    await revokeAllPr(AP1); // AP1's fixture scopes are all in Procurement — nothing now covers (A, A1, Engineering)
+    try {
+      expect(await rightsOf(pr.id, ap1C)).toMatchObject({ instance_id: pr.instanceId, can_approve: false, can_send_back: false });
+      const back = await sendBack(pr.id, "Need a second quote", ap1C);
+      expect(back.status).toBe(403);
+      expect(back.body.code).toBe("PR_FORBIDDEN");
+      // The engine refuses the same person on the generic endpoint.
+      expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(400);
+      expect(await prRow(pr.id)).toMatchObject({ status: "pending_approval", returned_note: null });
+    } finally {
+      await grantPr(AP1, "PR Approver", { departmentId: ENG });
+    }
+    expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: true, can_send_back: true });
+  });
+
+  it("an approver unmapped from the company can neither approve nor send back", async () => {
+    const pr = await submitted("1000.00");
+    const saved = await db.any(
+      `SELECT * FROM tbl_hospitality_user_mappings WHERE user_id = $1 AND hospitality_company_id = $2`, [AP1, A]);
+    expect(saved.length).toBeGreaterThan(0);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1 AND hospitality_company_id = $2`, [AP1, A]);
+    try {
+      expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: false, can_send_back: false });
+      expect((await sendBack(pr.id, "Need a second quote", ap1C)).status).toBe(403);
+      expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(400);
+      expect((await prRow(pr.id)).status).toBe("pending_approval");
+    } finally {
+      for (const row of saved) {
+        await db.none("INSERT INTO tbl_hospitality_user_mappings(${this:name}) VALUES(${this:csv})", row);
+      }
+    }
+    expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: true, can_send_back: true });
+  });
+
+  it("ALL step: an approver who already approved can no longer send back; the other still can", async () => {
+    await dropPrPolicies();
+    await makePrPolicy({ steps: [{ source: "ROLE", id: await prRoleId("PR Approver"), rule: "ALL" }] });
+    const pr = await submitted("1000.00");
+    expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(200);
+    expect((await prRow(pr.id)).status).toBe("pending_approval");
+
+    expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: false, can_send_back: false });
+    const back = await sendBack(pr.id, "Changed my mind", ap1C);
+    expect(back.status).toBe(403);
+    expect(back.body.code).toBe("PR_FORBIDDEN");
+    expect(await rightsOf(pr.id, ap2C)).toMatchObject({ can_approve: true, can_send_back: true });
+    expect((await sendBack(pr.id, "Need a second quote", ap2C)).status).toBe(200);
+    expect((await prRow(pr.id)).status).toBe("returned");
+  });
+
+  it("R14: the generic approval cancel refuses a PR instance; the PR and its instance are untouched", async () => {
+    const pr = await submitted("1000.00");
+    for (const client of [reqC, ap1C]) {
+      const res = await client.post(GENERIC_CANCEL).send({ instance_id: pr.instanceId, reason: "bypass" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ status: 3, code: "APPROVAL_ENTITY_HAS_OWN_WORKFLOW" });
+    }
+    expect((await instancesOf(pr.id))[0].status).toBe("PENDING");
+    expect((await prRow(pr.id)).status).toBe("pending_approval");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -479,6 +577,49 @@ describe("PR withdraw and approver send-back", () => {
     const all = await instancesOf(pr.id);
     expect(all.map((i) => i.status)).toEqual(["CANCELLED", "PENDING"]);
     expect(row.approval_instance_id).toBe(all[1].id);
+  });
+
+  it("withdraw self-heal: the instance was already APPROVED but the PR never moved → settled, then 409 saying so", async () => {
+    const pr = await submitted("1000.00");
+    // A decision whose handler failed: the instance says APPROVED, the PR still pending_approval.
+    await db.none(`UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`, [pr.instanceId]);
+
+    const res = await withdraw(pr.id);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ status: 0, code: "PR_STATE_CONFLICT", details: { status: "approved", instance_status: "APPROVED" } });
+    expect(res.body.message).toMatch(/already approved/);
+    const row = await prRow(pr.id);
+    expect(row.status).toBe("approved");
+    expect(row.approved_at).not.toBeNull();
+    expect((await eventTypes(pr.id)).filter((t) => t === "approved")).toHaveLength(1);
+    expect((await eventTypes(pr.id))).not.toContain("withdrawn");
+    expect(await recipientsOf(pr.id, "pr_approved")).toEqual([BUY, REQ].sort());
+
+    // Asking again is a plain state conflict on the now-approved PR.
+    const again = await withdraw(pr.id);
+    expect(again.status).toBe(409);
+    expect(again.body.details).toMatchObject({ status: "approved" });
+  });
+
+  it("withdraw loses the race to a committed rejection → 409 'already rejected'; the rejection is applied, not undone", async () => {
+    const pr = await submitted("1000.00");
+    // The engine primitive alone: the decision commits, the post-action handler has not run yet.
+    const decided = await submitApprovalAction({
+      approval_instance_id: pr.instanceId, approver_user_id: AP1, action: "REJECT", comment: "Duplicate of PR-1",
+    });
+    expect(decided.instance_status).toBe("REJECTED");
+    expect((await prRow(pr.id)).status).toBe("pending_approval");
+
+    const res = await withdraw(pr.id);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("PR_STATE_CONFLICT");
+    expect(res.body.message).toMatch(/already rejected/);
+    expect((await prRow(pr.id)).status).toBe("rejected");
+    const events = await eventsOf(pr.id);
+    expect(events[events.length - 1]).toMatchObject({
+      event_type: "rejected", actor_id: AP1, payload: { instance_id: pr.instanceId, comment: "Duplicate of PR-1" },
+    });
+    expect((await instancesOf(pr.id))[0].status).toBe("REJECTED");
   });
 
   it("approver send-back: only a pending approver of the current step, with a note; requester edits and resubmits", async () => {
@@ -663,6 +804,34 @@ describe("PR submit → technical review", () => {
     expect((await reviewsOf(pr.id)).map((r) => r.status)).toEqual(["superseded"]);
     const last = (await eventsOf(pr.id)).pop();
     expect(last).toMatchObject({ event_type: "withdrawn", payload: { from_status: "in_review", superseded_review_ids: [reviews[0].id] } });
+  });
+
+  it("resubmit detaches the previous chain: in_review shows no approval, and its approvers lose read (kept while returned)", async () => {
+    const pr = await submitted("1000.00");
+    expect((await sendBack(pr.id, "Add the datasheet", ap1C)).status).toBe(200);
+    // While returned, AP1 reads the PR they sent back as an approver of its chain
+    // (checked without their role, which would grant pr.read on its own).
+    await revokeAllPr(AP1);
+    try {
+      expect((await detail(pr.id, ap1C)).status).toBe(200);
+    } finally {
+      await grantPr(AP1, "PR Approver", { departmentId: ENG });
+    }
+
+    await mapCategory(A, variant.category_id, ENG);
+    expect((await submit(pr.id)).status).toBe(200);
+    expect(await prRow(pr.id)).toMatchObject({ status: "in_review", revision: 2, approval_instance_id: null });
+    const d = (await detail(pr.id)).body.data;
+    expect(d.approval).toBeNull();
+    expect(d.capabilities.approval).toBeNull();
+
+    // The old chain no longer opens the PR for AP1.
+    await revokeAllPr(AP1);
+    try {
+      expect((await detail(pr.id, ap1C)).status).toBe(404);
+    } finally {
+      await grantPr(AP1, "PR Approver", { departmentId: ENG });
+    }
   });
 
   it("review.submit-double: two concurrent submits into review → one 200, one 409; one revision, one review", async () => {

@@ -25,22 +25,18 @@
 import db from '../../config/dbConn.js';
 import { logger } from '../../util/logger.js';
 import * as prModel from '../../models/pr/prModel.js';
-import { createApprovalInstance, cancelApprovalInstance } from '../../models/generalModel.js';
+import {
+  createApprovalInstance, cancelApprovalInstance, approvalActorInScope, approvalStepSourceCanApprove,
+} from '../../models/generalModel.js';
 import { dispatchPostApprovalAction } from '../approvalActionService.js';
-import { NoApprovalPolicyError } from '../authorizationService.js';
 import { PR_ERR, PrError, prError } from './prErrors.js';
 import { record } from './prEvents.js';
-import { assertPerm, canReadPr } from './prAccess.js';
+import { assertPerm, canReadPr, cellOf, isRequester, notFound } from './prAccess.js';
 import { guardCatalogLines } from './prCatalog.js';
 import { computeReviewGroups, resolveReviewers, previewApproval, noReviewerProblem } from './prRouting.js';
 import { EDITABLE_STATUSES, WITHDRAWABLE_STATUSES, MAX_LEN } from './prConstants.js';
 import { notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected } from './prNotify.js';
 
-const cellOf = (pr) => ({
-  companyId: Number(pr.hospitality_company_id), hotelId: Number(pr.hotel_id), departmentId: Number(pr.department_id),
-});
-const isRequester = (user, pr) => Number(pr.raised_by) === Number(user?.id);
-const notFound = () => prError(PR_ERR.NOT_FOUND, 'Purchase requisition not found');
 const stateConflict = (pr, verb) => prError(
   PR_ERR.STATE_CONFLICT,
   `This requisition is ${String(pr.status).replace(/_/g, ' ')} and cannot be ${verb}`,
@@ -67,11 +63,10 @@ function problemError({ code, message, ...details }) {
  */
 function engineError(err) {
   if (err instanceof PrError) return err;
-  if (err instanceof NoApprovalPolicyError || err?.code === 'NO_APPROVAL_POLICY_FOR_PROCESS'
-      || err?.message === 'Policy has no approval steps configured') {
-    return prError(PR_ERR.NO_POLICY, `No approval workflow is set up for purchase requisitions at this hotel — ${CONTACT_ADMIN}`);
-  }
+  const noPolicy = () => prError(PR_ERR.NO_POLICY, `No approval workflow is set up for purchase requisitions at this hotel — ${CONTACT_ADMIN}`);
   switch (err?.code) {
+    case 'NO_APPROVAL_POLICY_FOR_PROCESS': // NoApprovalPolicyError
+      return noPolicy();
     case 'APPROVAL_STEP_UNRESOLVED':
       return prError(PR_ERR.STEP_UNRESOLVED,
         `Approval step ${err.step_order} has no one who can approve for this hotel and department — ${CONTACT_ADMIN}`,
@@ -83,10 +78,63 @@ function engineError(err) {
     default:
       break;
   }
-  if (/pending approval instance already exists|already been approved/i.test(err?.message || '')) {
+  // The engine throws these three as plain Errors with no code, so they can
+  // only be told apart by message (createApprovalInstance steps 1 and 3).
+  if (err?.message === 'Policy has no approval steps configured') return noPolicy();
+  if (/^A pending approval instance already exists|^This entity has already been approved/.test(err?.message || '')) {
     return prError(PR_ERR.STATE_CONFLICT, 'This requisition already has an approval in progress', {});
   }
   return err;
+}
+
+// ---------------------------------------------------------------------------
+// Who may decide (approve / reject / send back) right now
+// ---------------------------------------------------------------------------
+
+/**
+ * The caller's position on the PR's live approval, through the ENGINE's own
+ * decision gate — so the detail's buttons, the send-back endpoint and the
+ * generic approve/reject endpoint can never disagree:
+ *   - a PENDING, non-removed approver row on the instance's CURRENT, PENDING step;
+ *   - not the requester (separation of duties);
+ *   - approvalActorInScope — still mapped to the company/hotel and holding a
+ *     role scope covering the PR's (company, hotel, department), exactly as
+ *     submitApprovalAction requires (approver rows are not revalidated on
+ *     unmapping, so the row alone proves nothing);
+ *   - for APPROVE only, approvalStepSourceCanApprove — the step's source role
+ *     can still approve PRs (a reject / send-back stays possible).
+ * null when the PR is not pending_approval on an instance of its own.
+ * `lock` row-locks the instance (send-back holds it until commit).
+ * @returns {Promise<{position: object, rights: {instance_id, current_step_id, can_approve, can_send_back}}|null>}
+ */
+async function decisionPosition(t, pr, user, { lock = false } = {}) {
+  if (pr.status !== 'pending_approval' || !pr.approval_instance_id) return null;
+  const pos = await prModel.approvalPosition(t, {
+    prId: Number(pr.id), instanceId: Number(pr.approval_instance_id), userId: user.id, lock,
+  });
+  if (!pos) return null;
+  const onStep = !isRequester(user, pr) && pos.instance_status === 'PENDING'
+    && pos.step_status === 'PENDING' && pos.is_pending_approver === true;
+  const inScope = onStep && (await approvalActorInScope(user.id, pos, t));
+  const sourceOk = inScope && (await approvalStepSourceCanApprove(pos, pos, t)).ok;
+  return {
+    position: pos,
+    rights: {
+      instance_id: Number(pos.instance_id),
+      current_step_id: pos.step_id == null ? null : Number(pos.step_id),
+      can_approve: Boolean(sourceOk),
+      can_send_back: Boolean(inScope),
+    },
+  };
+}
+
+/**
+ * The detail's `capabilities.approval` — THE field the FE renders Approve /
+ * Reject / Send back from. Same gate as the endpoints (decisionPosition).
+ * @returns {Promise<{instance_id, current_step_id, can_approve, can_send_back}|null>}
+ */
+export async function decisionRights(pr, user, t = db) {
+  return (await decisionPosition(t, pr, user))?.rights ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,15 +239,20 @@ export async function submit(prId, user) {
       throw prError(PR_ERR.VALIDATION, 'Add at least one line before submitting', [{ field: 'lines', message: 'Add at least one line' }]);
     }
     const checked = await guardCatalogLines(t, cell, lines);
-    // A catalog line is filed under its product's category as it is now.
-    await prModel.setLineCategories(t, prId, checked
-      .filter((l, i) => l.category_id !== lines[i].category_id)
-      .map((l) => ({ id: l.id, category_id: l.category_id })));
+    // A catalog line is filed under its product's category as it is now (and
+    // routed by it); every line that moved is recorded on the submit event.
+    const recategorised = checked
+      .map((l, i) => ({ line_id: l.id, from: lines[i].category_id, to: l.category_id }))
+      .filter((c) => c.from !== c.to);
+    await prModel.setLineCategories(t, prId, recategorised.map((c) => ({ id: c.line_id, category_id: c.to })));
 
     const next = await prModel.markSubmitted(t, prId);
     await record(t, {
       prId, revision: next.revision, actorId: user.id, type: 'submitted',
-      payload: { estimated_total: next.estimated_total, line_count: lines.length, from_status: pr.status },
+      payload: {
+        estimated_total: next.estimated_total, line_count: lines.length, from_status: pr.status,
+        ...(recategorised.length ? { recategorised_lines: recategorised } : {}),
+      },
     });
 
     const groups = await computeReviewGroups({ companyId: cell.companyId, lines: checked }, t);
@@ -235,12 +288,34 @@ async function cancelCurrentInstance(t, pr, userId, reason) {
     [instanceId, pr.id]);
   if (!inst || inst.status === 'CANCELLED') return { instanceId, notify: null };
   if (inst.status !== 'PENDING') {
-    throw prError(PR_ERR.STATE_CONFLICT,
-      `The approval was already ${String(inst.status).toLowerCase()} — refresh to see the outcome`,
-      { instance_status: inst.status });
+    // A decision committed first; its handler has not moved the PR (yet, or it
+    // failed). Not answered here: the caller rolls back, settles, then refuses.
+    throw Object.assign(new Error('approval already decided'), { decided: { instanceId, status: inst.status } });
   }
   const res = await cancelApprovalInstance(instanceId, userId, reason, { t });
   return { instanceId, notify: res.notify };
+}
+
+/**
+ * A withdraw met an instance that was already APPROVED / REJECTED while the
+ * PR still said pending_approval: the decision's handler has not run (a race)
+ * or failed. Apply it now — settle is idempotent — and refuse the withdraw with
+ * the PR's settled state, instead of a 409 that would repeat forever.
+ */
+async function settleDecidedThenRefuse(prId, { instanceId, status }) {
+  const decision = await db.oneOrNone(
+    `SELECT approver_user_id, comment FROM tbl_approval_actions
+      WHERE approval_instance_id = $1 AND action = $2
+      ORDER BY id DESC LIMIT 1`,
+    [instanceId, status === 'APPROVED' ? 'APPROVE' : 'REJECT']);
+  if (status === 'APPROVED' || status === 'REJECTED') {
+    await settle(status, instanceId, decision?.approver_user_id ?? null, { comment: decision?.comment ?? null });
+  }
+  const now = await prModel.getPrRow(prId);
+  const word = String(status).toLowerCase();
+  return prError(PR_ERR.STATE_CONFLICT,
+    `This requisition was already ${word} by its approver and can no longer be withdrawn — refresh to see it`,
+    { status: now?.status ?? null, instance_status: status });
 }
 
 /**
@@ -248,7 +323,19 @@ async function cancelCurrentInstance(t, pr, userId, reason) {
  * instance is cancelled and pending reviews of the revision are superseded.
  */
 export async function withdraw(prId, user) {
-  const out = await db.tx(async (t) => {
+  let out;
+  try {
+    out = await withdrawTx(prId, user);
+  } catch (err) {
+    if (err?.decided) throw await settleDecidedThenRefuse(prId, err.decided);
+    throw err;
+  }
+  if (out.notify) await out.notify();
+  return { id: prId, status: 'draft' };
+}
+
+async function withdrawTx(prId, user) {
+  return db.tx(async (t) => {
     const pr = await prModel.lockPr(t, prId);
     if (!pr || !isRequester(user, pr)) throw notFound();
     if (!WITHDRAWABLE_STATUSES.includes(pr.status)) throw stateConflict(pr, 'withdrawn');
@@ -263,8 +350,6 @@ export async function withdraw(prId, user) {
     });
     return cancelled;
   });
-  if (out.notify) await out.notify();
-  return { id: prId, status: 'draft' };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,15 +367,14 @@ export async function approverSendBack(prId, user, rawNote) {
     if (!pr || !(await canReadPr(user, pr, t))) throw notFound();
     if (pr.status !== 'pending_approval') throw stateConflict(pr, 'sent back');
 
-    const pos = pr.approval_instance_id
-      ? await prModel.approvalPosition(t, { prId, instanceId: Number(pr.approval_instance_id), userId: user.id, lock: true })
-      : null;
+    const decision = await decisionPosition(t, pr, user, { lock: true });
+    const pos = decision?.position;
     if (!pos || pos.instance_status !== 'PENDING') {
       throw prError(PR_ERR.STATE_CONFLICT, 'The approval of this requisition has already moved on — refresh to see the latest', {
         instance_status: pos?.instance_status ?? null,
       });
     }
-    if (isRequester(user, pr) || pos.is_pending_approver !== true || pos.step_status !== 'PENDING') {
+    if (!decision.rights.can_send_back) {
       throw prError(PR_ERR.FORBIDDEN, 'Only an approver of the current approval step can send this requisition back');
     }
 
@@ -373,5 +457,5 @@ export async function handlePrRejection(approvalInstanceId, actorUserId, options
 }
 
 export default {
-  submit, startReview, startApproval, withdraw, approverSendBack, handlePrPostApproval, handlePrRejection,
+  submit, startReview, startApproval, withdraw, approverSendBack, decisionRights, handlePrPostApproval, handlePrRejection,
 };

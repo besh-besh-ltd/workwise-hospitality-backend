@@ -25,6 +25,15 @@ export { prGrantRowsSql };
 const SUPER_ADMIN = 8;
 export const isSuperAdmin = (user) => Number(user?.user_type) === SUPER_ADMIN;
 
+/** The PR's own (company, hotel, department) cell — the only scope its mutations are checked against. */
+export const cellOf = (pr) => ({
+  companyId: Number(pr.hospitality_company_id), hotelId: Number(pr.hotel_id), departmentId: Number(pr.department_id),
+});
+/** Did `user` raise this PR? */
+export const isRequester = (user, pr) => Number(pr?.raised_by) === Number(user?.id);
+/** The one "no such PR / not yours to see" refusal (404, never 403 — no existence leak). */
+export const notFound = () => prError(PR_ERR.NOT_FOUND, 'Purchase requisition not found');
+
 /**
  * Does `userId` hold `perm` ('pr.create', 'pr.convert'…) on the cell?
  * departmentId null = "on any department of the hotel" (the scope predicate is
@@ -147,4 +156,7 @@ export async function canReadPr(user, pr, t = db) {
   return row.ok === true;
 }
 
-export default { hasPerm, assertPerm, forbiddenMessage, canReadPr, readableScopeSql, prGrantRowsSql, isSuperAdmin };
+export default {
+  hasPerm, assertPerm, forbiddenMessage, canReadPr, readableScopeSql, prGrantRowsSql, isSuperAdmin,
+  cellOf, isRequester, notFound,
+};

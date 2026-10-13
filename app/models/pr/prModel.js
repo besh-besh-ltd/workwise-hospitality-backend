@@ -196,8 +196,11 @@ export async function setLineCategories(t, prId, changes) {
 
 /**
  * Open a new revision: revision + 1, estimated_total = the server Σ over active
- * lines (estimateTotalSql — never a client value), submitted_at = now, and the
- * previous send-back note cleared.
+ * lines (estimateTotalSql — never a client value), submitted_at = now, the
+ * previous send-back note cleared, and the previous revision's approval
+ * instance detached (approval_instance_id = NULL) — the new revision has no
+ * chain until startApproval opens one, so an in_review PR never shows the old
+ * chain and that chain's approvers stop reading the PR through it.
  */
 export async function markSubmitted(t, prId) {
   return t.one(
@@ -206,6 +209,7 @@ export async function markSubmitted(t, prId) {
             estimated_total = ${estimateTotalSql('p')},
             submitted_at = NOW(),
             returned_note = NULL,
+            approval_instance_id = NULL,
             updated_at = NOW()
       WHERE p.id = $1
      RETURNING ${PR_SELECT('p')}`,
@@ -266,8 +270,10 @@ export async function instanceStepSummary(t, instanceId) {
 
 /**
  * Where the PR's approval instance stands, from `userId`'s side: the instance
- * status, its current step, and whether the user is a PENDING, non-removed
- * approver on that step. null when the instance is not this PR's.
+ * (status, scope, entity_type), its current step (status + source snapshot),
+ * and whether the user is a PENDING, non-removed approver on that step. null
+ * when the instance is not this PR's. prWorkflow.decisionRights turns this
+ * into the engine's own decision gate.
  * Pass `lock` (inside a tx) to row-lock the instance first, so the answer
  * holds until commit (submitApprovalAction locks the same row).
  */
@@ -280,7 +286,9 @@ export async function approvalPosition(t, { prId, instanceId, userId, lock = fal
   }
   return t.oneOrNone(
     `SELECT ai.id AS instance_id, ai.status AS instance_status, ai.current_step,
+            ai.entity_type, ai.hospitality_company_id, ai.hotel_id, ai.department_id,
             st.id AS step_id, st.status AS step_status,
+            st.source_approver_type, st.source_approver_id, st.policy_step_id,
             EXISTS (SELECT 1 FROM tbl_approval_step_approvers asa
                      WHERE asa.approval_instance_step_id = st.id AND asa.approver_user_id = $3
                        AND asa.status = 'PENDING' AND asa.removed_at IS NULL) AS is_pending_approver

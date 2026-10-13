@@ -18,7 +18,9 @@ import { logger } from '../../util/logger.js';
 import * as prModel from '../../models/pr/prModel.js';
 import { PR_ERR, prError, sendPrError } from '../../services/pr/prErrors.js';
 import { record } from '../../services/pr/prEvents.js';
-import { hasPerm, assertPerm, canReadPr, forbiddenMessage, isSuperAdmin } from '../../services/pr/prAccess.js';
+import {
+  hasPerm, assertPerm, canReadPr, forbiddenMessage, isSuperAdmin, cellOf, isRequester, notFound,
+} from '../../services/pr/prAccess.js';
 import { userCanReadEntity } from '../../services/authorizationService.js';
 import { describeVariants, contractCoverage, guardCatalogLines } from '../../services/pr/prCatalog.js';
 import { previewRouting } from '../../services/pr/prRouting.js';
@@ -78,12 +80,6 @@ function parseUnitPrice(v) {
  * half-up back to paise (values are positive, so this equals Postgres ROUND).
  */
 const lineValuePaise = (quantity, price) => (toScaled(quantity, 3) * toScaled(price, 2) + 500n) / 1000n;
-
-const notFound = () => prError(PR_ERR.NOT_FOUND, 'Purchase requisition not found');
-const cellOf = (pr) => ({
-  companyId: Number(pr.hospitality_company_id), hotelId: Number(pr.hotel_id), departmentId: Number(pr.department_id),
-});
-const isRequester = (user, pr) => Number(pr.raised_by) === Number(user?.id);
 
 /**
  * Plain validator for a create/replace payload. Collects EVERY problem (no
@@ -258,29 +254,6 @@ function headerDiff(before, after) {
   return changed;
 }
 
-/**
- * The caller's side of the PR's live approval: null unless the PR is
- * pending_approval on an instance; otherwise the instance, its current step and
- * whether the caller may decide it — a PENDING, non-removed approver of the
- * current step who is not the requester (the engine and send-back apply the
- * same rule).
- */
-async function approvalCapability(user, pr) {
-  if (pr.status !== 'pending_approval' || !pr.approval_instance_id) return null;
-  const pos = await prModel.approvalPosition(db, {
-    prId: Number(pr.id), instanceId: Number(pr.approval_instance_id), userId: user.id,
-  });
-  if (!pos) return null;
-  const mayDecide = !isRequester(user, pr) && pos.instance_status === 'PENDING'
-    && pos.step_status === 'PENDING' && pos.is_pending_approver === true;
-  return {
-    instance_id: Number(pos.instance_id),
-    current_step_id: pos.step_id == null ? null : Number(pos.step_id),
-    can_approve: mayDecide,
-    can_send_back: mayDecide,
-  };
-}
-
 /** Booleans the FE renders actions from. Later tasks add review/convert keys. */
 async function capabilitiesFor(user, pr) {
   const requester = isRequester(user, pr);
@@ -293,7 +266,9 @@ async function capabilitiesFor(user, pr) {
     can_withdraw: requester && WITHDRAWABLE_STATUSES.includes(pr.status),
     can_cancel: requester && editable,
     can_copy: mayCreate,
-    approval: await approvalCapability(user, pr),
+    // Approve / Reject / Send back: null unless the PR is pending_approval;
+    // computed by the engine's own decision gate (prWorkflow.decisionRights).
+    approval: await prWorkflow.decisionRights(pr, user),
   };
 }
 

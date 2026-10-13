@@ -1405,7 +1405,20 @@ const hospitalityApprovalController = {
       // authenticated user could walk sequential ids and CANCEL another
       // tenant's pending approvals (3,846 instances / 361 pending in prod),
       // stalling their procurement without leaving an obvious trace.
-      if (!(await guardInstanceTenant(req, res, parseInt(instance_id)))) return;
+      const tenant = await guardInstanceTenant(req, res, parseInt(instance_id));
+      if (!tenant) return;
+
+      // A purchase requisition's approval is cancelled only by the PR workflow
+      // (requester withdraw, approver send-back), which moves the PR's own status
+      // in the same transaction. Cancelled through this generic door, the PR
+      // would sit in pending_approval on a dead instance.
+      if (String(tenant.entity_type).toUpperCase() === 'PR') {
+        return res.status(400).json({
+          status: 3,
+          code: 'APPROVAL_ENTITY_HAS_OWN_WORKFLOW',
+          message: 'A purchase requisition is withdrawn or sent back from the requisition itself.'
+        });
+      }
 
       const result = await cancelApprovalInstance(parseInt(instance_id), cancelled_by, reason);
       res.json({ status: 1, data: result });

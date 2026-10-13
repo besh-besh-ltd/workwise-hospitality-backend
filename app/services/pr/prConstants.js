@@ -21,6 +21,8 @@ export const PR_TYPES = Object.freeze(['goods', 'service', 'capex']);
 export const URGENCIES = Object.freeze(['low', 'normal', 'urgent']);
 export const LINE_KINDS = Object.freeze(['catalog', 'free_text']);
 export const LINE_STATUSES = Object.freeze(['active', 'cancelled', 'closed']);
+/** The pr.* permission actions (20261013100000_pr_permissions.sql). */
+export const PR_ACTIONS = Object.freeze(['create', 'read', 'evaluate', 'approve', 'convert']);
 
 // ---------------------------------------------------------------------------
 // Validation limits
@@ -152,10 +154,12 @@ export const NO_APPROVER_LABEL = 'No eligible approver — contact your admin';
  *     company level or at that hotel — the rule resolveApprovers applies to
  *     ROLE/DEPARTMENT approvers.
  * `company`, `hotel`, `department` are SQL expressions (columns or $n);
- * `department` null = a grant on any department qualifies. `action` is a
- * developer constant (never user input).
+ * `department` null = a grant on any department qualifies. `action` must be
+ * one of PR_ACTIONS (it is interpolated, so anything else throws).
  */
-const holderMatchSql = (action, company, hotel, department) => `
+const holderMatchSql = (action, company, hotel, department) => {
+  if (!PR_ACTIONS.includes(action)) throw new Error(`holderMatchSql: invalid pr action '${action}'`);
+  return `
     FROM tbl_users _rx_u
     JOIN tbl_user_role_scopes _rx_urs ON _rx_urs.user_id = _rx_u.id
     JOIN tbl_role_permissions _rx_rp ON _rx_rp.role_id = _rx_urs.role_id
@@ -172,6 +176,7 @@ const holderMatchSql = (action, company, hotel, department) => `
           AND _rx_hum.hospitality_company_id = ${company}
           AND (_rx_hum.hospitality_hotel_id = ${hotel}
                OR (_rx_hum.mapping_type = 0 AND _rx_hum.hospitality_hotel_id IS NULL)))`;
+};
 const reviewerMatchSql = (company, hotel, department) => holderMatchSql('evaluate', company, hotel, department);
 
 /**
