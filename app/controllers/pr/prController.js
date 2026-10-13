@@ -620,16 +620,17 @@ export async function duplicates(req, res) {
       if (item.readable) item.title = r.title;
       return item;
     });
-    for (const r of rfqs) {
+    const rfqItems = await Promise.all(rfqs.map(async (r) => {
       const readable = superAdmin || Number(r.created_by) === Number(req.user.id)
         || (await userCanReadEntity(req.user.id, 'rfq', r));
       const item = {
         kind: 'rfq', id: Number(r.id), number: r.number, hotel_name: r.hotel_name,
-        department_name: r.department_name, created_at: r.created_at, readable,
+        department_name: r.department_name, created_at: null, last_activity_at: r.last_activity_at, readable,
       };
       if (readable) item.title = r.title;
-      items.push(item);
-    }
+      return item;
+    }));
+    items.push(...rfqItems);
     return ok(res, { count: items.length, items });
   } catch (err) {
     return sendPrError(res, err, logger);

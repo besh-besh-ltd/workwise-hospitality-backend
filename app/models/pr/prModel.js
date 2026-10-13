@@ -13,7 +13,7 @@ import db from '../../config/dbConn.js';
 import {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
-  POOL_PROGRESSES, NO_REVIEWER_LABEL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
+  POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
 } from '../../services/pr/prConstants.js';
 import { readableScopeSql } from '../../services/pr/prAccess.js';
 
@@ -471,7 +471,7 @@ const NOW_WITH_SQL = (p) => `CASE ${p}.status
     SELECT CASE
              WHEN count(*) = 0 THEN 'Technical review'
              WHEN count(*) FILTER (WHERE NOT z.elig) > 0
-               THEN '${NO_REVIEWER_LABEL} (' || string_agg(z.title, ', ' ORDER BY z.title) FILTER (WHERE NOT z.elig) || ')'
+               THEN ${NO_REVIEWER_LABEL_SQL("string_agg(z.title, ', ' ORDER BY z.title) FILTER (WHERE NOT z.elig)")}
              ELSE 'Technical review: ' || string_agg(z.title, ', ' ORDER BY z.title) END
       FROM (SELECT d.title, ${REVIEWER_EXISTS_SQL(p, 'rv')} AS elig
               FROM tbl_pr_review rv JOIN tbl_department d ON d.id = rv.department_id
@@ -612,24 +612,30 @@ export async function kpis(user, superAdmin = false, t = db) {
        FROM tbl_purchase_requisition p
       WHERE ${scope}`,
     [user.id]);
+  // Each branch is driven from the caller's own rows (their requests, grants or
+  // approver rows), so it never scans other tenants' PRs.
   const awaiting = await t.one(
-    `SELECT count(*)::int AS n FROM tbl_purchase_requisition p
-      WHERE (p.status = 'returned' AND p.raised_by = $1)
-         OR (p.status = 'in_review' AND EXISTS (
-              SELECT 1 FROM tbl_pr_review rv
-               WHERE rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
-                 AND EXISTS (SELECT 1 FROM (${prGrantRowsSql('$1', 'evaluate')}) g
-                              WHERE g.company_id = p.hospitality_company_id
-                                AND (g.hotel_id IS NULL OR g.hotel_id = p.hotel_id)
-                                AND (g.department_id IS NULL OR g.department_id = rv.department_id))))
-         OR (p.status = 'pending_approval' AND EXISTS (
-              SELECT 1 FROM tbl_approval_instances ai
-                JOIN tbl_approval_instance_steps st
-                  ON st.approval_instance_id = ai.id AND st.step_order = ai.current_step AND st.status = 'PENDING'
-                JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = st.id
-               WHERE ai.id = p.approval_instance_id AND ai.entity_type = 'PR' AND ai.entity_id = p.id
-                 AND ai.status = 'PENDING'
-                 AND asa.approver_user_id = $1 AND asa.status = 'PENDING' AND asa.removed_at IS NULL))`,
+    `SELECT count(*)::int AS n FROM (
+       SELECT p.id FROM tbl_purchase_requisition p
+        WHERE p.raised_by = $1 AND p.status = 'returned'
+       UNION
+       SELECT p.id
+         FROM (${prGrantRowsSql('$1', 'evaluate')}) g
+         JOIN tbl_purchase_requisition p
+           ON p.hospitality_company_id = g.company_id AND (g.hotel_id IS NULL OR g.hotel_id = p.hotel_id)
+         JOIN tbl_pr_review rv ON rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
+        WHERE p.status = 'in_review' AND (g.department_id IS NULL OR g.department_id = rv.department_id)
+       UNION
+       SELECT p.id
+         FROM tbl_approval_step_approvers asa
+         JOIN tbl_approval_instance_steps st ON st.id = asa.approval_instance_step_id
+         JOIN tbl_approval_instances ai
+           ON ai.id = st.approval_instance_id AND st.step_order = ai.current_step
+         JOIN tbl_purchase_requisition p ON p.id = ai.entity_id AND p.approval_instance_id = ai.id
+        WHERE asa.approver_user_id = $1 AND asa.status = 'PENDING' AND asa.removed_at IS NULL
+          AND st.status = 'PENDING' AND ai.entity_type = 'PR' AND ai.status = 'PENDING'
+          AND p.status = 'pending_approval'
+     ) w`,
     [user.id]);
   return {
     open: row.open,
@@ -644,7 +650,9 @@ export async function kpis(user, superAdmin = false, t = db) {
  * effective variant is `variantId`) and live RFQs containing the variant.
  * `readable` for PRs is the one list/point-read predicate; RFQ readability is
  * decided by the caller (it needs the rfq.read scope check). Titles are only
- * selected for readable rows — never leaked to others.
+ * selected for readable rows — never leaked to others. Drafts are excluded (an
+ * unsubmitted draft is private). tbl_rfq has no created_at: "timestamp" is naive UTC
+ * and is rewritten on edit, so RFQs report last_activity_at, not a creation time.
  */
 export async function duplicates(user, { companyId, variantId }, superAdmin = false, t = db) {
   const readable = superAdmin ? 'TRUE' : readableScopeSql(user.id, 'p', 3).clause;
@@ -656,7 +664,7 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
        LEFT JOIN tbl_department d ON d.id = p.department_id
       WHERE p.hospitality_company_id = $1
-        AND p.status <> 'rejected' AND p.status <> 'cancelled'
+        AND p.status <> 'rejected' AND p.status <> 'cancelled' AND p.status <> 'draft'
         AND p.created_at >= NOW() - INTERVAL '30 days'
         AND EXISTS (SELECT 1 FROM tbl_purchase_requisition_line l
                      WHERE l.pr_id = p.id AND l.status = 'active'
@@ -665,7 +673,7 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
       LIMIT 50`,
     [companyId, variantId, user.id]);
   const rfqs = await t.any(
-    `SELECT r.id, r.rfq_no AS number, r.title, r."timestamp" AS created_at, r.created_by,
+    `SELECT r.id, r.rfq_no AS number, r.title, (r."timestamp" AT TIME ZONE 'UTC') AS last_activity_at, r.created_by,
             r.hospitality_company_id, r.hotel_id, r.department_id, r.process_id,
             h.name AS hotel_name, d.title AS department_name
        FROM tbl_rfq r
@@ -673,9 +681,9 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
        LEFT JOIN tbl_department d ON d.id = r.department_id
       WHERE r.hospitality_company_id = $1
         AND r.status NOT IN (2, 5)
-        AND r."timestamp" >= NOW() - INTERVAL '30 days'
+        AND (r."timestamp" AT TIME ZONE 'UTC') >= NOW() - INTERVAL '30 days'
         AND EXISTS (SELECT 1 FROM tbl_rfq_products rp WHERE rp.rfq_id = r.id AND rp.product_variant_id = $2)
-      ORDER BY r."timestamp" DESC, r.id DESC
+      ORDER BY (r."timestamp" AT TIME ZONE 'UTC') DESC, r.id DESC
       LIMIT 50`,
     [companyId, variantId]);
   return { prs, rfqs };

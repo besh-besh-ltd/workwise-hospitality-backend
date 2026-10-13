@@ -149,3 +149,8 @@ export const REVIEWER_EXISTS_SQL = (p, rv) => `EXISTS (
      AND (_rx_urs.department_id IS NULL OR _rx_urs.department_id = ${rv}.department_id)
      AND _rx_urs.process_id IS NULL
      AND _rx_perm.resource::text = 'pr' AND _rx_perm.action::text = 'evaluate')`;
+
+/** The in_review label when departments have no evaluator. Single source for SQL and JS callers. */
+export const noReviewerLabel = (deptTitles) => `${NO_REVIEWER_LABEL} (${deptTitles.join(', ')})`;
+/** SQL form of noReviewerLabel; `titlesExpr` is a SQL text expression (already aggregated). */
+export const NO_REVIEWER_LABEL_SQL = (titlesExpr) => `'${NO_REVIEWER_LABEL} (' || ${titlesExpr} || ')'`;

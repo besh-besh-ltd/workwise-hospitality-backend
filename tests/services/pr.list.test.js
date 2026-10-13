@@ -163,7 +163,12 @@ describe("PR list — scope", () => {
         expect(sum).toBe(res.body.data.total);
       }
       const dup = await c.get(`/api/v1/pr/duplicates?hotel_id=${A1}&variant_id=${v.variant_id}`);
-      if (dup.status === 200) expect(dup.body.data.items.map((i) => i.id)).not.toContain(bPr.id);
+      if (c === nobodyC) {
+        expect(dup.status).toBe(403);
+      } else {
+        expect(dup.status).toBe(200);
+        expect(dup.body.data.items.map((i) => i.id)).not.toContain(bPr.id);
+      }
     }
     // ...and B's own user sees only B.
     expect(idsOf(await list(xcoC, "tab=all&q=scope-"))).toEqual([bPr.id]);
@@ -391,6 +396,9 @@ describe("PR duplicates", () => {
     const line = { product_variant_id: v.variant_id, quantity: "1", uom: "nos", estimated_unit_price: "10.00" };
     p1 = await createAs(req2C, await draftBody({ title: "dup-a1", lines: [line] }));
     p2 = await createAs(req2C, await draftBody({ title: "dup-a2", hotel_id: A2, lines: [line] }));
+    // Drafts are private; only submitted PRs are hinted.
+    await setStatus(p1.id, "in_review");
+    await setStatus(p2.id, "in_review");
   });
   const dups = (c, variantId = v.variant_id, hotelId = A1) =>
     c.get(`/api/v1/pr/duplicates?hotel_id=${hotelId}&variant_id=${variantId}`);
@@ -413,11 +421,43 @@ describe("PR duplicates", () => {
     await db.none(`UPDATE tbl_purchase_requisition SET created_at = NOW() WHERE id = $1`, [p2.id]);
     await setStatus(p2.id, "cancelled");
     expect((await dups(reqC)).body.data.count).toBe(1);
-    await setStatus(p2.id, "draft");
+    await setStatus(p2.id, "in_review");
     await db.none(`UPDATE tbl_purchase_requisition_line SET status = 'cancelled' WHERE pr_id = $1`, [p2.id]);
     expect((await dups(reqC)).body.data.count).toBe(1);
     await db.none(`UPDATE tbl_purchase_requisition_line SET status = 'active' WHERE pr_id = $1`, [p2.id]);
     expect((await dups(reqC)).body.data.count).toBe(2);
+  });
+
+  it("never discloses drafts (R11)", async () => {
+    const draft = await createAs(req2C, await draftBody({
+      title: "dup-draft", lines: [{ product_variant_id: v.variant_id, quantity: "1", uom: "nos", estimated_unit_price: "10.00" }] }));
+    for (const c of [reqC, req2C]) {
+      expect((await dups(c)).body.data.items.map((i) => i.id)).not.toContain(draft.id);
+    }
+    await setStatus(draft.id, "pending_approval");
+    expect((await dups(reqC)).body.data.items.map((i) => i.id)).toContain(draft.id);
+    await setStatus(draft.id, "draft");
+  });
+
+  it("RFQ window: 30 days on the naive-UTC timestamp, reported as last_activity_at", async () => {
+    const mk = async (interval) => {
+      const r = await makeRFQ(db, { createdBy: REQ, status: 1, is_published: 1, hospitality: A, hotel: A1 });
+      rfqIds.push(r.rfq_id);
+      await db.none(`INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant)
+                     VALUES ($1, '', '0', '', '', $2, 1)`, [r.rfq_id, v.variant_id]);
+      await db.none(`UPDATE tbl_rfq SET "timestamp" = (NOW() AT TIME ZONE 'UTC') - $2::interval WHERE id = $1`, [r.rfq_id, interval]);
+      return r.rfq_id;
+    };
+    const inside = await mk("29 days 23 hours");
+    const outside = await mk("30 days 1 hour");
+    const items = (await dups(reqC)).body.data.items.filter((i) => i.kind === "rfq");
+    expect(items.map((i) => i.id)).toContain(inside);
+    expect(items.map((i) => i.id)).not.toContain(outside);
+    const it1 = items.find((i) => i.id === inside);
+    expect(it1.created_at).toBeNull();
+    const ageH = (Date.now() - new Date(it1.last_activity_at).getTime()) / 3600000;
+    expect(ageH).toBeGreaterThan(29.9 * 24 - 1);
+    expect(ageH).toBeLessThan(30 * 24);
   });
 
   it("includes live RFQs with the variant (not closed/withdrawn), readable per rfq.read or authorship", async () => {
@@ -432,7 +472,9 @@ describe("PR duplicates", () => {
     }
     const res = await dups(reqC);
     const rfqs = res.body.data.items.filter((i) => i.kind === "rfq");
-    expect(rfqs.map((i) => i.id).sort()).toEqual([open.rfq_id, theirs.rfq_id].sort());
+    const got = rfqs.map((i) => i.id);
+    expect(got).toEqual(expect.arrayContaining([open.rfq_id, theirs.rfq_id]));
+    expect(got).not.toContain(closed.rfq_id);
     const byId = Object.fromEntries(rfqs.map((i) => [i.id, i]));
     expect(byId[open.rfq_id].readable).toBe(true);
     expect(byId[theirs.rfq_id].readable).toBe(false);
