@@ -83,6 +83,33 @@ export const resetActivitySchemaCache = () => {
   buyerColumnCache = { value: null, checkedAt: 0 };
 };
 
+/**
+ * Runs a read or write once more, in the old shape, if the column vanished.
+ *
+ * A yes is cached for the life of the process, so a schema rollback while
+ * this code keeps running (the down migration applied without reverting the
+ * deploy) would otherwise leave every list, facet and detail call failing with
+ * "column does not exist", and every captured event lost, until a restart.
+ * Postgres says exactly that with 42703; on it, and only after a positive
+ * detection, the cache is forgotten and the call is made again — this time the
+ * check re-reads the catalogue, answers no, and the old queries run.
+ */
+const UNDEFINED_COLUMN = '42703';
+
+async function withSchemaRetry(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err?.code !== UNDEFINED_COLUMN || buyerColumnCache.value !== true) throw err;
+    logger.warn(
+      { err: err.message },
+      'tbl_activity_events.buyer_company_id disappeared; reverting to pre-migration queries'
+    );
+    resetActivitySchemaCache();
+    return fn();
+  }
+}
+
 const INSERT_COLUMNS = `
          occurred_at, request_id, source, event_key, category, severity,
          actor_type, actor_user_id, actor_label,
@@ -100,67 +127,8 @@ const INSERT_VALUES = `
          $21`;
 
 export async function recordActivityEvent(event, txContext = null) {
-  const t = txContext || db;
   try {
-    const withBuyer = await hasBuyerCompanyColumn();
-    const companyWide = !event?.hospitalityCompanyId && Boolean(event?.buyerCompanyId);
-
-    if (!event?.hospitalityCompanyId && !(withBuyer && companyWide)) {
-      // Company is the scoping key; a row without one could never be shown to
-      // anybody, so writing it would only grow the table. Before the
-      // company-wide migration lands, a buyer-only event lands here too.
-      logger.warn({ eventKey: event?.eventKey }, 'Activity event dropped: no company scope');
-      return null;
-    }
-
-    const severity = SEVERITIES.has(event.severity) ? event.severity : 'routine';
-    const source = SOURCES.has(event.source) ? event.source : 'HTTP';
-
-    const params = [
-      event.occurredAt || null,
-      event.requestId || null,
-      source,
-      event.eventKey || null,
-      event.category || 'Other',
-      severity,
-      event.actorType || 'UNKNOWN',
-      event.actorUserId ?? null,
-      event.actorLabel || 'Someone',
-      event.hospitalityCompanyId ?? null,
-      event.hotelId ?? null,
-      event.departmentId ?? null,
-      event.entityType || null,
-      event.entityId ?? null,
-      event.entityLabel || null,
-      event.summary || 'Something happened',
-      JSON.stringify(event.metadata || {}),
-      event.httpMethod || null,
-      event.routePattern || null,
-      event.statusCode ?? null,
-      event.isReconstructed === true,
-    ];
-
-    // The buyer company is derived from the hospitality company whenever there
-    // is one — that row is the authority — and only taken from the caller for
-    // a company-wide event, where the caller resolved it from the entity or
-    // the actor's own account, never from the request.
-    const row = withBuyer
-      ? await t.one(
-          `INSERT INTO tbl_activity_events (${INSERT_COLUMNS}, buyer_company_id)
-           VALUES (${INSERT_VALUES},
-             COALESCE(
-               (SELECT buyer_company_id FROM tbl_hospitality_companies WHERE id = $10::integer),
-               $22::integer))
-           RETURNING id`,
-          [...params, event.buyerCompanyId ?? null]
-        )
-      : await t.one(
-          `INSERT INTO tbl_activity_events (${INSERT_COLUMNS})
-           VALUES (${INSERT_VALUES})
-           RETURNING id`,
-          params
-        );
-    return row.id;
+    return await withSchemaRetry(() => insertActivityEvent(event, txContext));
   } catch (err) {
     logger.error(
       { err: err.message, eventKey: event?.eventKey },
@@ -168,6 +136,69 @@ export async function recordActivityEvent(event, txContext = null) {
     );
     return null;
   }
+}
+
+async function insertActivityEvent(event, txContext) {
+  const t = txContext || db;
+  const withBuyer = await hasBuyerCompanyColumn();
+  const companyWide = !event?.hospitalityCompanyId && Boolean(event?.buyerCompanyId);
+
+  if (!event?.hospitalityCompanyId && !(withBuyer && companyWide)) {
+    // Company is the scoping key; a row without one could never be shown to
+    // anybody, so writing it would only grow the table. Before the
+    // company-wide migration lands, a buyer-only event lands here too.
+    logger.warn({ eventKey: event?.eventKey }, 'Activity event dropped: no company scope');
+    return null;
+  }
+
+  const severity = SEVERITIES.has(event.severity) ? event.severity : 'routine';
+  const source = SOURCES.has(event.source) ? event.source : 'HTTP';
+
+  const params = [
+    event.occurredAt || null,
+    event.requestId || null,
+    source,
+    event.eventKey || null,
+    event.category || 'Other',
+    severity,
+    event.actorType || 'UNKNOWN',
+    event.actorUserId ?? null,
+    event.actorLabel || 'Someone',
+    event.hospitalityCompanyId ?? null,
+    event.hotelId ?? null,
+    event.departmentId ?? null,
+    event.entityType || null,
+    event.entityId ?? null,
+    event.entityLabel || null,
+    event.summary || 'Something happened',
+    JSON.stringify(event.metadata || {}),
+    event.httpMethod || null,
+    event.routePattern || null,
+    event.statusCode ?? null,
+    event.isReconstructed === true,
+  ];
+
+  // The buyer company is derived from the hospitality company whenever there
+  // is one — that row is the authority — and only taken from the caller for
+  // a company-wide event, where the caller resolved it from the entity or
+  // the actor's own account, never from the request.
+  const row = withBuyer
+    ? await t.one(
+        `INSERT INTO tbl_activity_events (${INSERT_COLUMNS}, buyer_company_id)
+         VALUES (${INSERT_VALUES},
+           COALESCE(
+             (SELECT buyer_company_id FROM tbl_hospitality_companies WHERE id = $10::integer),
+             $22::integer))
+         RETURNING id`,
+        [...params, event.buyerCompanyId ?? null]
+      )
+    : await t.one(
+        `INSERT INTO tbl_activity_events (${INSERT_COLUMNS})
+         VALUES (${INSERT_VALUES})
+         RETURNING id`,
+        params
+      );
+  return row.id;
 }
 
 /**
@@ -407,7 +438,7 @@ async function scopeWhere(companyIds, buyerCompanyId, alias = '') {
  * session before this is called and is the only thing standing between one
  * client's admin and another client's activity.
  */
-export async function listActivity({
+async function listActivityOnce({
   companyIds,
   buyerCompanyId = null,
   from = null,
@@ -472,7 +503,7 @@ export async function listActivity({
  * Built from what this company actually has rather than from the full
  * catalogue, so an admin is never offered a filter that returns nothing.
  */
-export async function activityFacets(companyIds, buyerCompanyId = null) {
+async function activityFacetsOnce(companyIds, buyerCompanyId = null) {
   if (!companyIds?.length) {
     return { categories: [], actors: [], entityTypes: [], units: [], severities: [] };
   }
@@ -539,7 +570,7 @@ export async function activityFacets(companyIds, buyerCompanyId = null) {
  * check. The event is re-read under the caller's company scope first, so an
  * id from another company returns nothing rather than leaking its diff.
  */
-export async function activityChanges(eventId, companyIds, buyerCompanyId = null) {
+async function activityChangesOnce(eventId, companyIds, buyerCompanyId = null) {
   if (!companyIds?.length) return null;
 
   const scope = await scopeWhere(companyIds, buyerCompanyId);
@@ -580,3 +611,11 @@ export async function activityChanges(eventId, companyIds, buyerCompanyId = null
 
   return { event, changes: changes.slice(0, CHANGE_LIMIT), truncated };
 }
+
+// Each read is retried once in the pre-migration shape if the company-wide
+// column disappears under a running process (see withSchemaRetry).
+export const listActivity = (args) => withSchemaRetry(() => listActivityOnce(args));
+export const activityFacets = (companyIds, buyerCompanyId = null) =>
+  withSchemaRetry(() => activityFacetsOnce(companyIds, buyerCompanyId));
+export const activityChanges = (eventId, companyIds, buyerCompanyId = null) =>
+  withSchemaRetry(() => activityChangesOnce(eventId, companyIds, buyerCompanyId));

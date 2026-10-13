@@ -97,6 +97,37 @@ describe("before the company-wide migration is applied", () => {
     expect(res.status).toBe(201);
   });
 
+  it("recovers on its own when the column disappears after it was detected", async () => {
+    // A schema rollback while the new code keeps running: the process has
+    // already cached "the column exists". Without a self-heal every list,
+    // facet and detail call would throw until somebody restarted it, and every
+    // captured event would be lost. The rollback is rehearsed the way the down
+    // migration does it — trigger off, column gone — but the cache is NOT
+    // reset, which is exactly what a running process would see.
+    await restoreColumn();
+    expect(await hasBuyerCompanyColumn()).toBe(true);
+    await db.none(`ALTER TABLE tbl_activity_events DISABLE TRIGGER tbl_activity_events_fill_buyer`);
+    await db.none(`ALTER TABLE tbl_activity_events RENAME COLUMN buyer_company_id TO buyer_company_id_premigration`);
+
+    const client = await httpClient(ADMIN);
+    const list = await client.get("/api/v1/activity");
+    expect(list.status).toBe(200);
+    const facets = await client.get("/api/v1/activity/facets");
+    expect(facets.status).toBe(200);
+
+    const unit = await recordActivityEvent({
+      eventKey: "premig_probe", category: "System", actorLabel: "Probe",
+      hospitalityCompanyId: HOSPITALITY_A, summary: "unit event after a rollback",
+    });
+    expect(unit).not.toBeNull();
+    expect(await hasBuyerCompanyColumn()).toBe(false);
+
+    const row = (await client.get("/api/v1/activity")).body.data.rows.find((r) => r.id === unit);
+    expect(row).toBeDefined();
+    const detail = await client.get(`/api/v1/activity/${unit}/changes`);
+    expect(detail.status).toBe(200);
+  });
+
   it("starts recording company-wide events as soon as the migration lands", async () => {
     await restoreColumn();
     try {

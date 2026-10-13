@@ -132,4 +132,12 @@ open Activity → it shows "… created the approval workflow …" and "… dele
   `tbl_activity_events_company_wide_parked`, not deleted; re-applying the up
   migration restores them. The four audit triggers it added are dropped (none
   existed before it on production).
+  - **Order:** revert the code first, then run the down. If the down has to
+    run while this code is still deployed, it heals itself: a running process
+    caches "the column exists", and on the first `column does not exist`
+    (Postgres 42703) from a feed read or an event write it forgets that,
+    re-checks the catalogue and retries once with the pre-migration query. The
+    Activity page keeps working and events keep landing (unit-scoped ones;
+    company-wide ones are dropped again, as before the migration). A restart
+    gives the same result immediately and is the belt-and-braces option.
 - Backfill rows: `DELETE FROM tbl_activity_events WHERE is_reconstructed AND metadata->>'source_table' = 'tbl_audit_row_changes';`
