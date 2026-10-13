@@ -29,6 +29,9 @@ PrRoutes.get( '/duplicates',         passportSignIn, acl([2, 8]), prController.d
 // Routing preview of an unsaved PR (static path: before /:id).
 PrRoutes.post('/routing-preview',    passportSignIn, acl([2, 8]), prController.routingPreview);
 
+// Technical reviewer's queue (static path: before /:id).
+PrRoutes.get( '/review-queue',       passportSignIn, acl([2, 8]), prController.reviewQueue);
+
 // Company admin: category → reviewing-department map. Gated by the company
 // admin capability (requireCompanyAdmin — admits legacy user_type 7 as well as
 // a buyer holding company.admin, so no acl([2, 8]) here); the administered
@@ -50,6 +53,16 @@ PrRoutes.post('/:id(\\d+)/submit',    passportSignIn, acl([2, 8]), prController.
 PrRoutes.post('/:id(\\d+)/withdraw',  passportSignIn, acl([2, 8]), prController.withdraw);
 PrRoutes.post('/:id(\\d+)/send-back', passportSignIn, acl([2, 8]), prController.sendBack);
 PrRoutes.get( '/:id(\\d+)/routing-preview', passportSignIn, acl([2, 8]), prController.savedRoutingPreview);
+
+// Technical review: reviewer line edits (own open review's lines), files
+// (requester on draft/returned, reviewer on own lines), review outcome.
+PrRoutes.put(   '/:id(\\d+)/lines/:lineId(\\d+)/specification',                passportSignIn, acl([2, 8]), prController.editLineSpecification);
+PrRoutes.post(  '/:id(\\d+)/lines/:lineId(\\d+)/clauses',                      passportSignIn, acl([2, 8]), prController.addLineClause);
+PrRoutes.delete('/:id(\\d+)/lines/:lineId(\\d+)/clauses/:clauseId(\\d+)',      passportSignIn, acl([2, 8]), prController.removeLineClause);
+PrRoutes.post(  '/:id(\\d+)/attachments',                                      passportSignIn, acl([2, 8]), prController.addAttachment);
+PrRoutes.delete('/:id(\\d+)/attachments/:attId(\\d+)',                         passportSignIn, acl([2, 8]), prController.removeAttachment);
+PrRoutes.post(  '/:id(\\d+)/reviews/:reviewId(\\d+)/complete',                 passportSignIn, acl([2, 8]), prController.completeReview);
+PrRoutes.post(  '/:id(\\d+)/reviews/:reviewId(\\d+)/send-back',                passportSignIn, acl([2, 8]), prController.sendBackReview);
 
 // Fallback for any /pr path no route above matched — a non-numeric id, an
 // unknown sub-path. It is a SEPARATE router mounted after PrRoutes

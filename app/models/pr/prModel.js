@@ -14,6 +14,7 @@ import {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
   POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
+  IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL,
 } from '../../services/pr/prConstants.js';
 import { readableScopeSql } from '../../services/pr/prAccess.js';
 
@@ -299,6 +300,150 @@ export async function approvalPosition(t, { prId, instanceId, userId, lock = fal
     [instanceId, prId, userId]);
 }
 
+// ---------------------------------------------------------------------------
+// Technical review (spec §6) — reviewer edits, review outcome, the queue.
+// prWorkflow decides who may act; every write here runs inside its
+// transaction, under the PR row lock (lockPr).
+// ---------------------------------------------------------------------------
+
+/**
+ * The OPEN reviews `userId` may act on right now: pending reviews of the PR's
+ * current revision while it is in_review, where the user passes the eligible-
+ * reviewer predicate (IS_ELIGIBLE_REVIEWER_SQL) — resolved at call time, never
+ * cached. Ordered by department title. Each carries its line ids.
+ * @returns {Promise<Array<{id, department_id, department_title, line_ids: number[]}>>}
+ */
+export async function eligibleReviews(t, prId, userId) {
+  const rows = await t.any(
+    `SELECT rv.id, rv.department_id, d.title AS department_title,
+            COALESCE(array_agg(rl.pr_line_id ORDER BY rl.pr_line_id) FILTER (WHERE rl.pr_line_id IS NOT NULL), '{}')
+              AS line_ids
+       FROM tbl_purchase_requisition p
+       JOIN tbl_pr_review rv ON rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
+       JOIN tbl_department d ON d.id = rv.department_id
+       LEFT JOIN tbl_pr_review_line rl ON rl.review_id = rv.id
+      WHERE p.id = $1 AND p.status = 'in_review'
+        AND ${IS_ELIGIBLE_REVIEWER_SQL('$2', 'p', 'rv')}
+      GROUP BY rv.id, rv.department_id, d.title
+      ORDER BY d.title, rv.id`,
+    [prId, userId]);
+  return rows.map((r) => ({
+    id: Number(r.id),
+    department_id: Number(r.department_id),
+    department_title: r.department_title,
+    line_ids: (r.line_ids || []).map(Number),
+  }));
+}
+
+/** One review of this PR (any revision, any status) with its department title, or null. */
+export async function reviewOfPr(t, prId, reviewId) {
+  return t.oneOrNone(
+    `SELECT rv.id, rv.pr_id, rv.revision, rv.department_id, d.title AS department_title, rv.status
+       FROM tbl_pr_review rv
+       JOIN tbl_department d ON d.id = rv.department_id
+      WHERE rv.id = $1 AND rv.pr_id = $2`,
+    [reviewId, prId]);
+}
+
+/**
+ * Close a PENDING review as completed / sent_back by `actedBy`. Returns the
+ * row, or null when it was no longer pending (the caller re-checked under the
+ * PR lock, so null means a bug, not a race).
+ */
+export async function closeReview(t, reviewId, { status, actedBy, note, selfReviewed }) {
+  return t.oneOrNone(
+    `UPDATE tbl_pr_review
+        SET status = $2, acted_by = $3, acted_at = NOW(), note = $4, self_reviewed = $5
+      WHERE id = $1 AND status = 'pending'
+     RETURNING id, status, acted_by, acted_at, note, self_reviewed`,
+    [reviewId, status, actedBy, note, selfReviewed]);
+}
+
+/** How many reviews of `revision` are still pending. */
+export async function pendingReviewCount(t, prId, revision) {
+  const row = await t.one(
+    `SELECT count(*)::int AS n FROM tbl_pr_review WHERE pr_id = $1 AND revision = $2 AND status = 'pending'`,
+    [prId, revision]);
+  return row.n;
+}
+
+/** A line of this PR, or null. */
+export async function lineOfPr(t, prId, lineId) {
+  return t.oneOrNone(
+    `SELECT id, line_no, specification, status FROM tbl_purchase_requisition_line WHERE id = $1 AND pr_id = $2`,
+    [lineId, prId]);
+}
+
+export async function setLineSpecification(t, lineId, specification) {
+  await t.none(
+    `UPDATE tbl_purchase_requisition_line SET specification = $2, updated_at = NOW() WHERE id = $1`,
+    [lineId, specification]);
+}
+
+const CLAUSE_COLS = 'id, pr_line_id, clause_text, clause_type, weightage, added_by, created_at';
+
+export async function insertClause(t, { lineId, clauseText, clauseType, weightage, addedBy }) {
+  return t.one(
+    `INSERT INTO tbl_pr_line_clause (pr_line_id, clause_text, clause_type, weightage, added_by)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${CLAUSE_COLS}`,
+    [lineId, clauseText, clauseType, weightage, addedBy]);
+}
+
+/** A clause of this line, or null. */
+export async function clauseOfLine(t, lineId, clauseId) {
+  return t.oneOrNone(`SELECT ${CLAUSE_COLS} FROM tbl_pr_line_clause WHERE id = $1 AND pr_line_id = $2`, [clauseId, lineId]);
+}
+
+export async function deleteClause(t, clauseId) {
+  await t.none(`DELETE FROM tbl_pr_line_clause WHERE id = $1`, [clauseId]);
+}
+
+const ATTACHMENT_COLS = 'id, pr_id, pr_line_id, kind, file_url, file_name, uploaded_by, created_at';
+
+export async function insertAttachment(t, { prId, lineId, kind, fileUrl, fileName, uploadedBy }) {
+  return t.one(
+    `INSERT INTO tbl_pr_attachment (pr_id, pr_line_id, kind, file_url, file_name, uploaded_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING ${ATTACHMENT_COLS}`,
+    [prId, lineId, kind, fileUrl, fileName, uploadedBy]);
+}
+
+/** An attachment of this PR (header or line), or null. */
+export async function attachmentOfPr(t, prId, attId) {
+  return t.oneOrNone(`SELECT ${ATTACHMENT_COLS} FROM tbl_pr_attachment WHERE id = $1 AND pr_id = $2`, [attId, prId]);
+}
+
+export async function deleteAttachment(t, attId) {
+  await t.none(`DELETE FROM tbl_pr_attachment WHERE id = $1`, [attId]);
+}
+
+/**
+ * GET /pr/review-queue: every OPEN review (pending, current revision, PR
+ * in_review) the user may act on right now (IS_ELIGIBLE_REVIEWER_SQL), oldest
+ * submission first. Driven from the companies the user holds pr.evaluate in,
+ * so other tenants' reviews are never scanned.
+ */
+export async function reviewQueue(userId, t = db) {
+  return t.any(
+    `SELECT rv.id AS review_id, p.id AS pr_id, p.pr_number, p.title, h.name AS hotel_name,
+            d.title AS department_title, ru.name AS requester_name,
+            (SELECT count(*)::int FROM tbl_pr_review_line rl WHERE rl.review_id = rv.id) AS line_count,
+            p.submitted_at,
+            GREATEST(0, floor(EXTRACT(EPOCH FROM (NOW() - p.submitted_at)) / 86400))::int AS age_days
+       FROM tbl_pr_review rv
+       JOIN tbl_purchase_requisition p
+         ON p.id = rv.pr_id AND p.revision = rv.revision AND p.status = 'in_review'
+       JOIN tbl_department d ON d.id = rv.department_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+       LEFT JOIN tbl_users ru ON ru.id = p.raised_by
+      WHERE rv.status = 'pending'
+        AND p.hospitality_company_id IN (SELECT g.company_id FROM (${prGrantRowsSql('$1', 'evaluate')}) g)
+        AND ${IS_ELIGIBLE_REVIEWER_SQL('$1', 'p', 'rv')}
+      ORDER BY p.submitted_at, rv.id`,
+    [userId]);
+}
+
 export async function getPrRow(prId, t = db) {
   return t.oneOrNone(`SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = $1`, [prId]);
 }
@@ -422,12 +567,19 @@ export async function getDetail(prId, t = db) {
       [prId]
     );
 
+    // eligible_reviewers: who may act on an OPEN review (pending, current
+    // revision, PR in_review) right now — the predicate every reviewer action
+    // is decided by; [] for a closed review (its acted_by_name says who acted).
     const reviews = await c.any(
       `SELECT rv.id, rv.revision, rv.department_id, d.title AS department_title, rv.status,
               rv.acted_by, u.name AS acted_by_name, rv.acted_at, rv.note, rv.self_reviewed, rv.created_at,
               COALESCE((SELECT json_agg(rl.pr_line_id ORDER BY rl.pr_line_id)
-                          FROM tbl_pr_review_line rl WHERE rl.review_id = rv.id), '[]'::json) AS line_ids
+                          FROM tbl_pr_review_line rl WHERE rl.review_id = rv.id), '[]'::json) AS line_ids,
+              (p.status = 'in_review' AND rv.revision = p.revision AND rv.status = 'pending') AS is_open,
+              CASE WHEN p.status = 'in_review' AND rv.revision = p.revision AND rv.status = 'pending'
+                   THEN ${REVIEWER_NAMES_SQL('p', 'rv')} ELSE '[]'::json END AS eligible_reviewers
          FROM tbl_pr_review rv
+         JOIN tbl_purchase_requisition p ON p.id = rv.pr_id
          LEFT JOIN tbl_department d ON d.id = rv.department_id
          LEFT JOIN tbl_users u ON u.id = rv.acted_by
         WHERE rv.pr_id = $1
@@ -475,7 +627,11 @@ export async function getDetail(prId, t = db) {
         links: linksBy.get(l.id) || [],
       })),
       attachments: attachments.filter((a) => a.pr_line_id == null),
-      reviews,
+      // no_eligible_reviewer: an open review nobody may act on — the detail's
+      // "No eligible reviewer — contact your admin" (same predicate as now_with).
+      reviews: reviews.map(({ is_open: open, ...rv }) => ({
+        ...rv, no_eligible_reviewer: open === true && rv.eligible_reviewers.length === 0,
+      })),
       events: events.map((e) => ({ ...e, id: Number(e.id) })),
       comments,
     };
@@ -918,6 +1074,8 @@ export default {
   istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
   activeLines, setLineCategories, markSubmitted, markApproved, insertReview, supersedePendingReviews,
   instanceStepSummary, approvalPosition,
+  eligibleReviews, reviewOfPr, closeReview, pendingReviewCount, lineOfPr, setLineSpecification,
+  insertClause, clauseOfLine, deleteClause, insertAttachment, attachmentOfPr, deleteAttachment, reviewQueue,
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
 };

@@ -35,7 +35,27 @@ export const TOTAL_MAX_PAISE = 999999999999999999n;      // Σ must fit estimate
 export const MAX_LEN = Object.freeze({
   title: 200, justification: 4000, delivery_location: 1000, free_text_name: 300, uom: 50,
   specification: 20000, suggested_vendor_note: 2000, reason: 2000, note: 2000,
+  // clause_text = the RFQ add-clause limit (rfqValidation.addClause), so a
+  // converted clause always fits; file_name = tbl_pr_attachment VARCHAR(300).
+  clause_text: 2000, file_name: 300, file_url: 2000,
 });
+
+// ---------------------------------------------------------------------------
+// Technical review: clauses and attachments (spec §6.3)
+// ---------------------------------------------------------------------------
+/**
+ * Clause types — exactly the set POST /rfq/add-clause accepts
+ * (rfqValidation.addClause: 'clause' | 'sampling', default 'clause'), so RFQ
+ * conversion copies a PR clause into tbl_rfq_product_tech_evaluation_clauses
+ * unchanged. (tbl_pr_line_clause's column DEFAULT 'mandatory' is never used:
+ * every insert names its type.)
+ */
+export const CLAUSE_TYPES = Object.freeze(['clause', 'sampling']);
+export const DEFAULT_CLAUSE_TYPE = 'clause';
+/** Weightage: a whole number 0..100 or null — the RFQ clause column is INTEGER. */
+export const MAX_WEIGHTAGE = 100;
+/** tbl_pr_attachment.kind CHECK. */
+export const ATTACHMENT_KINDS = Object.freeze(['spec', 'datasheet', 'qap', 'other']);
 
 const PLACEHOLDER_RE = /^\$\d+$/;
 const assertPlaceholder = (fn, p) => {
@@ -185,6 +205,29 @@ const reviewerMatchSql = (company, hotel, department) => holderMatchSql('evaluat
  */
 export const REVIEWER_EXISTS_SQL = (p, rv) =>
   `EXISTS (SELECT 1 ${reviewerMatchSql(`${p}.hospitality_company_id`, `${p}.hotel_id`, `${rv}.department_id`)})`;
+
+/**
+ * Is the user bound at `userParam` an eligible reviewer for PR `p`'s review
+ * `rv` right now? The same predicate as REVIEWER_EXISTS_SQL, narrowed to one
+ * user — what every reviewer ACTION is decided by (at action time, never from
+ * a list cached at submit), so "No eligible reviewer" on the detail and a 403
+ * on the action can never disagree.
+ */
+export const IS_ELIGIBLE_REVIEWER_SQL = (userParam, p, rv) => {
+  assertPlaceholder('IS_ELIGIBLE_REVIEWER_SQL', userParam);
+  return `EXISTS (SELECT 1 ${reviewerMatchSql(`${p}.hospitality_company_id`, `${p}.hotel_id`, `${rv}.department_id`)}
+     AND _rx_u.id = ${userParam})`;
+};
+
+/**
+ * The names of every eligible reviewer for PR `p`'s review `rv`, as a JSON
+ * array ordered by name ('[]' when there is none). Same predicate as above.
+ */
+export const REVIEWER_NAMES_SQL = (p, rv) => `COALESCE((
+  SELECT json_agg(_rn.name ORDER BY _rn.name, _rn.id)
+    FROM (SELECT DISTINCT _rx_u.id, _rx_u.name
+            ${reviewerMatchSql(`${p}.hospitality_company_id`, `${p}.hotel_id`, `${rv}.department_id`)}) _rn
+), '[]'::json)`;
 
 /**
  * Every eligible reviewer for (company, hotel, department) — `{id, name}` rows

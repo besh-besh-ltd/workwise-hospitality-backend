@@ -13,6 +13,9 @@
 //
 //   guardCatalogLines
 //       All of the above for a PR's lines, as one refusal per severity.
+//   isOwnUploadUrl
+//       Is a file URL one our upload endpoint produced (an object in our S3
+//       bucket)? PR attachments accept nothing else (spec §12).
 //
 // Used at save (create/update), at submit, and again at map / convert by later
 // tasks: the catalog can change between draft and use.
@@ -20,7 +23,7 @@
 import db from '../../config/dbConn.js';
 import { contractedVariantPredicateSql } from '../../models/mr/mrModel.js';
 import { activeCategoryIds } from '../../models/pr/prModel.js';
-import { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL } from './prConstants.js';
+import { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, MAX_LEN } from './prConstants.js';
 import { PR_ERR, prError } from './prErrors.js';
 
 export { USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL };
@@ -142,6 +145,49 @@ export async function guardCatalogLines(t, cell, lines) {
   return lines.map((l) => (l.line_kind === 'catalog' ? { ...l, category_id: variants.get(l.product_variant_id).category_id } : l));
 }
 
+/**
+ * Is `url` an object URL in OUR upload bucket — what the platform's upload
+ * endpoint (POST /users/upload-file, multer-s3 into AWS_S3_BUCKET) hands the
+ * FE as `file_path`? The platform stores full URLs, never bare keys, so a bare
+ * key is refused too.
+ *
+ * Accepted, over https only, for bucket B and region R (AWS_S3_BUCKET /
+ * AWS_REGION unless overridden):
+ *   virtual-hosted  https://B.s3.R.amazonaws.com/<key>   (what multer-s3 returns)
+ *                   https://B.s3.amazonaws.com/<key>     (legacy global form)
+ *   path-style      https://s3.R.amazonaws.com/B/<key>
+ *                   https://s3.amazonaws.com/B/<key>
+ * The host must match EXACTLY (so `B.s3.amazonaws.com.evil.com` fails), the
+ * key must be non-empty, and a URL carrying credentials, a port, a query (a
+ * presigned, expiring URL) or a fragment is refused. Paths are compared after
+ * WHATWG normalisation, so `/B/../other/x` (path-style) cannot leave the
+ * bucket; inside a virtual-hosted URL every path is in our bucket anyway.
+ * No bucket configured → nothing is ours.
+ */
+export function isOwnUploadUrl(url, { bucket = process.env.AWS_S3_BUCKET, region = process.env.AWS_REGION } = {}) {
+  if (typeof url !== 'string' || !url || url.length > MAX_LEN.file_url) return false;
+  const b = String(bucket ?? '').trim().toLowerCase();
+  const r = String(region ?? '').trim().toLowerCase();
+  if (!b) return false;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port || u.search || u.hash) return false;
+  const host = u.hostname.toLowerCase();
+  const virtualHosts = [`${b}.s3.amazonaws.com`, ...(r ? [`${b}.s3.${r}.amazonaws.com`] : [])];
+  const pathStyleHosts = ['s3.amazonaws.com', ...(r ? [`s3.${r}.amazonaws.com`] : [])];
+  if (virtualHosts.includes(host)) return u.pathname.length > 1;
+  if (pathStyleHosts.includes(host)) {
+    const prefix = `/${b}/`;
+    return u.pathname.startsWith(prefix) && u.pathname.length > prefix.length;
+  }
+  return false;
+}
+
 export default {
   USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, describeVariants, isUsableVariant, variantCategoryId, contractCoverage, guardCatalogLines,
+  isOwnUploadUrl,
 };

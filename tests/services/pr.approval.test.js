@@ -19,6 +19,7 @@
 // outside the review block, so submit goes straight to approval.
 
 import { httpClient } from "../helpers/http.js";
+import { grantRoleScope } from "../helpers/roleScope.js";
 import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import {
@@ -222,7 +223,7 @@ describe("PR submit → approval chain", () => {
     expect(asReq.capabilities.approval).toMatchObject({ instance_id: inst.id, can_approve: false, can_send_back: false });
     const asAp1 = (await detail(pr.id, ap1C)).body.data;
     expect(asAp1.capabilities.approval).toEqual({
-      instance_id: inst.id, current_step_id: expect.any(Number), can_approve: true, can_send_back: true,
+      instance_id: inst.id, current_step_id: expect.any(Number), can_approve: true, can_reject: true, can_send_back: true,
     });
     expect(asAp1.approval).toMatchObject({ id: inst.id, status: "PENDING", can_user_approve: true });
     expect(asAp1.pr.now_with).toBe(`Approval step 1: ${names.get(AP1)}`);
@@ -519,6 +520,43 @@ describe("PR decision gate (approve / reject / send back)", () => {
     expect(await rightsOf(pr.id, ap2C)).toMatchObject({ can_approve: true, can_send_back: true });
     expect((await sendBack(pr.id, "Need a second quote", ap2C)).status).toBe(200);
     expect((await prRow(pr.id)).status).toBe("returned");
+  });
+
+  it("R17: can_reject follows the actor gate (= can_send_back); a ROLE source that lost pr.approve leaves Reject but not Approve", async () => {
+    await dropPrPolicies();
+    const role = await db.one(
+      `INSERT INTO tbl_roles (title, description, created_by) VALUES ($1, 'PR approval test role', $2) RETURNING id`,
+      [`PR approval reject-only ${Date.now()}`, IDS.users.superAdmin]);
+    roleIds.push(Number(role.id));
+    await db.none(
+      `INSERT INTO tbl_role_permissions (role_id, permission_id)
+       SELECT $1, id FROM tbl_permissions WHERE resource::text = 'pr' AND action::text IN ('read', 'approve')`,
+      [role.id]);
+    await makePrPolicy({ steps: [{ source: "ROLE", id: Number(role.id) }] });
+    const scope = await grantRoleScope(db, { userId: AP1, roleId: Number(role.id), companyId: A, hotelId: A1, departmentId: ENG });
+    try {
+      const pr = await submitted("1000.00");
+      expect(await rightsOf(pr.id, ap1C)).toMatchObject({ can_approve: true, can_reject: true, can_send_back: true });
+      expect(await rightsOf(pr.id, reqC)).toMatchObject({ can_approve: false, can_reject: false, can_send_back: false });
+
+      // The step's source role stops being able to approve PRs.
+      await db.none(
+        `DELETE FROM tbl_role_permissions
+          WHERE role_id = $1 AND permission_id IN (
+            SELECT id FROM tbl_permissions WHERE resource::text = 'pr' AND action::text = 'approve')`,
+        [role.id]);
+      const rights = await rightsOf(pr.id, ap1C);
+      expect(rights).toMatchObject({ can_approve: false, can_reject: true, can_send_back: true });
+      expect(rights.can_reject).toBe(rights.can_send_back);
+      // The engine agrees: APPROVE is refused, REJECT is taken.
+      expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(400);
+      expect((await prRow(pr.id)).status).toBe("pending_approval");
+      expect((await act(ap1C, pr.instanceId, "REJECT", "Out of budget")).status).toBe(200);
+      expect((await prRow(pr.id)).status).toBe("rejected");
+    } finally {
+      // The custom role's scope would otherwise give AP1 pr.read for the rest of the suite.
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [scope]);
+    }
   });
 
   it("R14: the generic approval cancel refuses a PR instance; the PR and its instance are untouched", async () => {

@@ -254,7 +254,7 @@ function headerDiff(before, after) {
   return changed;
 }
 
-/** Booleans the FE renders actions from. Later tasks add review/convert keys. */
+/** Booleans the FE renders actions from. Later tasks add convert keys. */
 async function capabilitiesFor(user, pr) {
   const requester = isRequester(user, pr);
   const mayCreate = requester && (await hasPerm(user.id, 'pr.create', cellOf(pr)));
@@ -269,6 +269,10 @@ async function capabilitiesFor(user, pr) {
     // Approve / Reject / Send back: null unless the PR is pending_approval;
     // computed by the engine's own decision gate (prWorkflow.decisionRights).
     approval: await prWorkflow.decisionRights(pr, user),
+    // Technical review: {review_id, can_edit_lines} for an eligible reviewer of
+    // an open review, else null — the gate every reviewer endpoint applies
+    // (prWorkflow.reviewRights / prModel.eligibleReviews).
+    review: await prWorkflow.reviewRights(pr, user),
   };
 }
 
@@ -414,6 +418,122 @@ export async function sendBack(req, res) {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
     await prWorkflow.approverSendBack(id, req.user, req.body?.note);
+    return ok(res, await detailPayload(req.user, id), 'Sent back to the requester');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Technical review (Task 7): the reviewer's queue, line edits, files, and the
+// review outcome. Who may act is decided in prWorkflow at action time.
+// ---------------------------------------------------------------------------
+
+/** GET /v1/pr/review-queue — the open reviews the caller may act on now, oldest first. */
+export async function reviewQueue(req, res) {
+  try {
+    const rows = await prModel.reviewQueue(req.user.id);
+    const items = rows.map((r) => ({
+      review_id: Number(r.review_id),
+      pr_id: Number(r.pr_id),
+      pr_number: r.pr_number,
+      title: r.title,
+      hotel_name: r.hotel_name,
+      department_title: r.department_title,
+      requester_name: r.requester_name,
+      line_count: r.line_count,
+      submitted_at: r.submitted_at,
+      age_days: r.age_days,
+    }));
+    return ok(res, { count: items.length, items });
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** PUT /v1/pr/:id/lines/:lineId/specification {specification} — a reviewer of the line's open review. */
+export async function editLineSpecification(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.editSpecification(id, posInt(req.params.lineId), req.user, req.body);
+    return ok(res, out, 'Specification updated');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/lines/:lineId/clauses {clause_text, clause_type?, weightage?} — a reviewer of the line. */
+export async function addLineClause(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.addClause(id, posInt(req.params.lineId), req.user, req.body);
+    return ok(res, out, 'Clause added');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** DELETE /v1/pr/:id/lines/:lineId/clauses/:clauseId — a reviewer of the line. */
+export async function removeLineClause(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.removeClause(id, posInt(req.params.lineId), posInt(req.params.clauseId), req.user);
+    return ok(res, out, 'Clause removed');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/attachments {pr_line_id|null, kind, file_url, file_name} — requester (draft/returned) or reviewer (own lines). */
+export async function addAttachment(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.addAttachment(id, req.user, req.body);
+    return ok(res, out, 'File attached');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** DELETE /v1/pr/:id/attachments/:attId — same rules; in review only the uploader or the requester. */
+export async function removeAttachment(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.removeAttachment(id, posInt(req.params.attId), req.user);
+    return ok(res, out, 'File removed');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/**
+ * POST /v1/pr/:id/reviews/:reviewId/complete {note?} — an eligible reviewer.
+ * The last open review starts the approval chain in the same transaction; a
+ * broken chain answers 422 with its code and the review stays pending.
+ */
+export async function completeReview(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const out = await prWorkflow.completeReview(id, posInt(req.params.reviewId), req.user, req.body);
+    const message = out.status === 'pending_approval' ? 'Review completed — sent for approval' : 'Review completed';
+    return ok(res, await detailPayload(req.user, id), message);
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/** POST /v1/pr/:id/reviews/:reviewId/send-back {note} — an eligible reviewer; in_review → returned. */
+export async function sendBackReview(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    await prWorkflow.reviewSendBack(id, posInt(req.params.reviewId), req.user, req.body?.note);
     return ok(res, await detailPayload(req.user, id), 'Sent back to the requester');
   } catch (err) {
     return sendPrError(res, err, logger);
