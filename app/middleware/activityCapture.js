@@ -9,7 +9,7 @@ import {
   resolveBuyerScope,
   companiesVisibleTo,
 } from '../models/activityModel.js';
-import { emitToCompany } from '../util/socket.js';
+import { emitToCompany, emitToCompanies } from '../util/socket.js';
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -348,9 +348,9 @@ const captureEvent = async (req, res, responseBody) => {
     } else {
       // A company-wide event is shown to every administrator of the buyer
       // company, and the socket rooms are per hospitality company — so every
-      // room under that buyer company is told.
-      const rooms = await companiesVisibleTo(scope.buyerCompanyId);
-      for (const companyId of rooms) emitToCompany(companyId, 'activity:new', payload);
+      // room under that buyer company is told, in ONE emit: an admin's socket
+      // is in all of them, and room-by-room emits reached it once per room.
+      emitToCompanies(await companiesVisibleTo(scope.buyerCompanyId), 'activity:new', payload);
     }
   }
 };

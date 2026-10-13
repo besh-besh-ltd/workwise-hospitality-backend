@@ -52,6 +52,21 @@ export const emitToCompany = (companyId, event, payload) => {
   ioInstance.to(`company:${companyId}`).emit(event, payload);
 };
 
+/**
+ * Pushes once to everyone watching any of several companies' feeds.
+ *
+ * An administrator's socket joins every company room under their buyer
+ * company, so emitting room by room delivered a company-wide event once per
+ * room — each frame a feed refetch. A single emit addressed to all the rooms
+ * is de-duplicated per socket by socket.io.
+ */
+export const emitToCompanies = (companyIds, event, payload) => {
+  if (!ioInstance) return;
+  const rooms = [...new Set((companyIds || []).filter(Boolean))].map((id) => `company:${id}`);
+  if (!rooms.length) return;
+  ioInstance.to(rooms).emit(event, payload);
+};
+
 export const emitToUser = (userId, event, payload) => {
   if (!ioInstance || userId == null) return;
   ioInstance.to(`user:${userId}`).emit(event, payload);
