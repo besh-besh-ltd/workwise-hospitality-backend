@@ -561,3 +561,22 @@ describe("Task 26: a guest session reaches no vendor ARC endpoint", () => {
     }
   });
 });
+
+// Task 26 fix round 1: Assigned to me lists the member's routed work, rate-contract hotels
+// included (row titles name the contract and hotel). A guest session (RFQ only) reads none.
+describe("Task 26 fix round 1: Assigned to me refuses a guest session", () => {
+  it("the member's guest session gets 403 GUEST_SESSION; its normal session lists its assignment", async () => {
+    const { id } = await db.one(
+      `INSERT INTO tbl_vendor_routing_assignments (org_id, subject_type, subject_id, hotel_id, assigned_vendor_id, status, due_at)
+       VALUES ($1, 'ARC_HOTEL', 1, 1, $2, 'PENDING', now() + interval '1 day') RETURNING id`,
+      [ORG, BRANCH]
+    );
+    const normal = await (await httpClient(BRANCH)).get(`${BASE}/routing/assigned-to-me`);
+    expect(normal.status).toBe(200);
+    expect(normal.body.data.map((r) => r.id)).toContain(id);
+
+    const guest = await asGuest(BRANCH);
+    expectGuestRefusal(await guest.get(`${BASE}/routing/assigned-to-me`));
+    expectGuestRefusal(await guest.get(`${BASE}/routing/assigned-to-me?status=PENDING`));
+  });
+});

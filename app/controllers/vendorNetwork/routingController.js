@@ -257,7 +257,9 @@ export async function revokeAssignment(req, res) {
 /** GET /routing/assigned-to-me[?status=PENDING,ACCEPTED] */
 export async function assignedToMe(req, res) {
   try {
-    const denied = requireNetwork(req);
+    // An emailed-link guest session (RFQ only) does not list routed work: rate-contract
+    // rows name the contract and hotel (Task 26).
+    const denied = refuseGuest(req) ?? requireNetwork(req);
     if (denied) return res.status(denied.http).json(denied.body);
     let status;
     if (typeof req.query?.status === "string" && req.query.status.trim()) {
