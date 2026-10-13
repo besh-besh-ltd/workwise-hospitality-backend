@@ -17,6 +17,7 @@ import RbacRoutes from './rbac/rbacRoutes.js';
 // ArcRoutes (v1) removed during v2 quarantine — see _deprecated/arc_v1/
 import ArcV2Routes from './arc_v2/index.js';
 import MrRoutes from './mr/index.js';
+import PrRoutes from './pr/index.js';
 import DashboardV2Routes from './dashboard/dashboardV2Routes.js';
 import VendorDashboardRoutes from './dashboard/vendorDashboardRoutes.js';
 import PricingRoutes from './pricing/pricingRoutes.js';
@@ -43,6 +44,7 @@ v1.use('/rbac', RbacRoutes);
 // v1.use('/arc', ArcRoutes); — v1 ARC routes quarantined; v2 ARC mounted below.
 v1.use('/arc-v2', ArcV2Routes);
 v1.use('/mr', MrRoutes);
+v1.use('/pr', PrRoutes);
 v1.use('/dashboard-v2', DashboardV2Routes);
 v1.use('/vendor-dashboard', VendorDashboardRoutes);
 v1.use('/pricing', PricingRoutes);
