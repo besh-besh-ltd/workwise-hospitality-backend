@@ -2,18 +2,23 @@
 //
 // PR is the first entity type the shared approval engine treats differently,
 // so every rule below is asserted against real rows written by the production
-// engine (createApprovalInstance, the propagation service and the HTTP policy /
-// oversight endpoints), and one test pins that MR — the nearest neighbour —
-// still behaves exactly as before.
+// engine (createApprovalInstance / resolvePolicyChain, the propagation service
+// and the HTTP policy / oversight endpoints), and MR — the nearest neighbour —
+// is pinned to its existing behaviour.
 //
 //   amount thresholds   a step with min_amount applies only when amount >= it
 //                       (fixed-point paise compare; unknown amount = applies)
 //   separation of duty  the requester is never an approver of their own PR:
-//                       not at creation, not via a ROLE they hold, not via a
-//                       delegation, not on propagation or revalidation, not by
-//                       reassignment, and never auto-recorded as approving
+//                       not at creation, not via a ROLE they hold, not via
+//                       delegation in either direction, not on revalidation,
+//                       not by reassignment, never by acting directly, and no
+//                       PR step ever completes without an independent APPROVE
 //   strict steps        an applicable step resolving to nobody throws
 //                       APPROVAL_STEP_UNRESOLVED instead of being dropped
+//   pinned instances    a policy edit never touches a pending PR instance
+//                       (membership revalidation still does)
+//   one chain resolver  resolvePolicyChain is what createApprovalInstance uses,
+//                       so a preview built on it cannot disagree with submit
 //
 // Pattern B (commit + tracked-id cleanup): revalidateApproverMembership,
 // the delegation reader and the HTTP endpoints all read committed data.
@@ -26,19 +31,26 @@ import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import {
   createApprovalInstance,
   checkIfUserIsFinalApprover,
+  resolvePolicyChain,
+  submitApprovalAction,
 } from "../../app/models/generalModel.js";
 import {
   computePolicyStepDiff,
   revalidateApproverMembership,
+  revalidateRolePermissionChange,
+  simulateApproverImpact,
 } from "../../app/services/approvalPropagationService.js";
 import { createDelegation } from "../../app/models/approvalDelegationModel.js";
 
 const HC = IDS.hospitality.A;
 const HOTEL = IDS.hotels.A1;
+const OTHER_HOTEL = IDS.hotels.A2;
 const DEPT = IDS.departments.eng;
 const REQ = IDS.users.a1_eng_buyer;
 const A1 = IDS.users.a1_proc_commApp;
 const A2 = IDS.users.a1_proc_finance;
+const A3 = IDS.users.a1_proc_poApp;
+const A4 = IDS.users.a1_proc_techApp;
 const ADMIN = IDS.users.companyA_admin;
 
 // The dedicated pr read+approve role ensureApprovable() creates for 'pr'.
@@ -53,13 +65,17 @@ const STUCK_URL = "/api/v1/general/hospitality/approval/stuck";
 let PR_APPROVER_ROLE; // system role 'PR Approver' (pr.read + pr.approve), held by nobody in fixtures
 let nextEntityId = 990000;
 const track = { entityIds: [], policyIds: [], scopeIds: [], delegationIds: [] };
-const restoreUserType = {};
+const restoreUserType = new Map();
 
 const newEntityId = () => {
   nextEntityId += 1;
   track.entityIds.push(nextEntityId);
   return nextEntityId;
 };
+
+const fixtureScope = (overrides = {}) => ({
+  role_id: PR_FIXTURE_ROLE, company_id: HC, hotel_id: HOTEL, department_id: DEPT, process_id: null, ...overrides,
+});
 
 /** A process-free PR (or other) policy at (company A, hotel A1), committed. */
 async function seedPolicy(steps, { entityType = "PR" } = {}) {
@@ -106,7 +122,7 @@ async function stateOf(entityId, entityType = "PR") {
     [entityType, entityId]
   );
   const inst = instances[instances.length - 1] || null;
-  if (!inst) return { count: 0, inst: null, steps: [], approvers: [], actions: [] };
+  if (!inst) return { count: 0, inst: null, steps: [], approvers: [], actions: [], changeLogs: 0 };
   const steps = await db.any(
     `SELECT s.id, s.step_order, s.status, ps.step_order AS policy_step_order
        FROM tbl_approval_instance_steps s
@@ -127,7 +143,11 @@ async function stateOf(entityId, entityType = "PR") {
     `SELECT approver_user_id, action FROM tbl_approval_actions WHERE approval_instance_id = $1 ORDER BY id`,
     [inst.id]
   );
-  return { count: instances.length, inst, steps, approvers, actions };
+  const { n: changeLogs } = await db.one(
+    `SELECT count(*)::int AS n FROM tbl_approval_instance_change_log WHERE approval_instance_id = $1`,
+    [inst.id]
+  );
+  return { count: instances.length, inst, steps, approvers, actions, changeLogs };
 }
 
 const activeApproversOf = (state, stepOrder) =>
@@ -136,10 +156,31 @@ const activeApproversOf = (state, stepOrder) =>
     .map((a) => Number(a.approver_user_id))
     .sort((a, b) => a - b);
 
+const approverRow = (state, stepOrder, userId) =>
+  state.approvers.find((a) => a.step_order === stepOrder && Number(a.approver_user_id) === Number(userId));
+
 const everOnInstance = (state, userId) =>
   state.approvers.some((a) => Number(a.approver_user_id) === Number(userId));
 
 const skipped = (state) => state.inst?.metadata?.approval_diagnostics?.skipped_steps || [];
+
+const makeApprovable = (userIds, resource = "pr") =>
+  ensureApprovable(db, userIds, resource, HC, HOTEL, DEPT);
+
+const revalidate = (args) =>
+  db.tx((t) => revalidateApproverMembership({ changedBy: ADMIN, companyId: HC, ...args, txContext: t }));
+
+async function delegate(fromUser, toUser, reason) {
+  const d = await createDelegation({
+    delegatorUserId: fromUser,
+    delegateUserId: toUser,
+    startsAt: new Date(Date.now() - 3600_000),
+    endsAt: new Date(Date.now() + 86400_000),
+    reason,
+    createdBy: ADMIN,
+  });
+  track.delegationIds.push(Number(d.id));
+}
 
 beforeAll(async () => {
   const role = await db.one(
@@ -148,37 +189,29 @@ beforeAll(async () => {
   PR_APPROVER_ROLE = Number(role.id);
 
   // Fixture buyers carry user_type NULL; the route gates need a real type.
-  for (const [uid, type] of [[ADMIN, 7], [REQ, 2]]) {
+  // Every original value is recorded BEFORE anything is changed, so the
+  // restore in afterAll is complete even if a later update here fails.
+  for (const uid of [ADMIN, REQ]) {
     const row = await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [uid]);
-    restoreUserType[uid] = row.user_type;
+    restoreUserType.set(uid, row.user_type);
+  }
+  await db.none(`UPDATE tbl_users SET user_type = 7 WHERE id = $1`, [ADMIN]);
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [REQ]);
+});
+
+afterAll(async () => {
+  for (const [uid, type] of restoreUserType) {
     await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [uid, type]);
   }
 });
 
-afterAll(async () => {
-  for (const [uid, type] of Object.entries(restoreUserType)) {
-    await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [Number(uid), type]);
-  }
-  // Safety net for a failed assertion that created something untracked (e.g.
-  // an upsert that should have been refused). Only this suite creates PR
-  // policies / synthetic PR entity ids in this shard.
-  const strays = (
-    await db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PR' AND entity_id >= 990000`)
-  ).map((r) => Number(r.id));
-  if (strays.length) {
-    await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [strays]);
-  }
-  await db.none(
-    `DELETE FROM tbl_approval_policies p
-      WHERE p.entity_type = 'PR' AND p.hospitality_company_id = $1
-        AND NOT EXISTS (SELECT 1 FROM tbl_approval_instances i WHERE i.approval_policy_id = p.id)`,
-    [HC]
-  );
-});
-
 afterEach(async () => {
+  // Only tracked ids are touched. Each block runs even if an earlier one
+  // throws, so one failed delete cannot leak the rest into later suites.
+  const steps = [];
   const entityIds = track.entityIds.splice(0);
-  if (entityIds.length) {
+  steps.push(async () => {
+    if (!entityIds.length) return;
     const ids = (
       await db.any(
         `SELECT id FROM tbl_approval_instances
@@ -186,40 +219,43 @@ afterEach(async () => {
         [entityIds]
       )
     ).map((r) => Number(r.id));
-    if (ids.length) {
-      await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`, [ids]);
-      await db.none(
-        `DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id IN
-           (SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[]))`,
-        [ids]
-      );
-      await db.none(`DELETE FROM tbl_approval_instance_change_log WHERE approval_instance_id = ANY($1::int[])`, [ids]);
-      await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])`, [ids]);
-      await db.none(`DELETE FROM tbl_approval_policy_change_log WHERE affected_instance_ids && $1::int[]`, [ids]);
-      await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [ids]);
-    }
-  }
-
+    if (!ids.length) return;
+    await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`, [ids]);
+    await db.none(
+      `DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id IN
+         (SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[]))`,
+      [ids]
+    );
+    await db.none(`DELETE FROM tbl_approval_instance_change_log WHERE approval_instance_id = ANY($1::int[])`, [ids]);
+    await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])`, [ids]);
+    await db.none(`DELETE FROM tbl_approval_policy_change_log WHERE affected_instance_ids && $1::int[]`, [ids]);
+    await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [ids]);
+  });
   const policyIds = track.policyIds.splice(0);
-  if (policyIds.length) {
+  steps.push(async () => {
+    if (!policyIds.length) return;
     await db.none(`DELETE FROM tbl_approval_policy_change_log WHERE approval_policy_id = ANY($1::int[])`, [policyIds]);
     await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = ANY($1::int[])`, [policyIds]);
     await db.none(`DELETE FROM tbl_approval_policies WHERE id = ANY($1::int[])`, [policyIds]);
-  }
-
+  });
   const delegationIds = track.delegationIds.splice(0);
-  if (delegationIds.length) {
-    await db.none(`DELETE FROM tbl_approval_delegations WHERE id = ANY($1::int[])`, [delegationIds]);
+  steps.push(async () => {
+    if (delegationIds.length) {
+      await db.none(`DELETE FROM tbl_approval_delegations WHERE id = ANY($1::int[])`, [delegationIds]);
+    }
+  });
+  const scopeIds = track.scopeIds.splice(0);
+  steps.push(() => revokeRoleScopes(db, scopeIds));
+  // Per-test grants of the dedicated fixture role: each test names exactly
+  // who holds it, so a ROLE step's resolved set is what that test says it is.
+  steps.push(() => db.none(`DELETE FROM tbl_user_role_scopes WHERE role_id = $1`, [PR_FIXTURE_ROLE]));
+
+  const errors = [];
+  for (const step of steps) {
+    try { await step(); } catch (e) { errors.push(e); }
   }
-
-  await revokeRoleScopes(db, track.scopeIds.splice(0));
-  // Per-test grants of the dedicated fixture role: each test names exactly who
-  // holds it, so a ROLE step's resolved set is what that test says it is.
-  await db.none(`DELETE FROM tbl_user_role_scopes WHERE role_id = $1`, [PR_FIXTURE_ROLE]);
+  if (errors.length) throw errors[0];
 });
-
-const makeApprovable = (userIds, resource = "pr") =>
-  ensureApprovable(db, userIds, resource, HC, HOTEL, DEPT);
 
 // ---------------------------------------------------------------------------
 describe("PR approval — amount thresholds", () => {
@@ -241,6 +277,7 @@ describe("PR approval — amount thresholds", () => {
     expect(s.steps[0]).toMatchObject({ step_order: 1, status: "PENDING", policy_step_order: 1 });
     expect(activeApproversOf(s, 1)).toEqual([A1]);
     expect(s.inst.metadata.amount).toBe("49999.99");
+    // POLICY step order, in metadata.approval_diagnostics.skipped_steps.
     expect(skipped(s)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ step_order: 2, reason: "below_threshold", min_amount: "50000.00" }),
@@ -358,15 +395,7 @@ describe("PR approval — separation of duties", () => {
 
   it("sod.delegation: an approver covering via the requester keeps the approval themselves (PR only)", async () => {
     await makeApprovable([A1, A2, REQ]);
-    const d = await createDelegation({
-      delegatorUserId: A1,
-      delegateUserId: REQ,
-      startsAt: new Date(Date.now() - 3600_000),
-      endsAt: new Date(Date.now() + 86400_000),
-      reason: "PR SoD test — A1 on leave, REQ covering",
-      createdBy: ADMIN,
-    });
-    track.delegationIds.push(Number(d.id));
+    await delegate(A1, REQ, "PR SoD test — A1 on leave, REQ covering");
     await seedPolicy([
       { type: "USER", id: A1 },
       { type: "USER", id: A2 },
@@ -383,10 +412,75 @@ describe("PR approval — separation of duties", () => {
     expect(activeApproversOf(s, 2)).toEqual([A2]);
     expect(skipped(s)).toEqual([]);
   });
+
+  it("sod.requester-cover: the requester's own outgoing cover never acts for them (creation and revalidation)", async () => {
+    await makeApprovable([REQ, A1]); // PR_FIXTURE_ROLE held by REQ and A1 only
+    await delegate(REQ, A2, "PR SoD test — REQ away, A2 covering REQ's approvals");
+    await seedPolicy([
+      { type: "ROLE", id: PR_FIXTURE_ROLE },
+      { type: "USER", id: REQ },
+    ]);
+    const entityId = newEntityId();
+
+    await createPr(entityId, { amount: "1000.00" });
+
+    let s = await stateOf(entityId);
+    // ROLE step held by REQ+A1: REQ's cover (A2) does not stand in for REQ.
+    expect(activeApproversOf(s, 1)).toEqual([A1]);
+    // USER-REQ step: REQ is not swapped for A2, so the step is sod_self.
+    expect(s.steps).toHaveLength(1);
+    expect(skipped(s)).toEqual([expect.objectContaining({ step_order: 2, reason: "sod_self" })]);
+    expect(everOnInstance(s, A2)).toBe(false);
+
+    // Revalidation: A2 gains the step's role at ANOTHER hotel, which makes
+    // PART 2 re-resolve the step (at hotel A1: REQ + A1 hold it). Through REQ's
+    // cover A2 would appear in that set — it must not be added.
+    track.scopeIds.push(
+      await grantRoleScope(db, { userId: A2, roleId: PR_FIXTURE_ROLE, companyId: HC, hotelId: OTHER_HOTEL, departmentId: DEPT })
+    );
+    await revalidate({
+      userId: A2,
+      changeType: "scope_added",
+      changedScopes: [fixtureScope({ hotel_id: OTHER_HOTEL })],
+      changedRoleIds: [PR_FIXTURE_ROLE],
+    });
+    s = await stateOf(entityId);
+    expect(everOnInstance(s, A2)).toBe(false);
+    expect(activeApproversOf(s, 1)).toEqual([A1]);
+  });
+
+  it("sod.initiator-cannot-act: a requester row written by any other path neither acts nor completes the step", async () => {
+    await makeApprovable([A1]); // PR_FIXTURE_ROLE held by A1 only
+    await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }]);
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "1000.00" });
+    let s = await stateOf(entityId);
+
+    // Forge an APPROVED row for the requester on the live step.
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status, acted_at)
+       VALUES ($1, $2, 'APPROVED', NOW())`,
+      [s.steps[0].id, REQ]
+    );
+
+    await expect(
+      submitApprovalAction({ approval_instance_id: s.inst.id, approver_user_id: REQ, action: "APPROVE" })
+    ).rejects.toMatchObject({ code: "APPROVAL_INITIATOR_CANNOT_ACT" });
+
+    // The only independent approver is removed: the requester's APPROVED row
+    // must not complete the step.
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2`, [A1, PR_FIXTURE_ROLE]);
+    const result = await revalidate({ userId: A1, changeType: "scope_removed", changedScopes: [fixtureScope()] });
+
+    s = await stateOf(entityId);
+    expect(result.autoCompletedInstanceIds).not.toContain(s.inst.id);
+    expect(s.inst.status).toBe("PENDING");
+    expect(s.steps[0].status).toBe("PENDING");
+  });
 });
 
 // ---------------------------------------------------------------------------
-describe("PR approval — strict steps", () => {
+describe("PR approval — strict steps and the shared chain resolver", () => {
   it("strict.unresolved: an applicable step resolving to nobody throws, naming the step", async () => {
     await makeApprovable([A1]);
     const policyId = await seedPolicy([
@@ -424,6 +518,55 @@ describe("PR approval — strict steps", () => {
     });
     expect((await stateOf(gated)).count).toBe(0);
   });
+
+  it("chain.preview-parity: resolvePolicyChain reports exactly what createApprovalInstance builds and refuses", async () => {
+    await makeApprovable([A1, A2, REQ]);
+    const policyId = await seedPolicy([
+      { type: "USER", id: A1 },
+      { type: "USER", id: A2, min: "50000.00" },
+      { type: "USER", id: REQ },
+    ]);
+    const ask = () =>
+      resolvePolicyChain({
+        entity_type: "PR",
+        policy_id: policyId,
+        hospitality_company_id: HC,
+        hotel_id: HOTEL,
+        department_id: DEPT,
+        process_id: null,
+        initiated_by: REQ,
+        amount: "10000",
+      }, db);
+
+    const chain = await ask();
+    expect(chain.steps.map((st) => [st.policy_step.step_order, st.approverIds])).toEqual([[1, [A1]]]);
+    expect(chain.skipped.map((sk) => [sk.step_order, sk.reason])).toEqual([[2, "below_threshold"], [3, "sod_self"]]);
+    expect(chain.problems).toEqual([]);
+
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "10000" });
+    const s = await stateOf(entityId);
+    expect(s.steps.map((st) => [st.policy_step_order, activeApproversOf(s, st.step_order)])).toEqual([[1, [A1]]]);
+    expect(skipped(s).map((sk) => [sk.step_order, sk.reason])).toEqual(chain.skipped.map((sk) => [sk.step_order, sk.reason]));
+
+    // Unresolvable first step: the preview names the same problem submit throws.
+    await db.none(
+      `UPDATE tbl_approval_policy_steps SET approver_source_type = 'ROLE', approver_source_id = $2
+        WHERE approval_policy_id = $1 AND step_order = 1`,
+      [policyId, PR_APPROVER_ROLE]
+    );
+    const broken = await ask();
+    expect(broken.steps).toEqual([]);
+    expect(broken.problems).toEqual([
+      expect.objectContaining({ code: "APPROVAL_STEP_UNRESOLVED", step_order: 1, reason: "NO_APPROVERS_RESOLVED" }),
+      { code: "APPROVAL_NO_INDEPENDENT_APPROVER" },
+    ]);
+    const refused = newEntityId();
+    await expect(createPr(refused, { amount: "10000" })).rejects.toMatchObject({
+      code: broken.problems[0].code,
+      step_order: broken.problems[0].step_order,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -451,17 +594,33 @@ describe("Other entity types are unchanged", () => {
     expect(s.actions).toEqual([expect.objectContaining({ approver_user_id: REQ, action: "APPROVE" })]);
   });
 
+  it("non-PR refusal unchanged: an MR policy resolving to nobody is still refused with the coded, explained error", async () => {
+    // PR never reaches this branch (it refuses with NO_INDEPENDENT_APPROVER
+    // first), so it is pinned here on the shared createApprovalInstance path.
+    await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }], { entityType: "MR" }); // a role with no mr.*
+    const entityId = newEntityId();
+
+    const err = await createApprovalInstance({
+      entity_type: "MR",
+      entity_id: entityId,
+      hospitality_company_id: HC,
+      hotel_id: HOTEL,
+      department_id: DEPT,
+      initiated_by: REQ,
+      metadata: { mr_number: `MR-TEST-${entityId}` },
+    }).then(() => null, (e) => e);
+
+    expect(err).toMatchObject({ code: "APPROVAL_POLICY_RESOLVES_TO_NOBODY", httpStatus: 400 });
+    expect(err.message).toMatch(/mr\.read and mr\.approve/);
+    expect(err.diagnostics.skipped_steps).toEqual([
+      expect.objectContaining({ step_order: 1, reason: "ROLE_LACKS_READ_AND_APPROVE" }),
+    ]);
+    expect((await stateOf(entityId, "MR")).count).toBe(0);
+  });
+
   it("non-PR delegation unchanged: an MR approver covering via the initiator still hands it to them", async () => {
     await makeApprovable([A1], "mr");
-    const d = await createDelegation({
-      delegatorUserId: A1,
-      delegateUserId: REQ,
-      startsAt: new Date(Date.now() - 3600_000),
-      endsAt: new Date(Date.now() + 86400_000),
-      reason: "MR control — delegation behaves as before",
-      createdBy: ADMIN,
-    });
-    track.delegationIds.push(Number(d.id));
+    await delegate(A1, REQ, "MR control — delegation behaves as before");
     await seedPolicy([{ type: "USER", id: A1 }], { entityType: "MR" });
     const entityId = newEntityId();
 
@@ -483,69 +642,153 @@ describe("Other entity types are unchanged", () => {
 
 // ---------------------------------------------------------------------------
 describe("PR approval — mid-flight changes", () => {
-  it("propagation.no-readd: revalidation and policy edits never install the requester; added steps honour min_amount", async () => {
+  it("propagation.no-readd: membership revalidation never installs the requester", async () => {
     await makeApprovable([REQ, A1]);
-    const policyId = await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }]);
+    await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }]);
     const entityId = newEntityId();
     await createPr(entityId, { amount: "1000.00" });
     let s = await stateOf(entityId);
     expect(activeApproversOf(s, 1)).toEqual([A1]);
 
-    // 1. Membership revalidation: REQ gains another scope of the step's role.
-    const extraScope = { role_id: PR_FIXTURE_ROLE, company_id: HC, hotel_id: null, department_id: DEPT, process_id: null };
+    // REQ gains another scope of the step's role.
     track.scopeIds.push(
       await grantRoleScope(db, { userId: REQ, roleId: PR_FIXTURE_ROLE, companyId: HC, hotelId: null, departmentId: DEPT })
     );
-    await db.tx((t) =>
-      revalidateApproverMembership({
-        userId: REQ,
-        changedBy: ADMIN,
-        changeType: "scope_added",
-        changedScopes: [extraScope],
-        changedRoleIds: [PR_FIXTURE_ROLE],
-        companyId: HC,
-        txContext: t,
-      })
-    );
+    await revalidate({
+      userId: REQ,
+      changeType: "scope_added",
+      changedScopes: [fixtureScope({ hotel_id: null })],
+      changedRoleIds: [PR_FIXTURE_ROLE],
+    });
+
     s = await stateOf(entityId);
     expect(s.inst.status).toBe("PENDING");
     expect(everOnInstance(s, REQ)).toBe(false);
     expect(s.actions.filter((a) => Number(a.approver_user_id) === REQ)).toEqual([]);
+    expect(activeApproversOf(s, 1)).toEqual([A1]);
+  });
 
-    // 2. Policy edit through the admin endpoint (computePolicyStepDiff +
-    //    propagatePolicyChangeToInstances in production):
-    //      step 1  source change → PR Approver, held by REQ and A2
-    //      step 2  added         → the fixture role, held by REQ and A1
-    //      step 3  added         → A2, but only at ₹5,000+ (this PR is ₹1,000)
-    for (const userId of [REQ, A2]) {
-      track.scopeIds.push(
-        await grantRoleScope(db, { userId, roleId: PR_APPROVER_ROLE, companyId: HC, hotelId: HOTEL, departmentId: DEPT })
-      );
-    }
-    const admin = await httpClient(ADMIN);
-    const res = await admin.post(POLICIES_URL).send({
-      id: policyId,
-      entity_type: "PR",
-      hotel_id: HOTEL,
-      is_active: true,
-      confirmed_approval_impact: true,
-      steps: [
-        { step_order: 1, decision_rule: "ANY", approver_source_type: "ROLE", approver_source_id: PR_APPROVER_ROLE },
-        { step_order: 2, decision_rule: "ANY", approver_source_type: "ROLE", approver_source_id: PR_FIXTURE_ROLE },
-        { step_order: 3, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A2, min_amount: "5000.00" },
-      ],
+  it("propagation.pinned: editing, removing and adding policy steps never touches a pending PR instance", async () => {
+    await makeApprovable([A1, A2, A3, A4, REQ]);
+    const policyId = await seedPolicy([
+      { type: "USER", id: A1 },
+      { type: "USER", id: A2, min: "50000.00" },
+      { type: "USER", id: A3 },
+    ]);
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "10000.00" });
+
+    const before = await stateOf(entityId);
+    expect(before.steps.map((st) => [st.step_order, st.policy_step_order, st.status])).toEqual([
+      [1, 1, "PENDING"],
+      [2, 3, "PENDING"],
+    ]);
+    expect(activeApproversOf(before, 1)).toEqual([A1]);
+    expect(activeApproversOf(before, 2)).toEqual([A3]);
+    const snapshot = (st) => ({
+      status: st.inst.status,
+      current_step: st.inst.current_step,
+      policy_version: st.inst.policy_version,
+      steps: st.steps.map((x) => [x.id, x.step_order, x.status]),
+      approvers: st.approvers.map((a) => [a.step_order, Number(a.approver_user_id), a.status]),
+      actions: st.actions.map((a) => [Number(a.approver_user_id), a.action]),
+      changeLogs: st.changeLogs,
     });
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe(1);
+    const expected = snapshot(before);
+
+    const admin = await httpClient(ADMIN);
+    const saveSteps = (steps, extra = {}) =>
+      admin.post(POLICIES_URL).send({ id: policyId, entity_type: "PR", hotel_id: HOTEL, is_active: true, steps, ...extra });
+
+    // 1. The reviewer's case: delete the ₹50k step. A pending PR is not an
+    //    "affected approval" any more, so no impact confirmation is needed.
+    const removed = await saveSteps([
+      { step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1 },
+      { step_order: 2, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A3 },
+    ]);
+    expect(removed.status).toBe(200);
+    expect(removed.body.status).toBe(1);
+    expect(snapshot(await stateOf(entityId))).toEqual(expected);
+
+    // 2. Rewrite every step (step 1 → the requester, step 2 → A4) and add a
+    //    third. Applied by ordinal this would empty step 1 and replace A3.
+    const rewritten = await saveSteps([
+      { step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: REQ },
+      { step_order: 2, decision_rule: "ALL", approver_source_type: "USER", approver_source_id: A4 },
+      { step_order: 3, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A2 },
+    ], { confirmed_approval_impact: true });
+    expect(rewritten.status).toBe(200);
+    expect(rewritten.body.status).toBe(1);
+
+    const after = await stateOf(entityId);
+    expect(snapshot(after)).toEqual(expected);
+    expect(after.inst.status).toBe("PENDING");
+    expect(after.steps.every((st) => st.status === "PENDING")).toBe(true);
+    expect(everOnInstance(after, REQ)).toBe(false);
+  });
+
+  it("sod.blocked-not-auto-completed: losing the only approver blocks the PR step instead of approving it", async () => {
+    await makeApprovable([A1]); // PR_FIXTURE_ROLE held by A1 only
+    await seedPolicy([{ type: "ROLE", id: PR_FIXTURE_ROLE }]);
+    const entityId = newEntityId();
+    await createPr(entityId, { amount: "1000.00" });
+    let s = await stateOf(entityId);
+    const instanceId = s.inst.id;
+    expect(activeApproversOf(s, 1)).toEqual([A1]);
+
+    // The pre-flight warning describes what will actually happen: blocked, not approved.
+    const sim = await simulateApproverImpact(A1, "scope_removed", { companyId: HC, changedScopes: [fixtureScope()] });
+    const simRow = sim.affectedInstances.find((r) => Number(r.instance_id) === Number(instanceId));
+    expect(simRow).toMatchObject({ impact: "BLOCK_STEP", wouldBlockStep: true, wouldAutoCompleteStep: false, wouldAutoCompleteInstance: false });
+    expect(sim.willAutoComplete).toBe(false);
+
+    // 1. A1's role is revoked.
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1 AND role_id = $2`, [A1, PR_FIXTURE_ROLE]);
+    const revoked = await revalidate({ userId: A1, changeType: "scope_removed", changedScopes: [fixtureScope()] });
 
     s = await stateOf(entityId);
+    expect(revoked.autoCompletedInstanceIds).not.toContain(instanceId); // → no post-approval dispatch
     expect(s.inst.status).toBe("PENDING");
-    expect(everOnInstance(s, REQ)).toBe(false);
-    expect(s.actions.filter((a) => Number(a.approver_user_id) === REQ && a.action === "APPROVE")).toEqual([]);
-    expect(activeApproversOf(s, 1)).toEqual([A2]);
-    expect(activeApproversOf(s, 2)).toEqual([A1]);
-    // The ₹5,000 step was not added to a ₹1,000 PR.
-    expect(s.steps.map((x) => x.step_order)).toEqual([1, 2]);
+    expect(s.inst.current_step).toBe(1);
+    expect(s.steps.map((st) => st.status)).toEqual(["PENDING"]);
+    expect(approverRow(s, 1, A1).status).toBe("REMOVED");
+    expect(activeApproversOf(s, 1)).toEqual([]); // visibly approver-less
+    expect(s.actions.filter((a) => a.action === "APPROVE")).toEqual([]);
+
+    // 2. Re-granted: the engine re-adds A1 to the blocked step.
+    track.scopeIds.push(
+      await grantRoleScope(db, { userId: A1, roleId: PR_FIXTURE_ROLE, companyId: HC, hotelId: HOTEL, departmentId: DEPT })
+    );
+    await revalidate({
+      userId: A1,
+      changeType: "scope_added",
+      changedScopes: [fixtureScope()],
+      changedRoleIds: [PR_FIXTURE_ROLE],
+    });
+    s = await stateOf(entityId);
+    expect(approverRow(s, 1, A1).status).toBe("PENDING");
+    expect(s.inst.status).toBe("PENDING");
+
+    // 3. The ROLE itself loses pr.approve: the step is blocked, not retired.
+    await db.none(
+      `DELETE FROM tbl_role_permissions rp USING tbl_permissions p
+        WHERE rp.role_id = $1 AND rp.permission_id = p.id
+          AND p.resource::text = 'pr' AND p.action::text = 'approve'`,
+      [PR_FIXTURE_ROLE]
+    );
+    try {
+      const permResult = await db.tx((t) =>
+        revalidateRolePermissionChange({ roleId: PR_FIXTURE_ROLE, changedBy: ADMIN, txContext: t })
+      );
+      s = await stateOf(entityId);
+      expect(permResult.autoCompletedInstanceIds).not.toContain(instanceId);
+      expect(s.inst.status).toBe("PENDING");
+      expect(s.steps.map((st) => st.status)).toEqual(["PENDING"]);
+      expect(approverRow(s, 1, A1).status).toBe("REMOVED");
+      expect(s.actions.filter((a) => a.action === "APPROVE")).toEqual([]);
+    } finally {
+      await makeApprovable([A1]); // restores the role's read+approve for later tests
+    }
   });
 
   it("propagation.min_amount-diff: a min_amount change is a step modification (compared in paise)", () => {
@@ -572,6 +815,11 @@ describe("PR approval — mid-flight changes", () => {
 describe("PR approval — admin and generic endpoints", () => {
   it("policy upsert accepts PR (min_amount stored, process-free) and MR; validates min_amount", async () => {
     const admin = await httpClient(ADMIN);
+    const trackCreated = (res) => {
+      const id = Number(res.body?.data?.id);
+      if (Number.isFinite(id) && id > 0) track.policyIds.push(id);
+      return id;
+    };
 
     const pr = await admin.post(POLICIES_URL).send({
       entity_type: "PR",
@@ -584,10 +832,9 @@ describe("PR approval — admin and generic endpoints", () => {
         { step_order: 2, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A2, min_amount: "25000" },
       ],
     });
+    const prPolicyId = trackCreated(pr);
     expect(pr.status).toBe(201);
     expect(pr.body.status).toBe(1);
-    const prPolicyId = Number(pr.body.data.id);
-    track.policyIds.push(prPolicyId);
     const prRow = await db.one(`SELECT entity_type, process_id FROM tbl_approval_policies WHERE id = $1`, [prPolicyId]);
     expect(prRow).toEqual({ entity_type: "PR", process_id: null });
     const prSteps = await db.any(
@@ -599,6 +846,13 @@ describe("PR approval — admin and generic endpoints", () => {
       { step_order: 2, min_amount: "25000.00" },
     ]);
 
+    // An UPDATE that does not resend entity_type still cannot attach a process.
+    const upd = await admin.post(POLICIES_URL).send({
+      id: prPolicyId, hotel_id: HOTEL, process_id: IDS.processes.A_P1, is_active: true,
+    });
+    expect(upd.status).toBe(200);
+    expect((await db.one(`SELECT process_id FROM tbl_approval_policies WHERE id = $1`, [prPolicyId])).process_id).toBeNull();
+
     const mr = await admin.post(POLICIES_URL).send({
       entity_type: "MR",
       hospitality_company_id: HC,
@@ -608,28 +862,40 @@ describe("PR approval — admin and generic endpoints", () => {
         { step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1, min_amount: "25000" },
       ],
     });
+    const mrPolicyId = trackCreated(mr);
     expect(mr.status).toBe(201);
     expect(mr.body.status).toBe(1);
-    const mrPolicyId = Number(mr.body.data.id);
-    track.policyIds.push(mrPolicyId);
     // Thresholds are a PR rule; on any other entity type the field is ignored, as before.
     const mrStep = await db.one(`SELECT min_amount FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [mrPolicyId]);
     expect(mrStep.min_amount).toBeNull();
 
-    const before = await db.one(`SELECT count(*)::int AS n FROM tbl_approval_policies WHERE entity_type = 'PR'`);
-    for (const bad of ["-1", "12.345", "abc"]) {
-      const res = await admin.post(POLICIES_URL).send({
+    const newPrAtOtherHotel = (minAmount) =>
+      admin.post(POLICIES_URL).send({
         entity_type: "PR",
         hospitality_company_id: HC,
-        hotel_id: IDS.hotels.A2,
+        hotel_id: OTHER_HOTEL,
         is_active: true,
-        steps: [{ step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1, min_amount: bad }],
+        steps: [{ step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1, min_amount: minAmount }],
       });
+
+    const countPr = async () =>
+      (await db.one(`SELECT count(*)::int AS n FROM tbl_approval_policies WHERE entity_type = 'PR'`)).n;
+    const before = await countPr();
+    // NUMERIC(18,2) tops out at 9999999999999999.99 — one paisa more is refused, not a DB overflow.
+    for (const bad of ["-1", "12.345", "abc", "10000000000000000.00"]) {
+      const res = await newPrAtOtherHotel(bad);
+      trackCreated(res);
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("INVALID_MIN_AMOUNT");
     }
-    const after = await db.one(`SELECT count(*)::int AS n FROM tbl_approval_policies WHERE entity_type = 'PR'`);
-    expect(after.n).toBe(before.n);
+    expect(await countPr()).toBe(before);
+
+    const max = await newPrAtOtherHotel("9999999999999999.99");
+    const maxId = trackCreated(max);
+    expect(max.status).toBe(201);
+    expect(
+      (await db.one(`SELECT min_amount FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [maxId])).min_amount
+    ).toBe("9999999999999999.99");
   });
 
   it("the generic submit endpoint refuses PR: a PR approval only starts from the PR workflow", async () => {

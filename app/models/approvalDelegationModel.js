@@ -59,13 +59,19 @@ export async function activeDelegationsFor(userIds, at = null) {
  *     throw APPROVAL_POLICY_RESOLVES_TO_NOBODY, so a bad delegation would stop
  *     a purchase order being raised at all.
  *
- * `neverDelegateTo` (separation of duties): the one person cover may not land
- * on — the initiator of an instance whose initiator can never approve it (see
- * sodResolveOptions in services/approval/approvalEntityRules.js). Such a
- * delegate is "ineligible" in exactly the sense above, so the original
- * approver stays. Omitted (every non-SoD caller): unchanged behaviour.
+ * `sodInitiatorId` (separation of duties — see sodResolveOptions in
+ * services/approval/approvalEntityRules.js): the initiator of an instance
+ * whose initiator may never approve it. Cover is never applied across them, in
+ * either direction:
+ *   - TO them:   an approver whose delegate is the initiator keeps the step
+ *                (the delegate is "ineligible" in exactly the sense above);
+ *   - FROM them: the initiator's own outgoing cover is not applied, so they
+ *                stay in the list and the caller's SoD filter removes them.
+ *                Substituting their delegate would let someone exercise the
+ *                initiator's authority on the initiator's own request.
+ * Omitted (every non-SoD caller): unchanged behaviour.
  */
-export async function applyDelegations(userIds, hospitalityCompanyId, t = db, { neverDelegateTo = null } = {}) {
+export async function applyDelegations(userIds, hospitalityCompanyId, t = db, { sodInitiatorId = null } = {}) {
   if (!userIds?.length) return userIds;
 
   let delegations;
@@ -88,10 +94,13 @@ export async function applyDelegations(userIds, hospitalityCompanyId, t = db, { 
       continue;
     }
 
-    if (neverDelegateTo != null && Number(delegation.delegate_user_id) === Number(neverDelegateTo)) {
+    if (sodInitiatorId != null && (
+      Number(userId) === Number(sodInitiatorId) ||
+      Number(delegation.delegate_user_id) === Number(sodInitiatorId)
+    )) {
       logger.info(
-        { delegation_id: delegation.id, delegator: userId, delegate: delegation.delegate_user_id },
-        'Delegation not applied: the delegate initiated this approval and may not approve it'
+        { delegation_id: delegation.id, delegator: userId, delegate: delegation.delegate_user_id, initiator: sodInitiatorId },
+        'Delegation not applied: it would move approval authority to or from the initiator of this approval'
       );
       out.push(userId);
       continue;

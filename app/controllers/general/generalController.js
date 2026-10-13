@@ -65,7 +65,8 @@ import {
   AMOUNT_GATED,
   excludesInitiator,
   toPaise,
-  formatPaise
+  formatPaise,
+  MAX_MONEY_PAISE
 } from '../../services/approval/approvalEntityRules.js';
 
 const generalController = {
@@ -821,6 +822,11 @@ function normaliseStepMinAmounts(steps, entityType) {
         error: { status: 3, code: 'INVALID_MIN_AMOUNT', message: `${label}: the minimum value cannot be negative` }
       };
     }
+    if (paise !== null && paise > MAX_MONEY_PAISE) {
+      return {
+        error: { status: 3, code: 'INVALID_MIN_AMOUNT', message: `${label}: the minimum value cannot exceed ₹9999999999999999.99` }
+      };
+    }
     out.push({ ...step, min_amount: formatPaise(paise) });
   }
   return { steps: out };
@@ -879,6 +885,12 @@ const hospitalityApprovalController = {
         const tenant = await guardPolicyTenant(req, res, parseInt(id));
         if (!tenant) return;
 
+        // The stored row's entity type (read only after the tenant gate). An
+        // update need not resend entity_type, so every rule keyed on it —
+        // process-free PR, min_amount validation — uses the effective type.
+        const storedPolicy = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
+        const effectiveUpdateEntityType = entity_type !== undefined ? entity_type : storedPolicy?.entity_type;
+
         // The tenant is pinned to the row that actually exists. A body-supplied
         // company may only move the policy WITHIN the caller's own scope;
         // anything else is a cross-tenant move and 404s like the read paths.
@@ -918,8 +930,8 @@ const hospitalityApprovalController = {
         // that re-points every step at a different permission resource, so every
         // step is effectively new.
         if (steps && steps.length > 0) {
-          const stored = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
-          const effectiveEntityType = entity_type !== undefined ? entity_type : stored?.entity_type;
+          const stored = storedPolicy;
+          const effectiveEntityType = effectiveUpdateEntityType;
           const entityTypeChanged = entity_type !== undefined && stored?.entity_type !== undefined && entity_type !== stored.entity_type;
 
           // min_amount before anything compares or writes steps (the PHASE 2
@@ -1017,7 +1029,10 @@ const hospitalityApprovalController = {
           if (is_master !== undefined) patch.is_master = is_master;
           // ARC (and PR) stay process-free by design: force NULL whenever the
           // entity type says so, otherwise only touch process_id if it was sent.
-          if (isProcessFreeEntity) patch.process_id = null;
+          // PR is judged on the EFFECTIVE type (body, else the stored row), so
+          // an update that omits entity_type cannot attach a process to a PR
+          // policy. ARC keeps its existing body-only rule.
+          if (isProcessFreeEntity || effectiveUpdateEntityType === 'PR') patch.process_id = null;
           else if (process_id !== undefined) patch.process_id = effectiveProcessId;
 
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);

@@ -36,6 +36,16 @@ export function filterInitiator(entityType, approverIds, initiatedBy) {
   return approverIds.filter(id => Number(id) !== Number(initiatedBy));
 }
 
+// Entity types whose approval instances are PINNED to the steps resolved at
+// submission: a later policy edit (step added / removed / modified) never
+// propagates into a live instance of these types. Their chains are shaped per
+// instance by value thresholds and separation of duties, so instance and policy
+// step numbering routinely diverge and the propagation engine's ordinal
+// matching could rewrite the wrong step. Membership revalidation (a role
+// revoked or granted, a user deactivated) still applies, with the SoD filter.
+export const PINNED_TO_SUBMISSION = new Set([...SOD_EXCLUDE_INITIATOR, ...AMOUNT_GATED]);
+export const isPinnedToSubmission = (entityType) => PINNED_TO_SUBMISSION.has(String(entityType || '').toUpperCase());
+
 // ── Helpers built on the rules above ────────────────────────────────────────
 
 /** Paise (BigInt) → canonical 2-decimal string ('50000.00'); null stays null. */
@@ -46,6 +56,9 @@ export function formatPaise(p) {
   return `${neg ? '-' : ''}${abs / 100n}.${String(abs % 100n).padStart(2, '0')}`;
 }
 
+/** Largest value a NUMERIC(18,2) money column holds (9999999999999999.99), in paise. */
+export const MAX_MONEY_PAISE = 999999999999999999n;
+
 /** Any accepted money input → canonical 2-decimal string, or null. Throws like toPaise. */
 export const toMoneyString = (v) => formatPaise(toPaise(v));
 
@@ -54,20 +67,23 @@ export const toMoneyString = (v) => formatPaise(toPaise(v));
  * `entityType` started by `initiatedBy`.
  *
  * Delegation is substitution (approvalDelegationModel.applyDelegations): an
- * approver who is away is REPLACED by their delegate. Under SoD a delegate who
- * is the initiator cannot act, and merely filtering them out afterwards would
- * make the delegator's whole approval level vanish — an approver covering via
- * the requester would let the requester skip that level. So, for SoD entity
- * types, a delegation that would land on the initiator is not applied and the
- * original approver keeps the step (the same "never empty a step" rule the
- * delegation model applies to an inactive delegate). filterInitiator() still
- * runs on the result for the initiator's OWN direct eligibility.
+ * approver who is away is REPLACED by their delegate. Under SoD, cover must
+ * never cross the initiator in either direction:
+ *   - an approver delegating TO the initiator keeps the step. Filtering the
+ *     initiator out afterwards would instead make the delegator's whole level
+ *     vanish — an approver covering via the requester would let the requester
+ *     skip that level. (The delegation model's own "never empty a step" rule
+ *     for an ineligible delegate.)
+ *   - the initiator's OWN outgoing cover is not applied: their delegate would
+ *     otherwise exercise the initiator's authority on the initiator's own
+ *     request. The initiator stays in the list and filterInitiator() removes
+ *     them, so a step that was theirs alone is `sod_self`.
  *
- * For every other entity type this returns `{ neverDelegateTo: null }`, which
+ * For every other entity type this returns `{ sodInitiatorId: null }`, which
  * resolveApprovers treats exactly as before.
  */
 export function sodResolveOptions(entityType, initiatedBy) {
   return {
-    neverDelegateTo: excludesInitiator(entityType) && initiatedBy ? Number(initiatedBy) : null,
+    sodInitiatorId: excludesInitiator(entityType) && initiatedBy ? Number(initiatedBy) : null,
   };
 }
