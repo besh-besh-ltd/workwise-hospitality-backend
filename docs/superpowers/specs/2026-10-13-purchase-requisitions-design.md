@@ -95,14 +95,14 @@ Stored: `status ∈ {active, cancelled, closed}`, plus `mapped_variant_id` and c
 | `cancelled` / `closed` | stored status |
 | `pending` | PR header not `approved` |
 | `ordered` | a **live link** to an RFQ product that has a live PO (`po.status NOT IN ('rejected','rejected_by_vendor','cancelled','draft')`, the canonical `livePoForProduct`) |
-| `in_sourcing` | a live link whose RFQ is not closed or withdrawn (`status NOT IN (2,5)`) |
+| `in_sourcing` | a live link whose RFQ is not closed (`status <> 2`; a withdrawn publish request, status 5, is revivable and keeps its lines) |
 | `awaiting_catalog` | free-text, unmapped, with an open catalog request |
 | `needs_mapping` | free-text, unmapped, no open request |
 | `in_pool` | otherwise |
 
-A **live link** is a `tbl_pr_line_rfq` row whose RFQ product still exists (FK `ON DELETE CASCADE`, so deleting a draft releases the line automatically) and whose RFQ has `status NOT IN (2,5)`, **or** which has a live PO. Consequences, all with no hooks in RFQ/PO code:
+A **live link** is a `tbl_pr_line_rfq` row whose RFQ product still exists (FK `ON DELETE CASCADE`, so deleting a draft releases the line automatically) and whose RFQ has `status <> 2`, **or** which has a live PO. (Ruling R24, 2026-10-14: status 5 = publish request withdrawn returns the RFQ to the creator's drafts, so it must not release lines.) Consequences, all with no hooks in RFQ/PO code:
 - RFQ draft deleted → line returns to `in_pool`.
-- RFQ closed or withdrawn without a PO for this product → `in_pool` (an unawarded line returns to the pool).
+- RFQ closed without a PO for this product → `in_pool` (an unawarded line returns to the pool). A withdrawn publish request (status 5) keeps the line `in_sourcing`.
 - PO cancelled or rejected and the RFQ already closed → `in_pool`.
 - RFQ approval rejected → the RFQ returns to draft → still `in_sourcing`.
 
@@ -223,10 +223,10 @@ Money is stored as `NUMERIC`, never float. `estimated_total = Σ round(qty × es
      - the caller holds `pr.convert` for the hotel and `rfq.create` for (company, hotel, chosen department).
   3. Group the lines by effective variant. Lines of the same variant must share the same unit, otherwise **422 `PR_UNIT_MISMATCH`**.
   4. Build the RFQ draft with the same inserts as `copyRfq`:
-     - `tbl_rfq` (status 1, unpublished, the buyer's contact fields, hotel, department, title "From PR-…").
+     - `tbl_rfq` (status 1, unpublished, the buyer's contact fields, hotel, department; title = first PR's title + " & N more" (R25); `comment` = '' because it is the vendor-visible terms field that also lands on the PO (R22)).
      - `tbl_rfq_hotel_mappings`.
      - Per variant group:
-       - `tbl_rfq_products`, with comment = merged specifications tagged by PR number.
+       - `tbl_rfq_products`, with comment = de-duplicated specifications tagged "[PR-… · department · qty unit]" (never requester names). The RFQ product comment is capped at 1000 characters, so PR line specifications are capped at 1000 at entry and a merge that would exceed 1000 is refused with **422 `PR_SPEC_TOO_LONG`**, never truncated (R23).
        - Specs `Quantity` (sum) and `Unit`.
        - Files mapped from attachments (`spec→SPEC`, `datasheet→TDS`, `qap→QAP`).
        - Tech-evaluation clauses from the reviewers' clauses.
