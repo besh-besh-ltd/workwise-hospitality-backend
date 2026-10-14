@@ -30,8 +30,13 @@ SELECT r.id, p.id
     ('PR Technical Reviewer','read'),('PR Technical Reviewer','evaluate'),
     ('PR Approver','read'),('PR Approver','approve'),
     ('PR Buyer','read'),('PR Buyer','convert'),
-    ('Company Administrator','read'),('Company Administrator','create'),('Company Administrator','evaluate'),
-    ('Company Administrator','approve'),('Company Administrator','convert')
+    -- Company Administrator: oversight only (R40). In production it is a
+    -- non-operational admin role (company.admin, dashboard.*, reports.*), and
+    -- every PR audience is resolved from pr.* permissions — with
+    -- create/evaluate/approve/convert it would become an eligible reviewer of
+    -- every department, an assignable buyer and the recipient of every review
+    -- task and approved-PR mail. An admin who also works PRs gets the PR role.
+    ('Company Administrator','read')
   ) AS g(title, action)
   JOIN public.tbl_roles r ON r.title = g.title AND r.created_by IS NULL
   JOIN public.tbl_permissions p ON p.resource = 'pr'::public.resource_type

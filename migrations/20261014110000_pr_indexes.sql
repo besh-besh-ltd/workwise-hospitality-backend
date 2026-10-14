@@ -19,6 +19,15 @@
 --    token to a tbl_users row, adminModel.getUserById) or the buyer/requester
 --    whose map / close / cancel auto-resolves the request. The table is new, so
 --    the constraint is validated at once (no NOT VALID needed).
+--
+-- 3. The Company Administrator system role keeps pr.read ONLY (ruling R40).
+--    20261013100000 now grants it just pr.read; a dev/test DB that ran the
+--    earlier version also gave it pr.create / evaluate / approve / convert, which
+--    made every company-wide admin an eligible reviewer of every department, an
+--    assignable buyer and the recipient of every review task and approved-PR
+--    mail. Those four grants are removed here. Only the system role
+--    (created_by IS NULL) is touched; a custom role with the same title is not.
+--    The .down.sql does NOT re-grant them.
 BEGIN;
 
 CREATE INDEX IF NOT EXISTS idx_pr_attachment_pr      ON public.tbl_pr_attachment (pr_id);
@@ -40,5 +49,14 @@ BEGIN
       FOREIGN KEY (resolved_by) REFERENCES public.tbl_users(id) ON DELETE SET NULL;
   END IF;
 END $$;
+
+DELETE FROM public.tbl_role_permissions rp
+ USING public.tbl_roles r, public.tbl_permissions p
+ WHERE rp.role_id = r.id
+   AND rp.permission_id = p.id
+   AND r.title = 'Company Administrator'
+   AND r.created_by IS NULL
+   AND p.resource = 'pr'::public.resource_type
+   AND p.action::text IN ('create', 'evaluate', 'approve', 'convert');
 
 COMMIT;
