@@ -29,7 +29,23 @@ const base = `/api/v1/hospitality/company/${COMPANY}`;
 
 let restoreAdminType;
 const madeHotels = [];
+const madeCompanies = [];
+const madePrs = [];
 const grants = [];
+
+// A draft purchase requisition at `hotelId` — the least a unit can carry.
+const makeDraftPr = async (hotelId) => {
+  const row = await db.one(
+    `INSERT INTO tbl_purchase_requisition
+       (pr_number, title, pr_type, hospitality_company_id, hotel_id, department_id, urgency,
+        required_by_date, justification, status, raised_by)
+     VALUES ($1, 'Unit deletion probe', 'goods', $2, $3, $4, 'normal', CURRENT_DATE + 7, 'probe', 'draft', $5)
+     RETURNING id`,
+    [`PR-T-UNITDEL-${Date.now()}-${madePrs.length}`, COMPANY, hotelId, IDS.departments.eng, IDS.users.a1_eng_buyer]
+  );
+  madePrs.push(Number(row.id));
+  return Number(row.id);
+};
 
 const makeHotel = async (name = "Scratch unit") => {
   const row = await db.one(
@@ -52,6 +68,12 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await revokeRoleScopes(db, grants.splice(0));
+  const prIds = madePrs.splice(0);
+  if (prIds.length) await db.none("DELETE FROM tbl_purchase_requisition WHERE id = ANY($1::int[])", [prIds]);
+  for (const id of madeCompanies.splice(0)) {
+    await db.none("DELETE FROM tbl_pr_review_category_map WHERE hospitality_company_id = $1", [id]);
+    await db.none("DELETE FROM tbl_hospitality_companies WHERE id = $1", [id]);
+  }
   for (const id of madeHotels.splice(0)) {
     await db.none(
       "DELETE FROM tbl_vendor_hotel_category_subscription WHERE item_type = 'hotel' AND item_id = $1",
@@ -137,6 +159,31 @@ describe("the references Postgres would not have caught", () => {
     expect(refKeys(preflight.body)).toContain("vendor_subscriptions");
 
     expect((await client.delete(`${base}/hotels/${hotelId}`)).status).toBe(409);
+  });
+
+  it("refuses — never a 500 — when the unit's only reference is a draft purchase requisition", async () => {
+    // tbl_purchase_requisition.hotel_id has no ON DELETE action: a pre-flight
+    // that does not know the table says "delete it" and the DELETE then dies
+    // on the foreign key (23503) as a 500.
+    const hotelId = await makeHotel();
+    await makeDraftPr(hotelId);
+    const client = await httpClient(ADMIN);
+
+    const preflight = await client.get(`${base}/hotels/${hotelId}/delete-preflight`);
+    expect(preflight.status).toBe(200);
+    expect(preflight.body.data.can_hard_delete).toBe(false);
+    expect(preflight.body.data.references).toEqual([
+      { key: "purchase_requisitions", label: "Purchase requisitions", kind: "blocks", count: 1 },
+    ]);
+
+    const res = await client.delete(`${base}/hotels/${hotelId}`);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("UNIT_IN_USE");
+    const row = await db.oneOrNone("SELECT id FROM tbl_hospitality_company_hotels WHERE id = $1", [hotelId]);
+    expect(row).not.toBeNull();
+
+    // Archiving is the way out, and it leaves the requisition alone.
+    expect((await client.delete(`${base}/hotels/${hotelId}?archive=true`)).status).toBe(200);
   });
 
   it("counts everything, not just the first thing it finds", async () => {
@@ -314,6 +361,42 @@ describe("removing a company", () => {
     const res = await client.delete(base);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("COMPANY_IN_USE");
+  });
+});
+
+describe("removing a company whose only trace is PR review routing", () => {
+  it("refuses — never a 500 — while a category is routed to one of its departments for PR review", async () => {
+    // A company with no units, no RFQs, nothing — except the purchase
+    // requisitions review routing an admin configured. That row has no ON
+    // DELETE action, so the DELETE would die on the foreign key.
+    const { buyer_company_id: buyerCompanyId } = await db.one(
+      "SELECT buyer_company_id FROM tbl_hospitality_companies WHERE id = $1", [COMPANY]
+    );
+    const company = await db.one(
+      `INSERT INTO tbl_hospitality_companies (buyer_company_id, name, is_deleted)
+       VALUES ($1, 'Typo company', 0) RETURNING id`, [buyerCompanyId]
+    );
+    const companyId = Number(company.id);
+    madeCompanies.push(companyId);
+    const category = await db.one("SELECT id FROM tbl_category WHERE is_deleted = 0 ORDER BY id LIMIT 1");
+    await db.none(
+      `INSERT INTO tbl_pr_review_category_map (hospitality_company_id, category_id, department_id, created_by)
+       VALUES ($1, $2, $3, $4)`, [companyId, category.id, IDS.departments.eng, ADMIN]
+    );
+    const client = await httpClient(ADMIN);
+    const companyBase = `/api/v1/hospitality/company/${companyId}`;
+
+    const preflight = await client.get(`${companyBase}/delete-preflight`);
+    expect(preflight.status).toBe(200);
+    expect(preflight.body.data.can_hard_delete).toBe(false);
+    expect(preflight.body.data.references).toEqual([
+      { key: "pr_review_routing", label: "Requisition review routing rules", kind: "blocks", count: 1 },
+    ]);
+
+    const res = await client.delete(companyBase);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("COMPANY_IN_USE");
+    expect(await db.oneOrNone("SELECT id FROM tbl_hospitality_companies WHERE id = $1", [companyId])).not.toBeNull();
   });
 });
 
