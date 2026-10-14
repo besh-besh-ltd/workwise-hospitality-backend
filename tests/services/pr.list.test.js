@@ -12,7 +12,7 @@ import { httpClient } from "../helpers/http.js";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import {
-  grantPr, revokeAllPr, draftBody, firstUsableVariant, cleanupPrs, dropPrPolicies, makePrPolicy, istDate,
+  grantPr, revokeAllPr, draftBody, firstUsableVariant, cleanupPrs, dropPrPolicies,
 } from "../helpers/prFixtures.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { makePO } from "../helpers/dashboardSeed.js";
@@ -62,10 +62,6 @@ async function otherVariant() {
       ORDER BY pv.id DESC LIMIT 1`, [first.variant_id]);
   return { variant_id: Number(row.variant_id), category_id: Number(row.category_id) };
 }
-
-const oneLine = (extra = {}) => ({
-  free_text_name: "Unique widget", category_id: null, quantity: "1", uom: "nos", estimated_unit_price: "10.00", ...extra,
-});
 
 beforeAll(async () => {
   originalUserTypes = await db.any(`SELECT id, user_type FROM tbl_users WHERE id = ANY($1::int[])`, [PERSONAS]);
@@ -179,12 +175,11 @@ describe("PR list — scope", () => {
 });
 
 describe("PR list — facets, search, pagination", () => {
-  let d1, d2, inRev, urgentPr;
+  let d1, d2, inRev;
   beforeAll(async () => {
     d1 = await createAs(reqC, await draftBody({ title: "facet-alpha Gasket" }));
     d2 = await createAs(reqC, await draftBody({ title: "facet-beta", pr_type: "service" }));
     inRev = await createAs(reqC, await draftBody({ title: "facet-gamma", urgency: "urgent" }));
-    urgentPr = inRev;
     await setStatus(inRev.id, "in_review", ", submitted_at = NOW()");
   });
 
@@ -393,7 +388,7 @@ describe("PR KPIs", () => {
 });
 
 describe("PR duplicates", () => {
-  let v, p1, p2, own;
+  let v, p1, p2;
   beforeAll(async () => {
     v = await otherVariant();
     const line = { product_variant_id: v.variant_id, quantity: "1", uom: "nos", estimated_unit_price: "10.00" };
