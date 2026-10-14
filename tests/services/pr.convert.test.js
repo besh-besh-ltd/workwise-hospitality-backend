@@ -31,6 +31,7 @@ import {
 } from "../helpers/prFixtures.js";
 import hospitalityModel from "../../app/models/hospitalityModel.js";
 import { buyerPrDetail } from "../../app/services/notificationLinks.js";
+import { rfqContactNumber } from "../../app/services/pr/prConversion.js";
 
 const A = IDS.hospitality.A;
 const B = IDS.hospitality.B;
@@ -740,5 +741,45 @@ describe("PR convert — quantities and mapped free text", () => {
     const r = await convert(buyC, { line_ids: [lineId], department_id: PROC });
     expect(r.status).toBe(200);
     expect((await rfqProducts(r.body.data.rfq_id))[0].comment).toBe(spec);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Browser pass 19b: a buyer whose mobile is stored without a country code
+// ("9000096018") got a draft whose contact number the RFQ wizard rebuilt as
+// "-9000096018", and Submit failed with "Contact number must be in the format
+// +<country_code>-<mobile_number>". The draft now carries the wizard's own
+// "+CC-NNN" shape.
+// ---------------------------------------------------------------------------
+describe("PR convert — the draft's contact number is in the wizard's +CC-number shape", () => {
+  it.each([
+    ["+91-9876543210", "+91-9876543210"],
+    ["+44-7700900123", "+44-7700900123"],
+    [" +91 98765 43210 ", "+91-9876543210"],
+    ["9000096018", "+91-9000096018"],
+    ["09000096018", "+91-9000096018"],
+    ["919000096018", "+91-9000096018"],
+    ["9317222403-", "+91-9317222403"],
+    ["+919876543210", "+91-9876543210"],
+    ["+4477009001234", ""],
+    ["", ""],
+    [null, ""],
+    ["12345", ""],
+    ["not a number", ""],
+  ])("rfqContactNumber(%j) = %j", (mobile, expected) => {
+    expect(rfqContactNumber(mobile)).toBe(expected);
+  });
+
+  it("a buyer with a bare 10-digit mobile gets +91-<number> on the draft", async () => {
+    await db.none(`UPDATE tbl_users SET mobile = '9000096018' WHERE id = $1`, [BUY]);
+    try {
+      const pr = await approved([catalogLine(V.variant_id, { quantity: "1", uom: "nos" })], { title: "convert-contact" });
+      const out = await convert(buyC, { line_ids: pr.line_ids, department_id: PROC });
+      expect(out.status).toBe(200);
+      const rfq = await db.one(`SELECT contact_number FROM tbl_rfq WHERE id = $1`, [out.body.data.rfq_id]);
+      expect(rfq.contact_number).toBe("+91-9000096018");
+    } finally {
+      await db.none(`UPDATE tbl_users SET mobile = $2 WHERE id = $1`, [BUY, BUY_MOBILE]);
+    }
   });
 });

@@ -78,6 +78,34 @@ const asObject = (body) => (body && typeof body === 'object' && !Array.isArray(b
 const unitKey = (uom) => String(uom ?? '').trim().toLowerCase();
 
 /** The wizard page that opens an RFQ draft. */
+/**
+ * The buyer's mobile in the RFQ wizard's stored contact shape, "+<CC>-<number>".
+ *
+ * Every draft the wizard saves itself has that shape, and the wizard splits it
+ * on "-" when it loads a draft. A bare number ("9000096018") came back with an
+ * empty country code and was re-sent as "-9000096018", which RFQ create
+ * refuses. The wizard's default country is +91, so a number without one gets
+ * +91 (a leading 0 or 91 prefix is dropped). Anything that is not a phone
+ * number becomes '' and the wizard asks for it.
+ */
+export function rfqContactNumber(mobile) {
+  const raw = String(mobile ?? '').trim();
+  if (!raw) return '';
+  const withCode = raw.match(/^\+(\d{1,6})[\s-]+([\d\s-]+)$/);
+  if (withCode) {
+    const number = withCode[2].replace(/\D/g, '');
+    return number.length >= 6 && number.length <= 15 ? `+${withCode[1]}-${number}` : '';
+  }
+  // "+919876543210": no separator, so only an Indian number can be split safely.
+  const glued = raw.match(/^\+(\d+)$/);
+  if (glued) return glued[1].length === 12 && glued[1].startsWith('91') ? `+91-${glued[1].slice(2)}` : '';
+  if (/[^\d\s-]/.test(raw)) return '';
+  let digits = raw.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+  return digits.length >= 6 && digits.length <= 15 ? `+91-${digits}` : '';
+}
+
 export const rfqDraftUrl = (rfqId) => `/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${rfqId}`;
 
 /**
@@ -440,7 +468,7 @@ export async function convertLines({ user, lineIds, departmentId, processId = nu
     companyName: hotel.company_name ?? '',
     responseEmail: buyer.email ?? '',
     contactName: buyer.name ?? '',
-    contactNumber: buyer.mobile ?? '',
+    contactNumber: rfqContactNumber(buyer.mobile),
     location: hotel.location,
     createdBy: user.id,
     companyId,
@@ -497,4 +525,4 @@ export async function convert(user, body) {
   return { rfq_id: out.rfq_id, rfq_no: out.rfq_no, redirect: out.redirect };
 }
 
-export default { convert, convertLines, parseConvertBody, rfqDraftUrl, MAX_CONVERT_LINES, RFQ_SPEC_MAX };
+export default { convert, convertLines, parseConvertBody, rfqDraftUrl, rfqContactNumber, MAX_CONVERT_LINES, RFQ_SPEC_MAX };
