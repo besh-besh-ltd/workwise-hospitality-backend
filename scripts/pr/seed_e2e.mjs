@@ -233,9 +233,13 @@ async function seedRoles(t) {
     requester: await roleId(t, ROLE.requester), reviewer: await roleId(t, ROLE.reviewer), approver: await roleId(t, ROLE.approver),
     buyer: await roleId(t, ROLE.buyer), companyAdmin: await roleId(t, ROLE.companyAdmin), rfqCreator: await roleId(t, RFQ_CREATOR_ROLE),
   };
+  // A custom role belongs to the company that made it: rbac getRoles lists a
+  // role to users of its creator's company only. Owned by the fixture Super
+  // Admin (no company) the company admin could not see it, so the PR approval
+  // flow wizard showed level 1 as "Unknown Role" (browser pass 19b).
   const hod = await t.one(
     `INSERT INTO tbl_roles (title, description, created_by) VALUES ($1, 'Head of department: PR read + approve (custom role)', $2) RETURNING id`,
-    [HOD_ROLE_TITLE, FIXTURE_ADMIN]);
+    [HOD_ROLE_TITLE, ID.company_admin]);
   r.hod = Number(hod.id);
   await t.none(
     `INSERT INTO tbl_role_permissions (role_id, permission_id)
