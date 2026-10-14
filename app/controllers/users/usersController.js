@@ -22,6 +22,7 @@ import { decryptClaim, encryptStable } from '../../helper/claimCrypto.js';
 import bcrypt from 'bcryptjs';
 import httpClient from '../../util/httpClient.js';
 import { logger } from '../../util/logger.js';
+import { normalizeMobile, MOBILE_INVALID_MESSAGE } from '../../helper/mobile.js';
 import FormData from 'form-data';
 import Razorpay from 'razorpay';
 import Moment from 'moment';
@@ -54,6 +55,20 @@ import {
   dispatchPropagationEmails
 } from '../../services/approvalPropagationService.js';
 import { buyerHome, vendorHome } from '../../services/notificationLinks.js';
+
+/**
+ * Postgres SQLSTATEs that mean "the submitted data does not fit", raised by a
+ * user-account write. The request schemas should stop all of these first; this
+ * is the backstop that keeps one from surfacing as "An internal error".
+ */
+const USER_WRITE_DB_ERRORS = {
+  '22001': { http: 400, code: 'VALUE_TOO_LONG', message: 'One of the values is longer than that field allows. Please shorten it and try again.' },
+  '22P02': { http: 400, code: 'INVALID_VALUE', message: 'One of the values is not in an accepted format. Please check it and try again.' },
+  '23502': { http: 400, code: 'MISSING_VALUE', message: 'A required value is missing. Please fill it in and try again.' },
+  '23514': { http: 400, code: 'INVALID_VALUE', message: 'One of the values is not allowed. Please check it and try again.' },
+  '23505': { http: 409, code: 'DUPLICATE_VALUE', message: 'That value is already used by another account.' },
+};
+
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -1037,6 +1052,14 @@ create_buyer_company_users: async (req, res, next) => {
 
     const { company_id: companyID, id: loginUserID } = req.user;
 
+    // Stored canonical ("+91-9876543210") so every edit screen reads it back
+    // correctly. The schema already refused anything unnormalisable; this
+    // guards a caller that bypasses it.
+    const { value: canonicalMobile, error: mobileError } = normalizeMobile(mobile);
+    if (mobileError || !canonicalMobile) {
+      return res.status(400).json({ status: 2, code: 'INVALID_MOBILE', message: MOBILE_INVALID_MESSAGE });
+    }
+
     let company = await userModel.getCompanyDetail(loginUserID);
     if (company) company = company[0];
 
@@ -1044,7 +1067,7 @@ create_buyer_company_users: async (req, res, next) => {
     let userDetails = {
       name: name.trim(),
       email: email.toLowerCase().trim(),
-      mobile: mobile.trim(),
+      mobile: canonicalMobile,
       user_type,
       status: 1,
       password: generatePassword(password),
@@ -2554,7 +2577,17 @@ update_user_detail: async (req, res, next) => {
 
     if (reqData.name !== undefined) updateData.name = reqData.name.trim();
     if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
-    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
+    if (reqData.mobile !== undefined) {
+      // Rewrites every legacy shape ("9876500001", "9876500001-",
+      // "+91-75077 69010") into "+91-9876500001", and turns a blank number
+      // ("" or a bare "+91-") into NULL rather than storing it. The schema has
+      // already refused anything this cannot normalise.
+      const { value, error } = normalizeMobile(reqData.mobile);
+      if (error) {
+        return res.status(400).json({ status: 2, code: 'INVALID_MOBILE', message: MOBILE_INVALID_MESSAGE });
+      }
+      updateData.mobile = value;
+    }
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
 
     // Handle hospitality employee fields
@@ -2724,7 +2757,16 @@ update_user_detail: async (req, res, next) => {
       });
     }
     logError(err);
-    return res.status(400).json({
+    // A database refusal about the DATA is the caller's to fix, so say what
+    // was wrong. Everything else is ours: a real 500, so monitoring counts it.
+    // This used to be a blanket 400 with a generic sentence, which is how a
+    // varchar(15) overflow reached an admin as "An internal error has
+    // occurred" and never registered as an error anywhere.
+    const known = USER_WRITE_DB_ERRORS[err?.code];
+    if (known) {
+      return res.status(known.http).json({ status: false, code: known.code, message: known.message });
+    }
+    return res.status(500).json({
       status: false,
       message: Config.errorText.value
     });
