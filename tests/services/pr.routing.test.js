@@ -22,7 +22,7 @@
 //   RV_PROC   a1_proc_commEval  PR Technical Reviewer at (A, A1, proc)
 
 import { httpClient } from "../helpers/http.js";
-import { db, withTx } from "../setup/db.js";
+import { db, withTx, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import {
   grantPr, revokeAllPr, firstUsableVariant, cleanupPrs, makePrPolicy, dropPrPolicies, istDate, unmapAll,
@@ -147,6 +147,9 @@ afterAll(async () => {
   for (const u of originalUserTypes) {
     await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [u.id, u.user_type]);
   }
+  // Release this file's test-side pool: an idle client left open is killed by
+  // globalTeardown's DROP DATABASE … WITH (FORCE) and logs 57P01 after Jest ends.
+  await closeDb();
 });
 
 // ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@
 import nodemailer from "nodemailer";
 import { httpClient } from "../helpers/http.js";
 import { loginAsInternalStaff, stampAdmin } from "../helpers/auth.js";
-import { db } from "../setup/db.js";
+import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { ROLE_IDS } from "../fixtures/users.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
@@ -257,6 +257,9 @@ afterAll(async () => {
   for (const u of originalUsers) {
     await db.none(`UPDATE tbl_users SET user_type = $2, mobile = $3 WHERE id = $1`, [u.id, u.user_type, u.mobile]);
   }
+  // Release this file's test-side pool: an idle client left open is killed by
+  // globalTeardown's DROP DATABASE … WITH (FORCE) and logs 57P01 after Jest ends.
+  await closeDb();
 });
 
 // ---------------------------------------------------------------------------

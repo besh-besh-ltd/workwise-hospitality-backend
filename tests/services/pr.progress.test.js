@@ -11,7 +11,7 @@
 //   BUY  a1_proc_buyer  PR Buyer at (A, A1, all); fixture RFQ creator at (A, A1, proc)
 
 import { httpClient } from "../helpers/http.js";
-import { db } from "../setup/db.js";
+import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import {
   grantPr, revokeAllPr, firstUsableVariant, cleanupPrs, dropPrPolicies, unmapAll,
@@ -124,6 +124,9 @@ afterAll(async () => {
   for (const u of originalUserTypes) {
     await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [u.id, u.user_type]);
   }
+  // Release this file's test-side pool: an idle client left open is killed by
+  // globalTeardown's DROP DATABASE … WITH (FORCE) and logs 57P01 after Jest ends.
+  await closeDb();
 });
 
 describe("PR derived progress across the RFQ / PO lifecycle", () => {

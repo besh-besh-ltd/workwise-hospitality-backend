@@ -1,10 +1,13 @@
-import { db } from "../setup/db.js";
+import { db, closeDb } from "../setup/db.js";
 
 const perms = (roleTitle) => db.map(
   `SELECT p.resource::text || '.' || p.action::text AS k
      FROM tbl_role_permissions rp JOIN tbl_permissions p ON p.id = rp.permission_id
      JOIN tbl_roles r ON r.id = rp.role_id
     WHERE r.title = $1 AND r.created_by IS NULL AND p.resource::text = 'pr' ORDER BY 1`, [roleTitle], r => r.k);
+
+// Release this file's test-side pool (see the other PR suites' afterAll).
+afterAll(() => closeDb());
 
 describe("PR schema", () => {
   it("seeds pr.* permissions and the four system roles", async () => {
