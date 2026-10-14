@@ -506,3 +506,64 @@ describe("PR duplicates", () => {
     expect((await reqC.get("/api/v1/pr/duplicates?hotel_id=x&variant_id=1")).status).toBe(422);
   });
 });
+
+// Browser pass 19b: the "Awaiting me" KPI counted approvals and returned PRs,
+// but the tile led to the technical-review queue, so an approver clicking
+// "Awaiting me: 1" found "Nothing is waiting for your review". tab=awaiting
+// lists exactly what awaiting_me counts.
+describe("PR list — tab=awaiting (what the Awaiting me KPI counts)", () => {
+  const awaitingIds = async (client) => idsOf(await list(client, "tab=awaiting&q=awaitingtab-"));
+
+  it("lists open reviews for the reviewer, returned PRs for the requester and current-step approvals for the approver", async () => {
+    // REQ2 reviews eng (granted once per file; the KPI block may have done it already).
+    const held = await db.oneOrNone(
+      `SELECT 1 FROM tbl_user_role_scopes s JOIN tbl_roles r ON r.id = s.role_id
+        WHERE s.user_id = $1 AND r.title = 'PR Technical Reviewer' AND s.hotel_id = $2 AND s.department_id = $3`,
+      [REQ2, A1, ENG]);
+    if (!held) await grantPr(REQ2, "PR Technical Reviewer", { departmentId: ENG });
+    const review = await createAs(reqC, await draftBody({ title: "awaitingtab-review" }));
+    await db.none(`UPDATE tbl_purchase_requisition SET status = 'in_review', revision = 1, submitted_at = NOW() WHERE id = $1`, [review.id]);
+    await db.none(`INSERT INTO tbl_pr_review (pr_id, revision, department_id) VALUES ($1, 1, $2)`, [review.id, ENG]);
+
+    const approval = await createAs(reqC, await draftBody({ title: "awaitingtab-approval" }));
+    await setStatus(approval.id, "pending_approval");
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances (entity_type, entity_id, approval_policy_id, status, current_step,
+         hospitality_company_id, hotel_id, department_id, initiated_by)
+       VALUES ('PR', $1, (SELECT id FROM tbl_approval_policies LIMIT 1), 'PENDING', 1, $2, $3, $4, $5) RETURNING id`,
+      [approval.id, A, A1, ENG, REQ]);
+    await db.none(`UPDATE tbl_purchase_requisition SET approval_instance_id = $2 WHERE id = $1`, [approval.id, inst.id]);
+    const s = await db.one(`INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, status)
+                             VALUES ($1, 1, 'PENDING') RETURNING id`, [inst.id]);
+    await db.none(`INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+                    VALUES ($1, $2, 'PENDING')`, [s.id, OTHER]);
+
+    const untouched = await createAs(reqC, await draftBody({ title: "awaitingtab-draft" }));
+
+    expect(await awaitingIds(req2C)).toEqual([review.id]);
+    expect(await awaitingIds(otherC)).toEqual([approval.id]);
+    expect(await awaitingIds(reqC)).toEqual([]);
+    expect(await awaitingIds(nobodyC)).toEqual([]);
+
+    await setStatus(untouched.id, "returned");
+    expect(await awaitingIds(reqC)).toEqual([untouched.id]);
+
+    await db.none(`UPDATE tbl_approval_step_approvers SET status = 'APPROVED' WHERE approval_instance_step_id = $1`, [s.id]);
+    expect(await awaitingIds(otherC)).toEqual([]);
+  });
+
+  it("its total is the Awaiting me KPI, for every persona", async () => {
+    for (const c of [reqC, req2C, otherC, nobodyC, xcoC]) {
+      const k = (await c.get("/api/v1/pr/kpis")).body.data.awaiting_me;
+      const res = await list(c, "tab=awaiting&page_size=100");
+      expect(res.status).toBe(200);
+      expect(res.body.data.total).toBe(k);
+    }
+  });
+
+  it("any other tab value is still refused", async () => {
+    const res = await list(reqC, "tab=nope");
+    expect(res.status).toBe(422);
+    expect(res.body.details).toEqual([{ field: "tab", message: "tab must be mine, all or awaiting" }]);
+  });
+});

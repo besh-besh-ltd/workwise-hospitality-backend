@@ -730,9 +730,10 @@ const MAX_PAGE_SIZE = 100;
 const DEFAULT_PAGE_SIZE = 20;
 
 /**
- * GET /v1/pr?tab=mine|all&status=&hotel_id=&department_id=&pr_type=&urgency=&progress=&q=&page=&page_size=
+ * GET /v1/pr?tab=mine|all|awaiting&status=&hotel_id=&department_id=&pr_type=&urgency=&progress=&q=&page=&page_size=
  * Scope is derived from req.user only (mine = raised_by me; all = the same
- * predicate GET /:id uses; super admin = everything, as canReadPr).
+ * predicate GET /:id uses; super admin = everything, as canReadPr; awaiting =
+ * exactly what the Awaiting me KPI counts).
  */
 export async function list(req, res) {
   try {
@@ -740,7 +741,7 @@ export async function list(req, res) {
     const errors = [];
     const one = (v) => (Array.isArray(v) ? v[0] : v);
     const tab = text(one(qs.tab)) || 'mine';
-    if (tab !== 'mine' && tab !== 'all') errors.push({ field: 'tab', message: 'tab must be mine or all' });
+    if (!['mine', 'all', 'awaiting'].includes(tab)) errors.push({ field: 'tab', message: 'tab must be mine, all or awaiting' });
     const enumFilter = (field, allowed, key = field) => {
       const v = text(one(qs[key]));
       if (!v) return null;

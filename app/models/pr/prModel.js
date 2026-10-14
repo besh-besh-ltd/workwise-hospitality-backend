@@ -829,6 +829,9 @@ function scopeWhere(user, { tab, q }, superAdmin) {
   const params = [user.id];
   const conds = [];
   if (tab === 'mine') conds.push('p.raised_by = $1');
+  // Everything waiting on me is readable to me (requester / eligible reviewer /
+  // current approver), so no extra scope predicate is needed.
+  else if (tab === 'awaiting') conds.push(`p.id IN (${AWAITING_ME_IDS_SQL('$1')})`);
   else if (!superAdmin) conds.push(readableScopeSql(user.id, 'p', 1).clause);
   if (q) {
     params.push(likePattern(q));
@@ -920,6 +923,38 @@ export async function list(user, filters, superAdmin = false, t = db) {
 }
 
 /**
+ * Ids of the PRs waiting on the user — one definition for the "Awaiting me"
+ * KPI and the list's tab=awaiting, so the tile and the list it opens agree:
+ *   - returned PRs I raised (I must edit and resubmit);
+ *   - PRs in review with a pending review of the current revision for a
+ *     department where I hold pr.evaluate at the PR's hotel;
+ *   - PRs whose CURRENT approval step has a PENDING, non-removed row of mine.
+ * Each branch is driven from the caller's own rows (their requests, grants or
+ * approver rows), so it never scans other tenants' PRs.
+ * @param {string} userParam  SQL placeholder holding the user id, e.g. '$1'.
+ */
+export const AWAITING_ME_IDS_SQL = (userParam) => `
+       SELECT p.id FROM tbl_purchase_requisition p
+        WHERE p.raised_by = ${userParam} AND p.status = 'returned'
+       UNION
+       SELECT p.id
+         FROM (${prGrantRowsSql(userParam, 'evaluate')}) g
+         JOIN tbl_purchase_requisition p
+           ON p.hospitality_company_id = g.company_id AND (g.hotel_id IS NULL OR g.hotel_id = p.hotel_id)
+         JOIN tbl_pr_review rv ON rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
+        WHERE p.status = 'in_review' AND (g.department_id IS NULL OR g.department_id = rv.department_id)
+       UNION
+       SELECT p.id
+         FROM tbl_approval_step_approvers asa
+         JOIN tbl_approval_instance_steps st ON st.id = asa.approval_instance_step_id
+         JOIN tbl_approval_instances ai
+           ON ai.id = st.approval_instance_id AND st.step_order = ai.current_step
+         JOIN tbl_purchase_requisition p ON p.id = ai.entity_id AND p.approval_instance_id = ai.id
+        WHERE asa.approver_user_id = ${userParam} AND asa.status = 'PENDING' AND asa.removed_at IS NULL
+          AND st.status = 'PENDING' AND ai.entity_type = 'PR' AND ai.status = 'PENDING'
+          AND p.status = 'pending_approval'`;
+
+/**
  * Dashboard counters for the readable set.
  *   open               drafts + in review + pending approval + returned
  *   awaiting_me        pending reviews I am eligible for + PRs whose CURRENT approval
@@ -941,31 +976,8 @@ export async function kpis(user, superAdmin = false, t = db) {
        FROM tbl_purchase_requisition p
       WHERE ${scope}`,
     [user.id]);
-  // Each branch is driven from the caller's own rows (their requests, grants or
-  // approver rows), so it never scans other tenants' PRs.
-  const awaiting = await t.one(
-    `SELECT count(*)::int AS n FROM (
-       SELECT p.id FROM tbl_purchase_requisition p
-        WHERE p.raised_by = $1 AND p.status = 'returned'
-       UNION
-       SELECT p.id
-         FROM (${prGrantRowsSql('$1', 'evaluate')}) g
-         JOIN tbl_purchase_requisition p
-           ON p.hospitality_company_id = g.company_id AND (g.hotel_id IS NULL OR g.hotel_id = p.hotel_id)
-         JOIN tbl_pr_review rv ON rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
-        WHERE p.status = 'in_review' AND (g.department_id IS NULL OR g.department_id = rv.department_id)
-       UNION
-       SELECT p.id
-         FROM tbl_approval_step_approvers asa
-         JOIN tbl_approval_instance_steps st ON st.id = asa.approval_instance_step_id
-         JOIN tbl_approval_instances ai
-           ON ai.id = st.approval_instance_id AND st.step_order = ai.current_step
-         JOIN tbl_purchase_requisition p ON p.id = ai.entity_id AND p.approval_instance_id = ai.id
-        WHERE asa.approver_user_id = $1 AND asa.status = 'PENDING' AND asa.removed_at IS NULL
-          AND st.status = 'PENDING' AND ai.entity_type = 'PR' AND ai.status = 'PENDING'
-          AND p.status = 'pending_approval'
-     ) w`,
-    [user.id]);
+  // Same set as GET /pr?tab=awaiting (AWAITING_ME_IDS_SQL).
+  const awaiting = await t.one(`SELECT count(*)::int AS n FROM (${AWAITING_ME_IDS_SQL('$1')}) w`, [user.id]);
   return {
     open: row.open,
     awaiting_me: awaiting.n,
