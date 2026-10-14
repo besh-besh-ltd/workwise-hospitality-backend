@@ -113,7 +113,9 @@ const ENDED_LINE_NOTE = {
 async function endLineTx(t, pr, line, user, { status, reason }) {
   const why = status === 'closed' ? 'line_closed' : 'line_cancelled';
   await prModel.endLine(t, line.id, { status, reason, userId: user.id });
-  const rejected = await prModel.rejectOpenCatalogRequest(t, line.id, { resolvedBy: user.id, note: ENDED_LINE_NOTE[why] });
+  const rejected = await prModel.resolveOpenCatalogRequest(t, { lineId: line.id }, {
+    status: 'rejected', resolvedBy: user.id, note: ENDED_LINE_NOTE[why],
+  });
   await record(t, {
     prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: why,
     payload: { line_no: Number(line.line_no), reason, ...(rejected ? { rejected_catalog_request_id: rejected } : {}) },
@@ -229,8 +231,8 @@ export async function mapLine(prId, lineId, user, body) {
     const from = line.mapped_variant_id == null ? null : Number(line.mapped_variant_id);
     if (from === variantId) return { line, variant, variantId, fulfilled: null };
     await prModel.setLineMapping(t, line.id, { variantId, userId: user.id });
-    const fulfilled = await prModel.fulfilOpenCatalogRequest(t, line.id, {
-      variantId, resolvedBy: user.id, note: 'Mapped by buyer',
+    const fulfilled = await prModel.resolveOpenCatalogRequest(t, { lineId: line.id }, {
+      status: 'fulfilled', variantId, resolvedBy: user.id, note: 'Mapped by buyer',
     });
     await record(t, {
       prId: pr.id, lineId: line.id, revision: pr.revision, actorId: user.id, type: 'line_mapped',

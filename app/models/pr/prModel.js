@@ -15,7 +15,7 @@ import {
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
   POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
   IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL, HOTEL_BUYERS_SQL, IS_HOTEL_BUYER_SQL,
-  POOL_AGE_DAYS_SQL, POOL_AGE_BAND_SQL, NUMERIC_TEXT_SQL,
+  POOL_AGE_DAYS_SQL, POOL_AGE_BAND_SQL, NUMERIC_TEXT_SQL, CATALOG_REQUEST_STATUSES,
 } from '../../services/pr/prConstants.js';
 import { readableScopeSql } from '../../services/pr/prAccess.js';
 import { RFQ_STATUSES } from '../../util/constants.js';
@@ -1196,28 +1196,31 @@ export async function setLineMapping(t, lineId, { variantId, userId }) {
     [lineId, variantId, userId]);
 }
 
-/** The line's OPEN catalog request → fulfilled with `variantId`. Returns its id, or null when none was open. */
-export async function fulfilOpenCatalogRequest(t, lineId, { variantId, resolvedBy, note }) {
-  const row = await t.oneOrNone(
-    `UPDATE tbl_pr_catalog_request
-        SET status = 'fulfilled', resolved_variant_id = $2, resolved_by = $3, resolved_at = NOW(), resolution_note = $4
-      WHERE pr_line_id = $1 AND status = 'open'
-     RETURNING id`,
-    [lineId, variantId, resolvedBy, note]);
-  return row ? Number(row.id) : null;
-}
-
 /**
- * The line's OPEN catalog request → rejected with `note` (the line ended, so
- * nobody needs the item any more — R21). Returns its id, or null when none was open.
+ * Resolve ONE OPEN catalog request — the only writer of a request's outcome,
+ * shared by the buyer paths (a mapping fulfils, an ended line rejects — R21)
+ * and the platform queue (fulfil / reject).
+ * The second argument locates it: { requestId } (the platform acts on a
+ * request) or { lineId } (a buyer acts on a line; at most one request per line
+ * is open — uq_pr_catreq_open_per_line).
+ * status 'fulfilled' needs `variantId`; 'rejected' needs a non-blank `note`
+ * (chk_pr_catreq_resolution). Returns the request id, or null when none was open.
  */
-export async function rejectOpenCatalogRequest(t, lineId, { resolvedBy, note }) {
+export async function resolveOpenCatalogRequest(t, { requestId = null, lineId = null }, {
+  status, resolvedBy, note = null, variantId = null,
+}) {
+  if (!CATALOG_REQUEST_STATUSES.includes(status) || status === 'open') {
+    throw new Error(`resolveOpenCatalogRequest: invalid status '${status}'`);
+  }
+  if ((requestId == null) === (lineId == null)) {
+    throw new Error('resolveOpenCatalogRequest: pass exactly one of requestId / lineId');
+  }
   const row = await t.oneOrNone(
     `UPDATE tbl_pr_catalog_request
-        SET status = 'rejected', resolved_by = $2, resolved_at = NOW(), resolution_note = $3
-      WHERE pr_line_id = $1 AND status = 'open'
+        SET status = $3, resolved_by = $4, resolved_at = NOW(), resolution_note = $5, resolved_variant_id = $6
+      WHERE ${requestId != null ? 'id = $1' : 'pr_line_id = $2'} AND status = 'open'
      RETURNING id`,
-    [lineId, resolvedBy, note]);
+    [requestId, lineId, status, resolvedBy, note, variantId]);
   return row ? Number(row.id) : null;
 }
 
@@ -1237,20 +1240,6 @@ export async function catalogRequestLocator(requestId, t = db) {
 export async function lockCatalogRequest(t, requestId) {
   return t.oneOrNone(`SELECT * FROM tbl_pr_catalog_request WHERE id = $1 FOR UPDATE`, [requestId]);
 }
-
-/** Resolve one OPEN request by id. Returns true when it was open. */
-export async function resolveCatalogRequest(t, requestId, { status, resolvedBy, note, variantId = null }) {
-  const row = await t.oneOrNone(
-    `UPDATE tbl_pr_catalog_request
-        SET status = $2, resolved_by = $3, resolved_at = NOW(), resolution_note = $4, resolved_variant_id = $5
-      WHERE id = $1 AND status = 'open'
-     RETURNING id`,
-    [requestId, status, resolvedBy, note, variantId]);
-  return row != null;
-}
-
-const CATALOG_REQUEST_STATUSES = ['open', 'fulfilled', 'rejected'];
-export { CATALOG_REQUEST_STATUSES };
 
 /**
  * The platform queue: every company's catalog requests, newest first, with the
@@ -1529,8 +1518,8 @@ export default {
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
-  catalogRequestLocator, lockCatalogRequest, resolveCatalogRequest, listCatalogRequests,
-  setLineMapping, fulfilOpenCatalogRequest, rejectOpenCatalogRequest, insertCatalogRequest, endLine,
+  catalogRequestLocator, lockCatalogRequest, resolveOpenCatalogRequest, listCatalogRequests,
+  setLineMapping, insertCatalogRequest, endLine,
   lineOwners, lockPrs, lockLines, lockLinesForConvert, convertLineStates, convertGroups, prDepartmentTitles,
   isTenantMember, isActiveProcessOfCompany,
 };

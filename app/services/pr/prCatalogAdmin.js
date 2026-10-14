@@ -4,9 +4,10 @@
 //
 //   list     every company's requests, filtered and paged.
 //   fulfil   an OPEN request → fulfilled with a usable variant. The line is
-//            mapped to it (mapped_by NULL = the platform) only when it is still
-//            a free-text, active, unmapped line with no live RFQ link and the
-//            variant is not on a rate contract for the PR's (hotel, department);
+//            mapped to it (mapped_by NULL = the platform) only when its PR is
+//            still approved and it is still a free-text, active, unmapped line
+//            with no live RFQ link and the variant is not on a rate contract
+//            for the PR's (hotel, department);
 //            otherwise the line stays as it is and the catalog_fulfilled event
 //            says why ({line_mapped:false, reason}).
 //   reject   an OPEN request → rejected with a required note; the line derives
@@ -24,7 +25,7 @@ import * as prModel from '../../models/pr/prModel.js';
 import { PR_ERR, prError } from './prErrors.js';
 import { record } from './prEvents.js';
 import { describeVariants, contractCoverage } from './prCatalog.js';
-import { MAX_LEN } from './prConstants.js';
+import { MAX_LEN, CATALOG_REQUEST_STATUSES } from './prConstants.js';
 import { notifyCatalogResolved } from './prNotify.js';
 
 export const PAGE_SIZE = 25;
@@ -46,7 +47,7 @@ const requestNotFound = () => prError(PR_ERR.NOT_FOUND, 'Catalog request not fou
 export async function listRequests(query) {
   const raw = asObject(query);
   const status = raw.status === undefined || raw.status === '' ? null : String(raw.status);
-  if (status && !prModel.CATALOG_REQUEST_STATUSES.includes(status)) {
+  if (status && !CATALOG_REQUEST_STATUSES.includes(status)) {
     throw prError(PR_ERR.VALIDATION, 'status must be open, fulfilled or rejected', [
       { field: 'status', message: 'status must be open, fulfilled or rejected' }]);
   }
@@ -75,8 +76,13 @@ async function lockForResolution(t, requestId) {
   return { pr, line, request };
 }
 
-/** Why the line must keep its current mapping state; null when the variant may be mapped. */
+/**
+ * Why the line must keep its current mapping state; null when the variant may
+ * be mapped. The PR must still be approved — the buyer paths' own first rule
+ * (prPool.lineBlocker) — before anything about the line is considered.
+ */
 async function unmappableReason(t, pr, line, variantId) {
+  if (pr.status !== 'approved') return 'pr_not_approved';
   if (line.status === 'closed') return 'line_closed';
   if (line.status === 'cancelled') return 'line_cancelled';
   if (line.line_kind !== 'free_text' || line.mapped_variant_id != null) return 'already_mapped';
@@ -119,7 +125,9 @@ export async function fulfilRequest(requestId, adminId, body) {
     }
 
     const reason = await unmappableReason(t, pr, line, variantId);
-    await prModel.resolveCatalogRequest(t, request.id, { status: 'fulfilled', resolvedBy: adminId, note, variantId });
+    await prModel.resolveOpenCatalogRequest(t, { requestId: request.id }, {
+      status: 'fulfilled', resolvedBy: adminId, note, variantId,
+    });
     if (!reason) await prModel.setLineMapping(t, line.id, { variantId, userId: null });
 
     if (!reason) {
@@ -165,7 +173,7 @@ export async function rejectRequest(requestId, adminId, body) {
   }
   const out = await db.tx(async (t) => {
     const { pr, line, request } = await lockForResolution(t, posInt(requestId));
-    await prModel.resolveCatalogRequest(t, request.id, { status: 'rejected', resolvedBy: adminId, note });
+    await prModel.resolveOpenCatalogRequest(t, { requestId: request.id }, { status: 'rejected', resolvedBy: adminId, note });
     await record(t, {
       prId: pr.id, lineId: line.id, revision: pr.revision, actorId: adminId, type: 'catalog_rejected',
       payload: { request_id: Number(request.id), line_no: Number(line.line_no), resolved_by: 'platform', admin_id: adminId, note },

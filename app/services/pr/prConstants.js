@@ -21,6 +21,8 @@ export const PR_TYPES = Object.freeze(['goods', 'service', 'capex']);
 export const URGENCIES = Object.freeze(['low', 'normal', 'urgent']);
 export const LINE_KINDS = Object.freeze(['catalog', 'free_text']);
 export const LINE_STATUSES = Object.freeze(['active', 'cancelled', 'closed']);
+/** tbl_pr_catalog_request.status CHECK; 'open' until the platform or a buyer resolves it. */
+export const CATALOG_REQUEST_STATUSES = Object.freeze(['open', 'fulfilled', 'rejected']);
 /** The pr.* permission actions (20261013100000_pr_permissions.sql). */
 export const PR_ACTIONS = Object.freeze(['create', 'read', 'evaluate', 'approve', 'convert']);
 

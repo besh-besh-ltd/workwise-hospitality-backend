@@ -265,6 +265,22 @@ describe("admin catalog requests — fulfil", () => {
     expect(events.some((e) => e.event_type === "line_mapped")).toBe(false);
   });
 
+  it("fulfil.pr-not-approved: the PR is no longer approved → request fulfilled, line left unmapped, reason pr_not_approved", async () => {
+    const { pr, lineId, requestId } = await withRequest("catreq-not-approved");
+    // The PR left 'approved' out of band (a data fix); the buyer paths refuse its lines (lineBlocker).
+    await db.none(`UPDATE tbl_purchase_requisition SET status = 'cancelled' WHERE id = $1`, [pr.id]);
+    const res = await fulfil(requestId, { variant_id: W.variant_id });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ status: "fulfilled", line_mapped: false, reason: "pr_not_approved" });
+    expect(await requestRow(requestId)).toMatchObject({ status: "fulfilled", resolved_variant_id: W.variant_id });
+    expect((await lineRow(lineId)).mapped_variant_id).toBeNull();
+    const events = await eventsOf(pr.id);
+    expect(events.at(-1)).toMatchObject({
+      event_type: "catalog_fulfilled", payload: { line_mapped: false, reason: "pr_not_approved", variant_id: W.variant_id },
+    });
+    expect(events.some((e) => e.event_type === "line_mapped")).toBe(false);
+  });
+
   it("fulfil leaves the line unmapped when the variant is on contract for the PR cell, or the line already has a live RFQ link", async () => {
     const onContract = await withRequest("catreq-contract");
     // A live rate contract for K at (A, A1, eng) — the cell of the PR.
