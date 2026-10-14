@@ -856,10 +856,14 @@ function scopeWhere(user, { tab, q }, superAdmin) {
   const params = [user.id];
   const conds = [];
   if (tab === 'mine') conds.push('p.raised_by = $1');
-  // Everything waiting on me is readable to me (requester / eligible reviewer /
-  // current approver), so no extra scope predicate is needed.
-  else if (tab === 'awaiting') conds.push(`p.id IN (${AWAITING_ME_IDS_SQL('$1')})`);
-  else if (!superAdmin) conds.push(readableScopeSql(user.id, 'p', 1).clause);
+  else if (tab === 'awaiting') {
+    // Everything waiting on me is readable to me by construction (requester /
+    // eligible reviewer / current approver); the read rule is ANDed anyway,
+    // as defence in depth, so this list can never answer a wider question
+    // than GET /pr/:id — the Awaiting me KPI applies the same pair.
+    conds.push(`p.id IN (${AWAITING_ME_IDS_SQL('$1')})`);
+    if (!superAdmin) conds.push(readableScopeSql(user.id, 'p', 1).clause);
+  } else if (!superAdmin) conds.push(readableScopeSql(user.id, 'p', 1).clause);
   if (q) {
     params.push(likePattern(q));
     const n = `$${params.length}`;
@@ -1003,8 +1007,11 @@ export async function kpis(user, superAdmin = false, t = db) {
        FROM tbl_purchase_requisition p
       WHERE ${scope}`,
     [user.id]);
-  // Same set as GET /pr?tab=awaiting (AWAITING_ME_IDS_SQL).
-  const awaiting = await t.one(`SELECT count(*)::int AS n FROM (${AWAITING_ME_IDS_SQL('$1')}) w`, [user.id]);
+  // Same set as GET /pr?tab=awaiting: AWAITING_ME_IDS_SQL AND the read rule.
+  const awaiting = await t.one(
+    `SELECT count(*)::int AS n FROM tbl_purchase_requisition p
+      WHERE p.id IN (${AWAITING_ME_IDS_SQL('$1')}) AND ${scope}`,
+    [user.id]);
   return {
     open: row.open,
     awaiting_me: awaiting.n,

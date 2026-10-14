@@ -840,6 +840,17 @@ describe("PR convert — the draft's contact number is in the wizard's +CC-numbe
     ["9317222403-", "+91-9317222403"],
     ["+919876543210", "+91-9876543210"],
     ["+4477009001234", ""],
+    // 19b review: the country code is 1-4 digits (the RFQ Joi regex) …
+    ["+1-2025550123", "+1-2025550123"],
+    ["+1234-9876543210", "+1234-9876543210"],
+    ["+12345-9876543210", ""],
+    ["+123456 98765 43210", ""],
+    // … a bare number's international 00 prefix is dropped before +91 applies …
+    ["0091 98765 43210", "+91-9876543210"],
+    ["00919876543210", "+91-9876543210"],
+    // … and the result fits the 20 characters RFQ create allows.
+    ["+91-123456789012345", "+91-123456789012345"],
+    ["+1234-123456789012345", ""],
     ["", ""],
     [null, ""],
     ["12345", ""],

@@ -1042,6 +1042,37 @@ describe("PR detail — approval_history", () => {
     expect(h[1].comment).toBeNull();
   });
 
+  it("two PRs never see each other's approvals — nor a non-PR instance that shares the PR's id", async () => {
+    const p1 = await submitted("100000.00");
+    const p2 = await submitted("100000.00");
+    expect((await act(ap1C, p1.instanceId, "APPROVE", "first PR")).status).toBe(200);
+    expect((await act(ap1C, p2.instanceId, "APPROVE", "second PR")).status).toBe(200);
+
+    // An RFQ-type instance whose entity_id happens to equal p1's id, with an APPROVE of its own.
+    const foreign = await db.one(
+      `INSERT INTO tbl_approval_instances (entity_type, entity_id, approval_policy_id, status, current_step,
+         hospitality_company_id, hotel_id, department_id, initiated_by)
+       VALUES ('RFQ', $1, (SELECT approval_policy_id FROM tbl_approval_instances WHERE id = $2), 'PENDING', 1, $3, $4, $5, $6)
+       RETURNING id`, [p1.id, p1.instanceId, A, A1, ENG, REQ]);
+    try {
+      const step = await db.one(
+        `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, status) VALUES ($1, 1, 'APPROVED') RETURNING id`,
+        [foreign.id]);
+      await db.none(
+        `INSERT INTO tbl_approval_actions (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+         VALUES ($1, $2, $3, 'APPROVE', 'not a PR')`, [foreign.id, step.id, AP2]);
+
+      const h1 = await history(p1.id);
+      const h2 = await history(p2.id);
+      expect(h1.map((x) => [x.instance_id, x.actor_id, x.comment])).toEqual([[p1.instanceId, AP1, "first PR"]]);
+      expect(h2.map((x) => [x.instance_id, x.actor_id, x.comment])).toEqual([[p2.instanceId, AP1, "second PR"]]);
+    } finally {
+      await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = $1`, [foreign.id]);
+      await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = $1`, [foreign.id]);
+      await db.none(`DELETE FROM tbl_approval_instances WHERE id = $1`, [foreign.id]);
+    }
+  });
+
   it("a rejection is not repeated in the history (the PR's 'rejected' event carries it)", async () => {
     const pr = await submitted("100000.00");
     expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(200);

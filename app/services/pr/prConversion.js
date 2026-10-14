@@ -78,7 +78,14 @@ function posInt(v) {
 const asObject = (body) => (body && typeof body === 'object' && !Array.isArray(body) ? body : {});
 const unitKey = (uom) => String(uom ?? '').trim().toLowerCase();
 
-/** The wizard page that opens an RFQ draft. */
+/**
+ * RFQ create's contact_number rule (rfqValidation.create: max 20 characters,
+ * /^(?:\+\d{1,4}-)?\d{6,15}$/). A converted draft must pass it as is.
+ */
+const RFQ_CONTACT_RE = /^(?:\+\d{1,4}-)?\d{6,15}$/;
+const RFQ_CONTACT_MAX = 20;
+const rfqContactOrEmpty = (value) => (value.length <= RFQ_CONTACT_MAX && RFQ_CONTACT_RE.test(value) ? value : '');
+
 /**
  * The buyer's mobile in the RFQ wizard's stored contact shape, "+<CC>-<number>".
  *
@@ -86,27 +93,28 @@ const unitKey = (uom) => String(uom ?? '').trim().toLowerCase();
  * on "-" when it loads a draft. A bare number ("9000096018") came back with an
  * empty country code and was re-sent as "-9000096018", which RFQ create
  * refuses. The wizard's default country is +91, so a number without one gets
- * +91 (a leading 0 or 91 prefix is dropped). Anything that is not a phone
- * number becomes '' and the wizard asks for it.
+ * +91 (an international "00" prefix, then a leading 0 or 91, is dropped:
+ * "0091 98…" → "+91-98…"). The country code is 1-4 digits and the result must
+ * pass RFQ create's own rule (RFQ_CONTACT_RE, ≤ 20 characters). Anything else
+ * becomes '' and the wizard asks for it.
  */
 export function rfqContactNumber(mobile) {
   const raw = String(mobile ?? '').trim();
   if (!raw) return '';
-  const withCode = raw.match(/^\+(\d{1,6})[\s-]+([\d\s-]+)$/);
-  if (withCode) {
-    const number = withCode[2].replace(/\D/g, '');
-    return number.length >= 6 && number.length <= 15 ? `+${withCode[1]}-${number}` : '';
-  }
+  const withCode = raw.match(/^\+(\d{1,4})[\s-]+([\d\s-]+)$/);
+  if (withCode) return rfqContactOrEmpty(`+${withCode[1]}-${withCode[2].replace(/\D/g, '')}`);
   // "+919876543210": no separator, so only an Indian number can be split safely.
   const glued = raw.match(/^\+(\d+)$/);
-  if (glued) return glued[1].length === 12 && glued[1].startsWith('91') ? `+91-${glued[1].slice(2)}` : '';
+  if (glued) return glued[1].length === 12 && glued[1].startsWith('91') ? rfqContactOrEmpty(`+91-${glued[1].slice(2)}`) : '';
   if (/[^\d\s-]/.test(raw)) return '';
   let digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
   if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
   if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
-  return digits.length >= 6 && digits.length <= 15 ? `+91-${digits}` : '';
+  return rfqContactOrEmpty(`+91-${digits}`);
 }
 
+/** The wizard page that opens an RFQ draft. */
 export const rfqDraftUrl = (rfqId) => `/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${rfqId}`;
 
 /**

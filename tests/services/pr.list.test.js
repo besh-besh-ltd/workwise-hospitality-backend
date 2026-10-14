@@ -561,6 +561,14 @@ describe("PR list — tab=awaiting (what the Awaiting me KPI counts)", () => {
     }
   });
 
+  it("every PR it lists is one the caller can open (the list also ANDs the read rule)", async () => {
+    for (const c of [reqC, req2C, otherC, nobodyC, xcoC]) {
+      const res = await list(c, "tab=awaiting&page_size=100");
+      expect(res.status).toBe(200);
+      for (const id of idsOf(res)) expect((await c.get(`/api/v1/pr/${id}`)).status).toBe(200);
+    }
+  });
+
   it("any other tab value is still refused", async () => {
     const res = await list(reqC, "tab=nope");
     expect(res.status).toBe(422);
