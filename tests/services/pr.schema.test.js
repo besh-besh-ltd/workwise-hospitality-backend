@@ -27,22 +27,34 @@ describe("PR schema", () => {
   it("upgrade path (20261014110000): a DB that ran the old 20261013100000 loses the Company Administrator's operational pr grants; pr.read stays", async () => {
     // Re-create what the old version of 20261013100000 granted, then run the
     // follow-up migration exactly as a deploy does (its own BEGIN/COMMIT).
-    await db.none(
-      `INSERT INTO tbl_role_permissions (role_id, permission_id)
-       SELECT r.id, p.id FROM tbl_roles r JOIN tbl_permissions p ON p.resource::text = 'pr'
-        WHERE r.title = 'Company Administrator' AND r.created_by IS NULL
-          AND NOT EXISTS (SELECT 1 FROM tbl_role_permissions x WHERE x.role_id = r.id AND x.permission_id = p.id)`);
-    expect(await perms("Company Administrator")).toEqual(["pr.approve", "pr.convert", "pr.create", "pr.evaluate", "pr.read"]);
+    // Committed rows on a shared DB: whatever happens, the finally takes the
+    // operational grants away again, so a failure here can never leave every
+    // company-wide admin a reviewer/buyer for the rest of the shard.
+    try {
+      await db.none(
+        `INSERT INTO tbl_role_permissions (role_id, permission_id)
+         SELECT r.id, p.id FROM tbl_roles r JOIN tbl_permissions p ON p.resource::text = 'pr'
+          WHERE r.title = 'Company Administrator' AND r.created_by IS NULL
+            AND NOT EXISTS (SELECT 1 FROM tbl_role_permissions x WHERE x.role_id = r.id AND x.permission_id = p.id)`);
+      expect(await perms("Company Administrator")).toEqual(["pr.approve", "pr.convert", "pr.create", "pr.evaluate", "pr.read"]);
 
-    const sql = fs.readFileSync(path.join(backendRoot, "migrations/20261014110000_pr_indexes.sql"), "utf8");
-    await db.none(sql);
-    expect(await perms("Company Administrator")).toEqual(["pr.read"]);
-    // The PR system roles are untouched.
-    expect(await perms("PR Approver")).toEqual(["pr.approve", "pr.read"]);
-    expect(await perms("PR Buyer")).toEqual(["pr.convert", "pr.read"]);
-    // Idempotent: a second run changes nothing.
-    await db.none(sql);
-    expect(await perms("Company Administrator")).toEqual(["pr.read"]);
+      const sql = fs.readFileSync(path.join(backendRoot, "migrations/20261014110000_pr_indexes.sql"), "utf8");
+      await db.none(sql);
+      expect(await perms("Company Administrator")).toEqual(["pr.read"]);
+      // The PR system roles are untouched.
+      expect(await perms("PR Approver")).toEqual(["pr.approve", "pr.read"]);
+      expect(await perms("PR Buyer")).toEqual(["pr.convert", "pr.read"]);
+      // Idempotent: a second run changes nothing.
+      await db.none(sql);
+      expect(await perms("Company Administrator")).toEqual(["pr.read"]);
+    } finally {
+      await db.none(
+        `DELETE FROM tbl_role_permissions rp
+          USING tbl_roles r, tbl_permissions p
+          WHERE rp.role_id = r.id AND rp.permission_id = p.id
+            AND r.title = 'Company Administrator' AND r.created_by IS NULL
+            AND p.resource::text = 'pr' AND p.action::text IN ('create', 'evaluate', 'approve', 'convert')`);
+    }
   });
 
   it("creates every PR table", async () => {
