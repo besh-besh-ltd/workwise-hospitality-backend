@@ -1219,6 +1219,82 @@ export async function rejectOpenCatalogRequest(t, lineId, { resolvedBy, note }) 
   return row ? Number(row.id) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Platform catalog-request queue (admin API, Task 10)
+// ---------------------------------------------------------------------------
+
+/** Which PR / line a catalog request belongs to (no lock), or null. */
+export async function catalogRequestLocator(requestId, t = db) {
+  return t.oneOrNone(
+    `SELECT cr.id, cr.pr_line_id, l.pr_id
+       FROM tbl_pr_catalog_request cr JOIN tbl_purchase_requisition_line l ON l.id = cr.pr_line_id
+      WHERE cr.id = $1`, [requestId]);
+}
+
+/** Row-lock a catalog request (after the PR and line locks) and read it. */
+export async function lockCatalogRequest(t, requestId) {
+  return t.oneOrNone(`SELECT * FROM tbl_pr_catalog_request WHERE id = $1 FOR UPDATE`, [requestId]);
+}
+
+/** Resolve one OPEN request by id. Returns true when it was open. */
+export async function resolveCatalogRequest(t, requestId, { status, resolvedBy, note, variantId = null }) {
+  const row = await t.oneOrNone(
+    `UPDATE tbl_pr_catalog_request
+        SET status = $2, resolved_by = $3, resolved_at = NOW(), resolution_note = $4, resolved_variant_id = $5
+      WHERE id = $1 AND status = 'open'
+     RETURNING id`,
+    [requestId, status, resolvedBy, note, variantId]);
+  return row != null;
+}
+
+const CATALOG_REQUEST_STATUSES = ['open', 'fulfilled', 'rejected'];
+export { CATALOG_REQUEST_STATUSES };
+
+/**
+ * The platform queue: every company's catalog requests, newest first, with the
+ * context the platform needs (company, hotel, PR, line and its status, who
+ * asked, what it was resolved with). filters: { status, q, page, pageSize }.
+ */
+export async function listCatalogRequests({ status, q, page, pageSize }, t = db) {
+  const params = [];
+  const bind = (v) => { params.push(v); return `$${params.length}`; };
+  const where = ['TRUE'];
+  if (status) where.push(`cr.status = ${bind(status)}`);
+  if (q) {
+    const like = bind(likePattern(q));
+    where.push(`(cr.requested_name ILIKE ${like} OR p.pr_number ILIKE ${like} OR hc.name ILIKE ${like}
+                 OR h.name ILIKE ${like} OR u.name ILIKE ${like})`);
+  }
+  const from = `
+      FROM tbl_pr_catalog_request cr
+      JOIN tbl_purchase_requisition_line l ON l.id = cr.pr_line_id
+      JOIN tbl_purchase_requisition p ON p.id = l.pr_id
+      LEFT JOIN tbl_hospitality_companies hc ON hc.id = cr.hospitality_company_id
+      LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+      LEFT JOIN tbl_category cat ON cat.id = cr.category_id
+      LEFT JOIN tbl_users u ON u.id = cr.requested_by
+      LEFT JOIN tbl_product_variant rv ON rv.id = cr.resolved_variant_id
+     WHERE ${where.join(' AND ')}`;
+  const total = await t.one(`SELECT count(*)::int AS n ${from}`, params);
+  const limit = bind(pageSize);
+  const offset = bind((page - 1) * pageSize);
+  const rows = await t.any(
+    `SELECT cr.id, cr.requested_name, cr.description, cat.title AS category_title,
+            hc.name AS company_name, h.name AS hotel_name, p.pr_number, p.id AS pr_id, l.line_no,
+            l.status AS line_status, u.name AS requested_by_name, cr.requested_at, cr.status,
+            cr.resolved_variant_id, rv.name AS resolved_variant_name, cr.resolution_note, cr.resolved_at
+       ${from}
+      ORDER BY (cr.status = 'open') DESC, cr.requested_at DESC, cr.id DESC
+      LIMIT ${limit} OFFSET ${offset}`, params);
+  return {
+    rows: rows.map((r) => ({
+      ...r, id: Number(r.id), pr_id: Number(r.pr_id), line_no: Number(r.line_no),
+      resolved_variant_id: r.resolved_variant_id == null ? null : Number(r.resolved_variant_id),
+    })),
+    total: total.n,
+  };
+}
+
 /** Open a catalog request for a line (uq_pr_catreq_open_per_line: at most one open per line). */
 export async function insertCatalogRequest(t, { companyId, lineId, requestedName, description, categoryId, requestedBy }) {
   return t.one(
@@ -1451,6 +1527,7 @@ export default {
   list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
+  catalogRequestLocator, lockCatalogRequest, resolveCatalogRequest, listCatalogRequests,
   setLineMapping, fulfilOpenCatalogRequest, rejectOpenCatalogRequest, insertCatalogRequest, endLine,
   lineOwners, lockPrs, lockLines, lockLinesForConvert, convertLineStates, convertGroups, prDepartmentTitles,
   isTenantMember, isActiveProcessOfCompany,

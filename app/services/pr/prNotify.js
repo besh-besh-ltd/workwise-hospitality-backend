@@ -314,7 +314,33 @@ export async function notifyCatalogRequested({ pr, line, request, actorId }) {
   });
 }
 
+/**
+ * The platform resolved a catalog request (fulfilled or rejected): the PR's
+ * requester, whoever filed the request, and the assigned buyer — or, while the
+ * PR is unassigned, every pr.convert holder of its hotel. In-app, once each,
+ * never the actor.
+ * @param {{pr, line: {line_no, free_text_name?}, request: {requested_name, requested_by},
+ *          outcome: 'fulfilled'|'rejected', variantName?: string, note?: string, actorId}} p
+ */
+export async function notifyCatalogResolved({ pr, line, request, outcome, variantName, note, actorId }) {
+  await safely('notifyCatalogResolved', pr, async () => {
+    const handlers = pr.assigned_buyer_id
+      ? [pr.assigned_buyer_id]
+      : (await db.any(HOTEL_BUYERS_SQL('$1', '$2'), [pr.hospitality_company_id, pr.hotel_id])).map((r) => r.id);
+    const to = audience([pr.raised_by, request.requested_by, ...handlers], actorId);
+    const fulfilled = outcome === 'fulfilled';
+    const what = `"${request.requested_name}" for ${lineLabel(line)} of ${label(pr)}`;
+    await inApp(pr, to, actorId, {
+      type: fulfilled ? 'pr_catalog_fulfilled' : 'pr_catalog_rejected',
+      title: fulfilled ? `Catalog item added: ${pr.pr_number}` : `Catalog request declined: ${pr.pr_number}`,
+      body: fulfilled
+        ? `The platform team fulfilled the catalog request ${what}${variantName ? ` with ${variantName}` : ''}.`
+        : `The platform team declined the catalog request ${what}${note ? ` — "${note}"` : ''}.`,
+    });
+  });
+}
+
 export default {
   notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected,
-  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested, notifyConverted,
+  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested, notifyCatalogResolved, notifyConverted,
 };
