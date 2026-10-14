@@ -498,6 +498,7 @@ const RFQ_STATUS_LABEL_SQL = (r) => `CASE
 /**
  * Everything the detail page renders.
  * @returns {Promise<{pr, lines, attachments, reviews, events, comments}|null>}
+ *   pr.header_progress is the list's rule (HEADER_PROGRESS_JOIN), null unless approved;
  *   pr.now_with is the list's "who holds it" label (NOW_WITH_SQL), including
  *   the "No eligible reviewer / approver — contact your admin" states;
  *   lines[] carry clauses[], attachments[], progress and
@@ -513,8 +514,10 @@ export async function getDetail(prId, t = db) {
                 AS estimated_total,
               h.name AS hotel_name, d.title AS department_name,
               ru.name AS raised_by_name, bu.name AS assigned_buyer_name,
+              hp.header_progress,
               ${NOW_WITH_SQL('p')} AS now_with
          FROM tbl_purchase_requisition p
+         ${HEADER_PROGRESS_JOIN('p')}
          LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
          LEFT JOIN tbl_department d ON d.id = p.department_id
          LEFT JOIN tbl_users ru ON ru.id = p.raised_by
@@ -783,10 +786,14 @@ const HEADER_PROGRESS_JOIN = (p) => `LEFT JOIN LATERAL (
                     FROM tbl_purchase_requisition_line l WHERE l.pr_id = ${p}.id) x) c
 ) hp ON true`;
 
-/** Who holds the PR right now, as the label shown in the list. `p` = PR alias. */
+/**
+ * Who holds the PR right now, as the label shown in the list. `p` = PR alias.
+ * Viewer-neutral: draft/returned PRs are held by the requester, so the label is
+ * their name; the FE decides when to say "You".
+ */
 const NOW_WITH_SQL = (p) => `CASE ${p}.status
-  WHEN 'draft' THEN 'You'
-  WHEN 'returned' THEN 'You'
+  WHEN 'draft' THEN COALESCE((SELECT ru2.name FROM tbl_users ru2 WHERE ru2.id = ${p}.raised_by), 'Requester')
+  WHEN 'returned' THEN COALESCE((SELECT ru2.name FROM tbl_users ru2 WHERE ru2.id = ${p}.raised_by), 'Requester')
   WHEN 'approved' THEN COALESCE(
     (SELECT bu.name FROM tbl_users bu WHERE bu.id = ${p}.assigned_buyer_id), 'Purchase team')
   WHEN 'in_review' THEN (
@@ -865,7 +872,7 @@ export async function list(user, filters, superAdmin = false, t = db) {
     const offset = bind((page - 1) * pageSize);
     const rows = await c.any(
       `SELECT p.id, p.pr_number, p.title, p.status, hp.header_progress,
-              h.name AS hotel_name, d.title AS department_name, ru.name AS raised_by_name,
+              h.name AS hotel_name, d.title AS department_name, p.raised_by, ru.name AS raised_by_name,
               CASE WHEN p.status IN ('draft','returned') THEN ${estimateTotalSql('p')} ELSE p.estimated_total END
                 AS estimated_total,
               (SELECT count(*)::int FROM tbl_purchase_requisition_line lc

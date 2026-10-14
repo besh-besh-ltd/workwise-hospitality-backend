@@ -135,7 +135,7 @@ describe("PR list — scope", () => {
     expect(row).toMatchObject({
       id: engPr.id, pr_number: engPr.pr_number, title: "scope-eng", status: "draft", header_progress: null,
       hotel_name: expect.any(String), department_name: expect.any(String), raised_by_name: expect.any(String),
-      line_count: 2, urgency: "normal", pr_type: "goods", submitted_at: null, approved_at: null, now_with: "You",
+      line_count: 2, urgency: "normal", pr_type: "goods", submitted_at: null, approved_at: null, now_with: row.raised_by_name, raised_by: REQ,
     });
     expect(Number(row.estimated_total)).toBe(2 * 1500 + 4 * 250.5);
     expect(row.required_by_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -269,9 +269,15 @@ describe("PR list — header_progress", () => {
     });
     poIds.push(po.po_id);
     expect(await hp()).toBe("partly_ordered");           // line 0 ordered, line 1 still in queue
+    expect((await reqC.get(`/api/v1/pr/${pr.id}`)).body.data.pr.header_progress).toBe("partly_ordered");
 
     await db.none(`UPDATE tbl_purchase_requisition_line SET status = 'closed', close_reason = 'x' WHERE id = $1`, [lines[1]]);
     expect(await hp()).toBe("completed");                // ordered + closed, nothing open
+
+    // Detail exposes the SAME header_progress as the list (single SQL source).
+    const detailHp = async () => (await reqC.get(`/api/v1/pr/${pr.id}`)).body.data.pr.header_progress;
+    expect(await detailHp()).toBe(await hp());
+    expect(await detailHp()).toBe("completed");
 
     expect(idsOf(await list(reqC, "tab=mine&progress=completed&q=progress-matrix"))).toEqual([pr.id]);
     expect(idsOf(await list(reqC, "tab=mine&progress=in_queue&q=progress-matrix"))).toEqual([]);
@@ -282,7 +288,8 @@ describe("PR list — now_with", () => {
   it("labels who holds the PR in every state", async () => {
     const pr = await createAs(reqC, await draftBody({ title: "nowwith" }));
     const nw = async () => (await list(reqC, "tab=mine&q=nowwith")).body.data.rows[0].now_with;
-    expect(await nw()).toBe("You");
+    const reqName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [REQ])).name;
+    expect(await nw()).toBe(reqName);
 
     // in_review with no reviewer anywhere for eng.
     await db.none(`UPDATE tbl_purchase_requisition SET status = 'in_review', revision = 1 WHERE id = $1`, [pr.id]);
@@ -319,7 +326,20 @@ describe("PR list — now_with", () => {
     await db.none(`UPDATE tbl_purchase_requisition SET assigned_buyer_id = $2 WHERE id = $1`, [pr.id, OTHER]);
     expect(await nw()).toBe(otherName);
     await setStatus(pr.id, "returned");
-    expect(await nw()).toBe("You");
+    expect(await nw()).toBe(reqName);
+  });
+
+  it("is viewer-neutral: a reader who is not the requester sees the requester name (list and detail)", async () => {
+    const pr = await createAs(reqC, await draftBody({ title: "nowwith-neutral" }));
+    const reqName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [REQ])).name;
+    for (const status of ["draft", "returned"]) {
+      await setStatus(pr.id, status);
+      const row = (await list(otherC, "tab=all&q=nowwith-neutral")).body.data.rows[0];
+      expect(row.now_with).toBe(reqName);
+      const d = await otherC.get(`/api/v1/pr/${pr.id}`);
+      expect(d.status).toBe(200);
+      expect(d.body.data.pr.now_with).toBe(reqName);
+    }
   });
 });
 

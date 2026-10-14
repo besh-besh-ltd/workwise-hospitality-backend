@@ -491,19 +491,21 @@ describe("PR technical review: complete and send back", () => {
     // the PR would never reach approval).
     const gate = await db.connect();
     let results;
+    let committed = false;
     try {
       await gate.none("BEGIN");
       await gate.any(`SELECT id FROM tbl_pr_review WHERE id = ANY($1::int[]) FOR UPDATE`, [[pr.eng, pr.proc]]);
       const inflight = Promise.all([complete(engC, pr.id, pr.eng), complete(procC, pr.id, pr.proc)]);
       await waitForLockWaiters(2);
       await gate.none("COMMIT");
+      committed = true;
       results = await inflight;
     } finally {
       // If anything above threw, the gate still holds its transaction and the
       // row locks: end it before the client goes back to the pool. (After the
-      // COMMIT this is a no-op ROLLBACK — a warning, never an error.)
+      // COMMIT there is nothing to roll back, so skip it.)
       try {
-        await gate.none("ROLLBACK");
+        if (!committed) await gate.none("ROLLBACK");
       } finally {
         gate.done();
       }

@@ -3868,11 +3868,8 @@ export async function approvalStepSourceCanApprove(instance, step, t = db) {
 }
 
 /**
- * Submit an approval action (APPROVE or REJECT)
- * Validates user permission and handles step progression
- */
-/**
- * Record an approval decision.
+ * Record an approval decision (APPROVE or REJECT).
+ * Validates user permission and handles step progression.
  *
  * @param {Object} args
  * @param {Object} [txContext] - An open transaction to record the decision in.
