@@ -144,16 +144,37 @@ describe("PR derived progress across the RFQ / PO lifecycle", () => {
     expect(await headerProgress(pr)).toBe("in_queue");
   });
 
-  it("rfq-withdrawn → in_pool: the dead link stays visible (live:false) and the line converts again", async () => {
+  it("rfq-withdrawn → still in_sourcing (R24): a withdrawn publish request can return to drafts, so the line stays sourced", async () => {
     const pr = await approved([catalogLine(V.variant_id)], "progress-withdrawn");
     const lineId = pr.line_ids[0];
     const first = await convert(pr.line_ids);
     await setRfq(first.rfq_id, 5, 0);
 
+    const line = await lineOf(pr, lineId);
+    expect(line.progress).toBe("in_sourcing");
+    expect(line.links).toEqual([
+      { rfq_id: first.rfq_id, rfq_no: first.rfq_no, rfq_status_label: "Withdrawn", live: true, po: [] },
+    ]);
+    expect(await poolLineIds(pr)).toEqual([]);
+
+    const again = await buyC.post("/api/v1/pr/convert").send({ line_ids: pr.line_ids, department_id: PROC });
+    expect(again.status).toBe(409);
+    expect(again.body).toMatchObject({
+      code: "PR_LINE_NOT_CONVERTIBLE", details: [{ line_id: lineId, reason: "already_sourced" }],
+    });
+    expect(await db.any(`SELECT id FROM tbl_pr_line_rfq WHERE pr_line_id = $1`, [lineId])).toHaveLength(1);
+  });
+
+  it("rfq-closed without a PO → in_pool: the dead link stays visible (live:false) and the line converts again", async () => {
+    const pr = await approved([catalogLine(V.variant_id)], "progress-closed-no-po");
+    const lineId = pr.line_ids[0];
+    const first = await convert(pr.line_ids);
+    await setRfq(first.rfq_id, 2, 1);
+
     let line = await lineOf(pr, lineId);
     expect(line.progress).toBe("in_pool");
     expect(line.links).toEqual([
-      { rfq_id: first.rfq_id, rfq_no: first.rfq_no, rfq_status_label: "Withdrawn", live: false, po: [] },
+      { rfq_id: first.rfq_id, rfq_no: first.rfq_no, rfq_status_label: "Closed", live: false, po: [] },
     ]);
     expect(await poolLineIds(pr)).toEqual([lineId]);
 
@@ -162,7 +183,7 @@ describe("PR derived progress across the RFQ / PO lifecycle", () => {
     line = await lineOf(pr, lineId);
     expect(line.progress).toBe("in_sourcing");
     expect(line.links).toEqual([
-      { rfq_id: first.rfq_id, rfq_no: first.rfq_no, rfq_status_label: "Withdrawn", live: false, po: [] },
+      { rfq_id: first.rfq_id, rfq_no: first.rfq_no, rfq_status_label: "Closed", live: false, po: [] },
       { rfq_id: second.rfq_id, rfq_no: second.rfq_no, rfq_status_label: "Draft", live: true, po: [] },
     ]);
   });

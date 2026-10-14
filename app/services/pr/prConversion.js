@@ -10,21 +10,30 @@
 // RFQ wizard (bid end date, vendors, terms) and the RFQ approval runs as for
 // any other RFQ — conversion never publishes and never bypasses approval.
 //
+// Everything written to the RFQ is vendor-visible, so nothing internal goes
+// there: tbl_rfq.comment (the buyer's "Additional Terms & Conditions", merged
+// into the PO's T&C) stays empty (R22); the title is the first PR's title, not
+// PR numbers (R25); a product's specification carries only
+// "[PR-… · department · qty unit] specification" blocks — never requester
+// names, never the suggested-vendor note.
+//
 // Every source line gets a tbl_pr_line_rfq link to its RFQ product. Nothing in
 // the RFQ / PO code knows about PRs: the line's progress (in_sourcing, ordered,
 // back in_pool) is derived from the RFQ and PO tables alone (LINE_PROGRESS_SQL).
 //
 // One transaction, in this order:
-//   1. lock   — the PR rows (id order), then the lines (id order), then the
+//   1. tenant — on an UNLOCKED read: 404 for an unknown line, lines of several
+//               companies, or a company that is not the caller's — so a
+//               foreign caller never locks another tenant's rows;
+//   2. lock   — the PR rows (id order), then the lines (id order), then the
 //               per-line advisory lock pr_line_convert (R19: the order of every
 //               buyer line action, so they can never deadlock each other);
-//   2. check  — 404 (unknown line, several companies, not the caller's tenant),
-//               422 PR_HOTEL_MISMATCH, 422 department / process, 403 pr.convert
-//               on the hotel and rfq.create on (company, hotel, department,
-//               process) exactly as saveRfqDraft checks it, then 409
-//               PR_LINE_NOT_CONVERTIBLE listing every refused line, then 422
-//               PR_UNIT_MISMATCH per variant;
-//   3. build  — the RFQ draft, the links and one `converted` event per line.
+//   3. check  — 422 PR_HOTEL_MISMATCH, 422 department / process, 403
+//               pr.convert on the hotel and rfq.create on (company, hotel,
+//               department, process) exactly as saveRfqDraft checks it, then
+//               409 PR_LINE_NOT_CONVERTIBLE listing every refused line, then
+//               422 PR_UNIT_MISMATCH and 422 PR_SPEC_TOO_LONG per variant;
+//   4. build  — the RFQ draft, the links and one `converted` event per line.
 // The requesters are notified after the commit (prNotify never throws).
 
 import db from '../../config/dbConn.js';
@@ -46,8 +55,15 @@ export const MAX_CONVERT_LINES = 200;
 const RFQ_NO_ATTEMPTS = 3;
 /** PR attachment kind → RFQ product file type (tbl_rfq_product_files.file_type). */
 const FILE_TYPE_SQL = `CASE a.kind WHEN 'datasheet' THEN 'TDS' WHEN 'qap' THEN 'QAP' ELSE 'SPEC' END`;
-/** PR numbers named in the RFQ title before "+N". */
-const TITLE_PR_NUMBERS = 3;
+/** tbl_rfq.title is VARCHAR(500). */
+const RFQ_TITLE_MAX = 500;
+/**
+ * An RFQ product's specification (tbl_rfq_products.comment) holds 1000
+ * characters — the RFQ wizard's and PUT /rfq/update's limit (CreateRFQ.js,
+ * rfqValidation `comment: Joi.string().max(1000)`). A merged specification
+ * longer than that is refused, never truncated (R23).
+ */
+export const RFQ_SPEC_MAX = 1000;
 
 const INT4_MAX = 2147483647;
 function posInt(v) {
@@ -177,37 +193,37 @@ function assertOneUnitPerVariant(states) {
 // Building the RFQ draft
 // ---------------------------------------------------------------------------
 
-/** "From PR-1, PR-2, PR-3 +2". */
+/**
+ * The vendor-facing RFQ title (R25): the first PR's title (by PR id), plus
+ * " & N more" when the lines come from N other PRs, within VARCHAR(500).
+ */
 function rfqTitle(prs) {
-  const numbers = prs.map((p) => p.pr_number);
-  const more = numbers.length - TITLE_PR_NUMBERS;
-  return `From ${numbers.slice(0, TITLE_PR_NUMBERS).join(', ')}${more > 0 ? ` +${more}` : ''}`;
+  const more = prs.length > 1 ? ` & ${prs.length - 1} more` : '';
+  const title = String(prs[0].title ?? '').trim();
+  return `${title.slice(0, RFQ_TITLE_MAX - more.length).trim()}${more}`;
 }
 
-/** The RFQ comment: which PRs it was raised from, and by whom. */
-function rfqComment(prs, summaries) {
-  return [
-    'Raised from purchase requisitions:',
-    ...prs.map((p) => {
-      const s = summaries.get(Number(p.id)) || {};
-      const who = [s.requester_name, s.department_title].filter(Boolean).join(', ');
-      return `- ${p.pr_number}${p.title ? ` · ${p.title}` : ''}${who ? ` (requested by ${who})` : ''}`;
-    }),
-  ].join('\n');
-}
-
-/** A product's merged specification: one "[PR · department · qty unit] text" block per source line. */
-function productComment(lines, prById, summaries) {
-  return lines.map((l) => {
+/**
+ * A product's merged specification (vendor-visible): one block per DISTINCT
+ * text, in order of first appearance — "[PR-a · department · qty unit] [PR-b
+ * · …] text". Identical texts (trimmed) share one block listing every tag
+ * (R23). The text is the line's specification, after its free-text name for a
+ * mapped free-text line (what the requester asked for). Never requester names
+ * or the suggested-vendor note (R22).
+ */
+function productComment(lines, prById, deptTitles) {
+  const blocks = new Map(); // text → tags
+  for (const l of lines) {
     const pr = prById.get(Number(l.pr_id));
-    const dept = summaries.get(Number(pr.id))?.department_title;
-    const tag = [pr.pr_number, dept, `${l.quantity_text} ${l.uom}`].filter(Boolean).join(' · ');
+    const tag = [pr.pr_number, deptTitles.get(Number(pr.id)), `${l.quantity_text} ${l.uom}`].filter(Boolean).join(' · ');
     const text = [
-      l.line_kind === 'free_text' ? l.free_text_name : null,
+      l.line_kind === 'free_text' ? String(l.free_text_name ?? '').trim() : null,
       typeof l.specification === 'string' ? l.specification.trim() : null,
     ].filter(Boolean).join(' — ');
-    return `[${tag}]${text ? ` ${text}` : ''}`;
-  }).join('\n\n');
+    if (!blocks.has(text)) blocks.set(text, []);
+    blocks.get(text).push(`[${tag}]`);
+  }
+  return [...blocks].map(([text, tags]) => `${tags.join(' ')}${text ? ` ${text}` : ''}`).join('\n\n');
 }
 
 /** The header, as copyRfq inserts it (rfq_no = MAX + 1). Retries a lost rfq_no race in a savepoint. */
@@ -316,21 +332,25 @@ async function insertProduct(t, { rfqId, hotelId, group, comment, unit }) {
  */
 export async function convertLines({ user, lineIds, departmentId, processId = null }, t) {
   if (!t || typeof t.one !== 'function') throw new Error('prConversion.convertLines: a transaction is required');
-  // 1. Locks: PR rows, then lines, then the per-line advisory locks (R19).
-  const owners = await prModel.linePrIds(lineIds, t);
+  // 1. Tenant, on an unlocked read: one company, the caller's — else the lines
+  //    do not exist for them, and none of their rows is ever locked.
+  const owners = await prModel.lineOwners(lineIds, t);
   if (owners.length !== lineIds.length) throw notFound();
+  const companyIds = [...new Set(owners.map((o) => o.company_id))];
+  if (companyIds.length !== 1) throw notFound();
+  const [companyId] = companyIds;
+  if (!isSuperAdmin(user) && !(await prModel.isTenantMember(user.id, companyId, t))) throw notFound();
+
+  // 2. Locks: PR rows, then lines, then the per-line advisory locks (R19).
   const prs = await prModel.lockPrs(t, [...new Set(owners.map((o) => o.pr_id))].sort((x, y) => x - y));
   const locked = await prModel.lockLines(t, lineIds);
   if (locked.length !== lineIds.length) throw notFound(); // a line deleted while we waited
   await prModel.lockLinesForConvert(t, lineIds);
   const prById = new Map(prs.map((p) => [Number(p.id), p]));
   if (locked.some((l) => !prById.has(l.pr_id))) throw notFound();
+  if (prs.some((p) => Number(p.hospitality_company_id) !== companyId)) throw notFound(); // moved while we waited
 
-  // 2. Checks. Tenant: one company, the caller's — else the lines do not exist for them.
-  const companyIds = [...new Set(prs.map((p) => Number(p.hospitality_company_id)))];
-  if (companyIds.length !== 1) throw notFound();
-  const [companyId] = companyIds;
-  if (!isSuperAdmin(user) && !(await prModel.isTenantMember(user.id, companyId, t))) throw notFound();
+  // 3. Checks.
 
   const hotelIds = [...new Set(prs.map((p) => Number(p.hotel_id)))].sort((x, y) => x - y);
   if (hotelIds.length !== 1) {
@@ -368,7 +388,23 @@ export async function convertLines({ user, lineIds, departmentId, processId = nu
   }
   assertOneUnitPerVariant(states);
 
-  // 3. Build the draft.
+  // Each RFQ product's merged specification, refused (never truncated) over the RFQ limit.
+  const deptTitles = await prModel.prDepartmentTitles(prs.map((p) => Number(p.id)), t);
+  const stateById = new Map(states.map((s) => [Number(s.id), s]));
+  const plan = (await prModel.convertGroups(lineIds, t)).map((group) => {
+    const lines = group.line_ids.map((id) => stateById.get(id));
+    return { group, lines, comment: productComment(lines, prById, deptTitles) };
+  });
+  const tooLong = plan.filter((x) => x.comment.length > RFQ_SPEC_MAX)
+    .map((x) => ({ variant_id: x.group.variant_id, length: x.comment.length, line_ids: x.group.line_ids }));
+  if (tooLong.length) {
+    throw prError(PR_ERR.SPEC_TOO_LONG,
+      `The merged specification of ${tooLong.length === 1 ? 'an item' : `${tooLong.length} items`} is longer than the `
+      + `${RFQ_SPEC_MAX} characters an RFQ item allows — convert those lines in separate RFQs`,
+      tooLong);
+  }
+
+  // 4. Build the draft.
   const hotel = await t.one(
     `SELECT hc.name AS company_name,
             COALESCE(NULLIF(btrim(h.delivery_address), ''), NULLIF(btrim(h.full_address), ''),
@@ -378,10 +414,9 @@ export async function convertLines({ user, lineIds, departmentId, processId = nu
       WHERE h.id = $1`,
     [hotelId]);
   const buyer = await t.one(`SELECT name, email, mobile FROM tbl_users WHERE id = $1`, [user.id]);
-  const summaries = await prModel.prSummaries(prs.map((p) => Number(p.id)), t);
 
   const rfq = await insertRfqHeader(t, {
-    comment: rfqComment(prs, summaries),
+    comment: '', // R22: the buyer's vendor-visible "Additional Terms & Conditions" — not ours to fill
     companyName: hotel.company_name ?? '',
     responseEmail: buyer.email ?? '',
     contactName: buyer.name ?? '',
@@ -400,12 +435,8 @@ export async function convertLines({ user, lineIds, departmentId, processId = nu
     `INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
     [rfqId, hotelId, user.id]);
 
-  const stateById = new Map(states.map((s) => [Number(s.id), s]));
-  for (const group of await prModel.convertGroups(lineIds, t)) {
-    const lines = group.line_ids.map((id) => stateById.get(id));
-    const { rfqProductId } = await insertProduct(t, {
-      rfqId, hotelId, group, comment: productComment(lines, prById, summaries), unit: lines[0].uom,
-    });
+  for (const { group, lines, comment } of plan) {
+    const { rfqProductId } = await insertProduct(t, { rfqId, hotelId, group, comment, unit: lines[0].uom });
     await t.none(
       `INSERT INTO tbl_pr_line_rfq (pr_line_id, rfq_id, rfq_product_id, quantity, converted_by)
        SELECT l.id, $2, $3, l.quantity, $4
@@ -440,10 +471,10 @@ export async function convertLines({ user, lineIds, departmentId, processId = nu
 export async function convert(user, body) {
   const input = parseConvertBody(body);
   const out = await db.tx((t) => convertLines({ user, ...input }, t));
-  for (const { pr, line_count: lineCount } of out.converted) {
-    await notifyConverted({ pr, rfqNo: out.rfq_no, lineCount, actorId: user.id });
-  }
+  // One per PR, concurrently; each never throws (prNotify).
+  await Promise.all(out.converted.map(({ pr, line_count: lineCount }) =>
+    notifyConverted({ pr, rfqNo: out.rfq_no, lineCount, actorId: user.id })));
   return { rfq_id: out.rfq_id, rfq_no: out.rfq_no, redirect: out.redirect };
 }
 
-export default { convert, convertLines, parseConvertBody, rfqDraftUrl, MAX_CONVERT_LINES };
+export default { convert, convertLines, parseConvertBody, rfqDraftUrl, MAX_CONVERT_LINES, RFQ_SPEC_MAX };

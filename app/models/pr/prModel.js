@@ -11,7 +11,7 @@
 
 import db from '../../config/dbConn.js';
 import {
-  LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
+  LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINK_IS_LIVE_SQL, LINE_PROGRESS_SQL, estimateTotalSql,
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
   POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
   IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL, HOTEL_BUYERS_SQL, IS_HOTEL_BUYER_SQL,
@@ -566,12 +566,12 @@ export async function getDetail(prId, t = db) {
     );
 
     // Each line's RFQ links, oldest first: {rfq_id, rfq_no, rfq_status_label,
-    // live, po[]}. `live` is the live-link rule of LINE_PROGRESS_SQL (RFQ not
-    // closed/withdrawn, or a live PO for the product); po[] lists every PO of
-    // the linked RFQ product, whatever its status.
+    // live, po[]}. `live` is LINK_IS_LIVE_SQL — the very rule behind
+    // LINE_PROGRESS_SQL; po[] lists every PO of the linked RFQ product,
+    // whatever its status.
     const links = await c.any(
       `SELECT lk.pr_line_id, lk.rfq_id, r.rfq_no, ${RFQ_STATUS_LABEL_SQL('r')} AS rfq_status_label,
-              (r.status NOT IN (2,5) OR ${LIVE_PO_EXISTS('lk')}) AS live,
+              ${LINK_IS_LIVE_SQL('lk', 'r')} AS live,
               COALESCE((
                 SELECT json_agg(json_build_object('po_id', x.id, 'po_number', x.po_number, 'status', x.status) ORDER BY x.id)
                   FROM (SELECT DISTINCT po.id, po.po_number, po.status
@@ -1326,11 +1326,18 @@ export async function deleteReviewRouting(t, { mapId, companyIds }) {
 // the lines, each in id order, then the per-line advisory locks.
 // ---------------------------------------------------------------------------
 
-/** {id, pr_id} of the given lines, unlocked — which PR rows a conversion must lock first. */
-export async function linePrIds(lineIds, t = db) {
+/**
+ * {id, pr_id, company_id} of the given lines, UNLOCKED — the tenant check runs
+ * on this before any row lock is taken (a foreign caller never locks another
+ * tenant's rows), and it names the PR rows a conversion must lock first.
+ */
+export async function lineOwners(lineIds, t = db) {
   return t.map(
-    `SELECT id, pr_id FROM tbl_purchase_requisition_line WHERE id = ANY($1::int[])`,
-    [lineIds], (r) => ({ id: Number(r.id), pr_id: Number(r.pr_id) }));
+    `SELECT l.id, l.pr_id, p.hospitality_company_id AS company_id
+       FROM tbl_purchase_requisition_line l
+       JOIN tbl_purchase_requisition p ON p.id = l.pr_id
+      WHERE l.id = ANY($1::int[])`,
+    [lineIds], (r) => ({ id: Number(r.id), pr_id: Number(r.pr_id), company_id: Number(r.company_id) }));
 }
 
 /** Row-lock PRs in id order. Returns their rows, by id. */
@@ -1396,16 +1403,15 @@ export async function convertGroups(lineIds, t = db) {
   return rows.map((r) => ({ variant_id: Number(r.variant_id), quantity: r.quantity, line_ids: r.line_ids.map(Number) }));
 }
 
-/** Per PR: its department title and requester name (the RFQ's summary and the merged specifications). */
-export async function prSummaries(prIds, t = db) {
+/** PR id → its department's title (the tag of a merged RFQ specification). */
+export async function prDepartmentTitles(prIds, t = db) {
   const rows = await t.any(
-    `SELECT p.id, d.title AS department_title, u.name AS requester_name
+    `SELECT p.id, d.title
        FROM tbl_purchase_requisition p
        LEFT JOIN tbl_department d ON d.id = p.department_id
-       LEFT JOIN tbl_users u ON u.id = p.raised_by
       WHERE p.id = ANY($1::int[])`,
     [prIds]);
-  return new Map(rows.map((r) => [Number(r.id), r]));
+  return new Map(rows.map((r) => [Number(r.id), r.title]));
 }
 
 /**
@@ -1446,6 +1452,6 @@ export default {
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
   setLineMapping, fulfilOpenCatalogRequest, rejectOpenCatalogRequest, insertCatalogRequest, endLine,
-  linePrIds, lockPrs, lockLines, lockLinesForConvert, convertLineStates, convertGroups, prSummaries,
+  lineOwners, lockPrs, lockLines, lockLinesForConvert, convertLineStates, convertGroups, prDepartmentTitles,
   isTenantMember, isActiveProcessOfCompany,
 };

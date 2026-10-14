@@ -19,6 +19,7 @@ export const PR_ERR = Object.freeze({
   LINE_NOT_CONVERTIBLE: ['PR_LINE_NOT_CONVERTIBLE', 409],
   UNIT_MISMATCH: ['PR_UNIT_MISMATCH', 422],
   HOTEL_MISMATCH: ['PR_HOTEL_MISMATCH', 422],
+  SPEC_TOO_LONG: ['PR_SPEC_TOO_LONG', 422],
 });
 
 export class PrError extends Error {

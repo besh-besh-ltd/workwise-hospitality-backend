@@ -817,7 +817,7 @@ describe("PR pool — ending a line withdraws its open catalog request (R21)", (
 });
 
 describe("PR pool — a live RFQ link blocks line actions", () => {
-  it("a sourced line cannot be cancelled, closed or re-mapped (409); once its RFQ is withdrawn it can", async () => {
+  it("a sourced line cannot be cancelled, closed or re-mapped (409); once its RFQ closes without a PO it can", async () => {
     const pr = await approved([catalogLine(V.variant_id), freeLine()], { title: "pool-linked" });
     const [catalogId, freeId] = pr.line_ids;
     expect((await mapLine(buyC, pr.id, freeId, W.variant_id)).status).toBe(200);
@@ -836,8 +836,12 @@ describe("PR pool — a live RFQ link blocks line actions", () => {
     expect((await lineRow(catalogId)).status).toBe("active");
     expect((await lineRow(freeId)).mapped_variant_id).toBe(W.variant_id);
 
-    // RFQ withdrawn without a PO → the link is dead → the line is back in the pool.
+    // A withdrawn publish request (status 5) can go back to drafts: the link stays live (R24).
     await db.none(`UPDATE tbl_rfq SET status = 5 WHERE id = $1`, [rfqCatalog]);
+    expect(await poolOf(buyC, pr)).toEqual([]);
+    expect((await cancelLine(reqC, pr.id, catalogId, "stop")).body.details).toMatchObject({ reason: "already_sourced" });
+    // RFQ closed without a PO → the link is dead → the line is back in the pool.
+    await db.none(`UPDATE tbl_rfq SET status = 2 WHERE id = $1`, [rfqCatalog]);
     expect((await poolOf(buyC, pr)).map((r) => r.line_id)).toEqual([catalogId]);
     expect((await cancelLine(reqC, pr.id, catalogId, "stop")).status).toBe(200);
   });

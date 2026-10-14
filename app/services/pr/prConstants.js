@@ -34,7 +34,9 @@ export const PRICE_MAX_INT_DIGITS = 14;                  // ≤ 99,999,999,999,9
 export const TOTAL_MAX_PAISE = 999999999999999999n;      // Σ must fit estimated_total NUMERIC(18,2)
 export const MAX_LEN = Object.freeze({
   title: 200, justification: 4000, delivery_location: 1000, free_text_name: 300, uom: 50,
-  specification: 20000, suggested_vendor_note: 2000, reason: 2000, note: 2000,
+  // specification = an RFQ item's specification limit (CreateRFQ / rfqValidation:
+  // 1000), so a converted line always fits its RFQ product (R23).
+  specification: 1000, suggested_vendor_note: 2000, reason: 2000, note: 2000,
   // clause_text = the RFQ add-clause limit (rfqValidation.addClause), so a
   // converted clause always fits; file_name = tbl_pr_attachment VARCHAR(300).
   clause_text: 2000, file_name: 300, file_url: 2000,
@@ -115,16 +117,25 @@ export const prGrantRowsSql = (userParam, action) => {
 
 // ---------------------------------------------------------------------------
 // Derived line progress — single source of truth (spec §4.2). `l` = line alias, `p` = PR alias.
-// Live link = RFQ product still exists (FK cascade) AND (RFQ not closed/withdrawn OR a live PO exists for it).
 // ---------------------------------------------------------------------------
 export const LIVE_PO_EXISTS = (lk) => `EXISTS (
   SELECT 1 FROM tbl_rfq_purchase_order po_l
     JOIN tbl_purchase_order_product pop_l ON pop_l.purchase_order_id = po_l.id
    WHERE po_l.rfq_id = ${lk}.rfq_id AND pop_l.rfq_product_id = ${lk}.rfq_product_id
      AND po_l.status NOT IN ('rejected','rejected_by_vendor','cancelled','draft'))`;
+/**
+ * THE live-link rule, per link (R24): link `lk` (tbl_pr_line_rfq) of RFQ `r`
+ * is live iff its RFQ product still exists (the FK cascades, so a deleted
+ * draft takes its links with it) AND (the RFQ is not closed — status 2,
+ * RFQ_STATUSES.CLOSED — OR a live PO exists for the product). A withdrawn
+ * publish request (status 5) can go back to drafts, so it does NOT release
+ * the line. Used by LIVE_LINK_EXISTS and the detail's links[].live — no copy.
+ */
+export const LINK_IS_LIVE_SQL = (lk, r) => `(EXISTS (SELECT 1 FROM tbl_rfq_products _ll_rp WHERE _ll_rp.id = ${lk}.rfq_product_id)
+  AND (${r}.status <> 2 OR ${LIVE_PO_EXISTS(lk)}))`;
 export const LIVE_LINK_EXISTS = (l) => `EXISTS (
   SELECT 1 FROM tbl_pr_line_rfq lk JOIN tbl_rfq r ON r.id = lk.rfq_id
-   WHERE lk.pr_line_id = ${l}.id AND (r.status NOT IN (2,5) OR ${LIVE_PO_EXISTS('lk')}))`;
+   WHERE lk.pr_line_id = ${l}.id AND ${LINK_IS_LIVE_SQL('lk', 'r')})`;
 export const LINE_PROGRESS_SQL = (l, p) => `CASE
   WHEN ${l}.status = 'cancelled' THEN 'cancelled'
   WHEN ${l}.status = 'closed' THEN 'closed'

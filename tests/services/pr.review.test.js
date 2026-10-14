@@ -304,8 +304,10 @@ describe("PR technical review: reviewer edits", () => {
     }
     const bad = await editSpec(engC, pr.id, pr.l1, { specification: "x", quantity: "9" });
     expect(bad.body.details).toEqual(expect.arrayContaining([expect.objectContaining({ field: "quantity" })]));
-    const tooLong = await editSpec(engC, pr.id, pr.l1, { specification: "x".repeat(MAX_LEN.specification + 1) });
+    // R23: 1000 characters at most — what an RFQ item's specification holds.
+    const tooLong = await editSpec(engC, pr.id, pr.l1, { specification: "x".repeat(1001) });
     expect(tooLong.status).toBe(422);
+    expect(tooLong.body).toMatchObject({ code: "PR_VALIDATION", details: [expect.objectContaining({ field: "specification" })] });
     expect(await lineRow(pr.l1)).toEqual(before);
     expect((await eventTypes(pr.id)).filter((t) => t === "spec_edited")).toHaveLength(1);
 

@@ -239,7 +239,9 @@ describe("PR convert — one RFQ draft from many PRs", () => {
   let res;
   beforeAll(async () => {
     pr1 = await approved([
-      catalogLine(V.variant_id, { quantity: "2", uom: "nos", specification: "Stainless, 2 inch" }),
+      catalogLine(V.variant_id, {
+        quantity: "2", uom: "nos", specification: "Stainless, 2 inch", suggested_vendor_note: "Try Acme Traders",
+      }),
       catalogLine(W.variant_id, { quantity: "1", uom: "kg", specification: "Food grade" }),
     ], { title: "convert-merge-1" });
     pr2 = await approved([catalogLine(V.variant_id, { quantity: "3.5", uom: "Nos", specification: "Spare stock" })],
@@ -271,12 +273,12 @@ describe("PR convert — one RFQ draft from many PRs", () => {
       process_id: null, created_by: BUY, updated_by: BUY, bid_end_date: "", company_name: company.name,
       contact_name: "A1 Proc Buyer", contact_number: BUY_MOBILE, response_email: "a1.proc.buyer@test.local",
       location: A1_DELIVERY_ADDRESS, is_tender: 0,
-      title: `From ${pr1.pr_number}, ${pr2.pr_number}`,
+      // R25: the vendor-facing title is the first PR's title, never internal PR numbers.
+      title: "convert-merge-1 & 1 more",
+      // R22: tbl_rfq.comment is the buyer's vendor-visible "Additional Terms & Conditions"
+      // (merged into the PO's T&C) — conversion leaves it empty.
+      comment: "",
     });
-    expect(rfq.comment).toContain(pr1.pr_number);
-    expect(rfq.comment).toContain(pr2.pr_number);
-    expect(rfq.comment).toContain("A1 Eng Buyer");
-    expect(rfq.comment).toContain("Mid-Flight Approver");
     const mappings = await db.any(`SELECT hotel_id, created_by FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1`, [rfqId]);
     expect(mappings).toEqual([{ hotel_id: A1, created_by: BUY }]);
   });
@@ -298,6 +300,10 @@ describe("PR convert — one RFQ draft from many PRs", () => {
     expect(vp.comment).toContain(`[${pr2.pr_number} · `);
     expect(vp.comment).toContain(" · 3.5 Nos] Spare stock");
     expect(wp.comment).toMatch(new RegExp(`^\\[${pr1.pr_number} · [^\\]]+ · 1 kg\\] Food grade$`));
+    // R22: vendor-visible text — never requester names, never the suggested-vendor note.
+    for (const p of products) {
+      for (const hidden of ["A1 Eng Buyer", "Mid-Flight Approver", "Acme"]) expect(p.comment).not.toContain(hidden);
+    }
   });
 
   it("convert.merge: W carries a tech evaluation with both clauses; files are mapped by kind", async () => {
@@ -421,7 +427,10 @@ describe("PR convert — refusals", () => {
     const [rfqsBefore, linksBefore] = [await rfqCount(), await linkCount()];
     const r = await convert(buyC, { line_ids: [a1.line_ids[0], a2.line_ids[0]], department_id: PROC });
     expect(r.status).toBe(422);
-    expect(r.body).toMatchObject({ status: 0, code: "PR_HOTEL_MISMATCH" });
+    expect(r.body).toMatchObject({
+      status: 0, code: "PR_HOTEL_MISMATCH",
+      details: [{ hotel_id: A1, line_ids: [a1.line_ids[0]] }, { hotel_id: A2, line_ids: [a2.line_ids[0]] }],
+    });
     expect([await rfqCount(), await linkCount()]).toEqual([rfqsBefore, linksBefore]);
   });
 
@@ -542,6 +551,23 @@ describe("PR convert — refusals", () => {
     expect(await linksOf([...pr.line_ids, ...prB.line_ids])).toEqual([]);
   });
 
+  it("convert.tenant-before-locks: a foreign caller gets 404 without waiting on (or locking) the other tenant's rows", async () => {
+    const prB = await approved([catalogLine(V.variant_id)], {
+      requesterId: XCO, companyId: B, hotelId: B1, title: "convert-tenant-locks",
+    });
+    // Company B's PR row is locked by someone else; BUY's request must not queue behind it.
+    const res = await db.tx(async (t) => {
+      await t.one(`SELECT id FROM tbl_purchase_requisition WHERE id = $1 FOR UPDATE`, [prB.id]);
+      let timer;
+      const waited = new Promise((resolve) => { timer = setTimeout(() => resolve("blocked"), 5000); });
+      const answer = await Promise.race([convert(buyC, { line_ids: prB.line_ids, department_id: PROC }), waited]);
+      clearTimeout(timer);
+      return answer;
+    });
+    expect(res).not.toBe("blocked");
+    expect(res.status).toBe(404);
+  });
+
   it("convert.validation: line_ids 1..200 positive ints, a real department, an active process of the company → else 422", async () => {
     const pr = await approved([catalogLine(V.variant_id)], { title: "convert-validation" });
     for (const body of [
@@ -564,6 +590,32 @@ describe("PR convert — refusals", () => {
     expect(otherCompanyProcess.status).toBe(422);
     expect(await linksOf(pr.line_ids)).toEqual([]);
   });
+
+  it("convert.process: rfq.create is checked WITH the process; the RFQ stores it", async () => {
+    // REQ2 works A1's pool and may create RFQs only under process A_P1.
+    const grants = [
+      await grantPr(REQ2, "PR Buyer"),
+      await grantRoleScope(db, {
+        userId: REQ2, roleId: ROLE_IDS.TENDER_CREATOR, companyId: A, hotelId: A1, departmentId: PROC, processId: IDS.processes.A_P1,
+      }),
+    ];
+    try {
+      const req2C = await httpClient(REQ2);
+      const pr = await approved([catalogLine(V.variant_id)], { title: "convert-process" });
+      const otherProcess = await convert(req2C, { line_ids: pr.line_ids, department_id: PROC, process_id: IDS.processes.A_P2 });
+      expect(otherProcess.status).toBe(403);
+      const noProcess = await convert(req2C, { line_ids: pr.line_ids, department_id: PROC });
+      expect(noProcess.status).toBe(403);
+      expect(await linksOf(pr.line_ids)).toEqual([]);
+
+      const ok = await convert(req2C, { line_ids: pr.line_ids, department_id: PROC, process_id: IDS.processes.A_P1 });
+      expect(ok.status).toBe(200);
+      expect(await db.one(`SELECT process_id, department_id, created_by FROM tbl_rfq WHERE id = $1`, [ok.body.data.rfq_id]))
+        .toEqual({ process_id: IDS.processes.A_P1, department_id: PROC, created_by: REQ2 });
+    } finally {
+      await revokeRoleScopes(db, grants);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -581,6 +633,35 @@ describe("PR convert — quantities and mapped free text", () => {
     }
   });
 
+  it("convert.spec-dedup (R23): identical specifications of one item merge into ONE block listing every PR tag", async () => {
+    const spec = `Spec ${"y".repeat(595)}`; // 600 characters
+    const p1 = await approved([catalogLine(V.variant_id, { specification: spec })], { title: "convert-dedup-1" });
+    const p2 = await approved([catalogLine(V.variant_id, { specification: `  ${spec}  ` })], { title: "convert-dedup-2" });
+    const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    const [product] = await rfqProducts(r.body.data.rfq_id);
+    expect(product.comment.split(spec)).toHaveLength(2); // the text appears exactly once
+    expect(product.comment).toContain(`[${p1.pr_number} · `);
+    expect(product.comment).toContain(`[${p2.pr_number} · `);
+    expect(product.comment.length).toBeLessThanOrEqual(1000);
+  });
+
+  it("convert.spec-too-long (R23): one item's merged specifications over 1000 characters → 422 PR_SPEC_TOO_LONG, nothing inserted", async () => {
+    const p1 = await approved([catalogLine(V.variant_id, { specification: `A ${"a".repeat(598)}` })], { title: "convert-long-1" });
+    const p2 = await approved([catalogLine(V.variant_id, { specification: `B ${"b".repeat(598)}` })], { title: "convert-long-2" });
+    const [rfqsBefore, linksBefore] = [await rfqCount(), await linkCount()];
+    const ids = [p1.line_ids[0], p2.line_ids[0]];
+    const r = await convert(buyC, { line_ids: ids, department_id: PROC });
+    expect(r.status).toBe(422);
+    expect(r.body).toMatchObject({
+      status: 0, code: "PR_SPEC_TOO_LONG",
+      details: [{ variant_id: V.variant_id, length: expect.any(Number), line_ids: sorted(ids) }],
+    });
+    expect(r.body.details[0].length).toBeGreaterThan(1000);
+    expect(r.body.message).toMatch(/separate RFQs/);
+    expect([await rfqCount(), await linkCount()]).toEqual([rfqsBefore, linksBefore]);
+  });
+
   it("convert.free-text-mapped: a mapped free-text line converts as the mapped variant; the comment keeps the text", async () => {
     const pr = await approved([freeLine({ free_text_name: "Blue mop head 450mm", specification: "Cotton" })],
       { title: "convert-mapped" });
@@ -589,6 +670,7 @@ describe("PR convert — quantities and mapped free text", () => {
     const r = await convert(buyC, { line_ids: [lineId], department_id: PROC });
     expect(r.status).toBe(200);
     const [product] = await rfqProducts(r.body.data.rfq_id);
+    expect((await db.one(`SELECT title FROM tbl_rfq WHERE id = $1`, [r.body.data.rfq_id])).title).toBe("convert-mapped");
     expect(product.product_variant_id).toBe(W.variant_id);
     expect(product.comment).toContain("Blue mop head 450mm");
     expect(product.comment).toContain("Cotton");

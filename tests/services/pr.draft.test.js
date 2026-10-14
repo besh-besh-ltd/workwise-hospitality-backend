@@ -171,6 +171,8 @@ describe("PR drafts — create", () => {
       ["estimated_unit_price", withLine({ estimated_unit_price: "100000000000000.00" })],
       ["estimated_unit_price", withLine({ estimated_unit_price: "0.00" })],
       ["uom", withLine({ uom: "" })],
+      // R23: an RFQ item's specification holds 1000 characters, so a PR line's does too.
+      ["specification", withLine({ specification: "x".repeat(1001) })],
       ["line_kind", withLine({ free_text_name: "Also free text" })],
       ["line_kind", { ...base, lines: [{ quantity: "1", uom: "nos", estimated_unit_price: "1" }] }],
       ["category_id", { ...base, lines: [{ ...free, category_id: null }] }],
@@ -200,9 +202,11 @@ describe("PR drafts — create", () => {
     const atMax = await createPr({ ...base, lines: [{ ...cat, quantity: "100", estimated_unit_price: "99999999999999.99" }] });
     expect(atMax.status).toBe(200); // 9,999,999,999,999,999.00 fits
 
-    // Boundaries that must pass: today's IST date; the largest price.
+    // Boundaries that must pass: today's IST date; the largest price; a 1000-character specification.
     const ok = await createPr({ ...base, required_by_date: await istDate(0), lines: [{ ...cat, estimated_unit_price: "99999999999999.99" }] });
     expect(ok.status).toBe(200);
+    const longestSpec = await createPr({ ...base, lines: [{ ...cat, specification: "x".repeat(1000) }] });
+    expect(longestSpec.status).toBe(200);
   });
 
   it("create.fractional: 0.5 × 1250000.75 is stored and returned exactly", async () => {
