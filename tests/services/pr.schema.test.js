@@ -75,6 +75,38 @@ describe("PR schema", () => {
     });
   });
 
+  describe("indexes and resolved_by FK (20261014110000)", () => {
+    // Every FK column that a parent delete or a per-PR / per-line read scans.
+    // tbl_pr_review_line's PK leads with review_id, so pr_line_id needs its own;
+    // uq_pr_catreq_open_per_line is partial (status = 'open'), so it does not
+    // serve the line's whole request history or the ON DELETE CASCADE scan.
+    it.each([
+      ["idx_pr_attachment_pr", "tbl_pr_attachment", "(pr_id)"],
+      ["idx_pr_attachment_line", "tbl_pr_attachment", "(pr_line_id)"],
+      ["idx_pr_line_clause_line", "tbl_pr_line_clause", "(pr_line_id)"],
+      ["idx_pr_line_rfq_product", "tbl_pr_line_rfq", "(rfq_product_id)"],
+      ["idx_pr_review_line_line", "tbl_pr_review_line", "(pr_line_id)"],
+      ["idx_pr_catreq_line", "tbl_pr_catalog_request", "(pr_line_id)"],
+    ])("%s exists on %s %s, non-partial", async (name, table, cols) => {
+      const row = await db.oneOrNone(
+        `SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, [name]);
+      expect(row).not.toBeNull();
+      expect(row.tablename).toBe(table);
+      expect(row.indexdef).toContain(`USING btree ${cols}`);
+      expect(row.indexdef).not.toMatch(/WHERE/i);
+    });
+
+    it("tbl_pr_catalog_request.resolved_by references tbl_users(id) ON DELETE SET NULL", async () => {
+      const fk = await db.oneOrNone(
+        `SELECT c.confrelid::regclass::text AS parent, c.confdeltype, a.attname
+           FROM pg_constraint c
+           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+          WHERE c.conname = 'fk_pr_catreq_resolved_by' AND c.conrelid = 'public.tbl_pr_catalog_request'::regclass
+            AND c.contype = 'f'`);
+      expect(fk).toEqual({ parent: "tbl_users", confdeltype: "n", attname: "resolved_by" });
+    });
+  });
+
   describe("clause_type (20261014100000)", () => {
     // A clause on a real line, rolled back; `type` undefined = the column default.
     const insertClause = (type) => db.tx(async t => {
