@@ -16,6 +16,7 @@
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
+import { makePrPolicy, dropPrPolicies } from "../helpers/prFixtures.js";
 
 const ADMIN = IDS.users.companyA_admin;
 const APPROVER = IDS.users.a1_proc_poApp;
@@ -83,8 +84,15 @@ const seedRfqApproval = async ({ bidOffsetMs, approverId = APPROVER, ageDays = 0
   return { instanceId: Number(inst.id), stepId: Number(step.id), rfqId: Number(rfq.id) };
 };
 
-/** A purchase requisition waiting on APPROVER at step 1 (PR + instance rows, committed). */
+/**
+ * A purchase requisition waiting on APPROVER at step 1 (PR + instance rows,
+ * committed), under a real entity_type 'PR' policy (one USER step = APPROVER)
+ * that dropPrPolicies removes in afterAll.
+ */
 const seedPrApproval = async () => {
+  const policyId = await makePrPolicy({
+    companyId: IDS.hospitality.A, hotelId: IDS.hotels.A1, steps: [{ source: "USER", id: APPROVER }],
+  });
   const pr = await db.one(
     `INSERT INTO tbl_purchase_requisition
        (pr_number, title, pr_type, hospitality_company_id, hotel_id, department_id, urgency,
@@ -101,7 +109,7 @@ const seedPrApproval = async () => {
         hospitality_company_id, hotel_id, department_id)
      VALUES ('PR', $1, $2, 'PENDING', 1, $3, $4, $5, $6)
      RETURNING id`,
-    [Number(pr.id), IDS.policies.A1_P1_RFQ, IDS.users.a1_eng_buyer,
+    [Number(pr.id), policyId, IDS.users.a1_eng_buyer,
      IDS.hospitality.A, IDS.hotels.A1, IDS.departments.eng]
   );
   madeInstances.push(Number(inst.id));
@@ -154,6 +162,7 @@ afterAll(async () => {
     await db.none("DELETE FROM tbl_approval_instances WHERE id = $1", [id]);
   }
   for (const id of madeRfqs) await db.none("DELETE FROM tbl_rfq WHERE id = $1", [id]);
+  await dropPrPolicies();
   if (madePrs.length) await db.none("DELETE FROM tbl_purchase_requisition WHERE id = ANY($1::int[])", [madePrs]);
   await db.none(
     `DELETE FROM tbl_audit_row_changes WHERE table_name IN
