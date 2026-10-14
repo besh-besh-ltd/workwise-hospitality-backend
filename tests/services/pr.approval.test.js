@@ -952,3 +952,49 @@ describe("PR submit → technical review", () => {
     expect(await recipientsOf(pr.id)).toEqual([]);
   });
 });
+
+// Browser pass 19b: the timeline only had the final "Approved". Intermediate
+// step approvals were nowhere in the PR's history, and after a send-back the
+// first round's approvals vanished from the PR entirely (the chain panel shows
+// only the current instance). The detail now carries every non-final APPROVE
+// across all of the PR's instances.
+describe("PR detail — approval_history", () => {
+  const history = async (id) => (await detail(id)).body.data.approval_history;
+
+  it("lists each step approval with step, actor, comment and time; survives a send-back; the completing approval is the PR's own 'approved' event", async () => {
+    const pr = await submitted("100000.00");
+    expect(await history(pr.id)).toEqual([]);
+
+    expect((await act(ap1C, pr.instanceId, "APPROVE", "Step one fine")).status).toBe(200);
+    const h1 = await history(pr.id);
+    expect(h1).toEqual([expect.objectContaining({
+      instance_id: pr.instanceId, step_order: 1, total_steps: 2,
+      actor_id: AP1, actor_name: names.get(AP1), comment: "Step one fine",
+    })]);
+    expect(Math.abs(new Date(h1[0].created_at).getTime() - Date.now())).toBeLessThan(5 * 60 * 1000);
+
+    // AP2 sends back from step 2; the round-1 approval stays in the history.
+    expect((await sendBack(pr.id, "Qty is wrong", ap2C)).status).toBe(200);
+    expect((await history(pr.id)).map((h) => [h.instance_id, h.step_order, h.actor_id]))
+      .toEqual([[pr.instanceId, 1, AP1]]);
+
+    const put = await reqC.put(`/api/v1/pr/${pr.id}`).send(await unchangedBody(pr.id));
+    expect(put.status).toBe(200);
+    expect((await submit(pr.id)).status).toBe(200);
+    const round2 = (await prRow(pr.id)).approval_instance_id;
+    expect((await act(ap1C, round2, "APPROVE")).status).toBe(200);
+    expect((await act(ap2C, round2, "APPROVE", "Final")).status).toBe(200);
+    expect((await prRow(pr.id)).status).toBe("approved");
+
+    const h = await history(pr.id);
+    expect(h.map((x) => [x.instance_id, x.step_order, x.actor_id])).toEqual([[pr.instanceId, 1, AP1], [round2, 1, AP1]]);
+    expect(h[1].comment).toBeNull();
+  });
+
+  it("a rejection is not repeated in the history (the PR's 'rejected' event carries it)", async () => {
+    const pr = await submitted("100000.00");
+    expect((await act(ap1C, pr.instanceId, "APPROVE")).status).toBe(200);
+    expect((await act(ap2C, pr.instanceId, "REJECT", "No budget")).status).toBe(200);
+    expect((await history(pr.id)).map((x) => [x.step_order, x.actor_id])).toEqual([[1, AP1]]);
+  });
+});

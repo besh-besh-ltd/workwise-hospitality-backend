@@ -619,6 +619,29 @@ export async function getDetail(prId, t = db) {
       [prId]
     );
 
+    // Every step approval across ALL of the PR's approval instances (a send-back
+    // or withdraw cancels an instance, and its approvals must stay on the
+    // record). The APPROVE that completed an instance is the PR's own
+    // 'approved' event, and rejections are 'rejected' events, so both are left
+    // out. tbl_approval_actions.created_at is naive session time; AT TIME ZONE
+    // the session zone turns it into the instant the timeline sorts on.
+    const approvalHistory = await c.any(
+      `SELECT a.id, a.approval_instance_id AS instance_id, st.step_order,
+              (SELECT count(*) FROM tbl_approval_instance_steps s2 WHERE s2.approval_instance_id = ai.id)::int AS total_steps,
+              a.approver_user_id AS actor_id, u.name AS actor_name, NULLIF(btrim(a.comment), '') AS comment,
+              a.created_at AT TIME ZONE current_setting('TimeZone') AS created_at
+         FROM tbl_approval_instances ai
+         JOIN tbl_approval_actions a ON a.approval_instance_id = ai.id AND a.action = 'APPROVE'
+         LEFT JOIN tbl_approval_instance_steps st ON st.id = a.approval_instance_step_id
+         LEFT JOIN tbl_users u ON u.id = a.approver_user_id
+        WHERE ai.entity_type = 'PR' AND ai.entity_id = $1
+          AND NOT (ai.status = 'APPROVED' AND a.id = (
+                SELECT max(a2.id) FROM tbl_approval_actions a2
+                 WHERE a2.approval_instance_id = ai.id AND a2.action = 'APPROVE'))
+        ORDER BY a.created_at, a.id`,
+      [prId]
+    );
+
     const comments = await c.any(
       `SELECT cm.id, cm.author_id, u.name AS author_name, cm.body, cm.created_at
          FROM tbl_pr_comment cm
@@ -660,6 +683,10 @@ export async function getDetail(prId, t = db) {
         ...rv, no_eligible_reviewer: open === true && rv.eligible_reviewers.length === 0,
       })),
       events: events.map((e) => ({ ...e, id: Number(e.id) })),
+      approval_history: approvalHistory.map((h) => ({
+        ...h, id: Number(h.id), instance_id: Number(h.instance_id),
+        step_order: h.step_order == null ? null : Number(h.step_order),
+      })),
       comments,
     };
   });
