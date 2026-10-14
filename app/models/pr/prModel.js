@@ -751,19 +751,38 @@ export async function formDepartments(userId, { companyId, hotelId }, t = db) {
 
 const likePattern = (q) => `%${String(q).replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 
+/** The line picker's item row over the usable catalog (shared by the text and the by-id search). */
+const CATALOG_ITEM_SQL = `
+  SELECT pv.id AS variant_id, pv.name AS variant_name, p.name AS product_name, pv.slug,
+         cat.id AS category_id, cat.title AS category_title
+    FROM tbl_product_variant pv
+    JOIN tbl_product p ON p.id = pv.product_id
+    JOIN tbl_category cat ON cat.id = ${FIRST_CATEGORY_SQL('p.id')}
+   WHERE ${USABLE_VARIANT_SQL}`;
+
 /** Usable catalog variants matching `q` (variant name, product name or slug), with their PR category. */
 export async function searchItems({ q, limit = 25 }, t = db) {
   return t.any(
-    `SELECT pv.id AS variant_id, pv.name AS variant_name, p.name AS product_name, pv.slug,
-            cat.id AS category_id, cat.title AS category_title
-       FROM tbl_product_variant pv
-       JOIN tbl_product p ON p.id = pv.product_id
-       JOIN tbl_category cat ON cat.id = ${FIRST_CATEGORY_SQL('p.id')}
-      WHERE ${USABLE_VARIANT_SQL}
+    `${CATALOG_ITEM_SQL}
         AND (pv.name ILIKE $1 OR p.name ILIKE $1 OR pv.slug ILIKE $1)
       ORDER BY pv.name, pv.id
       LIMIT $2`,
     [likePattern(q), limit]
+  );
+}
+
+/**
+ * The usable catalog variants among `variantIds` (R44), in the order asked —
+ * the same rows and predicate as searchItems; an unknown or unusable id is
+ * simply absent.
+ */
+export async function catalogItemsByIds(variantIds, t = db) {
+  if (!variantIds?.length) return [];
+  return t.any(
+    `${CATALOG_ITEM_SQL}
+        AND pv.id = ANY($1::int[])
+      ORDER BY array_position($1::int[], pv.id)`,
+    [variantIds]
   );
 }
 
@@ -1575,7 +1594,8 @@ export default {
   instanceStepSummary, approvalPosition,
   eligibleReviews, reviewOfPr, closeReview, pendingReviewCount, lineOfPr, setLineSpecification,
   insertClause, clauseOfLine, deleteClause, insertAttachment, attachmentOfPr, deleteAttachment, reviewQueue,
-  list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems, searchCategories,
+  list, kpis, duplicates, hotelCell, departmentExists, activeCategoryIds, formHotels, formDepartments, searchItems,
+  catalogItemsByIds, searchCategories,
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
   catalogRequestLocator, lockCatalogRequest, resolveOpenCatalogRequest, listCatalogRequests,

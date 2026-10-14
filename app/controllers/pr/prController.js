@@ -678,19 +678,53 @@ async function authorizeSearchCell(req) {
   throw refused();
 }
 
+/** variant_ids takes at most this many distinct ids (R44). */
+const MAX_SEARCH_VARIANT_IDS = 50;
+
+/**
+ * `variant_ids` of GET /pr/search-items (R44): a string of comma-separated
+ * positive int4 ids → distinct ids in first-seen order, 1..50 of them; absent
+ * → null; anything else → 422 PR_VALIDATION on `variant_ids`.
+ */
+function parseVariantIds(raw) {
+  if (raw === undefined) return null;
+  const refuse = () => prError(PR_ERR.VALIDATION, 'Invalid variant_ids', [{
+    field: 'variant_ids',
+    message: `variant_ids must be 1 to ${MAX_SEARCH_VARIANT_IDS} comma-separated item ids`,
+  }]);
+  if (typeof raw !== 'string') throw refuse();
+  const ids = raw.split(',').map(posInt);
+  if (ids.some((n) => n === null)) throw refuse();
+  const distinct = [...new Set(ids)];
+  if (distinct.length < 1 || distinct.length > MAX_SEARCH_VARIANT_IDS) throw refuse();
+  return distinct;
+}
+
 /**
  * GET /v1/pr/search-items?hotel_id=&department_id=&q= — usable catalog
  * variants for the line picker (requester) and the mapping dialog (buyer),
  * flagged when on a rate contract for the cell (the FE blocks those with
  * "raise an MR instead"; save and map refuse them too).
+ *
+ * &variant_ids=1,2,… (R44) looks those variants up instead — the FE's
+ * contract re-check of a draft's lines, which a label search cannot do (a
+ * variant ranked past the top 50 never comes back). q and limit are then
+ * ignored; the answer is exactly the requested ids that are usable, same
+ * item shape and same gate.
  */
 export async function searchItems(req, res) {
   try {
+    const variantIds = parseVariantIds(req.query.variant_ids);
     const cell = await authorizeSearchCell(req);
-    const q = text(req.query.q).slice(0, 100);
-    if (q.length < 2) return ok(res, { items: [] });
-    const limit = Math.min(Math.max(posInt(req.query.limit) || 25, 1), 50);
-    const rows = await prModel.searchItems({ q, limit });
+    let rows;
+    if (variantIds) {
+      rows = await prModel.catalogItemsByIds(variantIds);
+    } else {
+      const q = text(req.query.q).slice(0, 100);
+      if (q.length < 2) return ok(res, { items: [] });
+      const limit = Math.min(Math.max(posInt(req.query.limit) || 25, 1), 50);
+      rows = await prModel.searchItems({ q, limit });
+    }
     const coverage = await contractCoverage({
       hotelId: cell.hotelId, departmentId: cell.departmentId, variantIds: rows.map((r) => r.variant_id),
     });

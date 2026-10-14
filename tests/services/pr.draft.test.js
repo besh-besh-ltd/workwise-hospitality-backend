@@ -810,6 +810,73 @@ describe("PR catalog guards — contracts and item search", () => {
       expect(hit).toMatchObject({ on_contract: true, arc_number: "ARC-TEST-PR-1", arc_contract_id: contractId });
     });
 
+    // R44: the FE re-checks contracts for the variants already on a draft by id
+    // — re-searching by label never finds a variant ranked past the top 50.
+    describe("search-items by id (variant_ids, R44)", () => {
+      let w; // a second usable variant, not on contract
+      let u; // a third usable variant, made unusable in one test
+      const byIds = (ids, extra = "", client = reqC) => client.get(
+        `/api/v1/pr/search-items?hotel_id=${A1}&department_id=${ENG}&variant_ids=${encodeURIComponent(ids)}${extra}`);
+
+      beforeAll(async () => {
+        [w, u] = await db.map(
+          `SELECT pv.id FROM tbl_product_variant pv JOIN tbl_product p ON p.id = pv.product_id
+            WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
+              AND pv.id <> $1
+              AND EXISTS (SELECT 1 FROM tbl_product_categories pc JOIN tbl_category c ON c.id = pc.category_id
+                           WHERE pc.product_id = p.id)
+            ORDER BY pv.id DESC LIMIT 2`, [v.variant_id], (r) => Number(r.id));
+      });
+
+      it("returns exactly the requested variants, on_contract per (hotel, department); q and limit are ignored, q is optional", async () => {
+        const res = await byIds(`${w},${v.variant_id},${w}`, "&q=zz-no-such-item-zz&limit=1");
+        expect(res.status).toBe(200);
+        const items = res.body.data.items;
+        expect(items.map((i) => i.variant_id).sort((a, b) => a - b)).toEqual([v.variant_id, w].sort((a, b) => a - b));
+        expect(items.find((i) => i.variant_id === v.variant_id)).toMatchObject({
+          variant_name: v.variant_name, product_name: expect.any(String), category_id: v.category_id,
+          category_title: expect.any(String), on_contract: true, arc_number: "ARC-TEST-PR-1", arc_contract_id: contractId,
+        });
+        expect(items.find((i) => i.variant_id === w)).toMatchObject({
+          on_contract: false, arc_contract_id: null, arc_number: null, category_id: expect.any(Number),
+        });
+        // The same item shape as the text search returns.
+        const textHit = (await search(v.variant_name)).body.data.items.find((i) => i.variant_id === v.variant_id);
+        expect(items.find((i) => i.variant_id === v.variant_id)).toEqual(textHit);
+      });
+
+      it("an unusable variant and an id outside the catalog are simply absent", async () => {
+        await db.none(`UPDATE tbl_product_variant SET is_approve = 0 WHERE id = $1`, [u]);
+        try {
+          const res = await byIds(`${u},${w},2147480000`);
+          expect(res.status).toBe(200);
+          expect(res.body.data.items.map((i) => i.variant_id)).toEqual([w]);
+        } finally {
+          await db.none(`UPDATE tbl_product_variant SET is_approve = 1 WHERE id = $1`, [u]);
+        }
+      });
+
+      it("more than 50 ids, or anything that is not comma-separated positive ints → 422 PR_VALIDATION on variant_ids", async () => {
+        const fiftyOne = Array.from({ length: 51 }, (_, i) => i + 1).join(",");
+        const fifty = Array.from({ length: 50 }, (_, i) => i + 1).join(",");
+        expect((await byIds(fifty)).status).toBe(200);
+        for (const bad of [fiftyOne, "", "abc", "1,abc", "1,,2", "0", "-3", "1.5", "99999999999"]) {
+          const res = await byIds(bad);
+          expect([bad, res.status]).toEqual([bad, 422]);
+          expect(res.body).toMatchObject({ status: 0, code: "PR_VALIDATION" });
+          expect(res.body.details).toEqual([expect.objectContaining({ field: "variant_ids" })]);
+        }
+      });
+
+      it("the same gate as the text search: no pr.create on the cell (nor pr.convert on the hotel) → 403", async () => {
+        expect((await byIds(`${v.variant_id}`, "", otherC)).status).toBe(403);
+        const wrongCell = await reqC.get(`/api/v1/pr/search-items?hotel_id=${A1}&department_id=${PROC}&variant_ids=${v.variant_id}`);
+        expect(wrongCell.status).toBe(403);
+        const missing = await reqC.get(`/api/v1/pr/search-items?hotel_id=${A1}&variant_ids=${v.variant_id}`);
+        expect(missing.status).toBe(422);
+      });
+    });
+
     it("a fully consumed contract line no longer blocks", async () => {
       await db.none(`UPDATE tbl_arc_contract_line SET consumed_qty = committed_qty WHERE arc_contract_id = $1`, [contractId]);
       try {
