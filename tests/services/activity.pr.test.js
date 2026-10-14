@@ -142,7 +142,7 @@ describe("PR activity trail", () => {
     expect(submittedEvent.severity).toBe("notable");
   });
 
-  it("a PR approved through the approval engine names the requisition in the trail", async () => {
+  it("a PR approved through the approval engine: the trail line is about that approval and names the requisition by number", async () => {
     const since = new Date().toISOString();
     const created = await reqC.post("/api/v1/pr").send(await draftBody({ title: "Approve probe" }));
     const { id, pr_number } = created.body.data;
@@ -156,7 +156,14 @@ describe("PR activity trail", () => {
     expect(res.status).toBe(200);
     const e = await waitForEvent(since, (x) => x.event_key === "approval_decided");
     expect(e).not.toBeNull();
-    expect(e.hospitality_company_id).toBe(A);
+    // The engine endpoint's body carries approval_instance_id: the event must
+    // resolve that instance, and through it the PR it approved.
+    expect(e).toMatchObject({
+      entity_type: "APPROVAL_INSTANCE", entity_id: Number(instance), entity_label: `requisition ${pr_number}`,
+      hospitality_company_id: A, hotel_id: A1, actor_user_id: AP1,
+    });
+    expect(e.summary).toContain(pr_number);
+    expect(e.summary).toMatch(/approved requisition/);
   });
 
   it("the company admin's review-routing changes are recorded (save and remove)", async () => {

@@ -40,10 +40,14 @@ const extractEntityId = (spec, { req, responseBody }) => {
       : spec.from === 'body' ? req.body
       : spec.from === 'response' ? responseBody
       : null;
-  const raw = source ? dig(source, spec.path) : null;
-  if (raw == null || raw === '') return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  if (!source) return null;
+  for (const path of [spec.path, ...(spec.fallbacks || [])]) {
+    const raw = dig(source, path);
+    if (raw == null || raw === '') continue;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 };
 
 /**

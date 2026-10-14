@@ -39,9 +39,10 @@ export const CATEGORIES = {
 };
 
 /** Where the entity id comes from. `response` covers the ~40 creations whose
- *  row does not exist until the insert returns. */
+ *  row does not exist until the insert returns. B() takes fallback paths, tried
+ *  in order when the first is absent (a body field with a legacy alias). */
 const P = (path) => ({ from: 'params', path });
-const B = (path) => ({ from: 'body', path });
+const B = (path, ...fallbacks) => ({ from: 'body', path, ...(fallbacks.length ? { fallbacks } : {}) });
 const R = (path = 'data.id') => ({ from: 'response', path });
 
 /** How to find the company and unit. Never from headers — the codebase's own
@@ -579,7 +580,9 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/general/hospitality/approval/action', key: 'approval_decided',
     category: CATEGORIES.APPROVALS, severity: 'critical',
-    entity: { type: 'APPROVAL_INSTANCE', id: B('instance_id') },
+    // The endpoint reads `approval_instance_id` (generalController.submitApprovalAction);
+    // `instance_id` is only a fallback for older callers.
+    entity: { type: 'APPROVAL_INSTANCE', id: B('approval_instance_id', 'instance_id') },
     scope: SCOPE.entity('APPROVAL_INSTANCE'),
     summary: (c) =>
       `${c.actor} ${c.body?.action === 'REJECT' ? 'rejected' : 'approved'} ${c.entityLabel || 'an item'}`,
