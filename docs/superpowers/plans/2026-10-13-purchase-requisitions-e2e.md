@@ -78,3 +78,58 @@ Notes from the run:
   Review routing is therefore seeded for both (free-text lines use the category the requester picks, 284).
 - The review preview lists "Chitra Company Admin" as an eligible reviewer: the Company Administrator system role carries `pr.evaluate`.
 - Step 1 of the approval policy is a ROLE step (HOD, scoped per department): only the HOD of the PR's own department can resolve it.
+
+## 19b browser pass (2026-10-14)
+
+Driver: chrome-devtools MCP, one isolated browser context per persona. Buyer FE http://localhost:3101 and admin panel
+http://localhost:3102, both confirmed (bundle + network panel) to call http://localhost:8124/api/v1 before any login.
+Screenshots: `docs/releases/2026-10-purchase-requisitions/screens/` (repo root). Two full passes: pass 1 on the 19a seed
+(PR-2026-0000A, catalog-request path), pass 2 after the BE fixes and a re-seed (PR-2026-0000G, map path).
+
+| step | result | screenshots |
+|---|---|---|
+| 1 create: on-contract item blocked with "raise an MR" link | PASS | 01 |
+| 1 catalog + free-text line, preview Eng review + HOD -> FC, GM below Rs 1L | PASS after D1 (GM was drawn as done) | 02 (before), 40 (after) |
+| 1 submit | PASS | 03 |
+| 2 reviewer: queue, spec edit, 2 clauses (clause 60% + sampling 40%), datasheet upload, complete | PASS | 04, 05, 06 |
+| 3 HOD approve, FC send back with note | PASS | 08, 09 |
+| 3 requester edits qty above Rs 1L, resubmit, review, HOD, FC, GM | PASS (edit after a page reload failed until D7) | 10, 11, 42, 43 |
+| 4 buyer queue, assign to self, catalog request -> admin-panel fulfil -> mappable | PASS | 12, 13, 14, 15, 16 |
+| 4 buyer maps a free-text line (pass 2) | PASS | 45 |
+| 4 convert -> wizard prefilled (products, Quantity/Unit, both clauses, datasheet as TDS, vendors in tbl_rfq_product_vendors) | PASS | 17, 18 |
+| 4 set bid end date, submit RFQ | PASS after D4 (pass 1 needed a manual country code) | 19, 20, 21, 22, 46, 47 |
+| 5 requester sees In sourcing + RFQ #100001, conversation both ways, timeline | PASS; step approvals missing until D5 | 23, 44 |
+| 6 withdraw during review | PASS | 24, 25 |
+| 6 REQ_ENG raising for Eng: HOD step skipped as self (REQ_ENG temporarily held the Eng HOD scope) | PASS | 27, 28 |
+| 6 admin deletes the policy -> Submit disabled with copy; restored as a company-wide chain | PASS | 49, 50, 51 |
+| 6 409 on a stale tab (withdraw from a second tab) | PASS: "This PR changed since you opened it. Refresh" | 26 |
+| 7 mobile 390 px: list, detail, queue | PASS (no page overflow); tables scroll sideways, see cosmetics | 32, 33, 34, 35, 36 |
+| admin: PR approval flow wizard (threshold field, hotel vs company-wide cards), PR review routing tab | PASS after the seed fix (L1 role showed "Unknown Role") | 29, 30, 31, 48, 50, 51 |
+| awaiting-me tile for an approver | PASS after D2 | 07 (before), 41 (after) |
+
+### Defects
+
+| id | symptom | root cause | fix | test |
+|---|---|---|---|---|
+| D1 | Preview drew the GM level (below Rs 1L) and a level skipped as self with the green done tick | PrRoutingPreview used class `done` for skipped steps | FE 76f66055: `skipped` class, greyed dashed node | create.test.js "preview steps skipped by design are greyed out" |
+| D2 | HOD with "Awaiting me: 1" clicked the tile and got "Nothing is waiting for your review" | KPI counts approvals + returned PRs, tile linked to the review-only queue | BE 2444231f: `GET /pr?tab=awaiting` (shared AWAITING_ME_IDS_SQL with the KPI); FE 9f037ec8: Waiting on me tab, tile opens it, `?tab=awaiting`, dashboard PR queue link | pr.list.test.js "tab=awaiting"; list.test.js, dashboardLinks.test.js |
+| D3 | Editing a returned PR warned "1 open request for this item" naming the same PR | duplicate hint did not exclude the PR being edited | FE 76f66055 (+ 5a99f025 for the reload case) | create.test.js "never lists the PR being edited" |
+| D4 | Converted RFQ failed to submit: "Contact number must be in the format +<country_code>-<mobile_number>" | conversion copied a bare mobile; the wizard split it into an empty code and sent "-9000096018" | BE 474219f0: `rfqContactNumber()` stores "+CC-number" (bare -> +91) | pr.convert.test.js "contact number" (unit + HTTP) |
+| D5 | Timeline only showed the final Approved; after a send-back the first round's approvals vanished from the PR | no PR event for step approvals; chain panel shows only the current instance | BE 4898d362: detail `approval_history` (non-final APPROVEs over all instances); FE 298a1ddf merges it into the timeline | pr.approval.test.js "approval_history"; detail.test.js "merges step approvals" |
+| D7 | After a reload of /purchase-requisitions/create?id=N, Save/Submit POSTed a new PR -> 422 "This line does not belong to this requisition"; the returned PR could not be resubmitted | prId state only read the route id on the first render, before the router was ready | FE 5a99f025: take the id when the router is ready | create.test.js "edit opened by a full page load" |
+| S1 | Admin PR flow wizard showed L1 as "Unknown Role" with an empty picker | seed created the HOD custom role as the company-less fixture Super Admin, so rbac getRoles hid it | BE b614b478 (seed) | verified in the browser (48) |
+| S2 | Re-seeding failed after the browser pass submitted an RFQ (tbl_lifecycle_history / auto-created projects) | seed wipe did not cover RFQ lifecycle rows and the wizard's "Auto Project" | BE a463959d (seed) | `scripts/pr/e2e_up.sh` re-run clean |
+
+### Cosmetic / not fixed (each under 15 min would not cover it, or it is pre-existing)
+- Department not auto-selected when the requester has exactly one; edit form shows quantity "2.000" and price "15000.00".
+- Preview label for USER steps repeats the user's name (label = approver).
+- Line progress says "Awaiting approval" while the PR is in review or returned.
+- "Draft edited" has no detail for quantity-only changes and is logged on submit-from-edit with no change; "Was In technical review" capitalisation.
+- Detail chain: skipped levels do not name the level (e.g. "Not required below Rs 1,00,000" without "GM").
+- Queue table needs horizontal scroll at 1440 px (Actions clipped); at 390 px detail items and queue tables are 1084/1124 px wide inside a sideways scroller, KPI tiles + filters push the list down.
+- The global AI-assistant button overlaps the right-most sticky action (Withdraw / Submit).
+- RFQ draft does not carry the PR delivery location (uses the hotel address; empty for the seed hotel).
+- Rail badge on "My requisitions" counts approvals but opens the Mine tab (Waiting on me is one click away).
+- Approvers without pr.create still see "New requisition".
+- Admin panel: catalog requests page has no heading; fulfil search does not show whether a variant has vendors.
+- RFQ wizard "MARKS AND CLAUSES (1 clauses)" counts only non-sampling clauses (pre-existing wizard).
