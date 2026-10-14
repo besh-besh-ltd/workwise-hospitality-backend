@@ -974,7 +974,9 @@ export async function kpis(user, superAdmin = false, t = db) {
  *   a PR   of the company, created in the last 30 days, not a draft (R11: an
  *          unsubmitted draft is private) and not rejected / cancelled, with an
  *          ACTIVE line whose effective variant is `variant`;
- *   an RFQ of the company, not closed / withdrawn, active in the last 30 days
+ *   an RFQ of the company, not closed (status 2 — the live-link rule's own
+ *          test, R24: a withdrawn publish request, status 5, can go back to
+ *          drafts and still holds its lines, so it is live), active in the last 30 days
  *          (R13: tbl_rfq has no created_at — "timestamp" is naive UTC and is
  *          rewritten on edit, so it is LAST ACTIVITY), containing `variant`.
  * `p` / `r` are the PR / RFQ aliases; `company` and `variant` are SQL
@@ -989,7 +991,7 @@ const DUPLICATE_PR_SQL = (p, company, variant) => `(
                  AND COALESCE(_dup_l.product_variant_id, _dup_l.mapped_variant_id) = ${variant}))`;
 const DUPLICATE_RFQ_SQL = (r, company, variant) => `(
   ${r}.hospitality_company_id = ${company}
-  AND ${r}.status NOT IN (2, 5)
+  AND ${r}.status <> 2
   AND (${r}."timestamp" AT TIME ZONE 'UTC') >= NOW() - INTERVAL '30 days'
   AND EXISTS (SELECT 1 FROM tbl_rfq_products _dup_rp WHERE _dup_rp.rfq_id = ${r}.id AND _dup_rp.product_variant_id = ${variant}))`;
 

@@ -669,6 +669,32 @@ describe("PR convert — quantities and mapped free text", () => {
     expect((await rfqProducts(r.body.data.rfq_id))[0].comment).toBe("");
   });
 
+  it("convert.spec-one-plus-empty (R26): one specification next to a line without one → that specification alone, no tags", async () => {
+    const spec = `Spec ${"s".repeat(945)}`; // 950 characters: tags would push it past 1000
+    const p1 = await approved([catalogLine(V.variant_id, { specification: spec })], { title: "convert-one-empty-1" });
+    const p2 = await approved([catalogLine(V.variant_id, { specification: "" })], { title: "convert-one-empty-2" });
+    const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    const [product] = await rfqProducts(r.body.data.rfq_id);
+    expect(product.comment).toBe(spec);
+    expect(await specsOf(r.body.data.rfq_id, V.variant_id)).toEqual({ Quantity: "4", Unit: "nos" });
+  });
+
+  it("convert.spec-free-text-shares (R26): a mapped free-text line and a catalog line sharing one specification → that specification alone", async () => {
+    const spec = `Mop ${"q".repeat(946)}`; // 950 characters
+    const free = await approved([freeLine({ free_text_name: "Blue mop head 450mm", specification: spec })],
+      { title: "convert-shared-free" });
+    expect((await buyC.post(`/api/v1/pr/${free.id}/lines/${free.line_ids[0]}/map`).send({ variant_id: W.variant_id })).status)
+      .toBe(200);
+    const cat = await approved([catalogLine(W.variant_id, { specification: spec, quantity: "4" })], { title: "convert-shared-cat" });
+    const r = await convert(buyC, { line_ids: [free.line_ids[0], cat.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    const [product] = await rfqProducts(r.body.data.rfq_id);
+    expect(product.product_variant_id).toBe(W.variant_id);
+    expect(product.comment).toBe(spec);
+    expect(await specsOf(r.body.data.rfq_id, W.variant_id)).toEqual({ Quantity: "8", Unit: "nos" });
+  });
+
   it("convert.spec-too-long (R23): one item's merged specifications over 1000 characters → 422 PR_SPEC_TOO_LONG, nothing inserted", async () => {
     const p1 = await approved([catalogLine(V.variant_id, { specification: `A ${"a".repeat(598)}` })], { title: "convert-long-1" });
     const p2 = await approved([catalogLine(V.variant_id, { specification: `B ${"b".repeat(598)}` })], { title: "convert-long-2" });

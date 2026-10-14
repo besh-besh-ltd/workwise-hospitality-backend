@@ -213,7 +213,11 @@ function rfqTitle(prs) {
  *     alone, untagged — so a line whose specification passed the 1000-character
  *     entry cap always converts. If a free-text name would push it past the RFQ
  *     limit, the name is dropped and the specification alone is used (R26).
- *   - Several distinct texts: one block per text, in order of first
+ *   - Several texts but ONE distinct non-empty specification (the others are
+ *     empty, or differ only by a free-text name): that specification alone,
+ *     untagged — the "one spec" decision is keyed on the specification, so an
+ *     empty line or a name never turns an entry-capped spec into a refusal.
+ *   - Several distinct specifications: one block per text, in order of first
  *     appearance, each listing the tags of the lines it came from —
  *     "[PR-a · department · qty unit] [PR-b · …] text" — joined by a blank
  *     line. Only this form can exceed the limit (→ PR_SPEC_TOO_LONG).
@@ -221,10 +225,12 @@ function rfqTitle(prs) {
  */
 function productComment(lines, prById, deptTitles) {
   const blocks = new Map(); // text → {specification, tags}
+  const specifications = new Set(); // distinct non-empty specifications
   for (const l of lines) {
     const pr = prById.get(Number(l.pr_id));
     const tag = [pr.pr_number, deptTitles.get(Number(pr.id)), `${l.quantity_text} ${l.uom}`].filter(Boolean).join(' · ');
     const specification = typeof l.specification === 'string' ? l.specification.trim() : '';
+    if (specification) specifications.add(specification);
     const text = [
       l.line_kind === 'free_text' ? String(l.free_text_name ?? '').trim() : null,
       specification,
@@ -236,6 +242,7 @@ function productComment(lines, prById, deptTitles) {
     const [[text, { specification }]] = blocks;
     return text.length <= RFQ_SPEC_MAX ? text : specification;
   }
+  if (specifications.size === 1) return [...specifications][0];
   return [...blocks].map(([text, { tags }]) => `${tags.join(' ')}${text ? ` ${text}` : ''}`).join('\n\n');
 }
 

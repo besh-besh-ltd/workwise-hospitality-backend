@@ -460,11 +460,12 @@ describe("PR duplicates", () => {
     expect(ageH).toBeLessThan(30 * 24);
   });
 
-  it("includes live RFQs with the variant (not closed/withdrawn), readable per rfq.read or authorship", async () => {
+  it("includes live RFQs with the variant (only closed ones drop out — a withdrawn publish request is live, R24), readable per rfq.read or authorship", async () => {
     const open = await makeRFQ(db, { createdBy: REQ, status: 1, is_published: 1, hospitality: A, hotel: A1 });
     const closed = await makeRFQ(db, { createdBy: REQ, status: 2, is_published: 1, hospitality: A, hotel: A1 });
+    const withdrawn = await makeRFQ(db, { createdBy: REQ, status: 5, is_published: 0, hospitality: A, hotel: A1 });
     const theirs = await makeRFQ(db, { createdBy: REQ2, status: 1, is_published: 1, hospitality: A, hotel: A2 });
-    for (const r of [open, closed, theirs]) {
+    for (const r of [open, closed, withdrawn, theirs]) {
       rfqIds.push(r.rfq_id);
       await db.none(
         `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, product_variant_id, variant)
@@ -473,7 +474,7 @@ describe("PR duplicates", () => {
     const res = await dups(reqC);
     const rfqs = res.body.data.items.filter((i) => i.kind === "rfq");
     const got = rfqs.map((i) => i.id);
-    expect(got).toEqual(expect.arrayContaining([open.rfq_id, theirs.rfq_id]));
+    expect(got).toEqual(expect.arrayContaining([open.rfq_id, withdrawn.rfq_id, theirs.rfq_id]));
     expect(got).not.toContain(closed.rfq_id);
     const byId = Object.fromEntries(rfqs.map((i) => [i.id, i]));
     expect(byId[open.rfq_id].readable).toBe(true);
