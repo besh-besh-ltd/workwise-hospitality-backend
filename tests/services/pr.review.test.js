@@ -21,7 +21,7 @@ import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import {
   grantPr, revokeAllPr, firstUsableVariant, cleanupPrs, makePrPolicy, dropPrPolicies,
-  mapCategory, unmapAll, istDate,
+  mapCategory, unmapAll, istDate, prRoleId,
 } from "../helpers/prFixtures.js";
 import { buyerPrDetail } from "../../app/services/notificationLinks.js";
 import { noReviewerLabel, MAX_LEN } from "../../app/services/pr/prConstants.js";
@@ -496,7 +496,14 @@ describe("PR technical review: complete and send back", () => {
       await gate.none("COMMIT");
       results = await inflight;
     } finally {
-      gate.done();
+      // If anything above threw, the gate still holds its transaction and the
+      // row locks: end it before the client goes back to the pool. (After the
+      // COMMIT this is a no-op ROLLBACK — a warning, never an error.)
+      try {
+        await gate.none("ROLLBACK");
+      } finally {
+        gate.done();
+      }
     }
     expect(results.map((r) => r.status)).toEqual([200, 200]);
     expect(await instancesOf(pr.id)).toHaveLength(1);
@@ -559,7 +566,13 @@ describe("PR technical review: complete and send back", () => {
   });
 
   it("self-review: the requester who is also an eligible reviewer completes their own review → self_reviewed; the approval still excludes them", async () => {
+    // The approval step is the PR Approver ROLE, which REQ ALSO holds here — so
+    // only separation of duties can keep REQ off the chain (a USER step naming
+    // AP1 would exclude REQ trivially).
+    await dropPrPolicies();
+    await makePrPolicy({ steps: [{ source: "ROLE", id: await prRoleId("PR Approver") }] });
     const own = await grantPr(REQ, "PR Technical Reviewer", { departmentId: ENG });
+    const ownApprover = await grantPr(REQ, "PR Approver", { departmentId: ENG });
     try {
       const pr = await inReview();
       expect((await detail(pr.id)).body.data.capabilities.review).toEqual({ review_id: pr.eng, can_edit_lines: [pr.l1] });
@@ -575,10 +588,15 @@ describe("PR technical review: complete and send back", () => {
       expect((await complete(procC, pr.id, pr.proc)).status).toBe(200);
       const [inst] = await instancesOf(pr.id);
       expect((await prRow(pr.id)).status).toBe("pending_approval");
+      // The role resolves to its holders minus the requester: AP1 only.
       expect(await approverIdsOf(inst.id)).toEqual([AP1]);
       expect((await detail(pr.id)).body.data.capabilities.approval).toMatchObject({ can_approve: false, can_reject: false });
+      expect((await detail(pr.id, ap1C)).body.data.capabilities.approval).toMatchObject({ can_approve: true });
+      const selfApprove = await reqC.post(ACTION).send({ approval_instance_id: inst.id, action: "APPROVE", comment: "mine" });
+      expect(selfApprove.status).toBe(400);
+      expect((await prRow(pr.id)).status).toBe("pending_approval");
     } finally {
-      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [own]);
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = ANY($1::int[])`, [[own, ownApprover]]);
     }
   });
 
