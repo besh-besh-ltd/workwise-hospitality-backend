@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Purchase Requisitions: brings up the LOCAL end-to-end backend stack (Task 19a).
 #
-#   scripts/pr/e2e_up.sh              # prepare the DB if missing, seed, start the server in the background
+#   scripts/pr/e2e_up.sh              # prepare the DB if missing, (re-)seed it, start the server in the background
 #   scripts/pr/e2e_up.sh --fresh      # drop + rebuild the database first
-#   scripts/pr/e2e_up.sh --reseed     # re-run the (idempotent) seed even when the DB exists (default: always seeds)
 #   scripts/pr/e2e_up.sh --foreground # run the server in the foreground instead
 #   scripts/pr/e2e_up.sh --stop       # stop the server this script started
 #
@@ -37,9 +36,22 @@ if [ "$E2E_DB_NAME" = "hospitality_test_e2e" ] || [ "$E2E_PORT" = "8122" ]; then
   echo "ABORT: hospitality_test_e2e / port 8122 belong to the Vendor Networks stack" >&2; exit 2
 fi
 
+# Kills the recorded pid only when it is still OUR backend: a stale pidfile can
+# name a pid the OS has since given to an unrelated process, which must never
+# be killed. The launcher execs `node … server.js`, so that is what we look for.
 stop_server() {
-  if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    kill "$(cat "$PIDFILE")" && echo "[pr-e2e] stopped server pid $(cat "$PIDFILE")"
+  if [ -s "$PIDFILE" ]; then
+    local pid cmd
+    pid="$(cat "$PIDFILE")"
+    if kill -0 "$pid" 2>/dev/null; then
+      cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+      if [[ "$cmd" =~ (^|[[:space:]/])server\.js([[:space:]]|$) ]]; then
+        kill "$pid" && echo "[pr-e2e] stopped server pid $pid"
+        for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+      else
+        echo "[pr-e2e] NOT killing pid $pid from $PIDFILE: not a server.js process ($cmd)" >&2
+      fi
+    fi
   fi
   rm -f "$PIDFILE"
 }
@@ -48,7 +60,6 @@ MODE=background; FRESH=0
 for a in "$@"; do
   case "$a" in
     --fresh) FRESH=1 ;;
-    --reseed) ;;
     --foreground) MODE=foreground ;;
     --stop) stop_server; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
@@ -56,6 +67,10 @@ for a in "$@"; do
 done
 
 stop_server
+if lsof -tiTCP:"$E2E_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "ABORT: something else is listening on port $E2E_PORT (pid $(lsof -tiTCP:"$E2E_PORT" -sTCP:LISTEN | head -1)); stop it first" >&2
+  exit 2
+fi
 
 DB_EXISTS=$(psql -h "$E2E_DB_HOST" -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname = '$E2E_DB_NAME'" || true)
 if [ "$FRESH" = 1 ] || [ -z "$DB_EXISTS" ]; then

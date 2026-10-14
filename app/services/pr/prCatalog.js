@@ -145,9 +145,23 @@ export async function guardCatalogLines(t, cell, lines) {
   return lines.map((l) => (l.line_kind === 'catalog' ? { ...l, category_id: variants.get(l.product_variant_id).category_id } : l));
 }
 
+/**
+ * Is `hostname` (a WHATWG URL hostname, lower-cased) this machine? `localhost`,
+ * any `*.localhost` name (RFC 6761 — always loopback), 127.0.0.0/8, or ::1.
+ */
+function isLoopbackHost(hostname) {
+  const h = String(hostname ?? '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === '[::1]') return true;
+  const v4 = h.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return Boolean(v4) && v4.slice(1).every((n) => Number(n) <= 255);
+}
+
 // Object URL on the configured S3 endpoint override (local sink). multer-s3
 // addresses the sink virtual-hosted (http://<bucket>.<endpoint host>:<port>/<key>);
-// path-style (<endpoint>/<bucket>/<key>) is accepted too.
+// path-style (<endpoint>/<bucket>/<key>) is accepted too. Honoured ONLY when the
+// endpoint is loopback / *.localhost: an override pointing anywhere else (a stray
+// env var on a real server) never widens what counts as our upload.
 function isOwnEndpointUrl(u, bucketLower, endpoint) {
   const raw = String(endpoint ?? '').trim();
   if (!raw) return false;
@@ -158,6 +172,7 @@ function isOwnEndpointUrl(u, bucketLower, endpoint) {
     return false;
   }
   if (!['http:', 'https:'].includes(e.protocol) || e.username || e.password) return false;
+  if (!isLoopbackHost(e.hostname)) return false;
   if (u.protocol !== e.protocol || u.username || u.password || u.search || u.hash) return false;
   const host = u.host.toLowerCase();
   const endpointHost = e.host.toLowerCase();
@@ -187,8 +202,8 @@ function isOwnEndpointUrl(u, bucketLower, endpoint) {
  * bucket; inside a virtual-hosted URL every path is in our bucket anyway.
  * No bucket configured → nothing is ours.
  *
- * Local/E2E only: when AWS_ENDPOINT_URL_S3 is set (a local S3 sink; unset in
- * production), objects at `<bucket>.<endpoint host>/<key>` (virtual-hosted, what
+ * Local/E2E only: when AWS_ENDPOINT_URL_S3 is set to a loopback or *.localhost
+ * endpoint (a local S3 sink; unset in production), objects at `<bucket>.<endpoint host>/<key>` (virtual-hosted, what
  * multer-s3 returns for the sink) and `<endpoint>/<bucket>/<key>` (path-style)
  * are ours too, with the same rules (exact origin, no credentials/query/
  * fragment, non-empty key, normalised path stays inside the bucket prefix).

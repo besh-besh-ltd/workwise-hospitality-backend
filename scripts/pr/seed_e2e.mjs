@@ -46,9 +46,17 @@ const conn = {
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const LOCAL_DB = /^hospitality_test_/;
 const NEVER_DB = /prod|stage|staging|main/i;
+const PR_DB = /_pr$/;
 
 if (!LOCAL_DB.test(conn.database) || NEVER_DB.test(conn.database)) {
   console.error(`ABORT: '${conn.database}' does not look like a local database (need /^hospitality_test_/).`);
+  process.exit(2);
+}
+// This seed WIPES the persona world it owns. Only a PR e2e database may take it:
+// never hospitality_test_e2e (the Vendor Networks stack of another session) nor
+// a jest test database.
+if (!PR_DB.test(conn.database)) {
+  console.error(`ABORT: '${conn.database}' is not a PR e2e database (the name must end in _pr, e.g. hospitality_test_e2e_pr).`);
   process.exit(2);
 }
 if (!LOCAL_HOSTS.has(conn.host)) {

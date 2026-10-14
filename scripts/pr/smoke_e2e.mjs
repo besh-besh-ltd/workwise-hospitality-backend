@@ -5,6 +5,14 @@ import fs from "fs";
 
 const BASE = (process.argv[2] || "http://localhost:8124").replace(/\/$/, "");
 if (!/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(BASE)) { console.error("ABORT: base URL must be http://localhost:<port>"); process.exit(2); }
+// The smoke writes PRs, RFQ drafts and catalog requests: only the PR e2e server
+// (port 8124) may take them — never another stack's (e.g. Vendor Networks on 8122)
+// unless E2E_ALLOW_PORT is set on purpose.
+const E2E_PORT = "8124";
+if (new URL(BASE).port !== E2E_PORT && !process.env.E2E_ALLOW_PORT) {
+  console.error(`ABORT: the PR smoke runs against port ${E2E_PORT} only (got ${new URL(BASE).port}); set E2E_ALLOW_PORT=1 to override`);
+  process.exit(2);
+}
 const API = `${BASE}/api/v1`;
 const PASSWORD = "PrE2e@12345";
 const CODES = { REQ_HK: "PRREQHK", REQ_ENG: "PRREQENG", RV_ENG: "PRRVENG", HOD_HK: "PRHODHK", FC: "PRFC", GM: "PRGM", BUY1: "PRBUY1", BUY2: "PRBUY2", COMPANY_ADMIN: "PRCADMIN" };
@@ -31,7 +39,6 @@ function check(label, ok, detail = "") {
   say(`${String(step).padStart(2, "0")}. [${ok ? "PASS" : "FAIL"}] ${label}${detail ? `  -> ${detail}` : ""}`);
   return ok;
 }
-const money = (s) => Number(s).toFixed(2);
 
 async function login(who, creds) {
   const { json } = await call(null, "POST", "/users/login?conform=true", creds, { raw: true });

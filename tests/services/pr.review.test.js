@@ -846,6 +846,24 @@ describe("isOwnUploadUrl", () => {
       nope("http://user:pw@localhost:9555/acme-files/x.pdf");
     });
 
+    it("is honoured only for a loopback / *.localhost endpoint — any other endpoint host is inert (19a hardening)", () => {
+      // An endpoint override that points anywhere but this machine (a stray env
+      // var in a real deploy) must never widen what counts as "our upload".
+      for (const endpoint of [
+        "http://minio.internal:9000", "https://s3.evil.example", "http://localhost.evil.example:9555",
+        "http://127.0.0.1.nip.io:9555", "http://10.0.0.5:9555",
+      ]) {
+        const host = new URL(endpoint).host;
+        nope(`${new URL(endpoint).protocol}//${host}/acme-files/x.pdf`, { ...sink, endpoint });
+        nope(`${new URL(endpoint).protocol}//acme-files.${host}/x.pdf`, { ...sink, endpoint });
+      }
+      yes("http://127.0.0.1:9555/acme-files/x.pdf", { ...sink, endpoint: "http://127.0.0.1:9555" });
+      yes("http://127.0.0.2:9555/acme-files/x.pdf", { ...sink, endpoint: "http://127.0.0.2:9555" });
+      yes("http://[::1]:9555/acme-files/x.pdf", { ...sink, endpoint: "http://[::1]:9555" });
+      yes("http://sink.localhost:9555/acme-files/x.pdf", { ...sink, endpoint: "http://sink.localhost:9555" });
+      yes("http://acme-files.sink.localhost:9555/x.pdf", { ...sink, endpoint: "http://sink.localhost:9555" });
+    });
+
     it("is inert when the endpoint is unset or blank (production)", () => {
       nope("http://acme-files.localhost:9555/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: undefined });
       nope("http://localhost:9555/acme-files/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: undefined });
