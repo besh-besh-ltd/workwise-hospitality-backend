@@ -166,6 +166,29 @@ describe("PR activity trail", () => {
     expect(e.summary).toMatch(/approved requisition/);
   });
 
+  it("a late APPROVE on an instance the requester already withdrew changes nothing, so the trail says nothing (A-M4)", async () => {
+    const created = await reqC.post("/api/v1/pr").send(await draftBody({ title: "Late approve probe" }));
+    const { id } = created.body.data;
+    prIds.push(id);
+    await makePrPolicy({ steps: [{ source: "USER", id: AP1 }] });
+    expect((await reqC.post(`/api/v1/pr/${id}/submit`).send({})).status).toBe(200);
+    const { approval_instance_id: instance } = await db.one(
+      `SELECT approval_instance_id FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    expect((await reqC.post(`/api/v1/pr/${id}/withdraw`).send({})).status).toBe(200);
+
+    const since = new Date().toISOString();
+    const late = await ap1C.post("/api/v1/general/hospitality/approval/action")
+      .send({ approval_instance_id: instance, action: "APPROVE", comment: "too late" });
+    // The engine's idempotent answer is unchanged: 200, nothing done.
+    expect(late.status).toBe(200);
+    expect(late.body.data).toMatchObject({ already_completed: true, instance_status: "CANCELLED" });
+    // Capture runs on the response's finish: give it the time it takes elsewhere.
+    const e = await waitForEvent(since, (x) => x.event_key === "approval_decided" && x.entity_id === Number(instance), 1500);
+    expect(e).toBeNull();
+    const pr = await db.one(`SELECT status FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    expect(pr.status).toBe("draft");
+  });
+
   it("the company admin's review-routing changes are recorded (save and remove)", async () => {
     const since = new Date().toISOString();
     const cat = Number((await db.one(

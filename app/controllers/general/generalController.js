@@ -1409,6 +1409,12 @@ const hospitalityApprovalController = {
         comment
       });
 
+      // `already_completed`: the instance was no longer PENDING (concluded,
+      // withdrawn, sent back) or this approver had already sent this decision.
+      // Nothing was decided, so the activity trail must not record "X approved
+      // …". The 200 stays — clients rely on the idempotent answer.
+      if (result?.already_completed === true) res.locals.skipActivityCapture = true;
+
       res.json({ status: 1, data: result });
     } catch (e) {
       logError(e);

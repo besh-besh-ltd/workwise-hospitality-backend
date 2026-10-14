@@ -299,6 +299,11 @@ const activityCapture = (req, res, next) => {
     // only for the ones that actually happened.
     if (mutating && !lookupEvent(req.method, routePattern(req) || '')) noteUncatalogued(req);
     if (res.statusCode >= 400) return;
+    // A handler that answered 200 for something that did NOT happen — an
+    // idempotent no-op such as a late decision on an approval that was already
+    // concluded or withdrawn — sets res.locals.skipActivityCapture, so the trail
+    // never claims it did. The HTTP answer itself is the handler's business.
+    if (res.locals?.skipActivityCapture === true) return;
     captureEvent(req, res, responseBody).catch((err) =>
       logger.error({ err: err.message }, 'Activity capture failed')
     );
