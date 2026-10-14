@@ -101,8 +101,12 @@ export function readableScopeSql(userId, alias = 'p', paramOffset = 1) {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias) || RESERVED_ALIASES.has(alias)) {
     throw new Error(`readableScopeSql: invalid alias '${alias}'`);
   }
-  const u = `$${Number(paramOffset)}`;
-  const clause = `(
+  return { clause: readableClause(`$${Number(paramOffset)}`, alias), params: [userId] };
+}
+
+/** THE read predicate, for the user at SQL expression `u` (a $n placeholder or a trusted column). */
+function readableClause(u, alias) {
+  return `(
     ${alias}.raised_by = ${u}
     OR EXISTS (
       SELECT 1
@@ -137,7 +141,6 @@ export function readableScopeSql(userId, alias = 'p', paramOffset = 1) {
          AND COALESCE(_pr_asa.status, 'PENDING') <> 'REMOVED'
     )
   )`;
-  return { clause, params: [userId] };
 }
 
 /**
@@ -156,7 +159,27 @@ export async function canReadPr(user, pr, t = db) {
   return row.ok === true;
 }
 
+/**
+ * Which of `userIds` may read PR `prId` right now — canReadPr for many users
+ * in one query: the same predicate (readableClause), plus super admins
+ * (user_type 8, as isSuperAdmin). A notification audience is filtered through
+ * this so nobody who lost access is sent a PR's content. Ids, de-duplicated,
+ * in no particular order; [] when none (or the PR does not exist).
+ * @returns {Promise<number[]>}
+ */
+export async function readersOf(prId, userIds, t = db) {
+  const ids = [...new Set((userIds || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!prId || !ids.length) return [];
+  return t.map(
+    `SELECT _rd_u.id
+       FROM tbl_users _rd_u
+       JOIN tbl_purchase_requisition p ON p.id = $1
+      WHERE _rd_u.id = ANY($2::int[])
+        AND (_rd_u.user_type = ${SUPER_ADMIN} OR ${readableClause('_rd_u.id', 'p')})`,
+    [prId, ids], (r) => Number(r.id));
+}
+
 export default {
-  hasPerm, assertPerm, forbiddenMessage, canReadPr, readableScopeSql, prGrantRowsSql, isSuperAdmin,
+  hasPerm, assertPerm, forbiddenMessage, canReadPr, readersOf, readableScopeSql, prGrantRowsSql, isSuperAdmin,
   cellOf, isRequester, notFound,
 };

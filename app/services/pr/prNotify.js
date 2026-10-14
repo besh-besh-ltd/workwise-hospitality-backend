@@ -28,6 +28,7 @@ import { dispatch } from '../notificationService.js';
 import { buyerPrDetail, toAbsoluteUrl } from '../notificationLinks.js';
 import { HOTEL_BUYERS_SQL } from './prConstants.js';
 import { resolveReviewers } from './prRouting.js';
+import { readersOf } from './prAccess.js';
 
 const escapeHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -350,7 +351,10 @@ export async function notifyCatalogResolved({ pr, line, request, outcome, varian
  * requester, the assigned buyer, the eligible reviewers of the reviews that are
  * still pending (resolved now, not at submit) plus every reviewer who acted on
  * any review, the pending approvers of the CURRENT step, and everyone who has
- * already commented. Not de-duplicated or actor-filtered; `audience()` does that.
+ * already commented — narrowed to those who may READ the PR right now (the
+ * read rule, prAccess.readersOf), so someone who acted earlier and has since
+ * lost access (a reviewer whose pr.evaluate was revoked, an unmapped buyer)
+ * is never sent the comment's text. Not actor-filtered; `audience()` does that.
  */
 async function commentParticipants(pr) {
   const rows = await db.any(
@@ -380,7 +384,7 @@ async function commentParticipants(pr) {
     });
     ids.push(...reviewers.map((r) => r.id));
   }
-  return ids;
+  return readersOf(pr.id, ids);
 }
 
 /**

@@ -417,6 +417,20 @@ describe("PR conversation: POST /pr/:id/comments", () => {
     expect(byProc.inApp).toEqual({ pr_comment: ids(REQ, RV_ENG) });
   });
 
+  it("comment.lost-access: a reviewer who acted, then lost pr.evaluate, can no longer read the PR → gets no comment snippet", async () => {
+    const pr = await inReview();
+    expect((await engC.post(`/api/v1/pr/${pr.id}/reviews/${pr.eng}/complete`).send({})).status).toBe(200);
+    await revokeAllPr([RV_ENG]);
+    try {
+      expect((await engC.get(`/api/v1/pr/${pr.id}`)).status).toBe(404); // really cannot read it any more
+      const byReq = await observe(pr.id, () => comment(reqC, pr.id, "Budget code is 4410"));
+      expect(byReq.res.status).toBe(200);
+      expect(byReq.inApp).toEqual({ pr_comment: ids(RV_PROC) }); // the pending reviewer still hears; RV_ENG does not
+    } finally {
+      await grantPr(RV_ENG, "PR Technical Reviewer", { departmentId: ENG });
+    }
+  });
+
   it("comment.pending-approval: the current-step approver and the requester; an unrelated user is not", async () => {
     const pr = await pendingApproval();
     const byReq = await observe(pr.id, () => comment(reqC, pr.id, "Urgent please"));
