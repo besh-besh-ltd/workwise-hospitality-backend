@@ -138,11 +138,25 @@ export async function istDate(offsetDays = 0) {
   return row.d;
 }
 
+// The test DB is built fresh per run (prepareTestDb) and its catalog tables
+// are never ANALYZEd: until autovacuum gets to them the planner believes
+// tbl_product holds ~1 row and nested-loops 11.5k products × 13k variants —
+// over 60 s, failing whichever suite asks first (seen when another jest run
+// loads Postgres and delays autoanalyze). One ANALYZE per process makes the
+// catalog reads below deterministic. Setup only — no code under test is involved.
+let catalogAnalyzed = false;
+async function analyzeCatalogOnce() {
+  if (catalogAnalyzed) return;
+  await db.none(`ANALYZE tbl_product, tbl_product_variant, tbl_product_categories, tbl_category`);
+  catalogAnalyzed = true;
+}
+
 /**
  * The lowest-id variant that the RFQ "usable" predicate admits and whose
  * product has a category. category_id = the product's first category by id.
  */
 export async function firstUsableVariant() {
+  await analyzeCatalogOnce();
   const row = await db.one(
     `SELECT pv.id AS variant_id, pv.name AS variant_name, cat.category_id
        FROM tbl_product_variant pv

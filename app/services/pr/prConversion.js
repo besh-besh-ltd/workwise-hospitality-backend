@@ -13,9 +13,9 @@
 // Everything written to the RFQ is vendor-visible, so nothing internal goes
 // there: tbl_rfq.comment (the buyer's "Additional Terms & Conditions", merged
 // into the PO's T&C) stays empty (R22); the title is the first PR's title, not
-// PR numbers (R25); a product's specification carries only
-// "[PR-… · department · qty unit] specification" blocks — never requester
-// names, never the suggested-vendor note.
+// PR numbers (R25); a product's specification is the lines' specification —
+// tagged "[PR-… · department · qty unit]" only when its lines disagree (R26) —
+// never requester names, never the suggested-vendor note.
 //
 // Every source line gets a tbl_pr_line_rfq link to its RFQ product. Nothing in
 // the RFQ / PO code knows about PRs: the line's progress (in_sourcing, ordered,
@@ -204,26 +204,39 @@ function rfqTitle(prs) {
 }
 
 /**
- * A product's merged specification (vendor-visible): one block per DISTINCT
- * text, in order of first appearance — "[PR-a · department · qty unit] [PR-b
- * · …] text". Identical texts (trimmed) share one block listing every tag
- * (R23). The text is the line's specification, after its free-text name for a
- * mapped free-text line (what the requester asked for). Never requester names
- * or the suggested-vendor note (R22).
+ * A product's merged specification (vendor-visible; R22, R23, R26).
+ *
+ * Each line contributes its text: the specification, after its free-text name
+ * for a mapped free-text line (what the requester asked for). Texts are
+ * compared trimmed.
+ *   - ONE distinct text (one line, identical lines, or all empty): that text
+ *     alone, untagged — so a line whose specification passed the 1000-character
+ *     entry cap always converts. If a free-text name would push it past the RFQ
+ *     limit, the name is dropped and the specification alone is used (R26).
+ *   - Several distinct texts: one block per text, in order of first
+ *     appearance, each listing the tags of the lines it came from —
+ *     "[PR-a · department · qty unit] [PR-b · …] text" — joined by a blank
+ *     line. Only this form can exceed the limit (→ PR_SPEC_TOO_LONG).
+ * Never requester names or the suggested-vendor note.
  */
 function productComment(lines, prById, deptTitles) {
-  const blocks = new Map(); // text → tags
+  const blocks = new Map(); // text → {specification, tags}
   for (const l of lines) {
     const pr = prById.get(Number(l.pr_id));
     const tag = [pr.pr_number, deptTitles.get(Number(pr.id)), `${l.quantity_text} ${l.uom}`].filter(Boolean).join(' · ');
+    const specification = typeof l.specification === 'string' ? l.specification.trim() : '';
     const text = [
       l.line_kind === 'free_text' ? String(l.free_text_name ?? '').trim() : null,
-      typeof l.specification === 'string' ? l.specification.trim() : null,
+      specification,
     ].filter(Boolean).join(' — ');
-    if (!blocks.has(text)) blocks.set(text, []);
-    blocks.get(text).push(`[${tag}]`);
+    if (!blocks.has(text)) blocks.set(text, { specification, tags: [] });
+    blocks.get(text).tags.push(`[${tag}]`);
   }
-  return [...blocks].map(([text, tags]) => `${tags.join(' ')}${text ? ` ${text}` : ''}`).join('\n\n');
+  if (blocks.size === 1) {
+    const [[text, { specification }]] = blocks;
+    return text.length <= RFQ_SPEC_MAX ? text : specification;
+  }
+  return [...blocks].map(([text, { tags }]) => `${tags.join(' ')}${text ? ` ${text}` : ''}`).join('\n\n');
 }
 
 /** The header, as copyRfq inserts it (rfq_no = MAX + 1). Retries a lost rfq_no race in a savepoint. */

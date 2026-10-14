@@ -299,7 +299,8 @@ describe("PR convert — one RFQ draft from many PRs", () => {
     expect(vp.comment).toContain(" · 2 nos] Stainless, 2 inch");
     expect(vp.comment).toContain(`[${pr2.pr_number} · `);
     expect(vp.comment).toContain(" · 3.5 Nos] Spare stock");
-    expect(wp.comment).toMatch(new RegExp(`^\\[${pr1.pr_number} · [^\\]]+ · 1 kg\\] Food grade$`));
+    // R26: one distinct specification → that text alone, no tag.
+    expect(wp.comment).toBe("Food grade");
     // R22: vendor-visible text — never requester names, never the suggested-vendor note.
     for (const p of products) {
       for (const hidden of ["A1 Eng Buyer", "Mid-Flight Approver", "Acme"]) expect(p.comment).not.toContain(hidden);
@@ -633,17 +634,39 @@ describe("PR convert — quantities and mapped free text", () => {
     }
   });
 
-  it("convert.spec-dedup (R23): identical specifications of one item merge into ONE block listing every PR tag", async () => {
+  it("convert.spec-dedup (R23/R26): identical specifications of one item → that specification alone, no PR tags", async () => {
     const spec = `Spec ${"y".repeat(595)}`; // 600 characters
     const p1 = await approved([catalogLine(V.variant_id, { specification: spec })], { title: "convert-dedup-1" });
     const p2 = await approved([catalogLine(V.variant_id, { specification: `  ${spec}  ` })], { title: "convert-dedup-2" });
     const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
     expect(r.status).toBe(200);
     const [product] = await rfqProducts(r.body.data.rfq_id);
-    expect(product.comment.split(spec)).toHaveLength(2); // the text appears exactly once
-    expect(product.comment).toContain(`[${p1.pr_number} · `);
-    expect(product.comment).toContain(`[${p2.pr_number} · `);
-    expect(product.comment.length).toBeLessThanOrEqual(1000);
+    expect(product.comment).toBe(spec);
+  });
+
+  it("convert.spec-1000 (R26): a 1000-character specification always converts — alone or merged with an identical one", async () => {
+    const spec = `Full spec ${"z".repeat(990)}`;
+    expect(spec).toHaveLength(1000);
+    const single = await approved([catalogLine(V.variant_id, { specification: spec })], { title: "convert-1000-single" });
+    const one = await convert(buyC, { line_ids: single.line_ids, department_id: PROC });
+    expect(one.status).toBe(200);
+    expect((await rfqProducts(one.body.data.rfq_id))[0].comment).toBe(spec);
+
+    const p1 = await approved([catalogLine(V.variant_id, { specification: spec })], { title: "convert-1000-a" });
+    const p2 = await approved([catalogLine(V.variant_id, { specification: spec, quantity: "3" })], { title: "convert-1000-b" });
+    const both = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(both.status).toBe(200);
+    const [product] = await rfqProducts(both.body.data.rfq_id);
+    expect(product.comment).toBe(spec);
+    expect(await specsOf(both.body.data.rfq_id, V.variant_id)).toEqual({ Quantity: "5", Unit: "nos" });
+  });
+
+  it("convert.spec-empty (R26): lines without a specification → an empty product specification, no tags", async () => {
+    const p1 = await approved([catalogLine(V.variant_id, { specification: "" })], { title: "convert-empty-1" });
+    const p2 = await approved([catalogLine(V.variant_id, { specification: "   " })], { title: "convert-empty-2" });
+    const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    expect((await rfqProducts(r.body.data.rfq_id))[0].comment).toBe("");
   });
 
   it("convert.spec-too-long (R23): one item's merged specifications over 1000 characters → 422 PR_SPEC_TOO_LONG, nothing inserted", async () => {
@@ -672,9 +695,21 @@ describe("PR convert — quantities and mapped free text", () => {
     const [product] = await rfqProducts(r.body.data.rfq_id);
     expect((await db.one(`SELECT title FROM tbl_rfq WHERE id = $1`, [r.body.data.rfq_id])).title).toBe("convert-mapped");
     expect(product.product_variant_id).toBe(W.variant_id);
-    expect(product.comment).toContain("Blue mop head 450mm");
-    expect(product.comment).toContain("Cotton");
+    // R26: one specification → no tag; the mapped line keeps what was asked for, then its specification.
+    expect(product.comment).toBe("Blue mop head 450mm — Cotton");
     expect(await specsOf(r.body.data.rfq_id, W.variant_id)).toEqual({ Quantity: "4", Unit: "nos" });
     expect(await linksOf([lineId])).toEqual([expect.objectContaining({ rfq_id: r.body.data.rfq_id, rfq_product_id: product.id })]);
+  });
+
+  it("convert.free-text-long-spec (R26): when the free-text name would push a lone specification past 1000, the name is dropped — never refused", async () => {
+    const spec = `Mop spec ${"m".repeat(991)}`;
+    expect(spec).toHaveLength(1000);
+    const pr = await approved([freeLine({ free_text_name: "Blue mop head 450mm", specification: spec })],
+      { title: "convert-mapped-long" });
+    const lineId = pr.line_ids[0];
+    expect((await buyC.post(`/api/v1/pr/${pr.id}/lines/${lineId}/map`).send({ variant_id: W.variant_id })).status).toBe(200);
+    const r = await convert(buyC, { line_ids: [lineId], department_id: PROC });
+    expect(r.status).toBe(200);
+    expect((await rfqProducts(r.body.data.rfq_id))[0].comment).toBe(spec);
   });
 });
