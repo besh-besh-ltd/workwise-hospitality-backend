@@ -193,7 +193,7 @@ async function assertMayConvert(t, user, { companyId, hotelId, departmentId, pro
   await assertPerm(user.id, 'pr.convert', { companyId, hotelId, departmentId: null }, t);
   const forbidden = () => prError(PR_ERR.FORBIDDEN,
     'You cannot create RFQs for this hotel and department', { permission: 'rfq.create' });
-  if (!(await hospitalityModel.userHasContext(user.id, companyId, hotelId))) throw forbidden();
+  if (!(await hospitalityModel.userHasContext(user.id, companyId, hotelId, t))) throw forbidden();
   try {
     await assertUserHasScope(user.id, 'rfq.create', {
       hospitality_company_id: companyId,
@@ -383,7 +383,7 @@ async function insertProduct(t, { rfqId, hotelId, group, comment, unit }) {
 
   // Vendors: the add-product flow's eligibility resolver for the hotel, then the
   // Vendor Networks direct-invite rule. None is a legal draft (publish blocks it).
-  const eligible = await hospitalityModel.getEligibleVendorsForVariant(group.variant_id, [hotelId]);
+  const eligible = await hospitalityModel.getEligibleVendorsForVariant(group.variant_id, [hotelId], t);
   const vendorIds = await directInviteIdsForLine(
     t, { rfqId, productVariantId: group.variant_id, variant }, eligible.map((v) => v.vendor_id));
   if (vendorIds.length) {

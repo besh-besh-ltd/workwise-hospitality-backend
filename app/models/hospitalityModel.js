@@ -996,7 +996,9 @@ const hospitalityModel = {
     );
   },
 
-  userHasContext: async (userId, companyId, hotelId = null) => {
+  // `t`: run inside the caller's transaction (PR convert holds row locks and
+  // must not take a second pooled connection); every other caller omits it.
+  userHasContext: async (userId, companyId, hotelId = null, t = db) => {
     const params = [userId, companyId];
     let condition = '';
     if (hotelId) {
@@ -1006,7 +1008,7 @@ const hospitalityModel = {
       condition = `AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL`;
     }
 
-    const row = await db.oneOrNone(
+    const row = await t.oneOrNone(
       `SELECT 1
        FROM tbl_hospitality_user_mappings hum
        WHERE hum.user_id = $1
@@ -1017,7 +1019,7 @@ const hospitalityModel = {
 
     if (!row && hotelId) {
       // allow company level access to cover hotels
-      const companyLevelAccess = await db.oneOrNone(
+      const companyLevelAccess = await t.oneOrNone(
         `SELECT 1
          FROM tbl_hospitality_user_mappings hum
          WHERE hum.user_id = $1
@@ -1146,7 +1148,8 @@ const hospitalityModel = {
  *    falls within the subscription start and end dates.
  * Vendors failing any of the above conditions are excluded.
  */
-getEligibleVendorsForVariant: async (variantId, hotelIds) => {
+// `t`: run inside the caller's transaction (PR convert); every other caller omits it.
+getEligibleVendorsForVariant: async (variantId, hotelIds, t = db) => {
   // Include vendors with active OR expired subscriptions (expired vendors
   // are included in RFQs but blocked from actions until they renew).
   // Must have BOTH a valid hotel subscription AND a valid category
@@ -1160,7 +1163,7 @@ getEligibleVendorsForVariant: async (variantId, hotelIds) => {
   // and the returned vendor_id is the principal. A vendor in no org is its own key,
   // so its answer is unchanged. One statement: this runs once per product on
   // publish/add-to-draft paths whose statement budgets are pinned by tests.
-  return db.any(
+  return t.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
     FROM tbl_product_variant_vendor_mapping

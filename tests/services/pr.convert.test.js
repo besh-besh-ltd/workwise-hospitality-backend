@@ -30,6 +30,7 @@ import {
   approvedPr, submittedPr, cleanupRfqDrafts, rfqsOfLines,
 } from "../helpers/prFixtures.js";
 import hospitalityModel from "../../app/models/hospitalityModel.js";
+import appDb, { pgp } from "../../app/config/dbConn.js";
 import { buyerPrDetail } from "../../app/services/notificationLinks.js";
 import { rfqContactNumber } from "../../app/services/pr/prConversion.js";
 
@@ -106,6 +107,33 @@ const eventsOf = (prId, type) => db.any(
 const detail = (client, id) => client.get(`/api/v1/pr/${id}`);
 const lineOf = (detailRes, lineId) => detailRes.body.data.lines.find((l) => l.id === lineId);
 const sorted = (ids) => [...ids].map(Number).sort((a, b) => a - b);
+
+/**
+ * Run `fn` and record every statement the APP's pool issues, in issue order, as
+ * {client, text} (the test harness's own pool and the per-connection audit
+ * stamp are left out — same filter as helpers/queryCounter.js). Read-only probe.
+ */
+async function recordAppStatements(fn) {
+  const proto = pgp.pg.Client.prototype;
+  const original = proto.query;
+  const log = [];
+  const isAppClient = (client) => {
+    const pool = appDb.$pool;
+    const clients = pool && (pool._clients || pool.clients);
+    return Array.isArray(clients) && clients.includes(client);
+  };
+  proto.query = function recordingQuery(...args) {
+    const config = args[0];
+    const text = String((typeof config === "string" ? config : config && config.text) || "").trim();
+    if (isAppClient(this) && !/set_config\('app\.actor_id'/.test(text)) log.push({ client: this, text });
+    return original.apply(this, args);
+  };
+  try {
+    return { result: await fn(), log };
+  } finally {
+    proto.query = original;
+  }
+}
 
 /** Usable variants other than V whose product has a category, highest id first. */
 async function otherUsableVariants(n) {
@@ -497,6 +525,35 @@ describe("PR convert — files for the whole PR (R41)", () => {
     expect(r.status).toBe(200);
     const [vp, wp] = await rfqProducts(r.body.data.rfq_id);
     expect(await filesOf([vp.id, wp.id])).toEqual([{ rfq_product_id: vp.id, file_type: "SPEC", file_url: DRAWING }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One pooled connection per conversion (final review B-M6)
+// ---------------------------------------------------------------------------
+describe("PR convert — one pooled connection while the transaction holds its locks", () => {
+  it("convert.one-connection: between the convert transaction's BEGIN and COMMIT, no statement runs on another pooled connection", async () => {
+    const pr = await approved([catalogLine(V.variant_id), catalogLine(W.variant_id, { quantity: "1", uom: "kg" })],
+      { title: "convert-one-connection" });
+    const { result: r, log } = await recordAppStatements(() => convert(buyC, { line_ids: pr.line_ids, department_id: PROC }));
+    expect(r.status).toBe(200);
+
+    const insertAt = log.findIndex((x) => /^INSERT INTO tbl_rfq\s*\(/i.test(x.text));
+    expect(insertAt).toBeGreaterThan(-1);
+    const txClient = log[insertAt].client;
+    let beginAt = insertAt;
+    while (beginAt >= 0 && !(log[beginAt].client === txClient && /^begin\b/i.test(log[beginAt].text))) beginAt -= 1;
+    let commitAt = insertAt;
+    while (commitAt < log.length && !(log[commitAt].client === txClient && /^commit\b/i.test(log[commitAt].text))) commitAt += 1;
+    expect(beginAt).toBeGreaterThan(-1);
+    expect(commitAt).toBeLessThan(log.length);
+
+    // The user-context check and every product's vendor eligibility run on the
+    // transaction's own connection: a convert holds ONE pooled connection.
+    const elsewhere = log.slice(beginAt, commitAt + 1)
+      .filter((x) => x.client !== txClient)
+      .map((x) => x.text.replace(/\s+/g, " ").slice(0, 120));
+    expect(elsewhere).toEqual([]);
   });
 });
 
