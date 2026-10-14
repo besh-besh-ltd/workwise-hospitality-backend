@@ -61,7 +61,7 @@ New RBAC resource **`pr`**. Actions (the existing `permission_action_type` enum 
 | `pr.evaluate` + `pr.read` | Technical review in the reviewing department | **PR Technical Reviewer** |
 | `pr.approve` + `pr.read` | Be resolved as an approver (`ROLE` steps) | **PR Approver** |
 | `pr.convert` + `pr.read` | Buyer pool, map lines, convert, close lines | **PR Buyer** |
-| all of the above | | Company Administrator |
+| `pr.read` only (oversight: every PR of its company; review routing is administered through `company.admin`, not `pr.*`) | | Company Administrator (ruling R40 — it is a non-operational admin role, so it is never a reviewer, approver or buyer by default; an admin who works PRs is given the PR role explicitly) |
 
 Scopes use `tbl_user_role_scopes` (company × hotel × department × process). PR rows carry `process_id` (always NULL in v1) so that `buildScopeExistsClause` works unchanged.
 
@@ -186,7 +186,7 @@ Money is stored as `NUMERIC`, never float. `estimated_total = Σ round(qty × es
   - **Withdraw** is a PR endpoint for the requester.
 - **Post-approval handler** (`handlePrPostApproval`, registered in **both** registries): row-locks the PR, sets `approved`/`approved_at`, writes an event, and notifies the requester and the hotel's buyers. It is idempotent: an already-approved PR is a no-op.
 - **Rejection handler:** sets `rejected`, writes an event, notifies the requester. Also idempotent.
-- The admin approval-hierarchy UI gets a process-free **PR flow** and a per-step "Only when PR value ≥ ₹" field. The policy upsert whitelist accepts `PR` (and `MR`, which was missing too). `insertPolicySteps` writes `min_amount`, and `computePolicyStepDiff` treats a `min_amount` change as a modify, so it propagates.
+- The admin approval-hierarchy UI gets a process-free **PR flow** and a per-step "Only when PR value ≥ ₹" field. The policy upsert whitelist accepts `PR` (and `MR`, which was missing too); both are process-free — a process sent for either is stored NULL (R43). `insertPolicySteps` writes `min_amount`, and `computePolicyStepDiff` treats a `min_amount` change as a modify. PR approval instances are **pinned** to the steps resolved at submit (R4): a policy edit, including a `min_amount` change, does **not** propagate to pending PR instances — it applies to new submissions (and resubmissions after a send-back or withdraw) only. Membership revalidation (a role revoked or granted, a user deactivated) still applies to pending PR instances, with the separation-of-duties filter.
 
 ## 8. Requester experience
 
@@ -294,10 +294,15 @@ Deep link: `/dashboard/buyer/purchase-requisitions/:id` (`buyerPrDetail`), plus 
 
 ## 14. Deploy notes
 
-- DB-first. Migrations in order:
-  1. Enum `resource_type += 'pr'`, `permission_action_type += 'convert'` (own transaction).
-  2. Permissions plus system roles.
-  3. PR tables.
-  4. `min_amount` column.
+- **DB-first, all five migrations, in this order, before any backend code:**
+  1. `20261013100000_pr_permissions` — enums `resource_type += 'pr'` and `permission_action_type += 'convert'` (own transaction), the `pr.*` permissions, the four PR system roles, and `pr.read` for the Company Administrator.
+  2. `20261013101000_pr_tables` — the PR tables and `tbl_approval_policy_steps.min_amount`.
+  3. `20261013102000_approval_instance_step_source_snapshot` — `tbl_approval_instance_steps.source_*`.
+  4. `20261014100000_pr_clause_type_check` — clause type default + CHECK.
+  5. `20261014110000_pr_indexes` — FK-column indexes, `tbl_pr_catalog_request.resolved_by` → `tbl_users`, and (for DBs that ran an earlier `20261013100000`) removal of the Company Administrator's operational `pr.*` grants.
+- **Code must never precede the migrations — for every tenant, not only PR users:**
+  - `20261013102000` is required by code paths of **every** approval entity type: the approval resolution SQL reads `ais.source_*` for all types, and membership revalidation runs it whenever a role or user changes. Without the column, those paths fail with "column does not exist" for RFQ, PO, ARC… alike.
+  - The buyer dashboard joins `tbl_purchase_requisition`, so it fails without `20261013101000`.
 - No backfill.
+- **Rollback:** before rolling the backend back to a build without PRs, **withdraw or cancel every pending PR approval instance** (requester withdraw, or approver send-back; `SELECT id, entity_id FROM tbl_approval_instances WHERE entity_type = 'PR' AND status = 'PENDING'`). The old engine has no PR separation of duties, no pinning and no PR post-approval handler: a PR instance it advances could be approved by the requester, have its steps rewritten by a policy edit, or complete without the PR ever leaving `pending_approval`. The migrations can stay in place (they are additive and old code tolerates them); run the `.down.sql` files in reverse order only if the schema itself must go.
 - Clients need: (a) PR roles granted, (b) a PR approval policy, (c) category → review department mappings. Without a policy, submit is refused with a clear message. Nothing is silently auto-approved.
