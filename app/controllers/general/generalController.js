@@ -864,6 +864,9 @@ function normaliseStepMinAmounts(steps, entityType) {
   return { steps: out };
 }
 
+/** Requisition entity types whose policies never carry a process (R43). */
+const PROCESS_FREE_REQUISITIONS = new Set(['PR', 'MR']);
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -897,9 +900,10 @@ const hospitalityApprovalController = {
       // publish/eval time. Force process_id = NULL for every ARC entity type
       // server-side, regardless of what the client sent.
       const isArcEntity = typeof entity_type === 'string' && (entity_type === 'ARC' || entity_type.startsWith('ARC_'));
-      // PR is process-free for the same reason: a requisition carries no
-      // process, so a PR policy saved with one could never be matched.
-      const isProcessFreeEntity = isArcEntity || entity_type === 'PR';
+      // PR and MR are process-free for the same reason: a requisition carries
+      // no process (the MR engine matches with process_id NULL — mrController,
+      // R43), so a PR or MR policy saved with one could never be matched.
+      const isProcessFreeEntity = isArcEntity || PROCESS_FREE_REQUISITIONS.has(entity_type);
       const effectiveProcessId = isProcessFreeEntity ? null : process_id;
 
       let policy;
@@ -1059,12 +1063,12 @@ const hospitalityApprovalController = {
           if (department_id !== undefined) patch.department_id = department_id;
           if (is_active !== undefined) patch.is_active = is_active;
           if (is_master !== undefined) patch.is_master = is_master;
-          // ARC (and PR) stay process-free by design: force NULL whenever the
+          // ARC, PR and MR stay process-free by design: force NULL whenever the
           // entity type says so, otherwise only touch process_id if it was sent.
-          // PR is judged on the EFFECTIVE type (body, else the stored row), so
-          // an update that omits entity_type cannot attach a process to a PR
-          // policy. ARC keeps its existing body-only rule.
-          if (isProcessFreeEntity || effectiveUpdateEntityType === 'PR') patch.process_id = null;
+          // PR and MR are judged on the EFFECTIVE type (body, else the stored
+          // row), so an update that omits entity_type cannot attach a process
+          // to such a policy. ARC keeps its existing body-only rule.
+          if (isProcessFreeEntity || PROCESS_FREE_REQUISITIONS.has(effectiveUpdateEntityType)) patch.process_id = null;
           else if (process_id !== undefined) patch.process_id = effectiveProcessId;
 
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);

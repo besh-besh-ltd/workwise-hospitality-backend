@@ -1019,6 +1019,31 @@ describe("PR approval — admin and generic endpoints", () => {
     ).toBe("9999999999999999.99");
   });
 
+  it("MR is process-free too (R43): a process sent on create or on an update that omits entity_type is stored NULL", async () => {
+    // The MR engine matches with process_id NULL (mrController), so an MR policy
+    // saved with a process could never be matched.
+    const admin = await httpClient(ADMIN);
+    const mr = await admin.post(POLICIES_URL).send({
+      entity_type: "MR",
+      hospitality_company_id: HC,
+      hotel_id: OTHER_HOTEL,
+      process_id: IDS.processes.A_P1,
+      is_active: true,
+      steps: [{ step_order: 1, decision_rule: "ANY", approver_source_type: "USER", approver_source_id: A1 }],
+    });
+    const mrPolicyId = Number(mr.body?.data?.id);
+    if (Number.isFinite(mrPolicyId) && mrPolicyId > 0) track.policyIds.push(mrPolicyId);
+    expect(mr.status).toBe(201);
+    expect(await db.one(`SELECT entity_type, process_id FROM tbl_approval_policies WHERE id = $1`, [mrPolicyId]))
+      .toEqual({ entity_type: "MR", process_id: null });
+
+    const upd = await admin.post(POLICIES_URL).send({
+      id: mrPolicyId, hotel_id: OTHER_HOTEL, process_id: IDS.processes.A_P1, is_active: true,
+    });
+    expect(upd.status).toBe(200);
+    expect((await db.one(`SELECT process_id FROM tbl_approval_policies WHERE id = $1`, [mrPolicyId])).process_id).toBeNull();
+  });
+
   it("the generic submit endpoint refuses PR: a PR approval only starts from the PR workflow", async () => {
     await makeApprovable([A1]);
     await seedPolicy([{ type: "USER", id: A1 }]);
