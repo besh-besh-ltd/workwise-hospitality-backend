@@ -25,6 +25,7 @@ import { userCanReadEntity } from '../../services/authorizationService.js';
 import { describeVariants, contractCoverage, guardCatalogLines } from '../../services/pr/prCatalog.js';
 import { previewRouting } from '../../services/pr/prRouting.js';
 import * as prWorkflow from '../../services/pr/prWorkflow.js';
+import * as prReview from '../../services/pr/prReview.js';
 import * as prPool from '../../services/pr/prPool.js';
 import * as prConversion from '../../services/pr/prConversion.js';
 import { notifyComment } from '../../services/pr/prNotify.js';
@@ -274,8 +275,8 @@ async function capabilitiesFor(user, pr) {
     approval: await prWorkflow.decisionRights(pr, user),
     // Technical review: {review_id, can_edit_lines} for an eligible reviewer of
     // an open review, else null — the gate every reviewer endpoint applies
-    // (prWorkflow.reviewRights / prModel.eligibleReviews).
-    review: await prWorkflow.reviewRights(pr, user),
+    // (prReview.reviewRights / prModel.eligibleReviews).
+    review: await prReview.reviewRights(pr, user),
     // Lines the requester may cancel now (approved PR, active, not sourced) —
     // the cancel-line endpoint's own rule (prPool.lineBlocker). [] otherwise.
     can_cancel_lines: await prPool.cancellableLineIds(pr, user),
@@ -432,7 +433,8 @@ export async function sendBack(req, res) {
 
 // ---------------------------------------------------------------------------
 // Technical review (Task 7): the reviewer's queue, line edits, files, and the
-// review outcome. Who may act is decided in prWorkflow at action time.
+// review outcome. Who may act is decided at action time — line edits and files
+// in prReview, the outcome (complete / send back) in prWorkflow.
 // ---------------------------------------------------------------------------
 
 /** GET /v1/pr/review-queue — the open reviews the caller may act on now, oldest first. */
@@ -462,7 +464,7 @@ export async function editLineSpecification(req, res) {
   try {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
-    const out = await prWorkflow.editSpecification(id, posInt(req.params.lineId), req.user, req.body);
+    const out = await prReview.editSpecification(id, posInt(req.params.lineId), req.user, req.body);
     return ok(res, out, 'Specification updated');
   } catch (err) {
     return sendPrError(res, err, logger);
@@ -474,7 +476,7 @@ export async function addLineClause(req, res) {
   try {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
-    const out = await prWorkflow.addClause(id, posInt(req.params.lineId), req.user, req.body);
+    const out = await prReview.addClause(id, posInt(req.params.lineId), req.user, req.body);
     return ok(res, out, 'Clause added');
   } catch (err) {
     return sendPrError(res, err, logger);
@@ -486,7 +488,7 @@ export async function removeLineClause(req, res) {
   try {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
-    const out = await prWorkflow.removeClause(id, posInt(req.params.lineId), posInt(req.params.clauseId), req.user);
+    const out = await prReview.removeClause(id, posInt(req.params.lineId), posInt(req.params.clauseId), req.user);
     return ok(res, out, 'Clause removed');
   } catch (err) {
     return sendPrError(res, err, logger);
@@ -498,7 +500,7 @@ export async function addAttachment(req, res) {
   try {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
-    const out = await prWorkflow.addAttachment(id, req.user, req.body);
+    const out = await prReview.addAttachment(id, req.user, req.body);
     return ok(res, out, 'File attached');
   } catch (err) {
     return sendPrError(res, err, logger);
@@ -510,7 +512,7 @@ export async function removeAttachment(req, res) {
   try {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
-    const out = await prWorkflow.removeAttachment(id, posInt(req.params.attId), req.user);
+    const out = await prReview.removeAttachment(id, posInt(req.params.attId), req.user);
     return ok(res, out, 'File removed');
   } catch (err) {
     return sendPrError(res, err, logger);
