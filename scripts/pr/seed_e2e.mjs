@@ -155,6 +155,8 @@ async function cleanup(t) {
       await t.none(`DELETE FROM ${table} WHERE rfq_id = ANY($1::int[])`, [rfqList]);
     }
     await t.none(`DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE tbl_rfq_product_tech_evaluation_id IN (SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[]))`, [rfqList]).catch(() => {});
+    // A draft the browser pass submitted also has RFQ lifecycle rows (entity_id, not rfq_id).
+    await t.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type = 'RFQ' AND entity_id = ANY($1::int[])`, [rfqList]);
     await t.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [rfqList]);
   }
   if (allInst.length) {
@@ -194,6 +196,15 @@ async function cleanup(t) {
     await t.none(`DELETE FROM tbl_roles WHERE id = ANY($1::int[])`, [hodRoleIds]);
   }
   // Remaining FK-by-user rows an E2E run can create: clear any nullable/audit-ish reference tables we know of.
+  // The RFQ wizard auto-creates an "Auto Project - Hotel N" for the buyer; any other lifecycle row they performed.
+  await t.none(`DELETE FROM tbl_lifecycle_history WHERE performed_by = ANY($1::int[])`, [userIds]);
+  const projectIds = (await t.any(`SELECT id FROM tbl_projects WHERE user_id = ANY($1::int[])`, [userIds])).map((r) => Number(r.id));
+  if (projectIds.length) {
+    for (const table of ["tbl_project_team", "tbl_project_files", "tbl_hospitality_project_mappings"]) {
+      await t.none(`DELETE FROM ${table} WHERE project_id = ANY($1::int[])`, [projectIds]);
+    }
+    await t.none(`DELETE FROM tbl_projects WHERE id = ANY($1::int[])`, [projectIds]);
+  }
   await t.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [userIds]);
   await t.none(`DELETE FROM tbl_company WHERE id = ANY($1::int[])`, [[ID.vendorA, ID.vendorB]]);
 }
