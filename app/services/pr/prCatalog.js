@@ -145,6 +145,29 @@ export async function guardCatalogLines(t, cell, lines) {
   return lines.map((l) => (l.line_kind === 'catalog' ? { ...l, category_id: variants.get(l.product_variant_id).category_id } : l));
 }
 
+// Object URL on the configured S3 endpoint override (local sink). multer-s3
+// addresses the sink virtual-hosted (http://<bucket>.<endpoint host>:<port>/<key>);
+// path-style (<endpoint>/<bucket>/<key>) is accepted too.
+function isOwnEndpointUrl(u, bucketLower, endpoint) {
+  const raw = String(endpoint ?? '').trim();
+  if (!raw) return false;
+  let e;
+  try {
+    e = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:'].includes(e.protocol) || e.username || e.password) return false;
+  if (u.protocol !== e.protocol || u.username || u.password || u.search || u.hash) return false;
+  const host = u.host.toLowerCase();
+  const endpointHost = e.host.toLowerCase();
+  if (host === `${bucketLower}.${endpointHost}`) return u.pathname.length > 1;
+  if (host !== endpointHost) return false;
+  const prefix = `${e.pathname.replace(/\/+$/, '')}/${bucketLower}/`.toLowerCase();
+  const path = u.pathname.toLowerCase();
+  return path.startsWith(prefix) && path.length > prefix.length;
+}
+
 /**
  * Is `url` an object URL in OUR upload bucket — what the platform's upload
  * endpoint (POST /users/upload-file, multer-s3 into AWS_S3_BUCKET) hands the
@@ -163,8 +186,18 @@ export async function guardCatalogLines(t, cell, lines) {
  * WHATWG normalisation, so `/B/../other/x` (path-style) cannot leave the
  * bucket; inside a virtual-hosted URL every path is in our bucket anyway.
  * No bucket configured → nothing is ours.
+ *
+ * Local/E2E only: when AWS_ENDPOINT_URL_S3 is set (a local S3 sink; unset in
+ * production), objects at `<bucket>.<endpoint host>/<key>` (virtual-hosted, what
+ * multer-s3 returns for the sink) and `<endpoint>/<bucket>/<key>` (path-style)
+ * are ours too, with the same rules (exact origin, no credentials/query/
+ * fragment, non-empty key, normalised path stays inside the bucket prefix).
  */
-export function isOwnUploadUrl(url, { bucket = process.env.AWS_S3_BUCKET, region = process.env.AWS_REGION } = {}) {
+export function isOwnUploadUrl(url, {
+  bucket = process.env.AWS_S3_BUCKET,
+  region = process.env.AWS_REGION,
+  endpoint = process.env.AWS_ENDPOINT_URL_S3,
+} = {}) {
   if (typeof url !== 'string' || !url || url.length > MAX_LEN.file_url) return false;
   const b = String(bucket ?? '').trim().toLowerCase();
   const r = String(region ?? '').trim().toLowerCase();
@@ -175,6 +208,7 @@ export function isOwnUploadUrl(url, { bucket = process.env.AWS_S3_BUCKET, region
   } catch {
     return false;
   }
+  if (isOwnEndpointUrl(u, b, endpoint)) return true;
   if (u.protocol !== 'https:' || u.username || u.password || u.port || u.search || u.hash) return false;
   const host = u.hostname.toLowerCase();
   const virtualHosts = [`${b}.s3.amazonaws.com`, ...(r ? [`${b}.s3.${r}.amazonaws.com`] : [])];

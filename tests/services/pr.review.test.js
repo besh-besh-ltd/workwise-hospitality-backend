@@ -813,6 +813,63 @@ describe("isOwnUploadUrl", () => {
     no(`https://acme-files.s3.ap-south-1.amazonaws.com/${"a".repeat(2000)}.pdf`);
   });
 
+  describe("local S3 endpoint override (AWS_ENDPOINT_URL_S3, E2E only)", () => {
+    const sink = { bucket: "acme-files", region: "ap-south-1", endpoint: "http://localhost:9555" };
+    const yes = (u, c = sink) => expect(isOwnUploadUrl(u, c)).toBe(true);
+    const nope = (u, c = sink) => expect(isOwnUploadUrl(u, c)).toBe(false);
+
+    it("accepts the sink's virtual-hosted objects (<bucket>.<endpoint host>) when the endpoint is set", () => {
+      yes("http://acme-files.localhost:9555/1791971407357-b6fde3ad.pdf");
+      yes("http://ACME-FILES.localhost:9555/a/b.pdf");
+      nope("http://acme-files.localhost:9555/");
+      nope("http://other-bucket.localhost:9555/x.pdf");
+      nope("http://acme-files.localhost:9556/x.pdf");
+      nope("http://acme-files.evil.localhost:9555/x.pdf");
+      nope("https://acme-files.localhost:9555/x.pdf");
+      nope("http://acme-files.localhost:9555/x.pdf?sig=1");
+    });
+
+    it("accepts path-style objects under <endpoint>/<bucket>/ when the endpoint is set", () => {
+      yes("http://localhost:9555/acme-files/1700000000-abc.pdf");
+      yes("http://localhost:9555/acme-files/a/b/c.pdf");
+      yes("http://localhost:9555/acme-files/x.pdf", { ...sink, endpoint: "http://localhost:9555/" });
+    });
+
+    it("still refuses other buckets, hosts, ports, queries, empty keys and traversal", () => {
+      nope("http://localhost:9555/other-bucket/x.pdf");
+      nope("http://localhost:9555/acme-files/");
+      nope("http://localhost:9555/acme-files/../other/x.pdf");
+      nope("http://localhost:9556/acme-files/x.pdf");
+      nope("http://evil.example:9555/acme-files/x.pdf");
+      nope("https://localhost:9555/acme-files/x.pdf");
+      nope("http://localhost:9555/acme-files/x.pdf?sig=1");
+      nope("http://user:pw@localhost:9555/acme-files/x.pdf");
+    });
+
+    it("is inert when the endpoint is unset or blank (production)", () => {
+      nope("http://acme-files.localhost:9555/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: undefined });
+      nope("http://localhost:9555/acme-files/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: undefined });
+      nope("http://localhost:9555/acme-files/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: "" });
+      nope("http://localhost:9555/acme-files/x.pdf", { bucket: "acme-files", region: "ap-south-1", endpoint: "not a url" });
+    });
+
+    it("reads AWS_ENDPOINT_URL_S3 from the environment by default", () => {
+      const prev = process.env.AWS_ENDPOINT_URL_S3;
+      const prevBucket = process.env.AWS_S3_BUCKET;
+      try {
+        process.env.AWS_S3_BUCKET = "acme-files";
+        delete process.env.AWS_ENDPOINT_URL_S3;
+        expect(isOwnUploadUrl("http://localhost:9555/acme-files/x.pdf")).toBe(false);
+        process.env.AWS_ENDPOINT_URL_S3 = "http://localhost:9555";
+        expect(isOwnUploadUrl("http://localhost:9555/acme-files/x.pdf")).toBe(true);
+        expect(isOwnUploadUrl("http://acme-files.localhost:9555/x.pdf")).toBe(true);
+      } finally {
+        if (prev === undefined) delete process.env.AWS_ENDPOINT_URL_S3; else process.env.AWS_ENDPOINT_URL_S3 = prev;
+        if (prevBucket === undefined) delete process.env.AWS_S3_BUCKET; else process.env.AWS_S3_BUCKET = prevBucket;
+      }
+    });
+  });
+
   it("refuses everything when no bucket is configured", () => {
     expect(isOwnUploadUrl("https://acme-files.s3.ap-south-1.amazonaws.com/x.pdf", { bucket: "", region: "ap-south-1" })).toBe(false);
     expect(isOwnUploadUrl("https://.s3.ap-south-1.amazonaws.com/x.pdf", { bucket: undefined, region: "ap-south-1" })).toBe(false);
