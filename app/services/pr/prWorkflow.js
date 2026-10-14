@@ -302,19 +302,24 @@ async function cancelCurrentInstance(t, pr, userId, reason) {
   if (inst.status !== 'PENDING') {
     // A decision committed first; its handler has not moved the PR (yet, or it
     // failed). Not answered here: the caller rolls back, settles, then refuses.
-    throw Object.assign(new Error('approval already decided'), { decided: { instanceId, status: inst.status } });
+    throw decidedFirst(instanceId, inst.status);
   }
   const res = await cancelApprovalInstance(instanceId, userId, reason, { t });
   return { instanceId, notify: res.notify };
 }
 
+/** Thrown inside a transition's tx when the instance was decided first; caught after the rollback. */
+const decidedFirst = (instanceId, status) =>
+  Object.assign(new Error('approval already decided'), { decided: { instanceId, status } });
+
 /**
- * A withdraw met an instance that was already APPROVED / REJECTED while the
- * PR still said pending_approval: the decision's handler has not run (a race)
- * or failed. Apply it now — settle is idempotent — and refuse the withdraw with
- * the PR's settled state, instead of a 409 that would repeat forever.
+ * A withdraw or an approver send-back met an instance that was already
+ * APPROVED / REJECTED while the PR still said pending_approval: the decision's
+ * handler has not run (a race) or failed. Apply it now — settle is idempotent —
+ * and refuse the transition (`verb`) with the PR's settled state, instead of a
+ * 409 that would repeat forever.
  */
-async function settleDecidedThenRefuse(prId, { instanceId, status }) {
+async function settleDecidedThenRefuse(prId, { instanceId, status }, verb) {
   const decision = await db.oneOrNone(
     `SELECT approver_user_id, comment FROM tbl_approval_actions
       WHERE approval_instance_id = $1 AND action = $2
@@ -326,7 +331,7 @@ async function settleDecidedThenRefuse(prId, { instanceId, status }) {
   const now = await prModel.getPrRow(prId);
   const word = String(status).toLowerCase();
   return prError(PR_ERR.STATE_CONFLICT,
-    `This requisition was already ${word} by its approver and can no longer be withdrawn — refresh to see it`,
+    `This requisition was already ${word} by its approver and can no longer be ${verb} — refresh to see it`,
     { status: now?.status ?? null, instance_status: status });
 }
 
@@ -339,7 +344,7 @@ export async function withdraw(prId, user) {
   try {
     out = await withdrawTx(prId, user);
   } catch (err) {
-    if (err?.decided) throw await settleDecidedThenRefuse(prId, err.decided);
+    if (err?.decided) throw await settleDecidedThenRefuse(prId, err.decided, 'withdrawn');
     throw err;
   }
   if (out.notify) await out.notify();
@@ -372,15 +377,33 @@ async function withdrawTx(prId, user) {
  * Send back (a PENDING approver of the instance's CURRENT step, note required):
  * pending_approval → returned, the instance cancelled. A caller who cannot
  * read the PR gets 404; a reader who is not on the current step gets 403.
+ * An instance already APPROVED / REJECTED (its handler has not moved the PR)
+ * is settled exactly as withdraw does, then refused (409).
  */
 export async function approverSendBack(prId, user, rawNote) {
-  const out = await db.tx(async (t) => {
+  let out;
+  try {
+    out = await approverSendBackTx(prId, user, rawNote);
+  } catch (err) {
+    if (err?.decided) throw await settleDecidedThenRefuse(prId, err.decided, 'sent back');
+    throw err;
+  }
+  if (out.notify) await out.notify();
+  await notifyReturned({ pr: out.pr, note: out.note, actorId: user.id, by: 'approver' });
+  return { id: prId, status: 'returned' };
+}
+
+async function approverSendBackTx(prId, user, rawNote) {
+  return db.tx(async (t) => {
     const pr = await prModel.lockPr(t, prId);
     if (!pr || !(await canReadPr(user, pr, t))) throw notFound();
     if (pr.status !== 'pending_approval') throw stateConflict(pr, 'sent back');
 
     const decision = await decisionPosition(t, pr, user, { lock: true });
     const pos = decision?.position;
+    if (pos && (pos.instance_status === 'APPROVED' || pos.instance_status === 'REJECTED')) {
+      throw decidedFirst(Number(pos.instance_id), pos.instance_status);
+    }
     if (!pos || pos.instance_status !== 'PENDING') {
       throw prError(PR_ERR.STATE_CONFLICT, 'The approval of this requisition has already moved on — refresh to see the latest', {
         instance_status: pos?.instance_status ?? null,
@@ -406,9 +429,6 @@ export async function approverSendBack(prId, user, rawNote) {
     });
     return { pr, note, notify: cancelled.notify };
   });
-  if (out.notify) await out.notify();
-  await notifyReturned({ pr: out.pr, note: out.note, actorId: user.id, by: 'approver' });
-  return { id: prId, status: 'returned' };
 }
 
 // ---------------------------------------------------------------------------

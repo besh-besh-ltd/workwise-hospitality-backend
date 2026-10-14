@@ -698,6 +698,49 @@ describe("PR withdraw and approver send-back", () => {
     expect((await instancesOf(pr.id)).map((i) => i.status)).toEqual(["CANCELLED", "PENDING"]);
   });
 
+  it("send-back self-heal: the instance was already APPROVED but the PR never moved → settled, then 409 saying so", async () => {
+    const pr = await submitted("1000.00");
+    // A decision whose handler failed: the instance says APPROVED, the PR still pending_approval.
+    await db.none(`UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`, [pr.instanceId]);
+
+    const res = await sendBack(pr.id, "Need a second quote", ap1C);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ status: 0, code: "PR_STATE_CONFLICT", details: { status: "approved", instance_status: "APPROVED" } });
+    expect(res.body.message).toMatch(/already approved/);
+    expect(res.body.message).toMatch(/sent back/);
+    const row = await prRow(pr.id);
+    expect(row).toMatchObject({ status: "approved", returned_note: null });
+    expect(row.approved_at).not.toBeNull();
+    const types = await eventTypes(pr.id);
+    expect(types.filter((t) => t === "approved")).toHaveLength(1);
+    expect(types).not.toContain("approval_sent_back");
+    expect((await instancesOf(pr.id))[0].status).toBe("APPROVED");
+
+    // Asking again is a plain state conflict on the now-approved PR; nothing is settled twice.
+    const again = await sendBack(pr.id, "Need a second quote", ap1C);
+    expect(again.status).toBe(409);
+    expect(again.body.details).toMatchObject({ status: "approved" });
+    expect((await eventTypes(pr.id)).filter((t) => t === "approved")).toHaveLength(1);
+  });
+
+  it("send-back loses the race to a committed rejection → 409 'already rejected'; the rejection is applied", async () => {
+    const pr = await submitted("1000.00");
+    const decided = await submitApprovalAction({
+      approval_instance_id: pr.instanceId, approver_user_id: AP1, action: "REJECT", comment: "Over budget",
+    });
+    expect(decided.instance_status).toBe("REJECTED");
+    expect((await prRow(pr.id)).status).toBe("pending_approval");
+
+    const res = await sendBack(pr.id, "Need a second quote", ap1C);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "PR_STATE_CONFLICT", details: { status: "rejected", instance_status: "REJECTED" } });
+    expect(res.body.message).toMatch(/already rejected/);
+    expect((await prRow(pr.id)).status).toBe("rejected");
+    expect((await eventsOf(pr.id)).at(-1)).toMatchObject({
+      event_type: "rejected", actor_id: AP1, payload: { instance_id: pr.instanceId, comment: "Over budget" },
+    });
+  });
+
   it("send-back: a caller who cannot read the PR gets 404", async () => {
     const pr = await submitted("1000.00");
     const res = await sendBack(pr.id, "nope", rvC);

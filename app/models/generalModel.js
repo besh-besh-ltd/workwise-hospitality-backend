@@ -3809,30 +3809,6 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
 // ============= APPROVAL ACTIONS =============
 
 /**
- * Submit an approval action (APPROVE or REJECT)
- * Validates user permission and handles step progression
- */
-/**
- * Record an approval decision.
- *
- * @param {Object} args
- * @param {Object} [txContext] - An open transaction to record the decision in.
- *   Pass one when the decision must commit together with other work, and the
- *   caller then owns the commit. PO approvals do exactly this: the PO document
- *   is rendered and stored on the same transaction, so an approval whose
- *   document cannot be produced rolls back instead of leaving the client a PO
- *   that contradicts its own approval record (see poApprovalService.js).
- *
- *   Without one, this opens its own transaction and commits on return — which
- *   is why the old PO endpoint could not be made atomic by wrapping this call:
- *   the decision committed on a second connection before the document was even
- *   attempted, so rolling the outer transaction back could not undo it.
- *
- *   Note that the step-progression email below is post-commit work. When a
- *   caller supplies a transaction, nothing has committed yet, so it is the
- *   caller's job to send it after their commit.
- */
-/**
  * May `userId` still decide on `instance` at all — the actor-scope half of
  * submitApprovalAction's gate (step 4), exported so every other decision door
  * applies the very same rule:
@@ -3891,6 +3867,30 @@ export async function approvalStepSourceCanApprove(instance, step, t = db) {
   return { ok: await roleHasReadAndApprovePermission(sourceId, resource, t), resource };
 }
 
+/**
+ * Submit an approval action (APPROVE or REJECT)
+ * Validates user permission and handles step progression
+ */
+/**
+ * Record an approval decision.
+ *
+ * @param {Object} args
+ * @param {Object} [txContext] - An open transaction to record the decision in.
+ *   Pass one when the decision must commit together with other work, and the
+ *   caller then owns the commit. PO approvals do exactly this: the PO document
+ *   is rendered and stored on the same transaction, so an approval whose
+ *   document cannot be produced rolls back instead of leaving the client a PO
+ *   that contradicts its own approval record (see poApprovalService.js).
+ *
+ *   Without one, this opens its own transaction and commits on return — which
+ *   is why the old PO endpoint could not be made atomic by wrapping this call:
+ *   the decision committed on a second connection before the document was even
+ *   attempted, so rolling the outer transaction back could not undo it.
+ *
+ *   Note that the step-progression email below is post-commit work. When a
+ *   caller supplies a transaction, nothing has committed yet, so it is the
+ *   caller's job to send it after their commit.
+ */
 export async function submitApprovalAction({
   approval_instance_id,
   approval_instance_step_id,
@@ -4645,7 +4645,10 @@ export const uploadToS3 = async (filePath, s3Key) => {
  * @param {Object} metadata - Additional metadata (optional, defaults to {})
  * @param {string} remarks - Remarks/notes (optional)
  * @param {Object} txContext - Optional transaction context for atomicity
- * @returns {Promise<Object>} Created lifecycle history record
+ * @returns {Promise<Object|null>} The created lifecycle history record, or null
+ *   when `entity_type` has no lifecycle trail (anything outside the
+ *   lifecycle_entity_type enum — MR, PR, the ARC v2 stage types…), which is
+ *   skipped without writing.
  */
 export async function recordLifecycleEvent({
   entity_type,
