@@ -1964,10 +1964,10 @@ export async function getApprovalPolicyTenant(policy_id) {
   );
 }
 
-/** @returns {Promise<{id:number, hospitality_company_id:number|null, entity_type:string}|null>} */
+/** @returns {Promise<{id:number, hospitality_company_id:number|null, entity_type:string, entity_id:number}|null>} */
 export async function getApprovalInstanceTenant(instance_id) {
   return db.oneOrNone(
-    `SELECT id, hospitality_company_id, entity_type FROM tbl_approval_instances WHERE id = $1`,
+    `SELECT id, hospitality_company_id, entity_type, entity_id FROM tbl_approval_instances WHERE id = $1`,
     [instance_id]
   );
 }

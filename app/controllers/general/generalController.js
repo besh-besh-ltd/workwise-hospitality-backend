@@ -68,6 +68,7 @@ import {
   formatPaise,
   MAX_MONEY_PAISE
 } from '../../services/approval/approvalEntityRules.js';
+import { canReadPr } from '../../services/pr/prAccess.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -508,6 +509,37 @@ async function guardInstanceTenant(req, res, instanceId) {
   const scopeIds = await resolveApprovalCompanyScope(req);
   const tenant = await getApprovalInstanceTenant(instanceId);
   if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Approval instance not found' });
+    return null;
+  }
+  return tenant;
+}
+
+/**
+ * May the caller read the entity behind an approval instance? Company scope is
+ * the rule for every entity type except a purchase requisition, which has its
+ * own read rule (prAccess.canReadPr, R9): requester, pr.read / pr.convert /
+ * routed pr.evaluate, or an approver on the PR's CURRENT instance. Company
+ * scope alone would let any same-company user read a requisition's approvers,
+ * comments and send-back notes that GET /pr/:id refuses them (404).
+ */
+async function canReadInstanceEntity(req, entityType, entityId) {
+  if (String(entityType).toUpperCase() !== 'PR') return true;
+  const pr = await db.oneOrNone(
+    'SELECT id, raised_by FROM tbl_purchase_requisition WHERE id = $1', [entityId]
+  );
+  return Boolean(pr) && canReadPr(req.user, pr);
+}
+
+/**
+ * guardInstanceTenant for the READ endpoints: also 404 when the instance is a
+ * purchase requisition's and the caller may not read that PR (same answer as
+ * an unknown id — no existence leak).
+ */
+async function guardInstanceRead(req, res, instanceId) {
+  const tenant = await guardInstanceTenant(req, res, instanceId);
+  if (!tenant) return null;
+  if (!(await canReadInstanceEntity(req, tenant.entity_type, tenant.entity_id))) {
     res.status(404).json({ status: 2, message: 'Approval instance not found' });
     return null;
   }
@@ -1333,8 +1365,9 @@ const hospitalityApprovalController = {
       // SECURITY: getApprovalInstanceDetails matches on `WHERE i.id = $1` and
       // returns approver names + emails plus company/hotel names. Guard at the
       // HTTP boundary (the model function is shared with ARC/MR/PO/negotiation
-      // flows that already scope their own entity).
-      if (!(await guardInstanceTenant(req, res, parseInt(id)))) return;
+      // flows that already scope their own entity). A purchase requisition's
+      // instance additionally needs the PR's own read rule.
+      if (!(await guardInstanceRead(req, res, parseInt(id)))) return;
       const data = await getApprovalInstanceDetails(parseInt(id), user_id);
       res.json({ status: 1, data });
     } catch (e) {
@@ -1491,7 +1524,9 @@ const hospitalityApprovalController = {
       // we drop any instance outside the caller's server-derived company scope.
       const scopeIds = await resolveApprovalCompanyScope(req);
       const rows = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
-      const data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
+      let data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
+      // A purchase requisition's instances follow the PR's own read rule.
+      if (data.length && !(await canReadInstanceEntity(req, entity_type, parseInt(entity_id)))) data = [];
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -1945,8 +1980,9 @@ const hospitalityApprovalController = {
   async getInstanceChangeHistory(req, res) {
     try {
       const instanceId = parseInt(req.params.id);
-      // SECURITY: instance id was unscoped (`WHERE i.id = $1`).
-      if (!(await guardInstanceTenant(req, res, instanceId))) return;
+      // SECURITY: instance id was unscoped (`WHERE i.id = $1`). A purchase
+      // requisition's instance additionally needs the PR's own read rule.
+      if (!(await guardInstanceRead(req, res, instanceId))) return;
       const history = await getInstanceChangeHistoryService(instanceId);
       return res.json({ status: 1, data: history });
     } catch (err) {

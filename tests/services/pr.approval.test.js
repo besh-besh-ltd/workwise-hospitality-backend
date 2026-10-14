@@ -41,7 +41,8 @@ const AP1 = IDS.users.a1_proc_commApp;
 const AP2 = IDS.users.a1_proc_finance;
 const BUY = IDS.users.a1_proc_buyer;
 const RV = IDS.users.a1_proc_techEval;
-const PERSONAS = [REQ, AP1, AP2, BUY, RV];
+const OUTSIDER = IDS.users.multiHotel; // company A (mapped at A1 and A2), no PR role
+const PERSONAS = [REQ, AP1, AP2, BUY, RV, OUTSIDER];
 
 const ACTION = "/api/v1/general/hospitality/approval/action";
 const PENDING = "/api/v1/general/hospitality/approval/pending";
@@ -950,6 +951,56 @@ describe("PR submit → technical review", () => {
     expect(await prRow(pr.id)).toMatchObject({ status: "draft", revision: 0 });
     expect(await reviewsOf(pr.id)).toEqual([]);
     expect(await recipientsOf(pr.id)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The generic approval-instance reads (final review A-M3): company scope alone
+// let any same-company user read a PR instance's approvers, comments and
+// send-back notes. A PR instance follows the PR's own read rule (canReadPr).
+// ---------------------------------------------------------------------------
+describe("PR approval — generic approval-instance reads follow the PR read rule", () => {
+  const INSTANCE = "/api/v1/general/hospitality/approval/instance";
+
+  it("instance/:id and its change-history: a same-company user with no pr.* → 404; the requester and the current approver → 200", async () => {
+    const pr = await submitted("1000.00");
+    const outsiderC = await httpClient(OUTSIDER);
+    expect((await detail(pr.id, outsiderC)).status).toBe(404); // cannot open the PR itself
+
+    for (const path of [`${INSTANCE}/${pr.instanceId}`, `${INSTANCE}/${pr.instanceId}/change-history`]) {
+      const outsider = await outsiderC.get(path);
+      expect(outsider.status).toBe(404);
+      expect(outsider.body).toEqual({ status: 2, message: "Approval instance not found" });
+      expect((await reqC.get(path)).status).toBe(200);
+      expect((await ap1C.get(path)).status).toBe(200);
+    }
+
+    // The entity listing drops the PR's instances for the outsider, as it drops another tenant's.
+    const byEntity = `/api/v1/general/hospitality/approval/entity/PR/${pr.id}`;
+    const hidden = await outsiderC.get(byEntity);
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.data).toEqual([]);
+    const shown = await reqC.get(byEntity);
+    expect(shown.status).toBe(200);
+    expect(shown.body.data.map((r) => Number(r.id))).toEqual([Number(pr.instanceId)]);
+  });
+
+  it("the same rule as GET /pr/:id: a pr.read holder of the PR's department reads it; a returned PR's approver still does (R16)", async () => {
+    const pr = await submitted("1000.00");
+    const outsiderC = await httpClient(OUTSIDER);
+    const readerScope = await grantPr(OUTSIDER, "PR Requester", { departmentId: ENG }); // pr.read on (A, A1, eng)
+    try {
+      expect((await outsiderC.get(`${INSTANCE}/${pr.instanceId}`)).status).toBe(200);
+    } finally {
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [readerScope]);
+    }
+    expect((await outsiderC.get(`${INSTANCE}/${pr.instanceId}`)).status).toBe(404);
+
+    // Sent back: the PR keeps its (now cancelled) instance while returned, so its approver still reads both.
+    expect((await sendBack(pr.id, "Wrong item", ap1C)).status).toBe(200);
+    expect((await detail(pr.id, ap1C)).status).toBe(200);
+    expect((await ap1C.get(`${INSTANCE}/${pr.instanceId}`)).status).toBe(200);
+    expect((await outsiderC.get(`${INSTANCE}/${pr.instanceId}/change-history`)).status).toBe(404);
   });
 });
 
