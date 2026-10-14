@@ -137,6 +137,14 @@ export const LINE_PROGRESS_SQL = (l, p) => `CASE
   ELSE 'in_pool' END`;
 
 /**
+ * A NUMERIC as text without trailing fractional zeros — '5.500' → '5.5',
+ * '12.000' → '12', '1000001.000' → '1000001'. Exact: the value never passes
+ * through a float. `expr` is a SQL NUMERIC expression (it is repeated).
+ */
+export const NUMERIC_TEXT_SQL = (expr) => `(CASE WHEN position('.' in (${expr})::text) > 0
+  THEN rtrim(rtrim((${expr})::text, '0'), '.') ELSE (${expr})::text END)`;
+
+/**
  * Σ ROUND(quantity × estimated_unit_price, 2) over the PR's ACTIVE lines, as an
  * exact NUMERIC with 2 decimals (0.00 when there are none). `p` = PR alias.
  * The only formula for a PR's value: submit stores it, lists/detail show it live.

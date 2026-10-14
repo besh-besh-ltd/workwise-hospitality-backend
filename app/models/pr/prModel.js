@@ -15,9 +15,10 @@ import {
   IST_TODAY_SQL, USABLE_VARIANT_SQL, FIRST_CATEGORY_SQL, prGrantRowsSql,
   POOL_PROGRESSES, NO_REVIEWER_LABEL_SQL, NO_APPROVER_LABEL, REVIEWER_EXISTS_SQL,
   IS_ELIGIBLE_REVIEWER_SQL, REVIEWER_NAMES_SQL, HOTEL_BUYERS_SQL, IS_HOTEL_BUYER_SQL,
-  POOL_AGE_DAYS_SQL, POOL_AGE_BAND_SQL,
+  POOL_AGE_DAYS_SQL, POOL_AGE_BAND_SQL, NUMERIC_TEXT_SQL,
 } from '../../services/pr/prConstants.js';
 import { readableScopeSql } from '../../services/pr/prAccess.js';
+import { RFQ_STATUSES } from '../../util/constants.js';
 
 // Line progress + PR value fragments live in prConstants; re-exported here as
 // the model's public SQL surface (lists, detail, pool, KPIs).
@@ -481,11 +482,26 @@ export async function copyPr(t, srcId, { prNumber, raisedBy }) {
 }
 
 /**
+ * An RFQ's status as the label the RFQ module shows (RFQ_STATUSES,
+ * app/util/constants.js): status 1 is "Draft" until published, then "Open".
+ * `r` = tbl_rfq alias.
+ */
+const RFQ_STATUS_LABEL_SQL = (r) => `CASE
+  WHEN ${r}.status = ${RFQ_STATUSES.OPEN} AND ${r}.is_published = 0 THEN 'Draft'
+  WHEN ${r}.status = ${RFQ_STATUSES.OPEN} THEN 'Open'
+  WHEN ${r}.status = ${RFQ_STATUSES.CLOSED} THEN 'Closed'
+  WHEN ${r}.status = ${RFQ_STATUSES.PENDING_APPROVAL} THEN 'Pending approval'
+  WHEN ${r}.status = ${RFQ_STATUSES.READY_TO_PUBLISH} THEN 'Ready to publish'
+  WHEN ${r}.status = ${RFQ_STATUSES.WITHDRAWN} THEN 'Withdrawn'
+  ELSE 'Unknown' END`;
+
+/**
  * Everything the detail page renders.
  * @returns {Promise<{pr, lines, attachments, reviews, events, comments}|null>}
  *   pr.now_with is the list's "who holds it" label (NOW_WITH_SQL), including
  *   the "No eligible reviewer / approver — contact your admin" states;
- *   lines[] carry clauses[], attachments[], progress and links[] (RFQ + POs);
+ *   lines[] carry clauses[], attachments[], progress and
+ *   links[] = [{rfq_id, rfq_no, rfq_status_label, live, po: [{po_id, po_number, status}]}];
  *   top-level attachments[] are the PR-level ones (no line).
  *   pr.estimated_total is the live Σ for draft/returned, else the value stored at submit.
  */
@@ -549,17 +565,20 @@ export async function getDetail(prId, t = db) {
       [prId]
     );
 
+    // Each line's RFQ links, oldest first: {rfq_id, rfq_no, rfq_status_label,
+    // live, po[]}. `live` is the live-link rule of LINE_PROGRESS_SQL (RFQ not
+    // closed/withdrawn, or a live PO for the product); po[] lists every PO of
+    // the linked RFQ product, whatever its status.
     const links = await c.any(
-      `SELECT lk.id, lk.pr_line_id, lk.rfq_id, r.rfq_no, r.title AS rfq_title, r.status AS rfq_status,
-              lk.rfq_product_id, lk.quantity, lk.converted_by, lk.created_at,
-              (r.status NOT IN (2,5) OR ${LIVE_PO_EXISTS('lk')}) AS is_live,
+      `SELECT lk.pr_line_id, lk.rfq_id, r.rfq_no, ${RFQ_STATUS_LABEL_SQL('r')} AS rfq_status_label,
+              (r.status NOT IN (2,5) OR ${LIVE_PO_EXISTS('lk')}) AS live,
               COALESCE((
                 SELECT json_agg(json_build_object('po_id', x.id, 'po_number', x.po_number, 'status', x.status) ORDER BY x.id)
                   FROM (SELECT DISTINCT po.id, po.po_number, po.status
                           FROM tbl_rfq_purchase_order po
                           JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
                          WHERE po.rfq_id = lk.rfq_id AND pop.rfq_product_id = lk.rfq_product_id) x
-              ), '[]'::json) AS pos
+              ), '[]'::json) AS po
          FROM tbl_pr_line_rfq lk
          JOIN tbl_purchase_requisition_line l ON l.id = lk.pr_line_id
          JOIN tbl_rfq r ON r.id = lk.rfq_id
@@ -617,7 +636,11 @@ export async function getDetail(prId, t = db) {
     };
     const clausesBy = byLine(clauses);
     const attachmentsBy = byLine(attachments);
-    const linksBy = byLine(links);
+    const linksBy = new Map(); // pr_line_id → its links, without the key
+    for (const { pr_line_id: lineId, ...link } of links) {
+      if (!linksBy.has(lineId)) linksBy.set(lineId, []);
+      linksBy.get(lineId).push(link);
+    }
 
     return {
       pr,
@@ -1297,6 +1320,121 @@ export async function deleteReviewRouting(t, { mapId, companyIds }) {
   return row ? Number(row.id) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Conversion to an RFQ draft (spec §9, services/pr/prConversion.js). Lock
+// order (R19 — the same as every buyer line action): the PR rows first, then
+// the lines, each in id order, then the per-line advisory locks.
+// ---------------------------------------------------------------------------
+
+/** {id, pr_id} of the given lines, unlocked — which PR rows a conversion must lock first. */
+export async function linePrIds(lineIds, t = db) {
+  return t.map(
+    `SELECT id, pr_id FROM tbl_purchase_requisition_line WHERE id = ANY($1::int[])`,
+    [lineIds], (r) => ({ id: Number(r.id), pr_id: Number(r.pr_id) }));
+}
+
+/** Row-lock PRs in id order. Returns their rows, by id. */
+export async function lockPrs(t, prIds) {
+  return t.any(
+    `SELECT ${PR_SELECT('p')} FROM tbl_purchase_requisition p WHERE p.id = ANY($1::int[]) ORDER BY p.id FOR UPDATE`,
+    [prIds]);
+}
+
+/** Row-lock lines in id order (after their PRs). Returns {id, pr_id}, by id. */
+export async function lockLines(t, lineIds) {
+  return t.map(
+    `SELECT l.id, l.pr_id FROM tbl_purchase_requisition_line l WHERE l.id = ANY($1::int[]) ORDER BY l.id FOR UPDATE`,
+    [lineIds], (r) => ({ id: Number(r.id), pr_id: Number(r.pr_id) }));
+}
+
+/**
+ * The per-line convert lock, pg_advisory_xact_lock(hashtext('pr_line_convert'),
+ * line id), taken in id order — a DB-level backstop serialising two
+ * conversions of one line (spec §9 concurrency). Held until the transaction ends.
+ */
+export async function lockLinesForConvert(t, lineIds) {
+  await t.any(
+    `SELECT pg_advisory_xact_lock(hashtext('pr_line_convert'), x.id)
+       FROM (SELECT DISTINCT unnest($1::int[]) AS id ORDER BY 1) x`,
+    [lineIds]);
+}
+
+/**
+ * What conversion decides on, per line (read AFTER the locks, so it sees every
+ * committed conversion): stored state, the effective variant (catalog or
+ * mapped), whether a live RFQ link exists (LIVE_LINK_EXISTS — the derived-
+ * progress rule) or an open catalog request, and the quantity as exact text.
+ */
+export async function convertLineStates(lineIds, t = db) {
+  return t.any(
+    `SELECT l.id, l.pr_id, l.line_no, l.line_kind, l.status, l.free_text_name, l.specification,
+            l.quantity, ${NUMERIC_TEXT_SQL('l.quantity')} AS quantity_text, btrim(l.uom) AS uom,
+            COALESCE(l.product_variant_id, l.mapped_variant_id) AS variant_id,
+            ${LIVE_LINK_EXISTS('l')} AS has_live_link,
+            EXISTS (SELECT 1 FROM tbl_pr_catalog_request cr
+                     WHERE cr.pr_line_id = l.id AND cr.status = 'open') AS has_open_catalog_request
+       FROM tbl_purchase_requisition_line l
+      WHERE l.id = ANY($1::int[])
+      ORDER BY l.id`,
+    [lineIds]);
+}
+
+/**
+ * The lines grouped by effective variant, in order of each group's first line:
+ * {variant_id, quantity (the exact NUMERIC Σ as text, no trailing zeros), line_ids}.
+ */
+export async function convertGroups(lineIds, t = db) {
+  const rows = await t.any(
+    `SELECT COALESCE(l.product_variant_id, l.mapped_variant_id) AS variant_id,
+            ${NUMERIC_TEXT_SQL('SUM(l.quantity)')} AS quantity,
+            array_agg(l.id ORDER BY l.id) AS line_ids
+       FROM tbl_purchase_requisition_line l
+      WHERE l.id = ANY($1::int[])
+      GROUP BY 1
+      ORDER BY MIN(l.id)`,
+    [lineIds]);
+  return rows.map((r) => ({ variant_id: Number(r.variant_id), quantity: r.quantity, line_ids: r.line_ids.map(Number) }));
+}
+
+/** Per PR: its department title and requester name (the RFQ's summary and the merged specifications). */
+export async function prSummaries(prIds, t = db) {
+  const rows = await t.any(
+    `SELECT p.id, d.title AS department_title, u.name AS requester_name
+       FROM tbl_purchase_requisition p
+       LEFT JOIN tbl_department d ON d.id = p.department_id
+       LEFT JOIN tbl_users u ON u.id = p.raised_by
+      WHERE p.id = ANY($1::int[])`,
+    [prIds]);
+  return new Map(rows.map((r) => [Number(r.id), r]));
+}
+
+/**
+ * Is the company one of the user's tenants — mapped to it (company or hotel
+ * level) or holding any role scope in it? Outside it, a PR's lines do not exist
+ * for the user (404, never 403).
+ */
+export async function isTenantMember(userId, companyId, t = db) {
+  const row = await t.one(
+    `SELECT EXISTS (SELECT 1 FROM tbl_hospitality_user_mappings WHERE user_id = $1 AND hospitality_company_id = $2)
+         OR EXISTS (SELECT 1 FROM tbl_user_role_scopes WHERE user_id = $1 AND company_id = $2) AS ok`,
+    [userId, companyId]);
+  return row.ok === true;
+}
+
+/**
+ * Is `processId` an ACTIVE approval process of the hospitality company's
+ * parent buyer company — the rule saveRfqDraft applies to an RFQ's process?
+ */
+export async function isActiveProcessOfCompany(processId, companyId, t = db) {
+  const row = await t.one(
+    `SELECT EXISTS (
+       SELECT 1 FROM tbl_approval_processes ap
+         JOIN tbl_hospitality_companies hc ON hc.buyer_company_id = ap.company_id
+        WHERE ap.id = $1 AND hc.id = $2 AND ap.is_active = true) AS ok`,
+    [processId, companyId]);
+  return row.ok === true;
+}
+
 export default {
   LIVE_PO_EXISTS, LIVE_LINK_EXISTS, LINE_PROGRESS_SQL, estimateTotalSql,
   istToday, nextPrNumber, insertPr, updateHeader, lineIds, replaceLines, lockPr, getPrRow, copyPr, getDetail,
@@ -1308,4 +1446,6 @@ export default {
   routingInputs, administeredCompanyIds, listReviewRouting, upsertReviewRouting, deleteReviewRouting,
   poolHotels, pool, buyersForHotel, isHotelBuyer, setAssignedBuyer, userName, lockLineState, lineStates, lineProgress,
   setLineMapping, fulfilOpenCatalogRequest, rejectOpenCatalogRequest, insertCatalogRequest, endLine,
+  linePrIds, lockPrs, lockLines, lockLinesForConvert, convertLineStates, convertGroups, prSummaries,
+  isTenantMember, isActiveProcessOfCompany,
 };

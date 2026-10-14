@@ -10,7 +10,8 @@
 //   cleanupPrs                    PR rows + their approval instances
 //   mapCategory / unmapAll        category → reviewing-department routing rows
 //   istDate                       an IST calendar date, computed by Postgres
-//   approvedPr                    an APPROVED PR, made entirely through the API
+//   approvedPr / submittedPr      an APPROVED / pending_approval PR, made entirely through the API
+//   cleanupRfqDrafts / rfqsOfLines  RFQ drafts made by POST /pr/convert, and finding them
 
 import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
@@ -234,6 +235,56 @@ async function clientFor(userId) {
 }
 
 /**
+ * Create a draft through the API and submit it under a fresh hotel-level PR
+ * policy whose only step is USER `approverId` (the newest, most specific
+ * policy for the hotel, so it is the one submit matches). Returns the PR and
+ * the policy id; the caller deactivates the policy. A PR that fails half-way
+ * is deleted here (the caller never learns its id).
+ */
+async function createAndSubmit(lines, {
+  requesterId = IDS.users.a1_eng_buyer,
+  approverId = IDS.users.a1_proc_commApp,
+  companyId = IDS.hospitality.A,
+  hotelId = IDS.hotels.A1,
+  departmentId = IDS.departments.eng,
+  ...header
+} = {}) {
+  const requester = await clientFor(requesterId);
+  const created = await requester.post("/api/v1/pr")
+    .send(await draftBody({ hotel_id: hotelId, department_id: departmentId, ...header, lines }));
+  if (created.status !== 200) throw new Error(`approvedPr: create ${created.status} ${JSON.stringify(created.body)}`);
+  const { id, pr_number } = created.body.data;
+
+  const policyId = await makePrPolicy({ companyId, hotelId, steps: [{ source: "USER", id: approverId }] });
+  try {
+    const submitted = await requester.post(`/api/v1/pr/${id}/submit`).send({});
+    if (submitted.status !== 200 || submitted.body.data?.pr?.status !== "pending_approval") {
+      throw new Error(`approvedPr: submit ${submitted.status} ${JSON.stringify(submitted.body?.data?.pr?.status ?? submitted.body)}`);
+    }
+    const row = await db.one(`SELECT approval_instance_id FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    const lineIds = await db.map(
+      `SELECT id FROM tbl_purchase_requisition_line WHERE pr_id = $1 ORDER BY line_no`, [id], (r) => Number(r.id));
+    return { pr: { id, pr_number, line_ids: lineIds, instance_id: Number(row.approval_instance_id) }, policyId };
+  } catch (err) {
+    await cleanupPrs([id]);
+    await db.none(`UPDATE tbl_approval_policies SET is_active = false WHERE id = $1`, [policyId]);
+    throw err;
+  }
+}
+
+/**
+ * A PR waiting for approval (pending_approval), made through the API like
+ * approvedPr (steps 1–3 below) but never approved. Same options and caller
+ * duties as approvedPr.
+ * @returns {Promise<{id: number, pr_number: string, line_ids: number[], instance_id: number}>}
+ */
+export async function submittedPr(lines, opts = {}) {
+  const { pr, policyId } = await createAndSubmit(lines, opts);
+  await db.none(`UPDATE tbl_approval_policies SET is_active = false WHERE id = $1`, [policyId]);
+  return pr;
+}
+
+/**
  * An APPROVED PR, made the way users make one — entirely through the API:
  *   1. `requesterId` creates a draft of `lines` (POST /api/v1/pr; each line in
  *      the create payload's shape) at (companyId, hotelId, departmentId);
@@ -252,41 +303,58 @@ async function clientFor(userId) {
  * @returns {Promise<{id: number, pr_number: string, line_ids: number[], instance_id: number}>}
  *   line_ids in line order.
  */
-export async function approvedPr(lines, {
-  requesterId = IDS.users.a1_eng_buyer,
-  approverId = IDS.users.a1_proc_commApp,
-  companyId = IDS.hospitality.A,
-  hotelId = IDS.hotels.A1,
-  departmentId = IDS.departments.eng,
-  ...header
-} = {}) {
-  const requester = await clientFor(requesterId);
-  const approver = await clientFor(approverId);
-  const created = await requester.post("/api/v1/pr")
-    .send(await draftBody({ hotel_id: hotelId, department_id: departmentId, ...header, lines }));
-  if (created.status !== 200) throw new Error(`approvedPr: create ${created.status} ${JSON.stringify(created.body)}`);
-  const { id, pr_number } = created.body.data;
-
-  const policyId = await makePrPolicy({ companyId, hotelId, steps: [{ source: "USER", id: approverId }] });
+export async function approvedPr(lines, opts = {}) {
+  const { pr, policyId } = await createAndSubmit(lines, opts);
   try {
-    const submitted = await requester.post(`/api/v1/pr/${id}/submit`).send({});
-    if (submitted.status !== 200 || submitted.body.data?.pr?.status !== "pending_approval") {
-      throw new Error(`approvedPr: submit ${submitted.status} ${JSON.stringify(submitted.body?.data?.pr?.status ?? submitted.body)}`);
-    }
-    const row = await db.one(`SELECT approval_instance_id FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+    const approver = await clientFor(opts.approverId ?? IDS.users.a1_proc_commApp);
     const approved = await approver.post("/api/v1/general/hospitality/approval/action")
-      .send({ approval_instance_id: row.approval_instance_id, action: "APPROVE", comment: "ok" });
-    const after = await db.one(`SELECT status FROM tbl_purchase_requisition WHERE id = $1`, [id]);
+      .send({ approval_instance_id: pr.instance_id, action: "APPROVE", comment: "ok" });
+    const after = await db.one(`SELECT status FROM tbl_purchase_requisition WHERE id = $1`, [pr.id]);
     if (approved.status !== 200 || after.status !== "approved") {
       throw new Error(`approvedPr: approve ${approved.status} → PR ${after.status} ${JSON.stringify(approved.body)}`);
     }
-    const lineIds = await db.map(
-      `SELECT id FROM tbl_purchase_requisition_line WHERE pr_id = $1 ORDER BY line_no`, [id], (r) => Number(r.id));
-    return { id, pr_number, line_ids: lineIds, instance_id: Number(row.approval_instance_id) };
+    return pr;
   } catch (err) {
-    await cleanupPrs([id]); // the caller never learns the id of a PR that failed half-way
+    await cleanupPrs([pr.id]); // the caller never learns the id of a PR that failed half-way
     throw err;
   } finally {
     await db.none(`UPDATE tbl_approval_policies SET is_active = false WHERE id = $1`, [policyId]);
   }
+}
+
+// ---------------------------------------------------------------------------
+// RFQ drafts built by POST /pr/convert
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete RFQs (drafts made by conversion, or test RFQs) and every row hanging
+ * off them: tech evaluations + clauses, product files, specs, invited vendors,
+ * products, hotel mappings, terms, and the RFQ (its tbl_pr_line_rfq links
+ * cascade). POs are the caller's (cleanupPurchaseOrders) — delete them first.
+ */
+export async function cleanupRfqDrafts(rfqIds) {
+  const ids = [...new Set((rfqIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return;
+  await db.none(
+    `DELETE FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE tbl_rfq_product_tech_evaluation_id IN (
+        SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[]))`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(
+    `DELETE FROM tbl_rfq_product_files
+      WHERE rfq_product_id IN (SELECT id FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[]))`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_hotel_mappings WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq_terms_map WHERE rfq_id = ANY($1::int[])`, [ids]);
+  await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [ids]);
+}
+
+/** Every RFQ any of these PR lines was ever converted into (call BEFORE cleanupPrs). */
+export async function rfqsOfLines(lineIds) {
+  const ids = (lineIds || []).map(Number).filter(Boolean);
+  if (!ids.length) return [];
+  return db.map(
+    `SELECT DISTINCT rfq_id FROM tbl_pr_line_rfq WHERE pr_line_id = ANY($1::int[])`, [ids], (r) => Number(r.rfq_id));
 }

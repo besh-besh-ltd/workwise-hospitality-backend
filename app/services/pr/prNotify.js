@@ -12,8 +12,8 @@
 //     assigned).
 //
 // Task 6 implements the approval-path events, Task 8 the buyer pool's
-// (notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested);
-// Task 11 completes the matrix (notifyConverted, notifyCatalogResolved,
+// (notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested),
+// Task 9 notifyConverted; Task 11 completes the matrix (notifyCatalogResolved,
 // notifyComment) under these names.
 //
 // `pr` is a PR row (at least id, pr_number, title, raised_by,
@@ -246,6 +246,22 @@ export async function notifyLineCancelled({ pr, line, reason, actorId }) {
   });
 }
 
+/**
+ * Lines of the PR went onto an RFQ draft (POST /pr/convert): the requester,
+ * in-app — one notification per PR, whichever of its lines were converted.
+ * @param {{pr, rfqNo: number, lineCount: number, actorId}} p
+ */
+export async function notifyConverted({ pr, rfqNo, lineCount, actorId }) {
+  await safely('notifyConverted', pr, async () => {
+    const lines = lineCount === 1 ? '1 line' : `${lineCount} lines`;
+    await inApp(pr, audience([pr.raised_by], actorId), actorId, {
+      type: 'pr_converted',
+      title: `${pr.pr_number} is being sourced: RFQ #${rfqNo}`,
+      body: `The purchase team is sourcing ${lines} of your purchase requisition ${label(pr)} on RFQ #${rfqNo}.`,
+    });
+  });
+}
+
 const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
 
 /**
@@ -300,5 +316,5 @@ export async function notifyCatalogRequested({ pr, line, request, actorId }) {
 
 export default {
   notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected,
-  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested,
+  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested, notifyConverted,
 };

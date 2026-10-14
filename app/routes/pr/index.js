@@ -36,6 +36,10 @@ PrRoutes.get( '/review-queue',       passportSignIn, acl([2, 8]), prController.r
 PrRoutes.get( '/pool',               passportSignIn, acl([2, 8]), prController.pool);
 PrRoutes.get( '/buyers',             passportSignIn, acl([2, 8]), prController.buyers);
 
+// Convert pool lines into one RFQ draft (static path: before /:id).
+// pr.convert on the hotel + rfq.create on the chosen department.
+PrRoutes.post('/convert',            passportSignIn, acl([2, 8]), prController.convert);
+
 // Company admin: category → reviewing-department map. Gated by the company
 // admin capability (requireCompanyAdmin — admits legacy user_type 7 as well as
 // a buyer holding company.admin, so no acl([2, 8]) here); the administered

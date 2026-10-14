@@ -26,6 +26,7 @@ import { describeVariants, contractCoverage, guardCatalogLines } from '../../ser
 import { previewRouting } from '../../services/pr/prRouting.js';
 import * as prWorkflow from '../../services/pr/prWorkflow.js';
 import * as prPool from '../../services/pr/prPool.js';
+import * as prConversion from '../../services/pr/prConversion.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { formatPaise } from '../../services/approval/approvalEntityRules.js';
 import {
@@ -1110,6 +1111,19 @@ export async function cancelLine(req, res) {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
     return ok(res, await prPool.cancelLine(id, posInt(req.params.lineId), req.user, req.body?.reason), 'Line cancelled');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/**
+ * POST /v1/pr/convert {line_ids, department_id, process_id?} — a buyer turns
+ * approved pool lines of one hotel into ONE RFQ draft (prConversion), answered
+ * after the commit with {rfq_id, rfq_no, redirect} (the wizard page that opens it).
+ */
+export async function convert(req, res) {
+  try {
+    return ok(res, await prConversion.convert(req.user, req.body), 'RFQ draft created');
   } catch (err) {
     return sendPrError(res, err, logger);
   }
