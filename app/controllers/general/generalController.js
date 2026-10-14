@@ -68,7 +68,7 @@ import {
   formatPaise,
   MAX_MONEY_PAISE
 } from '../../services/approval/approvalEntityRules.js';
-import { canReadPr } from '../../services/pr/prAccess.js';
+import { canReadPrById } from '../../services/pr/prAccess.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -525,10 +525,7 @@ async function guardInstanceTenant(req, res, instanceId) {
  */
 async function canReadInstanceEntity(req, entityType, entityId) {
   if (String(entityType).toUpperCase() !== 'PR') return true;
-  const pr = await db.oneOrNone(
-    'SELECT id, raised_by FROM tbl_purchase_requisition WHERE id = $1', [entityId]
-  );
-  return Boolean(pr) && canReadPr(req.user, pr);
+  return canReadPrById(req.user, entityId);
 }
 
 /**

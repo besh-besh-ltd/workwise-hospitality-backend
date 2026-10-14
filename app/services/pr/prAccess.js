@@ -160,6 +160,18 @@ export async function canReadPr(user, pr, t = db) {
 }
 
 /**
+ * canReadPr for a PR known only by id — for callers outside the PR module
+ * (the generic approval-instance reads) that must not know the PR schema.
+ * false for an unknown id.
+ */
+export async function canReadPrById(user, prId, t = db) {
+  const id = Number(prId);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  const pr = await t.oneOrNone('SELECT id, raised_by FROM tbl_purchase_requisition WHERE id = $1', [id]);
+  return Boolean(pr) && canReadPr(user, pr, t);
+}
+
+/**
  * Which of `userIds` may read PR `prId` right now — canReadPr for many users
  * in one query: the same predicate (readableClause), plus super admins
  * (user_type 8, as isSuperAdmin). A notification audience is filtered through
@@ -180,6 +192,6 @@ export async function readersOf(prId, userIds, t = db) {
 }
 
 export default {
-  hasPerm, assertPerm, forbiddenMessage, canReadPr, readersOf, readableScopeSql, prGrantRowsSql, isSuperAdmin,
+  hasPerm, assertPerm, forbiddenMessage, canReadPr, canReadPrById, readersOf, readableScopeSql, prGrantRowsSql, isSuperAdmin,
   cellOf, isRequester, notFound,
 };
