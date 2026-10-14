@@ -80,6 +80,9 @@ PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/catalog-request',  passportSignIn,
 PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/close',            passportSignIn, acl([2, 8]), prController.closeLine);
 PrRoutes.post('/:id(\\d+)/lines/:lineId(\\d+)/cancel',           passportSignIn, acl([2, 8]), prController.cancelLine);
 
+// Conversation: any reader of the PR may comment.
+PrRoutes.post('/:id(\\d+)/comments',                               passportSignIn, acl([2, 8]), prController.addComment);
+
 // Fallback for any /pr path no route above matched — a non-numeric id, an
 // unknown sub-path. It is a SEPARATE router mounted after PrRoutes
 // (routes/index.js: `v1.use('/pr', PrRoutes, PrNotFound)`), so it only runs

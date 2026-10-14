@@ -27,6 +27,7 @@ import { previewRouting } from '../../services/pr/prRouting.js';
 import * as prWorkflow from '../../services/pr/prWorkflow.js';
 import * as prPool from '../../services/pr/prPool.js';
 import * as prConversion from '../../services/pr/prConversion.js';
+import { notifyComment } from '../../services/pr/prNotify.js';
 import { getApprovalInstanceDetails } from '../../models/generalModel.js';
 import { formatPaise } from '../../services/approval/approvalEntityRules.js';
 import {
@@ -1111,6 +1112,42 @@ export async function cancelLine(req, res) {
     const id = posInt(req.params.id);
     if (!id) throw notFound();
     return ok(res, await prPool.cancelLine(id, posInt(req.params.lineId), req.user, req.body?.reason), 'Line cancelled');
+  } catch (err) {
+    return sendPrError(res, err, logger);
+  }
+}
+
+/**
+ * POST /v1/pr/:id/comments {body} — any reader of the PR (requester, reviewer,
+ * approver, buyer…) adds to its conversation, whatever the PR's status. 404
+ * before 422: a PR the caller cannot read does not reveal itself through
+ * validation. The participants are told after the commit (prNotify.notifyComment).
+ */
+export async function addComment(req, res) {
+  try {
+    const id = posInt(req.params.id);
+    if (!id) throw notFound();
+    const raw = req.body?.body;
+    const out = await db.tx(async (t) => {
+      const pr = await prModel.getPrRow(id, t);
+      if (!pr || !(await canReadPr(req.user, pr, t))) throw notFound();
+      const body = typeof raw === 'string' ? raw.trim() : '';
+      if (!body || body.length > MAX_LEN.comment) {
+        throw prError(PR_ERR.VALIDATION, 'Please fix the highlighted fields', [{
+          field: 'body', message: `Write a comment of 1 to ${MAX_LEN.comment} characters`,
+        }]);
+      }
+      const comment = await t.one(
+        `INSERT INTO tbl_pr_comment (pr_id, author_id, body) VALUES ($1, $2, $3) RETURNING id`,
+        [pr.id, req.user.id, body]);
+      await record(t, {
+        prId: pr.id, revision: pr.revision, actorId: req.user.id, type: 'comment_added',
+        payload: { comment_id: Number(comment.id) },
+      });
+      return { pr, body };
+    });
+    await notifyComment({ pr: out.pr, authorId: req.user.id, body: out.body });
+    return ok(res, await detailPayload(req.user, id), 'Comment added');
   } catch (err) {
     return sendPrError(res, err, logger);
   }

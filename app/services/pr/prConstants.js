@@ -36,7 +36,7 @@ export const MAX_LEN = Object.freeze({
   title: 200, justification: 4000, delivery_location: 1000, free_text_name: 300, uom: 50,
   // specification = an RFQ item's specification limit (CreateRFQ / rfqValidation:
   // 1000), so a converted line always fits its RFQ product (R23).
-  specification: 1000, suggested_vendor_note: 2000, reason: 2000, note: 2000,
+  specification: 1000, suggested_vendor_note: 2000, reason: 2000, note: 2000, comment: 4000,
   // clause_text = the RFQ add-clause limit (rfqValidation.addClause), so a
   // converted clause always fits; file_name = tbl_pr_attachment VARCHAR(300).
   clause_text: 2000, file_name: 300, file_url: 2000,

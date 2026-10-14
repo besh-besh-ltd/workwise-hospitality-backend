@@ -27,6 +27,7 @@ import { generateEmailTemplate, emailButton } from '../../helper/notificationEma
 import { dispatch } from '../notificationService.js';
 import { buyerPrDetail, toAbsoluteUrl } from '../notificationLinks.js';
 import { HOTEL_BUYERS_SQL } from './prConstants.js';
+import { resolveReviewers } from './prRouting.js';
 
 const escapeHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -340,7 +341,68 @@ export async function notifyCatalogResolved({ pr, line, request, outcome, varian
   });
 }
 
+// ---------------------------------------------------------------------------
+// Conversation (Task 11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everyone with a stake in the PR right now (spec §11, "new comment"): the
+ * requester, the assigned buyer, the eligible reviewers of the reviews that are
+ * still pending (resolved now, not at submit) plus every reviewer who acted on
+ * any review, the pending approvers of the CURRENT step, and everyone who has
+ * already commented. Not de-duplicated or actor-filtered; `audience()` does that.
+ */
+async function commentParticipants(pr) {
+  const rows = await db.any(
+    `SELECT p.raised_by AS uid FROM tbl_purchase_requisition p WHERE p.id = $1
+     UNION ALL SELECT p.assigned_buyer_id FROM tbl_purchase_requisition p WHERE p.id = $1
+     UNION ALL SELECT rv.acted_by FROM tbl_pr_review rv WHERE rv.pr_id = $1
+     UNION ALL SELECT cm.author_id FROM tbl_pr_comment cm WHERE cm.pr_id = $1
+     UNION ALL
+     SELECT asa.approver_user_id
+       FROM tbl_purchase_requisition p
+       JOIN tbl_approval_instances ai ON ai.id = p.approval_instance_id AND ai.entity_type = 'PR' AND ai.entity_id = p.id
+       JOIN tbl_approval_instance_steps st ON st.approval_instance_id = ai.id AND st.step_order = ai.current_step
+       JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = st.id
+      WHERE p.id = $1 AND p.status = 'pending_approval' AND ai.status = 'PENDING'
+        AND asa.status = 'PENDING' AND asa.removed_at IS NULL`,
+    [pr.id]);
+  const ids = rows.map((r) => r.uid);
+  const pending = await db.any(
+    `SELECT DISTINCT rv.department_id
+       FROM tbl_purchase_requisition p
+       JOIN tbl_pr_review rv ON rv.pr_id = p.id AND rv.revision = p.revision AND rv.status = 'pending'
+      WHERE p.id = $1 AND p.status = 'in_review'`,
+    [pr.id]);
+  for (const d of pending) {
+    const reviewers = await resolveReviewers({
+      companyId: Number(pr.hospitality_company_id), hotelId: Number(pr.hotel_id), departmentId: Number(d.department_id),
+    });
+    ids.push(...reviewers.map((r) => r.id));
+  }
+  return ids;
+}
+
+/**
+ * A comment was posted (after commit): every participant except the author, in-app.
+ * @param {{pr, authorId: number, body: string}} p
+ */
+export async function notifyComment({ pr, authorId, body }) {
+  await safely('notifyComment', pr, async () => {
+    const to = audience(await commentParticipants(pr), authorId);
+    if (!to.length) return;
+    const author = await db.oneOrNone(`SELECT name FROM tbl_users WHERE id = $1`, [authorId]);
+    const text = String(body ?? '');
+    const snippet = text.length > 140 ? `${text.slice(0, 139)}…` : text;
+    await inApp(pr, to, authorId, {
+      type: 'pr_comment',
+      title: `New comment: ${pr.pr_number}`,
+      body: `${author?.name || 'Someone'} commented on ${label(pr)} — "${snippet}"`,
+    });
+  });
+}
+
 export default {
   notifyReviewTasks, notifyReturned, notifyApproved, notifyRejected,
-  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested, notifyCatalogResolved, notifyConverted,
+  notifyAssigned, notifyLineClosed, notifyLineCancelled, notifyCatalogRequested, notifyCatalogResolved, notifyConverted, notifyComment,
 };

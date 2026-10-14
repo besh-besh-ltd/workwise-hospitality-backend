@@ -26,6 +26,7 @@ export const CATEGORIES = {
   RECEIPT: 'Goods Receipt',
   CONTRACTS: 'Rate Contracts',
   REQUISITIONS: 'Material Requisitions',
+  PURCHASE_REQUISITIONS: 'Purchase Requisitions',
   ORGANISATION: 'Organisation',
   PEOPLE: 'People',
   ACCESS: 'Roles & Access',
@@ -392,6 +393,153 @@ export const EVENTS = [
     category: CATEGORIES.ACCESS, severity: 'critical',
     entity: { type: 'ROLE', id: P('roleId') }, scope: SCOPE.actor(),
     summary: (c) => `${c.actor} changed what the role "${c.body?.title || `#${c.entityId}`}" can do`,
+  }),
+
+  // ── Purchase requisitions ───────────────────────────────────────────────
+  // Every mutating /pr route. Paths are the router's own patterns, regex
+  // constraint included (`:id(\\d+)`), because that is what req.route.path
+  // reports. Scope comes from the PR row, so a requisition's trail lands in
+  // the company and unit it belongs to.
+  e({
+    method: 'POST', path: '/pr', key: 'pr_created',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: R() }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} started purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'PUT', path: '/pr/:id(\\d+)', key: 'pr_updated',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} saved changes to purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/submit', key: 'pr_submitted',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} submitted purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/withdraw', key: 'pr_withdrawn',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} withdrew purchase requisition ${c.entityLabel || 'a purchase requisition'} from review`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/cancel', key: 'pr_cancelled',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} cancelled purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/copy', key: 'pr_copied',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} copied purchase requisition ${c.entityLabel || 'a purchase requisition'} into a new draft`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/send-back', key: 'pr_approval_sent_back',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} sent purchase requisition ${c.entityLabel || 'a purchase requisition'} back to the requester`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/reviews/:reviewId(\\d+)/complete', key: 'pr_review_completed',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} completed a technical review of purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/reviews/:reviewId(\\d+)/send-back', key: 'pr_review_sent_back',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} sent purchase requisition ${c.entityLabel || 'a purchase requisition'} back from technical review`,
+  }),
+  e({
+    method: 'PUT', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/specification', key: 'pr_spec_edited',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} edited a line specification on purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/clauses', key: 'pr_clause_added',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} added a technical clause to purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'DELETE', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/clauses/:clauseId(\\d+)', key: 'pr_clause_removed',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} removed a technical clause from purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/attachments', key: 'pr_attachment_added',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} attached a file to purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'DELETE', path: '/pr/:id(\\d+)/attachments/:attId(\\d+)', key: 'pr_attachment_removed',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} removed a file from purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/comments', key: 'pr_comment_added',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'routine',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} commented on purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/assign', key: 'pr_assigned',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} assigned purchase requisition ${c.entityLabel || 'a purchase requisition'} to a buyer`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/map', key: 'pr_line_mapped',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} matched a line of purchase requisition ${c.entityLabel || 'a purchase requisition'} to a catalog item`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/catalog-request', key: 'pr_catalog_requested',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} asked for a new catalog item for purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/close', key: 'pr_line_closed',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} closed a line of purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/:id(\\d+)/lines/:lineId(\\d+)/cancel', key: 'pr_line_cancelled',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'PR', id: P('id') }, scope: SCOPE.entity('PR'),
+    summary: (c) => `${c.actor} cancelled a line of purchase requisition ${c.entityLabel || 'a purchase requisition'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/convert', key: 'pr_converted',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'notable',
+    entity: { type: 'RFQ', id: R('data.rfq_id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `${c.actor} turned purchase requisition lines into RFQ ${c.entityLabel || 'a new draft'}`,
+  }),
+  e({
+    method: 'POST', path: '/pr/admin/review-routing', key: 'pr_review_routing_saved',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'critical',
+    entity: { type: 'PR_REVIEW_ROUTING', id: R() },
+    bodyScope: { companyKey: 'hospitality_company_id' },
+    summary: (c) => `${c.actor} changed which department reviews a purchase requisition category`,
+  }),
+  // The mapping row is gone by the time the event is written, so the company
+  // is the administrator's own (the scope chain ends at the actor).
+  e({
+    method: 'DELETE', path: '/pr/admin/review-routing/:mapId(\\d+)', key: 'pr_review_routing_removed',
+    category: CATEGORIES.PURCHASE_REQUISITIONS, severity: 'critical',
+    entity: { type: 'PR_REVIEW_ROUTING', id: P('mapId') }, scope: SCOPE.actor(),
+    summary: (c) => `${c.actor} removed a purchase requisition review routing`,
   }),
 
   // ── Approval configuration ──────────────────────────────────────────────
