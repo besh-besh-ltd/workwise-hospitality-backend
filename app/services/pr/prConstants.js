@@ -53,8 +53,8 @@ export const MAX_LEN = Object.freeze({
  * Clause types — exactly the set POST /rfq/add-clause accepts
  * (rfqValidation.addClause: 'clause' | 'sampling', default 'clause'), so RFQ
  * conversion copies a PR clause into tbl_rfq_product_tech_evaluation_clauses
- * unchanged. (tbl_pr_line_clause's column DEFAULT 'mandatory' is never used:
- * every insert names its type.)
+ * unchanged. Mirrors tbl_pr_line_clause's CHECK chk_pr_line_clause_type and
+ * column DEFAULT 'clause' (20261014100000_pr_clause_type_check.sql).
  */
 export const CLAUSE_TYPES = Object.freeze(['clause', 'sampling']);
 export const DEFAULT_CLAUSE_TYPE = 'clause';

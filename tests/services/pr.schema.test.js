@@ -71,4 +71,36 @@ describe("PR schema", () => {
       await expect(insertLine(patch)).rejects.toThrow(/violates check constraint/);
     });
   });
+
+  describe("clause_type (20261014100000)", () => {
+    // A clause on a real line, rolled back; `type` undefined = the column default.
+    const insertClause = (type) => db.tx(async t => {
+      const variantId = (await t.one(`SELECT id FROM tbl_product_variant ORDER BY id LIMIT 1`)).id;
+      const categoryId = (await t.one(`SELECT id FROM tbl_category WHERE is_deleted=0 ORDER BY id LIMIT 1`)).id;
+      const pr = await t.one(`INSERT INTO tbl_purchase_requisition
+        (pr_number,title,pr_type,hospitality_company_id,hotel_id,department_id,urgency,required_by_date,justification,status,raised_by)
+        VALUES ('PR-T-CLS','t','goods',10001,10101,10201,'normal',CURRENT_DATE+7,'j','draft',80011) RETURNING id`);
+      const line = await t.one(`INSERT INTO tbl_purchase_requisition_line
+        (pr_id,line_no,line_kind,product_variant_id,category_id,quantity,uom,estimated_unit_price)
+        VALUES ($1,1,'catalog',$2,$3,1,'nos',1) RETURNING id`, [pr.id, variantId, categoryId]);
+      const row = type === undefined
+        ? await t.one(`INSERT INTO tbl_pr_line_clause (pr_line_id, clause_text, added_by) VALUES ($1, 'IP65', 80011)
+                       RETURNING clause_type`, [line.id])
+        : await t.one(`INSERT INTO tbl_pr_line_clause (pr_line_id, clause_text, clause_type, added_by) VALUES ($1, 'IP65', $2, 80011)
+                       RETURNING clause_type`, [line.id, type]);
+      throw Object.assign(new Error("ROLLBACK_SENTINEL"), { row });
+    });
+
+    it("defaults to 'clause' — the RFQ add-clause default, never the unused 'mandatory'", async () => {
+      await expect(insertClause(undefined)).rejects.toMatchObject({ message: "ROLLBACK_SENTINEL", row: { clause_type: "clause" } });
+    });
+
+    it.each(["clause", "sampling"])("accepts '%s'", async (type) => {
+      await expect(insertClause(type)).rejects.toMatchObject({ message: "ROLLBACK_SENTINEL", row: { clause_type: type } });
+    });
+
+    it.each(["mandatory", "Clause", ""])("rejects '%s'", async (type) => {
+      await expect(insertClause(type)).rejects.toThrow(/violates check constraint "chk_pr_line_clause_type"/);
+    });
+  });
 });
