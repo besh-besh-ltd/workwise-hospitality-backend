@@ -235,12 +235,15 @@ export async function notifyLineClosed({ pr, line, reason, actorId }) {
 }
 
 /**
- * The requester cancelled a line: the assigned buyer (if any), in-app.
+ * The requester cancelled a line: the assigned buyer (if any), in-app — only
+ * while they may still read the PR (readersOf): a buyer who lost pr.convert
+ * since the assignment is not sent its content.
  * @param {{pr, line: {line_no, free_text_name?}, reason: string, actorId}} p
  */
 export async function notifyLineCancelled({ pr, line, reason, actorId }) {
   await safely('notifyLineCancelled', pr, async () => {
-    await inApp(pr, audience([pr.assigned_buyer_id], actorId), actorId, {
+    const to = audience(await readersOf(pr.id, [pr.assigned_buyer_id]), actorId);
+    await inApp(pr, to, actorId, {
       type: 'pr_line_cancelled',
       title: `Line cancelled: ${pr.pr_number}`,
       body: `The requester cancelled ${lineLabel(line)} of ${label(pr)} — "${reason}"`,
@@ -320,7 +323,8 @@ export async function notifyCatalogRequested({ pr, line, request, actorId }) {
  * The platform resolved a catalog request (fulfilled or rejected): the PR's
  * requester, whoever filed the request, and the assigned buyer — or, while the
  * PR is unassigned, every pr.convert holder of its hotel. In-app, once each,
- * never the actor.
+ * never the actor, and only those who may still read the PR (readersOf): the
+ * filer or the assigned buyer may have lost pr.convert since.
  * @param {{pr, line: {line_no, free_text_name?}, request: {requested_name, requested_by},
  *          outcome: 'fulfilled'|'rejected', variantName?: string, note?: string, actorId}} p
  */
@@ -329,7 +333,7 @@ export async function notifyCatalogResolved({ pr, line, request, outcome, varian
     const handlers = pr.assigned_buyer_id
       ? [pr.assigned_buyer_id]
       : (await db.any(HOTEL_BUYERS_SQL('$1', '$2'), [pr.hospitality_company_id, pr.hotel_id])).map((r) => r.id);
-    const to = audience([pr.raised_by, request.requested_by, ...handlers], actorId);
+    const to = audience(await readersOf(pr.id, [pr.raised_by, request.requested_by, ...handlers]), actorId);
     const fulfilled = outcome === 'fulfilled';
     const what = `"${request.requested_name}" for ${lineLabel(line)} of ${label(pr)}`;
     await inApp(pr, to, actorId, {

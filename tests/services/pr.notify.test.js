@@ -367,6 +367,36 @@ describe("PR notification matrix (spec §11)", () => {
     expect(second.mailTo).toEqual([]);
   });
 
+  it("line cancelled: an assigned buyer who has since lost pr.convert (cannot read the PR) is not told (B-M2)", async () => {
+    const pr = await approved();
+    expect((await assignTo(buyC, pr.id, BUY3)).status).toBe(200);
+    await revokeAllPr([BUY3]);
+    try {
+      expect((await buy3C.get(`/api/v1/pr/${pr.id}`)).status).toBe(404); // really cannot read it any more
+      const o = await observe(pr.id, () =>
+        reqC.post(`/api/v1/pr/${pr.id}/lines/${pr.line_ids[0]}/cancel`).send({ reason: "No longer needed" }));
+      expect(o.res.status).toBe(200);
+      expect(o.inApp).toEqual({});
+    } finally {
+      await grantPr(BUY3, "PR Buyer");
+    }
+  });
+
+  it("catalog request resolved: the buyer who filed it but has since lost pr.convert is not told; the rest are (B-M2)", async () => {
+    const pr = await approved();
+    expect((await assignTo(ap1C, pr.id, BUY3)).status).toBe(200);
+    const requestId = await withRequest(pr); // filed by BUY
+    await revokeAllPr([BUY]);
+    try {
+      expect((await buyC.get(`/api/v1/pr/${pr.id}`)).status).toBe(404);
+      const o = await observe(pr.id, () => admin("post", `${ADMIN_BASE}/${requestId}/reject`).send({ note: "Not sold anymore" }));
+      expect(o.res.status).toBe(200);
+      expect(o.inApp).toEqual({ pr_catalog_rejected: ids(REQ, BUY3) });
+    } finally {
+      await grantPr(BUY, "PR Buyer");
+    }
+  });
+
   it("catalog request created → the platform's address list by email; nobody in-app", async () => {
     process.env.PR_CATALOG_REQUEST_EMAIL = "platform-a@example.test, platform-b@example.test";
     const pr = await approved();
