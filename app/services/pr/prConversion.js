@@ -5,7 +5,8 @@
 // and the server builds a single RFQ draft in the shape copyRfq produces
 // (rfqController.copyRfq): the tbl_rfq header (status 1, unpublished, created
 // by the buyer), its hotel mapping, and per catalog variant one
-// tbl_rfq_products row with Quantity/Unit specs, files, technical-evaluation
+// tbl_rfq_products row with Quantity/Unit specs, files (the lines' own, plus
+// each source PR's files for the whole PR — R41), technical-evaluation
 // clauses and the eligible vendors. The buyer then finishes it in the existing
 // RFQ wizard (bid end date, vendors, terms) and the RFQ approval runs as for
 // any other RFQ — conversion never publishes and never bypasses approval.
@@ -330,6 +331,25 @@ async function insertProduct(t, { rfqId, hotelId, group, comment, unit }) {
               WHERE a.pr_line_id = ANY($2::int[])
               GROUP BY 1, 2) f
       ORDER BY f.first_id`,
+    [rfqProductId, group.line_ids]);
+
+  // Files for the whole PR (pr_line_id NULL, R41) of every PR this product's
+  // lines come from. The RFQ has no vendor-visible RFQ-level document slot
+  // (tbl_rfq_files holds only the buyer's T&C files), so they go on each product
+  // built from that PR's lines, kind-mapped like line files and once per URL:
+  // the same file on two merged PRs, or already put there by a line file, is
+  // not added again.
+  await t.none(
+    `INSERT INTO tbl_rfq_product_files (rfq_product_id, file_type, file_url)
+     SELECT $1, f.file_type, f.file_url
+       FROM (SELECT DISTINCT ON (a.file_url) ${FILE_TYPE_SQL} AS file_type, a.file_url, a.id
+               FROM tbl_pr_attachment a
+              WHERE a.pr_line_id IS NULL
+                AND a.pr_id IN (SELECT l.pr_id FROM tbl_purchase_requisition_line l WHERE l.id = ANY($2::int[]))
+                AND NOT EXISTS (SELECT 1 FROM tbl_rfq_product_files x
+                                 WHERE x.rfq_product_id = $1 AND x.file_url = a.file_url)
+              ORDER BY a.file_url, a.id) f
+      ORDER BY f.id`,
     [rfqProductId, group.line_ids]);
 
   // Technical evaluation, as POST /rfq/add-clause creates it: minimum_passing_score

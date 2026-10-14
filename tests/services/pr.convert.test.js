@@ -423,6 +423,84 @@ describe("PR convert — one RFQ draft from many PRs", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Files for the whole PR (R41): pr_line_id NULL. The RFQ has no vendor-visible
+// RFQ-level document slot (tbl_rfq_files holds only the buyer's T&C files), so
+// each PR-level file goes onto every RFQ product built from that PR's lines,
+// kind-mapped like line files and deduped by URL per product.
+// ---------------------------------------------------------------------------
+describe("PR convert — files for the whole PR (R41)", () => {
+  const DRAWING = "https://bucket.s3.amazonaws.com/pr/whole-pr-drawing.pdf";
+  const BOQ = "https://bucket.s3.amazonaws.com/pr/whole-pr-boq.xlsx";
+  const QAP = "https://bucket.s3.amazonaws.com/pr/whole-pr-qap.pdf";
+  const SHARED = "https://bucket.s3.amazonaws.com/pr/shared-spec.pdf";
+  const prFile = (prId, kind, url) => db.none(
+    `INSERT INTO tbl_pr_attachment (pr_id, pr_line_id, kind, file_url, file_name, uploaded_by)
+     VALUES ($1, NULL, $2, $3, 'whole-pr', $4)`, [prId, kind, url, REQ]);
+  const filesOf = (productIds) => db.any(
+    `SELECT rfq_product_id, file_type, file_url FROM tbl_rfq_product_files
+      WHERE rfq_product_id = ANY($1::int[]) ORDER BY rfq_product_id, file_type, file_url`, [productIds]);
+
+  it("convert.pr-files: one PR-level file → every product built from the PR's lines carries it, kind-mapped; the wizard shows it", async () => {
+    const pr = await approved([
+      catalogLine(V.variant_id),
+      catalogLine(W.variant_id, { quantity: "1", uom: "kg" }),
+    ], { title: "convert-pr-files" });
+    await prFile(pr.id, "datasheet", DRAWING);
+    await prFile(pr.id, "other", BOQ);
+
+    const r = await convert(buyC, { line_ids: pr.line_ids, department_id: PROC });
+    expect(r.status).toBe(200);
+    const rfqId = r.body.data.rfq_id;
+    const [vp, wp] = await rfqProducts(rfqId);
+    expect(await filesOf([vp.id, wp.id])).toEqual([
+      { rfq_product_id: vp.id, file_type: "SPEC", file_url: BOQ },
+      { rfq_product_id: vp.id, file_type: "TDS", file_url: DRAWING },
+      { rfq_product_id: wp.id, file_type: "SPEC", file_url: BOQ },
+      { rfq_product_id: wp.id, file_type: "TDS", file_url: DRAWING },
+    ]);
+
+    const draft = await buyC.get(`/api/v1/rfq/get-draft-by-id/${rfqId}`);
+    expect(draft.status).toBe(200);
+    for (const variant of [V, W]) {
+      const p = draft.body.data.rfq_products.find((x) => x.product_id === variant.variant_id);
+      expect(p.datasheet_file).toEqual([DRAWING]);
+      expect(p.spec_file).toEqual([BOQ]);
+    }
+  });
+
+  it("convert.pr-files-dedup: two PRs merged into one product, same PR-level URL → one file row; a URL a line file already put there is not added again", async () => {
+    const p1 = await approved([catalogLine(V.variant_id)], { title: "convert-pr-files-dedup-1" });
+    const p2 = await approved([catalogLine(V.variant_id)], { requesterId: REQ2, title: "convert-pr-files-dedup-2" });
+    await prFile(p1.id, "qap", QAP);
+    await prFile(p2.id, "qap", QAP);
+    // SHARED is a line file (spec) on p1's line and a PR-level datasheet on p2.
+    await db.none(
+      `INSERT INTO tbl_pr_attachment (pr_id, pr_line_id, kind, file_url, file_name, uploaded_by)
+       VALUES ($1, $2, 'spec', $3, 'line', $4)`, [p1.id, p1.line_ids[0], SHARED, REQ]);
+    await prFile(p2.id, "datasheet", SHARED);
+
+    const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    const [vp] = await rfqProducts(r.body.data.rfq_id);
+    expect(await filesOf([vp.id])).toEqual([
+      { rfq_product_id: vp.id, file_type: "QAP", file_url: QAP },
+      { rfq_product_id: vp.id, file_type: "SPEC", file_url: SHARED },
+    ]);
+  });
+
+  it("convert.pr-files-own-pr-only: a PR's whole-PR files never reach a product built only from another PR's lines", async () => {
+    const p1 = await approved([catalogLine(V.variant_id)], { title: "convert-pr-files-own-1" });
+    const p2 = await approved([catalogLine(W.variant_id, { quantity: "1", uom: "kg" })], { requesterId: REQ2, title: "convert-pr-files-own-2" });
+    await prFile(p1.id, "spec", DRAWING);
+
+    const r = await convert(buyC, { line_ids: [p1.line_ids[0], p2.line_ids[0]], department_id: PROC });
+    expect(r.status).toBe(200);
+    const [vp, wp] = await rfqProducts(r.body.data.rfq_id);
+    expect(await filesOf([vp.id, wp.id])).toEqual([{ rfq_product_id: vp.id, file_type: "SPEC", file_url: DRAWING }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
 describe("PR convert — refusals", () => {
