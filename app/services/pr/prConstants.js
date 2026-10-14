@@ -307,7 +307,10 @@ export const IS_HOTEL_BUYER_SQL = (userParam, companyParam, hotelParam) => {
      AND _rx_u.id = ${userParam}::int)`;
 };
 
-/** The in_review label when departments have no evaluator. Single source for SQL and JS callers. */
-export const noReviewerLabel = (deptTitles) => `${NO_REVIEWER_LABEL} (${deptTitles.join(', ')})`;
-/** SQL form of noReviewerLabel; `titlesExpr` is a SQL text expression (already aggregated). */
+/**
+ * The in_review now_with label when departments have no eligible reviewer:
+ * "No eligible reviewer — contact your admin (Engineering, Procurement)".
+ * The ONLY builder of that label (lists and detail read it from SQL);
+ * `titlesExpr` is a SQL text expression (already aggregated).
+ */
 export const NO_REVIEWER_LABEL_SQL = (titlesExpr) => `'${NO_REVIEWER_LABEL} (' || ${titlesExpr} || ')'`;

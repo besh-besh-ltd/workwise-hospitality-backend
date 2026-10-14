@@ -142,8 +142,11 @@ export async function istDate(offsetDays = 0) {
 // are never ANALYZEd: until autovacuum gets to them the planner believes
 // tbl_product holds ~1 row and nested-loops 11.5k products × 13k variants —
 // over 60 s, failing whichever suite asks first (seen when another jest run
-// loads Postgres and delays autoanalyze). One ANALYZE per process makes the
-// catalog reads below deterministic. Setup only — no code under test is involved.
+// loads Postgres and delays autoanalyze). One ANALYZE per test FILE makes the
+// catalog reads below deterministic: Jest gives every test file its own module
+// registry, so `catalogAnalyzed` starts false in each file (not once per jest
+// process) — cheap, and harmless to repeat. Setup only — no code under test is
+// involved.
 let catalogAnalyzed = false;
 async function analyzeCatalogOnce() {
   if (catalogAnalyzed) return;

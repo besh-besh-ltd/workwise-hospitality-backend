@@ -24,7 +24,7 @@ import {
   mapCategory, unmapAll, istDate, prRoleId,
 } from "../helpers/prFixtures.js";
 import { buyerPrDetail } from "../../app/services/notificationLinks.js";
-import { noReviewerLabel, MAX_LEN } from "../../app/services/pr/prConstants.js";
+import { MAX_LEN } from "../../app/services/pr/prConstants.js";
 import { isOwnUploadUrl } from "../../app/services/pr/prCatalog.js";
 
 const A = IDS.hospitality.A;
@@ -627,7 +627,7 @@ describe("PR technical review: complete and send back", () => {
         eligible_reviewers: [names.get(RV_PROC)], no_eligible_reviewer: false,
       });
       expect(d.pr.now_with).toContain("No eligible reviewer");
-      expect(d.pr.now_with).toBe(noReviewerLabel(["Engineering"]));
+      expect(d.pr.now_with).toBe("No eligible reviewer — contact your admin (Engineering)");
       // Eligibility is decided when acting: without the role RV_ENG can neither read nor complete.
       expect((await complete(engC, pr.id, pr.eng)).status).toBe(404);
       expect((await reviewsOf(pr.id)).find((r) => r.id === pr.eng).status).toBe("pending");

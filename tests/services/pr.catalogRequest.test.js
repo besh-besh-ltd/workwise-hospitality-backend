@@ -155,7 +155,7 @@ describe("admin catalog requests — list", () => {
     expect(open.body.data.total).toBe(1);
     const row = open.body.data.rows[0];
     expect(row).toMatchObject({
-      id: a.requestId, requested_name: "Zeta gizmo list A".replace(" A", ""), status: "open",
+      id: a.requestId, requested_name: "Zeta gizmo list", status: "open",
       pr_id: a.pr.id, pr_number: a.pr.pr_number, line_no: 1, requested_by_name: expect.any(String),
       company_name: expect.any(String), hotel_name: expect.any(String), line_status: "active",
       resolved_variant_id: null, resolved_variant_name: null, resolution_note: null,
@@ -170,8 +170,13 @@ describe("admin catalog requests — list", () => {
       id: b.requestId, status: "fulfilled", resolved_variant_id: W.variant_id, resolved_variant_name: W.variant_name,
     });
     expect((await list(`status=rejected&q=${encodeURIComponent(b.pr.pr_number)}`)).body.data.total).toBe(0);
-    // q also matches the requested name
-    expect((await list("q=Zeta%20gizmo%20list")).body.data.total).toBeGreaterThanOrEqual(2);
+    // q also matches the requested name: both of this test's requests, open and fulfilled
+    const byName = (await list("q=Zeta%20gizmo%20list")).body.data.rows
+      .filter((r) => [a.pr.pr_number, b.pr.pr_number].includes(r.pr_number));
+    expect(byName.map((r) => [r.id, r.requested_name, r.status]).sort((x, y) => x[0] - y[0])).toEqual([
+      [a.requestId, "Zeta gizmo list", "open"],
+      [b.requestId, "Zeta gizmo list B", "fulfilled"],
+    ].sort((x, y) => x[0] - y[0]));
     // page 2 of a 1-row filter is empty but total is stable
     const p2 = await list(`status=open&q=${encodeURIComponent(a.pr.pr_number)}&page=2`);
     expect(p2.body.data.rows).toEqual([]);
