@@ -146,7 +146,13 @@ async function cleanup(t) {
   const instanceIds = (await t.any(
     `SELECT id FROM tbl_approval_instances WHERE (entity_type = 'PR' AND entity_id = ANY($1::int[])) OR initiated_by = ANY($2::int[])`,
     [prIds, userIds])).map((r) => Number(r.id));
-  const policyIds = (await t.any(`SELECT id FROM tbl_approval_policies WHERE entity_type = 'PR' AND hospitality_company_id = $1 AND created_by = $2`, [COMPANY, FIXTURE_ADMIN])).map((r) => Number(r.id));
+  // The seeded PR policy, plus any approval policy a persona saved through the
+  // admin screens during a browser pass (created_by is NOT NULL with no ON
+  // DELETE action, so it would block deleting the persona).
+  const policyIds = (await t.any(
+    `SELECT id FROM tbl_approval_policies
+      WHERE (entity_type = 'PR' AND hospitality_company_id = $1 AND created_by = $2) OR created_by = ANY($3::int[])`,
+    [COMPANY, FIXTURE_ADMIN, userIds])).map((r) => Number(r.id));
   const policyInst = policyIds.length
     ? (await t.any(`SELECT id FROM tbl_approval_instances WHERE approval_policy_id = ANY($1::int[])`, [policyIds])).map((r) => Number(r.id)) : [];
   const allInst = [...new Set([...instanceIds, ...policyInst])];
@@ -182,7 +188,9 @@ async function cleanup(t) {
     await t.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = ANY($1::int[])`, [policyIds]);
     await t.none(`DELETE FROM tbl_approval_policies WHERE id = ANY($1::int[])`, [policyIds]);
   }
-  await t.none(`DELETE FROM tbl_pr_review_category_map WHERE hospitality_company_id = $1 AND created_by = $2`, [COMPANY, FIXTURE_ADMIN]);
+  await t.none(
+    `DELETE FROM tbl_pr_review_category_map WHERE (hospitality_company_id = $1 AND created_by = $2) OR created_by = ANY($3::int[])`,
+    [COMPANY, FIXTURE_ADMIN, userIds]);
 
   // ARC (the seeded contract at A1 x HK) and the vendors' catalogue wiring.
   const arcIds = (await t.any(`SELECT id FROM tbl_arc WHERE arc_number = 'ARC-E2E-PR-0001'`)).map((r) => Number(r.id));
