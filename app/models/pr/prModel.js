@@ -1039,11 +1039,18 @@ export async function duplicates(user, { companyId, variantId }, superAdmin = fa
 const POOL_ORDER = (b) => `CASE ${b}.urgency WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
   ${b}.required_by_date, ${b}.approved_at, ${b}.pr_id, ${b}.line_no`;
 
-/** WHERE: the PR's hotel is one the user (bound at `userParam`) holds pr.convert on — hasPerm's axis rules. */
-const POOL_SCOPE_SQL = (p, userParam) => `EXISTS (
+/**
+ * WHERE: the PR's hotel is one the user (bound at `userParam`) holds pr.convert
+ * on — hasPerm's axis rules — and that hotel is not deleted (the same hotels
+ * poolHotels offers, so a company-wide grant never surfaces a deleted hotel's lines).
+ */
+const POOL_SCOPE_SQL = (p, userParam) => `(EXISTS (
   SELECT 1 FROM (${prGrantRowsSql(userParam, 'convert')}) _pool_g
    WHERE _pool_g.company_id = ${p}.hospitality_company_id
-     AND (_pool_g.hotel_id IS NULL OR _pool_g.hotel_id = ${p}.hotel_id))`;
+     AND (_pool_g.hotel_id IS NULL OR _pool_g.hotel_id = ${p}.hotel_id))
+  AND EXISTS (
+  SELECT 1 FROM tbl_hospitality_company_hotels _pool_h
+   WHERE _pool_h.id = ${p}.hotel_id AND COALESCE(_pool_h.is_deleted, 0) = 0))`;
 
 /** Hotels whose pool the user may work (pr.convert on any department there), by name. [] = none. */
 export async function poolHotels(userId, t = db) {

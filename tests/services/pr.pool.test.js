@@ -47,7 +47,7 @@ const PERSONAS = [REQ, AP, BUY, BUY2, BUY3, XCO];
 const prIds = [];
 const rfqIds = [];
 let originalUserTypes = [];
-let reqC, buyC, buy2C, buy3C, xcoC;
+let reqC, buyC, buy2C, buy3C;
 let V; // the catalog variant of catalog lines
 let W; // a second usable variant (mapping target)
 let K; // a third usable variant (put on contract in one block)
@@ -174,7 +174,6 @@ beforeAll(async () => {
   buyC = await httpClient(BUY);
   buy2C = await httpClient(BUY2);
   buy3C = await httpClient(BUY3);
-  xcoC = await httpClient(XCO);
 
   realCreateTransport = nodemailer.createTransport;
   nodemailer.createTransport = (...args) => {
@@ -241,6 +240,30 @@ describe("PR pool — scope, rows, age, order, filters", () => {
     const asReq = await pool(reqC);
     expect(asReq.status).toBe(403);
     expect(asReq.body).toMatchObject({ status: 0, code: "PR_FORBIDDEN" });
+  });
+
+  it("pool.deleted-hotel: once its hotel is deleted, a PR's lines leave the pool — even for a company-wide buyer", async () => {
+    const wide = await grantPr(BUY3, "PR Buyer", { hotelId: null }); // pr.convert on every hotel of A
+    const before = await db.one(`SELECT is_deleted FROM tbl_hospitality_company_hotels WHERE id = $1`, [A2]);
+    const linesOf = async () => {
+      const res = await pool(buy3C, "page_size=200");
+      expect(res.status).toBe(200);
+      return res.body.data;
+    };
+    try {
+      expect((await linesOf()).rows.map((r) => r.line_id)).toEqual(expect.arrayContaining([...a1.line_ids, a2.line_ids[0]]));
+
+      await db.none(`UPDATE tbl_hospitality_company_hotels SET is_deleted = 1 WHERE id = $1`, [A2]);
+      const after = await linesOf();
+      expect(after.rows.map((r) => r.line_id)).not.toContain(a2.line_ids[0]);
+      expect(after.rows.map((r) => r.line_id)).toEqual(expect.arrayContaining(a1.line_ids));
+      expect(after.rows.every((r) => r.hotel_id !== A2)).toBe(true);
+      expect(after.hotels.map((h) => h.id)).not.toContain(A2);
+      expect(after.total).toBe(after.rows.length);
+    } finally {
+      await db.none(`UPDATE tbl_hospitality_company_hotels SET is_deleted = $2 WHERE id = $1`, [A2, before.is_deleted]);
+      await db.none(`DELETE FROM tbl_user_role_scopes WHERE id = $1`, [wide]);
+    }
   });
 
   it("row shape: one row per active line, money as exact strings, progress from the shared SQL", async () => {
