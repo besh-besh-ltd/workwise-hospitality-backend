@@ -133,3 +133,37 @@ Screenshots: `docs/releases/2026-10-purchase-requisitions/screens/` (repo root).
 - Approvers without pr.create still see "New requisition".
 - Admin panel: catalog requests page has no heading; fulfil search does not show whether a variant has vendors.
 - RFQ wizard "MARKS AND CLAUSES (1 clauses)" counts only non-sampling clauses (pre-existing wizard).
+
+## 19c final browser confirmation (2026-10-14)
+
+Confirms the final fix wave (BE Task 21 @ f52f3254, FE Task 22 @ 2d76ad93, AP Task 23 @ 8affe2f) in a real browser.
+- Driver: chrome-devtools MCP, one isolated context per persona, 1440x900.
+- Before any login, both FEs were checked: bundle and network panel use `localhost:8124/api/v1` only.
+- Data: re-seeded first. The DB was not written to except through the app.
+- Screenshots 70-90 are in `docs/releases/2026-10-purchase-requisitions/screens/` (repo root).
+
+| # | check | result | shots |
+|---|---|---|---|
+| 1 | Create preview: Engineering reviewers are RV_ENG + REQ_ENG only (Company Administrator no longer listed, R40); GM "Not required below Rs 1,00,000" | PASS | 70 |
+| 2 | GAS LIGHTER 12" blocked, "On contract ... raise an MR" | PASS | 71 |
+| 2 | Department cleared and re-picked: the contract re-check runs by variant id (`variant_ids=1445`) and "Couldn't verify" never appears | PASS | - |
+| 2 | Reload of the edit page: no blank-form flash, quantities "2", not blocked | PASS | 72 |
+| 3 | Whole-PR file + line datasheet -> review -> HOD -> FC -> map -> convert -> wizard | PASS | 78-80 |
+| 3 | Wizard (R41): every product carries the whole-PR file as Spec; the line datasheet is TDS; DB `tbl_rfq_product_files` agrees | PASS | 79, 80 |
+| 3 | Wizard submit | PASS (first try) | - |
+| 3 | Vendor quote view | SKIPPED: publishing needs an RFQ approval (instance pending), more than the wizard submit | - |
+| 4 | Awaiting me tile opens "Waiting on me" with the same count; `?tab=awaiting` survives a reload; tab clicks update the URL | PASS | 73 |
+| 5 | FC (approver only): no New requisition; create shows "can't raise requisitions yet"; review shows "You're not a technical reviewer" | PASS | 74-76 |
+| 5 | Company Administrator: read-only list + detail, no New requisition | PASS | 81, 82 |
+| 6 | Admin PR wizard: role lacking pr.approve marked "can't approve PRs"; Save shows the server refusal in a toast; Cancel leaves policy steps unchanged; preview still resolves | PASS | 84, 85, 90 |
+| 7 | Purchase queue at 1440: Actions column sticky right and fully readable | PASS | 77 |
+| 8 | Admin panel catalog requests: "Catalog requests" heading | PASS | 86 |
+| m | 390 px: list/detail unchanged; the queue's pinned Actions column now takes ~47% of the table | cosmetic | 87 |
+
+No defects in PR code, so no fix commits.
+
+Reported, not fixed:
+- **AI-assistant button over the sticky action.** At 1440x900 the global button covers the PR detail's right-most sticky action (Submit/Withdraw). A real click opened the assistant site instead of submitting. Root cause: `components/shared/WizardChat`, outside PR code.
+- **Pinned Actions on mobile.** The pinned Actions column is heavy at 390 px.
+
+Cosmetics, the old -> new screenshot map and the final DB state are in the SDD task-19c report.
