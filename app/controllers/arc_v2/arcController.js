@@ -11,6 +11,7 @@ import { logger } from '../../util/logger.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { userCanAccessArc, userCanReadArc, arcScopeUserId, buildArcScopeClause, filterRowsByProcessAxis } from '../../helper/arc_v2/arcScope.js';
 import { resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
+import { orgKeysFor } from '../../services/vendorNetwork/orgKeySql.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import { resolveGroupCoverage, normalizeGroupItems } from '../../helper/arc_v2/arcGroupDraft.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
@@ -148,9 +149,13 @@ async function resolveArcVendorPanel(arc, runner = db) {
   } else {
     const picked = await arcModel.listInvitations(arc.id, runner);
     if (arc.is_group) {
-      vendorIds = picked.map((i) => Number(i.vendor_id)).filter((id) => hotelIdsByVendor.has(id));
+      // Coverage is keyed by org principal (Vendor Networks, pooled): a pick linked
+      // into an org serves through, and is invited as, its principal.
+      const orgKeys = await orgKeysFor(picked.map((i) => i.vendor_id), runner);
+      const keyOf = (i) => orgKeys.get(Number(i.vendor_id)) ?? Number(i.vendor_id);
+      vendorIds = [...new Set(picked.map(keyOf).filter((id) => hotelIdsByVendor.has(id)))];
       picksServingNoHotel = picked
-        .filter((i) => !hotelIdsByVendor.has(Number(i.vendor_id)))
+        .filter((i) => !hotelIdsByVendor.has(keyOf(i)))
         .map((i) => ({ id: Number(i.vendor_id), name: i.vendor_name || null }));
     } else {
       vendorIds = picked.map((i) => Number(i.vendor_id));

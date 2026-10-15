@@ -457,7 +457,7 @@ async function getNoResponseDetail(buyer_company_id, user_id, hotel_ids = []) {
           WHERE rhm0.rfq_id = r.id AND rhm0.hotel_id = ANY($4)
           ORDER BY rhm0.hotel_id
           LIMIT 1) AS hotel_name,
-       (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id)::int AS invited_vendor_count,
+       (SELECT COUNT(DISTINCT rpv.user_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_id = r.id AND rpv.routed_from_vendor_id IS NULL)::int AS invited_vendor_count,
        (SELECT COUNT(*) FROM tbl_quotes qr WHERE qr.rfq_id = r.id AND qr.is_regret = 1)::int AS regret_count,
        ${bidClosed('r')} AS is_expired
      FROM tbl_rfq r
@@ -1759,8 +1759,12 @@ async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids) {
           AND ${bidOpen('r')}
           AND ${rfqMapped('r', 3)}
      ),
+     -- Vendor Networks (spec §6.3): one invitee per org. A member's routed copy belongs
+     -- to its principal's invite (org_key = routed_from_vendor_id, else the user), and the
+     -- org has responded once ANY of its rows on the RFQ quoted or regretted. A vendor in
+     -- no network is its own key: unchanged.
      invited AS (
-       SELECT DISTINCT rpv.rfq_id, rpv.user_id AS vendor_id
+       SELECT DISTINCT rpv.rfq_id, COALESCE(rpv.routed_from_vendor_id, rpv.user_id) AS org_key
          FROM tbl_rfq_product_vendors rpv
         WHERE rpv.rfq_id IN (SELECT id FROM my_live)
      ),
@@ -1768,7 +1772,11 @@ async function getMyNoResponseRfqsData(buyer_company_id, user_id, hotel_ids) {
        SELECT iv.rfq_id,
               COUNT(*)::int AS total_vendor_count,
               COUNT(*) FILTER (WHERE NOT EXISTS (
-                SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = iv.rfq_id AND q.created_by = iv.vendor_id
+                SELECT 1
+                  FROM tbl_quotes q
+                  JOIN tbl_rfq_product_vendors qv ON qv.rfq_id = q.rfq_id AND qv.user_id = q.created_by
+                 WHERE q.rfq_id = iv.rfq_id
+                   AND COALESCE(qv.routed_from_vendor_id, qv.user_id) = iv.org_key
               ))::int AS silent_vendor_count
          FROM invited iv
         GROUP BY iv.rfq_id

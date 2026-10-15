@@ -26,9 +26,11 @@ const VENDOR = IDS.users.vendor_alpha;
 // Whole request, auth included.
 //   buyer : 13 statements / 12 waves  ->  11 / 6
 //   vendor: 15 statements / 14 waves  ->  14 / 8
+// +1 vendor statement (Vendor Networks, spec §4.1): jwtUsr re-checks the vendor's
+// network placement on every request so revocation bites on the next call.
 const BUDGET = {
   buyer: { statements: 11, waves: 7 },
-  vendor: { statements: 14, waves: 9 },
+  vendor: { statements: 15, waves: 9 },
 };
 
 const best = async (fn) => {

@@ -80,6 +80,17 @@ import { IDS } from "../fixtures/ids.js";
 import rfqController from "../../app/controllers/rfq/rfqController.js";
 import { makeRFQ } from "../factories/rfq.js";
 
+// raiseClarification only admits a vendor mapped to the RFQ (security hotfix
+// 2026-10-06), so every RFQ these suites mint is mapped to both fixture vendors.
+async function mapFixtureVendors(rfq_id) {
+  for (const vendor_id of [IDS.users.vendor_alpha, IDS.users.vendor_beta]) {
+    await db.none(
+      `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`,
+      [rfq_id, vendor_id]
+    );
+  }
+}
+
 // --- Test scaffolding -------------------------------------------------------
 
 function mockExpress(opts = {}) {
@@ -174,6 +185,7 @@ afterEach(async () => {
   await db.none(`DELETE FROM tbl_quotes WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted.rfqIds]);
 });
 
@@ -195,6 +207,7 @@ async function seedRfq({ publishAt, clarificationEndsAt, published, bidEndsAt })
     process: IDS.processes.A_P1,
   });
   inserted.rfqIds.push(rfq_id);
+  await mapFixtureVendors(rfq_id);
   return rfq_id;
 }
 

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
+import { refuseGuestSessionMiddleware } from '../../helper/guestSession.js';
 import * as amendmentController from '../../controllers/arc_v2/arcAmendmentController.js';
 
 const r = Router();
@@ -10,8 +11,9 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 r.get('/',                      passportSignIn, acl([2, 8]),  amendmentController.listAmendments);
 
 // Request — vendor-initiated. The buyer cannot create amendments; they
-// only review what vendors propose.
-r.post('/request',              passportSignIn, acl([3]),     amendmentController.requestAmendment);
+// only review what vendors propose. An emailed-link guest session (RFQ only) is
+// refused, as on every vendor ARC route (Task 26).
+r.post('/request',              passportSignIn, refuseGuestSessionMiddleware, acl([3]),     amendmentController.requestAmendment);
 
 // Review — buyer (or whoever is the current step's approver) approves /
 // rejects / edits-then-approves. Drives the locked approval chain.

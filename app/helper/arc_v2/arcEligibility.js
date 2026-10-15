@@ -18,8 +18,19 @@
 //
 // Vendor distributor networks: when a vendor can attach local distributors,
 // widen hotel coverage HERE and nowhere else.
+//
+// VENDOR NETWORKS (spec §5.2): eligibility is POOLED per org and the invitation goes
+// to the principal. Every category and hotel subscription is mapped to its org key
+// (orgKeySql.js) before the two are intersected, so an org qualifies for a hotel when
+// ANY counting (ACTIVE, live-login) entity holds the category and ANY holds that hotel.
+// The principal's row lists the org's hotels; a hotel needs renewal unless the org
+// holds an active category AND an active hotel subscription for it. A vendor in no org
+// is its own key and gets exactly its pre-network row. Submission
+// (vendorCanSubmitForHotels) pools the same way over subscriptionHolderIdsFor.
 
 import db from '../../config/dbConn.js';
+import { subscriptionHolderIdsFor } from '../../services/vendorNetwork/actingContext.js';
+import { orgKeySelect, keyIsInvitable } from '../../services/vendorNetwork/orgKeySql.js';
 
 const uniqueIds = (ids) => [...new Set((ids || []).map(Number).filter(Boolean))];
 
@@ -31,19 +42,38 @@ export async function resolveArcVendorCoverage({ category_id, hotel_ids }, runne
   const hotels = uniqueIds(hotel_ids);
   if (!Number(category_id) || hotels.length === 0) return [];
   const rows = await runner.any(
-    `WITH cat AS (
+    `WITH cat_subs AS (
        SELECT vendor_id, bool_or(status = 'active') AS cat_active
          FROM tbl_vendor_hotel_category_subscription
         WHERE item_type = 'category' AND item_id = $1
           AND status IN ('active', 'expired')
         GROUP BY vendor_id
      ),
-     hot AS (
+     hot_subs AS (
        SELECT vendor_id, item_id AS hotel_id, bool_or(status = 'active') AS hotel_active
          FROM tbl_vendor_hotel_category_subscription
         WHERE item_type = 'hotel' AND item_id = ANY($2::int[])
           AND status IN ('active', 'expired')
         GROUP BY vendor_id, item_id
+     ),
+     -- Subscribers whose rows count, with their org key; same vendor filter as before.
+     holders AS (
+       SELECT k.vendor_id, k.org_key
+         FROM (${orgKeySelect('SELECT vendor_id FROM cat_subs UNION SELECT vendor_id FROM hot_subs')}) k
+         JOIN tbl_users hu ON hu.id = k.vendor_id
+        WHERE k.counts
+          AND hu.user_type = 3
+          AND hu.status = 1
+     ),
+     cat AS (
+       SELECT h.org_key, bool_or(c.cat_active) AS cat_active
+         FROM cat_subs c JOIN holders h ON h.vendor_id = c.vendor_id
+        GROUP BY h.org_key
+     ),
+     hot AS (
+       SELECT h.org_key, s.hotel_id, bool_or(s.hotel_active) AS hotel_active
+         FROM hot_subs s JOIN holders h ON h.vendor_id = s.vendor_id
+        GROUP BY h.org_key, s.hotel_id
      )
      SELECT u.id, u.name, u.email, u.mobile,
             array_agg(hot.hotel_id ORDER BY hot.hotel_id) AS hotel_ids,
@@ -52,11 +82,10 @@ export async function resolveArcVendorCoverage({ category_id, hotel_ids }, runne
                 FILTER (WHERE NOT (hot.hotel_active AND cat.cat_active)),
               '{}'
             ) AS renewal_needed_hotel_ids
-       FROM tbl_users u
-       JOIN cat ON cat.vendor_id = u.id
-       JOIN hot ON hot.vendor_id = u.id
-      WHERE u.user_type = 3
-        AND u.status = 1
+       FROM cat
+       JOIN hot ON hot.org_key = cat.org_key
+       JOIN tbl_users u ON u.id = cat.org_key
+      WHERE ${keyIsInvitable('cat.org_key')}
       GROUP BY u.id, u.name, u.email, u.mobile
       ORDER BY u.name`,
     [Number(category_id), hotels]
@@ -76,20 +105,23 @@ export async function resolveArcVendorCoverage({ category_id, hotel_ids }, runne
 export async function vendorCanSubmitForHotels(vendorId, { category_id, hotel_ids }, runner = db) {
   const hotels = uniqueIds(hotel_ids);
   if (!Number(vendorId) || !Number(category_id) || hotels.length === 0) return false;
+  // Any holder's category subscription and any holder's hotel subscription; in no org
+  // the only holder is the vendor itself.
+  const holderIds = await subscriptionHolderIdsFor(Number(vendorId), runner);
   const row = await runner.oneOrNone(
     `SELECT 1
        FROM tbl_vendor_hotel_category_subscription c
        JOIN tbl_vendor_hotel_category_subscription h
-         ON h.vendor_id = c.vendor_id
+         ON h.vendor_id = ANY($1::int[])
         AND h.item_type = 'hotel'
         AND h.item_id = ANY($3::int[])
         AND h.status = 'active'
-      WHERE c.vendor_id = $1
+      WHERE c.vendor_id = ANY($1::int[])
         AND c.item_type = 'category'
         AND c.item_id = $2
         AND c.status = 'active'
       LIMIT 1`,
-    [Number(vendorId), Number(category_id), hotels]
+    [holderIds, Number(category_id), hotels]
   );
   return !!row;
 }

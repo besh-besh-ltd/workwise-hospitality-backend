@@ -34,7 +34,10 @@ export const getActorUserId = () => {
   const ctx = getRequestContext();
   if (!ctx) return null;
   if (ctx.actorUserId !== undefined && ctx.actorUserId !== null) return ctx.actorUserId;
-  const id = ctx.req?.user?.id;
+  // A person acting for a vendor network entity is the actor, not the entity
+  // (spec §4.3), matching resolveActor in middleware/requestContext.js.
+  const user = ctx.req?.user;
+  const id = user?.network?.actor_user_id ?? user?.id;
   // -1 is auth.js's marker for a token-authenticated site representative. It
   // is not a row in tbl_users and must never be written anywhere as one.
   return typeof id === 'number' && id > 0 ? id : null;

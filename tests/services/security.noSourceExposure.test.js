@@ -10,7 +10,7 @@
 // health checks still answer.
 
 import { describe, it, expect, afterAll } from "@jest/globals";
-import request from "supertest";
+import { boundRequest } from "../helpers/http.js";
 import { closeDb } from "../setup/db.js";
 import { createApp } from "../../app/app.js";
 
@@ -29,19 +29,19 @@ describe("no source files over HTTP", () => {
     ["/otel-instrument.mjs", /opentelemetry/],
     ["/.env.test", /DATABASE/],
   ])("GET %s does not return the file", async (path, signature) => {
-    const res = await request(app).get(path);
+    const res = await (await boundRequest(app)).get(path);
     expect([404, 405]).toContain(res.status);
     expect(res.text || "").not.toMatch(signature);
   });
 
   it("GET /api/health still answers from the database", async () => {
-    const res = await request(app).get("/api/health");
+    const res = await (await boundRequest(app)).get("/api/health");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "ok" });
   });
 
   it("GET /health still answers", async () => {
-    const res = await request(app).get("/health");
+    const res = await (await boundRequest(app)).get("/health");
     expect(res.status).toBe(200);
     expect(res.text).toBe("OK");
   });

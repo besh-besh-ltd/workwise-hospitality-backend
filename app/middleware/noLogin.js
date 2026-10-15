@@ -2,6 +2,8 @@ import passport from './passport.js';
 import { validateDbBody } from "../validations/dbValidation/userDbValidation.js";
 import db from '../config/dbConn.js';
 import { logger } from '../util/logger.js';
+import { markGuestSession } from '../helper/guestSession.js';
+import { verifyVendorTokenLimiter, TOO_MANY_ATTEMPTS } from './failedAttemptLimiter.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -56,11 +58,21 @@ const noLogin = {
                     return next();
                 });
             } else if (req.query.token) {
-                const tokenData = await db.oneOrNone(
-                    'SELECT vendor_id FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
-                    [req.query.token]
-                );
+                // The emailed-link token, raw: same failed-attempt limit as
+                // POST /users/verify-vendor-token, and the same bigint-only lookup.
+                if (verifyVendorTokenLimiter.isBlocked(req)) {
+                    return res.status(429).json(TOO_MANY_ATTEMPTS);
+                }
+                const tokenText = String(req.query.token).trim();
+                const isBigint = /^\d{1,19}$/.test(tokenText) && BigInt(tokenText) <= 9223372036854775807n;
+                const tokenData = isBigint
+                    ? await db.oneOrNone(
+                        'SELECT vendor_id FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1::bigint',
+                        [tokenText]
+                    )
+                    : null;
                 if (!tokenData) {
+                    verifyVendorTokenLimiter.recordFailure(req);
                     return res.status(400).json({ status: 0, message: 'Invalid or expired token' });
                 }
                 const user = await db.oneOrNone(
@@ -70,7 +82,8 @@ const noLogin = {
                 if (!user) {
                     return res.status(404).json({ status: 0, message: 'Vendor not found' });
                 }
-                req.user = user;
+                // Whoever holds the link: an emailed-link guest session (RFQ only).
+                req.user = markGuestSession(user);
                 req.is_verified = false;
                 next();
             } else {

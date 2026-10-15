@@ -1,4 +1,5 @@
 import db from '../../config/dbConn.js';
+import { effectiveSupplierExpr } from '../../services/vendorNetwork/fulfilmentSql.js';
 
 /**
  * MR (Material Requisition) — Database access layer.
@@ -584,6 +585,10 @@ const mrModel = {
    * awarded this vendor at that hotel, unless HO paused the hotel. remaining_qty
    * is the GROUP's remaining (the hard cap); hotel_* is the hotel's own share
    * (soft), and current_rate honours a per-hotel rate override.
+   *
+   * vendor_id / vendor_name are the EFFECTIVE supplier at the hotel: an ACTIVE
+   * vendor network member fulfilling it, else the contract vendor
+   * (services/vendorNetwork/fulfilmentSql.js, shared with the call-off release).
    */
   searchContractedItems: async ({ hotel_id, department_id, query = null, limit = 25 }, txContext = null) => {
     const runner = txContext || db;
@@ -607,7 +612,7 @@ const mrModel = {
               clh.consumed_qty  AS hotel_consumed_qty,
               GREATEST(clh.committed_qty - clh.consumed_qty, 0) AS hotel_remaining_qty,
               c.id             AS arc_contract_id,
-              c.vendor_id,
+              sup.vendor_id,
               a.id             AS arc_id,
               a.arc_number,
               a.title          AS arc_title,
@@ -623,9 +628,14 @@ const mrModel = {
                                    AND (a.hotel_id = $1 OR a.is_group)
          JOIN tbl_arc_item ai       ON ai.id = cl.arc_item_id
          JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
-         LEFT JOIN tbl_users uvend  ON uvend.id = c.vendor_id
          LEFT JOIN tbl_arc_contract_line_hotel clh
                 ON clh.arc_contract_line_id = cl.id AND clh.hotel_id = $1
+         -- The supplier the release will pick for this hotel (vendor network
+         -- fulfilment): the same rule as callOffPoService.buildCallOffBuckets.
+         CROSS JOIN LATERAL (
+           SELECT ${effectiveSupplierExpr('clh.fulfilling_vendor_id', 'c.vendor_id')} AS vendor_id
+         ) sup
+         LEFT JOIN tbl_users uvend  ON uvend.id = sup.vendor_id
         WHERE (cl.committed_qty - cl.consumed_qty) > 0
           AND (
             (NOT a.is_group AND a.hotel_id = $1)

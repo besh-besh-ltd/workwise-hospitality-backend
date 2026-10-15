@@ -17,6 +17,8 @@ import { getBidEndMomentIst, istNow } from './quoteVisibility.js';
 import { recordSystemEvent } from '../services/activity/systemEvents.js';
 import { CATEGORIES } from '../services/activity/eventRegistry.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import { runRoutingSweep } from '../services/vendorNetwork/routingSweep.js';
+import { SWEEP_CRON } from '../constants/vendorNetwork.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -826,6 +828,27 @@ export const startRfqStuckPublishWatchdog = () => {
   logger.info('[RFQ Watchdog] Cron scheduled: every 5 minutes (grace=2m, max-attempts-before-email=3)');
 };
 
+// ============= VENDOR NETWORK ROUTING SWEEP =============
+
+/**
+ * One routing sweep (spec §6.2): times out overdue PENDING assignments, revokes those
+ * whose assignee left the network, and auto-routes for AUTO_SINGLE_MATCH orgs. Guarded
+ * by a Postgres advisory lock, so overlapping ticks (or instances) skip instead of racing.
+ */
+export const runVendorRoutingSweepTick = async (now = new Date()) => {
+  try {
+    return await runRoutingSweep(now);
+  } catch (err) {
+    logError('[Vendor Routing Sweep] Cron tick failed', err);
+    return { skipped: false, error: err.message };
+  }
+};
+
+export const startVendorRoutingSweep = () => {
+  cron.schedule(SWEEP_CRON, () => { runVendorRoutingSweepTick(); });
+  logger.info(`[Vendor Routing Sweep] Cron scheduled: ${SWEEP_CRON}`);
+};
+
 // ============= PO DOCUMENT WATCHDOG =============
 
 /**
@@ -851,7 +874,45 @@ export const startPoDocumentWatchdog = () => {
 // ============= VENDOR PO ACCEPTANCE REMINDERS =============
 
 /**
- * Sends tiered reminder emails to vendors for POs still in acceptance_pending.
+ * The POs in acceptance_pending that are due a vendor reminder at `now`, each with the
+ * reminder to send (`reminder_to_send`: 1, 2 or 3). Tiers count whole days since the PO
+ * last changed (updated_at): day 1 gentle, day 3 firm, day 5 final, one per tier.
+ *
+ * RFQ POs come with their RFQ (rfq_no, rfq_title) as before; one whose RFQ row is gone is
+ * still skipped. Call-off POs have no RFQ and come with their contract's ARC number
+ * (arc_number, arc_title) instead (spec §7.1).
+ */
+export const findPosNeedingVendorReminder = async (now = new Date(), runner = db) => {
+  const pendingPOs = await runner.any(`
+    SELECT po.*, r.rfq_no, r.title AS rfq_title, a.arc_number, a.title AS arc_title
+    FROM tbl_rfq_purchase_order po
+    LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+    LEFT JOIN tbl_arc_contract c ON c.id = po.arc_contract_id AND po.is_call_off
+    LEFT JOIN tbl_arc a ON a.id = c.arc_id
+    WHERE po.status = 'acceptance_pending'
+      AND (r.id IS NOT NULL OR po.is_call_off)
+  `);
+  const due = [];
+  for (const po of pendingPOs) {
+    const daysSince = Math.floor((new Date(now).getTime() - new Date(po.updated_at).getTime()) / (1000 * 60 * 60 * 24));
+    const reminderCount = po.vendor_reminder_count || 0;
+    let reminderToSend = null;
+
+    if (daysSince >= 5 && reminderCount === 2) {
+      reminderToSend = 3;
+    } else if (daysSince >= 3 && reminderCount === 1) {
+      reminderToSend = 2;
+    } else if (daysSince >= 1 && reminderCount === 0) {
+      reminderToSend = 1;
+    }
+    if (reminderToSend) due.push({ ...po, reminder_to_send: reminderToSend });
+  }
+  return due;
+};
+
+/**
+ * Sends tiered reminder emails to vendors for POs still in acceptance_pending
+ * (RFQ and call-off POs; see findPosNeedingVendorReminder).
  * Schedule: Runs every day at 10:00 AM IST.
  * Reminders: Day 1 (gentle), Day 3 (firm), Day 5 (final).
  */
@@ -860,52 +921,34 @@ export const startVendorAcceptanceReminderCron = () => {
   cron.schedule('30 4 * * *', async () => {
     logger.info('[Vendor Acceptance Reminder] Running daily check...');
     try {
-      const pendingPOs = await db.any(`
-        SELECT po.*, r.rfq_no, r.title AS rfq_title
-        FROM tbl_rfq_purchase_order po
-        JOIN tbl_rfq r ON r.id = po.rfq_id
-        WHERE po.status = 'acceptance_pending'
-      `);
+      const duePOs = await findPosNeedingVendorReminder(new Date());
 
-      if (pendingPOs.length === 0) {
-        logger.info('[Vendor Acceptance Reminder] No pending POs found.');
+      if (duePOs.length === 0) {
+        logger.info('[Vendor Acceptance Reminder] No POs due a reminder.');
         return;
       }
 
       const { sendPOAcceptanceReminderToVendor } = await import('../controllers/po/purchaseOrderEmails.js');
 
-      for (const po of pendingPOs) {
-        const daysSince = Math.floor((Date.now() - new Date(po.updated_at).getTime()) / (1000 * 60 * 60 * 24));
-        const reminderCount = po.vendor_reminder_count || 0;
-        let reminderToSend = null;
-
-        if (daysSince >= 5 && reminderCount === 2) {
-          reminderToSend = 3;
-        } else if (daysSince >= 3 && reminderCount === 1) {
-          reminderToSend = 2;
-        } else if (daysSince >= 1 && reminderCount === 0) {
-          reminderToSend = 1;
-        }
-
-        if (reminderToSend) {
-          try {
-            await sendPOAcceptanceReminderToVendor(
-              po,
-              { rfq_no: po.rfq_no, title: po.rfq_title },
-              reminderToSend
-            );
-            await db.none(
-              `UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = $2 WHERE id = $1`,
-              [po.id, reminderToSend]
-            );
-            logger.info(`[Vendor Acceptance Reminder] Sent reminder #${reminderToSend} for PO ${po.po_number}`);
-          } catch (emailError) {
-            logError(`[Vendor Acceptance Reminder] Failed to send reminder for PO ${po.id}`, emailError);
-          }
+      for (const po of duePOs) {
+        const reminderToSend = po.reminder_to_send;
+        try {
+          await sendPOAcceptanceReminderToVendor(
+            po,
+            { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number },
+            reminderToSend
+          );
+          await db.none(
+            `UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = $2 WHERE id = $1`,
+            [po.id, reminderToSend]
+          );
+          logger.info(`[Vendor Acceptance Reminder] Sent reminder #${reminderToSend} for PO ${po.po_number}`);
+        } catch (emailError) {
+          logError(`[Vendor Acceptance Reminder] Failed to send reminder for PO ${po.id}`, emailError);
         }
       }
 
-      logger.info(`[Vendor Acceptance Reminder] Processed ${pendingPOs.length} pending POs.`);
+      logger.info(`[Vendor Acceptance Reminder] Processed ${duePOs.length} due POs.`);
     } catch (error) {
       logError('[Vendor Acceptance Reminder] Cron job failed', error);
     }
