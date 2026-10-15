@@ -439,6 +439,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       "name": "Alpha Vendor Pvt Ltd",
       "on_time_pct": "<masked:null>",
       "orders_done": "<masked:number>",
+      "org_name": null,
       "po_value": "<masked:number>",
       "pos_accepted": "<masked:number>",
       "quote_pct": "<masked:number>",

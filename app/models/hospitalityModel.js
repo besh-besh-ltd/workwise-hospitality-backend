@@ -1,4 +1,12 @@
 import db, { pgp } from '../config/dbConn.js';
+import { subscriptionHolderIdsFor } from '../services/vendorNetwork/actingContext.js';
+import { orgKeySelect, orgEntitiesOfKeys, keyIsInvitable, activeSiblingIdsSql } from '../services/vendorNetwork/orgKeySql.js';
+import { resolveHotelLocationIds } from '../helper/hotelLocation.js';
+import {
+  lockLiveRfqAssignments,
+  propagateRoutedCopies,
+  propagateRoutedCopiesLocked,
+} from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 
 const hospitalityModel = {
   createCompany: async (companyObj) => {
@@ -126,13 +134,18 @@ const hospitalityModel = {
     );
   },
 
+  // state_id / city_id follow the free-text state / city on every write (vendor
+  // network coverage keys on them; spec §3). createHOFromCompany writes no state or
+  // city, so its ids stay NULL like the text.
   createHotel: async (hotelObj) => {
+    const location = await resolveHotelLocationIds(hotelObj.state || null, hotelObj.city || null);
     return db.one(
       `INSERT INTO tbl_hospitality_company_hotels
         (hospitality_company_id, name, city, keys, status, full_address, state,
          gst, pan, bank_account_number, bank_name, ifsc_code, account_holder_name,
-         msme, delivery_address, created_by, updated_by, fee_amount, email, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, $19)
+         msme, delivery_address, created_by, updated_by, fee_amount, email, payment_status,
+         state_id, city_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, $19, $20, $21)
        RETURNING *`,
       [
         hotelObj.hospitality_company_id,
@@ -153,7 +166,9 @@ const hospitalityModel = {
         hotelObj.created_by,
         hotelObj.fee_amount,
         hotelObj.email || null,
-        hotelObj.payment_status || 'onboarding'
+        hotelObj.payment_status || 'onboarding',
+        location.state_id,
+        location.city_id
       ]
     );
   },
@@ -237,6 +252,7 @@ const hospitalityModel = {
   },
 
   updateHotel: async (hotelId, hotelObj, companyId) => {
+    const location = await resolveHotelLocationIds(hotelObj.state || null, hotelObj.city || null);
     return db.one(
       `UPDATE tbl_hospitality_company_hotels
        SET name = $1,
@@ -256,6 +272,8 @@ const hospitalityModel = {
            updated_by = $15,
            email = $18,
            fee_amount = $19,
+           state_id = $20,
+           city_id = $21,
            updated_at = NOW()
        WHERE id = $16 AND hospitality_company_id = $17 AND is_deleted = 0
        RETURNING *`,
@@ -278,7 +296,9 @@ const hospitalityModel = {
         hotelId,
         companyId,
         hotelObj.email || null,
-        hotelObj.fee_amount
+        hotelObj.fee_amount,
+        location.state_id,
+        location.city_id
       ]
     );
   },
@@ -783,11 +803,23 @@ const hospitalityModel = {
     // so an admin-assigned vendor whose status was still 0 could never
     // authenticate. We now trust NULL-payment rows on their own merit and
     // let user_login auto-flip the vendor to status=1.
+    //
+    // Vendor Networks (spec §5.2): the subscriptions of every holder count, i.e. the
+    // ids subscriptionHolderIdsFor returns: all ACTIVE, live-login entities of the
+    // vendor's org when the vendor is itself ACTIVE in one, else just the vendor.
+    // Resolved in this same statement from the shared fragment (orgKeySql.js)
+    // because requireActiveSubscription runs this on every vendor request.
     const result = await db.oneOrNone(
-      `SELECT COUNT(*) as count
+      `WITH siblings AS (${activeSiblingIdsSql('$1')}),
+       holder_ids AS (
+         SELECT vendor_id FROM siblings
+         UNION ALL
+         SELECT $1::int WHERE NOT EXISTS (SELECT 1 FROM siblings)
+       )
+       SELECT COUNT(*) as count
        FROM tbl_vendor_hotel_category_subscription vhcs
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
-       WHERE vhcs.vendor_id = $1
+       WHERE vhcs.vendor_id IN (SELECT vendor_id FROM holder_ids)
          AND vhcs.status = 'active'
          AND vhcs.end_date >= CURRENT_DATE
          AND (
@@ -1120,6 +1152,14 @@ getEligibleVendorsForVariant: async (variantId, hotelIds) => {
   // Must have BOTH a valid hotel subscription AND a valid category
   // subscription for the product's category. Cancelled subscriptions
   // are excluded from both checks.
+  //
+  // Vendor Networks (spec §5.2): eligibility is POOLED per org. Each requirement
+  // (variant mapping, category subscription, hotel subscription) is mapped to its
+  // org key (orgKeySql.js) before the sets are intersected: an org qualifies when
+  // each requirement is met by ANY of its counting (ACTIVE, live-login) entities,
+  // and the returned vendor_id is the principal. A vendor in no org is its own key,
+  // so its answer is unchanged. One statement: this runs once per product on
+  // publish/add-to-draft paths whose statement budgets are pinned by tests.
   return db.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
@@ -1136,29 +1176,46 @@ product_categories AS (
     WHERE pv.id = $1
 ),
 
-eligible_category_vendors AS (
-    SELECT DISTINCT s.vendor_id
+mapped_keys AS (
+    SELECT DISTINCT org_key
+    FROM (${orgKeySelect('SELECT vendor_id FROM variant_vendors')}) mk
+    WHERE mk.counts
+),
+
+-- The mapped vendors plus the ACTIVE entities of their orgs: the only vendors whose
+-- subscriptions can make a mapped key eligible.
+candidate_keys AS (
+    SELECT ck.vendor_id, ck.org_key
+    FROM (${orgKeySelect(`SELECT vendor_id FROM variant_vendors
+                          UNION
+                          ${orgEntitiesOfKeys('SELECT org_key FROM mapped_keys')}`)}) ck
+    WHERE ck.counts
+      AND ck.org_key IN (SELECT org_key FROM mapped_keys)
+),
+
+eligible_category_keys AS (
+    SELECT DISTINCT ck.org_key
     FROM tbl_vendor_hotel_category_subscription s
-    JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+    JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
     JOIN product_categories pc ON pc.category_id = s.item_id
     WHERE s.item_type = 'category'
       AND s.status IN ('active', 'expired')
 ),
 
-eligible_hotel_vendors AS (
-    SELECT DISTINCT s.vendor_id
+eligible_hotel_keys AS (
+    SELECT DISTINCT ck.org_key
     FROM tbl_vendor_hotel_category_subscription s
-    JOIN variant_vendors vv
-        ON vv.vendor_id = s.vendor_id
+    JOIN candidate_keys ck ON ck.vendor_id = s.vendor_id
     WHERE s.item_type = 'hotel'
       AND s.item_id = ANY ($2)
       AND s.status IN ('active', 'expired')
 )
 
-SELECT vv.vendor_id
-FROM variant_vendors vv
-JOIN eligible_category_vendors ecv ON ecv.vendor_id = vv.vendor_id
-JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
+SELECT mk.org_key AS vendor_id
+FROM mapped_keys mk
+JOIN eligible_category_keys eck ON eck.org_key = mk.org_key
+JOIN eligible_hotel_keys ehk ON ehk.org_key = mk.org_key
+WHERE ${keyIsInvitable('mk.org_key')};
 `,
     [variantId, hotelIds]
   );
@@ -1256,6 +1313,11 @@ JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
 recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
   const ctx = txContext || db;
 
+  // Vendor Networks lock order (rfqSubject.js header): live routing assignments of the
+  // RFQ FOR SHARE before any tbl_rfq_product_vendors write. Without a transaction there is
+  // nothing held between statements, so the lock only matters inside one.
+  await lockLiveRfqAssignments(ctx, rfq_id);
+
   // Get all products for this RFQ
   const rfqProducts = await ctx.any(
     `SELECT rp.id AS rfq_product_id, rp.product_variant_id, rp.variant,
@@ -1277,10 +1339,14 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
     );
     const eligibleVendorIds = new Set(eligibleRows.map(r => r.vendor_id));
 
-    // Get current vendors for this product
+    // Get current vendors for this product. Rows a network routing added for a
+    // member entity (routed_from_vendor_id set) are not invites: they are not counted
+    // here, and follow their principal's row (removed with it below, added by the
+    // propagation at the end).
     const currentVendors = await ctx.any(
       `SELECT user_id FROM tbl_rfq_product_vendors
-       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+         AND routed_from_vendor_id IS NULL`,
       [rfq_id, product.product_variant_id, product.variant]
     );
     const currentVendorIds = new Set(currentVendors.map(v => v.user_id));
@@ -1299,12 +1365,18 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
       );
     }
 
-    // Remove stale vendor mappings
+    // Remove stale vendor mappings, and the network members' routed copies of them
+    // (spec §6.3) unless that member already quoted on the RFQ (its rows then stay, so
+    // the buyer still sees who quoted, as when its assignment ends).
     if (toRemove.length > 0) {
       await ctx.none(
-        `DELETE FROM tbl_rfq_product_vendors
-         WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
-           AND user_id IN ($4:csv)`,
+        `DELETE FROM tbl_rfq_product_vendors r
+         WHERE r.rfq_id = $1 AND r.product_variant_id = $2 AND r.variant = $3
+           AND (
+             (r.routed_from_vendor_id IS NULL AND r.user_id IN ($4:csv))
+             OR (r.routed_from_vendor_id IN ($4:csv)
+                 AND NOT EXISTS (SELECT 1 FROM tbl_quotes q WHERE q.rfq_id = r.rfq_id AND q.created_by = r.user_id))
+           )`,
         [rfq_id, product.product_variant_id, product.variant, toRemove]
       );
     }
@@ -1325,6 +1397,12 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
         product_name: product.product_name
       });
     }
+  }
+
+  // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+  // Without a transaction nothing was held across the writes above: lock, then copy.
+  if (results.some((r) => r.added > 0)) {
+    await (txContext ? propagateRoutedCopies(ctx, rfq_id) : propagateRoutedCopiesLocked(db, rfq_id));
   }
 
   return {
@@ -1360,9 +1438,11 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
     );
     const eligibleVendorIds = new Set(eligibleRows.map(r => r.vendor_id));
 
+    // Routed rows (routed_from_vendor_id set) are the routing engine's, not invites.
     const currentVendors = await db.any(
       `SELECT user_id FROM tbl_rfq_product_vendors
-       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+         AND routed_from_vendor_id IS NULL`,
       [rfq_id, product.product_variant_id, product.variant]
     );
     const currentVendorIds = new Set(currentVendors.map(v => v.user_id));
@@ -1398,6 +1478,9 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
       });
     }
   }
+
+  // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+  if (!options.preview && totalAdded > 0) await propagateRoutedCopiesLocked(db, rfq_id);
 
   return { refreshed: true, products: results, productsWithNoVendors, totalAdded, uniqueVendorCount: uniqueVendorsAdded.size };
 },
@@ -2073,29 +2156,57 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   // ============================================================
 
   /**
+   * Vendor Networks (spec §5.2): who receives the RFQ invite when `vendorId` joins open
+   * RFQs, and whose mappings/subscriptions qualify it (pooled per org).
+   *   inviteeId  — the org principal (the vendor itself in no org);
+   *   holderIds  — the org's counting entities (subscriptionHolderIdsFor), or [] when the
+   *                vendor's own rows do not count (a SUSPENDED entity, or an ACTIVE one
+   *                without a live login), or when the principal's login is dead: then
+   *                nobody can be invited for the org.
+   */
+  rfqInviteScope: async (vendorId) => {
+    const [holderIds, key] = await Promise.all([
+      subscriptionHolderIdsFor(vendorId),
+      db.one(
+        `SELECT org_key, counts, ${keyIsInvitable('k.org_key')} AS invitable
+           FROM (${orgKeySelect('SELECT $1::int')}) k`,
+        [Number(vendorId)]
+      ),
+    ]);
+    return { inviteeId: Number(key.org_key), holderIds: key.counts && key.invitable ? holderIds : [] };
+  },
+
+  /**
    * Find open (published & active) RFQs where the vendor is eligible
    * (has product-variant mapping + category subscription + hotel subscription)
    * but is NOT yet added to tbl_rfq_product_vendors.
    *
+   * Vendor Networks: eligibility is pooled over the org's counting entities and the
+   * invite belongs to the principal (spec §5.2), so "not yet added" is checked for the
+   * principal. In no org both are the vendor itself, exactly as before.
+   *
    * @param {number} vendorId - The vendor's user ID
+   * @param {{inviteeId:number, holderIds:number[]}} [scope] - rfqInviteScope(vendorId), if known
    * @returns {Promise<Array>} Matching RFQs with rfq_id, rfq_no, title, is_tender, bid_end_date, created_by
    */
-  getMatchingOpenRfqsForVendor: async (vendorId) => {
+  getMatchingOpenRfqsForVendor: async (vendorId, scope) => {
+    const { inviteeId, holderIds } = scope ?? (await hospitalityModel.rfqInviteScope(vendorId));
+    if (holderIds.length === 0) return [];
     return db.any(
       `WITH vendor_variants AS (
-        SELECT product_variant_id
+        SELECT DISTINCT product_variant_id
         FROM tbl_product_variant_vendor_mapping
-        WHERE vendor_id = $1 AND status = true AND is_approved = true
+        WHERE vendor_id = ANY($1::int[]) AND status = true AND is_approved = true
       ),
       vendor_hotels AS (
-        SELECT item_id AS hotel_id
+        SELECT DISTINCT item_id AS hotel_id
         FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'hotel' AND status IN ('active', 'expired')
+        WHERE vendor_id = ANY($1::int[]) AND item_type = 'hotel' AND status IN ('active', 'expired')
       ),
       vendor_cats AS (
-        SELECT item_id AS category_id
+        SELECT DISTINCT item_id AS category_id
         FROM tbl_vendor_hotel_category_subscription
-        WHERE vendor_id = $1 AND item_type = 'category' AND status IN ('active', 'expired')
+        WHERE vendor_id = ANY($1::int[]) AND item_type = 'category' AND status IN ('active', 'expired')
       ),
       -- Products that have an approved PO (approved/sent/GRN/completed).
       -- rfq_product_id is NULLABLE (legacy/manually-raised PO lines), so NULLs
@@ -2138,10 +2249,10 @@ getVendorHotelCategoryMappings: async (vendorId) => {
           WHERE rpv.rfq_id = r.id
             AND rpv.product_variant_id = rp.product_variant_id
             AND rpv.variant = rp.variant
-            AND rpv.user_id = $1
+            AND rpv.user_id = $2
         )
       ORDER BY r.id DESC`,
-      [vendorId]
+      [holderIds, inviteeId]
     );
   },
 
@@ -2150,27 +2261,35 @@ getVendorHotelCategoryMappings: async (vendorId) => {
    * Only inserts rows where the vendor has an approved product-variant mapping
    * and is not already present.
    *
+   * Vendor Networks: the row is written for the org principal (the invitee), and the
+   * mapping may be held by any of the org's counting entities (spec §5.2, pooled). Pass
+   * `scope` (rfqInviteScope) when the caller already resolved it for many RFQs. In no
+   * org the invitee and the only holder are the vendor itself.
+   *
    * @param {number} vendorId - The vendor's user ID
    * @param {number} rfqId - The RFQ ID
+   * @param {{inviteeId:number, holderIds:number[]}} [scope]
    * @returns {Promise<Array>} Inserted rows with product_variant_id and variant
    */
-  addVendorToRfq: async (vendorId, rfqId) => {
-    return db.any(
+  addVendorToRfq: async (vendorId, rfqId, scope) => {
+    const { inviteeId, holderIds } = scope ?? (await hospitalityModel.rfqInviteScope(vendorId));
+    if (holderIds.length === 0) return [];
+    const added = await db.any(
       `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
-       SELECT rp.rfq_id, rp.product_variant_id, $1, rp.variant
+       SELECT rp.rfq_id, rp.product_variant_id, $3, rp.variant
        FROM tbl_rfq_products rp
        WHERE rp.rfq_id = $2
          AND EXISTS (
            SELECT 1 FROM tbl_product_variant_vendor_mapping m
            WHERE m.product_variant_id = rp.product_variant_id
-             AND m.vendor_id = $1 AND m.status = true AND m.is_approved = true
+             AND m.vendor_id = ANY($1::int[]) AND m.status = true AND m.is_approved = true
          )
          AND NOT EXISTS (
            SELECT 1 FROM tbl_rfq_product_vendors rpv
            WHERE rpv.rfq_id = rp.rfq_id
              AND rpv.product_variant_id = rp.product_variant_id
              AND rpv.variant = rp.variant
-             AND rpv.user_id = $1
+             AND rpv.user_id = $3
          )
          -- Skip products that have an approved PO
          AND NOT EXISTS (
@@ -2181,8 +2300,11 @@ getVendorHotelCategoryMappings: async (vendorId) => {
          )
        ON CONFLICT DO NOTHING
        RETURNING product_variant_id, variant`,
-      [vendorId, rfqId]
+      [holderIds, rfqId, inviteeId]
     );
+    // Vendor Networks (spec §6.3): routed members follow their principal's new rows.
+    if (added.length) await propagateRoutedCopiesLocked(db, rfqId);
+    return added;
   },
 
 };

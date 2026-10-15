@@ -238,6 +238,7 @@ export async function requestAmendment(req, res) {
     const ctxRow = await db.oneOrNone(
       `SELECT c.id           AS arc_contract_id,
               c.arc_id,
+              c.vendor_id,
               a.hospitality_company_id,
               a.hotel_id,
               a.department_id,
@@ -249,6 +250,12 @@ export async function requestAmendment(req, res) {
       [arcContractId]
     );
     if (!ctxRow) return bad(res, 404, 'Contract not found', 2);
+
+    // Only the contract's own vendor may request an amendment on it. Checked
+    // before any insert or notification.
+    if (Number(ctxRow.vendor_id) !== Number(req.user.id)) {
+      return bad(res, 403, 'You can only request amendments on your own contracts');
+    }
 
     // One-in-flight guard: while an amendment is requested/approved/live, the
     // same item can't get a second one — and only one term extension may be

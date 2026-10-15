@@ -14,11 +14,10 @@
  * passport strategy minted the token.
  */
 import { db, closeDb } from "../setup/db.js";
-import { httpClient } from "../helpers/http.js";
+import { httpClient, boundRequest } from "../helpers/http.js";
 import { loginAsInternalStaff } from "../helpers/auth.js";
 import { buildTestApp } from "../setup/app.js";
 import { IDS } from "../fixtures/ids.js";
-import request from "supertest";
 
 const COMPANY_ID = IDS.hospitality.A;
 // One account, both consoles — which is the production situation: three
@@ -58,8 +57,9 @@ const waitForEvent = async (since, predicate, timeoutMs = 4000) => {
 const internalClient = async (userId) => {
   const app = await buildTestApp();
   const { headers } = await loginAsInternalStaff(userId);
+  const bound = await boundRequest(app);
   const wrap = (method) => (path) => {
-    let req = request(app)[method](path);
+    let req = bound[method](path);
     for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
     return req;
   };

@@ -76,8 +76,8 @@
     },
     {
       "name": "platform",
-      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification|platform\\.|sql\\.)",
-      "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, harness self-checks, platform config (DB pool), and cross-cutting SQL guards"
+      "pattern": "tests/services/(vendor\\.|vendorEligibility|mr\\.|financialYear|fixtures\\.|harness\\.|listView\\.|dbValidation\\.|techEval\\.|notification|platform\\.|vendorNetwork\\.|sql\\.)",
+      "description": "Vendor onboarding/eligibility, MR scoping, FY filter, technical evaluation, harness self-checks, platform config (DB pool), cross-cutting SQL guards, and vendor networks"
     },
     {
       "name": "activity",

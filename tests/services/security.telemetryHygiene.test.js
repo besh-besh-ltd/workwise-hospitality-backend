@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, jest } from "@jest/globals";
 import express from "express";
-import request from "supertest";
+import { boundRequest } from "../helpers/http.js";
 import { trace, context } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import bodyCapture, { bodyCaptureSettings } from "../../app/middleware/bodyCapture.js";
@@ -88,7 +88,7 @@ describe("bodyCapture: response bodies", () => {
   it("does not capture response bodies by default", async () => {
     delete process.env.LOG_RESPONSE_BODY;
     const captured = {};
-    const res = await request(appRespondingWith(LOGIN_RESPONSE, captured))
+    const res = await (await boundRequest(appRespondingWith(LOGIN_RESPONSE, captured)))
       .post("/thing")
       .send({ email: "buyer@example.com", password: "hunter2" });
     expect(res.body).toEqual(LOGIN_RESPONSE);
@@ -102,7 +102,7 @@ describe("bodyCapture: response bodies", () => {
   it("when opted in, captures the response sanitised (tokens redacted)", async () => {
     process.env.LOG_RESPONSE_BODY = "true";
     const captured = {};
-    const res = await request(appRespondingWith(LOGIN_RESPONSE, captured)).post("/thing").send({});
+    const res = await (await boundRequest(appRespondingWith(LOGIN_RESPONSE, captured))).post("/thing").send({});
     expect(res.body).toEqual(LOGIN_RESPONSE);
     const exported = captured.attributes["http.response.body"];
     expect(exported).toBeDefined();
@@ -118,7 +118,7 @@ describe("bodyCapture: response bodies", () => {
     const captured = {};
     const app = appRespondingWith(big, captured);
     const spy = jest.spyOn(JSON, "stringify");
-    const res = await request(app).post("/thing").send({});
+    const res = await (await boundRequest(app)).post("/thing").send({});
     const callsWithBig = spy.mock.calls.filter(([v]) => v === big).length;
     spy.mockRestore();
     expect(res.body.data).toHaveLength(500);

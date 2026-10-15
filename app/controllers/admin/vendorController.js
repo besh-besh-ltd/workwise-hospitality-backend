@@ -22,7 +22,7 @@ import moment from 'moment';
 import userModel from '../../models/userModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { isNumber } from 'razorpay/dist/utils/razorpay-utils.js';
-import { pgp } from '../../config/dbConn.js';
+import db, { pgp } from '../../config/dbConn.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
 import { vendorHome } from '../../services/notificationLinks.js';
 
@@ -82,6 +82,103 @@ const extractBuyerCompanyIds = (input) => {
 
   ids = [...new Set(ids)];
   return { provided: true, ids };
+};
+
+// ---------------------------------------------------------------------------
+// Ownership rules for the location / SPOC-map handlers.
+//
+// These handlers are mounted twice:
+//   - /users/{add,update,delete}-buyer-vendor-location, /users/map-spoc-location
+//     behind jwtUsr (vendor and buyer callers), and
+//   - /admin/vendor/{add-vendor-location,update-vendor-location/:id,
+//     delete-vendor-location/:id,map-spoc-location} behind jwtAdm.
+// jwtAdm marks its callers `is_internal_admin` (middleware/passport.js), and
+// they keep their existing behaviour. Every other caller is held to its own
+// company (req.user.company_id) and its own SPOCs (req.user.id).
+// ---------------------------------------------------------------------------
+const FORBIDDEN = Symbol('forbidden');
+const isInternalAdmin = (req) => req.user?.is_internal_admin === true;
+
+/** company_id to write: the caller's own. A different body value is refused, not rewritten. */
+const resolveLocationCompanyId = (req, bodyCompanyId) => {
+  if (isInternalAdmin(req)) return bodyCompanyId;
+  const own = req.user?.company_id;
+  if (!own) return FORBIDDEN;
+  if (bodyCompanyId != null && bodyCompanyId !== '' && Number(bodyCompanyId) !== Number(own)) {
+    return FORBIDDEN;
+  }
+  return own;
+};
+
+const callerOwnsLocation = async (req, locationId) => {
+  if (isInternalAdmin(req)) return true;
+  if (!req.user?.company_id || !Number.isInteger(Number(locationId))) return false;
+  const row = await db.oneOrNone(
+    'SELECT 1 FROM tbl_company_location WHERE id = $1 AND company_id = $2',
+    [Number(locationId), req.user.company_id]
+  );
+  return !!row;
+};
+
+const callerOwnsSpocs = async (req, spocIds) => {
+  if (isInternalAdmin(req)) return true;
+  const ids = [...new Set([].concat(spocIds ?? []).map(Number))];
+  if (ids.some((n) => !Number.isInteger(n))) return false;
+  if (ids.length === 0) return true;
+  const { count } = await db.one(
+    'SELECT COUNT(*)::int AS count FROM tbl_users_spoc WHERE id = ANY($1::int[]) AND user_id = $2',
+    [ids, req.user.id]
+  );
+  return count === ids.length;
+};
+
+/**
+ * Does the buyer work with this vendor?
+ *
+ * The boundary is the buyer's HOSPITALITY CLIENTS, not tbl_users.company_id:
+ * on prod one tbl_company holds hundreds of buyer users spread over several
+ * unrelated hospitality clients, so company_id alone would mean "any buyer".
+ *
+ * H = the hospitality_company_id values the caller is mapped to in
+ * tbl_hospitality_user_mappings (company-level and hotel-level rows both
+ * carry it). The relationship holds when
+ *   (a) the vendor is mapped (tbl_rfq_product_vendors) on an RFQ whose
+ *       tbl_rfq.hospitality_company_id is in H, or
+ *   (b) the vendor is in tbl_buyer_private_vendors_mapping under a row whose
+ *       created_by user is mapped to a hospitality company in H.
+ * Empty H -> false. Identify the vendor by user id or by its tbl_users.company_id.
+ */
+const buyerHasVendorRelationship = async (buyerUserId, { vendorUserId, vendorCompanyId }) => {
+  if (!Number.isInteger(Number(buyerUserId))) return false;
+  const byUser = vendorUserId != null;
+  const target = Number(byUser ? vendorUserId : vendorCompanyId);
+  if (!Number.isInteger(target)) return false;
+  const row = await db.oneOrNone(
+    `WITH h AS (
+       SELECT DISTINCT hospitality_company_id
+         FROM tbl_hospitality_user_mappings
+        WHERE user_id = $1
+     )
+     SELECT 1
+       FROM tbl_users vu
+      WHERE ${byUser ? 'vu.id' : 'vu.company_id'} = $2
+        AND vu.user_type = 3
+        AND (
+          EXISTS (SELECT 1
+                    FROM tbl_rfq_product_vendors pv
+                    JOIN tbl_rfq r ON r.id = pv.rfq_id
+                   WHERE pv.user_id = vu.id
+                     AND r.hospitality_company_id IN (SELECT hospitality_company_id FROM h))
+          OR EXISTS (SELECT 1
+                       FROM tbl_buyer_private_vendors_mapping m
+                       JOIN tbl_hospitality_user_mappings um ON um.user_id = m.created_by
+                      WHERE m.vendor_id = vu.id
+                        AND um.hospitality_company_id IN (SELECT hospitality_company_id FROM h))
+        )
+      LIMIT 1`,
+    [Number(buyerUserId), target]
+  );
+  return !!row;
 };
 
 const vendorController = {
@@ -557,6 +654,17 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   try {
     const company_id = req.params.id;
 
+    // Owner (vendor or buyer reading its own company), a buyer whose company
+    // works with the vendor owning :id, or the internal console.
+    const ownsCompany = req.user.company_id != null && Number(company_id) === Number(req.user.company_id);
+    if (!isInternalAdmin(req) && !ownsCompany) {
+      const allowed = Number(req.user.user_type) !== 3 &&
+        await buyerHasVendorRelationship(req.user.id, { vendorCompanyId: company_id });
+      if (!allowed) {
+        return res.status(403).json({ status: 0, message: 'You can only view locations of your own company or of a vendor your company works with' });
+      }
+    }
+
     // console.log("company_id", company_id)
     let locations;
     const user_type = req.user.user_type; // Get the user type from the request object
@@ -581,9 +689,35 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     });
   }
 },
+ /**
+  * Route middleware for POST /users/add-spoc. Sets req.params.id to the vendor
+  * whose SPOC list grows. A vendor may only add to itself; a buyer may add to a
+  * vendor its company has a relationship with.
+  */
+ authorizeAddSpocTarget: async (req, res, next) => {
+  try {
+    const raw = req.body.vendor_id;
+    const target = raw == null || raw === '' ? req.user.id : Number(raw);
+    if (target !== Number(req.user.id)) {
+      const isVendor = Number(req.user.user_type) === 3;
+      if (isVendor || !(await buyerHasVendorRelationship(req.user.id, { vendorUserId: target }))) {
+        return res.status(403).json({ status: 0, message: 'You can only add SPOCs to your own account or to a vendor your company works with' });
+      }
+    }
+    req.params.id = target;
+    return next();
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({ status: 3, message: Config.errorText.value });
+  }
+ },
  addVendorLocation: async (req, res, next) => {
     try {
-      const { company_id, address, postal_code, city, state, country } = req.body;
+      const { company_id: bodyCompanyId, address, postal_code, city, state, country } = req.body;
+      const company_id = resolveLocationCompanyId(req, bodyCompanyId);
+      if (company_id === FORBIDDEN) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const locationData = {
         company_id,
         address,
@@ -608,7 +742,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   },
   updateVendorLocation: async (req, res, next) => {
     try {
-      const { id, company_id, address, postal_code, city, state, country } = req.body;
+      const { id, company_id: bodyCompanyId, address, postal_code, city, state, country } = req.body;
+      const company_id = resolveLocationCompanyId(req, bodyCompanyId);
+      if (company_id === FORBIDDEN || !(await callerOwnsLocation(req, id))) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const locationData = {
         company_id,
         address,
@@ -637,6 +775,9 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   deleteVendorLocation: async (req, res, next) => {
     try {
       const location_id = req.params.id;
+      if (!(await callerOwnsLocation(req, location_id))) {
+        return res.status(403).json({ status: 0, message: 'You can only manage locations of your own company' });
+      }
       const deleted = await rfqModel.delete('tbl_company_location', { id: Number(location_id) });
       return res.status(200).json({
         status: 1,
@@ -661,6 +802,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           message: 'Please provide spoc_id and location_id'
         });
       }
+      if (!(await callerOwnsSpocs(req, spoc_id)) || !(await callerOwnsLocation(req, location_id))) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You can only map your own SPOCs to your own company locations'
+        });
+      }
+
              //Delete the existing mapping if there any
               await rfqModel.delete('tbl_spoc_location_mapping', { location_id });
 

@@ -337,6 +337,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/renew-subscription',
   passportSignIn,
+  hospitalityMiddleware.refuseNetworkMemberSubscriptionChange,
   hospitalityController.renewSubscription
 );
 
@@ -383,6 +384,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/vendor/subscription/preview',
   passportSignIn,
+  hospitalityMiddleware.refuseNetworkMemberSubscriptionChange,
   hospitalityController.previewSubscriptionModification
 );
 
@@ -395,6 +397,7 @@ HospitalityRoutes.post(
 HospitalityRoutes.post(
   '/vendor/subscription/modify',
   passportSignIn,
+  hospitalityMiddleware.refuseNetworkMemberSubscriptionChange,
   hospitalityController.modifySubscription
 );
 
@@ -418,6 +421,7 @@ HospitalityRoutes.get(
 HospitalityRoutes.post(
   '/vendor/subscription/extend',
   passportSignIn,
+  hospitalityMiddleware.refuseNetworkMemberSubscriptionChange,
   hospitalityController.extendSubscription
 );
 

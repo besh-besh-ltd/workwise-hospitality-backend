@@ -18,7 +18,7 @@ import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import crypto from "crypto";
 import fs from "fs";
 import nodemailer from "nodemailer";
-import request from "supertest";
+import { boundRequest } from "../helpers/http.js";
 import Config from "../../app/config/app.config.js";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
@@ -115,7 +115,7 @@ describe("POST /api/v1/hospitality/verify-payment", () => {
     // awaited the email, so this request could never complete.
     const started = Date.now();
     const res = await Promise.race([
-      request(app).post("/api/v1/hospitality/verify-payment").send({
+      (await boundRequest(app)).post("/api/v1/hospitality/verify-payment").send({
         razorpay_order_id: ORDER_ID,
         razorpay_payment_id: PAYMENT_ID,
         razorpay_signature: signature,

@@ -18,6 +18,10 @@ const jwtHelper = {
       Config.jwt.secret
     );
   },
+  /** userData.user_id, user_agent and (optional) ent must already be encrypted.
+   *  `ent` is the Vendor Networks acting entity (spec §4.1); omitted = act as default.
+   *  `exp` (unix seconds) keeps a re-issued token on its original session lifetime;
+   *  omitted = 24h from now. */
   signAccessTokenUser: (userData) => {
     return JWT.sign(
       {
@@ -27,8 +31,9 @@ const jwtHelper = {
         session: userData.sessions,
         user: true,
         ag: userData.user_agent,
+        ...(userData.ent ? { ent: userData.ent } : {}),
         iat: Math.round(new Date().getTime() / 1000),
-        exp: Math.round(new Date().getTime() / 1000) + 24 * 60 * 60
+        exp: userData.exp ?? Math.round(new Date().getTime() / 1000) + 24 * 60 * 60
         // exp: Math.round(new Date().getTime() / 1000) + 10
       },
       Config.jwt.secret

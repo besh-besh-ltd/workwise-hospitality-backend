@@ -1,0 +1,73 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`call-off document with an unknown supplier state a no-GSTIN vendor's call-off renders exactly as before networks 1`] = `
+"<!doctype html><html><head><meta charset="utf-8"><style>
+    * { box-sizing: border-box; }
+    body { font-family: 'Georgia','Times New Roman',serif; color:#1a1a1a; font-size:12px; margin:0; }
+    .doc { padding: 8px 4px; }
+    .hd { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:2px solid #1a1a1a; padding-bottom:10px; }
+    .hd h1 { font-size:20px; margin:0 0 2px; letter-spacing:0.5px; }
+    .tag { font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#666; }
+    .ref { text-align:right; font-size:11px; }
+    .ref b { font-size:13px; }
+    .parties { display:flex; gap:24px; margin:16px 0; }
+    .party { flex:1; border:1px solid #ddd; border-radius:6px; padding:10px 12px; }
+    .party .lbl { font-size:9px; text-transform:uppercase; letter-spacing:1px; color:#888; margin-bottom:4px; }
+    .party .nm { font-weight:bold; font-size:13px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th { background:#1a1a1a; color:#fff; font-size:10px; text-transform:uppercase; letter-spacing:0.5px; padding:7px 8px; text-align:left; }
+    td { padding:7px 8px; border-bottom:1px solid #eee; }
+    td.c, th.c { text-align:center; } td.r, th.r { text-align:right; }
+    .totals { margin-top:12px; margin-left:auto; width:260px; }
+    .totals div { display:flex; justify-content:space-between; padding:4px 0; }
+    .totals .grand { border-top:2px solid #1a1a1a; font-weight:bold; font-size:14px; padding-top:6px; }
+    .note { margin-top:18px; font-size:10px; color:#666; border-top:1px solid #eee; padding-top:8px; line-height:1.5; }
+  </style></head><body><div class="doc">
+    <div class="hd">
+      <div>
+        <h1>Call-off Purchase Order</h1>
+        <div class="tag">Drawn against Annual Rate Contract</div>
+      </div>
+      <div class="ref">
+        <div><b>CO-VN-GST-LEG</b></div>
+        <div>Released: 06 Oct 2026</div>
+        <div>ARC: ARC-VN-GST-1</div>
+        <div>Req: MR-VN-GST-LEG</div>
+      </div>
+    </div>
+    <div class="parties">
+      <div class="party"><div class="lbl">Buyer</div>
+        <div class="nm">Hospitality A</div>
+        <div>VN GST Mumbai</div>
+        <div>GSTIN: 27AAACH1234F1ZW</div>
+        
+      </div>
+      <div class="party"><div class="lbl">Supplier</div>
+        <div class="nm">VN GST Legacy Supplier</div>
+        <div>vn-gst-leg@example.com</div>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th class="c">#</th><th>Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">GST</th><th class="r">Amount</th></tr></thead>
+      <tbody>
+    <tr>
+      <td class="c">1</td>
+      <td>7 UP PEPSI 1.5 LTR</td>
+      <td class="r">10 pcs</td>
+      <td class="r">₹90.00</td>
+      <td class="r">5%</td>
+      <td class="r">₹945.00</td>
+    </tr></tbody>
+    </table>
+    <div class="totals">
+      <div><span>Subtotal</span><span>₹945.00</span></div>
+      <div class="grand"><span>Total</span><span>₹945.00</span></div>
+    </div>
+    <div class="note">
+      Rates are governed by the referenced Annual Rate Contract. This call-off
+      is released on approval of the originating material requisition and is
+      subject to the supplier's acceptance. Delivery and payment terms follow
+      the master contract.
+    </div>
+  </div></body></html>"
+`;

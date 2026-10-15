@@ -15,7 +15,7 @@
  * is what makes one global mount sufficient.
  */
 import express from 'express';
-import request from 'supertest';
+import { boundRequest } from '../helpers/http.js';
 import requestContext, { ACTOR_TYPES, resolveActor } from '../../app/middleware/requestContext.js';
 import {
   getRequestContext,
@@ -40,7 +40,7 @@ describe('request context', () => {
       a.get('/x', (req, res) => res.json({ requestId: deepInsideTheStack() }))
     );
 
-    const res = await request(app).get('/x');
+    const res = await (await boundRequest(app)).get('/x');
     expect(res.body.requestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
@@ -49,7 +49,7 @@ describe('request context', () => {
       a.get('/x', (req, res) => res.json({ id: getRequestContext().requestId }))
     );
 
-    const [a, b] = await Promise.all([request(app).get('/x'), request(app).get('/x')]);
+    const [a, b] = await Promise.all([(await boundRequest(app)).get('/x'), (await boundRequest(app)).get('/x')]);
     expect(a.body.id).not.toEqual(b.body.id);
   });
 
@@ -68,7 +68,7 @@ describe('request context', () => {
       )
     );
 
-    const res = await request(app).get('/x');
+    const res = await (await boundRequest(app)).get('/x');
     expect(res.body.actorUserId).toBe(467);
   });
 
@@ -87,7 +87,7 @@ describe('request context', () => {
       )
     );
 
-    const res = await request(app).get('/x');
+    const res = await (await boundRequest(app)).get('/x');
     expect(res.body.actorUserId).toBeNull();
   });
 
@@ -109,7 +109,7 @@ describe('request context', () => {
       )
     );
 
-    const res = await request(app).get('/x');
+    const res = await (await boundRequest(app)).get('/x');
     expect(res.body.companyId).toBe(5);
   });
 });
