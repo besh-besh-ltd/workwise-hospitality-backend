@@ -5,12 +5,14 @@
 //   - POST /users/verify-vendor-token answers 429 after 20 invalid tokens from one client.
 // Pattern B: committed rows (vendor ids 95571..95579), removed in afterEach.
 
+import express from "express";
 import { db, closeDb } from "../setup/db.js";
 import { buildTestApp } from "../setup/app.js";
+import util from "../../app/util/index.js";
 import { boundRequest } from "../helpers/http.js";
 import rfqModel from "../../app/models/rfqModel.js";
 import { generateEmailLinkToken } from "../../app/helper/emailLinkToken.js";
-import { createFailedAttemptLimiter, clientKey } from "../../app/middleware/failedAttemptLimiter.js";
+import { createFailedAttemptLimiter, clientKey, verifyVendorTokenLimiter } from "../../app/middleware/failedAttemptLimiter.js";
 import { trustProxySetting } from "../../app/util/trustProxy.js";
 import { seedVendorEntity, cleanupVendorNetworkFixtures } from "../helpers/vendorNetworkSeed.js";
 
@@ -22,6 +24,11 @@ const UA = "jest-test-agent";
 const MIN = 10n ** 17n;
 const MAX = 10n ** 18n; // exclusive
 const BIGINT_MAX = 9223372036854775807n;
+
+// The limiter cases model separate clients behind ONE proxy that appends the client
+// address (X-Forwarded-For), which is what TRUST_PROXY_HOPS=1 is for. The production
+// default, no proxy trusted, gets its own app in the last describe.
+process.env.TRUST_PROXY_HOPS = "1";
 
 beforeEach(async () => {
   for (const id of [V1, V2, V3]) {
@@ -156,13 +163,17 @@ describe("fix round 1: limiter client key and memory bound", () => {
     expect(blocked.status).toBe(429);
   });
 
-  it("TRUST_PROXY_HOPS: default 1 hop, 0 disables, N trusts N; junk falls back to 1", () => {
-    expect(trustProxySetting(undefined)).toBe(1);
-    expect(trustProxySetting("")).toBe(1);
+  it("TRUST_PROXY_HOPS: default trusts no proxy, N trusts N; 0 and junk trust none", () => {
+    const saved = process.env.TRUST_PROXY_HOPS;
+    delete process.env.TRUST_PROXY_HOPS; // unset, as in production
+    expect(trustProxySetting()).toBe(false);
+    process.env.TRUST_PROXY_HOPS = saved;
+    expect(trustProxySetting("")).toBe(false);
     expect(trustProxySetting("0")).toBe(false);
+    expect(trustProxySetting("1")).toBe(1);
     expect(trustProxySetting("2")).toBe(2);
-    expect(trustProxySetting("-3")).toBe(1);
-    expect(trustProxySetting("abc")).toBe(1);
+    expect(trustProxySetting("-3")).toBe(false);
+    expect(trustProxySetting("abc")).toBe(false);
     expect(clientKey({ ip: "203.0.113.9", socket: { remoteAddress: "10.0.0.1" } })).toBe("203.0.113.9");
   });
 
@@ -196,5 +207,34 @@ describe("fix round 1: limiter client key and memory bound", () => {
     const limiter = createFailedAttemptLimiter();
     for (let i = 0; i < 10_050; i++) limiter.recordFailure({ ip: `10.${i >> 16}.${(i >> 8) & 255}.${i & 255}` });
     expect(limiter.size()).toBe(10_000);
+  });
+});
+
+describe("default: no proxy trusted (production's proxy does not add X-Forwarded-For)", () => {
+  let agent;
+  beforeAll(async () => {
+    const saved = process.env.TRUST_PROXY_HOPS;
+    delete process.env.TRUST_PROXY_HOPS;
+    const app = express();
+    util(app);
+    process.env.TRUST_PROXY_HOPS = saved;
+    agent = await boundRequest(app);
+  });
+
+  it("ignores a client-sent X-Forwarded-For entirely: forging a new address per request never buys a new bucket", async () => {
+    verifyVendorTokenLimiter.reset();
+    for (let i = 0; i < 20; i++) {
+      const res = await agent
+        .post("/api/v1/users/verify-vendor-token")
+        .set({ "User-Agent": UA, "X-Forwarded-For": `198.51.100.${i}` })
+        .send({ token: String(100000000000000000n + BigInt(i)) });
+      expect(res.status).toBe(400);
+    }
+    const blocked = await agent
+      .post("/api/v1/users/verify-vendor-token")
+      .set({ "User-Agent": UA, "X-Forwarded-For": "198.51.100.250" })
+      .send({ token: "100000000000000077" });
+    expect(blocked.status).toBe(429);
+    verifyVendorTokenLimiter.reset();
   });
 });

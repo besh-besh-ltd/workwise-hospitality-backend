@@ -1,24 +1,25 @@
 // Express 'trust proxy' (https://expressjs.com/en/guide/behind-proxies.html).
 //
-// Until Task 23 the app never set it, so `req.ip` was always the socket address: behind
-// the production reverse proxy that is the proxy itself, the same for every client. The
-// emailed-link limiter keys on `req.ip`, so it is now set from TRUST_PROXY_HOPS:
-//   - unset / blank / invalid -> 1: trust ONE hop. `req.ip` is the address the proxy
-//     appended to X-Forwarded-For (the real client); anything the client put to its left
-//     is ignored. Correct for one nginx / load balancer in front of the backend.
-//   - 0 -> false: no proxy; `req.ip` is the socket address and X-Forwarded-For is ignored.
-//     Use this when the backend is reached directly.
-//   - N -> trust N hops (a CDN in front of a load balancer, etc.).
+// `req.ip` keys the emailed-link limiter and is the activity trail's `ip`, so it must be an
+// address the client cannot choose. Set from TRUST_PROXY_HOPS:
+//   - unset / blank / invalid -> false: trust no proxy. `req.ip` is the socket address and
+//     X-Forwarded-For is ignored. This is the default because of how production is reached
+//     (measured from request traces, 2026-10-15): every request arrives from the Docker
+//     bridge gateway, and the reverse proxy does NOT add X-Forwarded-For; it passes on
+//     whatever the client sent. Trusting a hop there would let any client pick its own
+//     address (a fresh limiter bucket per request, a forged ip in the activity trail).
+//     The cost is that all clients share one limiter bucket, which is the safe direction.
+//   - N >= 1 -> trust N hops. Set 1 only once the proxy appends the client address
+//     (nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for) and the
+//     backend port is reachable through the proxy alone.
 // It also changes req.protocol / req.hostname / req.secure; nothing in the app reads them.
-// The only other req.ip reader is requestContext (the activity trail's `ip`), which now
-// records the client's address instead of the proxy's.
 
 /** The 'trust proxy' value for TRUST_PROXY_HOPS. */
 export function trustProxySetting(raw = process.env.TRUST_PROXY_HOPS) {
-  if (raw === undefined || raw === null || String(raw).trim() === "") return 1;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return false;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) return 1;
-  return n === 0 ? false : n;
+  if (!Number.isInteger(n) || n < 1) return false;
+  return n;
 }
 
 export default { trustProxySetting };
