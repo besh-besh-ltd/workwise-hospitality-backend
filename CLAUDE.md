@@ -5,7 +5,7 @@
 **Project:** DeshTechnicos (Workwise Backend) - Hospitality Procurement SaaS
 **Repository:** https://github.com/letsworkwise/workwise-backend
 **Type:** Backend API Server
-**Runtime:** Node.js (>=16.0.0) with ES Modules
+**Runtime:** Node.js (>=20.11.0) with ES Modules
 **Port:** 8002
 
 A multi-tenant hospitality procurement platform enabling companies and hotels to manage the complete procurement lifecycle: RFQ/Tender creation → Vendor bidding → Negotiation → Purchase Orders → Goods Receipt.
@@ -16,7 +16,7 @@ A multi-tenant hospitality procurement platform enabling companies and hotels to
 
 | Category | Technology |
 |----------|------------|
-| **Runtime** | Node.js 16+ (ES Modules) |
+| **Runtime** | Node.js 20.11+ (ES Modules) — floor set by `node-pg-migrate@9` |
 | **Framework** | Express.js 4.21.2 |
 | **Database** | PostgreSQL (pg-promise 11.13.0) |
 | **Authentication** | Passport.js + JWT (jsonwebtoken) |

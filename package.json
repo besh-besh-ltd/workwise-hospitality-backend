@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "engines": {
-    "node": ">=16.0.0",
+    "node": ">=20.11.0",
     "npm": ">=8.0.0"
   },
   "main": "server.js",
@@ -20,8 +20,19 @@
     "test:teardown": "NODE_ENV=test node tests/setup/dropTestDb.js",
     "test:cleanup": "NODE_ENV=test node tests/setup/dropTestDb.js --orphans",
     "test:shards": "node scripts/check-shard-coverage.mjs",
+    "test:tooling": "node --test scripts/__tests__/*.test.mjs",
     "check:tx-response": "node scripts/check-response-in-tx.mjs",
-    "test:snapshot-staging": "node tests/setup/snapshotStaging.js"
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "check:drift": "node scripts/schema-drift.mjs",
+    "test:snapshot-staging": "node tests/setup/snapshotStaging.js",
+    "migrate:status": "node scripts/migrate.mjs status",
+    "migrate:up": "node scripts/migrate.mjs up",
+    "migrate:down": "node scripts/migrate.mjs down",
+    "migrate:verify": "node scripts/migrate.mjs verify",
+    "migrate:baseline": "node scripts/migrate.mjs baseline",
+    "migrate:manifest": "node scripts/migrate.mjs manifest",
+    "migrate:dump-baseline": "node scripts/dump-baseline.mjs",
+    "migrate:replay": "node scripts/migrate-replay.mjs"
   },
   "repository": {
     "type": "git",
@@ -53,6 +64,7 @@
     "cors": "^2.8.5",
     "cryptr": "^6.3.0",
     "dateformat": "^5.0.3",
+    "dotenv": "^16.6.1",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "firebase-admin": "^13.2.0",
@@ -66,12 +78,14 @@
     "multer": "^1.4.5-lts.2",
     "multer-s3": "^3.0.1",
     "node-cron": "^3.0.3",
+    "node-pg-migrate": "^9.0.0",
     "nodemailer": "^6.10.0",
     "number-to-words": "^1.2.4",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
     "pdf2json": "^3.1.5",
+    "pg": "^8.23.0",
     "pg-promise": "^11.13.0",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
@@ -84,7 +98,6 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "dotenv": "^16.4.7",
     "eslint": "^8.57.1",
     "jest": "^30.2.0",
     "knip": "^6.9.0",
