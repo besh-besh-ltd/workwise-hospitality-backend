@@ -616,26 +616,18 @@ describe("the add path grants authority only on steps the role actually backs", 
 // ===========================================================================
 // The policy-diff path (applyDiffToInstance + the policy_step_id refresh)
 //
-// WHY THESE CALL THE PRODUCTION FUNCTIONS DIRECTLY INSTEAD OF POSTING THE EDIT:
-// upsertApprovalPolicy runs `deletePolicySteps(id, t)` BEFORE propagation
-// (generalController.js:694), and `fk_instance_step_policy_step` is ON DELETE
-// SET NULL — so by the time applyDiffToInstance loads the instance steps, every
-// `policy_step_id` on that instance is already NULL. Through the endpoint the
-// matcher can therefore only ever take the ordinal path, where injectivity is
-// free (one diff entry per step_order × UNIQUE (instance, step_order)).
+// upsertApprovalPolicy runs `deletePolicySteps(id, t)` BEFORE propagation, and
+// `fk_instance_step_policy_step` is ON DELETE SET NULL — so by the time
+// applyDiffToInstance loads the instance steps, every `policy_step_id` on the
+// instance is NULL in the database. The controller therefore CAPTURES every
+// pending instance's links first (snapshotPendingInstanceStepLinks, inside the
+// same transaction, before the delete) and hands them to propagation; matching
+// follows the captured link, and the ordinal is used only for an instance that
+// has no link at all AND lines up with the old policy step for step.
 //
-// So be clear about what these two tests are: applyDiffToInstance and
-// propagatePolicyChangeToInstances are EXPORTED functions, and the injectivity
-// guard defends them against callers other than the single one that exists
-// today. On that one live caller it is provably a no-op. It is ~25 lines with
-// zero regression risk, which is the whole justification — there is no
-// production state and no repo-buildable environment that reaches it. (The FK
-// lives in tests/setup/schema.sql, a pg_dump of production, so every test DB has
-// it; no file in migrations/ mentions policy_step_id at all.)
-//
-// These tests exist because the guard's behaviour should be pinned even so — an
-// unexercised guard is a guess. The last test in this block pins the FK-nulling
-// premise itself, since the "no-op on the live path" claim rests on it.
+// The first two tests call the exported functions directly (no captured map),
+// in which case the links stored on the instance rows are the links. The last
+// test pins the live path end to end.
 // ===========================================================================
 describe("a policy edit maps diff entries onto instance steps injectively", () => {
   it("never lets a removal and a modification claim the same instance step", async () => {
@@ -652,16 +644,17 @@ describe("a policy edit maps diff entries onto instance steps injectively", () =
         [3, COL_STEPS[3]], // policy step 4 (ROLE_B)
       ]);
 
-      // The mix of live links and NULLs that propagatePolicyChangeToInstances
-      // itself produces: it re-points only MODIFIED steps, so an instance ends
-      // up holding some live links and some NULLed ones.
+      // A mix of live links and NULLs — the shape propagation used to leave
+      // behind when it re-pointed only MODIFIED steps.
       await t.none(`UPDATE tbl_approval_instance_steps SET policy_step_id = NULL WHERE id = $1`, [steps[1].id]);
 
       // Drop policy step 4 and change policy step 3's source →
       // {STEP_MODIFIED@3, STEP_REMOVED@4}:
       //   REMOVED@4   id-matches  instance step 3 (link = policy step 4)
-      //   MODIFIED@3  has no id-match (link NULLed) → ordinal → instance step 3
-      // Both entries want the same row.
+      //   MODIFIED@3  has no id-match (link NULLed). An ordinal fallback would
+      //               hand it instance step 3 — the row the removal claimed.
+      // The instance HAS links, so the ordinal is not consulted: MODIFIED@3 is
+      // skipped and reported instead of guessed.
       const oldSteps = await snapshotPolicySteps(COLLISION_POLICY, t);
       const newSteps = [
         oldSteps[0],
@@ -684,10 +677,9 @@ describe("a policy edit maps diff entries onto instance steps injectively", () =
       );
       expect(after.find((s) => s.step_order === 3).status).toBe("REMOVED");
 
-      // With a per-entry (rather than assignment) matcher, the removals loop
-      // kills this step and the modifications loop then matches it AGAIN — the
-      // removal by id, the modification by ordinal — reads a stale in-memory
-      // status of 'PENDING', and INSERTs a live approver row onto a dead step.
+      // Had the modification matched this step too (removal by id, modification
+      // by ordinal), the modifications loop would read a stale in-memory status
+      // of 'PENDING' and INSERT a live approver row onto a dead step.
       // getPendingApprovalsForUser filters on sa.status but not s.status, so that
       // row reads as a real pending approval and earns an "action required" email.
       const zombies = await t.any(
@@ -715,7 +707,7 @@ describe("a policy edit maps diff entries onto instance steps injectively", () =
       // this instance did not receive, so it is reported rather than dropped —
       // same standard as PART 1's `unresolvedSteps`.
       expect(result.unmatchedDiffEntries).toEqual([
-        { type: "STEP_MODIFIED", step_order: 3, policy_step_id: COL_STEPS[2] },
+        { type: "UNMATCHED_SKIPPED", diff_type: "STEP_MODIFIED", step_order: 3, policy_step_id: COL_STEPS[2] },
       ]);
     });
   });
@@ -766,13 +758,14 @@ describe("a policy edit maps diff entries onto instance steps injectively", () =
     });
   });
 
-  it("clears every instance link before the diff is applied, so in-flow matching is ordinal", async () => {
-    // The premise the two tests above rest on, pinned. If it ever stops holding
-    // (FK dropped, or the controller stops deleting first) those tests describe
-    // the live path rather than a guard — and this one says so by failing.
+  it("captures every instance link before the steps are deleted, so in-flow matching follows the true link", async () => {
+    // The deletePolicySteps → FK SET NULL premise still holds (the links ARE
+    // NULL in the database when propagation runs); what changed is that the
+    // controller captures them first. Matching therefore reaches the instance
+    // step each policy level really built, even on a divergent instance.
     const instance = await makeInstance(COLLISION_POLICY, IDS.hotels.A3);
     const before = await instanceStepsOf(instance.id);
-    expect(before.every((s) => s.policy_step_id !== null)).toBe(true);
+    expect(before.map((s) => s.policy_step_id)).toEqual([COL_STEPS[1], COL_STEPS[2], COL_STEPS[3]]);
 
     const client = await httpClient(ADMIN_ID);
     const res = await editPolicy(client, COLLISION_POLICY, {
@@ -783,21 +776,25 @@ describe("a policy edit maps diff entries onto instance steps injectively", () =
     expect(res.status).toBe(200);
 
     const after = await instanceStepsOf(instance.id);
-    const newStep3 = await db.one(
-      `SELECT id FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 AND step_order = 3`,
-      [COLLISION_POLICY]
-    );
+    const newStep = async (order) =>
+      (
+        await db.one(`SELECT id FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 AND step_order = $2`, [
+          COLLISION_POLICY,
+          order,
+        ])
+      ).id;
 
-    // Every link is NULL except the single one propagation deliberately rewrote.
-    expect(after.filter((s) => s.policy_step_id !== null).map((s) => s.policy_step_id)).toEqual([newStep3.id]);
-
-    // ORDERING, pinned: the surviving link sits on the step the ORDINAL selects
-    // (instance step 3), not the one the id-match would have selected (instance
-    // step 2, which is genuinely policy step 3). That outcome is only reachable
-    // if the links were ALREADY NULL when applyDiffToInstance loaded them —
-    // i.e. deletePolicySteps ran before propagation. Reverse the order and this
-    // flips to 2.
-    expect(after.find((s) => s.policy_step_id === newStep3.id).step_order).toBe(3);
+    // Level 3 (ROLE_A → USER CO) was applied to INSTANCE step 2 — the step
+    // policy level 3 built — not to instance step 3, which the ordinal selects
+    // and which is really policy level 4. Level 4 was removed, so instance step 3
+    // is REMOVED. Every surviving step is re-linked to its level's new row.
+    expect(after.map((s) => [s.step_order, s.status, s.policy_step_id])).toEqual([
+      [1, "PENDING", await newStep(2)],
+      [2, "PENDING", await newStep(3)],
+      [3, "REMOVED", null],
+    ]);
+    expect(await approverStatusAt(instance.id, 2, TARGET_ID)).toBe("REMOVED");
+    expect(await approverStatusAt(instance.id, 2, CO_ID)).toBe("PENDING");
 
     // And the real flow still leaves no live approver row on a dead step.
     const zombies = await db.any(

@@ -32,7 +32,10 @@ import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospi
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import {
   snapshotPolicySteps,
+  snapshotPendingInstanceStepLinks,
+  pairPolicySteps,
   computePolicyStepDiff,
+  summarizeDiffEntry,
   propagatePolicyChangeToInstances,
   handleAutoCompletedInstances,
   getPendingInstancesForPolicy,
@@ -581,10 +584,11 @@ async function resolveMutationCompany(req, res, requestedRaw, notFoundMessage) {
  * Pick the ROLE steps a policy save must be validated against.
  *
  * ── WHY THIS DOES NOT USE computePolicyStepDiff ───────────────────────────
- * That diff keys purely on `step_order`, and `step_order` is CLIENT-SUPPLIED,
- * OPTIONAL (`insertPolicySteps` falls back to the array index) and NOT unique in
- * the database. Both holes are exploitable, and both restore exactly the state
- * the guard exists to prevent:
+ * When this guard was written that diff keyed purely on `step_order` (it now
+ * pairs by approver identity first, and only falls back to `step_order`), and
+ * `step_order` is CLIENT-SUPPLIED and OPTIONAL (`insertPolicySteps` falls back
+ * to the array index). An order-keyed delta had two exploitable holes, both
+ * restoring exactly the state the guard exists to prevent:
  *
  *   1. OMIT `step_order` entirely → every proposed step collapses onto the single
  *      `undefined` key, so the map holds only the LAST element. Every stored step
@@ -877,8 +881,11 @@ const hospitalityApprovalController = {
         // Compute diff against the proposed steps BEFORE applying any DB changes,
         // so we can warn the admin if PENDING instances would be affected.
         if (oldSteps.length > 0 && steps && steps.length > 0) {
-          const previewDiff = computePolicyStepDiff(oldSteps, steps);
-          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          // Number the proposed steps exactly as insertPolicySteps will, so the
+          // preview pairs the same levels the save will.
+          const proposedSteps = steps.map((s, i) => ({ ...s, step_order: (s && s.step_order) || (i + 1) }));
+          const previewDiff = computePolicyStepDiff(oldSteps, proposedSteps);
+          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(summarizeDiffEntry))}`);
 
           if (previewDiff.length > 0 && !confirmed_approval_impact) {
             const pendingInstances = await getPendingInstancesForPolicy(id);
@@ -903,7 +910,10 @@ const hospitalityApprovalController = {
                 steps_removed: previewDiff.filter(d => d.type === 'STEP_REMOVED').map(d => d.step_order),
                 steps_modified: previewDiff
                   .filter(d => d.type === 'STEP_MODIFIED')
-                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged }))
+                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })),
+                steps_moved: previewDiff
+                  .filter(d => d.type === 'STEP_MOVED')
+                  .map(d => ({ from: d.from, to: d.to }))
               };
 
               logger.info(`[PolicyUpdate] Returning APPROVAL_IMPACT_WARNING for policy ${id} (${pendingInstances.length} pending) — save aborted`);
@@ -957,29 +967,44 @@ const hospitalityApprovalController = {
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);
 
           let newSteps = [];
+          let lockedOldSteps = [];
+          let instanceLinks = null;
           if (steps && steps.length > 0) {
+            // Read the steps being replaced and capture every pending instance's
+            // link to them UNDER THE POLICY LOCK, before deletePolicySteps —
+            // the FK is ON DELETE SET NULL, so afterwards no row says which
+            // level any instance step came from. Read here rather than reusing
+            // the Phase 1 snapshot so a save that committed in between (a
+            // double-click) cannot leave the diff and the links describing
+            // different rows.
+            lockedOldSteps = await snapshotPolicySteps(id, t);
+            instanceLinks = await snapshotPendingInstanceStepLinks(id, t);
             await deletePolicySteps(id, t);
             newSteps = await insertPolicySteps(steps, id, t);
           }
 
           // PHASE 4: Compute diff against the steps we just wrote, propagate.
-          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${oldSteps.length}, newSteps=${newSteps.length}`);
+          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${lockedOldSteps.length}, newSteps=${newSteps.length}, capturedLinks=${instanceLinks?.size ?? 0}`);
           let propResult = null;
-          if (oldSteps.length > 0 && newSteps.length > 0) {
-            const diff = computePolicyStepDiff(oldSteps, newSteps);
-            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          if (lockedOldSteps.length > 0 && newSteps.length > 0) {
+            const diff = computePolicyStepDiff(lockedOldSteps, newSteps);
+            const stepIdMap = new Map(
+              pairPolicySteps(lockedOldSteps, newSteps).pairs.map(p => [Number(p.oldStep.id), Number(p.newStep.id)])
+            );
+            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(summarizeDiffEntry))}`);
 
-            if (diff.length > 0) {
-              // Re-read the policy inside the tx to get the up-to-date row.
-              const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
+            // Re-read the policy inside the tx to get the up-to-date row.
+            const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
 
-              propResult = await propagatePolicyChangeToInstances({
-                policyId: id, diff, changedBy: created_by, policy: fullPolicy, t
-              });
-              logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted })}`);
-            }
+            // Called even for an empty diff: re-saving unchanged levels still
+            // replaced every policy step row, and propagation restores the
+            // instance links it captured above.
+            propResult = await propagatePolicyChangeToInstances({
+              policyId: id, diff, changedBy: created_by, policy: fullPolicy, t, instanceLinks, stepIdMap
+            });
+            logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted, linksRestored: propResult?.linksRestored })}`);
           } else {
-            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${oldSteps.length}, newSteps.length=${newSteps.length}`);
+            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${lockedOldSteps.length}, newSteps.length=${newSteps.length}`);
           }
 
           return { policy: updatedPolicy, propagationResult: propResult };
